@@ -14,6 +14,7 @@ import (
 
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -59,7 +60,11 @@ type sniffResult struct {
 //   - cert pinning rejects keploy's MITM cert
 //   - SCRAM-*-PLUS and other channel-binding mechanisms break
 //   - apps without keploy's CA installed fail handshake
-func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn, dstAddr string, backdate time.Time) error {
+//
+// opts carries the session's resolved upstream-TLS trust material
+// (see Proxy.applyUpstreamTLSOptions); it is threaded down to
+// hijackAndMITM, which owns the only upstream tls.Config on this path.
+func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn, dstAddr string, backdate time.Time, opts models.OutgoingOptions) error {
 	dialCtx, dialCancel := context.WithTimeout(ctx, opportunisticDialTimeout)
 	defer dialCancel()
 	var dialer net.Dialer
@@ -112,7 +117,7 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 				// handshakes ourselves. Relay loops have already
 				// withheld the buffered ClientHello from the upstream.
 				cleanup()
-				return p.hijackAndMITM(ctx, srcConn, dstConn, res.buffered, dstAddr, backdate)
+				return p.hijackAndMITM(ctx, srcConn, dstConn, res.buffered, dstAddr, backdate, opts)
 			}
 
 			// One side reported "not TLS" — either it hit the byte
@@ -232,7 +237,7 @@ func (p *Proxy) sniffAndRelayLoop(ctx context.Context, side string, from, to net
 // upstream. After both handshakes complete it relays cleartext until
 // EOF on either side. There is no parser dispatch here — that's
 // what differentiates this mode from the default record path.
-func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bufferedClientHello []byte, dstAddr string, backdate time.Time) error {
+func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bufferedClientHello []byte, dstAddr string, backdate time.Time, opts models.OutgoingOptions) error {
 	defer srcConn.Close()
 	defer dstConn.Close()
 
@@ -257,12 +262,44 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	// Upstream handshake. The dst socket is in "expecting
 	// ClientHello" state because we deliberately did NOT forward
 	// the client's ClientHello — keploy starts a fresh TLS session
-	// of its own. ServerName is best-effort from the dial address;
-	// InsecureSkipVerify is required because keploy is not the
-	// authoritative CA for the upstream's chain.
+	// of its own.
+	//
+	// Verification is off unless the operator opted in via
+	// record.upstreamTls.verify, for the same reason as every other
+	// upstream dial in this package: keploy must never be stricter
+	// than the app it records. An app that chose not to authenticate
+	// its own upstream would have its connection broken by keploy
+	// doing it on its behalf, and the failure is silent — the
+	// handshake error drops this connection's recording entirely
+	// while the app itself keeps working. Not a CA-bundle
+	// limitation: crypto/tls uses the platform root pool when
+	// RootCAs is nil.
+	//
+	// ServerName:
+	//
+	//   - Default (verification off): hostFromAddr(dstAddr), byte for byte
+	//     what this site has always sent. dstAddr here is ALWAYS an
+	//     `ip:port` built from destInfo, so this is an IP literal and
+	//     crypto/tls omits SNI from the wire for it. Preserving that is the
+	//     whole point — the app never sent an SNI to the real server on this
+	//     path, and keploy must not invent one.
+	//   - Verifying: the SNI the APPLICATION sent, which the client-facing
+	//     handshake above has just recovered from its ClientHello, falling
+	//     back to the dial address only when the app sent none. "Never
+	//     empty" is not the same as "verifiable": a hostname-addressed
+	//     upstream presents a DNS-SAN-only certificate, and checking it
+	//     against the destination IP fails with `cannot validate certificate
+	//     for <ip> because it doesn't contain any IP SANs` — which on THIS
+	//     path is worse than a dropped mock, because the deferred
+	//     srcConn/dstConn closes above tear down the application's own
+	//     connection after it has already completed its handshake with us.
 	serverName := hostFromAddr(dstAddr)
+	if opts.UpstreamTLSVerify {
+		serverName = resolveUpstreamServerName(capturedClientSNI(tlsClient), "", dstAddr, true)
+	}
 	upstreamCfg := &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // lgtm[go/disabled-tls-certificate-check] — MITM proxy by design; keploy is not the authoritative CA for the upstream chain
+		InsecureSkipVerify: !opts.UpstreamTLSVerify, //nolint:gosec // MITM proxy by design; opt in with record.upstreamTls.verify
+		RootCAs:            opts.UpstreamTLSRootCAs,
 		ServerName:         serverName,
 		KeyLogWriter:       pTls.KeyLogWriter(),
 	}
@@ -460,6 +497,42 @@ func hostFromAddr(addr string) string {
 		return addr
 	}
 	return host
+}
+
+// capturedClientSNI returns the ServerName the APPLICATION put in the
+// ClientHello it sent to keploy, or "" if it sent none (which is what
+// crypto/tls does for an IP-literal destination — RFC 6066 forbids IP
+// literals in SNI).
+//
+// Read straight off the completed client-facing *tls.Conn rather than through
+// pTls.SrcPortToDstURL: it is the same value CertForClient stored there
+// moments earlier, but it needs no source-port lookup and so cannot be
+// confused by a recycled port. Returns "" for anything that is not a
+// *tls.Conn, so callers degrade to their existing fallback.
+func capturedClientSNI(clientConn net.Conn) string {
+	tc, ok := clientConn.(*tls.Conn)
+	if !ok {
+		return ""
+	}
+	return tc.ConnectionState().ServerName
+}
+
+// hostFromConn is hostFromAddr over a connection's remote address — the peer
+// keploy is actually talking to. Used as the last-resort ServerName when the
+// caller had no SNI to reuse and verification is on.
+//
+// Returns "" for a nil conn or a nil RemoteAddr rather than panicking: the
+// callers feed the result straight to tls.Config.ServerName, and "" there is
+// exactly the state they were already in — no worse than not calling it.
+func hostFromConn(conn net.Conn) string {
+	if conn == nil {
+		return ""
+	}
+	addr := conn.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	return hostFromAddr(addr.String())
 }
 
 // isTimeoutErr matches the deadline-exceeded error returned by

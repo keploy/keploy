@@ -313,6 +313,45 @@ type Proxy struct {
 	// (missing CAP_BPF / older kernel / feature flag off); the proxy
 	// keeps working for non-PLUS clients in that case.
 	cbshim cbshim.CBShim
+
+	// upstreamTLSVerifyCfg / upstreamTLSCACert are the RESOLVED
+	// record.upstreamTls settings for this agent process: the precedence
+	// (explicit --upstream-tls-* argv > keploy.yml record.upstreamTls >
+	// default) is applied once in New, but nothing is read off disk there.
+	//
+	// The trust anchors themselves are loaded lazily, on the first RECORD
+	// session (Proxy.Record → applyUpstreamTLSOptions), because replay never
+	// verifies anything: Proxy.Mock deliberately does not stamp these options,
+	// so a `keploy test` agent that happens to read a keploy.yml with
+	// upstreamTls.verify set must not read the PEM, must not log "verification
+	// is enabled", and must not LogError a bad caCert for a setting its mode
+	// ignores.
+	upstreamTLSVerifyCfg bool
+	upstreamTLSCACert    string
+
+	// upstreamTLSOnce guards the one-time load below. Record can be called
+	// more than once per process (one session per /outgoing request), and the
+	// PEM parse is ~150 roots — it must not be paid per session, and never on
+	// the per-connection dial path.
+	upstreamTLSOnce sync.Once
+
+	// upstreamTLSVerify / upstreamTLSRootCAs are the post-load values stamped
+	// onto every RECORD session's OutgoingOptions by applyUpstreamTLSOptions,
+	// so the dial sites can read them straight off the options they already
+	// carry. upstreamTLSVerify is upstreamTLSVerifyCfg minus any load failure.
+	//
+	// upstreamTLSRootCAs nil means "use Go's default" — crypto/tls falls back
+	// to the platform root pool — and never "trust nothing"; see
+	// pTls.LoadUpstreamRootCAs for that contract.
+	upstreamTLSVerify  bool
+	upstreamTLSRootCAs *x509.CertPool
+	// upstreamTLSLoadFailed records that verification was ASKED FOR and the
+	// trust anchors could not be built. It is distinct from
+	// !upstreamTLSVerify ("never asked") for logging: in this state an
+	// /outgoing request that asks to verify is refused with a message that
+	// names the CA path, instead of silently verifying against roots that are
+	// missing the operator's anchor.
+	upstreamTLSLoadFailed bool
 }
 
 // SetCBShim wires the eBPF channel-binding shim handle into the proxy.
@@ -731,6 +770,95 @@ func nextProtosSubset(want, offered []string) bool {
 	return true
 }
 
+// resolveUpstreamServerName decides the ServerName keploy puts on its own
+// TLS dial to the real destination, in descending order of trustworthiness:
+//
+//  1. capturedSNI — the SNI the application itself sent, recovered from
+//     pTls.SrcPortToDstURL. Authoritative when present.
+//  2. connectTargetHost — the authority from the client's CONNECT request,
+//     used only when it is a real hostname. IP literals are skipped here
+//     for the historical reason the original fallback skipped them: as SNI
+//     they are useless (crypto/tls omits SNI for IP literals anyway).
+//  3. hostFromAddr(dstAddr) — the host keploy is actually dialling, applied
+//     ONLY when verification is on.
+//
+// Step 3 is what makes record.upstreamTls.verify usable at all. capturedSNI
+// is stored unconditionally by CertForClient, empty string included, and the
+// client omits SNI for every IP-literal destination (RFC 6066 forbids it) —
+// which is the dominant shape for databases in dev/CI/docker-compose. With
+// verification on and ServerName empty, crypto/tls rejects the config
+// outright ("either ServerName or InsecureSkipVerify must be specified")
+// BEFORE it examines any certificate, so verification could never even be
+// attempted on those connections. An IP literal is the correct value to
+// supply, not a compromise: Go matches it against the certificate's IP SANs.
+//
+// Step 3 is deliberately scoped to the verifying path. With verification off
+// ServerName's only remaining effect is the SNI extension on the wire, and
+// dstAddr IS a hostname on the CONNECT path (it is overwritten with
+// connectResult.TargetAddr), so applying step 3 unconditionally could put an
+// SNI on the wire that the application itself never sent. The default path
+// must stay byte-identical to its pre-upstreamTls behaviour, so it keeps the
+// empty ServerName it has always had.
+//
+// Step 3 never returns "" for a non-empty dstAddr, and that totality is the
+// point: hostFromAddr yields "" for an address with no host at all (":443" —
+// net.SplitHostPort accepts it), which would put us right back in the config
+// crypto/tls rejects before it examines any certificate. handleConnectTunnel
+// now rejects a host-less CONNECT authority at the source, so that address
+// shape should no longer reach here; this branch is the belt to that braces,
+// and it fails LOUDLY (an x509 hostname error naming the target) instead of
+// cryptically.
+func resolveUpstreamServerName(capturedSNI, connectTargetHost, dstAddr string, verify bool) string {
+	if capturedSNI != "" {
+		return capturedSNI
+	}
+	// If SNI was not captured (e.g., client omitted it after CONNECT),
+	// fall back to the CONNECT target hostname for the TLS handshake.
+	// Skip IP literals — Go's TLS uses IP SANs, not ServerName for those.
+	if connectTargetHost != "" && net.ParseIP(connectTargetHost) == nil {
+		return connectTargetHost
+	}
+	if verify {
+		if host := hostFromAddr(dstAddr); host != "" {
+			return host
+		}
+		return dstAddr
+	}
+	return ""
+}
+
+// resolveUpstreamTLSConfig settles record.upstreamTls for this agent process.
+//
+// Precedence is flag > yaml > default, and it must resolve IDENTICALLY on a
+// native run and inside docker. That is why argv wins outright rather than
+// being OR-ed with the yaml value: an OR can only ever ADD verification, so
+// `keploy record --upstream-tls-verify=false` against a keploy.yml carrying
+// `record.upstreamTls.verify: true` could never switch it off on a native run
+// (where the agent subprocess reads that same keploy.yml through --config-path)
+// while it DID switch it off under docker (where the container never sees the
+// file) — one config, two behaviours, for a flag whose whole purpose is to be
+// able to turn a connection-breaking check back off.
+//
+// The orchestrator now forwards its own resolved value unconditionally as
+// `--upstream-tls-verify=%t` (pkg/platform/http/agent.go, pkg/platform/docker),
+// exactly like --disable-mapping, so for an orchestrator-spawned agent the
+// argv value is always present and always authoritative. The *Set markers are
+// what distinguishes "the orchestrator said false" from "the orchestrator said
+// nothing", which a bare bool cannot express; they are tracked per flag so a
+// hand-started `keploy agent --upstream-tls-verify` still picks up a caCert
+// from its own keploy.yml.
+func resolveUpstreamTLSConfig(opts *config.Config) (verify bool, caCert string) {
+	verify = opts.Record.UpstreamTLS.Verify
+	if opts.Agent.UpstreamTLSVerifySet {
+		verify = opts.Agent.UpstreamTLSVerify
+	}
+	caCert = opts.Record.UpstreamTLS.CACert
+	if opts.Agent.UpstreamTLSCACertSet {
+		caCert = opts.Agent.UpstreamTLSCACert
+	}
+	return verify, caCert
+}
+
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
 		logger:                    logger,
@@ -784,6 +912,10 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		logger,
 		opts.Record.RecordBuffer.ConsumerStallGrace,
 	)
+
+	// Upstream TLS verification (record.upstreamTls). Only the PRECEDENCE is
+	// settled here; nothing is read off disk (see upstreamTLSOnce).
+	proxy.upstreamTLSVerifyCfg, proxy.upstreamTLSCACert = resolveUpstreamTLSConfig(opts)
 
 	if len(opts.Async.Lanes) > 0 {
 		// Parser instances are attached in InitIntegrations via AsyncAware;
@@ -1035,8 +1167,18 @@ func (p *Proxy) replayTargetHasHTTP2Mock(sniHost string, port uint32) bool {
 // discriminator must actually match — otherwise we'd fall back to the old
 // session-global behaviour.
 func http2DestMatches(aHost string, aPort int, sniHost string, port uint32) bool {
-	portKnown := port != 0 && aPort != 0
-	if portKnown && uint32(aPort) != port {
+	// aPort is decoded from a recorded mock's :authority, i.e. from on-disk
+	// data we do not control, so it can be negative or far beyond the TCP port
+	// space. A value outside 1..65535 cannot name a real destination, so it
+	// counts as UNKNOWN rather than as a mismatch — per the contract above an
+	// unknown discriminator must never reject, otherwise a mock whose host
+	// genuinely matches would be discarded over a garbage port. The comparison
+	// itself is done in int64, which holds both the int and the uint32 domain
+	// without wrapping: narrowing aPort with uint32() would truncate, e.g.
+	// authority "host:4294968296" (2^32+1000) would alias a connection to
+	// port 1000 and wrongly push it onto h2.
+	portKnown := port != 0 && aPort > 0 && aPort <= math.MaxUint16
+	if portKnown && int64(aPort) != int64(port) {
 		return false
 	}
 	hostKnown := sniHost != "" && aHost != ""
@@ -1068,7 +1210,12 @@ func hostPortFromAuthority(authority, scheme string) (string, int) {
 		return "", 0
 	}
 	if h, pStr, err := net.SplitHostPort(authority); err == nil {
-		if pNum, err := strconv.Atoi(pStr); err == nil {
+		// SplitHostPort only splits, it does not validate the port numerically
+		// ("host:-1" and "host:4294968296" both parse fine), and strconv.Atoi
+		// happily returns those. Anything outside 1..65535 is not a dialable
+		// TCP port, so report it as unknown (0) exactly like an unparseable
+		// one instead of propagating a value callers would have to narrow.
+		if pNum, err := strconv.Atoi(pStr); err == nil && pNum > 0 && pNum <= math.MaxUint16 {
 			return h, pNum
 		}
 		return h, 0
@@ -1797,7 +1944,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// other parser-incompatible workloads) keep their existing
 	// semantics. Takes precedence over GlobalPassthrough.
 	if p.OpportunisticTLSIntercept {
-		if err := p.opportunisticTLSIntercept(parserCtx, srcConn, dstAddr, rule.Backdate); err != nil {
+		if err := p.opportunisticTLSIntercept(parserCtx, srcConn, dstAddr, rule.Backdate, outgoingOpts); err != nil {
 			utils.LogError(p.logger, err, "opportunistic TLS intercept failed",
 				zap.String("server address", dstAddr))
 			return err
@@ -2137,12 +2284,29 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if sniVal, ok := pTls.SrcPortToDstURL.Load(sourcePort); ok {
 			if sni, ok := sniVal.(string); ok && sni != "" {
 				addr := net.JoinHostPort(sni, fmt.Sprint(destInfo.Port))
-				// InsecureSkipVerify mirrors the synchronous dial
-				// below and the current MITM model (keploy is a
-				// man-in-the-middle by design; upstream cert chain
-				// verification would require shipping a CA bundle).
+				// Upstream verification mirrors the synchronous dial
+				// below: off unless the operator opted in via
+				// record.upstreamTls.verify. Off is the default
+				// because a recording proxy must never be stricter
+				// than the app it records — an app on
+				// sslmode=require / tls=skip-verify deliberately chose
+				// not to authenticate its upstream, and verifying on
+				// its behalf would break connections the app would
+				// have made, silently: the dest-side handshake fails,
+				// the supervisor falls through to raw passthrough, and
+				// the mock is DROPPED while the app keeps working.
+				// This is NOT a CA-bundle limitation — crypto/tls uses
+				// the platform root pool for free when RootCAs is nil,
+				// and keploy already embeds
+				// pkg/agent/proxy/tls/data/mozilla_roots.pem.
+				//
+				// No ServerName plumbing is needed at this site: the
+				// enclosing guard is `ok && sni != ""` and the dial
+				// target is JoinHostPort(sni, port), so keploy dials
+				// the very name it would verify.
 				specCfg := &tls.Config{
-					InsecureSkipVerify: true, // nolint:gosec
+					InsecureSkipVerify: !outgoingOpts.UpstreamTLSVerify, // nolint:gosec
+					RootCAs:            outgoingOpts.UpstreamTLSRootCAs,
 					ServerName:         sni,
 					NextProtos:         []string{"h2", "http/1.1"},
 					KeyLogWriter:       pTls.KeyLogWriter(),
@@ -2375,16 +2539,22 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			logger.Debug("NOT offering H2 (HTTP/1.x detected)", zap.Strings("nextProtos", nextProtos))
 		}
 
-		serverName := dstURL
-		// If SNI was not captured (e.g., client omitted it after CONNECT),
-		// fall back to the CONNECT target hostname for the TLS handshake.
-		// Skip IP literals — Go's TLS uses IP SANs, not ServerName for those.
-		if serverName == "" && connectResult != nil && net.ParseIP(connectResult.TargetHost) == nil {
-			serverName = connectResult.TargetHost
+		var connectTargetHost string
+		if connectResult != nil {
+			connectTargetHost = connectResult.TargetHost
 		}
+		serverName := resolveUpstreamServerName(dstURL, connectTargetHost, dstAddr, outgoingOpts.UpstreamTLSVerify)
 
 		cfg := &tls.Config{
-			InsecureSkipVerify: true,
+			// Off by default: keploy must never be stricter than the app it
+			// records. An app on sslmode=require / tls=skip-verify chose not
+			// to authenticate its upstream, and a verification failure here
+			// is silent — the supervisor falls through to raw passthrough,
+			// the app keeps working and the mock is DROPPED. Opt in with
+			// record.upstreamTls.verify. Not a CA-bundle limitation:
+			// crypto/tls uses the platform root pool when RootCAs is nil.
+			InsecureSkipVerify: !outgoingOpts.UpstreamTLSVerify, // nolint:gosec
+			RootCAs:            outgoingOpts.UpstreamTLSRootCAs,
 			ServerName:         serverName,
 			NextProtos:         nextProtos,
 			KeyLogWriter:       pTls.KeyLogWriter(),
@@ -2847,6 +3017,84 @@ func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certif
 	return nil
 }
 
+// applyUpstreamTLSOptions stamps the agent-resolved upstream-TLS trust material
+// onto a RECORD session's OutgoingOptions, so every dial site can read it off
+// the options it already carries instead of reaching back into the Proxy.
+// Record-only by design — see the note in Mock.
+//
+// The pool is deliberately NOT part of the request the CLI sends: x509.CertPool
+// has only unexported fields, so JSON round-tripping it would deliver a non-nil
+// EMPTY pool to the agent — a trust store that trusts nothing and fails every
+// handshake (see models.OutgoingOptions.UpstreamTLSRootCAs). Only the boolean
+// crosses the wire; the pool is built here, agent-side, from the CA path that
+// travelled over argv.
+//
+// The agent's own resolution is AUTHORITATIVE; the request's boolean is not
+// OR-ed in. Two reasons, and both are about not producing silent mock loss:
+//
+//   - An OR can only ever add verification, never remove it, which is what
+//     made `--upstream-tls-verify=false` unable to switch off a keploy.yml
+//     `verify: true` on a native run while it worked under docker. Precedence
+//     has to be resolved in exactly one place — resolveUpstreamTLSConfig — and
+//     this is the consumer of that decision, not a second opinion on it.
+//   - A request that asks to verify against an agent that resolved NO trust
+//     material (never configured, or the CA failed to load) would verify with
+//     Go's default roots and the operator's private CA silently absent — the
+//     dest handshake then fails, the supervisor falls through to raw
+//     passthrough, the app keeps working and the mock is DROPPED. That is the
+//     exact outcome the load-failure path exists to prevent, so it is refused
+//     here too, loudly, naming the configured CA path.
+func (p *Proxy) applyUpstreamTLSOptions(opts *models.OutgoingOptions) {
+	p.loadUpstreamTLSTrustAnchors()
+
+	if opts.UpstreamTLSVerify && !p.upstreamTLSVerify {
+		p.logger.Warn("ignoring the recording session's request to verify upstream TLS certificates: this agent has no upstream trust anchors resolved",
+			zap.Bool("agent_ca_load_failed", p.upstreamTLSLoadFailed),
+			zap.String("agent_ca_cert", p.upstreamTLSCACert),
+			zap.String("next_step", "start the agent with --upstream-tls-verify (and --upstream-tls-ca-cert for a private CA, resolved on the AGENT's filesystem), or set record.upstreamTls in the keploy.yml the agent reads. Verification is left OFF for this session so mocks are still recorded rather than silently dropped by a failed dest-side handshake."))
+	}
+
+	opts.UpstreamTLSVerify = p.upstreamTLSVerify
+	opts.UpstreamTLSRootCAs = p.upstreamTLSRootCAs
+}
+
+// loadUpstreamTLSTrustAnchors builds the root pool for record.upstreamTls.verify
+// at most once per agent process, on the first RECORD session.
+//
+// Deliberately not done in New: New runs for every agent regardless of mode, and
+// replay never verifies (Proxy.Mock does not stamp these options at all), so
+// resolving there meant a `keploy test` agent reading a keploy.yml with
+// upstreamTls.verify set would read the PEM, log "verification is enabled" for a
+// mode that verifies nothing, and LogError a bad caCert with a remediation for a
+// setting replay ignores.
+//
+// Still once, not per dial: the load reads a PEM off disk and parses ~150 roots.
+func (p *Proxy) loadUpstreamTLSTrustAnchors() {
+	p.upstreamTLSOnce.Do(func() {
+		if !p.upstreamTLSVerifyCfg {
+			return
+		}
+		pool, err := pTls.LoadUpstreamRootCAs(p.logger, p.upstreamTLSCACert)
+		if err != nil {
+			// Verifying against a trust store that is MISSING the operator's
+			// CA is worse than not verifying at all: the dest-side handshake
+			// fails, the supervisor falls through to raw passthrough, the app
+			// keeps working, and the mock is dropped with no user-visible
+			// cause. So fall back to today's behaviour (skip verification) and
+			// make the misconfiguration loud instead of turning it into
+			// missing mocks.
+			utils.LogError(p.logger, err, "failed to load upstream TLS trust anchors; upstream certificate verification is DISABLED for this session",
+				zap.String("next_step", "fix record.upstreamTls.caCert (the path is resolved on the AGENT's filesystem — bind-mount the PEM for docker/k8s runs) and restart, or unset record.upstreamTls.verify to silence this"))
+			p.upstreamTLSLoadFailed = true
+			return
+		}
+		p.upstreamTLSRootCAs = pool
+		p.upstreamTLSVerify = true
+		p.logger.Info("upstream TLS certificate verification is enabled",
+			zap.Bool("extra_ca_cert", p.upstreamTLSCACert != ""))
+	})
+}
+
 func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
@@ -2855,6 +3103,7 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	// Lift the per-session opportunistic-TLS toggle onto the proxy
 	// for handleConnection to read. Independent of GlobalPassthrough.
 	p.OpportunisticTLSIntercept = opts.OpportunisticTLSIntercept
+	p.applyUpstreamTLSOptions(&opts)
 	p.setSession(&agent.Session{
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
@@ -2890,6 +3139,15 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	// Mock is replay; no pcap capture during replay. Tear down any
 	// capture left over from a previous record session.
 	p.stopPacketCapture()
+	// Deliberately NOT calling applyUpstreamTLSOptions here. upstreamTls is a
+	// `record:` setting: it exists so the traffic being CAPTURED comes from an
+	// authenticated upstream. Replay serves its traffic from mocks; the dials
+	// it still makes are passthrough of calls that were never recorded, and
+	// failing those on a certificate check would break a test run over trust
+	// material that has no bearing on what is being asserted. Replay therefore
+	// keeps today's behaviour exactly, and because this is the only caller-side
+	// stamp, the trust anchors are never even loaded in MODE_TEST (see
+	// loadUpstreamTLSTrustAnchors).
 	p.setSession(&agent.Session{
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,

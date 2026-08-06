@@ -637,6 +637,15 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.ChannelBindingShim {
 		command = append(command, "--channel-binding-shim")
 	}
+	// Upstream TLS verification. Forwarded unconditionally as =%t, matching
+	// --disable-mapping above and the native launcher, so that the precedence
+	// flag > yaml > default resolves IDENTICALLY here and on a native run —
+	// see proxy.resolveUpstreamTLSConfig. The CA path is resolved inside the
+	// agent container, so the operator must bind-mount the PEM (or point at a
+	// path that already exists in the image); the host's keploy.yml is not
+	// visible here either, which is why this travels over argv at all.
+	command = append(command, fmt.Sprintf("--upstream-tls-verify=%t", opts.UpstreamTLSVerify))
+	command = append(command, fmt.Sprintf("--upstream-tls-ca-cert=%s", opts.UpstreamTLSCACert))
 
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))

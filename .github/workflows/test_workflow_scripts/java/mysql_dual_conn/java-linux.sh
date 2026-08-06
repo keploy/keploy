@@ -226,6 +226,22 @@ if [[ $REPLAY_RC -ne 0 ]]; then
   echo "Replay exited with code $REPLAY_RC but all tests passed. Ignoring exit code."
 fi
 
+# --- Regression guard for keploy#4372 (MySQL system-variable matcher) ---
+# Connector/J issues a live `SELECT @@session.transaction_isolation` during pool
+# setup. Before #4372 an unrecorded read of it could be cross-served a DIFFERENT
+# system variable's mock, and Connector/J then threw "Could not map transaction
+# isolation '<value>'" and the pool never initialised. The report status alone
+# would not always surface this, so assert the marker never appears in the replay
+# log. This is additive — it does not alter the existing report-status gate above.
+section "Guard: system-variable matcher (keploy#4372)"
+if grep -qi "Could not map transaction isolation" test_logs.txt 2>/dev/null; then
+  echo "::error::keploy#4372 regression: 'Could not map transaction isolation' in replay log — a system-variable read was cross-served the wrong mock"
+  grep -i "Could not map transaction isolation" test_logs.txt | head -5
+  exit 1
+fi
+echo "OK: no transaction-isolation cross-match marker in replay log."
+endsec
+
 if json_pass_supported; then
   section "Replay (json)"
   set +e

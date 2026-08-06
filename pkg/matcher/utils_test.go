@@ -2,10 +2,14 @@ package matcher
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // subsKeyMatchWithOriginal is a test helper that lets subtests pass
@@ -20,14 +24,9 @@ func subsKeyMatchWithOriginal(s string, mp map[string][]string) ([]string, bool)
 	for k, v := range mp {
 		lk := strings.ToLower(k)
 		if existing, ok := lowered[lk]; ok {
-			merged := make([]string, 0, len(existing)+len(v))
-			merged = append(merged, existing...)
-			merged = append(merged, v...)
-			lowered[lk] = merged
+			lowered[lk] = slices.Concat(existing, v)
 		} else {
-			cp := make([]string, len(v))
-			copy(cp, v)
-			lowered[lk] = cp
+			lowered[lk] = slices.Clone(v)
 		}
 	}
 	return SubstringKeyMatch(s, lowered)
@@ -322,5 +321,396 @@ func TestCompareHeaders_UppercaseHeaderSentinel(t *testing.T) {
 	var res []models.HeaderResult
 	if ok := CompareHeaders(h1, h2, &res, noise); !ok {
 		t.Fatalf("uppercase 'Header' sentinel should mark all headers noisy; got match=false (res=%+v)", res)
+	}
+}
+
+func TestSplitNoise(t *testing.T) {
+	cases := []struct {
+		name       string
+		noise      map[string][]string
+		wantBody   map[string][]string
+		wantHeader map[string][]string
+		wantSkip   bool
+	}{
+		{
+			name:       "dotted body key keeps its regex list",
+			noise:      map[string][]string{"body.user.id": {".*"}},
+			wantBody:   map[string][]string{"user.id": {".*"}},
+			wantHeader: map[string][]string{},
+		},
+		{
+			name:       "dotted header key is scoped to the header name",
+			noise:      map[string][]string{"header.Date": {}},
+			wantBody:   map[string][]string{},
+			wantHeader: map[string][]string{"date": {}},
+		},
+		{
+			name:       "sectioned body key lists paths, it does not skip the body",
+			noise:      map[string][]string{"body": {"items.0.product.stock", "Total"}},
+			wantBody:   map[string][]string{"items.0.product.stock": {}, "total": {}},
+			wantHeader: map[string][]string{},
+		},
+		{
+			name:       "sectioned header key lists header names",
+			noise:      map[string][]string{"header": {"Content-Length"}},
+			wantBody:   map[string][]string{},
+			wantHeader: map[string][]string{"content-length": {}},
+		},
+		{
+			name:       "empty body key is the whole-section sentinel",
+			noise:      map[string][]string{"body": {}},
+			wantBody:   map[string][]string{},
+			wantHeader: map[string][]string{},
+			wantSkip:   true,
+		},
+		{
+			name:       "empty header key is the whole-section sentinel",
+			noise:      map[string][]string{"header": {}},
+			wantBody:   map[string][]string{},
+			wantHeader: map[string][]string{"header": {}},
+		},
+		{
+			name: "both shapes coexist",
+			noise: map[string][]string{
+				"body":            {"stock"},
+				"body.created_at": {},
+				"header":          {"Content-Length"},
+				"header.Date":     {},
+			},
+			wantBody:   map[string][]string{"stock": {}, "created_at": {}},
+			wantHeader: map[string][]string{"content-length": {}, "date": {}},
+		},
+		{
+			name:       "unrelated sections are dropped",
+			noise:      map[string][]string{"trailer.Foo": {}, "somethingelse": {"x"}},
+			wantBody:   map[string][]string{},
+			wantHeader: map[string][]string{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotBody, gotHeader, gotSkip := SplitNoise(tc.noise, nil)
+			if gotSkip != tc.wantSkip {
+				t.Errorf("skipBody = %v, want %v", gotSkip, tc.wantSkip)
+			}
+			if !noiseMapsEqual(gotBody, tc.wantBody) {
+				t.Errorf("bodyNoise = %v, want %v", gotBody, tc.wantBody)
+			}
+			if !noiseMapsEqual(gotHeader, tc.wantHeader) {
+				t.Errorf("headerNoise = %v, want %v", gotHeader, tc.wantHeader)
+			}
+		})
+	}
+}
+
+func noiseMapsEqual(got, want map[string][]string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for k, wv := range want {
+		gv, ok := got[k]
+		if !ok || len(gv) != len(wv) {
+			return false
+		}
+		for i := range wv {
+			if gv[i] != wv[i] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// TestSplitNoise_DottedWinsOverSectioned pins a deterministic merge when both
+// shapes name the same path. Resolving it by map iteration order would make a
+// run flaky rather than merely wrong.
+func TestSplitNoise_DottedWinsOverSectioned(t *testing.T) {
+	noise := map[string][]string{
+		"body":         {"user.id"},
+		"body.user.id": {"^[0-9]+$"},
+		"header":       {"Date"},
+		"header.Date":  {"^Mon"},
+	}
+	for i := 0; i < 200; i++ {
+		body, header, _ := SplitNoise(noise, nil)
+		if got := body["user.id"]; len(got) != 1 || got[0] != "^[0-9]+$" {
+			t.Fatalf("iteration %d: bodyNoise[user.id] = %v, want the dotted entry's regex", i, got)
+		}
+		if got := header["date"]; len(got) != 1 || got[0] != "^Mon" {
+			t.Fatalf("iteration %d: headerNoise[date] = %v, want the dotted entry's regex", i, got)
+		}
+	}
+}
+
+func TestSplitNoise_SectionNamesAreCaseInsensitive(t *testing.T) {
+	body, header, skip := SplitNoise(map[string][]string{
+		"Body":        {"Stock"},
+		"Header.Date": {},
+	}, nil)
+	if _, ok := body["stock"]; !ok {
+		t.Errorf("bodyNoise = %v, want a lowercased \"stock\" entry", body)
+	}
+	if _, ok := header["date"]; !ok {
+		t.Errorf("headerNoise = %v, want a lowercased \"date\" entry", header)
+	}
+	if skip {
+		t.Errorf("skipBody = true, want false")
+	}
+}
+
+func TestCloneNoiseMap(t *testing.T) {
+	original := map[string][]string{"a": {"x"}}
+	clone := CloneNoiseMap(original)
+	clone["b"] = []string{"y"}
+	clone["a"][0] = "mutated"
+
+	if _, ok := original["b"]; ok {
+		t.Errorf("adding to the clone must not add to the original")
+	}
+	if original["a"][0] != "x" {
+		t.Errorf("mutating a cloned value slice must not touch the original, got %v", original["a"])
+	}
+	if got := CloneNoiseMap(nil); got == nil || len(got) != 0 {
+		t.Errorf("CloneNoiseMap(nil) = %v, want an empty non-nil map", got)
+	}
+}
+
+// TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported pins a known gap that
+// this change deliberately does NOT paper over.
+//
+// The JSON walker never adds an array position to its keys — every element of
+// `items` is walked under the key "items" — so an index-free path works and an
+// indexed one matches nothing. Normalizing the indexed form by dropping numeric
+// segments looks obvious and is a trap: noise keys are matched with
+// strings.Contains, so "items.0.id" would collapse to "items.id", which is a
+// substring of "items.idempotency_key" and would silence it. That trades this
+// change's silent false negative for a wider one, so the indexed form is left
+// unmatched (loud) until the walker itself carries positions.
+func TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported(t *testing.T) {
+	exp := `{"items":[{"product":{"name":"Laptop","stock":99}}]}`
+	act := `{"items":[{"product":{"name":"Laptop","stock":100}}]}`
+
+	t.Run("index-free path is honoured", func(t *testing.T) {
+		e, a := exp, act
+		v, err := ValidateAndMarshalJSON(zap.NewNop(), &e, &a)
+		if err != nil {
+			t.Fatalf("ValidateAndMarshalJSON: %v", err)
+		}
+		res, err := JSONDiffWithNoiseControl(v, map[string][]string{"items.product.stock": {}}, false, nil)
+		if err != nil {
+			t.Fatalf("JSONDiffWithNoiseControl: %v", err)
+		}
+		if !res.IsExact() {
+			t.Errorf("expected match: items.product.stock is the walker's own key syntax")
+		}
+	})
+
+	t.Run("indexed path matches nothing", func(t *testing.T) {
+		e, a := exp, act
+		v, err := ValidateAndMarshalJSON(zap.NewNop(), &e, &a)
+		if err != nil {
+			t.Fatalf("ValidateAndMarshalJSON: %v", err)
+		}
+		res, err := JSONDiffWithNoiseControl(v, map[string][]string{"items.0.product.stock": {}}, false, nil)
+		if err != nil {
+			t.Fatalf("JSONDiffWithNoiseControl: %v", err)
+		}
+		if res.IsExact() {
+			t.Errorf("indexed noise paths are not supported yet; if this now passes, " +
+				"the walker gained positions and the docs on SplitNoise need updating")
+		}
+	})
+
+	t.Run("no normalization leak into a sibling", func(t *testing.T) {
+		e := `{"items":[{"id":"1","idempotency_key":"k1"}]}`
+		a := `{"items":[{"id":"1","idempotency_key":"TAMPERED"}]}`
+		v, err := ValidateAndMarshalJSON(zap.NewNop(), &e, &a)
+		if err != nil {
+			t.Fatalf("ValidateAndMarshalJSON: %v", err)
+		}
+		res, err := JSONDiffWithNoiseControl(v, map[string][]string{"items.0.id": {}}, false, nil)
+		if err != nil {
+			t.Fatalf("JSONDiffWithNoiseControl: %v", err)
+		}
+		if res.IsExact() {
+			t.Errorf("idempotency_key must not be silenced by a noise path for id")
+		}
+	})
+}
+
+// TestJSONDiffWithNoiseControl_NumericObjectKey pins that a genuinely numeric
+// object key stays scoped to itself and does not bleed into a same-named
+// sibling one level up.
+func TestJSONDiffWithNoiseControl_NumericObjectKey(t *testing.T) {
+	exp := `{"data":{"2026":{"count":5},"count":7}}`
+	act := `{"data":{"2026":{"count":5},"count":999}}`
+	v, err := ValidateAndMarshalJSON(zap.NewNop(), &exp, &act)
+	if err != nil {
+		t.Fatalf("ValidateAndMarshalJSON: %v", err)
+	}
+	res, err := JSONDiffWithNoiseControl(v, map[string][]string{"data.2026.count": {}}, false, nil)
+	if err != nil {
+		t.Fatalf("JSONDiffWithNoiseControl: %v", err)
+	}
+	if res.IsExact() {
+		t.Errorf("data.count is a different field from data.2026.count and must still be compared")
+	}
+}
+
+// TestLooksLikeRegex pins the heuristic behind the sectioned-noise warning.
+// It must not flag OpenAPI/JSON-Schema document keys: telling a user to move
+// "$ref" into a regex position is worse than silence, because as a regex it
+// anchors to end-of-string and matches nothing.
+func TestLooksLikeRegex(t *testing.T) {
+	regexes := []string{
+		`^[0-9]+$`,
+		`^\d{4}-\d{2}-\d{2}$`,
+		`.*`,
+		`id-.+`,
+		`\w+`,
+		`(?i)abc`,
+		`PENDING|PAID`,
+		`[a-z]{3}`,
+		`value$`,
+	}
+	for _, v := range regexes {
+		if !looksLikeRegex(v) {
+			t.Errorf("looksLikeRegex(%q) = false, want true", v)
+		}
+	}
+
+	paths := []string{
+		"items.product.stock",
+		"user.id",
+		"created_at",
+		"components.schemas.User.$ref",
+		"$schema",
+		"$id",
+		"definitions.Foo.$id",
+		"data.2026.count",
+		"items.0.product.stock",
+		"X-Request-Id",
+		"a+b",
+		"arr[0]",
+	}
+	for _, v := range paths {
+		if looksLikeRegex(v) {
+			t.Errorf("looksLikeRegex(%q) = true, want false (it is a field path)", v)
+		}
+	}
+}
+
+// TestWarnIfRegexShaped_DedupesAcrossCalls pins that the warning does not fire
+// once per test case. SplitNoise is on the per-test-case path (twice per case on
+// the failure-assessment path), so an undeduped warning would bury real output.
+func TestWarnIfRegexShaped_DedupesAcrossCalls(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+
+	noise := map[string][]string{"body": {`^[0-9]+$`}}
+	for i := 0; i < 50; i++ {
+		SplitNoise(noise, logger)
+	}
+
+	if got := logs.Len(); got != 1 {
+		t.Errorf("emitted %d warnings across 50 calls, want exactly 1", got)
+	}
+}
+
+// TestSplitNoise_NoWarningForPlainPaths guards the common case from noise.
+func TestSplitNoise_NoWarningForPlainPaths(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+
+	SplitNoise(map[string][]string{
+		"body":   {"items.product.stock", "components.schemas.User.$ref"},
+		"header": {"X-Request-Id"},
+	}, logger)
+
+	if got := logs.Len(); got != 0 {
+		t.Errorf("emitted %d warnings for plain field paths, want 0: %v", got, logs.All())
+	}
+}
+
+// TestCompareHeaders_DoesNotMutateCallerNoiseMap is a STANDING anti-aliasing
+// guard on the loweredNoise builder in CompareHeaders: the caller's noise map
+// is read-only config, and a case-only key collision must never write through
+// into the caller's slices.
+//
+// Be honest about its reach. It passes on the slices.Concat/slices.Clone
+// builder AND on the make+copy builder that preceded it — both are
+// non-aliasing, so there is no assertion that can tell them apart, and this
+// test is not coverage for that refactor. What it does catch is the builder
+// being rewritten to store the caller's slice verbatim and merge collisions
+// in place, which is the regression the comments in utils.go warn against.
+//
+// The trap is spare capacity. Each noise value here is a len=1 window over a
+// len=1/cap=3 backing array whose tail holds sentinels. A builder that stored
+// the caller's slice in loweredNoise verbatim and then merged the collision
+// with an in-place `append(existing, v...)` would find room in the spare
+// capacity and write the other entry's regexes straight over the sentinels —
+// silent, caller-visible corruption of a map the caller is entitled to reuse.
+// (Cloning on insert is what defuses the trap: a clone has zero spare capacity,
+// so a later append must reallocate. That is why the two lines only fail this
+// test together, and why the guard is written against the builder as a whole
+// rather than either line.) Whichever of the two case variants Go's randomized
+// map iteration visits first becomes `existing`, so both backing arrays carry
+// sentinels and the check is order-independent.
+//
+// CompareHeaders is deliberately called twice with the SAME map, because that
+// is how the corruption compounds in production: keploy re-runs the matcher
+// per test case against one parsed keploy.yml noise config.
+func TestCompareHeaders_DoesNotMutateCallerNoiseMap(t *testing.T) {
+	backingA := []string{"^alpha-.*$", "SENTINEL-A1", "SENTINEL-A2"}
+	backingB := []string{"^beta-.*$", "SENTINEL-B1", "SENTINEL-B2"}
+
+	noise := map[string][]string{
+		"X-Correlation-Id": backingA[:1], // len 1, cap 3
+		"x-correlation-id": backingB[:1], // len 1, cap 3
+	}
+
+	// Snapshot the exact slice headers the caller handed us so we can detect
+	// both a length change and a backing-array rewrite.
+	origA, origB := noise["X-Correlation-Id"], noise["x-correlation-id"]
+
+	// Two calls, same map. Each call exercises one of the merged regexes, so a
+	// merge that dropped either entry also fails here.
+	for i, val := range []string{"alpha-abc", "beta-xyz"} {
+		h1, h2 := http.Header{}, http.Header{}
+		h1.Set("X-Correlation-Id", val+"-expected")
+		h2.Set("X-Correlation-Id", val+"-actual")
+
+		var res []models.HeaderResult
+		if ok := CompareHeaders(h1, h2, &res, noise); !ok {
+			t.Fatalf("call %d: value %q should be noise via the merged regex set; got match=false (res=%+v)", i, val, res)
+		}
+		got, found := findHeaderResult(res, "X-Correlation-Id")
+		if !found || !got.Normal {
+			t.Fatalf("call %d: expected Normal=true HeaderResult for %q; found=%v got=%+v", i, val, found, got)
+		}
+	}
+
+	// The caller's map must be structurally untouched.
+	if len(noise) != 2 {
+		t.Fatalf("caller noise map was resized: len=%d, want 2 (%v)", len(noise), noise)
+	}
+	if len(noise["X-Correlation-Id"]) != 1 || len(noise["x-correlation-id"]) != 1 {
+		t.Fatalf("caller noise slices grew: %v", noise)
+	}
+	if len(origA) != 1 || origA[0] != "^alpha-.*$" || len(origB) != 1 || origB[0] != "^beta-.*$" {
+		t.Fatalf("caller noise slice contents changed: origA=%v origB=%v", origA, origB)
+	}
+
+	// …and so must the spare capacity behind them.
+	wantA := []string{"^alpha-.*$", "SENTINEL-A1", "SENTINEL-A2"}
+	wantB := []string{"^beta-.*$", "SENTINEL-B1", "SENTINEL-B2"}
+	for i := range wantA {
+		if backingA[i] != wantA[i] {
+			t.Fatalf("CompareHeaders wrote into the caller's backing array: backingA=%v, want %v", backingA, wantA)
+		}
+		if backingB[i] != wantB[i] {
+			t.Fatalf("CompareHeaders wrote into the caller's backing array: backingB=%v, want %v", backingB, wantB)
+		}
 	}
 }

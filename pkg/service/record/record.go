@@ -600,7 +600,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, ChannelBindingShim: r.config.Record.ChannelBindingShim, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize, RecordBufferConsumerStallGrace: r.config.Record.RecordBuffer.ConsumerStallGrace})
+	err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, ChannelBindingShim: r.config.Record.ChannelBindingShim, UpstreamTLSVerify: r.config.Record.UpstreamTLS.Verify, UpstreamTLSCACert: r.config.Record.UpstreamTLS.CACert, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize, RecordBufferConsumerStallGrace: r.config.Record.RecordBuffer.ConsumerStallGrace})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
@@ -977,8 +977,14 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		TLSPrivateKey:             tlsPrivateKey,
 		CapturePackets:            r.config.Record.CapturePackets,
 		OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept,
-		MysqlPorts:                r.config.MysqlPorts,
-		DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
+		// Only the boolean travels on this request; the *x509.CertPool cannot
+		// (see models.OutgoingOptions.UpstreamTLSRootCAs). The agent resolves
+		// record.upstreamTls.caCert on its own filesystem — the path precedence
+		// at proxy.New, the pool itself lazily on the first record session —
+		// and stamps it onto these options in Proxy.Record.
+		UpstreamTLSVerify:      r.config.Record.UpstreamTLS.Verify,
+		MysqlPorts:             r.config.MysqlPorts,
+		DisableMysqlAutoDetect: r.config.DisableMysqlAutoDetect,
 		// Advertise that this CLI understands the reserved Kind=RevokedTests
 		// control frame: it diverts such a frame into a revoke set and deletes
 		// those deferred-orphan test cases at finalize instead of persisting it

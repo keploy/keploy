@@ -809,6 +809,16 @@ func CreatePayloadFromLengthPrefixedMessage(msg models.GrpcLengthPrefixedMessage
 	return payload, nil
 }
 
+// MaxGRPCFrameLength bounds the message length ReadGRPCFrame is willing to
+// allocate for. The length prefix is 4 attacker-supplied bytes off the wire,
+// so without a bound a single frame header asks for up to 4 GiB before any of
+// the payload has been read — a trivial remote memory-exhaustion of the proxy.
+// The bound matches the other wire-buffer caps in this repo (relay
+// DefaultPerConnCap, the agent's outgoing mock buffer) and is an order of
+// magnitude above grpc-go's own 4 MiB default receive limit, so it cannot
+// reject a message a real gRPC peer would have accepted.
+const MaxGRPCFrameLength = 64 * 1024 * 1024
+
 // ReadGRPCFrame reads a gRPC frame from the given reader and returns it as a byte array
 func ReadGRPCFrame(r io.Reader) ([]byte, error) {
 	// Read compression flag (1 byte)
@@ -826,6 +836,14 @@ func ReadGRPCFrame(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read message length: %w", err)
 	}
 	msgLen := binary.BigEndian.Uint32(lenBuf)
+	// Bound BEFORE allocating: io.ReadFull can only reject an oversized
+	// frame after make() has already committed the memory. The check also
+	// keeps the 5+msgLen below from wrapping — in uint32 arithmetic
+	// 5+0xFFFFFFFF is 4, which then panics in copy(frame[5:], msgBuf) with
+	// "slice bounds out of range".
+	if msgLen > MaxGRPCFrameLength {
+		return nil, fmt.Errorf("grpc frame message length %d exceeds the %d byte limit", msgLen, MaxGRPCFrameLength)
+	}
 
 	// Read message data
 	msgBuf := make([]byte, msgLen)
@@ -833,8 +851,10 @@ func ReadGRPCFrame(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read message: %w", err)
 	}
 
-	// Combine all parts
-	frame := make([]byte, 5+msgLen)
+	// Combine all parts. int arithmetic, not uint32: msgLen is bounded
+	// above, but the widening makes the absence of wraparound local and
+	// obvious rather than dependent on a check ten lines up.
+	frame := make([]byte, 5+int(msgLen))
 	frame[0] = compFlag[0]
 	copy(frame[1:5], lenBuf)
 	copy(frame[5:], msgBuf)
