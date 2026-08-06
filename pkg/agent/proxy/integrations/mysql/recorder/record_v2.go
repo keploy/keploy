@@ -837,17 +837,34 @@ func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervis
 }
 
 // buildDestTLSConfigV2 constructs the TLS client config used by the
-// relay when dialing TLS to the real upstream MySQL server. We derive
-// the ServerName from the destination address (host portion of
-// host:port in Opts.DstCfg.Addr) so the handshake uses correct SNI.
+// relay when dialing TLS to the real upstream MySQL server.
 //
-// Certificate verification uses the system trust store by default.
-// If the upstream's cert does not verify (e.g. self-signed), the
-// relay's TLS handshake fails and the supervisor falls through to
-// raw passthrough — the application's connection continues but the
-// mock is dropped. This is the intended trade-off: stability over
-// fidelity. Users who need to record against non-system-trust
-// upstreams should add the cert to their system store.
+// ServerName is a BEST-EFFORT default only. It is derived from the
+// destination address (host portion of host:port in Opts.DstCfg.Addr),
+// which the proxy always sets to the `ip:port` eBPF reported — never
+// the hostname the application dialled. That is the right value when
+// the app itself dialled by IP and the upstream cert carries an IP
+// SAN, and the wrong one for every hostname DSN. It is not the last
+// word: proxy.newProxyTLSUpgradeFn overrides it with the SNI the
+// application actually sent whenever verification is on.
+//
+// This config sets NO InsecureSkipVerify, and that is deliberate —
+// the decision does not belong here. proxy.newProxyTLSUpgradeFn owns
+// it for every V2 parser: it clones this config and sets
+// InsecureSkipVerify = !record.upstreamTls.verify, which is OFF by
+// default. So by default keploy does NOT authenticate the upstream —
+// a recording proxy must never be stricter than the app it records,
+// and a MySQL client on tls=skip-verify chose not to authenticate its
+// own upstream.
+//
+// If verification IS turned on and the upstream's cert does not
+// verify, the relay's TLS handshake fails and the supervisor falls
+// through to raw passthrough — the application's connection continues
+// but the mock is dropped. To record against a private-CA or
+// self-signed upstream, point record.upstreamTls.caCert at the CA PEM
+// (resolved on the AGENT's filesystem — bind-mount it for docker/k8s
+// runs); installing the cert in the system trust store is NOT what
+// makes this work, since with verification off no chain is ever built.
 func buildDestTLSConfigV2(sess *supervisor.Session) *tls.Config {
 	var serverName string
 	if sess.Opts.DstCfg != nil {

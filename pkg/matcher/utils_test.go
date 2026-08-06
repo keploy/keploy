@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,14 +24,9 @@ func subsKeyMatchWithOriginal(s string, mp map[string][]string) ([]string, bool)
 	for k, v := range mp {
 		lk := strings.ToLower(k)
 		if existing, ok := lowered[lk]; ok {
-			merged := make([]string, 0, len(existing)+len(v))
-			merged = append(merged, existing...)
-			merged = append(merged, v...)
-			lowered[lk] = merged
+			lowered[lk] = slices.Concat(existing, v)
 		} else {
-			cp := make([]string, len(v))
-			copy(cp, v)
-			lowered[lk] = cp
+			lowered[lk] = slices.Clone(v)
 		}
 	}
 	return SubstringKeyMatch(s, lowered)
@@ -634,5 +630,87 @@ func TestSplitNoise_NoWarningForPlainPaths(t *testing.T) {
 
 	if got := logs.Len(); got != 0 {
 		t.Errorf("emitted %d warnings for plain field paths, want 0: %v", got, logs.All())
+	}
+}
+
+// TestCompareHeaders_DoesNotMutateCallerNoiseMap is a STANDING anti-aliasing
+// guard on the loweredNoise builder in CompareHeaders: the caller's noise map
+// is read-only config, and a case-only key collision must never write through
+// into the caller's slices.
+//
+// Be honest about its reach. It passes on the slices.Concat/slices.Clone
+// builder AND on the make+copy builder that preceded it — both are
+// non-aliasing, so there is no assertion that can tell them apart, and this
+// test is not coverage for that refactor. What it does catch is the builder
+// being rewritten to store the caller's slice verbatim and merge collisions
+// in place, which is the regression the comments in utils.go warn against.
+//
+// The trap is spare capacity. Each noise value here is a len=1 window over a
+// len=1/cap=3 backing array whose tail holds sentinels. A builder that stored
+// the caller's slice in loweredNoise verbatim and then merged the collision
+// with an in-place `append(existing, v...)` would find room in the spare
+// capacity and write the other entry's regexes straight over the sentinels —
+// silent, caller-visible corruption of a map the caller is entitled to reuse.
+// (Cloning on insert is what defuses the trap: a clone has zero spare capacity,
+// so a later append must reallocate. That is why the two lines only fail this
+// test together, and why the guard is written against the builder as a whole
+// rather than either line.) Whichever of the two case variants Go's randomized
+// map iteration visits first becomes `existing`, so both backing arrays carry
+// sentinels and the check is order-independent.
+//
+// CompareHeaders is deliberately called twice with the SAME map, because that
+// is how the corruption compounds in production: keploy re-runs the matcher
+// per test case against one parsed keploy.yml noise config.
+func TestCompareHeaders_DoesNotMutateCallerNoiseMap(t *testing.T) {
+	backingA := []string{"^alpha-.*$", "SENTINEL-A1", "SENTINEL-A2"}
+	backingB := []string{"^beta-.*$", "SENTINEL-B1", "SENTINEL-B2"}
+
+	noise := map[string][]string{
+		"X-Correlation-Id": backingA[:1], // len 1, cap 3
+		"x-correlation-id": backingB[:1], // len 1, cap 3
+	}
+
+	// Snapshot the exact slice headers the caller handed us so we can detect
+	// both a length change and a backing-array rewrite.
+	origA, origB := noise["X-Correlation-Id"], noise["x-correlation-id"]
+
+	// Two calls, same map. Each call exercises one of the merged regexes, so a
+	// merge that dropped either entry also fails here.
+	for i, val := range []string{"alpha-abc", "beta-xyz"} {
+		h1, h2 := http.Header{}, http.Header{}
+		h1.Set("X-Correlation-Id", val+"-expected")
+		h2.Set("X-Correlation-Id", val+"-actual")
+
+		var res []models.HeaderResult
+		if ok := CompareHeaders(h1, h2, &res, noise); !ok {
+			t.Fatalf("call %d: value %q should be noise via the merged regex set; got match=false (res=%+v)", i, val, res)
+		}
+		got, found := findHeaderResult(res, "X-Correlation-Id")
+		if !found || !got.Normal {
+			t.Fatalf("call %d: expected Normal=true HeaderResult for %q; found=%v got=%+v", i, val, found, got)
+		}
+	}
+
+	// The caller's map must be structurally untouched.
+	if len(noise) != 2 {
+		t.Fatalf("caller noise map was resized: len=%d, want 2 (%v)", len(noise), noise)
+	}
+	if len(noise["X-Correlation-Id"]) != 1 || len(noise["x-correlation-id"]) != 1 {
+		t.Fatalf("caller noise slices grew: %v", noise)
+	}
+	if len(origA) != 1 || origA[0] != "^alpha-.*$" || len(origB) != 1 || origB[0] != "^beta-.*$" {
+		t.Fatalf("caller noise slice contents changed: origA=%v origB=%v", origA, origB)
+	}
+
+	// …and so must the spare capacity behind them.
+	wantA := []string{"^alpha-.*$", "SENTINEL-A1", "SENTINEL-A2"}
+	wantB := []string{"^beta-.*$", "SENTINEL-B1", "SENTINEL-B2"}
+	for i := range wantA {
+		if backingA[i] != wantA[i] {
+			t.Fatalf("CompareHeaders wrote into the caller's backing array: backingA=%v, want %v", backingA, wantA)
+		}
+		if backingB[i] != wantB[i] {
+			t.Fatalf("CompareHeaders wrote into the caller's backing array: backingB=%v, want %v", backingB, wantB)
+		}
 	}
 }

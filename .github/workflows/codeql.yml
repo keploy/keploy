@@ -42,16 +42,25 @@ jobs:
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
+      uses: github/codeql-action/init@v3
       with:
         languages: ${{ matrix.language }}
-        # Repo-local CodeQL config narrowly excludes
-        # go/disabled-certificate-check on pkg/agent/proxy/proxy.go.
-        # InsecureSkipVerify is intentional there: Keploy is a MITM
-        # recording proxy and upstream cert pinning would defeat the
-        # traffic-capture model. All other files in the repo remain
-        # audited by the rule.
-        config-file: ./.github/codeql/codeql-config.yml
+        # There is deliberately no `config-file:` here. A previous revision
+        # pointed one at a `query-filters` block that tried to exclude
+        # go/disabled-certificate-check for pkg/agent/proxy/proxy.go. That
+        # never suppressed anything: query-filters match query METADATA only
+        # (id, name, kind, problem.severity, security-severity, precision,
+        # tags), so the `paths` key was silently ignored and the alerts
+        # stayed open through every green run. Path-scoping a rule is not
+        # available for Go either — top-level `paths`/`paths-ignore` is
+        # restricted to interpreted languages and to compiled languages
+        # analysed with `build-mode: none`, and this job uses autobuild.
+        # The remaining InsecureSkipVerify sites on the record-mode upstream
+        # dial are a deliberate default (a recording proxy must never be
+        # stricter than the app it records; upstream verification is opt-in
+        # via record.upstreamTls.verify), are documented inline, and are
+        # dismissed per alert in the code scanning UI. Do not re-add a
+        # filter here — there is no form of it that works.
         # If you wish to specify custom queries, you can do so here or in a config file.
         # By default, queries listed here will override any specified in a config file.
         # Prefix the list here with "+" to use these queries and those in the config file.
@@ -60,7 +69,7 @@ jobs:
     # Autobuild attempts to build any compiled languages  (C/C++, C#, or Java).
     # If this step fails, then you should remove it and run the build manually (see below)
     - name: Autobuild
-      uses: github/codeql-action/autobuild@v2
+      uses: github/codeql-action/autobuild@v3
 
     # ℹ️ Command-line programs to run using the OS shell.
     # 📚 https://git.io/JvXDl
@@ -74,7 +83,7 @@ jobs:
     #   make release
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
+      uses: github/codeql-action/analyze@v3
 
     - name: Create a folder for security reports
       run: mkdir -p reports

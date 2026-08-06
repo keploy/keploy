@@ -93,6 +93,24 @@ record:
   sync: false
   memoryLimit: 0
   testCaseNaming: descriptive
+  # upstreamTls controls whether keploy authenticates the REAL upstream
+  # server when it dials out on your application's behalf. Being a TLS
+  # MITM constrains only the app-facing leg; the upstream leg is an
+  # ordinary Go TLS client, so verification needs no extra CA bundle.
+  upstreamTls:
+    # Off by default because keploy must never be stricter than the app
+    # it records: an app using sslmode=require / tls=skip-verify chose
+    # not to authenticate its upstream, and verifying on its behalf
+    # would refuse connections the app would have made. The failure is
+    # also silent — a dest-side handshake error falls through to raw
+    # passthrough, so the app keeps working while the mock is dropped.
+    # Turn this on when the recording itself is security-relevant.
+    verify: false
+    # Optional PEM file of extra trust anchors, appended to the system
+    # pool when verify is true. Use it for private/internal CAs. The
+    # path is resolved on the AGENT's filesystem, which for docker/k8s
+    # runs is not the host's.
+    caCert: ""
   # recordBuffer tunes the per-connection recording queue. Touch only
   # if you see "mock incomplete" warnings (reason: per_conn_cap) in
   # the agent logs. Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN,
