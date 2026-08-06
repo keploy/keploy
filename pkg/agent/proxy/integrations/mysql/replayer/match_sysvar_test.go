@@ -42,6 +42,15 @@ func TestParseSingleSystemVarRead(t *testing.T) {
 		{"semicolon then CRLF", "SELECT @@sql_mode;\r\n", "sql_mode", true},
 		{"CR after select", "SELECT\r@@autocommit", "autocommit", true},
 
+		// Space before the terminator. TrimSpace only strips whitespace at the very
+		// end of the string, and there the last character is ';', so this space is
+		// interior and used to trip the multi-column check — rejecting a legal
+		// single-variable read. The terminator is now trimmed before that check.
+		{"space before semicolon", "SELECT @@sql_mode ;", "sql_mode", true},
+		{"tab before semicolon", "SELECT @@sql_mode\t;", "sql_mode", true},
+		{"space before semicolon then CRLF", "SELECT @@sql_mode ;\r\n", "sql_mode", true},
+		{"prefixed with space before semicolon", "SELECT @@session.transaction_isolation ;", "transaction_isolation", true},
+
 		{"multi column", "SELECT @@a, @@b", "", false},
 		{"aliased", "SELECT @@transaction_isolation AS ti", "", false},
 		{"projects var in dml", "SELECT @@version, u.name FROM users u WHERE u.id = 1", "", false},
@@ -55,7 +64,7 @@ func TestParseSingleSystemVarRead(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gotVar, gotOK := parseSingleSystemVarRead(tc.query)
+			gotVar, _, gotOK := parseSingleSystemVarRead(tc.query)
 			assert.Equal(t, tc.wantOK, gotOK)
 			if tc.wantOK {
 				assert.Equal(t, tc.wantVar, gotVar)
@@ -214,7 +223,7 @@ func TestBuildSessionVarResponse_RoundTrip(t *testing.T) {
 	log := zap.NewNop()
 	pool := probeMockPool()
 
-	resp := buildSessionVarResponse(log, pool, "transaction_isolation", deprecateEOFContext())
+	resp := buildSessionVarResponse(log, pool, "transaction_isolation", "@@transaction_isolation", deprecateEOFContext())
 	require.NotNil(t, resp)
 	trs, ok := resp.PacketBundle.Message.(*mysql.TextResultSet)
 	require.True(t, ok)
@@ -231,7 +240,11 @@ func TestBuildSessionVarResponse_RoundTrip(t *testing.T) {
 	col, cn, err := rowscols.DecodeColumn(ctx, log, enc[pos:])
 	require.NoError(t, err)
 	require.NotNil(t, col)
-	assert.Equal(t, "transaction_isolation", col.Name)
+	// The column is labelled with the EXPRESSION TEXT, matching what a real
+	// server returns for "SELECT @@session.transaction_isolation". A client that
+	// reads its result by label (rather than by index, as Connector/J does) would
+	// not find the column under the bare variable name.
+	assert.Equal(t, "@@transaction_isolation", col.Name)
 	pos += cn
 
 	row, rn, err := rowscols.DecodeTextRow(ctx, log, enc[pos:], []*mysql.ColumnDefinition41{col})
@@ -250,13 +263,13 @@ func TestBuildSessionVarResponse_NonDeprecateEOF_ReturnsNil(t *testing.T) {
 	pool := probeMockPool()
 	// No CLIENT_DEPRECATE_EOF negotiated: must decline rather than emit
 	// mis-sequenced framing.
-	resp := buildSessionVarResponse(zap.NewNop(), pool, "transaction_isolation", &wire.DecodeContext{})
+	resp := buildSessionVarResponse(zap.NewNop(), pool, "transaction_isolation", "@@transaction_isolation", &wire.DecodeContext{})
 	assert.Nil(t, resp)
 }
 
 func TestBuildSessionVarResponse_UnknownVar_ReturnsNil(t *testing.T) {
 	pool := probeMockPool()
-	resp := buildSessionVarResponse(zap.NewNop(), pool, "nonexistent_var", deprecateEOFContext())
+	resp := buildSessionVarResponse(zap.NewNop(), pool, "nonexistent_var", "@@nonexistent_var", deprecateEOFContext())
 	assert.Nil(t, resp)
 }
 
@@ -388,4 +401,42 @@ func TestMatchQuery_CrossVarRejectionIsComQueryOnly(t *testing.T) {
 
 	_, scorePrepare := matchQuery(ctx, log, expected, actual, getQuery, false)
 	assert.NotEqual(t, 0, scorePrepare, "COM_STMT_PREPARE: matching must be left as it was")
+}
+
+// TestParseSingleSystemVarRead_Label pins the expression text returned alongside
+// the normalised variable name. The name drives the probe lookup; the label is
+// what the synthesized column is called, and it must match what a real server
+// would return for that exact query — prefix and all.
+func TestParseSingleSystemVarRead_Label(t *testing.T) {
+	tests := []struct {
+		query     string
+		wantVar   string
+		wantLabel string
+	}{
+		{"SELECT @@transaction_isolation", "transaction_isolation", "@@transaction_isolation"},
+		{"SELECT @@session.transaction_isolation", "transaction_isolation", "@@session.transaction_isolation"},
+		{"SELECT @@GLOBAL.max_allowed_packet", "max_allowed_packet", "@@GLOBAL.max_allowed_packet"},
+		{"SELECT @@sql_mode;", "sql_mode", "@@sql_mode"},
+		{"SELECT @@sql_mode ;", "sql_mode", "@@sql_mode"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.query, func(t *testing.T) {
+			gotVar, gotLabel, ok := parseSingleSystemVarRead(tc.query)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantVar, gotVar, "normalised name drives the probe lookup")
+			assert.Equal(t, tc.wantLabel, gotLabel, "label must be the expression as written")
+		})
+	}
+}
+
+// TestBuildSessionVarResponse_LabelFallback covers the caller that has no
+// expression to give: the column keeps the bare variable name rather than being
+// left unlabelled.
+func TestBuildSessionVarResponse_LabelFallback(t *testing.T) {
+	resp := buildSessionVarResponse(zap.NewNop(), probeMockPool(), "transaction_isolation", "", deprecateEOFContext())
+	require.NotNil(t, resp)
+	trs, ok := resp.PacketBundle.Message.(*mysql.TextResultSet)
+	require.True(t, ok)
+	require.Len(t, trs.Columns, 1)
+	assert.Equal(t, "transaction_isolation", trs.Columns[0].Name)
 }

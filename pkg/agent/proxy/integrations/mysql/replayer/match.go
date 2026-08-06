@@ -820,8 +820,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				// and Part A in matchQuery). Ordered BEFORE the control-statement
 				// OK so the read is answered with its REAL recorded value rather
 				// than a bare OK.
-				if varName, isVarRead := parseSingleSystemVarRead(qp.Query); isVarRead {
-					if resp := buildSessionVarResponse(logger, pool, varName, decodeCtx); resp != nil {
+				if varName, varLabel, isVarRead := parseSingleSystemVarRead(qp.Query); isVarRead {
+					if resp := buildSessionVarResponse(logger, pool, varName, varLabel, decodeCtx); resp != nil {
 						logger.Debug("served system-variable read from recorded session probe",
 							zap.String("var", varName))
 						return resp, true, nil, nil
@@ -2016,11 +2016,11 @@ func rejectsCrossVariableRead(expectedQuery, actualQuery string) bool {
 	if expectedQuery == actualQuery {
 		return false
 	}
-	actualVar, isPureVarRead := parseSingleSystemVarRead(actualQuery)
+	actualVar, _, isPureVarRead := parseSingleSystemVarRead(actualQuery)
 	if !isPureVarRead {
 		return false
 	}
-	expectedVar, expectedIsVarRead := parseSingleSystemVarRead(expectedQuery)
+	expectedVar, _, expectedIsVarRead := parseSingleSystemVarRead(expectedQuery)
 	return !expectedIsVarRead || !strings.EqualFold(expectedVar, actualVar)
 }
 
@@ -2049,28 +2049,42 @@ func stripLeadingSQLComment(s string) string {
 // anything that isn't a SINGLE bare variable read (multi-column, AS aliases,
 // expressions, function calls) — so it only fires for the deterministic
 // single-variable probes Connector/J issues at connection setup.
-func parseSingleSystemVarRead(query string) (string, bool) {
+func parseSingleSystemVarRead(query string) (varName string, label string, ok bool) {
 	s := stripLeadingSQLComment(query)
 	// Require the SELECT keyword followed by at least one whitespace character.
 	// Match any whitespace (space, tab, CR, LF) rather than a single literal
 	// space, so "SELECT\t@@x" is recognised too.
 	const kw = "SELECT"
 	if len(s) <= len(kw) || !strings.EqualFold(s[:len(kw)], kw) {
-		return "", false
+		return "", "", false
 	}
 	if !strings.ContainsRune(sqlWhitespace, rune(s[len(kw)])) {
-		return "", false
+		return "", "", false
 	}
 	rest := strings.TrimSpace(s[len(kw):])
 	if !strings.HasPrefix(rest, "@@") {
-		return "", false
+		return "", "", false
 	}
+	// The expression AS WRITTEN, which is what a real server returns as the
+	// column label for "SELECT @@session.transaction_isolation".
+	label = strings.TrimRight(rest, ";"+sqlWhitespace)
 	rest = strings.TrimPrefix(rest, "@@")
+	// Trim the statement terminator and any trailing whitespace BEFORE the
+	// single-variable check below, not after.
+	//
+	// The other order rejected "SELECT @@sql_mode ;". TrimSpace above only strips
+	// whitespace at the very END of the string, and there the last character is
+	// ';', so the space before it survives as interior whitespace and the
+	// ContainsAny check treats a legal single-variable read as multi-column.
+	// Trimming first also makes this the one place the terminator is handled;
+	// doing it afterwards was mostly dead, since TrimSpace had already removed a
+	// bare trailing \r or \t.
+	rest = strings.TrimRight(rest, ";"+sqlWhitespace)
 	// Single variable only: reject multi-column / AS / expressions / calls.
 	// The whitespace set matches sqlWhitespace used for the SELECT keyword check
 	// above, \r included, so "SELECT @@a\r@@b" is rejected like its \n counterpart.
 	if strings.ContainsAny(rest, ",()"+sqlWhitespace) {
-		return "", false
+		return "", "", false
 	}
 	if low := strings.ToLower(rest); strings.HasPrefix(low, "session.") {
 		rest = rest[len("session."):]
@@ -2079,14 +2093,10 @@ func parseSingleSystemVarRead(query string) (string, bool) {
 	} else if strings.HasPrefix(low, "local.") {
 		rest = rest[len("local."):]
 	}
-	// Trim the statement terminator plus ANY trailing whitespace, using the same
-	// set as above: trimming only "; " left "\r" and "\t" attached to the returned
-	// variable name, which then failed every lookup.
-	rest = strings.TrimRight(rest, ";"+sqlWhitespace)
 	if rest == "" {
-		return "", false
+		return "", "", false
 	}
-	return rest, true
+	return rest, label, true
 }
 
 // resolveVarFromProbe scans the mock pool for a recorded result set carrying a
@@ -2225,7 +2235,7 @@ func terminatorForSingleColumn(probe *mysql.GenericResponse) *mysql.GenericRespo
 // bodies, so only the sequence IDs must be set here. Returns nil when varName
 // isn't present in any recorded result set (caller falls through to its normal
 // no-match handling).
-func buildSessionVarResponse(logger *zap.Logger, pool []*models.Mock, varName string, decodeCtx *wire.DecodeContext) *mysql.Response {
+func buildSessionVarResponse(logger *zap.Logger, pool []*models.Mock, varName, label string, decodeCtx *wire.DecodeContext) *mysql.Response {
 	// The single-column framing built below is the CLIENT_DEPRECATE_EOF form
 	// (no intermediate EOF after the column; an OK-replacing-EOF terminator at
 	// sequence 4). Every modern JVM MySQL driver (Connector/J 8.x, MariaDB
@@ -2247,8 +2257,17 @@ func buildSessionVarResponse(logger *zap.Logger, pool []*models.Mock, varName st
 	}
 	c := *col // copy; we only overwrite header/name, keeping the probe's type/charset/length
 	c.Header = mysql.Header{SequenceID: 2}
-	c.Name = varName
-	c.OrgName = varName
+	// A real server labels the column with the EXPRESSION TEXT, so
+	// "SELECT @@session.transaction_isolation" comes back labelled
+	// "@@session.transaction_isolation", not "transaction_isolation". Connector/J
+	// reads this by index and does not care, but a client that reads by label
+	// would not find its column. Fall back to the bare name if the caller had no
+	// expression to give.
+	if label == "" {
+		label = varName
+	}
+	c.Name = label
+	c.OrgName = label
 	trs := &mysql.TextResultSet{
 		ColumnCount:     1,
 		Columns:         []*mysql.ColumnDefinition41{&c},
