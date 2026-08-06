@@ -44,7 +44,7 @@ runs:
 
     - name: Wait for the Docker daemon (Windows)
       if: runner.os == 'Windows'
-      shell: powershell
+      shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
       run: |
         $maxAttempts = 30
         $attempt = 0
@@ -117,17 +117,29 @@ runs:
       if: runner.os == 'Windows'
       # Use Windows PowerShell 5.1 (always preinstalled on Windows
       # runners) rather than pwsh (PowerShell 7, which not every
-      # self-hosted runner in the fleet ships — see the Bootstrap
-      # PowerShell environment step in prepare_and_run.yml's
-      # build-windows-amd64 job, which repairs *that* job but does
-      # not run in the pull-docker-image-windows job that invokes
-      # this action). Every cmdlet used below (Join-Path, Test-Path,
+      # self-hosted runner in the fleet ships).
+      #
+      # The explicit -ExecutionPolicy Bypass is now required, not
+      # decorative. GitHub's built-in `powershell` shell invokes
+      # `powershell -command ". '<script>'"` with no policy flag, and
+      # dot-sourcing a .ps1 is subject to ExecutionPolicy. Until
+      # recently this happened to work on the fleet because
+      # prepare_and_run.yml's "Bootstrap PowerShell environment" step
+      # wrote `Set-ExecutionPolicy -Scope CurrentUser -Bypass`, which
+      # persists in HKCU across jobs and runs — so any box that had run
+      # build-windows-amd64 was covered by a side effect. That step was
+      # deleted when build-windows-amd64 moved to GitHub-hosted
+      # windows-latest, so the guarantee is gone; a freshly provisioned
+      # runner would fail here. Carrying the flag ourselves makes this
+      # action independent of whatever else ran on the machine first.
+      #
+      # Every cmdlet used below (Join-Path, Test-Path,
       # Get-ChildItem, Select-String, [Environment]::NewLine,
       # string .Trim(), [string]::IsNullOrWhiteSpace) is 5.1-
       # compatible, so keeping the floor at 5.1 is free and avoids
       # a 'pwsh: command not found' step failure on unrepaired
       # runners.
-      shell: powershell
+      shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
       run: |
         $ErrorActionPreference = 'Stop'
         $tar = Join-Path "${{ runner.temp }}" "keploy-image\image.tar"

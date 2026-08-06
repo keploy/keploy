@@ -278,10 +278,11 @@ jobs:
   # ---------------------------------------------------------------
   # Windows native CGo build.
   #
-  # windows-latest ships MinGW-w64 (gcc.exe) via the pre-installed
-  # msys2/mingw64 toolchain on PATH, which satisfies pg_query_go's
-  # cgo link. Running native here avoids the linux → windows cross
-  # path that pg_query_go #138 documents as unreliable.
+  # windows-latest ships MinGW-w64 (gcc.exe) at C:\mingw64\bin, which
+  # the runner image puts on the machine PATH, and which satisfies
+  # pg_query_go's cgo link. Running native here avoids the
+  # linux → windows cross path that pg_query_go #138 documents as
+  # unreliable.
   # ---------------------------------------------------------------
   build-windows:
     runs-on: windows-latest
@@ -304,25 +305,14 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Ensure MinGW gcc on PATH
-        # windows-latest ships MinGW-w64 under
-        # C:\ProgramData\mingw64\mingw64\bin (hosted runner image).
-        # Append defensively — if a future image moves it, the job
-        # fails fast at gcc --version rather than later at `go build`
-        # with a cryptic 'cannot find -lpg_query' link error.
+        # Shared with prepare_and_run.yml's build-windows-amd64 so the
+        # binary users download is linked against the same toolchain the
+        # PR build verified — see the script header for why the two
+        # inline copies this replaces were a latent hazard.
         shell: pwsh
         run: |
-          $candidates = @(
-            'C:\ProgramData\mingw64\mingw64\bin',
-            'C:\msys64\mingw64\bin',
-            'C:\mingw64\bin'
-          )
-          foreach ($c in $candidates) {
-            if (Test-Path (Join-Path $c 'gcc.exe')) {
-              Add-Content -Path $env:GITHUB_PATH -Value $c
-              Write-Host "Using MinGW at $c"
-            }
-          }
-          # Verify once PATH is rewritten for the next step.
+          $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-mingw.ps1'
+          & $script
 
       - name: Verify gcc
         shell: bash

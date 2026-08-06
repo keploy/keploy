@@ -21,8 +21,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Must match the default $IsoRoot in setup-git-isolation.ps1 / cleanup-git-isolation.ps1
-  _ISO_ROOT: .git-isolation
   # Central ref for the keploy/integrations commit every build leg in
   # this workflow checks out. Keeping it in one place means the 4
   # Add-Private-Parsers steps below (linux/amd64, linux/arm64,
@@ -166,318 +164,42 @@ jobs:
           path: keploy
 
   build-windows-amd64:
-    # Native windows/amd64 cgo build on self-hosted runner.
+    # Native windows/amd64 cgo build on a GitHub-hosted runner.
+    #
+    # Native rather than cross-compiled because
+    # pkg/agent/hooks/windows/redirector.go is `//go:build windows &&
+    # amd64` and cgo-links the in-repo libwindows_redirector.a against
+    # -lws2_32/-luserenv/-lntdll/-ladvapi32; the linux -> windows cross
+    # path does not handle that reliably.
+    #
+    # Hosted rather than self-hosted because nothing in this job needs
+    # the fleet: no Docker, no WinDivert kernel driver, no admin
+    # rights, no licensed software and no private network. The only
+    # non-public dependency (keploy/integrations) is fetched over
+    # public github.com by the setup-private-parsers action, and the
+    # 20 MB libwindows_redirector.a is committed in-repo. release.yml's
+    # `build-windows` job runs the identical windows/amd64 cgo build on
+    # windows-latest and ships every Windows release binary from it, so
+    # this configuration is proven in this repo rather than new.
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: [self-hosted, Windows, X64]
-    # Bound wall-clock so a hung cgo link step (historically: a
+    runs-on: windows-latest
+    # Bound the wall-clock so a hung cgo link step (historically: a
     # deadlock inside libwindows_redirector.a's shutdown path) cannot
-    # sit on a self-hosted Windows runner for 6h. Healthy runs are
-    # ~5 min; 30 gives 6x headroom.
+    # sit on a runner for GitHub's 6h default. A healthy hosted run is
+    # ~5 min end to end with a cold module cache; 30 gives 6x headroom.
     timeout-minutes: 30
     steps:
-      # Bootstrap a consistent shell environment on every self-hosted
-      # Windows runner. Some runners in the fleet ship without pwsh
-      # (PowerShell Core) or with a Restricted ExecutionPolicy that
-      # blocks subsequent step scripts from running. This step makes
-      # every downstream `shell: powershell` and `shell: pwsh`
-      # invocation succeed regardless of which runner the scheduler
-      # picks. Run it unconditionally with explicit -ExecutionPolicy
-      # Bypass so it itself is not subject to the restriction it
-      # repairs.
-      - name: Bootstrap PowerShell environment
-        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
-        run: |
-          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-          # CurrentUser scope persists across subsequent GitHub Actions
-          # steps (each is a fresh powershell invocation, so Process scope
-          # would not carry over). Bypass here is scoped to the runner
-          # user account, not the machine.
-          try { Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass -Force } catch { Write-Host "::warning::CurrentUser scope write failed: $_" }
-          if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
-            Write-Host "pwsh not found; repairing runner (one-shot per-runner install)."
-            # Try choco first (fastest when present), then fall back to
-            # a portable ZIP download from the official PowerShell
-            # GitHub release so runners without choco are still
-            # repaired. 7.4.6 is the current LTS at time of writing;
-            # pinned to a known-good version so behaviour is
-            # reproducible.
-            $pwshVersion = "7.4.6"
-            $pwshBase = Join-Path $env:USERPROFILE ".pwsh-portable"
-            $pwshBin = Join-Path $pwshBase ("PowerShell-" + $pwshVersion + "-win-x64")
-            $pwshExe = Join-Path $pwshBin "pwsh.exe"
-            if (Get-Command choco -ErrorAction SilentlyContinue) {
-              try {
-                & choco install pwsh -y --no-progress
-                $env:Path = "$env:ProgramFiles\PowerShell\7;" + $env:Path
-                "$env:ProgramFiles\PowerShell\7" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-              } catch {
-                Write-Host "::warning::choco install failed: $_. Falling back to portable ZIP."
-              }
-            }
-            if (-not (Get-Command pwsh -ErrorAction SilentlyContinue) -and -not (Test-Path $pwshExe)) {
-              New-Item -Path $pwshBase -ItemType Directory -Force | Out-Null
-              $zipUrl = "https://github.com/PowerShell/PowerShell/releases/download/v$pwshVersion/PowerShell-$pwshVersion-win-x64.zip"
-              $zipPath = Join-Path $pwshBase ("pwsh-" + $pwshVersion + ".zip")
-              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-              Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
-              Expand-Archive -Path $zipPath -DestinationPath $pwshBin -Force
-              Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
-            }
-            if (Test-Path $pwshExe) {
-              $env:Path = "$pwshBin;" + $env:Path
-              $pwshBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-              Write-Host "Installed portable pwsh at $pwshExe"
-            }
-            if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
-              Write-Host "::warning::pwsh still unavailable after install attempts. Runner needs manual repair."
-            }
-          } else {
-            Write-Host "pwsh already available: $((Get-Command pwsh).Source)"
-          }
-
-      - name: Free runner disk space
-        # Use Windows PowerShell 5.1 (always preinstalled) instead of
-        # pwsh. The new win-runner-[1-4] pool doesn't ship
-        # PowerShell 7 - job 71974521109 failed at the first pwsh
-        # step with 'pwsh: command not found'. Every cmdlet used
-        # below (Get-PSDrive, Get-ChildItem, Where-Object, etc.) is
-        # PS5.1-compatible.
-        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
-        run: |
-          $ErrorActionPreference = 'Continue'
-          # The shared self-hosted Windows runners have hit "not
-          # enough space on the disk" mid-build (go build writes
-          # importcfg into SystemTemp and gets ENOSPC). Tiered
-          # cleanup: fast-path on healthy disk (>=4 GB free), light
-          # sweep (stale go-build temp + other runners' _diag /
-          # _temp + other-repo _work >7d), heavy sweep (user %TEMP%
-          # + Windows Update download cache), then last-resort go
-          # module/cache purge. Hard-fail under 2 GB so subsequent
-          # CGO builds don't die confused.
-          $targetFree = 4GB
-          $beforeC = (Get-PSDrive C).Free
-          Write-Host ("Free on C: before cleanup: {0:N0} bytes" -f $beforeC)
-          if ($beforeC -ge $targetFree) {
-            Write-Host ("Already have {0:N0} bytes free (>= {1:N0}); skipping cleanup" -f $beforeC, $targetFree)
-            exit 0
-          }
-
-          # 1. Stale go-build intermediate directories under SystemTemp.
-          foreach ($base in @("C:\WINDOWS\SystemTemp", "C:\Windows\Temp")) {
-            if (Test-Path $base) {
-              Get-ChildItem -Path $base -Directory -Force -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -like 'go-build*' } |
-                ForEach-Object {
-                  Write-Host "Removing $($_.FullName)"
-                  Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                }
-            }
-          }
-
-          # 2. Other runners' _diag/_temp + stale other-repo _work checkouts (>7 days).
-          $runnersRoot = "C:\actions-runners"
-          if (Test-Path $runnersRoot) {
-            foreach ($rel in @("_diag", "_temp")) {
-              Get-ChildItem -Path $runnersRoot -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                $p = Join-Path $_.FullName $rel
-                if (Test-Path $p) {
-                  Write-Host "Purging $p (entries older than 1 day)"
-                  Get-ChildItem -Path $p -Force -ErrorAction SilentlyContinue |
-                    Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } |
-                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-                }
-              }
-            }
-            $thisRepoDir = $env:GITHUB_REPOSITORY.Split('/')[-1]
-            Get-ChildItem -Path $runnersRoot -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
-              $work = Join-Path $_.FullName "_work"
-              if (Test-Path $work) {
-                Get-ChildItem -Path $work -Directory -Force -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Name -ne $thisRepoDir -and $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
-                  ForEach-Object {
-                    Write-Host "Removing stale work dir $($_.FullName)"
-                    Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                  }
-              }
-            }
-          }
-
-          if ((Get-PSDrive C).Free -lt $targetFree) {
-            $userTemp = $env:TEMP
-            if ($userTemp -and (Test-Path $userTemp)) {
-              Write-Host "Sweeping $userTemp"
-              Get-ChildItem -Path $userTemp -Force -ErrorAction SilentlyContinue |
-                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            $sd = "C:\Windows\SoftwareDistribution\Download"
-            if (Test-Path $sd) {
-              Write-Host "Sweeping $sd"
-              Get-ChildItem -Path $sd -Force -ErrorAction SilentlyContinue |
-                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-            }
-          }
-
-          if ((Get-PSDrive C).Free -lt $targetFree) {
-            foreach ($cache in @("$env:USERPROFILE\go\pkg\mod", "$env:LOCALAPPDATA\go-build")) {
-              if (Test-Path $cache) {
-                Write-Host "Removing $cache"
-                Remove-Item -Path $cache -Recurse -Force -ErrorAction SilentlyContinue
-              }
-            }
-          }
-
-          $afterC = (Get-PSDrive C).Free
-          Write-Host ("Free on C: after cleanup:  {0:N0} bytes (freed {1:N0})" -f $afterC, ($afterC - $beforeC))
-          if ($afterC -lt 2GB) {
-            Write-Error "Free on C: is under 2 GB after cleanup - not enough headroom for a CGO Windows build. The self-hosted runner operator should expand the C: volume; this job will fail during go build otherwise."
-            exit 1
-          }
-
-      - name: Create workflow start lock
-        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
-        run: |
-          $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
-          New-Item -Path $lockDir -ItemType Directory -Force | Out-Null
-          $timestamp = (Get-Date -UFormat %s)
-          $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
-          Set-Content -Path $lockPath -Value "started-$timestamp"
-          Write-Host "Created workflow start lock: $lockPath"
-
-      # Inline because this runs BEFORE checkout (workspace may not exist).
-      # Logic mirrors .github/scripts/windows/setup-git-isolation.ps1.
-      - name: Setup per-job git isolation
-        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $isoName = $env:GIT_ISOLATION_ID
-          if ([string]::IsNullOrWhiteSpace($isoName)) {
-            $isoName = "$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$env:GITHUB_JOB-$([guid]::NewGuid().ToString('N'))"
-            $isoName = $isoName -replace '[^A-Za-z0-9._-]', '_'
-          }
-          $isoDir = Join-Path (Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}") $isoName
-          New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
-
-          # Seed per-job gitconfig from the global one (if it exists)
-          $gitConfig = Join-Path $isoDir 'gitconfig'
-          $globalCfg = Join-Path $env:USERPROFILE '.gitconfig'
-          if (Test-Path $globalCfg) { Copy-Item $globalCfg $gitConfig -Force } else { New-Item -Path $gitConfig -ItemType File -Force | Out-Null }
-
-          # Remove inherited SSH redirect settings so the initial
-          # actions/checkout always uses HTTPS (before ssh-agent is loaded).
-          $staleKeys = @(
-              'url."git@github.com:".insteadOf',
-              'url."ssh://git@github.com/".insteadOf',
-              'core.sshCommand'
-          )
-          $savedPref = $PSNativeCommandUseErrorActionPreference
-          $PSNativeCommandUseErrorActionPreference = $false
-          foreach ($key in $staleKeys) {
-              git config --file $gitConfig --unset-all $key 2>$null
-          }
-          $PSNativeCommandUseErrorActionPreference = $savedPref
-
-          Set-Content -Path (Join-Path $isoDir '.active') -Value (Get-Date -UFormat '%s')
-
-          git config --file $gitConfig core.autocrlf false
-          if ($LASTEXITCODE -ne 0) { throw "git config core.autocrlf failed (exit $LASTEXITCODE)" }
-          git config --file $gitConfig core.eol lf
-          if ($LASTEXITCODE -ne 0) { throw "git config core.eol failed (exit $LASTEXITCODE)" }
-
-          # Per-job SSH known_hosts. Prefer ssh-keyscan so we pick up
-          # any host-key rotation automatically; fall back to GitHub's
-          # published keys (https://api.github.com/meta .ssh_keys) when
-          # ssh-keyscan returns nothing. Some self-hosted runners in
-          # this fleet ship without the OpenSSH client, or have egress
-          # policies that block port 22, so ssh-keyscan can be silent
-          # even though HTTPS git clones work fine.
-          $knownHosts = Join-Path $isoDir 'known_hosts'
-          $hostKeys = $null
-          if (Get-Command ssh-keyscan -ErrorAction SilentlyContinue) {
-              $hostKeys = & ssh-keyscan github.com 2>$null
-          }
-          if ([string]::IsNullOrWhiteSpace(($hostKeys | Out-String))) {
-              Write-Host "ssh-keyscan unavailable or empty; using GitHub published host keys."
-              $hostKeys = @(
-                  'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl',
-                  'github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=',
-                  'github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk='
-              )
-          }
-          $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
-
-          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "GIT_ISOLATION_ID=$isoName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o GlobalKnownHostsFile=NUL -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          Write-Host "Git isolation setup complete for $isoName"
-          Write-Host "  GIT_CONFIG_GLOBAL = $gitConfig"
-
-          $global:LASTEXITCODE = 0
-          exit 0
-
-      # Defensive recovery: if a prior run on this self-hosted runner was
-      # interrupted partway through cleanup, the workspace can end up with
-      # files present but the .git subdirectory missing or corrupt. In that
-      # state actions/checkout@v4 with clean:true fails at "git config
-      # --local" with "not a git repository" because clean tries to operate
-      # on a non-git tree. Wipe the workspace contents in that case so
-      # checkout starts from a fresh init. Healthy workspaces (with a valid
-      # .git) are left untouched so the existing checkout fast path
-      # (clean+fetch over an existing clone) keeps working.
-      - name: Recover stale runner state
-        continue-on-error: true
-        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
-        run: |
-          $ErrorActionPreference = 'Continue'
-          try {
-            # 1. Kill any keploy processes left over from a prior run on this
-            #    self-hosted runner. They hold open file handles into the
-            #    workspace bin/ (notably WinDivert64.sys, the kernel driver
-            #    keploy uses for Windows traffic redirection), which makes
-            #    actions/checkout's clean step fail with EPERM on unlink.
-            Get-Process -Name 'keploy' -ErrorAction SilentlyContinue | ForEach-Object {
-              Write-Host "Stopping leftover keploy.exe pid=$($_.Id)"
-              try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
-            }
-
-            # 2. Stop the WinDivert kernel driver if it's still loaded.
-            #    keploy registers it as an SCM service named "WinDivert"
-            #    (or "WinDivert64" on some versions); leaving it running
-            #    pins the .sys file in the workspace and causes the same
-            #    EPERM observed at checkout-clean time.
-            foreach ($name in @('WinDivert', 'WinDivert64')) {
-              $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
-              if ($svc -and $svc.Status -ne 'Stopped') {
-                Write-Host "Stopping kernel driver service $name (status=$($svc.Status))"
-                try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
-              }
-            }
-
-            # 3. If a prior run was interrupted partway through cleanup the
-            #    workspace can end up with files but no .git, which makes
-            #    actions/checkout's clean:true fail with "not a git
-            #    repository". Wipe in that case so checkout starts fresh.
-            #    Healthy workspaces (with valid .git) are left alone so the
-            #    existing fast path (clean+fetch over an existing clone)
-            #    keeps working.
-            $ws = $env:GITHUB_WORKSPACE
-            if ($ws -and (Test-Path $ws)) {
-              $gitDir = Join-Path $ws '.git'
-              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
-              $hasFiles = $items.Count -gt 0
-              if ($hasFiles -and -not (Test-Path $gitDir)) {
-                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
-                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
-              }
-            }
-          } catch {
-            Write-Host "::warning::Recover stale runner state: $_"
-          }
-          exit 0
-
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
+          # persist-credentials/clean are belt-and-braces on an
+          # ephemeral hosted VM (the workspace is destroyed with the
+          # job), but they cost nothing and keep the checkout token out
+          # of .git/config. fetch-depth: 0 is carried over unchanged
+          # and matches release.yml's build-windows; nothing in this
+          # job reads git history (main.version is stamped from the
+          # github.sha context), so it is ~11s of insurance, not a
+          # requirement.
           persist-credentials: false
           fetch-depth: 0
           clean: true
@@ -486,67 +208,38 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          go-cache: false
+          # Was false only because the self-hosted disk sweep could
+          # delete GOMODCACHE mid-job. That sweep is gone, so cache
+          # like release.yml's build-windows does.
+          go-cache: true
           # See INTEGRATION_REF in the workflow-level env block.
           integration-ref: ${{ env.INTEGRATION_REF }}
 
-      - name: Add MinGW gcc to PATH
-        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+      - name: Ensure MinGW gcc on PATH
+        # Shared with release.yml's build-windows so the PR build and
+        # the shipped binary can never resolve different toolchains —
+        # see the script header for why the two inline copies this
+        # replaces were a latent hazard.
+        shell: pwsh
         run: |
-          $candidates = @(
-            "C:\msys64\mingw64\bin",
-            "C:\mingw64\bin",
-            "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin",
-            "C:\tools\mingw64\bin",
-            "$env:USERPROFILE\.mingw64-portable\mingw64\bin"
-          )
-          $gccBin = $null
-          foreach ($c in $candidates) {
-            if (Test-Path (Join-Path $c "gcc.exe")) { $gccBin = $c; break }
-          }
-          if (-not $gccBin) {
-            $onPath = Get-Command gcc -ErrorAction SilentlyContinue
-            if ($onPath) { $gccBin = Split-Path $onPath.Source }
-          }
-          if (-not $gccBin) {
-            Write-Host "No MinGW found in known paths; installing portable MinGW-w64 14.2.0 (WinLibs ZIP)."
-            $portableRoot = Join-Path $env:USERPROFILE ".mingw64-portable"
-            $portableBin = Join-Path $portableRoot "mingw64\bin"
-            if (-not (Test-Path (Join-Path $portableBin "gcc.exe"))) {
-              New-Item -Path $portableRoot -ItemType Directory -Force | Out-Null
-              $mingwUrl = "https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-12.0.0-ucrt-r3/winlibs-x86_64-posix-seh-gcc-14.2.0-mingw-w64ucrt-12.0.0-r3.zip"
-              $archive = Join-Path $portableRoot "mingw64.zip"
-              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-              Invoke-WebRequest -Uri $mingwUrl -OutFile $archive -UseBasicParsing
-              Expand-Archive -Path $archive -DestinationPath $portableRoot -Force
-              Remove-Item -Path $archive -Force -ErrorAction SilentlyContinue
-            }
-            if (Test-Path (Join-Path $portableBin "gcc.exe")) {
-              $gccBin = $portableBin
-            } else {
-              throw "MinGW install did not produce gcc.exe at $portableBin"
-            }
-          }
-          Write-Host "Using mingw gcc at $gccBin"
-          echo $gccBin >> $env:GITHUB_PATH
-          $env:Path = "$gccBin;$env:Path"
-          where.exe gcc
-          gcc --version
+          $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-mingw.ps1'
+          & $script
 
       - name: CGO toolchain sanity
-        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        # Fails fast here (exit 127 on a missing gcc) instead of
+        # letting the cgo link stage fail 3 minutes into `go build`.
+        shell: bash
         run: |
-          Write-Host "PATH=$env:PATH"
-          where.exe gcc
           gcc --version
           go env CGO_ENABLED CC CXX GOOS GOARCH
 
       - name: Build Keploy (PR) - Windows (windows/amd64)
-        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        shell: bash
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "1"
         run: |
-          $env:GOOS = "windows"
-          $env:GOARCH = "amd64"
-          $env:CGO_ENABLED = "1"
           go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy.exe ./main.go
 
       - name: Upload build artifact (Windows CLI)
@@ -554,13 +247,6 @@ jobs:
         with:
           name: build-windows
           path: keploy.exe
-
-      - name: Prune stale git isolation dirs
-        if: always()
-        continue-on-error: true
-        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
-        run: |
-          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   upload-latest:
     runs-on: ubuntu-latest
@@ -893,23 +579,90 @@ jobs:
           echo "Docker cleanup completed."
 
   # -------------------------------------------------------------------
-  # Windows test jobs — self-hosted runner loads the linux/amd64 image
-  # (Docker Desktop on Windows runs linux containers via WSL2).
+  # Windows test jobs. Two lanes with different runner requirements:
+  #
+  #   * run_golang_native_windows — GitHub-hosted (windows-latest). Runs
+  #     keploy.exe directly against native sample apps; needs only the
+  #     WinDivert driver the artifact carries.
+  #   * run_golang_docker_windows — self-hosted, gated on
+  #     precheck-windows. Loads the linux/amd64 image and drives it from
+  #     the Windows keploy.exe, which requires Docker Desktop's WSL2
+  #     Linux engine (the sample stack and keploy's injected eBPF agent
+  #     sidecar are Linux containers). Hosted Windows runners ship
+  #     Docker in Windows-container mode only, so this lane cannot move.
   # -------------------------------------------------------------------
 
   precheck-windows:
-    # Pre-flight sanity on the self-hosted Windows runner: set up
-    # per-job git isolation and confirm Docker Desktop is up. Fails
-    # fast BEFORE the parallel Windows test jobs spin up. The docker
-    # image itself is loaded inside each downstream test job via the
+    # Pre-flight sanity on the self-hosted Windows runner: create the
+    # workflow start lock that cleanup_windows consumes, set up per-job
+    # git isolation, and start/confirm Docker Desktop. Fails fast
+    # BEFORE the parallel Windows test jobs spin up. The docker image
+    # itself is loaded inside each downstream test job via the
     # download-image composite action — pre-loading here would
     # duplicate the artifact download + docker load for every test.
+    #
+    # Stays self-hosted: its load-bearing step launches Docker Desktop,
+    # which is what gives run_golang_docker_windows a LINUX-container
+    # engine on a Windows host. GitHub-hosted Windows runners ship
+    # Docker in Windows-container mode only and cannot run the
+    # linux/amd64 sample stack or keploy's eBPF agent sidecar.
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
-    # Same rationale as build-windows-amd64: bound the wall-clock so a
-    # hung self-hosted Windows runner cannot stall the whole pipeline.
+    # Bound the wall-clock so a hung self-hosted Windows runner cannot
+    # stall the whole pipeline.
     timeout-minutes: 30
     steps:
+      # Marks "a Windows run is live on this shared VM" for
+      # cleanup-windows.ps1, which only runs its destructive
+      # `docker system prune -af --volumes` when NO lock files remain.
+      # This lock used to be written by build-windows-amd64; that job
+      # now runs on an ephemeral GitHub-hosted VM whose $USERPROFILE
+      # the self-hosted cleanup can never see, so the writer moved here
+      # — the earliest self-hosted job in the Windows lane, and the
+      # mirror of precheck-macos. Without a writer, cleanup would find
+      # zero locks on every run and prune a concurrent run's images and
+      # volumes mid-`docker compose up`.
+      - name: Create workflow start lock
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
+          New-Item -Path $lockDir -ItemType Directory -Force | Out-Null
+          $timestamp = (Get-Date -UFormat %s)
+          $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
+          Set-Content -Path $lockPath -Value "started-$timestamp"
+          Write-Host "Created workflow start lock: $lockPath"
+
+      - name: Report fleet disk headroom
+        # The self-hosted fleet's only remaining reclamation is
+        # cleanup-windows.ps1's docker prune, which runs in a job with
+        # `continue-on-error: true` that nothing depends on — so a fleet
+        # filling up produces no signal anywhere. This is that signal.
+        #
+        # It lives HERE, in precheck-windows, deliberately: precheck is
+        # the earliest self-hosted Windows job AND is still a gate input,
+        # so an exhausted runner red-lights the PR with an actionable
+        # message instead of surfacing as a mid-build "no space left"
+        # three jobs later.
+        #
+        # Observe-only above the floor. It does NOT delete anything: the
+        # 98-line sweep this replaces used to purge GOMODCACHE and walk
+        # C:\actions-runners, which raced concurrent jobs on the shared
+        # box. Reporting is what was actually missing.
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          $c = Get-PSDrive -Name C
+          $freeGB = [math]::Round($c.Free / 1GB, 2)
+          $usedGB = [math]::Round($c.Used / 1GB, 2)
+          Write-Host "C: free ${freeGB} GB (used ${usedGB} GB) on $($env:COMPUTERNAME)"
+
+          if ($freeGB -lt 2) {
+            Write-Host "::error::Windows runner $($env:COMPUTERNAME) has only ${freeGB} GB free on C:. A CGO build plus a docker image load needs more than this; the runner operator should expand the volume or prune the docker cache."
+            exit 1
+          }
+          elseif ($freeGB -lt 6) {
+            Write-Host "::warning::Windows runner $($env:COMPUTERNAME) is low on disk: ${freeGB} GB free on C:. Cleanup is falling behind — check that cleanup_windows is still pruning."
+          }
+
       # Create a minimal per-job gitconfig BEFORE checkout to prevent
       # concurrent jobs' SSH redirects from leaking into our checkout.
       - name: Pre-checkout git isolation
@@ -929,7 +682,13 @@ jobs:
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "GIT_ISOLATION_ID=$isoName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # See build-windows-amd64's "Recover broken workspace" step for rationale.
+      # Self-hosted only: the workspace and the machine persist between
+      # runs, so a prior run interrupted mid-cleanup can leave a
+      # keploy.exe holding handles on WinDivert64.sys, the WinDivert
+      # kernel driver service still loaded, or a workspace with files
+      # but no .git. All three make actions/checkout's clean:true fail
+      # (EPERM on unlink, or "not a git repository"). The inline
+      # comments below cover each case.
       - name: Recover stale runner state
         continue-on-error: true
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
@@ -1033,20 +792,31 @@ jobs:
     uses: ./.github/workflows/golang_native_windows.yml
 
   cleanup_windows:
+    # Disk hygiene for the shared self-hosted Windows VM: drop this
+    # run's workflow lock, kill containers older than 30 min, and prune
+    # Docker once no other run holds a lock. Stays self-hosted by
+    # definition — there is nothing to reclaim on an ephemeral hosted
+    # VM that is destroyed at job end.
     if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: [self-hosted, Windows, X64]
-    needs: [run_golang_docker_windows, run_golang_native_windows]
+    # Only the docker lane touches this VM. run_golang_native_windows
+    # runs entirely on GitHub-hosted windows-latest, so waiting on it
+    # would just park a self-hosted runner slot behind machines this
+    # job can never affect.
+    needs: [run_golang_docker_windows]
     # The only self-hosted job in the repo that had no cap, so it inherited
-    # GitHub's 360-minute default. Because it is `if: always()` and the final
-    # `gate_windows` needs it, a Windows fleet that is busy or offline parks it
-    # in the queue and the ENTIRE run stays in_progress behind it for six
-    # hours — the PR shows no verdict and `gh run rerun --failed` refuses,
-    # because that requires a completed run. Observed on run 30620482988: 60+
-    # minutes queued with zero steps executed while every other job had long
-    # finished. 10 minutes matches its macOS twin `clean_up_docker_macos`; the
-    # work itself is `docker rm -f` and a lock-file delete. Losing a cleanup
-    # pass is cheap and self-correcting — the next push schedules a fresh one,
-    # as the concurrency comment at the top of this file already notes.
+    # GitHub's 360-minute default. Because it is `if: always()`, a Windows
+    # fleet that is busy or offline parks it in the queue and the ENTIRE run
+    # stays in_progress behind it for six hours — the PR shows no verdict and
+    # `gh run rerun --failed` refuses, because that requires a completed run.
+    # Observed on run 30620482988: 60+ minutes queued with zero steps executed
+    # while every other job had long finished. (`gate_windows` no longer needs
+    # this job, so a slow cleanup no longer blocks the Windows verdict itself,
+    # but it still holds the run open.) 10 minutes matches its macOS twin
+    # `clean_up_docker_macos`; the work itself is `docker rm -f` and a
+    # lock-file delete. Losing a cleanup pass is cheap and self-correcting —
+    # the next push schedules a fresh one, as the concurrency comment at the
+    # top of this file already notes.
     timeout-minutes: 10
     steps:
       - name: Pre-checkout git isolation
@@ -1066,7 +836,13 @@ jobs:
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "GIT_ISOLATION_ID=$isoName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # See build-windows-amd64's "Recover broken workspace" step for rationale.
+      # Self-hosted only: the workspace and the machine persist between
+      # runs, so a prior run interrupted mid-cleanup can leave a
+      # keploy.exe holding handles on WinDivert64.sys, the WinDivert
+      # kernel driver service still loaded, or a workspace with files
+      # but no .git. All three make actions/checkout's clean:true fail
+      # (EPERM on unlink, or "not a git repository"). The inline
+      # comments below cover each case.
       - name: Recover stale runner state
         continue-on-error: true
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
@@ -1127,11 +903,31 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
       - name: Remove workflow start lock
+        # `if: always()` is load-bearing, and newly so. cleanup-windows.ps1
+        # only prunes when NO lock files remain, so a leaked lock disables
+        # the shared VM's last disk reclamation permanently and silently.
+        # Three unguarded steps run before this one (git isolation, checkout,
+        # git isolation again) and setup-git-isolation.ps1 throws when
+        # ssh-keyscan comes back empty — a real fleet condition. Without
+        # always(), that throw strands the lock forever.
+        #
+        # The 24h reaper mirrors the macOS twin ("Remove workflow lock file"),
+        # and is the backstop for locks stranded by a cancelled or
+        # hard-killed run, which no `if:` can cover.
+        if: always()
         shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |
           $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
           $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
           Remove-Item -Path $lockPath -Force -ErrorAction SilentlyContinue
+
+          Write-Host "Reaping workflow locks older than 24 hours..."
+          Get-ChildItem -Path $lockDir -Filter 'prepare-windows-workflow-*.lock' -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } |
+            ForEach-Object {
+              Write-Host "  reaping stale lock: $($_.Name) (last written $($_.LastWriteTime))"
+              Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+            }
 
       - name: Check and cleanup long-running containers (Windows helper)
         id: count_stash
@@ -1247,13 +1043,20 @@ jobs:
   gate_windows:
     name: CI Gate (Windows)
     if: always()
+    # `cleanup_windows` is deliberately absent: it is self-hosted VM
+    # disk hygiene with zero product signal, yet as a gate input it
+    # could red-light a PR on its own whenever the fleet was busy or a
+    # docker prune hiccuped. Every job below carries real signal.
+    # precheck-windows must STAY — because this gate counts `skipped`
+    # as a pass, a failed precheck silently skips
+    # run_golang_docker_windows, and precheck's own `failure` is then
+    # the only thing that surfaces the lost docker-lane coverage.
     needs:
       - build-windows-amd64
       - build-docker-image-amd64
       - precheck-windows
       - run_golang_docker_windows
       - run_golang_native_windows
-      - cleanup_windows
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
@@ -1264,7 +1067,6 @@ jobs:
             "${{ needs.precheck-windows.result }}" \
             "${{ needs.run_golang_docker_windows.result }}" \
             "${{ needs.run_golang_native_windows.result }}" \
-            "${{ needs.cleanup_windows.result }}" \
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then
