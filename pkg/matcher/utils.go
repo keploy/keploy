@@ -14,6 +14,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1751,24 +1752,36 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	for k, v := range noise {
 		lk := strings.ToLower(k)
 		if existing, ok := loweredNoise[lk]; ok {
-			// Case-collision: build a NEW merged slice rather than appending
-			// onto `existing`. `existing` may share its backing array with a
-			// caller-owned slice (we copy on first insert below, but be
-			// defensive — a future change could reintroduce sharing), and
-			// appending here could otherwise mutate that caller slice across
-			// repeated CompareHeaders calls.
-			merged := make([]string, 0, len(existing)+len(v))
-			merged = append(merged, existing...)
-			merged = append(merged, v...)
-			loweredNoise[lk] = merged
+			// Case-collision. slices.Concat never writes into either operand:
+			// it builds the result in a freshly grown slice (nil when the
+			// total length is zero), so the result cannot alias `existing`
+			// or `v` — unlike `append(existing, v...)`, which would write
+			// into `existing`'s spare capacity. `existing` may share that
+			// array with a caller-owned slice (we clone on first insert
+			// below, but be defensive — a future change could reintroduce
+			// sharing), and an in-place append could otherwise corrupt that
+			// caller slice across repeated CompareHeaders calls.
+			//
+			// This replaced a hand-rolled make+append+append that was
+			// equally non-aliasing; CodeQL flagged its
+			// `len(existing)+len(v)` capacity as an allocation-size
+			// overflow, which it is not — both operands are lengths of
+			// in-memory slices parsed from keploy.yml, so the sum cannot
+			// approach MaxInt, and a wrapped (negative) capacity would
+			// panic in makeslice rather than under-allocate. Concat is the
+			// clearer spelling of the same guarantee, not a fix for a real
+			// hazard.
+			loweredNoise[lk] = slices.Concat(existing, v)
 		} else {
-			// Copy `v` so later case-collision merges (or any downstream
+			// Clone `v` so later case-collision merges (or any downstream
 			// mutation of loweredNoise) can never grow/duplicate the caller's
 			// original noise-map slice. The caller's `noise` is treated as
-			// read-only config.
-			cp := make([]string, len(v))
-			copy(cp, v)
-			loweredNoise[lk] = cp
+			// read-only config. slices.Clone maps nil to nil rather than to an
+			// empty non-nil slice; that is safe because nothing downstream
+			// distinguishes the two — the "header" sentinel lookup and the
+			// collision branch above both key off map-entry presence, and every
+			// consumer of the regex list only tests len(...) != 0.
+			loweredNoise[lk] = slices.Clone(v)
 		}
 	}
 	// Look up the "header"-scope sentinel via the normalized map so user-supplied

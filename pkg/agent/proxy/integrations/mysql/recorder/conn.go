@@ -218,9 +218,23 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 				return res, fmt.Errorf("failed to type cast destination url for source port %d", sourcePort)
 			}
 
+			// dstURL is the client's own SNI and is empty for every
+			// IP-dialled MySQL — see resolveDestServerName for why that
+			// blocks verification and what it falls back to.
+			serverName := resolveDestServerName(dstURL, destConn, opts.UpstreamTLSVerify)
+
 			tlsConfig := &tls.Config{
-				InsecureSkipVerify: true,
-				ServerName:         dstURL,
+				// Off by default: keploy must never be stricter than the app
+				// it records. A MySQL client on tls=skip-verify chose not to
+				// authenticate its upstream, and a failure here is silent —
+				// the handshake error trips the supervisor's passthrough
+				// fallback, the app keeps working and the mock is DROPPED.
+				// Opt in with record.upstreamTls.verify. Not a CA-bundle
+				// limitation: crypto/tls uses the platform root pool when
+				// RootCAs is nil.
+				InsecureSkipVerify: !opts.UpstreamTLSVerify, //nolint:gosec
+				RootCAs:            opts.UpstreamTLSRootCAs,
+				ServerName:         serverName,
 				KeyLogWriter:       pTls.KeyLogWriter(),
 			}
 			logger.Debug("Upgrading the destination connection to TLS", zap.String("ServerName", tlsConfig.ServerName))
@@ -426,6 +440,48 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	setHandshakeResult(&res, authRes)
 
 	return res, nil
+}
+
+// resolveDestServerName decides the ServerName keploy puts on its own TLS
+// dial to the real MySQL server.
+//
+// capturedSNI is the SNI CertForClient recovered from the client's
+// ClientHello (pTls.SrcPortToDstURL). SrcPortToDstURL stores it
+// unconditionally — the empty string included — and MySQL clients
+// overwhelmingly dial by IP (keploy's own e2e uses tcp(127.0.0.1:3306)),
+// while RFC 6066 forbids IP literals in SNI so the client sends none. Empty
+// is therefore the NORMAL case here, not an edge case, and this site has
+// never had any fallback at all.
+//
+// That is fatal the moment verification is on: crypto/tls rejects a config
+// with an empty ServerName and InsecureSkipVerify=false outright ("either
+// ServerName or InsecureSkipVerify must be specified") before it examines any
+// certificate, so record.upstreamTls.verify would be unusable against every
+// IP-dialled MySQL. Falling back to the peer keploy is already connected to
+// fixes that; an IP literal is the RIGHT value, Go matches it against the
+// certificate's IP SANs.
+//
+// Scoped to the verifying path on purpose: with verification off, ServerName
+// only feeds the SNI extension, so filling it in would put an SNI on the wire
+// that the application itself never sent. The default must stay byte-identical.
+func resolveDestServerName(capturedSNI string, destConn net.Conn, verify bool) string {
+	if capturedSNI != "" || !verify {
+		return capturedSNI
+	}
+	if destConn == nil {
+		return ""
+	}
+	addr := destConn.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	// Addresses that carry no port (unix sockets, anything SplitHostPort
+	// rejects) are used verbatim, matching proxy.hostFromAddr.
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
 }
 
 func setHandshakeResult(res *handshakeRes, authRes handshakeRes) {

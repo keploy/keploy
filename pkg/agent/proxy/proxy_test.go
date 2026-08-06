@@ -278,25 +278,35 @@ func TestNextProtosSubset(t *testing.T) {
 	}
 }
 
-// TestNewProxyTLSUpgradeFn_DestSide_AlwaysInsecureSkipVerify locks in the
-// MITM-correct dest-side posture: when the upgrade fn is invoked with
-// isClient=true (keploy dialing the real upstream), it MUST handshake
-// without verifying the upstream cert, regardless of what
-// InsecureSkipVerify the caller-supplied cfg held. The supplied cfg
-// must NOT be mutated — only the per-dial clone gets the flag flipped.
+// TestNewProxyTLSUpgradeFn_DestSide_DefaultSkipsVerification locks in the
+// DEFAULT dest-side posture: when the upgrade fn is invoked with
+// isClient=true (keploy dialing the real upstream) and upstream
+// verification has NOT been opted into, it MUST handshake without
+// verifying the upstream cert, regardless of what InsecureSkipVerify the
+// caller-supplied cfg held. The supplied cfg must NOT be mutated — only
+// the per-dial clone gets the flag flipped.
 //
 // This is a regression test for the dest-side passthrough drop reported
 // as `dest TLS handshake failed: x509: certificate is valid for
 // 127.0.0.1, not 10.224.0.152` against in-cluster K8s services whose
 // upstream cert SAN doesn't match the ClusterIP keploy sees.
-func TestNewProxyTLSUpgradeFn_DestSide_AlwaysInsecureSkipVerify(t *testing.T) {
+//
+// The override used to be unconditional; it is now driven by
+// record.upstreamTls.verify (see the companion
+// TestNewProxyTLSUpgradeFn_DestSide_VerifyFlag* tests). This case is the
+// one that must never change: false — the zero value, and what every
+// existing user gets — has to reproduce the old behaviour exactly,
+// including on a strict caller cfg like the one below, which is precisely
+// the shape the K8s incident produced.
+func TestNewProxyTLSUpgradeFn_DestSide_DefaultSkipsVerification(t *testing.T) {
 	// Self-signed cert with CN "test.local"; we'll dial it asking for
 	// a different ServerName to force the strict-verify path to fail
 	// if the fix is missing.
 	ln, _ := newTLSTestServer(t, 0, []string{"h2", "http/1.1"}, nil)
 	defer ln.Close()
 
-	upgrade := newProxyTLSUpgradeFn(zap.NewNop())
+	// verify=false, rootCAs=nil — the zero-config default.
+	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, nil, nil)
 
 	rawConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -325,6 +335,12 @@ func TestNewProxyTLSUpgradeFn_DestSide_AlwaysInsecureSkipVerify(t *testing.T) {
 	// what the parser handed us.
 	if caller.InsecureSkipVerify {
 		t.Fatalf("caller cfg.InsecureSkipVerify was mutated to true; expected the upgrade fn to clone before flipping the flag")
+	}
+	if caller.ServerName != "wrong.example.invalid" {
+		t.Fatalf("caller cfg.ServerName was mutated to %q; expected the upgrade fn to clone before touching it", caller.ServerName)
+	}
+	if caller.RootCAs != nil {
+		t.Fatalf("caller cfg.RootCAs was mutated; expected the upgrade fn to clone before touching it")
 	}
 }
 
