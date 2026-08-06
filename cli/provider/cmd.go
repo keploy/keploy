@@ -270,6 +270,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+	case "schema-summary":
+		cmd.Flags().StringP("namespace", "n", "", "Kubernetes namespace of the target deployment (required)")
+		cmd.Flags().StringP("deployment", "d", "", "Kubernetes deployment name (required)")
+		cmd.Flags().StringP("cluster", "c", "", "Keploy cluster name (required)")
+		cmd.Flags().StringP("release", "r", "", "App release/version tag (optional)")
+		cmd.Flags().String("api-server", "", "api-server base URL (defaults to https://api.keploy.io; or set KEPLOY_API_URL)")
+		cmd.Flags().String("token", "", "Bearer token — user JWT or PAT (or set KEPLOY_TOKEN)")
 
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
