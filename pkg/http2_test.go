@@ -87,3 +87,47 @@ func grpcPayload(msg []byte) []byte {
 	copy(payload[5:], msg)
 	return payload
 }
+
+// TestReadGRPCFrameRejectsOversizedLength pins the allocation bound on the
+// 4-byte, wire-supplied length prefix. Two distinct failures are covered:
+//
+//  1. A merely huge length (here 2 GiB) used to be handed straight to
+//     make([]byte, msgLen) — the proxy commits the memory before io.ReadFull
+//     gets a chance to notice the peer never sends that many bytes.
+//  2. 0xFFFFFFFF additionally wrapped the follow-on `5+msgLen` uint32
+//     arithmetic to 4, so the function panicked in copy(frame[5:], msgBuf)
+//     with "slice bounds out of range [5:4]".
+//
+// Both must now come back as an error, and a legitimate frame must still
+// round-trip.
+func TestReadGRPCFrameRejectsOversizedLength(t *testing.T) {
+	frameWithLength := func(n uint32) []byte {
+		buf := make([]byte, 5)
+		buf[0] = 0 // compression flag
+		binary.BigEndian.PutUint32(buf[1:5], n)
+		return buf
+	}
+
+	for _, tc := range []struct {
+		name   string
+		msgLen uint32
+	}{
+		{"two_gib", 2 << 30},
+		{"uint32_max_wraps_the_frame_length", ^uint32(0)},
+		{"just_over_the_bound", MaxGRPCFrameLength + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReadGRPCFrame(bytes.NewReader(frameWithLength(tc.msgLen)))
+			require.Error(t, err, "oversized length %d must be rejected before allocating", tc.msgLen)
+			assert.Nil(t, got)
+			assert.Contains(t, err.Error(), "exceeds")
+		})
+	}
+
+	// A real frame still reads back byte-for-byte.
+	payload := []byte("hello grpc")
+	raw := append(frameWithLength(uint32(len(payload))), payload...)
+	got, err := ReadGRPCFrame(bytes.NewReader(raw))
+	require.NoError(t, err)
+	assert.Equal(t, raw, got)
+}

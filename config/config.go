@@ -72,6 +72,23 @@ type Config struct {
 
 type Agent struct {
 	models.SetupOptions
+	// UpstreamTLSVerifySet / UpstreamTLSCACertSet record that the
+	// corresponding --upstream-tls-* flag was PRESENT on this agent's argv,
+	// as opposed to merely sitting at its zero value.
+	//
+	// They exist because a bare bool cannot express the difference between
+	// "the orchestrator said false" and "the orchestrator said nothing", and
+	// that difference is the entire off switch: the orchestrator forwards its
+	// resolved value unconditionally as --upstream-tls-verify=%t, and a native
+	// agent ALSO reads the very same keploy.yml through --config-path. Without
+	// the marker the agent has to guess, and the only safe-looking guess (OR
+	// the two) makes `--upstream-tls-verify=false` a no-op on native while it
+	// works under docker. See proxy.resolveUpstreamTLSConfig.
+	//
+	// Not user configuration — set by the CLI flag parser, never read from
+	// keploy.yml, hence the "-" tags.
+	UpstreamTLSVerifySet bool `json:"-" yaml:"-" mapstructure:"-"`
+	UpstreamTLSCACertSet bool `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 // Async configures the async-egress engine. Empty Lanes => feature off,
@@ -111,6 +128,11 @@ type Record struct {
 	MemoryLimit        uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
 	GlobalPassthrough  bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 	TLSPrivateKeyPath  string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	// UpstreamTLS controls whether keploy authenticates the REAL upstream
+	// server when it dials out on the application's behalf. TLSPrivateKeyPath
+	// above is the client half of the same story (upstream mTLS); this is the
+	// root half. See the UpstreamTLS type for why it is off by default.
+	UpstreamTLS UpstreamTLS `json:"upstreamTls" yaml:"upstreamTls" mapstructure:"upstreamTls"`
 	// MockFormat selects the on-disk format for recorded mocks.
 	// "" or "yaml" (default) writes mocks.yaml — human-readable, the
 	// format all tooling expects. "gob" writes a binary mocks.gob — a
@@ -152,6 +174,43 @@ type Record struct {
 	// suit ~99% of workloads; only touch these if you see "mock
 	// incomplete" warnings with reason "per_conn_cap" in the agent logs.
 	RecordBuffer RecordBuffer `json:"recordBuffer" yaml:"recordBuffer" mapstructure:"recordBuffer"`
+}
+
+// UpstreamTLS configures the upstream (destination-side) leg of keploy's TLS
+// MITM during record. Being a MITM constrains only the CLIENT-facing leg — the
+// cert keploy presents to the app is minted by keploy's own CA. The upstream
+// leg is an ordinary Go TLS client, so verifying the real server costs nothing
+// extra: crypto/tls uses the host's system root pool when RootCAs is nil, and
+// the agent additionally embeds the Mozilla NSS roots
+// (pkg/agent/proxy/tls/data/mozilla_roots.pem) for images with no trust store.
+//
+// Verify nevertheless defaults to FALSE, and the reason is fidelity, not a
+// missing CA bundle: a recording proxy must never be stricter than the
+// application it records. An app connecting with `sslmode=require` (postgres)
+// or `tls=skip-verify` (go-sql-driver/mysql) has deliberately chosen to encrypt
+// without authenticating its upstream. If keploy authenticated on its behalf it
+// would refuse connections the app would happily have made — and the failure is
+// silent rather than loud: on a dest-side handshake error the supervisor falls
+// through to raw passthrough, so the application keeps working while the mock
+// is DROPPED. The user sees a healthy app and a mysteriously empty mocks.yaml.
+// Self-signed upstreams and Kubernetes ClusterIP destinations whose cert SAN
+// does not match the address keploy dials both land in exactly that hole.
+//
+// Turn Verify on when the recording itself is security-relevant — e.g. recording
+// against public APIs in a regulated environment, where an on-path attacker at
+// record time could poison a mock set that later gates CI.
+type UpstreamTLS struct {
+	// Verify turns on certificate verification for keploy's own outbound TLS
+	// dials. False (the default) preserves today's behaviour exactly.
+	Verify bool `json:"verify" yaml:"verify" mapstructure:"verify"`
+	// CACert is an optional path to a PEM file of extra trust anchors, appended
+	// to the system pool (or, on an image with no trust store, to keploy's
+	// embedded Mozilla NSS roots). Use it for private/internal CAs instead of
+	// installing them into the agent's OS trust store. Only consulted when
+	// Verify is true. The path is resolved on the AGENT's filesystem, which for
+	// docker/k8s runs is not the host's — bind-mount the file or pass a path
+	// that exists inside the agent container.
+	CACert string `json:"caCert" yaml:"caCert" mapstructure:"caCert"`
 }
 
 // RecordBuffer tunes the per-connection recording queue used by the

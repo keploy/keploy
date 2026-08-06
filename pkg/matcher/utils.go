@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,23 +35,49 @@ import (
 var (
 	regexCacheMu sync.RWMutex
 	regexCache   = make(map[string]*regexp.Regexp)
+	// neverMatches matches no input at all, not even the empty string.
+	neverMatches = regexp.MustCompile(`[^\s\S]`)
 )
 
 // getCompiled returns a cached compiled regexp for pattern.
-// It never panics: on invalid patterns, it returns a "never matches" regex (?!) and caches it.
+// It never panics and never returns nil: on invalid patterns it returns a
+// "never matches" regex and caches it. Use getCompiledE when the caller can
+// report the mistake to the user.
 func getCompiled(pattern string) *regexp.Regexp {
+	re, _ := getCompiledE(pattern)
+	return re
+}
+
+// getCompiledE is getCompiled plus the compile error, so a caller holding a
+// logger can tell the user their pattern is broken instead of silently turning
+// it into a never-match — which reads as "my noise entry stopped working" with
+// no explanation.
+func getCompiledE(pattern string) (*regexp.Regexp, error) {
 	regexCacheMu.RLock()
 	re := regexCache[pattern]
 	regexCacheMu.RUnlock()
 	if re != nil {
-		return re
+		if bad, ok := badPatterns.Load(pattern); ok {
+			// Report the error on every call, not just the first: the cache is
+			// process-wide, so a later caller holding a logger must still be
+			// able to tell the user their pattern is broken.
+			err, _ := bad.(error)
+			return re, err
+		}
+		return re, nil
 	}
 
 	// Compile outside the read lock.
-	compiled, err := regexp.Compile(pattern)
-	if err != nil {
-		// Fallback to a regex that never matches to avoid panics / repeated compiles
-		compiled, _ = regexp.Compile(`(?!)`)
+	compiled, compileErr := regexp.Compile(pattern)
+	if compileErr != nil {
+		// Fall back to a regex that never matches, to avoid repeated compiles of
+		// a pattern that will never work. It must be a pattern RE2 accepts:
+		// `(?!)` is a negative lookahead, which Go's regexp rejects, so the
+		// fallback used to leave `compiled` nil and every user of it dereferenced
+		// nil. `[^\s\S]` asks for a character that is neither whitespace nor
+		// non-whitespace, so it matches nothing at all — not even the empty string.
+		compiled = neverMatches
+		badPatterns.Store(pattern, compileErr)
 	}
 
 	regexCacheMu.Lock()
@@ -59,7 +88,30 @@ func getCompiled(pattern string) *regexp.Regexp {
 		compiled = old
 	}
 	regexCacheMu.Unlock()
-	return compiled
+	return compiled, compileErr
+}
+
+// badPatterns remembers which patterns failed to compile, so the error survives
+// the regex cache.
+var badPatterns sync.Map
+
+// warnedBadPattern dedupes the invalid-pattern warning. Noise is compiled once
+// per test case, so warning every time would emit one line per case.
+var warnedBadPattern sync.Map
+
+// warnInvalidPattern reports a pattern that could not be compiled. Such a
+// pattern silently matches nothing, so without this the user sees a field they
+// thought was noise start failing, with nothing pointing at the cause.
+func warnInvalidPattern(logger *zap.Logger, pattern string, err error) {
+	if logger == nil {
+		return
+	}
+	if _, seen := warnedBadPattern.LoadOrStore(pattern, struct{}{}); seen {
+		return
+	}
+	logger.Warn("ignoring an invalid noise pattern; it matches nothing, so the field it names is still compared",
+		zap.String("pattern", pattern),
+		zap.Error(err))
 }
 
 func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
@@ -79,21 +131,31 @@ type noiseIndex struct {
 	entries []noiseEntry
 }
 
-func buildNoiseIndex(mp map[string][]string) noiseIndex {
+func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
 	if mp == nil {
 		return noiseIndex{}
 	}
 	out := noiseIndex{entries: make([]noiseEntry, 0, len(mp))}
 	for k, arr := range mp {
-		e := noiseEntry{keyLower: strings.ToLower(k)}
-		if len(arr) > 0 {
-			e.regexps = make([]*regexp.Regexp, 0, len(arr))
-			for _, p := range arr {
-				e.regexps = append(e.regexps, getCompiled(p))
-			}
-		}
-		out.entries = append(out.entries, e)
+		out.entries = append(out.entries, noiseEntry{
+			keyLower: strings.ToLower(k),
+			regexps:  compilePatterns(arr, logger),
+		})
 	}
+
+	// match() returns the FIRST entry that matches, and entries arrive here in
+	// Go map order, which is randomized per process. That was invisible while
+	// every entry meant the same thing (ignore unconditionally); now that an
+	// entry's patterns decide the verdict, two overlapping entries would make a
+	// test pass or fail depending on the run. Order most-specific first so the
+	// winner is both deterministic and the one a user writing "user.id" and
+	// "order.user.id" would expect.
+	sort.Slice(out.entries, func(i, j int) bool {
+		if len(out.entries[i].keyLower) != len(out.entries[j].keyLower) {
+			return len(out.entries[i].keyLower) > len(out.entries[j].keyLower)
+		}
+		return out.entries[i].keyLower < out.entries[j].keyLower
+	})
 	return out
 }
 
@@ -106,34 +168,231 @@ func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool
 	return nil, false
 }
 
+// CloneNoiseMap returns a copy of a noise map, so that merging a test case's
+// own noise into the shared global config cannot leak across test cases. The
+// callers hold long-lived config maps (Replayer/runner globals) that would
+// otherwise accumulate every test case's noise as the run progresses.
+func CloneNoiseMap(input map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(input))
+	for key, values := range input {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+// SplitNoise separates a test case's flat noise map into body-scoped and
+// header-scoped entries, and reports whether the body section should be
+// ignored wholesale.
+//
+// A noise key comes in one of two shapes:
+//
+//	dotted     "body.user.id": [regex...]      -> a single field path
+//	sectioned  "body": ["user.id", "total"]    -> a list of field paths
+//
+// Only a bare section key with an EMPTY list means "ignore this whole
+// section" — that is the sentinel a global `body: {"*": ["*"]}` config expands
+// to. A bare section key with a NON-empty list names the fields to ignore.
+//
+// Reading a non-empty sectioned list as the whole-section sentinel silently
+// disables the assertion for the entire body or header set, so any test case
+// carrying such an entry can never fail on its body (or on any header).
+//
+// Note this makes the sectioned values paths, not regexes. A regex there was
+// never evaluated — it only ever tripped the whole-section skip — so nothing
+// that worked stops working, but a suite that was passing because of that skip
+// will start reporting the differences it was hiding. A sectioned value that
+// looks like a regex is warned about, since the equivalent is the dotted form
+// `body.<path>: [regex]`.
+//
+// A dot-delimited path is matched against the JSON walker's own key syntax,
+// which does NOT carry array positions: every element of `items` is walked
+// under the key "items". So `items.stock` works and `items.0.stock` matches
+// nothing. Normalizing the latter is deliberately NOT done here — see
+// TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported for why.
+//
+// OSS noise auto-detection emits the dotted, index-free shape; the sectioned
+// shape reaches us from hand-written YAML and from other producers of
+// test-case files.
+//
+// Header scope has no separate skip flag: CompareHeaders already treats the
+// presence of a "header" key as "all headers are noisy", so the sentinel is
+// passed through as that key.
+func SplitNoise(noise map[string][]string, logger *zap.Logger) (bodyNoise map[string][]string, headerNoise map[string][]string, skipBody bool) {
+	bodyNoise = map[string][]string{}
+	headerNoise = map[string][]string{}
+
+	// Sectioned keys are applied first so that a dotted key naming the same
+	// path always wins. Doing both in one pass would let map iteration order
+	// decide, which makes a run flaky rather than merely wrong.
+	for field, values := range noise {
+		switch strings.ToLower(field) {
+		case "body":
+			if len(values) == 0 || containsWildcard(values) {
+				// A bare "*" is the documented "ignore everything" wildcard, not
+				// a field literally named "*".
+				skipBody = true
+				continue
+			}
+			for _, path := range values {
+				warnIfRegexShaped(logger, "body", path)
+				warnIfIndexedPath(logger, "body", path)
+				// An empty regex list means "ignore unconditionally", which is
+				// what a listed path is asking for.
+				bodyNoise[strings.ToLower(path)] = []string{}
+			}
+		case "header":
+			if len(values) == 0 || containsWildcard(values) {
+				headerNoise["header"] = []string{}
+				continue
+			}
+			for _, name := range values {
+				warnIfRegexShaped(logger, "header", name)
+				headerNoise[strings.ToLower(name)] = []string{}
+			}
+		}
+	}
+
+	for field, regexArr := range noise {
+		parts := strings.Split(field, ".")
+		if len(parts) < 2 {
+			continue
+		}
+		// Copy the value slice: the destination map is a clone the caller is
+		// free to mutate, so it must not alias the test case's own noise.
+		regexes := append([]string(nil), regexArr...)
+		switch strings.ToLower(parts[0]) {
+		case "body":
+			bodyNoise[strings.ToLower(strings.Join(parts[1:], "."))] = regexes
+		case "header":
+			headerNoise[strings.ToLower(parts[len(parts)-1])] = regexes
+		}
+	}
+
+	return bodyNoise, headerNoise, skipBody
+}
+
+// regexShapedTokens are substrings that cannot occur in a JSON field path but
+// are unmistakable in a regex. Single metacharacters are deliberately excluded:
+// `$` alone would flag every OpenAPI/JSON-Schema document key (`$ref`,
+// `$schema`, `$id`), and telling that user to move `$ref` into a regex position
+// is worse than saying nothing — as a regex it anchors to end-of-string and
+// matches nothing at all.
+var regexShapedTokens = []string{".*", ".+", `\d`, `\w`, `\s`, "[0-9", "[a-z", "[A-Z", "(?", "|"}
+
+// warnedRegexShaped dedupes the warning below. SplitNoise runs per test case —
+// and twice per case on the failure-assessment path — so warning unconditionally
+// would emit one line per case and bury the actual failures.
+var warnedRegexShaped sync.Map
+
+// warnIfRegexShaped flags a sectioned noise value that looks like a regex
+// rather than a field path. Such a value used to be inert — it only tripped the
+// whole-section skip — so silently reinterpreting it as a path would turn a
+// green suite red with no explanation.
+// arrayIndexSegment matches a path segment that is only digits, i.e. an array
+// position. The JSON walker keys array elements without a position, so such a
+// path matches nothing and the field it names silently starts being compared.
+var arrayIndexSegment = regexp.MustCompile(`(^|\.)\d+(\.|$)`)
+
+// warnIfIndexedPath reports a noise path carrying an array position. Recorded
+// test cases do carry this shape, and it is exactly the one that goes red with
+// no explanation, so it is worth a line even though the fix is the user's.
+func warnIfIndexedPath(logger *zap.Logger, section, value string) {
+	if logger == nil || !arrayIndexSegment.MatchString(value) {
+		return
+	}
+	if _, seen := warnedRegexShaped.LoadOrStore("idx\x00"+section+"\x00"+value, struct{}{}); seen {
+		return
+	}
+	logger.Warn("noise path contains an array index, which matches nothing; drop the index to cover every element",
+		zap.String("section", section),
+		zap.String("value", value),
+		zap.String("suggested", arrayIndexSegment.ReplaceAllString(value, "$1")))
+}
+
+// containsWildcard reports whether a sectioned noise list is the documented
+// "ignore everything" wildcard.
+func containsWildcard(values []string) bool {
+	for _, v := range values {
+		if strings.TrimSpace(v) == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func warnIfRegexShaped(logger *zap.Logger, section, value string) {
+	if logger == nil || !looksLikeRegex(value) {
+		return
+	}
+	if _, seen := warnedRegexShaped.LoadOrStore(section+"\x00"+value, struct{}{}); seen {
+		return
+	}
+	logger.Warn("noise value looks like a regex but is read as a field path; use the dotted form to apply a regex",
+		zap.String("section", section),
+		zap.String("value", value),
+		zap.String("dotted_equivalent", section+".<path>: ["+value+"]"))
+}
+
+func looksLikeRegex(value string) bool {
+	if strings.HasPrefix(value, "^") || strings.HasSuffix(value, "$") {
+		return true
+	}
+	for _, tok := range regexShapedTokens {
+		if strings.Contains(value, tok) {
+			return true
+		}
+	}
+	return false
+}
+
 // JSONDiffWithNoiseControl compares JSON with support for both Path-based noise (e.g. "body.user.id")
 // and Global noise (e.g. "timestamp") to be ignored everywhere.
-func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
+func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool, logger *zap.Logger) (JSONComparisonResult, error) {
 	// Split noise into Path-based (contains dots) and Global (no dots)
 	pathNoise := make(map[string][]string)
-	globalKeys := make(map[string]bool)
+	globalKeys := make(map[string][]*regexp.Regexp)
 
 	for k, v := range noise {
 		// If a key has no dots, treat it as a Global Key to be ignored everywhere.
+		// Its patterns are carried through: a global key is by far the most common
+		// shape (http.Match strips the "body." prefix, so "body.status" arrives
+		// here as the dot-free "status"), and dropping them here would leave every
+		// such entry an unconditional skip no matter what the caller wrote.
 		if !strings.Contains(k, ".") {
-			globalKeys[strings.ToLower(k)] = true
+			globalKeys[strings.ToLower(k)] = compilePatterns(v, logger)
 		} else {
 			// Otherwise, it's a path-specific noise (e.g. "body.data.timestamp")
 			pathNoise[k] = v
 		}
 	}
 
-	idx := buildNoiseIndex(pathNoise)
-	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering)
+	idx := buildNoiseIndex(pathNoise, logger)
+	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering, false)
 }
 
 // matchJSONWithNoiseHandlingIndexed now accepts globalKeys to skip specific keys at any depth.
-func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, globalKeys map[string]bool, ignoreOrdering bool) (JSONComparisonResult, error) {
+func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, globalKeys map[string][]*regexp.Regexp, ignoreOrdering bool, ancestorNoisy bool) (JSONComparisonResult, error) {
 	var out JSONComparisonResult
 	// Type check fast-path (JSON unmarshal produces these concrete types).
 	switch e := expected.(type) {
 	case nil:
 		if actual == nil {
+			out.matches, out.isExact = true, true
+			return out, nil
+		}
+		// A field recorded as null and replayed as something else. Nullable
+		// volatile fields are exactly what a pattern is for, so consult the
+		// noise entry against the replayed value rather than ignoring it.
+		if av, ok := jsonScalarToString(actual); ok {
+			if ancestorNoisy || noisyForValue(ni, key, av) {
+				out.matches, out.isExact = true, true
+			}
+			return out, nil
+		}
+		// null replaced by a container: no single value for a pattern to match,
+		// and a retype is a schema change, so only an unconditional entry covers
+		// it. Same rule as a scalar replaced by a container.
+		if regs, noisy := ni.match(strings.ToLower(key)); ancestorNoisy || (noisy && len(regs) == 0) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -143,14 +402,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ok {
 			return out, errors.New("type not matched")
 		}
-		regs, noisy := ni.match(strings.ToLower(key))
-		if noisy && len(regs) != 0 {
-			if anyRegexpMatchStr(a, regs) {
-				out.matches, out.isExact = true, true
-				return out, nil
-			}
-		}
-		if e == a || noisy {
+		if e == a || ancestorNoisy || noisyForValue(ni, key, a) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -160,8 +412,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ok {
 			return out, errors.New("type not matched")
 		}
-		_, noisy := ni.match(strings.ToLower(key))
-		if e == a || noisy {
+		if e == a || ancestorNoisy || noisyForValue(ni, key, strconv.FormatBool(a)) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -171,8 +422,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ok {
 			return out, errors.New("type not matched")
 		}
-		_, noisy := ni.match(strings.ToLower(key))
-		if e == a || noisy {
+		if e == a || ancestorNoisy || noisyForValue(ni, key, formatJSONNumber(a)) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -183,11 +433,17 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 			return out, errors.New("type not matched")
 		}
 
-		// If whole subtree is noisy (no regex guard), accept.
-		if regs, noisy := ni.match(strings.ToLower(key)); noisy && len(regs) == 0 {
+		// An entry with no patterns ignores the whole subtree, structure included.
+		regs, noisy := ni.match(strings.ToLower(key))
+		if noisy && len(regs) == 0 {
 			out.matches, out.isExact = true, true
 			return out, nil
 		}
+		// A pattern describes one scalar, so there is nothing here for it to
+		// match. Keep walking the structure — a key added, removed or retyped
+		// inside is still a real change — and let the descendant leaf VALUES be
+		// accepted, which is the most the pattern could have been asking for.
+		ancestorNoisy = ancestorNoisy || noisy
 
 		// Quick length check — allows early exit if extra/missing keys (ignoring noisy children).
 		// We still need to walk to account for noisy exclusions; so we won't return solely on len.
@@ -202,22 +458,38 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 
 		// 1) All expected keys must be present & match.
 		for k, v := range e {
-			if globalKeys[strings.ToLower(k)] {
+			val, ok := a[k]
+			if !ok {
+				// The replay dropped a key the recording had. Only an entry that
+				// ignores the field unconditionally excuses that: a pattern has
+				// no value to match against, and a field disappearing is a schema
+				// change rather than a volatile value. Path noise and global noise
+				// agree on this — previously the global form excused it even when
+				// pattern-guarded, and the path form never excused it at all.
+				if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && len(regs) == 0 {
+					continue
+				}
+				if regs, noisy := ni.match(prefixLower + strings.ToLower(k)); noisy && len(regs) == 0 {
+					continue
+				}
+				return out, nil
+			}
+
+			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && noisyForRegexps(regs, val, true) {
 				continue
 			}
 
-			val, ok := a[k]
-			if !ok {
-				return out, nil
-			}
 			childKeyLower := prefixLower + strings.ToLower(k)
 
-			// If child subtree is entirely noisy via path, skip deep compare.
+			// If the child subtree is entirely noisy via path, skip deep compare.
+			// A pattern-guarded child is NOT skipped here: it is walked so the
+			// pattern reaches the scalars, and so that a scalar replaced by an
+			// object or array is still reported.
 			if regs, noisy := ni.match(childKeyLower); noisy && len(regs) == 0 {
 				continue
 			}
 
-			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, globalKeys, ignoreOrdering)
+			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, globalKeys, ignoreOrdering, ancestorNoisy)
 			if err != nil || !res.matches {
 				return out, nil
 			}
@@ -230,15 +502,14 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 
 		// 2) No unexpected non-noisy keys in actual.
 		for k := range a {
-			if globalKeys[strings.ToLower(k)] {
-				continue
-			}
-
 			if _, ok := e[k]; ok {
 				continue
 			}
+			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && noisyForRegexps(regs, a[k], false) {
+				continue
+			}
 			childKeyLower := prefixLower + strings.ToLower(k)
-			if regs, noisy := ni.match(childKeyLower); noisy && len(regs) == 0 {
+			if regs, noisy := ni.match(childKeyLower); noisy && noisyForRegexps(regs, a[k], false) {
 				continue // ignore unexpected but noisy subtree
 			}
 			return out, nil
@@ -256,17 +527,26 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 			return out, nil
 		}
 
-		// If the whole slice is marked noisy-without-regex, accept.
-		if regs, noisy := ni.match(strings.ToLower(key)); noisy && len(regs) == 0 {
+		// No patterns ignores the whole slice, structure included.
+		regs, noisy := ni.match(strings.ToLower(key))
+		if noisy && len(regs) == 0 {
 			out.matches, out.isExact = true, true
 			return out, nil
+		}
+		// A pattern on an array of scalars is unambiguous — `ids: ["^ord-\d+$"]`
+		// says every id looks like that — so it is applied per element and the
+		// elements keep being compared. Only a heterogeneous or nested array
+		// falls back to relaxing its values wholesale, for the same reason a map
+		// does: there is no single value the pattern could be describing.
+		if noisy && !allJSONScalars(e) {
+			ancestorNoisy = true
 		}
 
 		// Fast path: if ordering matters, avoid O(n²).
 		if !ignoreOrdering {
 			isExact := true
 			for i := 0; i < len(e); i++ {
-				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering)
+				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering, ancestorNoisy)
 				if err != nil || !res.matches {
 					return out, nil
 				}
@@ -295,7 +575,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 						continue
 					}
 					childKey := key
-					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering)
+					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering, ancestorNoisy)
 					if err == nil && res.matches {
 						if !res.isExact {
 							isExact = false
@@ -327,11 +607,129 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 
 func anyRegexpMatchStr(s string, regs []*regexp.Regexp) bool {
 	for _, re := range regs {
-		if re.MatchString(s) {
+		if re != nil && re.MatchString(s) {
 			return true
 		}
 	}
 	return false
+}
+
+// noisyForValue reports whether the leaf at key should be ignored given the
+// value actually replayed.
+//
+// A noise entry with no patterns ignores the field unconditionally — that is
+// what auto-detected noise emits and it is unchanged. An entry WITH patterns
+// describes which values are volatile, so it ignores the field only when the
+// replayed value is one of them. Treating a pattern-guarded entry as an
+// unconditional skip makes the pattern decorative and silently stops asserting
+// the field, which is the opposite of what writing a pattern asks for.
+func noisyForValue(ni noiseIndex, key, actual string) bool {
+	regs, noisy := ni.match(strings.ToLower(key))
+	switch {
+	case !noisy:
+		return false
+	case len(regs) == 0:
+		return true
+	default:
+		return anyRegexpMatchStr(actual, regs)
+	}
+}
+
+// compilePatterns compiles a noise entry's patterns. A nil result means the
+// entry has none, i.e. it ignores its field unconditionally.
+func compilePatterns(patterns []string, logger *zap.Logger) []*regexp.Regexp {
+	if len(patterns) == 0 {
+		return nil
+	}
+	out := make([]*regexp.Regexp, 0, len(patterns))
+	for _, p := range patterns {
+		if p == "" || p == "*" {
+			// "*" is the documented ignore-everything wildcard and "" says
+			// nothing; neither is a regex, so compiling them would only produce
+			// a spurious "invalid pattern" warning for a valid config.
+			continue
+		}
+		re, err := getCompiledE(p)
+		if err != nil {
+			warnInvalidPattern(logger, p, err)
+		}
+		out = append(out, re)
+	}
+	if len(out) == 0 {
+		// Every pattern was a sentinel, so the entry is unconditional.
+		return nil
+	}
+	return out
+}
+
+// noisyForRegexps reports whether a noise entry covers this value. With no
+// patterns it covers the field unconditionally; with patterns it covers only
+// the values they describe.
+//
+// containersCovered decides the case where the value is a container and there
+// is therefore no single value for a pattern to match. Say true only where the
+// entry already covered the field before patterns were enforced, so that
+// behaviour is preserved; say false where the field is newly appearing in the
+// replay, because "a pattern that cannot match this" must not be read as
+// "ignore it" — that would let an injected object through unchecked.
+func noisyForRegexps(regs []*regexp.Regexp, value interface{}, containersCovered bool) bool {
+	if len(regs) == 0 {
+		return true
+	}
+	s, ok := jsonScalarToString(value)
+	if !ok {
+		return containersCovered
+	}
+	return anyRegexpMatchStr(s, regs)
+}
+
+// allJSONScalars reports whether every element is a JSON scalar, i.e. the array
+// is homogeneous enough for a single pattern to describe each element.
+func allJSONScalars(vals []interface{}) bool {
+	for _, v := range vals {
+		if _, ok := jsonScalarToString(v); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// jsonScalarToString renders a JSON scalar for pattern matching. The second
+// result is false for containers, which have no single value to match.
+func jsonScalarToString(v interface{}) (string, bool) {
+	switch t := v.(type) {
+	case nil:
+		return "null", true
+	case string:
+		return t, true
+	case bool:
+		return strconv.FormatBool(t), true
+	case float64:
+		return formatJSONNumber(t), true
+	}
+	return "", false
+}
+
+// formatJSONNumber renders a JSON number exactly as encoding/json would, so a
+// pattern written against the value Keploy prints in its diff matches at
+// replay. JSON numbers unmarshal to float64; reaching for plain 'f' formatting
+// diverges from the printed form at both extremes (1e21 would render as
+// "1000000000000000000000" and 1e-7 as "0.0000001").
+func formatJSONNumber(f float64) string {
+	abs := math.Abs(f)
+	format := byte('f')
+	if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+		format = 'e'
+	}
+	b := strconv.AppendFloat(nil, f, format, -1, 64)
+	if format == 'e' {
+		// Trim the exponent's leading zero, as encoding/json does: 1e-07 -> 1e-7.
+		if n := len(b); n >= 4 && b[n-4] == 'e' && b[n-3] == '-' && b[n-2] == '0' {
+			b[n-2] = b[n-1]
+			b = b[:n-1]
+		}
+	}
+	return string(b)
 }
 
 func findAndClaimPrimitiveEqual(x interface{}, arr []interface{}, used []bool) (int, bool) {
@@ -734,7 +1132,11 @@ var ansiRegex *regexp.Regexp
 func init() {
 	re, err := regexp.Compile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	if err != nil {
-		re, _ = regexp.Compile(`(?!)`)
+		// Same trap as getCompiled had: `(?!)` is not valid RE2, so this
+		// fallback used to leave ansiRegex nil and every use of it would panic.
+		// Unreachable while the pattern above is valid; kept correct so that
+		// editing that pattern cannot reintroduce the crash.
+		re = neverMatches
 	}
 	ansiRegex = re
 }
@@ -1350,24 +1752,36 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	for k, v := range noise {
 		lk := strings.ToLower(k)
 		if existing, ok := loweredNoise[lk]; ok {
-			// Case-collision: build a NEW merged slice rather than appending
-			// onto `existing`. `existing` may share its backing array with a
-			// caller-owned slice (we copy on first insert below, but be
-			// defensive — a future change could reintroduce sharing), and
-			// appending here could otherwise mutate that caller slice across
-			// repeated CompareHeaders calls.
-			merged := make([]string, 0, len(existing)+len(v))
-			merged = append(merged, existing...)
-			merged = append(merged, v...)
-			loweredNoise[lk] = merged
+			// Case-collision. slices.Concat never writes into either operand:
+			// it builds the result in a freshly grown slice (nil when the
+			// total length is zero), so the result cannot alias `existing`
+			// or `v` — unlike `append(existing, v...)`, which would write
+			// into `existing`'s spare capacity. `existing` may share that
+			// array with a caller-owned slice (we clone on first insert
+			// below, but be defensive — a future change could reintroduce
+			// sharing), and an in-place append could otherwise corrupt that
+			// caller slice across repeated CompareHeaders calls.
+			//
+			// This replaced a hand-rolled make+append+append that was
+			// equally non-aliasing; CodeQL flagged its
+			// `len(existing)+len(v)` capacity as an allocation-size
+			// overflow, which it is not — both operands are lengths of
+			// in-memory slices parsed from keploy.yml, so the sum cannot
+			// approach MaxInt, and a wrapped (negative) capacity would
+			// panic in makeslice rather than under-allocate. Concat is the
+			// clearer spelling of the same guarantee, not a fix for a real
+			// hazard.
+			loweredNoise[lk] = slices.Concat(existing, v)
 		} else {
-			// Copy `v` so later case-collision merges (or any downstream
+			// Clone `v` so later case-collision merges (or any downstream
 			// mutation of loweredNoise) can never grow/duplicate the caller's
 			// original noise-map slice. The caller's `noise` is treated as
-			// read-only config.
-			cp := make([]string, len(v))
-			copy(cp, v)
-			loweredNoise[lk] = cp
+			// read-only config. slices.Clone maps nil to nil rather than to an
+			// empty non-nil slice; that is safe because nothing downstream
+			// distinguishes the two — the "header" sentinel lookup and the
+			// collision branch above both key off map-entry presence, and every
+			// consumer of the regex list only tests len(...) != 0.
+			loweredNoise[lk] = slices.Clone(v)
 		}
 	}
 	// Look up the "header"-scope sentinel via the normalized map so user-supplied
@@ -1376,11 +1790,19 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	_, isHeaderNoisy := loweredNoise["header"]
 	for k, v := range h1 {
 		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
+		val, ok := h2[k]
 		if isNoisy && len(regexArr) != 0 {
-			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
+			// Constrain on the REPLAYED value, matching how body noise works:
+			// the replayed value is the one that varies, so testing the recorded
+			// one instead would let any replayed value through. A header the
+			// replay dropped has no value to match, so a pattern-guarded entry
+			// does not excuse it — only an unconditional entry does.
+			isNoisy = false
+			if ok && len(val) > 0 {
+				isNoisy, _ = MatchesAnyRegex(val[0], regexArr)
+			}
 		}
 		isNoisy = isNoisy || isHeaderNoisy
-		val, ok := h2[k]
 		if !isNoisy {
 			if !ok {
 				if checkKey(res, k) {
@@ -1454,7 +1876,10 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	for k, v := range h2 {
 		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
 		if isNoisy && len(regexArr) != 0 {
-			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
+			isNoisy = false
+			if len(v) > 0 {
+				isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
+			}
 		}
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h1[k]
@@ -1523,12 +1948,23 @@ func MapToArray(mp map[string][]string) []string {
 // does not accept one today.
 func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
 	sLower := strings.ToLower(s)
-	for key, val := range mp {
-		if strings.Contains(sLower, strings.ToLower(key)) {
-			return val, true
+	// Ranging a map picks an arbitrary winner when several keys match, so two
+	// runs of the same suite could disagree on whether a header is noisy.
+	// Resolve most-specific first — longest key, ties lexicographic — the same
+	// precedence buildNoiseIndex uses.
+	best, found := "", false
+	for key := range mp {
+		if !strings.Contains(sLower, strings.ToLower(key)) {
+			continue
+		}
+		if !found || len(key) > len(best) || (len(key) == len(best) && key < best) {
+			best, found = key, true
 		}
 	}
-	return []string{}, false
+	if !found {
+		return []string{}, false
+	}
+	return mp[best], true
 }
 
 // func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {

@@ -26,7 +26,7 @@ var composeSubcommands = map[string]bool{
 // It tokenizes the arguments, strips all -f/--file flags (including dangling
 // ones without a value), and injects a single "-f -" before the first compose
 // subcommand to avoid producing multiple stdin readers.
-func ensureInMemoryComposeFlags(appCmd, serviceName string) string {
+func ensureInMemoryComposeFlags(appCmd, serviceName string, preferFailureAbort bool) string {
 	parts := strings.Fields(appCmd)
 
 	// Strip every existing -f/--file flag and its value, including dangling
@@ -62,7 +62,7 @@ func ensureInMemoryComposeFlags(appCmd, serviceName string) string {
 		result = append(result, "-f", "-")
 	}
 
-	return ensureComposeExitOnAppFailure(strings.Join(result, " "), serviceName)
+	return ensureComposeExitOnAppFailure(strings.Join(result, " "), serviceName, preferFailureAbort)
 }
 
 func findComposeFile(cmd string) []string {
@@ -124,24 +124,24 @@ func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServi
 				// Check if this file matches the appComposePath
 				if actualFile == appComposePath {
 					modifiedCmd = strings.Replace(appCmd, fullMatch, fmt.Sprintf("-f %s", newComposeFile), 1)
-					return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName)
+					return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
 				}
 			}
 		}
 		// If no matching compose path found, return original command
 		modifiedCmd = appCmd
-		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName)
+		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
 	}
 
 	// If the pattern doesn't exist, inject the new Compose file right after "docker-compose" or "docker compose"
 	upIdx := strings.Index(appCmd, " up")
 	if upIdx != -1 {
 		modifiedCmd = fmt.Sprintf("%s -f %s%s", appCmd[:upIdx], newComposeFile, appCmd[upIdx:])
-		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName)
+		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
 	}
 
 	modifiedCmd = fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
-	return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName)
+	return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
 }
 
 func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
@@ -178,16 +178,21 @@ func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
 //   - serviceName: the name of the service whose exit code should be monitored (empty string skips --exit-code-from)
 //
 // Returns: the modified command with the necessary flags added
-func ensureComposeExitOnAppFailure(appCmd, serviceName string) string {
+func ensureComposeExitOnAppFailure(appCmd, serviceName string, preferFailureAbort bool) string {
 	// If the user already passed one of these flags, don't touch the command.
-	if strings.Contains(appCmd, "--abort-on-container-exit") || strings.Contains(appCmd, "--exit-code-from") {
+	if strings.Contains(appCmd, "--abort-on-container-exit") || strings.Contains(appCmd, "--abort-on-container-failure") || strings.Contains(appCmd, "--exit-code-from") {
 		return appCmd
 	}
 
 	// Arguments we want to inject.
-	args := []string{"--abort-on-container-exit"}
-	if serviceName != "" {
-		args = append(args, "--exit-code-from", serviceName)
+	var args []string
+	if preferFailureAbort {
+		args = []string{"--abort-on-container-failure"}
+	} else {
+		args = []string{"--abort-on-container-exit"}
+		if serviceName != "" {
+			args = append(args, "--exit-code-from", serviceName)
+		}
 	}
 
 	parts := strings.Fields(appCmd)

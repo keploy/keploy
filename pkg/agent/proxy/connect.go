@@ -96,6 +96,17 @@ func handleConnectTunnel(
 		port = "443"
 		targetAddr = net.JoinHostPort(host, port)
 	}
+	// Reject an empty host (e.g. ":443"). net.SplitHostPort accepts it and
+	// http.ReadRequest accepts `CONNECT :443 HTTP/1.1`, so without this check
+	// an authority with no host at all flows on as a real target: it is stored
+	// as the SNI for this source port (so CertForClient mints a cert with an
+	// empty CN), it overwrites dstAddr with ":443", and with upstream
+	// verification on it leaves keploy with no name to verify against. There
+	// is no destination in a host-less CONNECT — reject it the same way the
+	// empty port below is rejected.
+	if host == "" {
+		return nil, fmt.Errorf("empty host in CONNECT target %q", targetAddr)
+	}
 	// Reject empty port (e.g., "example.com:"), non-numeric, out-of-range.
 	if port == "" {
 		return nil, fmt.Errorf("empty port in CONNECT target %q", targetAddr)
