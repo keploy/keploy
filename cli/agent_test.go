@@ -10,7 +10,11 @@ func TestIsDaemonSetAgent(t *testing.T) {
 	}{
 		{name: "empty (equivalent to unset)", val: "", want: false},
 		{name: "true", val: "true", want: true},
-		{name: "one", val: "1", want: true},
+		// Only the exact string "true" gates DaemonSet mode, matching k8s-proxy's
+		// canonical daemonsetenv package and pkg/agent/hooks/linux/hooks.go — "1"
+		// must NOT be accepted, or this gate would diverge from the rest of the
+		// system on a KEPLOY_DAEMONSET_ENABLED=1 pod.
+		{name: "one is not accepted", val: "1", want: false},
 		{name: "false", val: "false", want: false},
 		{name: "zero", val: "0", want: false},
 		{name: "uppercase TRUE is not accepted", val: "TRUE", want: false},

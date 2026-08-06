@@ -21,11 +21,17 @@ import (
 // chart's DaemonSet spec sets to "true". It is read straight from the
 // environment — the same source pkg/agent/hooks/linux/hooks.go already keys off
 // — so the OSS agent needs no dependency on the enterprise DaemonSet config
-// (whose `daemonsetenv` helper lives in a different module). The accepted truthy
-// values mirror the enterprise bring-up check in cmd/enterprise/main.go.
+// (whose `daemonsetenv` helper lives in a different module).
+//
+// Accept ONLY the exact string "true", matching the canonical gate in
+// k8s-proxy's daemonsetenv package and pkg/agent/hooks/linux/hooks.go. Every
+// DaemonSet gate must agree on the truthy set: if this one alone also honoured
+// "1", a KEPLOY_DAEMONSET_ENABLED=1 pod would skip this server bind while
+// k8s-proxy (still seeing sidecar mode) polls the now-unbound agent port. The
+// chart always sets "true", so this is strictness for cross-component
+// consistency, not a live path.
 func isDaemonSetAgent() bool {
-	v := os.Getenv("KEPLOY_DAEMONSET_ENABLED")
-	return v == "true" || v == "1"
+	return os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true"
 }
 
 func init() {
