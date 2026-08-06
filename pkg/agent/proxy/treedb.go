@@ -87,8 +87,9 @@ func (db *TreeDb) deleteMock(mock *models.Mock) bool {
 	if !found {
 		return false
 	}
+	
 	// Identity check. Name+Kind is what distinguishes two mocks that collide on
-	// (SortOrder, ID); a mismatch means this key belongs to a different tree's
+	// (SortOrder, ID); a mismatch means this key belongs to a different tree's  
 	// numbering and must not be touched here.
 	if stored, ok := v.(*models.Mock); !ok || stored == nil ||
 		stored.Name != mock.Name || stored.Kind != mock.Kind {
