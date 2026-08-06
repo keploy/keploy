@@ -159,6 +159,14 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		} else {
 			fmt.Printf("SYSCALL FAILURE: %v\n", err)
 		}
+		// Loading the programs is where an agent with NO eBPF capabilities at
+		// all fails — earlier than any attach, and far more common than the
+		// tracepoint case below. Give it the same actionable diagnosis instead
+		// of a bare errno.
+		if hint := PerfEventPermissionHint(err); hint != "" {
+			utils.LogError(h.logger, err, "failed to load eBPF programs", zap.String("hint", hint))
+			return fmt.Errorf("%w: %s", err, hint)
+		}
 		return err
 	}
 	//getting all the ebpf maps with proper synchronization
@@ -191,6 +199,13 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	} else {
 		socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
 		if err != nil {
+			// A bare "permission denied" here is close to undiagnosable from
+			// the outside — most often it is the node's perf_event_paranoid
+			// sysctl, not anything about this install. Say which.
+			if hint := PerfEventPermissionHint(err); hint != "" {
+				utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket", zap.String("hint", hint))
+				return fmt.Errorf("%w: %s", err, hint)
+			}
 			utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
 			return err
 		}

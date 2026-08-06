@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
@@ -21,6 +22,12 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 		Use:   "agent",
 		Short: "starts keploy agent for hooking and starting proxy",
 		// Hidden: true,
+		// Runtime failures below are reported by their own log line and by the
+		// process exit status; without this, cobra would dump the whole usage
+		// text after every one of them and bury the actual error. Bad flags
+		// still print their own message via SetFlagErrorFunc (the error, not
+		// the usage listing).
+		SilenceUsage: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
@@ -28,14 +35,15 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
-				return nil
+				return err
 			}
 
 			var a agent.Service
 			var ok bool
 			if a, ok = svc.(agent.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
-				return nil
+				err = errors.New("service doesn't satisfy agent service interface")
+				utils.LogError(logger, err, "failed to start agent")
+				return err
 			}
 
 			// Self-terminate (gracefully) if the parent keploy client dies
@@ -85,7 +93,21 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			err = a.Setup(ctx, startAgentCh)
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")
-				return nil
+				// A cancelled context is how the agent is asked to stop
+				// (SIGINT/SIGTERM, parent exit) — that is a normal shutdown,
+				// not a failure, and must keep exiting 0. Anything else means
+				// the agent never came up: it must exit non-zero so kubelet,
+				// docker and CI see a failure instead of "Completed".
+				//
+				// Check the CONTEXT as well as the error: a shutdown that
+				// races agent startup surfaces as whatever error the
+				// interrupted step happened to produce, which need not carry
+				// context.Canceled. We own this context, so its state is the
+				// authoritative answer to "was this a shutdown?".
+				if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+					return nil
+				}
+				return err
 			}
 
 			return nil

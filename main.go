@@ -36,7 +36,7 @@ func main() {
 	setVersion()
 	ctx := utils.NewCtx()
 	start(ctx)
-	os.Exit(utils.ErrCode)
+	os.Exit(utils.ErrCode())
 }
 
 func setVersion() {
@@ -233,10 +233,19 @@ func start(ctx context.Context) {
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
+		// A failed command must exit non-zero. Without this the error is
+		// logged and then discarded, and keploy exits 0 — so an agent that
+		// never loaded its hooks is reported to kubelet as
+		// "Reason: Completed, Exit Code: 0", and every orchestrator above it
+		// (Kubernetes, docker, CI) reads a hard failure as a clean shutdown.
+		utils.SetErrCode(1)
 		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
 			fmt.Println("Error: ", err.Error())
 			fmt.Println("Run 'keploy --help' for usage.")
-			os.Exit(1)
+			// No os.Exit here: the exit status is already 1 (above), and
+			// exiting inline would skip every deferred cleanup in start() —
+			// the debug-file flush, the profile writers, the log-file close
+			// and the umask restore.
 		}
 	}
 
