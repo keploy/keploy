@@ -102,6 +102,52 @@ func probeMockPool() []*models.Mock {
 	return []*models.Mock{{
 		Kind: models.MySQL,
 		Spec: models.MockSpec{
+			// The probe's REQUEST, which is what marks this mock as a legitimate
+			// source for a synthesized variable read. Column labels alone cannot
+			// distinguish a probe from an application query that happens to
+			// project a same-named column, so resolveVarFromProbe keys off this.
+			MySQLRequests: []mysql.Request{{PacketBundle: mysql.PacketBundle{
+				Message: &mysql.QueryPacket{
+					Command: 0x03,
+					Query:   "SELECT @@transaction_isolation AS transaction_isolation, @@sql_mode",
+				},
+			}}},
+			MySQLResponses: []mysql.Response{{PacketBundle: mysql.PacketBundle{Message: trs}}},
+		},
+	}}
+}
+
+// appQueryMockPool is a NON-probe mock whose result set carries a column named
+// "version" — the conventional optimistic-locking column, and an ordinary
+// application query. resolveVarFromProbe must not answer SELECT @@version from
+// it: doing so would report an application row value (here 3) as the MySQL
+// server version.
+func appQueryMockPool() []*models.Mock {
+	trs := &mysql.TextResultSet{
+		ColumnCount: 1,
+		Columns: []*mysql.ColumnDefinition41{{
+			Header: mysql.Header{SequenceID: 2}, Catalog: "def",
+			Name: "version", OrgName: "version", CharacterSet: 0x21,
+			ColumnLength: 11, Type: 0x03,
+		}},
+		Rows: []*mysql.TextRow{{
+			Header: mysql.Header{SequenceID: 3},
+			Values: []mysql.ColumnEntry{{Type: mysql.FieldTypeLong, Value: "3"}},
+		}},
+		FinalResponse: &mysql.GenericResponse{
+			Type: "OK",
+			Data: []byte{0x07, 0x00, 0x00, 0x05, 0xfe, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00},
+		},
+	}
+	return []*models.Mock{{
+		Kind: models.MySQL,
+		Spec: models.MockSpec{
+			MySQLRequests: []mysql.Request{{PacketBundle: mysql.PacketBundle{
+				Message: &mysql.QueryPacket{
+					Command: 0x03,
+					Query:   "SELECT version FROM orders WHERE id = 42",
+				},
+			}}},
 			MySQLResponses: []mysql.Response{{PacketBundle: mysql.PacketBundle{Message: trs}}},
 		},
 	}}
@@ -270,4 +316,76 @@ func TestRejectsCrossVariableRead(t *testing.T) {
 		assert.False(t, rejectsCrossVariableRead(
 			"SELECT @@transaction_isolation", "SELECT @@transaction_isolation"))
 	})
+}
+
+// TestResolveVarFromProbe_IgnoresNonProbeMocks pins the source check. Matching on
+// column label alone let an ordinary application result set answer a system
+// variable read: `version` is the conventional optimistic-locking column, and
+// `autocommit`, `sql_mode` and `timezone` are all plausible application names. An
+// unrecorded SELECT @@version would then be served an application row value as
+// the MySQL server version.
+func TestResolveVarFromProbe_IgnoresNonProbeMocks(t *testing.T) {
+	_, _, _, ok := resolveVarFromProbe(appQueryMockPool(), "version")
+	assert.False(t, ok, "an application query must never answer a system-variable read")
+
+	// The same label IS answerable from a real probe, so the guard is about the
+	// source and not about the variable name.
+	pool := probeMockPool()
+	_, _, _, ok = resolveVarFromProbe(pool, "transaction_isolation")
+	assert.True(t, ok, "a genuine probe must still resolve")
+}
+
+// TestTerminatorForSingleColumn_SanitisesStatusFlags covers the two recorded
+// flags that describe the PROBE's result set and are harmful when replayed onto
+// a synthesized single-column one.
+func TestTerminatorForSingleColumn_SanitisesStatusFlags(t *testing.T) {
+	t.Run("SERVER_MORE_RESULTS_EXISTS is cleared", func(t *testing.T) {
+		// 0x0b = AUTOCOMMIT|IN_TRANS|MORE_RESULTS. Leaving MORE_RESULTS set makes
+		// the driver wait for a second result set that never arrives.
+		probe := &mysql.GenericResponse{Type: "OK", Data: []byte{0x07, 0x00, 0x00, 0x05, 0xfe, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00}}
+		got := terminatorForSingleColumn(probe)
+		require.NotNil(t, got)
+		assert.Equal(t, byte(0x03), got.Data[7], "MORE_RESULTS cleared, other flags kept")
+		assert.Equal(t, byte(0x0b), probe.Data[7], "source probe must not be mutated")
+	})
+
+	t.Run("SERVER_SESSION_STATE_CHANGED falls back", func(t *testing.T) {
+		// 0x4000 (d[8]=0x40) means a session-state trailer follows. That trailer
+		// belongs to the probe, so replaying it would apply state changes that did
+		// not happen for this query. There is no safe rewrite; use the fallback.
+		probe := &mysql.GenericResponse{Type: "OK", Data: []byte{0x07, 0x00, 0x00, 0x05, 0xfe, 0x00, 0x00, 0x02, 0x40, 0x00, 0x00}}
+		got := terminatorForSingleColumn(probe)
+		require.NotNil(t, got)
+		assert.Equal(t, fallbackOKReplacingEOFTerminator, got.Data, "must use the deterministic fallback")
+	})
+}
+
+// TestMatchQuery_CrossVarRejectionIsComQueryOnly pins the rejection's scope.
+// matchQuery is shared with COM_STMT_PREPARE, but the compensating synthesis in
+// matchCommand runs only for COM_QUERY. Rejecting on the prepare path would drop
+// a candidate that used to fuzzy-match and put nothing in its place, so a
+// server-side-prepared variable read (useServerPrepStmts=true) would hard-fail.
+func TestMatchQuery_CrossVarRejectionIsComQueryOnly(t *testing.T) {
+	ctx := context.Background()
+	log := zap.NewNop()
+
+	mk := func(q string) mysql.PacketBundle {
+		return mysql.PacketBundle{
+			Header:  &mysql.PacketInfo{Header: &mysql.Header{}},
+			Message: &mysql.QueryPacket{Command: 0x03, Query: q},
+		}
+	}
+	getQuery := func(p mysql.PacketBundle) string {
+		msg, _ := p.Message.(*mysql.QueryPacket)
+		return msg.Query
+	}
+	expected := mk("SELECT @@session.transaction_read_only")
+	actual := mk("SELECT @@session.transaction_isolation")
+
+	okQuery, scoreQuery := matchQuery(ctx, log, expected, actual, getQuery, true)
+	assert.False(t, okQuery)
+	assert.Equal(t, 0, scoreQuery, "COM_QUERY: a different @@var must score 0")
+
+	_, scorePrepare := matchQuery(ctx, log, expected, actual, getQuery, false)
+	assert.NotEqual(t, 0, scorePrepare, "COM_STMT_PREPARE: matching must be left as it was")
 }
