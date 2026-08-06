@@ -313,6 +313,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
+		// Agent-side mirrors of the record command's upstream-TLS flags.
+		// The agent is the process that actually dials the upstream, and
+		// on containerised runs it cannot read the host's keploy.yml, so
+		// argv is the only propagation channel. The CA path is resolved
+		// here, inside the agent's filesystem.
+		cmd.Flags().Bool("upstream-tls-verify", c.cfg.Agent.UpstreamTLSVerify, "Verify the real upstream server's TLS certificate on the agent's own outbound dials")
+		cmd.Flags().String("upstream-tls-ca-cert", c.cfg.Agent.UpstreamTLSCACert, "PEM file of extra trust anchors for --upstream-tls-verify, resolved on the agent's filesystem")
 		// Internal orchestrator→agent propagation flag. The user-
 		// facing surface for the channel-binding shim lives in the
 		// enterprise CLI provider; this flag exists on `keploy agent`
@@ -362,6 +369,14 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
+		// Upstream (destination-side) TLS verification. Off by default:
+		// keploy must never be stricter than the app it records — an app
+		// on sslmode=require / tls=skip-verify chose not to authenticate
+		// its upstream, and a dest-side handshake failure falls through
+		// to raw passthrough, which drops the mock silently. Not a
+		// CA-bundle limitation; crypto/tls uses the system pool for free.
+		cmd.Flags().Bool("upstream-tls-verify", c.cfg.Record.UpstreamTLS.Verify, "Verify the real upstream server's TLS certificate on keploy's own outbound dials during record. Off by default so keploy is never stricter than the application it records.")
+		cmd.Flags().String("upstream-tls-ca-cert", c.cfg.Record.UpstreamTLS.CACert, "PEM file of extra trust anchors for --upstream-tls-verify, appended to the system pool. Resolved on the agent's filesystem, which for docker/k8s runs is not the host's.")
 		cmd.Flags().Bool("capture-packets", c.cfg.Record.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Record.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode. Bytes flow verbatim between app and upstream until a TLS ClientHello is seen; the proxy then MITM-terminates both halves so the captured pcap is decryptable. Independent of --global-passthrough.")
 		// Advanced record-buffer tuning. Hidden from --help: only relevant
@@ -503,7 +518,12 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"updateTestMapping":         "update-test-mapping",
 		"capturePackets":            "capture-packets",
 		"opportunisticTlsIntercept": "opportunistic-tls-intercept",
-		"keepAppAlive":              "keep-app-alive",
+		// record.upstreamTls is a nested block, so the keploy.yml key is
+		// dotted where the sibling entries above are single-segment. The
+		// alias is what lets a lookup by config key resolve to the flag.
+		"upstreamTls.verify": "upstream-tls-verify",
+		"upstreamTls.caCert": "upstream-tls-ca-cert",
+		"keepAppAlive":       "keep-app-alive",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -1344,6 +1364,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			c.cfg.Record.OpportunisticTLSIntercept = opportunisticTLSIntercept
 
+			// Upstream TLS verification. Unlike the flat flags above these
+			// must be applied ONLY when the user actually typed them.
+			// record.upstreamTls is a nested block, and utils.BindFlagsToViper
+			// derives its viper key from the kebab flag name
+			// (upstream-tls-verify → record.upstreamTlsVerify), which does not
+			// address record.upstreamTls.verify — so viper.Unmarshal cannot
+			// carry the flag into the struct and this assignment is the only
+			// path. Flags are registered before keploy.yml is read, so an
+			// unconditional assignment would push the flag DEFAULT over a value
+			// the user set in keploy.yml. Gating on Changed() keeps the
+			// precedence flag > yaml > default.
+			if cmd.Flags().Changed("upstream-tls-verify") {
+				upstreamTLSVerify, err := cmd.Flags().GetBool("upstream-tls-verify")
+				if err != nil {
+					errMsg := "failed to read the upstream-tls-verify flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Record.UpstreamTLS.Verify = upstreamTLSVerify
+			}
+			if cmd.Flags().Changed("upstream-tls-ca-cert") {
+				upstreamTLSCACert, err := cmd.Flags().GetString("upstream-tls-ca-cert")
+				if err != nil {
+					errMsg := "failed to read the upstream-tls-ca-cert flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Record.UpstreamTLS.CACert = upstreamTLSCACert
+			}
+
 			// Read --disable-mapping if the user explicitly passed it on
 			// `keploy record`, or if keploy.yml hasn't set the field at
 			// all (so we fall back to the flag's default). Matches the
@@ -1419,6 +1469,40 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.ChannelBindingShim = channelBindingShim
+
+		// Upstream TLS verification, forwarded from the orchestrator. Gated on
+		// Changed() — but the gate now records that the flag was PRESENT
+		// (…Set) rather than leaving the agent to guess. The orchestrator
+		// forwards its own already-resolved value unconditionally as
+		// --upstream-tls-verify=%t (see pkg/platform/http/agent.go and
+		// pkg/platform/docker), so for an orchestrator-spawned agent the flag
+		// is always present and always wins over the keploy.yml the agent
+		// happens to share with the CLI on a native run. Without the marker an
+		// explicit `--upstream-tls-verify=false` is indistinguishable from
+		// "not specified" and cannot switch a yaml `verify: true` back off —
+		// which it CAN under docker, where the container never sees the file.
+		// One config must not mean two things. See
+		// proxy.resolveUpstreamTLSConfig for the consumer.
+		if cmd.Flags().Changed("upstream-tls-verify") {
+			upstreamTLSVerify, err := cmd.Flags().GetBool("upstream-tls-verify")
+			if err != nil {
+				errMsg := "failed to read the upstream-tls-verify flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Agent.UpstreamTLSVerify = upstreamTLSVerify
+			c.cfg.Agent.UpstreamTLSVerifySet = true
+		}
+		if cmd.Flags().Changed("upstream-tls-ca-cert") {
+			upstreamTLSCACert, err := cmd.Flags().GetString("upstream-tls-ca-cert")
+			if err != nil {
+				errMsg := "failed to read the upstream-tls-ca-cert flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Agent.UpstreamTLSCACert = upstreamTLSCACert
+			c.cfg.Agent.UpstreamTLSCACertSet = true
+		}
 
 		isdocker, err := cmd.Flags().GetBool("is-docker")
 		if err != nil {

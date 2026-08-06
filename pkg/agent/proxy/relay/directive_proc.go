@@ -357,12 +357,27 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 	// plaintext the other, corrupting any traffic in flight before
 	// the outer layer torn the sockets down. The local-then-store
 	// pattern keeps the corruption window at zero.
+	//
+	// The two handshakes are independent (keploy is the TLS server for one
+	// and the TLS client for the other, on two separate sockets), so the
+	// order between them is a policy choice, not a protocol constraint. It is
+	// destination-first by default — the order every release has used — and
+	// client-first under Config.ClientTLSFirst, which upstream verification
+	// turns on so the dest dial can use the ServerName the application itself
+	// sent rather than the IP eBPF reported. See Config.ClientTLSFirst.
+	//
+	// Whichever runs second closes whatever the first produced on failure:
+	// nothing is published until both have succeeded, so a half-upgraded
+	// relay is never observable by the forwarders parked on the barrier.
 	var (
 		upgradedDst net.Conn
 		upgradedSrc net.Conn
 	)
 
-	if params.DestTLSConfig != nil {
+	upgradeDest := func() *directive.Ack {
+		if params.DestTLSConfig == nil {
+			return nil
+		}
 		dst := *r.dst.Load()
 		// If the D2C forwarder stashed any cleartext bytes beyond the
 		// preamble window (e.g. a protocol that frames more than the
@@ -396,11 +411,17 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				log.Debug("relay: dest-side TLS upgrade failed",
 					zap.Error(err),
 					zap.String("directive_reason", d.Reason),
-					zap.String("next_step", "if the upstream uses a self-signed or private-CA cert, add it to the system trust store or run with KEPLOY_NEW_RELAY=off to fall back to the legacy parser path"),
+					zap.String("next_step", "if the upstream uses a self-signed or private-CA cert, either turn on record.upstreamTls.verify with record.upstreamTls.caCert pointing at its CA PEM (resolved on the agent's filesystem), or leave verification off — the default — and run with KEPLOY_NEW_RELAY=off to fall back to the legacy parser path"),
 				)
 			}
+			// If the client side was upgraded first (Config.ClientTLSFirst),
+			// its *tls.Conn was never published either — close it so the
+			// handshake state does not outlive this failed directive.
+			if upgradedSrc != nil {
+				_ = upgradedSrc.Close()
+			}
 			r.endPause()
-			return directive.Ack{
+			return &directive.Ack{
 				Kind:            d.Kind,
 				OK:              false,
 				Err:             fmt.Errorf("dest TLS upgrade: %w", err),
@@ -427,9 +448,13 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 		publishRealCertFromUpgraded(r, upgradedDst, log)
 
 		upgradedDst = newReadTimeReportingConn(upgradedDst, trackedDst)
+		return nil
 	}
 
-	if params.ClientTLSConfig != nil {
+	upgradeClient := func() *directive.Ack {
+		if params.ClientTLSConfig == nil {
+			return nil
+		}
 		src := *r.src.Load()
 		// If the C2D forwarder stashed any bytes (canonically the
 		// SUT's TLS ClientHello, which can land in the C2D forwarder's
@@ -482,7 +507,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				_ = upgradedDst.Close()
 			}
 			r.endPause()
-			return directive.Ack{
+			return &directive.Ack{
 				Kind:            d.Kind,
 				OK:              false,
 				Err:             fmt.Errorf("client TLS upgrade: %w", err),
@@ -490,6 +515,17 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 			}
 		}
 		upgradedSrc = newReadTimeReportingConn(upgradedSrc, trackedSrc)
+		return nil
+	}
+
+	steps := []func() *directive.Ack{upgradeDest, upgradeClient}
+	if r.cfg.ClientTLSFirst {
+		steps = []func() *directive.Ack{upgradeClient, upgradeDest}
+	}
+	for _, step := range steps {
+		if ack := step(); ack != nil {
+			return *ack
+		}
 	}
 
 	// Both handshakes (or only those requested) succeeded. Publish

@@ -271,8 +271,18 @@ func (p *Proxy) recordViaSupervisor(
 	defer close(trackerStop)
 
 	r := relay.New(relay.Config{
-		Logger:       logger,
-		TLSUpgradeFn: newProxyTLSUpgradeFn(logger),
+		Logger: logger,
+		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
+		// captured once per connection: the relay calls the returned fn with
+		// no options in hand. With the flag unset this is the historic
+		// InsecureSkipVerify=true dial, unchanged.
+		TLSUpgradeFn: newProxyTLSUpgradeFn(logger, opts.UpstreamTLSVerify, opts.UpstreamTLSRootCAs, srcConn),
+		// Only when verification is on: run the client-side handshake first so
+		// the application's SNI is captured before keploy dials the upstream it
+		// has to verify. Off (the default) keeps the historic dest-first order
+		// untouched — a dest-side failure is survivable there. See
+		// relay.Config.ClientTLSFirst.
+		ClientTLSFirst: opts.UpstreamTLSVerify,
 		// Wrapped to also stamp when this connection last carried bytes.
 		// After a parser is retired the relay keeps forwarding, so this is
 		// the signal that says WHEN the dead connection was actually in
@@ -495,57 +505,115 @@ func (p *Proxy) recordViaSupervisor(
 //   - For isClient=true (upgrading the destination side — keploy
 //     acts as TLS client to the real server), dials TLS over the
 //     existing conn using tls.Client and performs the handshake.
-//     Upstream cert verification is ALWAYS skipped here — see the
-//     dest-side InsecureSkipVerify rationale on the cfg clone below.
+//     Upstream cert verification is skipped unless the operator opted
+//     in — see the dest-side rationale on the cfg clone below.
 //   - For isClient=false (upgrading the client side — keploy acts
 //     as TLS server presenting the MITM cert), hands off to
 //     pTls.HandleTLSConnection which already implements the server-
 //     side handshake used elsewhere in the proxy.
 //
+// verify / rootCAs come from the session's OutgoingOptions
+// (record.upstreamTls.verify / .caCert, resolved once in Proxy.New).
+// They are captured at closure-construction time because the relay
+// calls this fn per connection with no options in hand.
+//
+// srcConn is the application-facing socket for THIS connection. It is
+// held only to recover the client's source port, which is the key
+// CertForClient files the application's SNI under; the fn never reads
+// or writes it (the relay owns it). Nil is safe.
+//
 // The conn pointer update (so the forwarders switch to the upgraded
 // conn on subsequent iterations) is the relay's responsibility; this
 // fn only performs the handshake and returns the new net.Conn —
 // hence it does not need the caller's *net.Conn handles.
-func newProxyTLSUpgradeFn(logger *zap.Logger) relay.TLSUpgradeFn {
+func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPool, srcConn net.Conn) relay.TLSUpgradeFn {
 	return func(ctx context.Context, conn net.Conn, isClient bool, cfg *tls.Config) (net.Conn, error) {
 		if cfg == nil {
 			return conn, nil
 		}
 		if isClient {
-			// Upstream identity verification is keploy's responsibility
-			// to NOT do. Keploy is a transparent MITM record/replay
-			// proxy: the real client (pgx, asyncpg, libpq, JDBC, mongo
-			// driver, etc.) already made its trust decision against
-			// keploy's minted cert when it dialed in, and the upstream
-			// it points at in record mode is whatever the application
-			// would have dialed itself — typically a self-signed dev /
-			// CI / staging Postgres or Mongo, or a Kubernetes service
-			// reachable only by ClusterIP. Either way the upstream
-			// cert's SAN/CN often does not match the IP literal keploy
-			// sees in `Destination Address` (e.g. cert valid for
-			// 127.0.0.1, dial target 10.224.0.152), and Go's default
-			// hostname/IP verification would surface that as
+			// By default, upstream identity verification is keploy's
+			// responsibility to NOT do. Keploy is a transparent MITM
+			// record/replay proxy: the real client (pgx, asyncpg, libpq,
+			// JDBC, mongo driver, etc.) already made its trust decision
+			// against keploy's minted cert when it dialed in, and the
+			// upstream it points at in record mode is whatever the
+			// application would have dialed itself — typically a
+			// self-signed dev / CI / staging Postgres or Mongo, or a
+			// Kubernetes service reachable only by ClusterIP. Either way
+			// the upstream cert's SAN/CN often does not match the IP
+			// literal keploy sees in `Destination Address` (e.g. cert
+			// valid for 127.0.0.1, dial target 10.224.0.152), and Go's
+			// default hostname/IP verification would surface that as
 			// `dest TLS handshake failed: x509: certificate is valid
 			// for X, not Y` and trip the parser supervisor's
 			// passthrough fallback — silently dropping all recording
-			// for that connection.
+			// for that connection. A recording proxy must not be
+			// stricter than the app it records.
 			//
-			// Parsers that build their DestTLSConfig already set
-			// InsecureSkipVerify on it (see e.g.
-			// integrations/pkg/postgres/v3/recorder.buildDestTLSConfigV2,
-			// keploy/pkg/agent/proxy/integrations/mysql/recorder.buildDestTLSConfigV2)
-			// — but if a parser ever forgets, or if some future call
-			// site lands here with a strict config, we still need the
-			// MITM-correct posture. So clone the parser's cfg, force
-			// InsecureSkipVerify=true on the clone, and dial against
-			// that. ServerName / RootCAs / NextProtos / ClientCert
-			// material on the parser-supplied cfg is preserved
-			// (shallow clone via tls.Config.Clone), so SNI for
+			// This used to be an UNCONDITIONAL override, justified by the
+			// claim that parsers set InsecureSkipVerify on their own
+			// DestTLSConfig anyway. That claim was false for the one OSS
+			// parser it named: mysql/recorder.buildDestTLSConfigV2 sets no
+			// such field, so the override was silently stripping a
+			// decision a layer above had already made — and that parser's
+			// docstring, which promised verification against the system
+			// trust store, described behaviour that had not existed for as
+			// long as this override had. Both are now driven by
+			// record.upstreamTls.verify: off reproduces the old behaviour
+			// exactly, on leaves the caller's cfg alone and lets Go verify.
+			//
+			// Either way the parser's cfg is CLONED, never mutated —
+			// ServerName / NextProtos / ClientCert material on it is
+			// preserved (shallow clone via tls.Config.Clone), so SNI for
 			// vhosted PG-as-a-service providers (RDS, Cloud SQL, Neon)
 			// and any upstream-mTLS material a parser might wire in
-			// still reaches the wire.
+			// still reaches the wire. RootCAs is only overwritten when
+			// the operator configured roots of their own; a parser that
+			// pinned its own pool keeps it otherwise.
 			dialCfg := cfg.Clone()
-			dialCfg.InsecureSkipVerify = true //#nosec G402 -- MITM record-time proxy: keploy intentionally never validates the upstream cert. See the docstring above.
+			dialCfg.InsecureSkipVerify = !verify //#nosec G402 -- MITM record-time proxy: upstream verification is opt-in via record.upstreamTls.verify. See the docstring above.
+			if verify {
+				if rootCAs != nil {
+					dialCfg.RootCAs = rootCAs
+				}
+				// ServerName, in descending order of trustworthiness:
+				//
+				//  1. The SNI the APPLICATION sent. Parsers derive their
+				//     ServerName from the destination ADDRESS — e.g.
+				//     mysql/recorder.buildDestTLSConfigV2 takes the host of
+				//     sess.Opts.DstCfg.Addr, which the proxy always sets to
+				//     the `ip:port` eBPF reported, never the hostname the
+				//     app dialled. Against a DNS-SAN-only upstream (a
+				//     hostname DSN, the normal shape outside dev) that IP
+				//     literal fails verification with `doesn't contain any
+				//     IP SANs`, the supervisor falls through to raw
+				//     passthrough, and the mock vanishes with a Debug log.
+				//     A NON-EMPTY parser ServerName is therefore not enough
+				//     to leave alone — it has to be overridden, not merely
+				//     backfilled. The relay runs the client-side handshake
+				//     first whenever verification is on (see
+				//     relay.Config.ClientTLSFirst) precisely so this value
+				//     exists by the time we get here.
+				//  2. The parser's own ServerName, for parsers that pin a
+				//     vhost name of their own (RDS/Cloud SQL/Neon proxies)
+				//     and for apps that sent no SNI at all.
+				//  3. The peer we are already connected to. An IP literal
+				//     is correct here, Go matches it against the
+				//     certificate's IP SANs; without it crypto/tls rejects
+				//     an empty ServerName outright ("either ServerName or
+				//     InsecureSkipVerify must be specified") before it
+				//     looks at any certificate.
+				//
+				// The whole ladder is guarded by `verify` so the default
+				// path never gains an SNI the application did not send.
+				if sni := capturedSNIForSrc(srcConn); sni != "" {
+					dialCfg.ServerName = sni
+				}
+				if dialCfg.ServerName == "" {
+					dialCfg.ServerName = hostFromConn(conn)
+				}
+			}
 			tlsConn := tls.Client(conn, dialCfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
 				return nil, fmt.Errorf("dest TLS handshake failed: %w", err)
@@ -564,6 +632,29 @@ func newProxyTLSUpgradeFn(logger *zap.Logger) relay.TLSUpgradeFn {
 		}
 		return wrapped, nil
 	}
+}
+
+// capturedSNIForSrc returns the SNI the application sent on srcConn's
+// connection, as filed by CertForClient under the client's source port
+// (pTls.SrcPortToDstURL). "" when the app sent none — the normal case for an
+// IP-literal destination, which RFC 6066 forbids in SNI — or when the value
+// has not been captured yet.
+//
+// srcConn is only ever asked for its RemoteAddr; the relay owns the socket.
+func capturedSNIForSrc(srcConn net.Conn) string {
+	if srcConn == nil {
+		return ""
+	}
+	tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr)
+	if !ok || tcpAddr == nil {
+		return ""
+	}
+	v, ok := pTls.SrcPortToDstURL.Load(tcpAddr.Port)
+	if !ok {
+		return ""
+	}
+	sni, _ := v.(string)
+	return sni
 }
 
 // Compile-time sanity: ensure the dispatcher-side V2 call site can be

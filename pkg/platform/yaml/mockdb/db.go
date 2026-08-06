@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -1645,36 +1645,15 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	// different test-set's directory; guard before we touch the
 	// filesystem.
 	//
-	// Legitimate names with a '..' substring (e.g. "v1..v2", "team..a")
-	// are allowed as long as no path element equals "." or "..". We
-	// check that by enforcing: no separator, no volume qualifier,
-	// not absolute, not "." or ".." verbatim, and stable under
-	// filepath.Clean.
-	//
-	// The VolumeName check is the Windows-only escape Copilot
-	// flagged on keploy#4045 review round 26: `filepath.IsAbs("C:")`
-	// returns false, `Clean("C:") == "C:"`, and there are no
-	// separators, but `filepath.Join(base, "C:")` on Windows
-	// absorbs the volume qualifier and drops the base, so a
-	// re-record request with testSetID="C:" would turn os.Remove
-	// into a delete at the root of drive C: on a Windows runner.
-	// filepath.VolumeName returns the drive / UNC prefix when the
-	// path carries one, and is empty on the legitimate path.
-	// filepath.VolumeName is Windows-specific at runtime and returns
-	// "" for "C:" on Linux, so we ALSO explicitly reject any ID
-	// containing ':' — a legitimate test-set name has no reason
-	// to carry one, and this makes the Linux build reject the
-	// same strings the Windows runtime would. strings.HasPrefix
-	// catches UNC-style ("\\\\server") and extended-length
-	// ("\\\\?\\C:") prefixes for the same cross-platform reason.
-	if testSetID == "" ||
-		testSetID == "." ||
-		testSetID == ".." ||
-		strings.ContainsAny(testSetID, "/\\:") ||
-		filepath.VolumeName(testSetID) != "" ||
-		filepath.IsAbs(testSetID) ||
-		filepath.Clean(testSetID) != testSetID {
-		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..') under the mocks output directory", testSetID)
+	// The rules (no separator on either platform's spelling, no volume
+	// qualifier, not absolute, no "." / ".." element, while still
+	// allowing a '..' SUBSTRING like "v1..v2") live in utils/pathsafe,
+	// shared with DebugFileSink.RotateForScope — the other place a
+	// test-set ID reaches the filesystem. One definition, so the two
+	// cannot drift; see the package doc for why each rule is there,
+	// including the Windows "C:" escape from keploy#4045 review round 26.
+	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
+		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..') under the mocks output directory: %w", testSetID, err)
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
 

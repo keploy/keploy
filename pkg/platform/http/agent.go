@@ -1029,6 +1029,20 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.ChannelBindingShim {
 		args = append(args, "--channel-binding-shim")
 	}
+	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
+	// pattern (and for the same reason) as --disable-mapping above: the
+	// orchestrator has already applied flag > yaml > default, and the native
+	// agent inherits the very same keploy.yml through --config-path below. If
+	// we only sent the flag when it was true, an explicit
+	// `--upstream-tls-verify=false` over a keploy.yml `verify: true` would be
+	// indistinguishable from "not specified" and the agent would re-derive
+	// true from the file — while the identical command under docker (no
+	// keploy.yml in the container) would correctly record with verification
+	// off. The CA path travels the same way so that clearing it is expressible
+	// too; `--flag=value` keeps an empty or space-bearing path a single argv
+	// element (no shell is involved on this path).
+	args = append(args, fmt.Sprintf("--upstream-tls-verify=%t", opts.UpstreamTLSVerify))
+	args = append(args, fmt.Sprintf("--upstream-tls-ca-cert=%s", opts.UpstreamTLSCACert))
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}

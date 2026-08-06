@@ -135,6 +135,45 @@ type Config struct {
 	// is acked with OK=false and a wrapped ErrNoTLSUpgrader.
 	TLSUpgradeFn TLSUpgradeFn
 
+	// ClientTLSFirst swaps the order of the two handshakes performed for a
+	// KindUpgradeTLS directive: client side first, destination side second.
+	//
+	// Default (false) is destination-first, which is what every release before
+	// upstream verification existed did, and it stays the default so the
+	// overwhelmingly common path keeps its exact wire timing.
+	//
+	// It is set only when record.upstreamTls.verify is on, and only because of
+	// what the two handshakes KNOW. keploy learns the hostname the application
+	// intended — its SNI — by terminating the CLIENT side; on the destination
+	// side all it has is the IP:port eBPF reported. Verifying a hostname-
+	// addressed upstream against that IP fails against a DNS-SAN-only
+	// certificate, the supervisor falls through to raw passthrough, and the
+	// mock is dropped with only a Debug log. Running the client handshake
+	// first makes the real ServerName available to the destination dial.
+	//
+	// Safe in both orders: neither handshake depends on the other. Keploy is
+	// the TLS server for one and the TLS client for the other, over two
+	// separate sockets, and Step 1 has already exchanged whatever preamble
+	// the protocol needs before the client sends its ClientHello (Postgres'
+	// 'S'; MySQL sends its ClientHello straight after SSLRequest). Both conns
+	// are still published atomically after BOTH succeed, so the failure of
+	// either leaves the relay's published pointers exactly as it found them.
+	//
+	// It does change one thing, and only inside the opt-in: what a dest-side
+	// handshake FAILURE costs. Destination-first, keploy has not touched the
+	// client socket yet, so the supervisor's FallthroughToPassthrough can
+	// still relay the client's withheld ClientHello to the real server and
+	// the application's connection survives with its mock dropped.
+	// Client-first, keploy has already terminated TLS with the application,
+	// so there is no cleartext stream left to pass through and the connection
+	// is closed instead. That is the honest outcome of asking keploy to
+	// authenticate an upstream that does not authenticate: it is LOUD rather
+	// than a silently missing mock, it matches what the application's own
+	// strict TLS config would have done, and it is reachable only when the
+	// operator has explicitly set record.upstreamTls.verify. With the flag at
+	// its default the field is false and none of this applies.
+	ClientTLSFirst bool
+
 	// RealCertHook, if non-nil, is invoked after the V2 relay path
 	// completes the upstream TLS handshake (handleUpgradeTLS), with
 	// the source-port-derived connID and the DER bytes of the real

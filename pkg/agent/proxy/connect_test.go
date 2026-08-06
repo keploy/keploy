@@ -261,3 +261,40 @@ func TestStripUtilConn(t *testing.T) {
 		t.Error("stripUtilConn modified a plain net.Conn")
 	}
 }
+
+// TestHandleConnectTunnel_EmptyHost closes the last route by which an address
+// with no host at all could reach the upstream TLS dial.
+//
+// http.ReadRequest accepts `CONNECT :443 HTTP/1.1` and reports Host==":443";
+// net.SplitHostPort then succeeds with host=="". Before this check that value
+// flowed on as a real target: it was stored as the SNI for the client's source
+// port (so CertForClient minted a certificate with an empty CN), it overwrote
+// dstAddr with ":443", and with upstream verification on it left
+// resolveUpstreamServerName with no host to verify against — crypto/tls then
+// rejects the config outright with "either ServerName or InsecureSkipVerify
+// must be specified", which reads as keploy being broken rather than the
+// target being unroutable. A CONNECT with no authority host names no
+// destination; reject it exactly as the empty port is rejected.
+//
+// FAILS BEFORE THE FIX: handleConnectTunnel returned a result with
+// TargetHost=="" and no error.
+func TestHandleConnectTunnel_EmptyHost(t *testing.T) {
+	for _, target := range []string{":443", "[]:443"} {
+		t.Run(target, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+
+			go func() {
+				_, _ = client.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
+				buf := make([]byte, 256)
+				_, _ = client.Read(buf)
+			}()
+
+			res, err := handleConnectTunnel(testLogger(), server, nil, true)
+			if err == nil {
+				t.Fatalf("a host-less CONNECT target was accepted (TargetHost=%q, TargetAddr=%q)", res.TargetHost, res.TargetAddr)
+			}
+		})
+	}
+}

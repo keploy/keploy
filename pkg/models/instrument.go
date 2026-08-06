@@ -2,6 +2,7 @@ package models
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"time"
 )
 
@@ -119,6 +120,31 @@ type OutgoingOptions struct {
 	// older CLI that never sets it never receives one — the version-skew
 	// guard for the deferred-orphan revoke protocol. Record path only.
 	SupportsDroppedRevoke bool
+	// UpstreamTLSVerify mirrors config.Record.UpstreamTLS.Verify: when true,
+	// keploy's own dial to the REAL destination validates the server's
+	// certificate chain and hostname instead of skipping verification.
+	//
+	// Default false, and deliberately so — a recording proxy must never be
+	// stricter than the application it records. An app on sslmode=require /
+	// tls=skip-verify chose not to authenticate its upstream; verifying on its
+	// behalf would break connections the app would have made, and the failure
+	// is silent (the supervisor falls through to raw passthrough and the mock
+	// is dropped). This is NOT a CA-bundle limitation: crypto/tls uses the
+	// system pool for free when RootCAs is nil.
+	UpstreamTLSVerify bool
+	// UpstreamTLSRootCAs is the trust anchor set for those verifying dials.
+	// nil means "use Go's default" (crypto/tls falls back to the platform
+	// root pool) — it never means "trust nothing".
+	//
+	// json:"-" is load-bearing, not cosmetic. OutgoingOptions is JSON-encoded
+	// on the CLI → agent /outgoing request (pkg/platform/http/agent.go), and
+	// x509.CertPool has only unexported fields: it would marshal to `{}` and
+	// decode on the agent into a NON-NIL EMPTY pool, i.e. a trust store that
+	// trusts nothing, failing every handshake. The pool is therefore built
+	// agent-side from UpstreamTLSCACert, which does travel: proxy.New settles
+	// only the argv-vs-yaml precedence for the CA PATH, and the pool itself is
+	// read from disk lazily, under a sync.Once, on the first record session.
+	UpstreamTLSRootCAs *x509.CertPool `json:"-"`
 }
 
 type ConditionalDstCfg struct {
@@ -156,14 +182,27 @@ type SetupOptions struct {
 	// so containerised agents honour the user's choice without seeing the
 	// host's keploy.yml.
 	ChannelBindingShim bool
-	AgentPort          uint32
-	AppPorts           []string
-	AppNetworks        []string
-	NetworkAliases     map[string][]string
-	BuildDelay         uint64
-	PassThroughPorts   []uint
-	MemoryLimit        uint64
-	ConfigPath         string
+	// UpstreamTLSVerify / UpstreamTLSCACert mirror config.Record.UpstreamTLS.
+	// Forwarded orchestrator → agent over the --upstream-tls-verify /
+	// --upstream-tls-ca-cert argv flags, the same propagation channel
+	// CapturePackets / OpportunisticTLSIntercept / ChannelBindingShim use, so a
+	// containerised agent honours the operator's choice without ever seeing the
+	// host's keploy.yml.
+	//
+	// The CA pool itself cannot travel — see OutgoingOptions.UpstreamTLSRootCAs
+	// — so the PATH travels and the agent loads it locally. That path is
+	// resolved on the AGENT's filesystem; for docker/k8s runs the operator must
+	// bind-mount the PEM or point at a path that exists inside the container.
+	UpstreamTLSVerify bool
+	UpstreamTLSCACert string
+	AgentPort         uint32
+	AppPorts          []string
+	AppNetworks       []string
+	NetworkAliases    map[string][]string
+	BuildDelay        uint64
+	PassThroughPorts  []uint
+	MemoryLimit       uint64
+	ConfigPath        string
 	// RecordBufferMaxMemoryPerConn mirrors config.Record.RecordBuffer.MaxMemoryPerConnection.
 	// Forwarded from orchestrator → agent so containerised agents (docker-compose,
 	// k8s sidecar) honour the user's tuning; the agent's filesystem doesn't have

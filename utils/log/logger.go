@@ -3,6 +3,7 @@ package log
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
@@ -419,11 +421,20 @@ func (s *cappedWriteSyncer) swap(inner zapcore.WriteSyncer) {
 // The mu mutex serializes Swap against itself; concurrent Writes through
 // the buffered/capped chain are still safe via cappedWriteSyncer.mu.
 type DebugFileSink struct {
-	mu           sync.Mutex
-	capped       *cappedWriteSyncer
-	buffered     *zapcore.BufferedWriteSyncer
-	originPath   string // path the sink was originally bound to (best-effort, used to derive rotation paths)
-	currentScope string // last scope value seen by RotateForScope (e.g. test-set ID); empty for the original file
+	mu       sync.Mutex
+	capped   *cappedWriteSyncer
+	buffered *zapcore.BufferedWriteSyncer
+	// rootDir and baseName are captured once, from the file the sink was
+	// created with, and are NEVER reassigned: they are the anchor every
+	// rotation target is resolved against. Deriving them from the live
+	// path instead would mean a mis-set live path re-anchors the sink and
+	// then validates the new target against itself, which is no check at
+	// all.
+	rootDir      string
+	baseName     string
+	originPath   string   // path currently being written to (informational)
+	currentScope string   // last scope value seen by RotateForScope (e.g. test-set ID); empty for the original file
+	owned        *os.File // file THIS sink opened during rotation (nil ⇒ the caller-supplied original, which the caller closes)
 }
 
 // Flush flushes the in-memory write buffer to the underlying file.
@@ -497,14 +508,24 @@ func AddDebugFileSink(logger *zap.Logger, file *os.File, capBytes int64) (*zap.L
 	return newLogger, &DebugFileSink{
 		capped:     capped,
 		buffered:   buffered,
+		rootDir:    filepath.Dir(file.Name()),
+		baseName:   filepath.Base(file.Name()),
 		originPath: file.Name(),
 	}
 }
 
-// Swap atomically swaps the underlying file the sink writes to. The
-// caller opens newFile; the previous file is returned so the caller
-// can close it after Swap returns. Buffered writes are flushed to the
-// previous file before the swap, and the cap-tripped state is reset.
+// Swap atomically swaps the underlying file the sink writes to.
+// Buffered writes are flushed to the previous file before the swap, and
+// the cap-tripped state is reset.
+//
+// Ownership: the caller opens newFile and keeps ownership of it — Swap
+// never closes it. A file the SINK itself opened (during a previous
+// RotateForScope) is closed here, because the caller has no handle on
+// it and could not close it itself.
+//
+// Swap does not move the sink's rotation anchor: RotateForScope keeps
+// resolving against the directory the sink was created with, so a swap
+// to a file elsewhere cannot relocate future per-scope files.
 //
 // Concurrent log Writes are safe — they serialize through the inner
 // cappedWriteSyncer's mutex, so no record can land half-written
@@ -514,27 +535,67 @@ func (s *DebugFileSink) Swap(newFile *os.File) error {
 		return fmt.Errorf("debug file sink: swap called on uninitialized sink or nil file")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.buffered.Sync(); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("debug file sink: flush before swap: %w", err)
 	}
 	s.capped.swap(zapcore.AddSync(newFile))
 	s.originPath = newFile.Name()
+	prev := s.owned
+	s.owned = nil
+	s.mu.Unlock()
+	// Close after the swap so no in-flight write can land on a closed fd.
+	if prev != nil {
+		_ = prev.Close()
+	}
 	return nil
 }
 
-// RotateForScope swaps the sink to a per-scope file derived from the
-// sink's origin path. Scope semantics are caller-defined; for the
+// validateScope rejects any scope that is not a single, self-contained
+// path segment. RotateForScope interpolates the scope into a filesystem
+// path and opens the result with O_TRUNC, so an unvalidated value is an
+// arbitrary-file-truncate primitive: the agent takes the test set ID
+// straight off its HTTP API (HandleBeforeTestSetCompose json-decodes it
+// out of the request body) and keploy commonly runs as root for its
+// eBPF hooks.
+//
+// The rules live in utils/pathsafe so this and MockYaml.DeleteMocksForSet
+// — the other place a test set ID reaches the filesystem — enforce ONE
+// definition instead of two hand-maintained copies. An empty scope is
+// valid here (it means "rotate back to the origin file"), which is the
+// one point on which the two call sites differ.
+func validateScope(scope string) error {
+	if err := pathsafe.ValidateSingleSegment(scope, true); err != nil {
+		return fmt.Errorf("debug file sink: rejecting scope: %w", err)
+	}
+	return nil
+}
+
+// RotateForScope swaps the sink to a per-scope file under the directory
+// the sink was created in. Scope semantics are caller-defined; for the
 // keploy-agent debug log this is the test set ID, and the resulting
-// path is "<dir>/<scope>/<basename>" — e.g. an origin of
+// path is "<rootDir>/<scope>/<basename>" — e.g. a sink created on
 // "/keploy-host/agent-debug.log" with scope "test-set-3" yields
 // "/keploy-host/test-set-3/agent-debug.log".
 //
 // On the first call with a given scope, the new directory is created,
 // the new file is opened (truncated), the buffered writer is flushed
-// to the previous file, the inner is swapped, and the previous file
-// is closed. Repeated calls with the same scope are no-ops. An empty
-// scope rotates back to the origin path.
+// to the previous file, the inner writer is swapped, and the previous
+// file is closed — unless it is the caller-supplied original, which
+// stays open because the caller owns it. Repeated calls with the same
+// scope are no-ops. An empty scope rotates back to the origin file.
+//
+// Containment is enforced by the OS, not by string inspection. Every
+// filesystem operation goes through an os.Root opened on the sink's
+// immutable root directory, which refuses any component that resolves
+// outside it — including a pre-existing symlink planted in the debug
+// log directory, which a lexical Abs/Clean/Rel check happily follows.
+// That matters because the debug log directory is the user's keploy
+// folder (bind-mounted into the agent container), so its contents are
+// repo-controlled while the scope arrives over the agent's HTTP API.
+// The scope is additionally required to be a single path segment (see
+// validateScope), rejected with an error naming it — never silently
+// rewritten.
 //
 // All errors are returned to the caller — typical caller logs at warn
 // and proceeds without rotation rather than failing the surrounding
@@ -544,40 +605,46 @@ func (s *DebugFileSink) RotateForScope(scope string) error {
 	if s == nil {
 		return nil
 	}
+	// Validate before touching any state: an invalid scope must neither
+	// reach the filesystem nor be recorded as currentScope (which would
+	// make the next call with the same value a silent no-op).
+	if err := validateScope(scope); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	if scope == s.currentScope {
 		s.mu.Unlock()
 		return nil
 	}
-	prevScope := s.currentScope
-	prevOrigin := s.originPath
+	rootDir, baseName := s.rootDir, s.baseName
 	s.mu.Unlock()
 
-	// Compute the target path before reacquiring the mutex so we can
-	// fail with no side effects if the origin path is unset.
-	if prevOrigin == "" {
-		return fmt.Errorf("debug file sink: origin path unset; cannot derive scoped path")
+	if rootDir == "" || baseName == "" {
+		return fmt.Errorf("debug file sink: root directory unset; cannot derive scoped path")
 	}
-	dir := filepath.Dir(prevOrigin)
-	base := filepath.Base(prevOrigin)
-	// Compute the absolute origin: when rotating away from a scoped
-	// file back to the unscoped one, prevOrigin is the scoped path,
-	// which sits one directory deeper than the original. Re-anchor by
-	// chopping prevScope off prevOrigin's tail.
-	originDir := dir
-	if prevScope != "" && filepath.Base(dir) == prevScope {
-		originDir = filepath.Dir(dir)
-	}
-	target := filepath.Join(originDir, scope, base)
-	if scope == "" {
-		target = filepath.Join(originDir, base)
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return fmt.Errorf("debug file sink: mkdir %q: %w", filepath.Dir(target), err)
-	}
-	newFile, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+
+	// os.Root confines every path operation below to rootDir: components
+	// that traverse out ("..") and symlinks that point out are refused by
+	// the kernel-level resolution, so neither the mkdir nor the O_TRUNC
+	// open can touch a file outside the debug log directory.
+	root, err := os.OpenRoot(rootDir)
 	if err != nil {
-		return fmt.Errorf("debug file sink: open %q: %w", target, err)
+		return fmt.Errorf("debug file sink: opening debug log directory %q: %w", rootDir, err)
+	}
+	defer func() { _ = root.Close() }()
+
+	rel := baseName
+	if scope != "" {
+		// Single segment by construction (validateScope), so one Mkdir is
+		// enough — no MkdirAll walking caller-controlled components.
+		if err := root.Mkdir(scope, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("debug file sink: mkdir %q in %q: %w", scope, rootDir, err)
+		}
+		rel = filepath.Join(scope, baseName)
+	}
+	newFile, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("debug file sink: open %q under %q: %w", rel, rootDir, err)
 	}
 
 	s.mu.Lock()
@@ -587,9 +654,20 @@ func (s *DebugFileSink) RotateForScope(scope string) error {
 		return fmt.Errorf("debug file sink: flush before swap: %w", err)
 	}
 	s.capped.swap(zapcore.AddSync(newFile))
-	s.originPath = target
+	s.originPath = newFile.Name()
 	s.currentScope = scope
+	prev := s.owned
+	s.owned = newFile
 	s.mu.Unlock()
+	// Close the file we replaced AFTER the swap, so no concurrent write
+	// can land on a closed descriptor. prev is nil on the first rotation:
+	// that file belongs to the caller of AddDebugFileSink. Without this,
+	// every rotation leaked a descriptor until the GC ran os.File's
+	// finalizer, and the scope is caller-supplied, so a burst of distinct
+	// scopes walked the agent's descriptor table up.
+	if prev != nil {
+		_ = prev.Close()
+	}
 	return nil
 }
 
