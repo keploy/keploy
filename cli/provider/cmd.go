@@ -1644,10 +1644,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		// Cross-check: max-memory-per-conn must not exceed the agent's
-		// memory limit. The agent's --memory-limit (Agent.MemoryLimit in
-		// MB) is what memoryguard enforces; if the per-connection buffer
-		// alone is larger than the agent's whole budget, a single large
-		// response will OOM the recording loop before any concurrency.
+		// memory limit. --memory-limit (Agent.MemoryLimit in MB) is what
+		// memoryguard budgets against; in a k8s injection it now carries the
+		// container LIMIT (2× the request), i.e. the real OOM boundary, so
+		// checking the per-connection buffer against it is the correct bound —
+		// k8s-proxy validates the same limit at record-start (ApplyRecordConfig).
+		// If the per-connection buffer alone exceeds the whole budget, a single
+		// large response will OOM the recording loop before any concurrency.
 		// Skip when MemoryLimit=0 (uncapped); proxy.go's
 		// clampRecordBuffer still applies the 2 GiB upper bound there.
 		if c.cfg.Agent.MemoryLimit > 0 && c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > 0 {
