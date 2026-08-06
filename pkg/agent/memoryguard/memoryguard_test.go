@@ -293,6 +293,12 @@ func TestEvaluateMemory(t *testing.T) {
 			wantCurrent: mib(400), wantLimit: mib(1000), wantOverhead: 0, wantViable: true,
 		},
 		{
+			// Proxy mode is viable at ANY positive limit — the absolute floor and
+			// non-viability rules are low-latency-only and must not touch it.
+			name: "proxy mode: small limit is still viable", current: mib(50), limit: mib(128), overhead: 0,
+			wantCurrent: mib(50), wantLimit: mib(128), wantOverhead: 0, wantViable: true,
+		},
+		{
 			name:    "low-latency: ringbuf discounted from usage and limit",
 			current: mib(500), limit: mib(1000), overhead: mib(256),
 			wantCurrent: mib(244), wantLimit: mib(744), wantOverhead: mib(256), wantViable: true,
@@ -307,13 +313,15 @@ func TestEvaluateMemory(t *testing.T) {
 		},
 		{
 			// overhead >= limit is NON-viable (not silently zeroed — that would
-			// reintroduce the startup-pause bug), so the guard holds paused.
+			// reintroduce the startup-pause bug). effCurrent is still computed so
+			// the pause log carries real usage.
 			name: "overhead above limit is non-viable", current: mib(500), limit: mib(200), overhead: mib(256),
-			wantCurrent: 0, wantLimit: mib(200) - mib(256), wantOverhead: mib(256), wantViable: false,
+			wantCurrent: mib(244), wantLimit: mib(200) - mib(256), wantOverhead: mib(256), wantViable: false,
 		},
 		{
-			name: "budget below resume headroom is non-viable", current: mib(300), limit: mib(400), overhead: mib(256),
-			wantCurrent: 0, wantLimit: mib(144), wantOverhead: mib(256), wantViable: false,
+			// effLimit 144 MiB < the 320 MiB viable floor → non-viable.
+			name: "budget below viable floor is non-viable", current: mib(300), limit: mib(400), overhead: mib(256),
+			wantCurrent: mib(44), wantLimit: mib(144), wantOverhead: mib(256), wantViable: false,
 		},
 	}
 
@@ -339,11 +347,15 @@ func TestEvaluateMemory(t *testing.T) {
 				if d.resumeThreshold >= d.pauseThreshold {
 					t.Errorf("resume (%d) must be below pause (%d)", d.resumeThreshold, d.pauseThreshold)
 				}
-				if hr := d.effLimit - d.pauseThreshold; hr < int64(minPauseHeadroomBytes) {
-					t.Errorf("pause headroom %d below floor %d", hr, minPauseHeadroomBytes)
-				}
-				if hr := d.effLimit - d.resumeThreshold; hr < int64(minResumeHeadroomBytes) {
-					t.Errorf("resume headroom %d below floor %d", hr, minResumeHeadroomBytes)
+				// The absolute headroom floors apply to low-latency (overhead>0)
+				// only; proxy mode uses the plain ratios with no floor.
+				if tt.overhead > 0 {
+					if hr := d.effLimit - d.pauseThreshold; hr < int64(minPauseHeadroomBytes) {
+						t.Errorf("pause headroom %d below floor %d", hr, minPauseHeadroomBytes)
+					}
+					if hr := d.effLimit - d.resumeThreshold; hr < int64(minResumeHeadroomBytes) {
+						t.Errorf("resume headroom %d below floor %d", hr, minResumeHeadroomBytes)
+					}
 				}
 			} else if d.pauseThreshold != 0 || d.resumeThreshold != 0 {
 				t.Errorf("non-viable must leave thresholds zero, got pause=%d resume=%d", d.pauseThreshold, d.resumeThreshold)
@@ -352,27 +364,32 @@ func TestEvaluateMemory(t *testing.T) {
 	}
 }
 
-// TestEvaluateMemoryRatioDominatesLargeBudget: for a large budget the percentage
-// thresholds win (0.2/0.3 of the budget exceed the absolute floors), so proxy
-// mode is provably unchanged.
-func TestEvaluateMemoryRatioDominatesLargeBudget(t *testing.T) {
+// TestEvaluateMemoryProxyUsesPlainRatios: proxy mode (overhead 0) uses the plain
+// pause/resume ratios at ANY limit, with no absolute floor and no non-viability
+// — provably the pre-discount behaviour.
+func TestEvaluateMemoryProxyUsesPlainRatios(t *testing.T) {
 	t.Parallel()
+	// Large budget.
 	d := evaluateMemory(mib(500), mib(1000), 0)
-	if d.pauseThreshold != mib(800) { // 0.8 * 1000
-		t.Errorf("pause: want %d, got %d", mib(800), d.pauseThreshold)
+	if d.pauseThreshold != mib(800) || d.resumeThreshold != mib(700) {
+		t.Errorf("large: pause/resume want 800/700, got %d/%d", d.pauseThreshold, d.resumeThreshold)
 	}
-	if d.resumeThreshold != mib(700) { // 0.7 * 1000
-		t.Errorf("resume: want %d, got %d", mib(700), d.resumeThreshold)
+	// Small budget: still plain ratios (0.8/0.7 × 200), still viable — the
+	// low-latency floors must NOT bind in proxy mode.
+	s := evaluateMemory(mib(50), mib(200), 0)
+	if !s.viable || s.pauseThreshold != mib(160) || s.resumeThreshold != mib(140) {
+		t.Errorf("small: viable=%v pause/resume want 160/140, got %d/%d", s.viable, s.pauseThreshold, s.resumeThreshold)
 	}
 }
 
-// TestEvaluateMemoryAbsoluteHeadroomFloor is the A4 fix: for a small budget the
-// percentage margin would be a dangerously small absolute number, so the
-// absolute headroom floor binds instead (>=128MiB pause / >=192MiB resume).
+// TestEvaluateMemoryAbsoluteHeadroomFloor is the A4 fix: for a small LOW-LATENCY
+// budget the percentage margin would be a dangerously small absolute number, so
+// the absolute headroom floor binds instead (>=128MiB pause / >=192MiB resume).
 func TestEvaluateMemoryAbsoluteHeadroomFloor(t *testing.T) {
 	t.Parallel()
-	// effLimit = 500MiB: 0.2*500=100MiB < 128MiB pause floor, 0.3*500=150MiB < 192MiB resume floor.
-	d := evaluateMemory(mib(300), mib(500), 0)
+	// limit 756 − 256 ringbuf = effLimit 500MiB: 0.2*500=100MiB < 128 pause floor,
+	// 0.3*500=150MiB < 192 resume floor, so both floors bind.
+	d := evaluateMemory(mib(400), mib(756), mib(256))
 	if !d.viable {
 		t.Fatal("expected viable")
 	}
@@ -395,6 +412,27 @@ func TestEvaluateMemoryGoMemFloor(t *testing.T) {
 	big := evaluateMemory(0, mib(1000), 0) // 0.9*1000 well above floor
 	if big.goMemFloored {
 		t.Error("large budget should not floor GOMEMLIMIT")
+	}
+}
+
+// TestMinViableLowLatencyLimitBytes: the exported floor k8s-proxy derives its
+// record-start check from = overhead + the minimum usable budget.
+func TestMinViableLowLatencyLimitBytes(t *testing.T) {
+	t.Parallel()
+	if got, want := MinViableLowLatencyLimitBytes(mib(256)), mib(256)+int64(minViableEffLimitBytes); got != want {
+		t.Errorf("overhead 256Mi: want %d, got %d", want, got)
+	}
+	if got := MinViableLowLatencyLimitBytes(-1); got != int64(minViableEffLimitBytes) {
+		t.Errorf("negative overhead: want %d, got %d", int64(minViableEffLimitBytes), got)
+	}
+	// A low-latency limit at exactly this floor must be viable; one byte under
+	// must not — pinning the validator and the guard to the same boundary.
+	floor := MinViableLowLatencyLimitBytes(mib(256))
+	if d := evaluateMemory(0, floor, mib(256)); !d.viable {
+		t.Errorf("limit at floor should be viable, effLimit=%d", d.effLimit)
+	}
+	if d := evaluateMemory(0, floor-1, mib(256)); d.viable {
+		t.Errorf("limit one byte under floor should be non-viable, effLimit=%d", d.effLimit)
 	}
 }
 

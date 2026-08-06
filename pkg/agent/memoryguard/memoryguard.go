@@ -45,7 +45,28 @@ const (
 	// hysteresis ordering.
 	minPauseHeadroomBytes  = 128 << 20 // 128 MiB
 	minResumeHeadroomBytes = 192 << 20 // 1.5 × pause headroom
+
+	// minViableEffLimitBytes is the smallest post-overhead budget a low-latency
+	// recording will run within. Below it the band between the pause and resume
+	// points is too thin for the guard to ever fall back far enough to resume — a
+	// one-way pause. Set to the sum of the two headroom floors so, at the floor,
+	// resume sits a full pause-headroom below pause (pause=effLimit−128,
+	// resume=effLimit−192). Applies to low-latency (overhead>0) only.
+	minViableEffLimitBytes = minPauseHeadroomBytes + minResumeHeadroomBytes // 320 MiB
 )
+
+// MinViableLowLatencyLimitBytes returns the smallest container memory limit (in
+// bytes) a low-latency recording needs for a given fixed capture-buffer
+// overhead: the overhead plus the minimum usable post-overhead budget. Callers
+// that validate a memory limit before the agent starts (e.g. k8s-proxy's
+// record-start check) can derive their floor from this instead of duplicating
+// the guard's constants. A negative overhead is treated as zero.
+func MinViableLowLatencyLimitBytes(overheadBytes int64) int64 {
+	if overheadBytes < 0 {
+		overheadBytes = 0
+	}
+	return overheadBytes + minViableEffLimitBytes
+}
 
 var recordingPaused atomic.Bool
 
@@ -234,34 +255,41 @@ func (g *guard) run(ctx context.Context) {
 			// evaluateMemory) so a small budget can't drive near-continuous GC.
 			if dec.overhead != lastOverhead {
 				debug.SetMemoryLimit(dec.goMemTarget)
-				if dec.goMemFloored && !goMemFlooredLogged {
-					g.logger.Warn("keploy-agent GOMEMLIMIT floored — the heap budget left "+
-						"after the capture ring buffer is very small; raise --memory-limit "+
-						"or lower record.ringbufSizeMB",
-						zap.Int64("go_mem_limit_bytes", dec.goMemTarget),
-						zap.Int64("effective_limit_bytes", dec.effLimit),
-						zap.Int64("fixed_overhead_bytes", dec.overhead))
-					goMemFlooredLogged = true
+				// Re-log if a later overhead change re-floors GOMEMLIMIT; reset the
+				// latch when it is no longer floored so the two states stay in sync.
+				if dec.goMemFloored {
+					if !goMemFlooredLogged {
+						g.logger.Warn("keploy-agent GOMEMLIMIT floored — the heap budget left "+
+							"after the capture ring buffer is very small; raise --memory-limit "+
+							"or lower record.ringbufSizeMB",
+							zap.Int64("go_mem_limit_bytes", dec.goMemTarget),
+							zap.Int64("effective_limit_bytes", dec.effLimit),
+							zap.Int64("fixed_overhead_bytes", dec.overhead))
+						goMemFlooredLogged = true
+					}
+				} else {
+					goMemFlooredLogged = false
 				}
 				lastOverhead = dec.overhead
 			}
 
-			// Non-viable budget: the fixed floor leaves less than the minimum
-			// safety headroom under the limit, so there is no room to record
-			// without courting an OOM-kill. Hold paused and say so loudly ONCE —
-			// silently falling back to raw guarding here would reintroduce the
-			// startup-pause bug this discount exists to fix, indistinguishable in
-			// the logs from proxy mode. The real fix is upstream (reject the
-			// record-start); this is the in-agent backstop.
+			// Non-viable budget (low-latency only): the fixed ring buffer leaves
+			// too little room above it for a usable pause/resume band, so there is
+			// no way to record without courting an OOM-kill. Hold paused and say so
+			// loudly ONCE — silently falling back to raw guarding would reintroduce
+			// the startup-pause bug this discount exists to fix. Proxy mode
+			// (overhead 0) is never non-viable, so this and its ring-buffer message
+			// only fire when a ring buffer is actually present. The real fix is
+			// upstream (reject the record-start); this is the in-agent backstop.
 			if !dec.viable {
 				if !nonViableLogged {
-					g.logger.Error("capture ring buffer meets or exceeds the agent memory "+
-						"limit minus safety headroom; recording cannot proceed — raise "+
-						"--memory-limit or lower record.ringbufSizeMB",
+					g.logger.Error("capture ring buffer leaves too little memory below the "+
+						"limit for a usable recording budget; recording cannot proceed — "+
+						"raise --memory-limit or lower record.ringbufSizeMB",
 						zap.Int64("fixed_overhead_bytes", dec.overhead),
 						zap.Int64("effective_limit_bytes", dec.effLimit),
 						zap.Int64("memory_limit_bytes", g.limitBytes),
-						zap.Int64("min_headroom_bytes", int64(minResumeHeadroomBytes)))
+						zap.Int64("min_viable_budget_bytes", int64(minViableEffLimitBytes)))
 					nonViableLogged = true
 				}
 				g.enterPressure(dec.effCurrent, 0, dec.overhead, dec.effLimit)
@@ -967,8 +995,17 @@ func evaluateMemory(currentBytes, limitBytes, overhead int64) memoryDecision {
 		overhead = 0
 	}
 	effLimit := limitBytes - overhead
-	d := memoryDecision{overhead: overhead, effLimit: effLimit}
+	effCurrent := currentBytes - overhead
+	if effCurrent < 0 {
+		effCurrent = 0
+	}
+	// effCurrent is computed even on the non-viable path so the pause log carries
+	// the real usage, not a zero.
+	d := memoryDecision{overhead: overhead, effLimit: effLimit, effCurrent: effCurrent}
 
+	// GOMEMLIMIT floored so a tiny budget can't drive near-continuous GC. effLimit
+	// may be negative here when overhead > limit; 0.9×negative is still below the
+	// floor, so it lands on the floor and is safe.
 	goTarget := int64(float64(effLimit) * 0.9)
 	if goTarget < minGoMemLimitBytes {
 		goTarget = minGoMemLimitBytes
@@ -976,20 +1013,27 @@ func evaluateMemory(currentBytes, limitBytes, overhead int64) memoryDecision {
 	}
 	d.goMemTarget = goTarget
 
-	// Non-viable: the fixed floor leaves less than the resume headroom under the
-	// limit (also catches overhead ≥ limit ⇒ effLimit ≤ 0). No usable budget.
-	if effLimit <= minResumeHeadroomBytes {
+	// Proxy mode (overhead == 0): there is no fixed floor to compensate for, so
+	// guard the raw working set against the plain ratios exactly as before — no
+	// absolute headroom, no non-viability. Those rules exist only to stop a large
+	// ring buffer from eating the low-latency budget; imposing them on proxy mode
+	// would wrongly declare any small --memory-limit unrecordable.
+	if overhead == 0 {
+		d.viable = true
+		d.pauseThreshold = thresholdBytes(effLimit, pauseThresholdRatio)
+		d.resumeThreshold = thresholdBytes(effLimit, resumeThresholdRatio)
+		return d
+	}
+
+	// Low-latency: the ring buffer is a fixed floor. Require a usable budget above
+	// it — pause and resume must be separated by a real band — else hold paused
+	// and report the config as too small (also catches overhead ≥ limit ⇒
+	// effLimit ≤ 0).
+	if effLimit < minViableEffLimitBytes {
 		d.viable = false
 		return d
 	}
 	d.viable = true
-
-	effCurrent := currentBytes - overhead
-	if effCurrent < 0 {
-		effCurrent = 0
-	}
-	d.effCurrent = effCurrent
-
 	pauseHeadroom := max(effLimit-thresholdBytes(effLimit, pauseThresholdRatio), int64(minPauseHeadroomBytes))
 	resumeHeadroom := max(effLimit-thresholdBytes(effLimit, resumeThresholdRatio), int64(minResumeHeadroomBytes))
 	d.pauseThreshold = effLimit - pauseHeadroom
