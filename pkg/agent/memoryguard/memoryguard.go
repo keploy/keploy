@@ -26,6 +26,25 @@ const (
 	reclaimCooldown      = 5 * time.Second
 	pauseThresholdRatio  = 0.80
 	resumeThresholdRatio = 0.70 // Lower than pause to avoid rapid toggle (hysteresis)
+
+	// minGoMemLimitBytes floors GOMEMLIMIT. Below this the Go runtime is told to
+	// hold the whole agent heap in a few tens of MiB and GCs nearly continuously
+	// (see runtime/debug.SetMemoryLimit). k8s-proxy settled on the same 64 MiB
+	// floor on the replay path (pkg/platform/k8s/k8s.go, minGoMemLimitBytes) for
+	// this exact reason — keep the two in lockstep.
+	minGoMemLimitBytes = 64 << 20 // 64 MiB
+
+	// minPauseHeadroomBytes is the absolute memory margin the guard keeps below
+	// the OOM ceiling. The percentage thresholds alone leave a margin
+	// proportional to the (limit − overhead) budget, which shrinks to a
+	// dangerously small ABSOLUTE number for small budgets; the guard polls every
+	// 500ms and debug.FreeOSMemory cannot reclaim live heap, so a fast burst can
+	// cross a thin margin between ticks and get the agent OOM-killed inside the
+	// app's pod. This clamps the pause point to leave at least this much room
+	// regardless of budget size. resume keeps 1.5× to preserve pause<resume
+	// hysteresis ordering.
+	minPauseHeadroomBytes  = 128 << 20 // 128 MiB
+	minResumeHeadroomBytes = 192 << 20 // 1.5 × pause headroom
 )
 
 var recordingPaused atomic.Bool
@@ -41,17 +60,23 @@ var recordingPaused atomic.Bool
 var fixedOverheadBytes atomic.Int64
 
 // SetFixedOverheadMB records the fixed, non-reclaimable memory overhead (in MB)
-// the guard should discount when evaluating memory pressure. Safe to call
-// before or after Start; the running guard picks up the new value on its next
-// tick (the ring buffer is allocated after the guard has already started).
-// Callers MUST pass the actual configured buffer size (e.g. the enterprise
-// low-latency capture ring buffer's record.ringbufSizeMB), not a hardcoded
-// value. Passing 0 disables the discount (the proxy-mode default).
-func SetFixedOverheadMB(mb uint64) {
-	if mb > math.MaxInt64/(1024*1024) {
-		return // implausibly large; ignore rather than overflow
+// the guard should discount when evaluating memory pressure, and returns the
+// number of bytes actually applied so the caller can log it (this setter is the
+// only thing that turns the discount on, so a silent no-op is indistinguishable
+// from working correctly). Safe to call before or after Start; the running
+// guard picks up the new value on its next tick (the ring buffer is allocated
+// after the guard has already started). Callers MUST pass the actual configured
+// buffer size (e.g. the enterprise low-latency capture ring buffer's
+// record.ringbufSizeMB), not a hardcoded value. A non-positive or implausibly
+// large value clears the discount (returns 0) rather than overflowing — the
+// proxy-mode default.
+func SetFixedOverheadMB(mb int) int64 {
+	var b int64
+	if mb > 0 && int64(mb) <= math.MaxInt64/(1024*1024) {
+		b = int64(mb) * 1024 * 1024
 	}
-	fixedOverheadBytes.Store(int64(mb) * 1024 * 1024)
+	fixedOverheadBytes.Store(b)
+	return b
 }
 
 // FixedOverheadBytes returns the currently configured fixed overhead in bytes.
@@ -124,7 +149,12 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 	// non-Go memory (kernel buffers, page cache, OS overhead).  Without
 	// this headroom the GC won't kick in until the cgroup is already at
 	// the OOM boundary, causing connection drops and I/O disruptions.
+	// Floored (see minGoMemLimitBytes) so a small limit can't drive the GC
+	// nearly continuous; run() realigns this once the overhead is known.
 	goMemLimit := int64(float64(limitBytes) * 0.9)
+	if goMemLimit < minGoMemLimitBytes {
+		goMemLimit = minGoMemLimitBytes
+	}
 	prevMemLimit := debug.SetMemoryLimit(goMemLimit)
 
 	g := &guard{
@@ -156,6 +186,10 @@ func (g *guard) run(ctx context.Context) {
 	// impossible byte count) so the first tick always aligns GOMEMLIMIT with the
 	// effective budget even when the overhead is still zero.
 	lastOverhead := int64(-1)
+	// One-time log latches so a persistent misconfiguration (budget too small to
+	// record) is reported once, not on every 500ms tick.
+	goMemFlooredLogged := false
+	nonViableLogged := false
 
 	for {
 		select {
@@ -186,46 +220,67 @@ func (g *guard) run(ctx context.Context) {
 			}
 			g.readFailCount = 0
 
-			// Discount the fixed, non-reclaimable overhead (e.g. the low-latency
-			// eBPF ring buffer) from BOTH the usage and the limit. Pausing cannot
-			// free that memory, so budgeting against it would trip the guard on a
-			// fixed floor it can never relieve. We instead pause when the
-			// *reclaimable* portion (current - overhead) fills the room left above
-			// the floor (limit - overhead) — i.e. take the threshold ratio of the
-			// remainder. In proxy mode overhead is 0, so this reduces exactly to
+			// Discount the fixed, non-reclaimable overhead (the low-latency eBPF
+			// ring buffer) from BOTH usage and limit, then pause when the
+			// reclaimable remainder fills the ratio of the room left above the
+			// floor — but never closer than an absolute headroom to the ceiling.
+			// See evaluateMemory. In proxy mode overhead is 0, so this reduces to
 			// the previous working-set-vs-limit behaviour.
-			effCurrent, effLimit, overhead := effectiveUsage(currentBytes, g.limitBytes, fixedOverheadBytes.Load())
+			dec := evaluateMemory(currentBytes, g.limitBytes, fixedOverheadBytes.Load())
 
-			// Keep GOMEMLIMIT aligned with the Go-heap budget (the room left after
-			// the non-Go fixed overhead), recomputing only when overhead changes so
-			// we don't thrash debug.SetMemoryLimit on every tick.
-			if overhead != lastOverhead {
-				debug.SetMemoryLimit(int64(float64(effLimit) * 0.9))
-				lastOverhead = overhead
+			// Realign GOMEMLIMIT with the Go-heap budget (the room left after the
+			// non-Go fixed overhead), recomputing only when the overhead changes so
+			// we don't thrash debug.SetMemoryLimit every tick. Floored (see
+			// evaluateMemory) so a small budget can't drive near-continuous GC.
+			if dec.overhead != lastOverhead {
+				debug.SetMemoryLimit(dec.goMemTarget)
+				if dec.goMemFloored && !goMemFlooredLogged {
+					g.logger.Warn("keploy-agent GOMEMLIMIT floored — the heap budget left "+
+						"after the capture ring buffer is very small; raise --memory-limit "+
+						"or lower record.ringbufSizeMB",
+						zap.Int64("go_mem_limit_bytes", dec.goMemTarget),
+						zap.Int64("effective_limit_bytes", dec.effLimit),
+						zap.Int64("fixed_overhead_bytes", dec.overhead))
+					goMemFlooredLogged = true
+				}
+				lastOverhead = dec.overhead
 			}
 
-			pauseThreshold := thresholdBytes(effLimit, pauseThresholdRatio)
-			resumeThreshold := thresholdBytes(effLimit, resumeThresholdRatio)
-
-			if pauseThreshold == 0 {
-				pauseThreshold = effLimit
+			// Non-viable budget: the fixed floor leaves less than the minimum
+			// safety headroom under the limit, so there is no room to record
+			// without courting an OOM-kill. Hold paused and say so loudly ONCE —
+			// silently falling back to raw guarding here would reintroduce the
+			// startup-pause bug this discount exists to fix, indistinguishable in
+			// the logs from proxy mode. The real fix is upstream (reject the
+			// record-start); this is the in-agent backstop.
+			if !dec.viable {
+				if !nonViableLogged {
+					g.logger.Error("capture ring buffer meets or exceeds the agent memory "+
+						"limit minus safety headroom; recording cannot proceed — raise "+
+						"--memory-limit or lower record.ringbufSizeMB",
+						zap.Int64("fixed_overhead_bytes", dec.overhead),
+						zap.Int64("effective_limit_bytes", dec.effLimit),
+						zap.Int64("memory_limit_bytes", g.limitBytes),
+						zap.Int64("min_headroom_bytes", int64(minResumeHeadroomBytes)))
+					nonViableLogged = true
+				}
+				g.enterPressure(dec.effCurrent, 0, dec.overhead, dec.effLimit)
+				continue
 			}
-			if resumeThreshold == 0 {
-				resumeThreshold = effLimit
-			}
+			nonViableLogged = false
 
-			if effCurrent >= pauseThreshold {
-				g.enterPressure(effCurrent, pauseThreshold, overhead, effLimit)
+			if dec.effCurrent >= dec.pauseThreshold {
+				g.enterPressure(dec.effCurrent, dec.pauseThreshold, dec.overhead, dec.effLimit)
 				continue
 			}
 
-			if g.underPressure && effCurrent <= resumeThreshold {
+			if g.underPressure && dec.effCurrent <= dec.resumeThreshold {
 				g.resetPressure()
 				g.logger.Info("Cleared keploy-agent memory pressure after memory recovered",
-					zap.Int64("memory_usage_bytes", effCurrent),
-					zap.Int64("resume_threshold_bytes", resumeThreshold),
-					zap.Int64("fixed_overhead_bytes", overhead),
-					zap.Int64("effective_limit_bytes", effLimit))
+					zap.Int64("memory_usage_bytes", dec.effCurrent),
+					zap.Int64("resume_threshold_bytes", dec.resumeThreshold),
+					zap.Int64("fixed_overhead_bytes", dec.overhead),
+					zap.Int64("effective_limit_bytes", dec.effLimit))
 			}
 		}
 	}
@@ -875,22 +930,69 @@ func thresholdBytes(limit int64, ratio float64) int64 {
 	return threshold
 }
 
-// effectiveUsage discounts the fixed, non-reclaimable memory overhead from both
-// the working-set usage and the limit. Pausing recording cannot reclaim that
-// overhead (e.g. the low-latency eBPF ring buffer, charged as kernel memory),
-// so the guard must budget the *reclaimable* remainder (current-overhead)
-// against the room left above the fixed floor (limit-overhead). A negative
-// overhead, or one large enough that the floor alone meets or exceeds the limit,
-// is treated as zero — the guard then falls back to raw working-set guarding
-// rather than producing a zero/negative budget. effOverhead is the sanitised
-// value actually applied. effCurrent is floored at zero.
-func effectiveUsage(currentBytes, limitBytes, overhead int64) (effCurrent, effLimit, effOverhead int64) {
-	if overhead < 0 || overhead >= limitBytes {
+// memoryDecision is the pure result of evaluating one memory sample against the
+// limit and the fixed overhead. run() applies it (pause/resume, GOMEMLIMIT,
+// logging); keeping the arithmetic here makes it unit-testable without a cgroup.
+type memoryDecision struct {
+	effCurrent      int64 // reclaimable usage = working set − overhead, floored at 0
+	effLimit        int64 // budget for reclaimable memory = limit − overhead
+	overhead        int64 // sanitised overhead actually applied
+	pauseThreshold  int64 // pause when effCurrent ≥ this (viable only)
+	resumeThreshold int64 // resume when effCurrent ≤ this (viable only)
+	goMemTarget     int64 // GOMEMLIMIT to install (floored at minGoMemLimitBytes)
+	goMemFloored    bool  // goMemTarget hit its floor
+	viable          bool  // false ⇒ budget too small to record; hold paused
+}
+
+// evaluateMemory discounts the fixed, non-reclaimable overhead (the low-latency
+// eBPF ring buffer, charged to the cgroup as kernel memory) from both the
+// working-set usage and the limit — pausing cannot reclaim it, so the guard
+// budgets only the reclaimable remainder against the room above the floor.
+//
+// Two safety rules on top of the percentage thresholds:
+//   - GOMEMLIMIT is floored at minGoMemLimitBytes so a tiny budget can't drive
+//     the runtime into near-continuous GC.
+//   - The pause/resume points never leave less than an absolute headroom below
+//     the ceiling (minPause/minResumeHeadroomBytes); the percentage margin alone
+//     shrinks to a dangerously small ABSOLUTE number for small budgets, and the
+//     500ms poll + FreeOSMemory-can't-reclaim-live-heap means a thin margin gets
+//     the agent OOM-killed between ticks. If the floor leaves less than the
+//     resume headroom, the budget is non-viable and the guard holds paused.
+//
+// In proxy mode overhead is 0, so effLimit == limit and the ratios apply as
+// before (the absolute floor only binds for small budgets). A negative overhead
+// means "unset/bad" and is treated as no discount.
+func evaluateMemory(currentBytes, limitBytes, overhead int64) memoryDecision {
+	if overhead < 0 {
 		overhead = 0
 	}
-	effCurrent = currentBytes - overhead
+	effLimit := limitBytes - overhead
+	d := memoryDecision{overhead: overhead, effLimit: effLimit}
+
+	goTarget := int64(float64(effLimit) * 0.9)
+	if goTarget < minGoMemLimitBytes {
+		goTarget = minGoMemLimitBytes
+		d.goMemFloored = true
+	}
+	d.goMemTarget = goTarget
+
+	// Non-viable: the fixed floor leaves less than the resume headroom under the
+	// limit (also catches overhead ≥ limit ⇒ effLimit ≤ 0). No usable budget.
+	if effLimit <= minResumeHeadroomBytes {
+		d.viable = false
+		return d
+	}
+	d.viable = true
+
+	effCurrent := currentBytes - overhead
 	if effCurrent < 0 {
 		effCurrent = 0
 	}
-	return effCurrent, limitBytes - overhead, overhead
+	d.effCurrent = effCurrent
+
+	pauseHeadroom := max(effLimit-thresholdBytes(effLimit, pauseThresholdRatio), int64(minPauseHeadroomBytes))
+	resumeHeadroom := max(effLimit-thresholdBytes(effLimit, resumeThresholdRatio), int64(minResumeHeadroomBytes))
+	d.pauseThreshold = effLimit - pauseHeadroom
+	d.resumeThreshold = effLimit - resumeHeadroom
+	return d
 }

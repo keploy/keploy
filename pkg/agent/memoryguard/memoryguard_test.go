@@ -275,7 +275,7 @@ func TestBuildMountedCgroupPath(t *testing.T) {
 	}
 }
 
-func TestEffectiveUsage(t *testing.T) {
+func TestEvaluateMemory(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -286,51 +286,34 @@ func TestEffectiveUsage(t *testing.T) {
 		wantCurrent  int64
 		wantLimit    int64
 		wantOverhead int64
+		wantViable   bool
 	}{
 		{
-			name:         "proxy mode: zero overhead is a no-op",
-			current:      mib(400),
-			limit:        mib(1000),
-			overhead:     0,
-			wantCurrent:  mib(400),
-			wantLimit:    mib(1000),
-			wantOverhead: 0,
+			name: "proxy mode: zero overhead", current: mib(400), limit: mib(1000), overhead: 0,
+			wantCurrent: mib(400), wantLimit: mib(1000), wantOverhead: 0, wantViable: true,
 		},
 		{
-			name:         "low-latency: ringbuf discounted from usage and limit",
-			current:      mib(500), // 244 real + 256 ringbuf
-			limit:        mib(1000),
-			overhead:     mib(256),
-			wantCurrent:  mib(244),
-			wantLimit:    mib(744),
-			wantOverhead: mib(256),
+			name:    "low-latency: ringbuf discounted from usage and limit",
+			current: mib(500), limit: mib(1000), overhead: mib(256),
+			wantCurrent: mib(244), wantLimit: mib(744), wantOverhead: mib(256), wantViable: true,
 		},
 		{
-			name:         "overhead at/above limit falls back to raw guarding",
-			current:      mib(500),
-			limit:        mib(200),
-			overhead:     mib(256),
-			wantCurrent:  mib(500),
-			wantLimit:    mib(200),
-			wantOverhead: 0,
+			name: "effective current floored at zero", current: mib(100), limit: mib(1000), overhead: mib(256),
+			wantCurrent: 0, wantLimit: mib(744), wantOverhead: mib(256), wantViable: true,
 		},
 		{
-			name:         "negative overhead treated as zero",
-			current:      mib(300),
-			limit:        mib(1000),
-			overhead:     -1,
-			wantCurrent:  mib(300),
-			wantLimit:    mib(1000),
-			wantOverhead: 0,
+			name: "negative overhead treated as zero", current: mib(300), limit: mib(1000), overhead: -1,
+			wantCurrent: mib(300), wantLimit: mib(1000), wantOverhead: 0, wantViable: true,
 		},
 		{
-			name:         "effective current is floored at zero",
-			current:      mib(100),
-			limit:        mib(1000),
-			overhead:     mib(256),
-			wantCurrent:  0,
-			wantLimit:    mib(744),
-			wantOverhead: mib(256),
+			// overhead >= limit is NON-viable (not silently zeroed — that would
+			// reintroduce the startup-pause bug), so the guard holds paused.
+			name: "overhead above limit is non-viable", current: mib(500), limit: mib(200), overhead: mib(256),
+			wantCurrent: 0, wantLimit: mib(200) - mib(256), wantOverhead: mib(256), wantViable: false,
+		},
+		{
+			name: "budget below resume headroom is non-viable", current: mib(300), limit: mib(400), overhead: mib(256),
+			wantCurrent: 0, wantLimit: mib(144), wantOverhead: mib(256), wantViable: false,
 		},
 	}
 
@@ -338,62 +321,100 @@ func TestEffectiveUsage(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-
-			gotCurrent, gotLimit, gotOverhead := effectiveUsage(tt.current, tt.limit, tt.overhead)
-			if gotCurrent != tt.wantCurrent {
-				t.Errorf("effCurrent: want %d, got %d", tt.wantCurrent, gotCurrent)
+			d := evaluateMemory(tt.current, tt.limit, tt.overhead)
+			if d.effCurrent != tt.wantCurrent {
+				t.Errorf("effCurrent: want %d, got %d", tt.wantCurrent, d.effCurrent)
 			}
-			if gotLimit != tt.wantLimit {
-				t.Errorf("effLimit: want %d, got %d", tt.wantLimit, gotLimit)
+			if d.effLimit != tt.wantLimit {
+				t.Errorf("effLimit: want %d, got %d", tt.wantLimit, d.effLimit)
 			}
-			if gotOverhead != tt.wantOverhead {
-				t.Errorf("effOverhead: want %d, got %d", tt.wantOverhead, gotOverhead)
+			if d.overhead != tt.wantOverhead {
+				t.Errorf("overhead: want %d, got %d", tt.wantOverhead, d.overhead)
+			}
+			if d.viable != tt.wantViable {
+				t.Errorf("viable: want %v, got %v", tt.wantViable, d.viable)
+			}
+			if d.viable {
+				// Invariants: hysteresis ordering and both absolute headroom floors.
+				if d.resumeThreshold >= d.pauseThreshold {
+					t.Errorf("resume (%d) must be below pause (%d)", d.resumeThreshold, d.pauseThreshold)
+				}
+				if hr := d.effLimit - d.pauseThreshold; hr < int64(minPauseHeadroomBytes) {
+					t.Errorf("pause headroom %d below floor %d", hr, minPauseHeadroomBytes)
+				}
+				if hr := d.effLimit - d.resumeThreshold; hr < int64(minResumeHeadroomBytes) {
+					t.Errorf("resume headroom %d below floor %d", hr, minResumeHeadroomBytes)
+				}
+			} else if d.pauseThreshold != 0 || d.resumeThreshold != 0 {
+				t.Errorf("non-viable must leave thresholds zero, got pause=%d resume=%d", d.pauseThreshold, d.resumeThreshold)
 			}
 		})
 	}
 }
 
-// TestEffectiveUsageDrivesPauseBoundary documents the end-to-end intent: pause
-// when the reclaimable usage fills the configured ratio of the room left above
-// the fixed floor. With a 1 GiB limit and a 256 MiB ring buffer, the pause line
-// is 0.80 * (1024-256) = 614.4 MiB of reclaimable usage.
-func TestEffectiveUsageDrivesPauseBoundary(t *testing.T) {
+// TestEvaluateMemoryRatioDominatesLargeBudget: for a large budget the percentage
+// thresholds win (0.2/0.3 of the budget exceed the absolute floors), so proxy
+// mode is provably unchanged.
+func TestEvaluateMemoryRatioDominatesLargeBudget(t *testing.T) {
 	t.Parallel()
-
-	limit := mib(1024)
-	overhead := mib(256)
-
-	// Just below the boundary: 600 MiB reclaimable + 256 ringbuf = 856 total.
-	effCurrent, effLimit, _ := effectiveUsage(mib(600)+overhead, limit, overhead)
-	if pause := thresholdBytes(effLimit, pauseThresholdRatio); effCurrent >= pause {
-		t.Fatalf("did not expect pause: effCurrent=%d pause=%d", effCurrent, pause)
+	d := evaluateMemory(mib(500), mib(1000), 0)
+	if d.pauseThreshold != mib(800) { // 0.8 * 1000
+		t.Errorf("pause: want %d, got %d", mib(800), d.pauseThreshold)
 	}
+	if d.resumeThreshold != mib(700) { // 0.7 * 1000
+		t.Errorf("resume: want %d, got %d", mib(700), d.resumeThreshold)
+	}
+}
 
-	// Just above the boundary: 700 MiB reclaimable + 256 ringbuf = 956 total.
-	effCurrent, effLimit, _ = effectiveUsage(mib(700)+overhead, limit, overhead)
-	if pause := thresholdBytes(effLimit, pauseThresholdRatio); effCurrent < pause {
-		t.Fatalf("expected pause: effCurrent=%d pause=%d", effCurrent, pause)
+// TestEvaluateMemoryAbsoluteHeadroomFloor is the A4 fix: for a small budget the
+// percentage margin would be a dangerously small absolute number, so the
+// absolute headroom floor binds instead (>=128MiB pause / >=192MiB resume).
+func TestEvaluateMemoryAbsoluteHeadroomFloor(t *testing.T) {
+	t.Parallel()
+	// effLimit = 500MiB: 0.2*500=100MiB < 128MiB pause floor, 0.3*500=150MiB < 192MiB resume floor.
+	d := evaluateMemory(mib(300), mib(500), 0)
+	if !d.viable {
+		t.Fatal("expected viable")
+	}
+	if hr := d.effLimit - d.pauseThreshold; hr != int64(minPauseHeadroomBytes) {
+		t.Errorf("pause headroom: want floor %d, got %d", minPauseHeadroomBytes, hr)
+	}
+	if hr := d.effLimit - d.resumeThreshold; hr != int64(minResumeHeadroomBytes) {
+		t.Errorf("resume headroom: want floor %d, got %d", minResumeHeadroomBytes, hr)
+	}
+}
+
+// TestEvaluateMemoryGoMemFloor: a tiny budget floors GOMEMLIMIT rather than
+// telling the runtime to hold the heap in a few MiB.
+func TestEvaluateMemoryGoMemFloor(t *testing.T) {
+	t.Parallel()
+	d := evaluateMemory(0, mib(60), 0) // 0.9*60 = 54MiB < 64MiB floor
+	if !d.goMemFloored || d.goMemTarget != int64(minGoMemLimitBytes) {
+		t.Errorf("want floored GOMEMLIMIT %d, got target=%d floored=%v", minGoMemLimitBytes, d.goMemTarget, d.goMemFloored)
+	}
+	big := evaluateMemory(0, mib(1000), 0) // 0.9*1000 well above floor
+	if big.goMemFloored {
+		t.Error("large budget should not floor GOMEMLIMIT")
 	}
 }
 
 func TestSetFixedOverheadMB(t *testing.T) {
 	t.Cleanup(func() { fixedOverheadBytes.Store(0) })
 
-	SetFixedOverheadMB(256)
-	if got, want := FixedOverheadBytes(), mib(256); got != want {
-		t.Fatalf("after SetFixedOverheadMB(256): want %d, got %d", want, got)
+	if got := SetFixedOverheadMB(256); got != mib(256) || FixedOverheadBytes() != mib(256) {
+		t.Fatalf("SetFixedOverheadMB(256): returned %d, stored %d", got, FixedOverheadBytes())
 	}
-
-	SetFixedOverheadMB(0)
-	if got := FixedOverheadBytes(); got != 0 {
-		t.Fatalf("after SetFixedOverheadMB(0): want 0, got %d", got)
+	if got := SetFixedOverheadMB(0); got != 0 || FixedOverheadBytes() != 0 {
+		t.Fatalf("SetFixedOverheadMB(0): returned %d, stored %d", got, FixedOverheadBytes())
 	}
-
-	// An implausibly large value must be ignored (no overflow), leaving the
-	// previous value untouched.
+	// Negative clears the discount (no huge-positive conversion).
 	SetFixedOverheadMB(64)
-	SetFixedOverheadMB(math.MaxUint64)
-	if got, want := FixedOverheadBytes(), mib(64); got != want {
-		t.Fatalf("overflow input should be ignored: want %d, got %d", want, got)
+	if got := SetFixedOverheadMB(-5); got != 0 || FixedOverheadBytes() != 0 {
+		t.Fatalf("SetFixedOverheadMB(-5): returned %d, stored %d", got, FixedOverheadBytes())
+	}
+	// Implausibly large clears rather than overflowing.
+	SetFixedOverheadMB(64)
+	if got := SetFixedOverheadMB(math.MaxInt); got != 0 || FixedOverheadBytes() != 0 {
+		t.Fatalf("SetFixedOverheadMB(MaxInt): returned %d, stored %d", got, FixedOverheadBytes())
 	}
 }
