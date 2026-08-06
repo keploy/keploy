@@ -1823,13 +1823,17 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	m.treesMu.RLock()
 	globalTree := m.filtered
 	m.treesMu.RUnlock()
-	deletedGlobal := globalTree.delete(mock.TestModeInfo)
+	// deleteMock, not delete: the trees are keyed on (SortOrder, ID) alone and
+	// each pool stamps those from its own 0-based slice index, so this key may
+	// belong to a DIFFERENT tree's numbering. Verifying identity turns a
+	// wrong-tree delete into a clean miss instead of evicting a bystander.
+	deletedGlobal := globalTree.deleteMock(&mock)
 
 	// per-kind
 	k := mock.Kind
 	flt, _ := m.ensureKindTrees(k)
 	m.treesMu.Lock()
-	deletedKind := flt.delete(mock.TestModeInfo)
+	deletedKind := flt.deleteMock(&mock)
 	m.treesMu.Unlock()
 
 	if deletedGlobal {
@@ -1863,13 +1867,14 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
-	deletedGlobal := globalTree.delete(mock.TestModeInfo)
+	// deleteMock, not delete — see the note in DeleteFilteredMock.
+	deletedGlobal := globalTree.deleteMock(&mock)
 
 	// per-kind
 	k := mock.Kind
 	_, unf := m.ensureKindTrees(k)
 	m.treesMu.Lock()
-	deletedKind := unf.delete(mock.TestModeInfo)
+	deletedKind := unf.deleteMock(&mock)
 	m.treesMu.Unlock()
 
 	if deletedGlobal {

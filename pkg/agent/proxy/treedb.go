@@ -65,6 +65,40 @@ func (db *TreeDb) delete(key interface{}) bool {
 	return true
 }
 
+// deleteMock removes the entry at mock's key ONLY when the stored value is that
+// same mock, and reports whether it removed anything.
+//
+// This exists because customComparator keys the tree on (SortOrder, ID) alone —
+// not Name, not Kind — while SetFilteredMocks and SetUnFilteredMocks each stamp
+// those fields from their OWN 0-based slice index. The same key therefore exists
+// in more than one tree, so a delete aimed at the wrong tree does not miss: it
+// removes whichever unrelated mock happens to occupy that coordinate.
+//
+// Callers that hold the matched *models.Mock should prefer this over delete() so
+// a wrong-tree delete degrades to a clean miss instead of silently destroying a
+// bystander. delete() is kept for callers that only have a key.
+func (db *TreeDb) deleteMock(mock *models.Mock) bool {
+	if mock == nil {
+		return false
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	v, found := db.rbt.Get(mock.TestModeInfo)
+	if !found {
+		return false
+	}
+	// Identity check. Name+Kind is what distinguishes two mocks that collide on
+	// (SortOrder, ID); a mismatch means this key belongs to a different tree's
+	// numbering and must not be touched here.
+	if stored, ok := v.(*models.Mock); !ok || stored == nil ||
+		stored.Name != mock.Name || stored.Kind != mock.Kind {
+		return false
+	}
+	db.rbt.Remove(mock.TestModeInfo)
+	delete(db.idIndex, mock.TestModeInfo.ID)
+	return true
+}
+
 func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interface{}) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
