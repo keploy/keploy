@@ -639,6 +639,226 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	return nil
 }
 
+// startupCutoffMarkerName holds the anchored startup-window boundary for a test
+// set. It lives in the test-set dir alongside the mocks file, so it is discarded
+// with that dir when a new recording session starts fresh.
+const startupCutoffMarkerName = ".keploy-startup-cutoff"
+
+// anchoredStartupCutoff stabilises the startup-window boundary across auto-replay
+// intervals. StartupMockCutoff is recomputed each interval from the test cases
+// still on disk, and executed test cases are deleted after every interval, so a
+// fresh computation drifts later each cycle and would re-keep each interval's
+// first few test cases' per-test mocks forever (linear growth, not bounded). The
+// first real boundary — a candidate earlier than pruneBefore, i.e. an actual
+// boot window rather than the whole-batch keep-all a set of <= the window size
+// yields — is persisted next to the mocks file and reused thereafter.
+//
+// A marker whose cutoff predates sessionStart (the recording's start) is stale:
+// it was left by an EARLIER recording session that happened to reuse this
+// test-set directory. Honouring it would over-drop the NEW session's tagged
+// per-test boot mocks — they all fall after the stale cutoff — and silently
+// break the next replay's boot while the kept/dropped counts look normal. Such a
+// marker is discarded and recomputed. When sessionStart is zero the check is
+// skipped (cannot validate). A failed persist is logged, not swallowed: without
+// the marker the cutoff re-arms next interval and linear growth resumes, and the
+// write fails exactly on the full-disk condition this drain exists to avoid.
+// Callers hold the striped file lock, so the read/write here is already serialised.
+func (ys *MockYaml) anchoredStartupCutoff(path string, candidate, pruneBefore, sessionStart time.Time) time.Time {
+	markerPath := filepath.Join(path, startupCutoffMarkerName)
+	if data, err := os.ReadFile(markerPath); err == nil {
+		if anchored, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); perr == nil {
+			if sessionStart.IsZero() || !anchored.Before(sessionStart) {
+				return anchored
+			}
+			ys.Logger.Debug("drain: discarding stale startup-cutoff marker from a prior session",
+				zap.String("path", path), zap.Time("staleAnchor", anchored), zap.Time("sessionStart", sessionStart))
+		}
+	}
+	if candidate.Before(pruneBefore) {
+		if werr := os.WriteFile(markerPath, []byte(candidate.UTC().Format(time.RFC3339Nano)), 0644); werr != nil {
+			ys.Logger.Warn("drain: failed to persist startup-cutoff anchor; the window will re-arm and growth may resume until this succeeds",
+				zap.String("path", markerPath), zap.Error(werr))
+		}
+	}
+	return candidate
+}
+
+// DrainToStartupMocks rewrites a test set's mocks file to keep ONLY the mocks a
+// future auto-replay pod needs to restart — Session/Connection-lifetime mocks
+// (the config/connection/session boot pool, including MySQL session-reusable
+// commands), config-tagged mocks, startup-window mocks (recorded before
+// startupCutoffTime), and any mock recorded after pruneBefore (the current
+// recording interval still in flight) — and DROPS the consumed per-test mocks of
+// the just-replayed interval, which the caller has already uploaded to object
+// storage. Unlike UpdateMocks (which keys only on the raw "config" tag) the keep
+// set is derived via Mock.DeriveLifetime, so connection-tagged and MySQL-reusable
+// session mocks are preserved rather than dropped. The derivation is snapshotted
+// and restored around the keep check so it is never written back to disk:
+// DeriveLifetime mutates TestModeInfo (Lifetime + LifetimeDerived), and the gob
+// path encodes those fields (gob ignores the json:"-" tags), so persisting them
+// would pin a mode-specific classification and defeat fresh re-derivation on the
+// next load. Takes the SAME striped file lock as InsertMock/UpdateMocks, so it is
+// race-safe against a concurrent recorder append. Best-effort at the call site:
+// an error here must not fail the replay run.
+//
+// startupCutoffTime is anchored to the first value seen for this test set (see
+// anchoredStartupCutoff) rather than used verbatim, so the startup window does
+// not re-arm every interval and disk stays bounded across a long session.
+// sessionStart (the recording's start time) is used only to reject a stale
+// anchor left by a prior session that reused this directory.
+func (ys *MockYaml) DrainToStartupMocks(ctx context.Context, testSetID string, pruneBefore, startupCutoffTime, sessionStart time.Time) error {
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+	path := filepath.Join(ys.MockPath, testSetID)
+	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
+	lock.Lock()
+	defer lock.Unlock()
+
+	startupCutoffTime = ys.anchoredStartupCutoff(path, startupCutoffTime, pruneBefore, sessionStart)
+
+	keep := func(mock *models.Mock) bool {
+		if mock.Spec.Metadata["type"] == "config" {
+			return true
+		}
+		savedTestModeInfo := mock.TestModeInfo
+		mock.DeriveLifetime()
+		lt := mock.TestModeInfo.Lifetime
+		mock.TestModeInfo = savedTestModeInfo
+		if lt == models.LifetimeSession || lt == models.LifetimeConnection {
+			return true
+		}
+		if !startupCutoffTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
+			mock.Spec.ReqTimestampMock.Before(startupCutoffTime) {
+			return true
+		}
+		if !mock.Spec.ReqTimestampMock.IsZero() && mock.Spec.ReqTimestampMock.After(pruneBefore) {
+			return true
+		}
+		return false
+	}
+
+	gobPath := filepath.Join(path, mockFileName+".gob")
+	if _, err := os.Stat(gobPath); err == nil {
+		return ys.drainMocksGob(ctx, testSetID, gobPath, keep)
+	}
+
+	existsAny, detectedFormat, err := yaml.FileExistsAny(ctx, ys.Logger, path, mockFileName, ys.Format)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to stat mocks file for drain", zap.String("path", path))
+		return err
+	}
+	if !existsAny {
+		return nil
+	}
+
+	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to read the mocks from file for drain", zap.String("path", path))
+		return err
+	}
+	defer reader.Close()
+
+	var mocks []*models.Mock
+	if reader.Format() == yaml.FormatJSON {
+		var jsonDocs []*yaml.NetworkTrafficDocJSON
+		for {
+			jd, err := reader.ReadNextDocJSON()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				utils.LogError(ys.Logger, err, "failed to decode the file documents for drain", zap.String("path", path))
+				return fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			}
+			jsonDocs = append(jsonDocs, jd)
+		}
+		m, err := DecodeMocksJSON(jsonDocs, ys.Logger)
+		if err != nil {
+			return err
+		}
+		mocks = m
+	} else {
+		var mockYamls []*yaml.NetworkTrafficDoc
+		for {
+			doc, err := reader.ReadNextDoc()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				utils.LogError(ys.Logger, err, "failed to decode the file documents for drain", zap.String("path", path))
+				return fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			}
+			mockYamls = append(mockYamls, doc)
+		}
+		m, err := DecodeMocks(mockYamls, ys.Logger)
+		if err != nil {
+			return err
+		}
+		mocks = m
+	}
+
+	newMocks := make([]*models.Mock, 0, len(mocks))
+	for _, mock := range mocks {
+		if keep(mock) {
+			newMocks = append(newMocks, mock)
+		}
+	}
+
+	if err := ys.writeMocksAtomically(path, mockFileName, newMocks, detectedFormat); err != nil {
+		return err
+	}
+
+	ys.Logger.Debug("drained per-test mocks to startup pool",
+		zap.String("testSetID", testSetID),
+		zap.Int("total", len(mocks)),
+		zap.Int("kept", len(newMocks)),
+		zap.Int("dropped", len(mocks)-len(newMocks)),
+		zap.Time("pruneBefore", pruneBefore),
+		zap.Time("startupCutoff", startupCutoffTime))
+	return nil
+}
+
+// drainMocksGob is the mocks.gob path of DrainToStartupMocks. Mirrors
+// updateMocksGob's quiesce/read/rewrite skeleton but applies the drain keep
+// predicate. The async gob writer is quiesced first so a concurrent InsertMock
+// doesn't race the truncate-and-rewrite.
+func (ys *MockYaml) drainMocksGob(ctx context.Context, testSetID, gobPath string, keep func(*models.Mock) bool) error {
+	if err := ys.Close(); err != nil {
+		utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before draining", zap.String("path", gobPath))
+		return err
+	}
+	mocks, err := readGobMocks(gobPath)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to read gob mocks for draining", zap.String("path", gobPath))
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	newMocks := make([]*models.Mock, 0, len(mocks))
+	for i, mock := range mocks {
+		if i&0x3ff == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		if keep(mock) {
+			newMocks = append(newMocks, mock)
+		}
+	}
+	if err := writeGobMocksAtomically(ctx, gobPath, newMocks); err != nil {
+		return err
+	}
+	ys.Logger.Debug("drained per-test mocks to startup pool (gob)",
+		zap.String("testSetID", testSetID),
+		zap.Int("total", len(mocks)),
+		zap.Int("kept", len(newMocks)),
+		zap.Int("dropped", len(mocks)-len(newMocks)))
+	return nil
+}
+
 // writeGobMocksAtomically rewrites gobPath with the given mocks via a
 // sibling tmp file + rename. os.Rename on the same filesystem is atomic, so
 // a concurrent reader either sees the full old file or the full new one.
