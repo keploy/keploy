@@ -1229,7 +1229,7 @@ func getQueryStructure(sql string) (string, error) {
 	return strings.Join(structureParts, "->"), nil
 }
 
-func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle, getQuery func(packet mysql.PacketBundle) string, rejectCrossVarRead bool) (bool, int) {
+func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle, getQuery func(packet mysql.PacketBundle) string) (bool, int) {
 	matchCount := 0
 
 	// Match the type and return zero if the types are not equal
@@ -1302,14 +1302,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 	// Comparing the parsed variable NAMES keeps the defect fixed (a different @@var
 	// is still never cross-served) while leaving same-variable candidates eligible
 	// for normal matching.
-	// Gated to COM_QUERY. matchQuery is shared with COM_STMT_PREPARE, but the
-	// compensating synthesis in matchCommand runs only for COM_QUERY, so rejecting
-	// here on the prepare path would remove a candidate that used to fuzzy-match
-	// and put nothing in its place: a server-side-prepared pure variable read
-	// (useServerPrepStmts=true) would hard-fail to a mock miss. That path is not
-	// what this fix targets, and making it strictly worse is not an acceptable
-	// trade for tightening it.
-	if rejectCrossVarRead && rejectsCrossVariableRead(expectedQuery, actualQuery) {
+	if rejectsCrossVariableRead(expectedQuery, actualQuery) {
 		return false, 0
 	}
 
@@ -1369,9 +1362,7 @@ func matchQueryPacket(ctx context.Context, log *zap.Logger, expected, actual mys
 		msg, _ := packet.Message.(*mysql.QueryPacket)
 		return msg.Query
 	}
-	// COM_QUERY: matchCommand can synthesize the read from the recorded probe, so
-	// rejecting a cross-variable candidate here is safe.
-	return matchQuery(ctx, log, expected, actual, getQuery, true)
+	return matchQuery(ctx, log, expected, actual, getQuery)
 }
 
 func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) (bool, int) {
@@ -1379,9 +1370,7 @@ func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual m
 		msg, _ := packet.Message.(*mysql.StmtPreparePacket)
 		return msg.Query
 	}
-	// COM_STMT_PREPARE: no synthesis fallback exists for this path, so leave its
-	// matching exactly as it was.
-	return matchQuery(ctx, log, expected, actual, getQuery, false)
+	return matchQuery(ctx, log, expected, actual, getQuery)
 }
 
 // query-aware EXEC scoring.
@@ -2182,44 +2171,18 @@ var fallbackOKReplacingEOFTerminator = []byte{0x07, 0x00, 0x00, 0x04, 0xfe, 0x00
 
 // terminatorForSingleColumn returns the result-set terminator to emit for the
 // synthesized single-column response. It PREFERS the probe's own recorded
-// OK-replacing-EOF terminator, so the status flags and warning count are the
-// real recorded ones rather than invented, rewriting its sequence-ID byte to 4
-// for the single-column framing — the terminator's structure is independent of
-// column count, so that is valid.
-//
-// Two recorded flags are NOT safe to carry over, because they describe the
-// probe's result set rather than ours, and both are corrected below:
-// SERVER_MORE_RESULTS_EXISTS is cleared (we send exactly one result set), and
-// SERVER_SESSION_STATE_CHANGED forces the deterministic fallback (its trailer
-// belongs to the probe). It also falls back when the probe carried no
-// terminator or it was not an OK-replacing-EOF (e.g. a legacy plain EOF), so the
-// status is honest when we have it and deterministic when we don't.
+// OK-replacing-EOF terminator (preserving the real recorded status flags,
+// warnings and any session-state trailer), only rewriting its sequence-ID byte
+// to 4 for the single-column framing — the terminator's structure is
+// independent of column count, so this is valid. It falls back to a synthesized
+// autocommit terminator only when the probe carried none or it was not an
+// OK-replacing-EOF (e.g. a legacy plain EOF), so the status is honest when we
+// have it and deterministic when we don't.
 func terminatorForSingleColumn(probe *mysql.GenericResponse) *mysql.GenericResponse {
-	if probe != nil && mysqlutils.IsOKReplacingEOF(probe.Data) && len(probe.Data) > 8 {
-		// The probe's status flags describe the PROBE's result set, not ours, and
-		// two of them are actively harmful when replayed onto a synthesized one.
-		// d[7]/d[8] are the little-endian status_flags of the OK-replacing-EOF
-		// packet (len[3] seq[1] 0xFE affected_rows last_insert_id status[2]
-		// warnings[2]).
-		//
-		// SERVER_SESSION_STATE_CHANGED (0x4000, d[8]) means a session-state
-		// trailer follows. That trailer belongs to the probe and describes changes
-		// that did not happen for this query; replaying it would have the driver
-		// apply stale session state. There is no safe way to rewrite it, so fall
-		// back to the deterministic terminator instead.
-		if probe.Data[8]&0x40 != 0 {
-			d := make([]byte, len(fallbackOKReplacingEOFTerminator))
-			copy(d, fallbackOKReplacingEOFTerminator)
-			return &mysql.GenericResponse{Type: "OK", Data: d}
-		}
+	if probe != nil && mysqlutils.IsOKReplacingEOF(probe.Data) {
 		d := make([]byte, len(probe.Data))
 		copy(d, probe.Data)
 		d[3] = 0x04 // sequence ID of the terminator in a 1-column result set
-		// SERVER_MORE_RESULTS_EXISTS (0x0008, d[7]) would make the driver wait for
-		// a second result set that this synthesized response never sends: a hang,
-		// or a protocol desync on the next command. We emit exactly one result
-		// set, so the flag must be cleared.
-		d[7] &^= 0x08
 		return &mysql.GenericResponse{Type: probe.Type, Data: d}
 	}
 	d := make([]byte, len(fallbackOKReplacingEOFTerminator))

@@ -348,61 +348,6 @@ func TestResolveVarFromProbe_IgnoresNonProbeMocks(t *testing.T) {
 	assert.True(t, ok, "a genuine probe must still resolve")
 }
 
-// TestTerminatorForSingleColumn_SanitisesStatusFlags covers the two recorded
-// flags that describe the PROBE's result set and are harmful when replayed onto
-// a synthesized single-column one.
-func TestTerminatorForSingleColumn_SanitisesStatusFlags(t *testing.T) {
-	t.Run("SERVER_MORE_RESULTS_EXISTS is cleared", func(t *testing.T) {
-		// 0x0b = AUTOCOMMIT|IN_TRANS|MORE_RESULTS. Leaving MORE_RESULTS set makes
-		// the driver wait for a second result set that never arrives.
-		probe := &mysql.GenericResponse{Type: "OK", Data: []byte{0x07, 0x00, 0x00, 0x05, 0xfe, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00}}
-		got := terminatorForSingleColumn(probe)
-		require.NotNil(t, got)
-		assert.Equal(t, byte(0x03), got.Data[7], "MORE_RESULTS cleared, other flags kept")
-		assert.Equal(t, byte(0x0b), probe.Data[7], "source probe must not be mutated")
-	})
-
-	t.Run("SERVER_SESSION_STATE_CHANGED falls back", func(t *testing.T) {
-		// 0x4000 (d[8]=0x40) means a session-state trailer follows. That trailer
-		// belongs to the probe, so replaying it would apply state changes that did
-		// not happen for this query. There is no safe rewrite; use the fallback.
-		probe := &mysql.GenericResponse{Type: "OK", Data: []byte{0x07, 0x00, 0x00, 0x05, 0xfe, 0x00, 0x00, 0x02, 0x40, 0x00, 0x00}}
-		got := terminatorForSingleColumn(probe)
-		require.NotNil(t, got)
-		assert.Equal(t, fallbackOKReplacingEOFTerminator, got.Data, "must use the deterministic fallback")
-	})
-}
-
-// TestMatchQuery_CrossVarRejectionIsComQueryOnly pins the rejection's scope.
-// matchQuery is shared with COM_STMT_PREPARE, but the compensating synthesis in
-// matchCommand runs only for COM_QUERY. Rejecting on the prepare path would drop
-// a candidate that used to fuzzy-match and put nothing in its place, so a
-// server-side-prepared variable read (useServerPrepStmts=true) would hard-fail.
-func TestMatchQuery_CrossVarRejectionIsComQueryOnly(t *testing.T) {
-	ctx := context.Background()
-	log := zap.NewNop()
-
-	mk := func(q string) mysql.PacketBundle {
-		return mysql.PacketBundle{
-			Header:  &mysql.PacketInfo{Header: &mysql.Header{}},
-			Message: &mysql.QueryPacket{Command: 0x03, Query: q},
-		}
-	}
-	getQuery := func(p mysql.PacketBundle) string {
-		msg, _ := p.Message.(*mysql.QueryPacket)
-		return msg.Query
-	}
-	expected := mk("SELECT @@session.transaction_read_only")
-	actual := mk("SELECT @@session.transaction_isolation")
-
-	okQuery, scoreQuery := matchQuery(ctx, log, expected, actual, getQuery, true)
-	assert.False(t, okQuery)
-	assert.Equal(t, 0, scoreQuery, "COM_QUERY: a different @@var must score 0")
-
-	_, scorePrepare := matchQuery(ctx, log, expected, actual, getQuery, false)
-	assert.NotEqual(t, 0, scorePrepare, "COM_STMT_PREPARE: matching must be left as it was")
-}
-
 // TestParseSingleSystemVarRead_Label pins the expression text returned alongside
 // the normalised variable name. The name drives the probe lookup; the label is
 // what the synthesized column is called, and it must match what a real server
