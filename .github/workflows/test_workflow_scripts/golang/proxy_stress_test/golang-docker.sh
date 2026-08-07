@@ -12,6 +12,17 @@ docker compose build
 sudo rm -rf keploy/
 $RECORD_BIN config --generate
 
+# The sample checks in its own keploy.yml carrying the globalNoise that ignores
+# the wall-clock `duration` field these endpoints report (see samples-go
+# proxy-stress-test/keploy.yml). `config --generate` above is a no-op when that
+# file exists, so the noise applies here and to a bare `./test.sh` run alike —
+# deliberately not patched in from CI, so the two cannot drift.
+grep -q 'duration' ./keploy.yml || {
+    echo "FAIL: the sample's keploy.yml is missing the duration noise; without it"
+    echo "      /api/transfer, /api/batch-transfer and /api/post-transfer mismatch on every replay."
+    exit 1
+}
+
 container_kill() {
     REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
     echo "Keploy record PID: $REC_PID"
@@ -109,7 +120,10 @@ echo "Services stopped"
 test_container="proxyStressApp"
 # timeout -s INT: hard ceiling so a stuck replay can't hang the job (matches the
 # record path); the "No reports — replay hung" guard below then fails it fast.
-timeout -s INT 600 $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}.txt" || true
+set +e
+timeout -s INT 600 $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}.txt"
+replay_rc=${PIPESTATUS[0]}
+set -e
 
 if grep "WARNING: DATA RACE" "${test_container}.txt"; then echo "FAIL: Data race during replay"; exit 1; fi
 if grep -q "panic:" "${test_container}.txt"; then echo "FAIL: Panic during replay"; cat "${test_container}.txt"; exit 1; fi
@@ -120,9 +134,52 @@ if [ "$report_count" -eq 0 ]; then echo "FAIL: No reports — replay hung"; cat 
 if grep -q "Error channel is full" "${test_container}.txt"; then echo "FAIL: Error channel overflow"; cat "${test_container}.txt"; exit 1; fi
 if grep -q "incomplete or invalid response packet" "${test_container}.txt"; then echo "FAIL: PG decode failure"; cat "${test_container}.txt"; exit 1; fi
 
+# Enforce the report status. This loop used to only `echo` it, so the lane was
+# green through four consecutive FAILED test sets — 11 of 18 tests failing —
+# and had been for weeks. Everything else in this script (data race, panic,
+# zero test cases, zero reports) checks for the run not happening; nothing
+# checked whether it passed.
+all_passed=true
+seen_reports=0
 for report_file in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
-    [ -f "$report_file" ] && echo "$(basename "$report_file"): $(grep 'status:' "$report_file" | head -1 | awk '{print $2}')"
+    [ -f "$report_file" ] || continue
+    seen_reports=$((seen_reports + 1))
+    status=$(grep 'status:' "$report_file" | head -1 | awk '{print $2}')
+    echo "$(basename "$report_file"): $status"
+    if [ "$status" != "PASSED" ]; then
+        all_passed=false
+    fi
 done
+# A glob that matched nothing leaves the loop body unexecuted, which would
+# otherwise sail through as "all passed".
+if [ "$seen_reports" -eq 0 ]; then
+    echo "FAIL: no test-set reports under ./keploy/reports/test-run-0"
+    cat "${test_container}.txt"
+    exit 1
+fi
+# Every recorded test-set must have produced a report. Checking only the
+# reports that exist means a test-set whose replay died before writing one is
+# invisible: the survivors all say PASSED and the loop above is satisfied.
+recorded_sets=$(find ./keploy -maxdepth 1 -type d -name 'test-set-*' | wc -l)
+if [ "$seen_reports" -ne "$recorded_sets" ]; then
+    echo "FAIL: $recorded_sets test-sets recorded but $seen_reports reported — they must match; a replay died before writing its report"
+    cat "${test_container}.txt"
+    exit 1
+fi
+if [ "$all_passed" != true ]; then
+    echo "FAIL: one or more yaml test sets did not pass"
+    cat "${test_container}.txt"
+    exit 1
+fi
+# Asserted last so the per-report diagnostics above are printed first. Catches
+# anything keploy fails at AFTER the final report is written — coverage,
+# mock pruning, teardown — which leaves every report PASSED and would
+# otherwise go green.
+if [ "$replay_rc" -ne 0 ]; then
+    echo "FAIL: every test set passed but keploy exited $replay_rc"
+    cat "${test_container}.txt"
+    exit 1
+fi
 
 if json_pass_supported; then
     # Reuse the compose service name (`proxyStressApp`) — there is no
@@ -130,10 +187,36 @@ if json_pass_supported; then
     # auto-detected per file by NewMockReaderAny / GetTestCases on the
     # replay side, so the --storage-format flag here only affects what
     # extension the json *report* gets written under.
-    timeout -s INT 600 $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}_json.txt" || true
+    set +e
+    timeout -s INT 600 $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}_json.txt"
+    json_replay_rc=${PIPESTATUS[0]}
+    set -e
     if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then echo "FAIL: Data race during json replay"; exit 1; fi
     if grep -q "panic:" "${test_container}_json.txt"; then echo "FAIL: Panic during json replay"; cat "${test_container}_json.txt"; exit 1; fi
-    json_scan_reports || true
+    # json_scan_reports already emits ::error:: annotations for FAILED sets and
+    # returns non-zero. The `|| true` that used to be here threw that away, so
+    # the lane printed four "##[error] ... status=FAILED" lines and then
+    # declared itself passed on the very next line.
+    if ! json_scan_reports; then
+        echo "FAIL: one or more json test sets did not pass"
+        cat "${test_container}_json.txt"
+        exit 1
+    fi
+    # json_scan_reports only inspects the reports that EXIST — the same hole the
+    # yaml pass has above, so it needs the same denominator. A test set whose
+    # replay died before writing its report is otherwise invisible: the
+    # survivors all say PASSED and the scan is satisfied.
+    json_reports=$(find ./keploy/reports -type f -path '*/test-run-*/test-set-*-report.json' | wc -l)
+    if [ "$json_reports" -ne "$recorded_sets" ]; then
+        echo "FAIL: $recorded_sets test-sets recorded but only $json_reports json reports written — a replay died before writing its report"
+        cat "${test_container}_json.txt"
+        exit 1
+    fi
+    if [ "$json_replay_rc" -ne 0 ]; then
+        echo "FAIL: every json test set passed but keploy exited $json_replay_rc"
+        cat "${test_container}_json.txt"
+        exit 1
+    fi
     echo "Proxy stress test PASSED — yaml + json"
 else
     echo "Proxy stress test PASSED — yaml only (json pass skipped for compat-matrix cell)"
