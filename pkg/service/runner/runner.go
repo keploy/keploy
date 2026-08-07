@@ -384,6 +384,8 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.SchemaNoiseStrict = r.config.Test.SchemaNoiseStrict
 		outOpts.MysqlPorts = r.config.MysqlPorts
 		outOpts.DisableMysqlAutoDetect = r.config.DisableMysqlAutoDetect
+		outOpts.PassThroughPorts = r.config.Record.PassThroughPorts
+		outOpts.PassThroughHosts = r.config.Record.PassThroughHosts
 	}
 	noiseCfg := map[string]map[string][]string{}
 	if headerNoise, ok := r.globalNoise["header"]; ok {
