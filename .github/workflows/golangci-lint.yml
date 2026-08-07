@@ -27,6 +27,39 @@ env:
   INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
 
 jobs:
+  # A few Windows workflow steps must run BEFORE actions/checkout (they are
+  # what repairs the workspace so checkout can succeed), so they cannot call a
+  # script out of the repository - it is not on disk yet. They inline the body
+  # of .github/scripts/windows/recover-stale-workspace.ps1 instead, so the same
+  # body exists at five call sites as well as in the script they are copied
+  # from, and the copies can drift apart. Drift between them is the bug this
+  # arrangement exists to prevent, so it is checked mechanically here instead
+  # of being left to a comment asking people to keep the copies in sync.
+  #
+  # It lives in the lint workflow because that workflow runs on every pull
+  # request with no path or branch filter and already hosts the repo's non-Go
+  # static checks (the keploy/integrations import check, gofmt, the
+  # deprecated-dependency scan), so a "these files must stay identical" check
+  # belongs with them rather than in a workflow of its own. It is a separate
+  # job so it neither waits on the Go toolchain nor hides inside the
+  # golangci-lint report.
+  inline-regions:
+    name: inline-regions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Check inlined script regions match their source
+        run: python3 .github/scripts/check-inline-regions.py
+
   golangci:
     name: lint
     runs-on: ubuntu-latest
