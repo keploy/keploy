@@ -26,6 +26,7 @@ The following behaviors are expected and requested of all community members:
 * Give and receive constructive feedback in a gracious manner.
 * Take responsibility for your actions and apologize for mistakes. Use them as learning opportunities.
 * Prioritize the well-being and success of the community as a whole over individual gain.
+* Contribute original, thoiughtful work and avoid using AI generated code that does not add meaningfull value to the product.
 
 Examples of unacceptable behavior include:
 
