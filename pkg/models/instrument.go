@@ -106,6 +106,15 @@ type OutgoingOptions struct {
 	// an escape hatch rather than a requirement: a port listed here
 	// skips the detection probe entirely. See DisableMysqlAutoDetect.
 	MysqlPorts []uint32
+	// PassThroughPorts / PassThroughHosts mark telemetry / noisy egress that
+	// keploy should not record normally (see PassThroughRule). Ports gate on the
+	// destination port; Hosts gate on the destination host/authority (needed for
+	// TLS egress where the port is not observable at capture). A matched rule is
+	// either "skip" (never record; synth success on replay) or "recordOne"
+	// (keep one exchange per (host,port,path,method); serve it body-agnostic on
+	// replay). Empty ⇒ built-in telemetry defaults only (see MergePassThroughDefaults).
+	PassThroughPorts []PassThroughRule
+	PassThroughHosts []PassThroughRule
 	// DisableMysqlAutoDetect turns off automatic MySQL port detection,
 	// restoring the strict "MysqlPorts or nothing" behaviour. With
 	// detection on (the default), a MySQL server on any port is

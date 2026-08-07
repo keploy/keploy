@@ -48,11 +48,15 @@ type HTTP struct {
 	Logger *zap.Logger
 	//opts  globalOptions //other global options set by the proxy
 	asyncEngine *async.Engine
+	// ptRecorder de-duplicates recordOne telemetry-passthrough captures to one
+	// representative exchange per endpoint (see passthrough_egress.go).
+	ptRecorder *ptRecorder
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
 	return &HTTP{
-		Logger: logger,
+		Logger:     logger,
+		ptRecorder: &ptRecorder{},
 	}
 }
 
@@ -259,15 +263,34 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		return nil
 	}
 
-	// Do not record telemetry exports (POST /v1/traces, /ingest). They are live
-	// telemetry, not a dependency: recording them stores volatile, large
-	// config-tier mocks that at replay schema-match the app's re-emitted
-	// exports and fall into the fuzzy-matcher, which shingles the ~150 KB
-	// bodies and OOMs the sidecar. Keeping them out of the pool removes the
-	// candidates entirely. Hardcoded pending a configurable egress-bypass rule.
-	if isTelemetryEgress(req.Method, req.URL) {
-		h.Logger.Debug("egress bypass: not recording telemetry export (/v1/traces, /ingest)", zap.Any("metadata", utils.GetReqMeta(req)))
-		return nil
+	// Telemetry / noisy-egress passthrough (config-driven via
+	// opts.PassThroughPorts/Hosts, with built-in defaults as "skip"):
+	//   - skip:      do not record (live telemetry, not a dependency).
+	//   - recordOne: keep ONE representative exchange per (method,host,port,path),
+	//                preferring the first 2xx, tagged type:config so it becomes a
+	//                session-lifetime mock served body-agnostically on replay.
+	{
+		ptHost := req.Host
+		if ptHost == "" && req.URL != nil {
+			ptHost = req.URL.Host
+		}
+		if mode, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL); matched {
+			if mode == models.PassThroughSkip {
+				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
+				return nil
+			}
+			key := ptRecordKey(req.Method, ptHost, uint32(destPort), req.URL.Path)
+			allow := true
+			if h.ptRecorder != nil {
+				allow = h.ptRecorder.shouldRecord(key, respParsed.StatusCode)
+			}
+			if !allow {
+				h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+				return nil
+			}
+			meta["type"] = "config"
+			meta["passthrough"] = string(models.PassThroughRecordOne)
+		}
 	}
 
 	newMock := &models.Mock{
