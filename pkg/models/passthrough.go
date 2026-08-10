@@ -22,6 +22,12 @@ const (
 	// every matching call body-agnostically (no fuzzy match). Keeps a correctly
 	// shaped response for clients that parse it (e.g. Datadog /v0.7/config).
 	PassThroughRecordOne PassThroughMode = "recordOne"
+	// PassThroughOff: an explicit opt-out. The endpoint is matched (so it can
+	// override a built-in default for the same target) but is NOT treated as
+	// passthrough — it is recorded and replayed as a normal dependency. This is
+	// how a user turns off a built-in telemetry default when that endpoint is
+	// actually one of their own internal routes they need matched on replay.
+	PassThroughOff PassThroughMode = "off"
 )
 
 // DefaultPassThroughMode is applied to a rule whose Mode is empty and to the
@@ -98,7 +104,7 @@ func (r *PassThroughRule) UnmarshalJSON(b []byte) error {
 // DefaultPassThroughMode. Callers should treat the returned value as canonical.
 func (r PassThroughRule) NormalizeMode() PassThroughMode {
 	switch r.Mode {
-	case PassThroughSkip, PassThroughRecordOne:
+	case PassThroughSkip, PassThroughRecordOne, PassThroughOff:
 		return r.Mode
 	default:
 		return DefaultPassThroughMode
@@ -218,22 +224,55 @@ func matchHost(pattern, host string) bool {
 // target wins (see MergePassThroughDefaults). Users disable a default by
 // declaring a recordOne rule for the same target.
 func BuiltinTelemetryDefaults() []PassThroughRule {
-	return []PassThroughRule{
+	defs := TelemetryDefaults()
+	rules := make([]PassThroughRule, len(defs))
+	for i, d := range defs {
+		rules[i] = d.Rule
+	}
+	return rules
+}
+
+// TelemetryDefaultsVersion identifies the built-in telemetry defaults SET. Bump
+// it whenever TelemetryDefaults() changes (a rule added/removed/retargeted or a
+// mode/queryKeys change). It is served to clients (the UI) alongside the rules so
+// a UI can prove it is showing the set the running agent actually applies, rather
+// than a drifting hardcoded copy. It is NOT the mock-format version (see
+// models.GetVersion) and does not affect on-disk compatibility.
+const TelemetryDefaultsVersion = 1
+
+// TelemetryDefault is a built-in passthrough rule plus display metadata, so a UI
+// can present each default with a human-readable provider/label and let the user
+// turn it off (mode:"off") or override its mode. It is the single source of truth
+// for the defaults; BuiltinTelemetryDefaults() is derived from it.
+type TelemetryDefault struct {
+	Provider string          `json:"provider"`
+	Label    string          `json:"label"`
+	Rule     PassThroughRule `json:"rule"`
+}
+
+// TelemetryDefaults returns the built-in "skip"/"recordOne" rules for well-known
+// telemetry / observability endpoints, with display metadata. Matched
+// deterministically by request path-prefix (HTTP OTLP + Pyroscope + OTLP/gRPC
+// method) or host (SaaS backends). Merged UNDER user rules so a user rule for the
+// same target wins (see MergePassThroughDefaults); a user rule with mode:"off"
+// disables the default entirely (records the endpoint normally).
+func TelemetryDefaults() []TelemetryDefault {
+	return []TelemetryDefault{
 		// OTLP/HTTP exporters (protobuf/json), path-prefixed.
-		{Path: "/v1/traces", Mode: PassThroughSkip},
-		{Path: "/v1/metrics", Mode: PassThroughSkip},
-		{Path: "/v1/logs", Mode: PassThroughSkip},
+		{"OpenTelemetry", "OTLP/HTTP traces", PassThroughRule{Path: "/v1/traces", Mode: PassThroughSkip}},
+		{"OpenTelemetry", "OTLP/HTTP metrics", PassThroughRule{Path: "/v1/metrics", Mode: PassThroughSkip}},
+		{"OpenTelemetry", "OTLP/HTTP logs", PassThroughRule{Path: "/v1/logs", Mode: PassThroughSkip}},
 		// Pyroscope continuous-profiler ingest.
-		{Path: "/ingest", Mode: PassThroughSkip},
+		{"Pyroscope", "profiler ingest", PassThroughRule{Path: "/ingest", Mode: PassThroughSkip}},
 		// Datadog trace-agent intake.
-		{Path: "/v0.4/traces", Mode: PassThroughSkip},
-		{Path: "/v0.7/traces", Mode: PassThroughSkip},
+		{"Datadog", "trace agent v0.4", PassThroughRule{Path: "/v0.4/traces", Mode: PassThroughSkip}},
+		{"Datadog", "trace agent v0.7", PassThroughRule{Path: "/v0.7/traces", Mode: PassThroughSkip}},
 		// Prometheus remote_write: stateless POST, empty 2xx/204 body → skip is
 		// safe (the sender ignores the body). Pull-scrape /metrics is ingress and
 		// intentionally not here.
-		{Path: "/api/v1/write", Mode: PassThroughSkip},
+		{"Prometheus", "remote_write", PassThroughRule{Path: "/api/v1/write", Mode: PassThroughSkip}},
 		// OTLP/gRPC exporters — the gRPC :path is the OTLP collector service.
-		{Path: "/opentelemetry.proto.collector.", Mode: PassThroughSkip},
+		{"OpenTelemetry", "OTLP/gRPC", PassThroughRule{Path: "/opentelemetry.proto.collector.", Mode: PassThroughSkip}},
 		// New Relic RPM: every RPC is POSTed to ONE path, distinguished only by
 		// ?method= (preconnect, connect, metric_data, …). It needs recordOne (not
 		// skip) because the agent parses the response — connect must return an
@@ -241,12 +280,12 @@ func BuiltinTelemetryDefaults() []PassThroughRule {
 		// mock while ignoring the per-session run_id, so recordOne still collapses
 		// repeat calls of the same method. This is the one built-in that is not
 		// skip, because a synthetic empty 200 would fail the agent's handshake.
-		{Host: "*.newrelic.com", Path: "/agent_listener/invoke_raw_method",
-			Mode: PassThroughRecordOne, QueryKeys: []string{"method"}},
+		{"New Relic", "RPM collector", PassThroughRule{Host: "*.newrelic.com", Path: "/agent_listener/invoke_raw_method",
+			Mode: PassThroughRecordOne, QueryKeys: []string{"method"}}},
 		// Well-known SaaS telemetry hosts (glob).
-		{Host: "*.datadoghq.com", Mode: PassThroughSkip},
-		{Host: "*.sentry.io", Mode: PassThroughSkip},
-		{Host: "dc.services.visualstudio.com", Mode: PassThroughSkip},
+		{"Datadog", "SaaS intake", PassThroughRule{Host: "*.datadoghq.com", Mode: PassThroughSkip}},
+		{"Sentry", "SaaS intake", PassThroughRule{Host: "*.sentry.io", Mode: PassThroughSkip}},
+		{"Azure App Insights", "SaaS intake", PassThroughRule{Host: "dc.services.visualstudio.com", Mode: PassThroughSkip}},
 	}
 }
 

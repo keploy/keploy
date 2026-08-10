@@ -26,6 +26,13 @@ func passThroughEgressDecision(opts models.OutgoingOptions, host string, port ui
 	// User rules + built-in telemetry defaults, matched by specificity.
 	rules := models.MergePassThroughDefaults(opts.PassThroughPorts, opts.PassThroughHosts)
 	if rule, ok := models.MatchPassThrough(rules, host, port, reqPath); ok {
+		// mode:"off" is an explicit opt-out: the rule matched (so it overrode any
+		// built-in default for this target), but the endpoint must NOT be passed
+		// through — record/replay it as a normal dependency. Return early so the
+		// legacy telemetry bypass below does not re-skip it.
+		if rule.Mode == models.PassThroughOff {
+			return models.PassThroughRule{}, false
+		}
 		return rule, true
 	}
 	// Belt-and-suspenders: the legacy exact-path+POST bypass (subset of defaults).

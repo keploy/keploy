@@ -39,6 +39,23 @@ func TestPassThroughEgressDecision(t *testing.T) {
 	}
 }
 
+// A user mode:"off" rule overrides a built-in skip and makes the endpoint NOT a
+// passthrough target, so it is recorded/replayed as a normal dependency.
+func TestPassThroughEgressDecision_OffOverridesBuiltin(t *testing.T) {
+	u := &url.URL{Path: "/v1/traces", Host: "otel-collector"}
+	// Baseline: with no user rule the OTLP path is a built-in skip.
+	if _, ok := passThroughEgressDecision(models.OutgoingOptions{}, "otel-collector", 4318, "POST", u); !ok {
+		t.Fatal("baseline: /v1/traces should be a built-in passthrough")
+	}
+	// With an off rule for the same path, the decision must report NOT-passthrough.
+	opts := models.OutgoingOptions{
+		PassThroughHosts: []models.PassThroughRule{{Path: "/v1/traces", Mode: models.PassThroughOff}},
+	}
+	if rule, ok := passThroughEgressDecision(opts, "otel-collector", 4318, "POST", u); ok {
+		t.Fatalf("off rule should make it not-passthrough, got ok=true mode=%q", rule.Mode)
+	}
+}
+
 func TestPtRecorder_FirstSuccess(t *testing.T) {
 	r := &ptRecorder{}
 	key := ptRecordKey("POST", "dd-agent", 8126, "/v0.4/traces", nil, nil)
