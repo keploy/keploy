@@ -1840,6 +1840,21 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return nil
 	}
 
+	// A nil result with a nil error is not permitted by the DestInfo contract,
+	// but this seam now officially accepts third-party implementations
+	// (agent.HooksFactory) and (nil, nil) is a very natural Go shape for a
+	// lookup that treats "absent" as not-an-error. Treat it exactly like a
+	// lookup failure rather than dereferencing it and panicking the
+	// per-connection goroutine.
+	if destInfo == nil {
+		p.logger.Debug("Untracked connection (destination lookup returned no address), closing gracefully",
+			zap.Int("Source port", sourcePort))
+		if srcConn != nil {
+			srcConn.Close()
+		}
+		return nil
+	}
+
 	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
 
 	// releases the occupied source port when done fetching the destination info

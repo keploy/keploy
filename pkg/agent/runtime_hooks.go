@@ -1,6 +1,11 @@
 package agent
 
-import "go.keploy.io/server/v3/pkg/agent/hooks/structs"
+import (
+	"go.uber.org/zap"
+
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
+)
 
 // Pinnable is implemented by eBPF maps that support pinning to bpffs.
 type Pinnable interface {
@@ -20,19 +25,36 @@ var EbpfProxyPortOverride uint32
 // servers and session management still operate normally.
 var SkipProxyListener bool
 
-// HooksOverride, when non-nil, replaces the kernel-backed Hooks implementation
+// HooksFactory, when non-nil, replaces the kernel-backed Hooks implementation
 // that the agent composition root would otherwise construct. Downstream builds
 // set it to run the datapath entirely in userspace — e.g. the JVM-fed sidecar
-// path, where an in-process javaagent reports connection destinations instead
-// of cgroup/connect4 writing redirectProxyMap — on clusters that do not permit
+// path, where an in-process javaagent reports connection destinations instead of
+// cgroup/connect4 writing redirectProxyMap — on clusters that do not permit
 // eBPF.
 //
-// It MUST satisfy the whole Hooks contract: DestInfo.Get/Delete, Load and
-// WatchBindEvents. A partial implementation degrades silently rather than
-// failing: a Get that never resolves makes the proxy close every outgoing
-// connection (see proxy.handleConnection), and a WatchBindEvents that never
-// fires records zero test cases while still producing mocks.
-var HooksOverride Hooks
+// It is a FACTORY rather than a pre-built value on purpose. The composition root
+// owns the process logger and the fully-parsed config, so a factory receives
+// both instead of forcing downstream to re-plumb them through its own globals.
+// It also makes "no override" unambiguous: a nil func is nil, whereas a nil
+// implementation pointer stored in an interface is non-nil and would install a
+// Hooks that panics on first use.
+//
+// The returned value MUST satisfy the whole Hooks contract:
+//
+//   - Get: returning (nil, nil) is NOT permitted. Return a non-nil error for an
+//     unknown source port; the proxy closes such connections gracefully, but it
+//     dereferences the result whenever err is nil.
+//   - Delete: MUST be idempotent and return nil for a port that was never
+//     registered. The proxy treats a Delete error as fatal to the connection,
+//     unlike Get, so "not found" here tears down live traffic.
+//   - Load: HookCfg.Port is only populated when EbpfProxyPortOverride is set;
+//     read the proxy port from the config passed to the factory instead.
+//   - WatchBindEvents: the returned channel MUST be closed when ctx is done, or
+//     the ingress manager never runs StopAll and the app's port stays bound.
+//     An error return is permanent — the consumer starts once and never retries.
+//
+// The value is read ONCE, at composition. Setting it afterwards has no effect.
+var HooksFactory func(logger *zap.Logger, cfg *config.Config) Hooks
 
 // AgentInfoCustomizer is called after the base AgentInfo has been
 // populated but before it is written to the eBPF map. Downstream
