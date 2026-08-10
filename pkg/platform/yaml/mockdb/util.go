@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -225,6 +226,25 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		return nil, false, nil
 	}
 
+	// encoding/json has no lossless representation for a Go string holding
+	// invalid UTF-8: it substitutes U+FFFD for every bad byte and returns NO
+	// error. A gzip-encoded response body is perfectly valid HTTP and invalid
+	// UTF-8, so on this path the recorder would write a corrupted body, report
+	// success, and only fail at replay as an unexplained mismatch.
+	//
+	// Refuse instead. Tagged as a payload fault so the recorder skips and counts
+	// this one mock and keeps recording (see models.ErrMockEncode) — the same
+	// treatment the YAML path gives a body it cannot represent, except YAML CAN
+	// represent it (as !!binary) and therefore does.
+	if field, ok := firstNonUTF8Body(mock); !ok {
+		err := fmt.Errorf("%w: mockdb: %s is not valid UTF-8 and the json format cannot store it losslessly; record with storageFormat yaml to keep binary bodies", models.ErrMockEncode, field)
+		utils.LogError(logger, err, "refusing to write a binary body as JSON",
+			zap.String("mock_name", mock.Name),
+			zap.String("mock_kind", string(mock.Kind)),
+			zap.String("next_step", "set storageFormat to yaml; the yaml encoder stores binary bodies as !!binary without loss"))
+		return nil, true, err
+	}
+
 	specBytes, err := json.Marshal(spec)
 	if err != nil {
 		utils.LogError(logger, err, "failed to marshal mock spec to JSON")
@@ -233,6 +253,38 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 	doc.Spec = specBytes
 	return doc, true, nil
 }
+
+// firstNonUTF8Body reports whether every string field that can carry raw
+// response/request bytes is valid UTF-8, naming the first that is not.
+//
+// Covers every `string` field this encoder projects that can hold arbitrary
+// payload bytes: the HTTP and HTTP/2 request/response bodies. The remaining
+// projected fields are headers, URLs and timestamps, and []byte fields are not
+// at risk because encoding/json base64s them (Generic payloads take that path,
+// and gRPC DecodedData is protoscope text).
+func firstNonUTF8Body(mock *models.Mock) (string, bool) {
+	if mock == nil {
+		return "", true
+	}
+	if r := mock.Spec.HTTPReq; r != nil && !utf8.ValidString(r.Body) {
+		return "the request body", false
+	}
+	if r := mock.Spec.HTTPResp; r != nil && !utf8.ValidString(r.Body) {
+		return "the response body", false
+	}
+	if r := mock.Spec.HTTP2Req; r != nil && !utf8.ValidString(r.Body) {
+		return "the http2 request body", false
+	}
+	if r := mock.Spec.HTTP2Resp; r != nil && !utf8.ValidString(r.Body) {
+		return "the http2 response body", false
+	}
+	return "", true
+}
+
+// errMapperEncode marks a failure that came from a registered out-of-tree
+// MockYAMLMapper rather than from keploy's own encoders. See its use in
+// EncodeMock: mapper failures must stay fatal because they can be I/O.
+var errMapperEncode = errors.New("mock encode mapper failure")
 
 func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 
@@ -254,7 +306,14 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 	}
 	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
-		wrapped := fmt.Errorf("mockdb: encode mapper for kind %q: %w", mock.Kind, err)
+		// Marked so callers do NOT classify this as a payload fault. A registered
+		// MockYAMLMapper is out-of-tree code that may touch the filesystem or the
+		// network (offloading large bodies to an assets dir, for example), so its
+		// failure can be environmental — ENOSPC, EACCES. Treating that as
+		// "skip this one mock and keep going" would silently drop EVERY mock and
+		// finish with an empty test set. Only keploy's own encoders below are
+		// pure enough to be safely skippable.
+		wrapped := fmt.Errorf("%w: mockdb: encode mapper for kind %q: %w", errMapperEncode, mock.Kind, err)
 		utils.LogError(logger, wrapped, "registered MockYAMLMapper.Encode returned an error; check the mapper for this kind", zap.String("kind", string(mock.Kind)))
 		return nil, wrapped
 	}

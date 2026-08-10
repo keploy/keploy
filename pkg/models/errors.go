@@ -137,3 +137,15 @@ func NewMockMismatchError(err error, report *MockMismatchReport) error {
 	}
 	return &mockMismatchError{err: err, report: report}
 }
+
+// ErrMockEncode marks a mock-persist failure caused by THIS mock's own payload
+// — an unsupported kind, a malformed spec, a value the encoder cannot represent
+// — rather than by the storage environment.
+//
+// The distinction decides whether a recording survives. The recorder treats a
+// failed mock insert as fatal and tears the whole session down, which is right
+// for disk-full or storage-gone (every subsequent mock fails too) and badly
+// wrong for one unencodable payload. A single gzip response body ended a
+// 46-hour production recording that way. Errors wrapped with this sentinel are
+// skipped and counted; everything else stays fatal.
+var ErrMockEncode = errors.New("mock encode failure")
