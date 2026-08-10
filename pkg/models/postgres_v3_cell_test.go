@@ -2,6 +2,7 @@ package models
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/gob"
 	"encoding/json"
 	"math/big"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	yaml "gopkg.in/yaml.v3"
@@ -640,9 +642,14 @@ func TestPostgresV3Cell_BinaryWithFoldedWhitespace_Decodes(t *testing.T) {
 	// yaml-authored payload with a real line wrap inside the scalar —
 	// identical in effect to what yaml.v3 emits for long binary cells.
 	// The original bytes are the 12-byte sequence below; base64 is
-	// "AAECAwQFBgcICQoL", wrapped at position 6 across two lines. With
-	// the `|` indicator the newline becomes whitespace in the scalar.
-	body := "!!binary |\n  AAECAwQF\n  BgcICQoL\n"
+	// "AAECAwQFBgcICQoL", wrapped at position 8 across two lines.
+	//
+	// The `>` (folded) indicator is deliberate: it joins the two lines
+	// with a SPACE, which base64.StdEncoding rejects. A `|` literal
+	// block would join with \n, which the decoder happens to skip on
+	// its own — so that spelling would pass even with the strip removed
+	// and would pin nothing.
+	body := "!!binary >\n  AAECAwQF\n  BgcICQoL\n"
 
 	var c PostgresV3Cell
 	if err := yaml.Unmarshal([]byte(body), &c); err != nil {
@@ -655,5 +662,121 @@ func TestPostgresV3Cell_BinaryWithFoldedWhitespace_Decodes(t *testing.T) {
 	want := []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B}
 	if !bytes.Equal(got, want) {
 		t.Errorf("folded !!binary decode: got %x, want %x", got, want)
+	}
+}
+
+// TestPostgresV3Cell_NonUTF8HstoreRoundTrips covers the sibling of the HTTP
+// body defect. scalarStrNode used to stamp an explicit `!!str` on hstore values
+// and TSVector lexemes, which makes yaml.v3 hard-fail on invalid UTF-8 — the
+// same "cannot marshal invalid UTF-8 data as !!str" that surfaces as a failed
+// mock insert. Keys had the mirror-image bug: they encoded fine (yaml.v3
+// auto-binarizes an untagged scalar) but decoded back as the BASE64 TEXT,
+// silently replacing the key.
+//
+// The mapping marshalPgHstoreYAML emits is untagged, so a bare
+// yaml.Unmarshal into a PostgresV3Cell yields a generic map — hstore is
+// reconstructed by decodePgHstoreMapping, which is what this drives.
+func TestPostgresV3Cell_NonUTF8HstoreRoundTrips(t *testing.T) {
+	binKey := string([]byte{0xff, 0xfe, 0x48, 0x8b})
+	binVal := string([]byte{0x1f, 0x8b, 0x08, 0x00})
+	if utf8.ValidString(binKey) || utf8.ValidString(binVal) {
+		t.Fatal("fixtures must be invalid UTF-8")
+	}
+	v := binVal
+	in := PostgresV3Cell{Value: pgtype.Hstore{binKey: &v}}
+
+	out, err := yaml.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshalling a non-UTF-8 hstore failed: %v\n"+
+			"  this aborts the mock insert exactly like the HTTP body case did", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
+		t.Fatalf("unexpected document shape: kind=%d content=%d", doc.Kind, len(doc.Content))
+	}
+	h, err := decodePgHstoreMapping(doc.Content[0])
+	if err != nil {
+		t.Fatalf("decodePgHstoreMapping: %v", err)
+	}
+	gv, present := h[binKey]
+	if !present {
+		keys := make([]string, 0, len(h))
+		for k := range h {
+			keys = append(keys, k)
+		}
+		t.Fatalf("the binary hstore KEY did not round-trip: want % x, got keys %q", binKey, keys)
+	}
+	if gv == nil || *gv != binVal {
+		t.Fatalf("hstore VALUE did not round-trip: want % x", binVal)
+	}
+}
+
+// TestDecodePgHstoreMapping_FoldedBinaryKey pins the whitespace strip inside
+// decodeYAMLScalarKey. yaml.v3 emits binary on one long line, so the sibling
+// round-trip test can never produce a folded key on its own — but a mocks.yaml
+// may be written by a libyaml-based tool (PyYAML, ruby-psych, which wrap at 80
+// columns) or hand-edited. The `>` indicator joins lines with a SPACE, which
+// base64.StdEncoding rejects outright; without the strip the decode fails and
+// the key silently becomes the raw base64 text, replacing the real hstore key.
+func TestDecodePgHstoreMapping_FoldedBinaryKey(t *testing.T) {
+	const doc = `? !!binary >-
+    //4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv/
+    /gCL
+: some-value
+`
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(doc), &node); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	mapping := node.Content[0]
+	if got := mapping.Content[0].Value; !bytes.Contains([]byte(got), []byte(" ")) {
+		t.Fatalf("fixture must actually fold to a space, otherwise this asserts nothing: %q", got)
+	}
+
+	h, err := decodePgHstoreMapping(mapping)
+	if err != nil {
+		t.Fatalf("decodePgHstoreMapping: %v", err)
+	}
+	wantKey := string(bytes.Repeat([]byte{0xff, 0xfe, 0x00, 0x8b}, 15))
+	v, ok := h[wantKey]
+	if !ok {
+		keys := make([]string, 0, len(h))
+		for k := range h {
+			keys = append(keys, k)
+		}
+		t.Fatalf("a folded !!binary hstore key was not decoded: want % x, got keys %q", wantKey, keys)
+	}
+	if v == nil || *v != "some-value" {
+		t.Fatalf("value for the folded key is wrong: %v", v)
+	}
+}
+
+// TestScalarKeyNode_TagsBinaryExplicitly pins what scalarKeyNode actually does.
+// Round-trip tests cannot: yaml.v3 auto-binarizes an untagged non-UTF-8 scalar
+// on emit, so the decoder sees !!binary whether or not this function tags it,
+// and deleting the arm leaves every round-trip green. The value of the arm is
+// that the tag is stated here rather than inherited from an emitter heuristic,
+// so that is what this asserts — at the node, before the emitter runs.
+func TestScalarKeyNode_TagsBinaryExplicitly(t *testing.T) {
+	binKey := string([]byte{0xff, 0xfe, 0x48, 0x8b})
+	if utf8.ValidString(binKey) {
+		t.Fatal("fixture must be invalid UTF-8")
+	}
+	n := scalarKeyNode(binKey)
+	if n.Tag != "!!binary" {
+		t.Errorf("non-UTF-8 key node tag = %q, want !!binary; the encoding is left to yaml.v3's "+
+			"auto-promotion instead of being stated by this package", n.Tag)
+	}
+	if n.Value != base64.StdEncoding.EncodeToString([]byte(binKey)) {
+		t.Errorf("non-UTF-8 key node value is not the base64 payload: %q", n.Value)
+	}
+
+	// Valid UTF-8 must stay a plain, readable key — base64-ing everything would
+	// "fix" the encoding and ruin the mock files.
+	if p := scalarKeyNode("plain"); p.Tag != "" || p.Value != "plain" {
+		t.Errorf("a valid UTF-8 key was not left plain: tag=%q value=%q", p.Tag, p.Value)
 	}
 }
