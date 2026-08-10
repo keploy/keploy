@@ -457,6 +457,14 @@ func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
 // input bytes (modulo timestamps, which are allowed to differ because
 // legacy uses time.Now() and V2 uses chunk timestamps).
 func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
+	// Prefer the resolved destination port. The V2 recorder derives destPort from
+	// the DestStream FakeConn, which in proxyless (observe-only) capture has no
+	// real remote port (0) — breaking port-keyed telemetry-passthrough matching.
+	// routeEgressToParser sets DstCfg.Port authoritatively; equal to the FakeConn
+	// port on the proxy path, so this is a no-op there.
+	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
+		destPort = opts.DstCfg.Port
+	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
