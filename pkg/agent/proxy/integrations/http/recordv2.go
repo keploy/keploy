@@ -534,7 +534,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
 				return nil, nil
 			}
-			key := ptRecordKey(req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
+			key := ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
 			allow := true
 			if h.ptRecorder != nil {
 				allow = h.ptRecorder.shouldRecord(key, respParsed.StatusCode)

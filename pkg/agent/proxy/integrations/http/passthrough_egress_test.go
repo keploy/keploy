@@ -58,7 +58,7 @@ func TestPassThroughEgressDecision_OffOverridesBuiltin(t *testing.T) {
 
 func TestPtRecorder_FirstSuccess(t *testing.T) {
 	r := &ptRecorder{}
-	key := ptRecordKey("POST", "dd-agent", 8126, "/v0.4/traces", nil, nil)
+	key := ptRecordKey("", "POST", "dd-agent", 8126, "/v0.4/traces", nil, nil)
 
 	// A warmup 503 records once (nothing better yet).
 	if !r.shouldRecord(key, 503) {
@@ -77,7 +77,7 @@ func TestPtRecorder_FirstSuccess(t *testing.T) {
 		t.Fatal("subsequent 2xx should be dropped")
 	}
 	// A different key is independent.
-	if !r.shouldRecord(ptRecordKey("POST", "dd-agent", 8126, "/v0.7/config", nil, nil), 200) {
+	if !r.shouldRecord(ptRecordKey("", "POST", "dd-agent", 8126, "/v0.7/config", nil, nil), 200) {
 		t.Fatal("distinct endpoint key should record")
 	}
 }
@@ -90,11 +90,11 @@ func TestPtRecordKey_QueryMux(t *testing.T) {
 	p := "/agent_listener/invoke_raw_method"
 	q := func(vals url.Values) url.Values { return vals }
 
-	connect := ptRecordKey("POST", "collector.newrelic.com", 443, p, qk,
+	connect := ptRecordKey("", "POST", "collector.newrelic.com", 443, p, qk,
 		q(url.Values{"method": {"connect"}, "run_id": {"111"}}))
-	metric := ptRecordKey("POST", "collector.newrelic.com", 443, p, qk,
+	metric := ptRecordKey("", "POST", "collector.newrelic.com", 443, p, qk,
 		q(url.Values{"method": {"metric_data"}, "run_id": {"111"}}))
-	metric2 := ptRecordKey("POST", "collector.newrelic.com", 443, p, qk,
+	metric2 := ptRecordKey("", "POST", "collector.newrelic.com", 443, p, qk,
 		q(url.Values{"method": {"metric_data"}, "run_id": {"999"}})) // different run_id
 
 	if connect == metric {
@@ -111,6 +111,24 @@ func TestPtRecordKey_QueryMux(t *testing.T) {
 	}
 	if r.shouldRecord(metric2, 200) {
 		t.Fatal("a second metric_data (varying run_id) must be dropped")
+	}
+}
+
+// A non-empty scope isolates recordOne dedup per app/session: the same endpoint
+// under two different scopes records once EACH (so a shared DaemonSet recorder
+// doesn't let app A suppress app B). Empty scope reproduces the sidecar key.
+func TestPtRecordKey_Scope(t *testing.T) {
+	a := ptRecordKey("ns/dep/tsA", "POST", "collector.newrelic.com", 443, "/x", nil, nil)
+	b := ptRecordKey("ns/dep/tsB", "POST", "collector.newrelic.com", 443, "/x", nil, nil)
+	if a == b {
+		t.Fatal("different scopes must produce different keys")
+	}
+	r := &ptRecorder{}
+	if !r.shouldRecord(a, 200) || !r.shouldRecord(b, 200) {
+		t.Fatal("same endpoint under different scopes should each record once")
+	}
+	if r.shouldRecord(a, 200) {
+		t.Fatal("a repeat within the same scope must still be dropped")
 	}
 }
 
@@ -139,7 +157,7 @@ func TestMockQueryMatches(t *testing.T) {
 
 func TestPtRecorder_2xxFirstDropsRest(t *testing.T) {
 	r := &ptRecorder{}
-	key := ptRecordKey("GET", "dd-agent", 8126, "/info", nil, nil)
+	key := ptRecordKey("", "GET", "dd-agent", 8126, "/info", nil, nil)
 	if !r.shouldRecord(key, 200) {
 		t.Fatal("first 2xx should record")
 	}

@@ -1485,6 +1485,12 @@ func pickClosestCandidate(request *http.Request, schemaSurvivors, pool []*models
 // stores big mocks that at replay schema-match the app's re-emitted telemetry
 // and fall into the fuzzy-matcher, which shingles the ~150–200 KB bodies and
 // OOMs the agent. Bypassing them keeps the pool clean and the matcher out of it.
+//
+// NOTE: both of these paths are now a strict subset of BuiltinTelemetryDefaults
+// (models.TelemetryDefaults), so passThroughEgressDecision already resolves them
+// to "skip" before this legacy check runs. isTelemetryEgress is kept only as a
+// belt-and-suspenders fallback for callers that bypass the rule set; it can be
+// removed once every path is confirmed to route through MergePassThroughDefaults.
 var telemetryEgressPaths = map[string]struct{}{
 	"/v1/traces": {}, // OpenTelemetry OTLP/HTTP trace export
 	"/ingest":    {}, // Pyroscope continuous-profiler upload

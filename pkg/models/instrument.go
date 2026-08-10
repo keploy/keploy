@@ -115,6 +115,14 @@ type OutgoingOptions struct {
 	// replay). Empty ⇒ built-in telemetry defaults only (see MergePassThroughDefaults).
 	PassThroughPorts []PassThroughRule
 	PassThroughHosts []PassThroughRule
+	// PassThroughScope isolates recordOne de-duplication to one app/session. The
+	// HTTP integration (and its ptRecorder) is a single instance shared across
+	// apps in a long-lived proxyless/DaemonSet agent, so without a scope the first
+	// app's recordOne capture would suppress a second app's identical endpoint.
+	// Callers that share a recorder across tenants (the enterprise DaemonSet gate)
+	// set this to a per-app/per-session key; the classic sidecar leaves it empty
+	// (process-per-session, so the plain key already isolates).
+	PassThroughScope string
 	// DisableMysqlAutoDetect turns off automatic MySQL port detection,
 	// restoring the strict "MysqlPorts or nothing" behaviour. With
 	// detection on (the default), a MySQL server on any port is

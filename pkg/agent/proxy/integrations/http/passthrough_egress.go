@@ -106,8 +106,10 @@ func isSuccessStatus(code int) bool { return code >= 200 && code < 300 }
 // query params that ARE significant to identity — folded in so query-multiplexed
 // collectors (New Relic ?method=) keep one mock per operation instead of
 // collapsing to a single mock. Empty queryKeys reproduces the path-only key.
-func ptRecordKey(method, host string, port uint32, reqPath string, queryKeys []string, query url.Values) string {
-	key := method + "\x00" + host + "\x00" + reqPath + "\x00" + itoaU32(port)
+func ptRecordKey(scope, method, host string, port uint32, reqPath string, queryKeys []string, query url.Values) string {
+	// scope isolates the dedup to one app/session when the recorder is shared
+	// across tenants (DaemonSet); empty scope reproduces the classic sidecar key.
+	key := scope + "\x00" + method + "\x00" + host + "\x00" + reqPath + "\x00" + itoaU32(port)
 	for _, name := range queryKeys {
 		key += "\x00" + name + "=" + query.Get(name)
 	}
