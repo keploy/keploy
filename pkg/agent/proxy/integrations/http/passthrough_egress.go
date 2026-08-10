@@ -18,21 +18,21 @@ import (
 //
 // The full defaults-registry merge / precedence hardening lives in T10; this is
 // the minimal config-first + legacy-default behavior.
-func passThroughEgressDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL) (models.PassThroughMode, bool) {
+func passThroughEgressDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL) (models.PassThroughRule, bool) {
 	if u == nil {
-		return "", false
+		return models.PassThroughRule{}, false
 	}
 	reqPath := u.Path
 	// User rules + built-in telemetry defaults, matched by specificity.
 	rules := models.MergePassThroughDefaults(opts.PassThroughPorts, opts.PassThroughHosts)
 	if rule, ok := models.MatchPassThrough(rules, host, port, reqPath); ok {
-		return rule.Mode, true
+		return rule, true
 	}
 	// Belt-and-suspenders: the legacy exact-path+POST bypass (subset of defaults).
 	if isTelemetryEgress(method, u) {
-		return models.PassThroughSkip, true
+		return models.PassThroughRule{Mode: models.PassThroughSkip}, true
 	}
-	return "", false
+	return models.PassThroughRule{}, false
 }
 
 // serveOnePassThroughMock returns the raw response bytes of ONE recorded HTTP
@@ -43,7 +43,7 @@ func passThroughEgressDecision(opts models.OutgoingOptions, host string, port ui
 // to a synthetic 200). Candidates are drawn from both the per-test and session
 // pools; a recordOne mock is tagged type:config (LifetimeSession) at record
 // time so it lives in the session pool and is never window-filtered.
-func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req) []byte {
+func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req, queryKeys []string) []byte {
 	if mockDb == nil || input == nil || input.url == nil {
 		return nil
 	}
@@ -63,6 +63,14 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 			continue
 		}
 		if mockURLPath(m.Spec.HTTPReq.URL) != input.url.Path {
+			continue
+		}
+		// Significant-query gate: for query-multiplexed collectors (queryKeys
+		// non-empty, e.g. New Relic's ?method=), the recorded mock must agree
+		// with the request on every significant param — otherwise a connect
+		// request could be served a metric_data mock. Empty queryKeys keeps the
+		// default body/query-agnostic behavior.
+		if !mockQueryMatches(m.Spec.HTTPReq, input.url, queryKeys) {
 			continue
 		}
 		// Prefer a 2xx response (a warmup error may also have been recorded
@@ -86,9 +94,44 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 func isSuccessStatus(code int) bool { return code >= 200 && code < 300 }
 
 // ptRecordKey identifies a recordOne endpoint for record-time de-duplication.
-// Body and query are excluded by design; host/port select the upstream.
-func ptRecordKey(method, host string, port uint32, reqPath string) string {
-	return method + "\x00" + host + "\x00" + reqPath + "\x00" + itoaU32(port)
+// The body and non-significant query params are excluded by design; host/port
+// select the upstream. queryKeys (from the matched rule, in order) names the
+// query params that ARE significant to identity — folded in so query-multiplexed
+// collectors (New Relic ?method=) keep one mock per operation instead of
+// collapsing to a single mock. Empty queryKeys reproduces the path-only key.
+func ptRecordKey(method, host string, port uint32, reqPath string, queryKeys []string, query url.Values) string {
+	key := method + "\x00" + host + "\x00" + reqPath + "\x00" + itoaU32(port)
+	for _, name := range queryKeys {
+		key += "\x00" + name + "=" + query.Get(name)
+	}
+	return key
+}
+
+// mockQueryMatches reports whether a recorded mock and the live request agree on
+// every significant query param. Empty queryKeys ⇒ true (query-agnostic default).
+func mockQueryMatches(mockReq *models.HTTPReq, reqURL *url.URL, queryKeys []string) bool {
+	if len(queryKeys) == 0 {
+		return true
+	}
+	reqQ := reqURL.Query()
+	for _, name := range queryKeys {
+		if mockQueryGet(mockReq, name) != reqQ.Get(name) {
+			return false
+		}
+	}
+	return true
+}
+
+// mockQueryGet reads a recorded request's query param, preferring the structured
+// URLParams map and falling back to parsing the stored full URL.
+func mockQueryGet(mockReq *models.HTTPReq, name string) string {
+	if v, ok := mockReq.URLParams[name]; ok {
+		return v
+	}
+	if u, err := url.Parse(mockReq.URL); err == nil {
+		return u.Query().Get(name)
+	}
+	return ""
 }
 
 func itoaU32(v uint32) string {
@@ -154,6 +197,6 @@ func (p *ptRecorder) shouldRecord(key string, statusCode int) bool {
 // passThroughEgressDecision: it decides whether an outgoing request being
 // recorded targets a telemetry/noisy endpoint and, if so, its mode. host is the
 // request Host (falling back to URL host); port is the resolved destination port.
-func passThroughRecordDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL) (models.PassThroughMode, bool) {
+func passThroughRecordDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL) (models.PassThroughRule, bool) {
 	return passThroughEgressDecision(opts, host, port, method, u)
 }

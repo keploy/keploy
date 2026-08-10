@@ -90,3 +90,31 @@ func TestMergePassThroughDefaults(t *testing.T) {
 		t.Fatalf("built-in OTLP default should apply: ok=%v mode=%q", ok, got.Mode)
 	}
 }
+
+// The New Relic built-in must work with ZERO user config: matched by host+path,
+// mode recordOne, carrying QueryKeys:[method] so the record/replay layer keys on
+// ?method=. Also verifies Prometheus remote_write skips by default.
+func TestBuiltinDefaults_NewRelicAndPrometheus(t *testing.T) {
+	merged := MergePassThroughDefaults(nil, nil)
+
+	nr, ok := MatchPassThrough(merged, "collector.newrelic.com", 443, "/agent_listener/invoke_raw_method")
+	if !ok {
+		t.Fatal("New Relic collector should match a built-in default with no user config")
+	}
+	if nr.Mode != PassThroughRecordOne {
+		t.Fatalf("New Relic default mode = %q, want recordOne", nr.Mode)
+	}
+	if len(nr.QueryKeys) != 1 || nr.QueryKeys[0] != "method" {
+		t.Fatalf("New Relic default QueryKeys = %v, want [method]", nr.QueryKeys)
+	}
+
+	// A user rule for the same host still overrides the built-in (skip wins).
+	over := MergePassThroughDefaults(nil, []PassThroughRule{{Host: "*.newrelic.com", Mode: PassThroughSkip}})
+	if got, ok := MatchPassThrough(over, "collector.newrelic.com", 443, "/agent_listener/invoke_raw_method"); !ok || got.Mode != PassThroughSkip {
+		t.Fatalf("user New Relic rule should override built-in: ok=%v mode=%q", ok, got.Mode)
+	}
+
+	if got, ok := MatchPassThrough(merged, "", 0, "/api/v1/write"); !ok || got.Mode != PassThroughSkip {
+		t.Fatalf("Prometheus remote_write built-in should skip: ok=%v mode=%q", ok, got.Mode)
+	}
+}

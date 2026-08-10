@@ -274,12 +274,12 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		if ptHost == "" && req.URL != nil {
 			ptHost = req.URL.Host
 		}
-		if mode, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL); matched {
-			if mode == models.PassThroughSkip {
+		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL); matched {
+			if rule.Mode == models.PassThroughSkip {
 				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
 				return nil
 			}
-			key := ptRecordKey(req.Method, ptHost, uint32(destPort), req.URL.Path)
+			key := ptRecordKey(req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
 			allow := true
 			if h.ptRecorder != nil {
 				allow = h.ptRecorder.shouldRecord(key, respParsed.StatusCode)

@@ -235,11 +235,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if dstCfg != nil {
 				ptPort = uint32(dstCfg.Port)
 			}
-			if mode, matched := passThroughEgressDecision(opts, ptHost, ptPort, input.method, input.url); matched {
+			if rule, matched := passThroughEgressDecision(opts, ptHost, ptPort, input.method, input.url); matched {
+				mode := rule.Mode
 				out := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 				served := "synthetic-200"
 				if mode == models.PassThroughRecordOne {
-					if recorded := h.serveOnePassThroughMock(mockDb, input); recorded != nil {
+					if recorded := h.serveOnePassThroughMock(mockDb, input, rule.QueryKeys); recorded != nil {
 						out = recorded
 						served = "recorded-one"
 					}

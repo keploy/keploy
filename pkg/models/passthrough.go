@@ -42,6 +42,17 @@ type PassThroughRule struct {
 	Host string          `json:"host,omitempty" yaml:"host,omitempty" mapstructure:"host"`
 	Path string          `json:"path,omitempty" yaml:"path,omitempty" mapstructure:"path"`
 	Mode PassThroughMode `json:"mode,omitempty" yaml:"mode,omitempty" mapstructure:"mode"`
+	// QueryKeys names the query parameters that are significant to endpoint
+	// identity under recordOne. Params listed here are folded into the record-time
+	// dedup key and required to match at replay; every other query param (e.g. a
+	// per-session run_id/token) is ignored, so recordOne still collapses repeat
+	// calls. Empty (the default) means the query is ignored entirely.
+	//
+	// This exists mainly for BuiltinTelemetryDefaults: query-multiplexed
+	// collectors — New Relic POSTs every RPC to one path, keyed only by
+	// ?method= — would otherwise collapse all operations to a single mock.
+	// Users rarely need to set it by hand; the built-ins carry it for known APIs.
+	QueryKeys []string `json:"queryKeys,omitempty" yaml:"queryKeys,omitempty" mapstructure:"queryKeys"`
 }
 
 // UnmarshalJSON accepts either the object form ({port,host,path,mode}) or the
@@ -217,8 +228,21 @@ func BuiltinTelemetryDefaults() []PassThroughRule {
 		// Datadog trace-agent intake.
 		{Path: "/v0.4/traces", Mode: PassThroughSkip},
 		{Path: "/v0.7/traces", Mode: PassThroughSkip},
+		// Prometheus remote_write: stateless POST, empty 2xx/204 body → skip is
+		// safe (the sender ignores the body). Pull-scrape /metrics is ingress and
+		// intentionally not here.
+		{Path: "/api/v1/write", Mode: PassThroughSkip},
 		// OTLP/gRPC exporters — the gRPC :path is the OTLP collector service.
 		{Path: "/opentelemetry.proto.collector.", Mode: PassThroughSkip},
+		// New Relic RPM: every RPC is POSTed to ONE path, distinguished only by
+		// ?method= (preconnect, connect, metric_data, …). It needs recordOne (not
+		// skip) because the agent parses the response — connect must return an
+		// agent_run_id — and QueryKeys:[method] keeps each operation a distinct
+		// mock while ignoring the per-session run_id, so recordOne still collapses
+		// repeat calls of the same method. This is the one built-in that is not
+		// skip, because a synthetic empty 200 would fail the agent's handshake.
+		{Host: "*.newrelic.com", Path: "/agent_listener/invoke_raw_method",
+			Mode: PassThroughRecordOne, QueryKeys: []string{"method"}},
 		// Well-known SaaS telemetry hosts (glob).
 		{Host: "*.datadoghq.com", Mode: PassThroughSkip},
 		{Host: "*.sentry.io", Mode: PassThroughSkip},
