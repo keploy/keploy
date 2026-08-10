@@ -20,6 +20,20 @@ var EbpfProxyPortOverride uint32
 // servers and session management still operate normally.
 var SkipProxyListener bool
 
+// HooksOverride, when non-nil, replaces the kernel-backed Hooks implementation
+// that the agent composition root would otherwise construct. Downstream builds
+// set it to run the datapath entirely in userspace — e.g. the JVM-fed sidecar
+// path, where an in-process javaagent reports connection destinations instead
+// of cgroup/connect4 writing redirectProxyMap — on clusters that do not permit
+// eBPF.
+//
+// It MUST satisfy the whole Hooks contract: DestInfo.Get/Delete, Load and
+// WatchBindEvents. A partial implementation degrades silently rather than
+// failing: a Get that never resolves makes the proxy close every outgoing
+// connection (see proxy.handleConnection), and a WatchBindEvents that never
+// fires records zero test cases while still producing mocks.
+var HooksOverride Hooks
+
 // AgentInfoCustomizer is called after the base AgentInfo has been
 // populated but before it is written to the eBPF map. Downstream
 // builds can use this to set the extensible Flags slot on AgentInfo,

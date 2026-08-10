@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy"
 	incoming "go.keploy.io/server/v3/pkg/agent/proxy/incoming"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -27,7 +28,12 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 		}
 	}
 
-	h := hooks.New(logger, cfg)
+	// here we take the coreAgent Hooks
+	var h coreAgent.Hooks = hooks.New(logger, cfg)
+	if coreAgent.HooksOverride != nil {
+		h = coreAgent.HooksOverride
+	}
+
 	p := proxy.New(logger, h, cfg)
 	ip := incoming.New(logger, h, cfg)
 

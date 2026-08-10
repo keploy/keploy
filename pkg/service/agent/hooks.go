@@ -111,6 +111,13 @@ func SetSkipProxyListener(skip bool) {
 	coreAgent.SkipProxyListener = skip
 }
 
+// SetHooksOverride installs a non-kernel Hooks implementation, replacing the
+// eBPF-backed hooks the agent would otherwise build. Pass nil to restore the
+// default. Must be called before the agent composition root runs.
+func SetHooksOverride(h coreAgent.Hooks) {
+	coreAgent.HooksOverride = h
+}
+
 // SetAgentInfoCustomizer registers a callback that mutates AgentInfo
 // before it is written to the BPF map. Use it to set the extensible
 // Flags slot from a downstream build.
