@@ -246,7 +246,8 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 				if len(data[pos:]) < 4 {
 					return nil, fmt.Errorf("malformed FieldTypeFloat value")
 				}
-				param.Value = float32(binary.LittleEndian.Uint32(data[pos : pos+4]))
+				// IEEE-754 reinterpret, exactly as FieldTypeDouble below.
+				param.Value = math.Float32frombits(binary.LittleEndian.Uint32(data[pos : pos+4]))
 				pos += 4
 
 			case mysql.FieldTypeDouble:

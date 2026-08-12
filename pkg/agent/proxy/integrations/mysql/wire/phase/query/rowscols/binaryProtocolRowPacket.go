@@ -7,7 +7,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -141,14 +143,21 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 		if len(data) < 4 {
 			return nil, 0, errors.New("malformed FieldTypeFloat value")
 		}
-		res.value = float32(binary.LittleEndian.Uint32(data[:4]))
+		// IEEE-754 reinterpret, NOT a numeric cast. Same defect that
+		// stmtExecutePacket.go's FieldTypeDouble param carried: the wire
+		// bytes ARE the bit pattern, so float32(uint32(...)) reads 9.99
+		// out as 1.09154e+09. Result-set columns are the other half of
+		// that bug — the bad value lands in mocks.yaml at RECORD time,
+		// so it survives re-recording and cannot be fixed at replay.
+		res.value = math.Float32frombits(binary.LittleEndian.Uint32(data[:4]))
 		return res, 4, nil
 
 	case mysql.FieldTypeDouble:
 		if len(data) < 8 {
 			return nil, 0, errors.New("malformed FieldTypeDouble value")
 		}
-		res.value = float64(binary.LittleEndian.Uint64(data[:8]))
+		// As above: 9.99 was being recorded as 4.6218134880894373e+18.
+		res.value = math.Float64frombits(binary.LittleEndian.Uint64(data[:8]))
 		return res, 8, nil
 
 	case mysql.FieldTypeDate, mysql.FieldTypeNewDate:
@@ -236,14 +245,16 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 
 		switch ce.Type {
 		case mysql.FieldTypeLong:
+			n, err := coerceToInt64(ce.Value)
+			if err != nil {
+				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+			}
 			if ce.Unsigned {
-				v := uint32(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
+				if err := binary.Write(body, binary.LittleEndian, uint32(n)); err != nil {
 					return nil, err
 				}
 			} else {
-				v := int32(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
+				if err := binary.Write(body, binary.LittleEndian, int32(n)); err != nil {
 					return nil, err
 				}
 			}
@@ -281,51 +292,65 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 			}
 
 		case mysql.FieldTypeTiny:
+			n, err := coerceToInt64(ce.Value)
+			if err != nil {
+				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+			}
 			if ce.Unsigned {
-				if err := body.WriteByte(uint8(ce.Value.(int))); err != nil {
+				if err := body.WriteByte(uint8(n)); err != nil {
 					return nil, err
 				}
 			} else {
-				if err := body.WriteByte(byte(int8(ce.Value.(int)))); err != nil {
+				if err := body.WriteByte(byte(int8(n))); err != nil {
 					return nil, err
 				}
 			}
 
 		case mysql.FieldTypeShort, mysql.FieldTypeYear:
+			n, err := coerceToInt64(ce.Value)
+			if err != nil {
+				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+			}
 			if ce.Unsigned {
-				v := uint16(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
+				if err := binary.Write(body, binary.LittleEndian, uint16(n)); err != nil {
 					return nil, err
 				}
 			} else {
-				v := int16(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
+				if err := binary.Write(body, binary.LittleEndian, int16(n)); err != nil {
 					return nil, err
 				}
 			}
 
 		case mysql.FieldTypeLongLong:
+			n, err := coerceToInt64(ce.Value)
+			if err != nil {
+				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+			}
 			if ce.Unsigned {
-				v := uint64(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
+				if err := binary.Write(body, binary.LittleEndian, uint64(n)); err != nil {
 					return nil, err
 				}
 			} else {
-				v := int64(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
+				if err := binary.Write(body, binary.LittleEndian, n); err != nil {
 					return nil, err
 				}
 			}
 
 		case mysql.FieldTypeFloat:
-			v := float32(ce.Value.(float32))
-			if err := binary.Write(body, binary.LittleEndian, v); err != nil {
+			f, err := coerceToFloat64(ce.Value)
+			if err != nil {
+				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+			}
+			if err := binary.Write(body, binary.LittleEndian, float32(f)); err != nil {
 				return nil, err
 			}
 
 		case mysql.FieldTypeDouble:
-			v := float64(ce.Value.(float64))
-			if err := binary.Write(body, binary.LittleEndian, v); err != nil {
+			f, err := coerceToFloat64(ce.Value)
+			if err != nil {
+				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+			}
+			if err := binary.Write(body, binary.LittleEndian, f); err != nil {
 				return nil, err
 			}
 
@@ -364,6 +389,100 @@ func writeLenEncBytes(buf *bytes.Buffer, b []byte) error {
 	}
 	_, err := buf.Write(b)
 	return err
+}
+
+// coerceToInt64 / coerceToFloat64 exist because ce.Value is an
+// interface{} that has been through a serializer, and no serializer
+// preserves Go's numeric types.
+//
+// YAML (mocks.yaml, the OSS record/replay store) resolves an untagged
+// scalar by shape, not by the column's declared FieldType: `9.99` comes
+// back float64 and `10` comes back int — so a FieldTypeFloat column
+// yields float64, and a FieldTypeDouble column whose value happens to be
+// integral yields int. JSON is worse: encoding/json gives float64 for
+// every number.
+//
+// The old code type-asserted nakedly (`ce.Value.(float32)`), which
+// panics rather than errors. A panic here is not a failed row, it tears
+// down the proxy's connection handler and the application under replay
+// sees "invalid connection" with nothing pointing at the cause.
+//
+// pkg/models/mysql.coerceValueForFieldType solves the same problem for
+// the JSON path. It cannot be reused here without an import cycle, and
+// it does not cover the YAML path at all — which is the one the OSS
+// binary actually uses.
+func coerceToInt64(v interface{}) (int64, error) {
+	switch t := v.(type) {
+	case int:
+		return int64(t), nil
+	case int8:
+		return int64(t), nil
+	case int16:
+		return int64(t), nil
+	case int32:
+		return int64(t), nil
+	case int64:
+		return t, nil
+	case uint:
+		return int64(t), nil
+	case uint8:
+		return int64(t), nil
+	case uint16:
+		return int64(t), nil
+	case uint32:
+		return int64(t), nil
+	case uint64:
+		// Wraps for values above MaxInt64. That is intended: the caller
+		// immediately narrows to uint32/uint64 for the unsigned branch,
+		// so the bit pattern is what survives, not the sign.
+		return int64(t), nil
+	case float32:
+		return int64(t), nil
+	case float64:
+		return int64(t), nil
+	default:
+		return 0, fmt.Errorf("cannot coerce %T to integer", v)
+	}
+}
+
+func coerceToFloat64(v interface{}) (float64, error) {
+	switch t := v.(type) {
+	case float64:
+		return t, nil
+	case float32:
+		// Widen through the shortest decimal form. float64(float32(9.99))
+		// is 9.989999771118164; parsing "9.99" back gives the float64 a
+		// human wrote down. Narrowing to float32 later is exact either
+		// way, but DOUBLE columns holding a float32 must not inherit the
+		// float32 representation error.
+		return strconv.ParseFloat(strconv.FormatFloat(float64(t), 'g', -1, 32), 64)
+	case int:
+		return float64(t), nil
+	case int8:
+		return float64(t), nil
+	case int16:
+		return float64(t), nil
+	case int32:
+		return float64(t), nil
+	case int64:
+		return float64(t), nil
+	case uint:
+		return float64(t), nil
+	case uint8:
+		return float64(t), nil
+	case uint16:
+		return float64(t), nil
+	case uint32:
+		return float64(t), nil
+	case uint64:
+		return float64(t), nil
+	case string:
+		// DECIMAL-typed values recorded before a schema change, and any
+		// path that stringified the scalar.
+		return strconv.ParseFloat(t, 64)
+	default:
+		return 0, fmt.Errorf("cannot coerce %T to float", v)
+	}
 }
 
 // accepts string, []byte, time.Time, or fmt.Stringer; returns a normalized string.
