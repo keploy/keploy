@@ -524,6 +524,8 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	//   - recordOne: keep ONE representative exchange per (method,host,port,path),
 	//                preferring the first 2xx, tagged type:config so it becomes a
 	//                session-lifetime mock served body-agnostically on replay.
+	var ptRecordOne bool
+	var ptKey string
 	{
 		ptHost := req.Host
 		if ptHost == "" && req.URL != nil {
@@ -534,15 +536,10 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
 				return nil, nil
 			}
-			key := ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
-			allow := true
-			if h.ptRecorder != nil {
-				allow = h.ptRecorder.shouldRecord(key, respParsed.StatusCode)
-			}
-			if !allow {
-				h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
-				return nil, nil
-			}
+			// recordOne: defer the dedup decision to emit time (below) so a later
+			// drop can't burn the one representative and leave zero mocks.
+			ptRecordOne = true
+			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
 			meta["type"] = "config"
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}
@@ -576,6 +573,11 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			Lifetime:        models.LifetimePerTest,
 			LifetimeDerived: true,
 		},
+	}
+	// recordOne dedup, committed only now that a mock is actually being emitted.
+	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
+		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+		return nil, nil
 	}
 	return mock, nil
 }

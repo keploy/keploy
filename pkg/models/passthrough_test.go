@@ -131,6 +131,26 @@ func TestResolvePassThrough(t *testing.T) {
 	}
 }
 
+// matchHost covers the apex of a "*.x" glob; normalizeHost must not eat a
+// bracket-less IPv6 group as a port.
+func TestMatchHostApexAndNormalizeIPv6(t *testing.T) {
+	if !matchHost("*.datadoghq.com", "datadoghq.com") {
+		t.Fatal("apex host should match *.datadoghq.com")
+	}
+	if !matchHost("*.datadoghq.com", "intake.datadoghq.com") {
+		t.Fatal("subdomain should still match")
+	}
+	if matchHost("*.datadoghq.com", "evil.com") {
+		t.Fatal("unrelated host must not match")
+	}
+	if got := normalizeHost("::1"); got != "::1" {
+		t.Fatalf("normalizeHost(::1) = %q, want ::1 (must not strip a v6 group as a port)", got)
+	}
+	if got := normalizeHost("api.datadoghq.com:443"); got != "api.datadoghq.com" {
+		t.Fatalf("normalizeHost should strip a real :port, got %q", got)
+	}
+}
+
 // UnmarshalJSON scalar shorthand is accepted on the JSON agent wire (NOT yaml).
 func TestPassThroughRule_UnmarshalJSON_Shorthand(t *testing.T) {
 	var list []PassThroughRule

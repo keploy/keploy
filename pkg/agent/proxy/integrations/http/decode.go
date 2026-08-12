@@ -239,11 +239,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				mode := rule.Mode
 				out := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 				served := "synthetic-200"
-				if mode == models.PassThroughRecordOne {
-					if recorded := h.serveOnePassThroughMock(mockDb, input, rule.QueryKeys); recorded != nil {
-						out = recorded
-						served = "recorded-one"
-					}
+				// Serve a recorded mock when one exists — for recordOne always, and
+				// for skip too: an existing test-set may have legitimately recorded
+				// this endpoint (before it became a skip default), and synthesizing a
+				// 200 over it would change replay behaviour on unchanged test data.
+				// Non-consuming; falls back to the synthetic 200 when nothing matches.
+				if recorded := h.serveOnePassThroughMock(mockDb, input, ptHost, ptPort, rule.QueryKeys); recorded != nil {
+					out = recorded
+					served = "recorded"
 				}
 				h.Logger.Debug("egress passthrough: serving without mock match",
 					zap.String("mode", string(mode)), zap.String("served", served),

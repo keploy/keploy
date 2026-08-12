@@ -269,6 +269,8 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	//   - recordOne: keep ONE representative exchange per (method,host,port,path),
 	//                preferring the first 2xx, tagged type:config so it becomes a
 	//                session-lifetime mock served body-agnostically on replay.
+	var ptRecordOne bool
+	var ptKey string
 	{
 		ptHost := req.Host
 		if ptHost == "" && req.URL != nil {
@@ -279,15 +281,11 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
 				return nil
 			}
-			key := ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
-			allow := true
-			if h.ptRecorder != nil {
-				allow = h.ptRecorder.shouldRecord(key, respParsed.StatusCode)
-			}
-			if !allow {
-				h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
-				return nil
-			}
+			// recordOne: defer the dedup decision to emit time (below). Marking here
+			// would burn the one allowed representative even if the mock is never
+			// actually emitted, leaving the endpoint with zero mocks on replay.
+			ptRecordOne = true
+			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
 			meta["type"] = "config"
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}
@@ -329,6 +327,13 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			Lifetime:        models.LifetimePerTest,
 			LifetimeDerived: true,
 		},
+	}
+
+	// recordOne dedup, committed only now that a mock is actually being emitted:
+	// keep the first 2xx per (scope,method,host,port,path,queryKeys), drop the rest.
+	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
+		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+		return nil
 	}
 
 	if onMockRecorded != nil {

@@ -56,6 +56,30 @@ func TestPassThroughEgressDecision_OffOverridesBuiltin(t *testing.T) {
 	}
 }
 
+// mockHostPortMatches gates replay by the mock's recorded host/port, but only
+// enforces a component the mock actually carries.
+func TestMockHostPortMatches(t *testing.T) {
+	full := &models.HTTPReq{URL: "http://collector.newrelic.com:8200/x"}
+	if !mockHostPortMatches(full, "collector.newrelic.com", 8200) {
+		t.Fatal("matching host+port should match")
+	}
+	if mockHostPortMatches(full, "other.host", 8200) {
+		t.Fatal("different host must not match")
+	}
+	if mockHostPortMatches(full, "collector.newrelic.com", 9999) {
+		t.Fatal("different port must not match")
+	}
+	// A mock recorded with no host in the URL must not over-filter.
+	rel := &models.HTTPReq{URL: "/x"}
+	if !mockHostPortMatches(rel, "anything", 1234) {
+		t.Fatal("host-less recorded URL should not filter")
+	}
+	// Request host carrying a :port compares against the mock's hostname.
+	if !mockHostPortMatches(full, "collector.newrelic.com:8200", 8200) {
+		t.Fatal("request host with :port should still match on hostname")
+	}
+}
+
 func TestPtRecorder_FirstSuccess(t *testing.T) {
 	r := &ptRecorder{}
 	key := ptRecordKey("", "POST", "dd-agent", 8126, "/v0.4/traces", nil, nil)

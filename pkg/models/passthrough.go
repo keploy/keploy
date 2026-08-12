@@ -234,8 +234,10 @@ func normalizeHost(h string) string {
 		return h
 	}
 	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i+1:], "]") {
-		// Only strip when the suffix looks like a port (all digits).
-		if isAllDigits(h[i+1:]) {
+		// Only strip when the suffix looks like a port AND the head is not itself
+		// a colon-bearing IPv6 authority — otherwise "::1" (head ":") would get
+		// eaten to ":". Bracketed IPv6 ("[::1]:4317") is handled above.
+		if isAllDigits(h[i+1:]) && !strings.Contains(h[:i], ":") {
 			return h[:i]
 		}
 	}
@@ -266,6 +268,11 @@ func matchHost(pattern, host string) bool {
 	if pattern == host {
 		return true
 	}
+	// A "*.example.com" pattern should also cover the apex "example.com"
+	// (path.Match requires at least one char for "*", so it misses the apex).
+	if strings.HasPrefix(pattern, "*.") && host == pattern[2:] {
+		return true
+	}
 	if strings.ContainsAny(pattern, "*?[") {
 		if ok, err := path.Match(pattern, host); err == nil && ok {
 			return true
@@ -282,13 +289,21 @@ func matchHost(pattern, host string) bool {
 // target wins (see MergePassThroughDefaults). Users disable a default by
 // declaring a recordOne rule for the same target.
 func BuiltinTelemetryDefaults() []PassThroughRule {
+	return builtinTelemetryDefaultsCache
+}
+
+// builtinTelemetryDefaultsCache is the built-in rule slice materialised ONCE at
+// init, not rebuilt per request. ResolvePassThrough runs on every egress call
+// (matched or not), so rebuilding the 12-element literal each time was pure
+// per-request garbage. Read-only; callers must not mutate it.
+var builtinTelemetryDefaultsCache = func() []PassThroughRule {
 	defs := TelemetryDefaults()
 	rules := make([]PassThroughRule, len(defs))
 	for i, d := range defs {
 		rules[i] = d.Rule
 	}
 	return rules
-}
+}()
 
 // TelemetryDefaultsVersion identifies the built-in telemetry defaults SET. Bump
 // it whenever TelemetryDefaults() changes (a rule added/removed/retargeted or a

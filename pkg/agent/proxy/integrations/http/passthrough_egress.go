@@ -2,6 +2,8 @@ package http
 
 import (
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -35,7 +37,7 @@ func passThroughEgressDecision(opts models.OutgoingOptions, host string, port ui
 // to a synthetic 200). Candidates are drawn from both the per-test and session
 // pools; a recordOne mock is tagged type:config (LifetimeSession) at record
 // time so it lives in the session pool and is never window-filtered.
-func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req, queryKeys []string) []byte {
+func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req, host string, port uint32, queryKeys []string) []byte {
 	if mockDb == nil || input == nil || input.url == nil {
 		return nil
 	}
@@ -55,6 +57,13 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 			continue
 		}
 		if mockURLPath(m.Spec.HTTPReq.URL) != input.url.Path {
+			continue
+		}
+		// Host/port gate: the record key includes host+port, so replay must too —
+		// otherwise two collectors on the same path cross-serve, or a recordOne
+		// request gets a mock from an unrelated upstream sharing method+path.
+		// Best-effort: only enforce a field the recorded mock actually carries.
+		if !mockHostPortMatches(m.Spec.HTTPReq, host, port) {
 			continue
 		}
 		// Significant-query gate: for query-multiplexed collectors (queryKeys
@@ -99,6 +108,46 @@ func ptRecordKey(scope, method, host string, port uint32, reqPath string, queryK
 		key += "\x00" + name + "=" + query.Get(name)
 	}
 	return key
+}
+
+// mockHostPortMatches reports whether the recorded mock's URL host/port agree
+// with the live request's. It only enforces a component the mock actually has
+// (a mock recorded with a relative/host-less URL, or the request lacking a
+// resolved port, doesn't over-filter). Host compare is case-insensitive and
+// port-stripped on both sides.
+func mockHostPortMatches(mockReq *models.HTTPReq, host string, port uint32) bool {
+	u, err := url.Parse(mockReq.URL)
+	if err != nil {
+		return true // unparseable recorded URL → don't over-filter
+	}
+	if mh := u.Hostname(); mh != "" && host != "" && !strings.EqualFold(mh, hostOnly(host)) {
+		return false
+	}
+	if mp := u.Port(); mp != "" && port != 0 && mp != strconv.FormatUint(uint64(port), 10) {
+		return false
+	}
+	return true
+}
+
+// hostOnly strips a trailing :port from an authority (leaving bracketed IPv6 as
+// its hostname), for comparing against a mock URL's Hostname().
+func hostOnly(h string) string {
+	if hp, _, err := splitHostPortLenient(h); err == nil && hp != "" {
+		return hp
+	}
+	return h
+}
+
+// splitHostPortLenient is net.SplitHostPort but returns the input host unchanged
+// (no port) instead of erroring when there is no port.
+func splitHostPortLenient(h string) (host, portStr string, err error) {
+	if !strings.Contains(h, ":") {
+		return h, "", nil
+	}
+	if u, perr := url.Parse("//" + h); perr == nil && u.Host != "" {
+		return u.Hostname(), u.Port(), nil
+	}
+	return h, "", nil
 }
 
 // mockQueryMatches reports whether a recorded mock and the live request agree on
@@ -149,6 +198,11 @@ func itoaU32(v uint32) string {
 // later capture for that key is dropped. Shared across a parser instance's
 // connections; per-app isolation for the proxyless path is handled by the
 // enterprise gate (T7), not here.
+// ptRecorderMaxKeys bounds ptRecorder.seen so a long-lived agent can't grow it
+// without limit (one entry per scope×endpoint). Generous: real telemetry
+// endpoint sets are tiny; this only backstops pathological churn.
+const ptRecorderMaxKeys = 8192
+
 type ptRecorder struct {
 	mu   sync.Mutex
 	seen map[string]*ptSeenState
@@ -169,6 +223,13 @@ func (p *ptRecorder) shouldRecord(key string, statusCode int) bool {
 	}
 	st := p.seen[key]
 	if st == nil {
+		// Bound the map: in a long-lived multi-app/session agent (scope in the
+		// key) it would otherwise grow one entry per (scope × endpoint) forever.
+		// At the cap we stop tracking new keys and record them (fail toward
+		// capturing, not toward silently dropping).
+		if len(p.seen) >= ptRecorderMaxKeys {
+			return true
+		}
 		st = &ptSeenState{}
 		p.seen[key] = st
 	}
