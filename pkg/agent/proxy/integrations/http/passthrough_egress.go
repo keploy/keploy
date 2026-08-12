@@ -8,38 +8,23 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// passThroughEgressDecision reports whether an outgoing HTTP request targets a
-// configured telemetry / noisy-egress endpoint and, if so, the effective mode
-// ("skip" or "recordOne"). Configured rules (opts.PassThroughPorts /
-// PassThroughHosts) take precedence; the built-in telemetry-path defaults
-// (telemetryEgressPaths, see isTelemetryEgress) apply as a "skip" fallback when
-// no configured rule matches. host is the destination authority (request Host
-// header preferred, URL host next, dstCfg.Addr last); port comes from dstCfg.
-//
-// The full defaults-registry merge / precedence hardening lives in T10; this is
-// the minimal config-first + legacy-default behavior.
+// passThroughEgressDecision reports whether an outgoing HTTP request should be
+// passed through and, if so, the winning rule (mode "skip" or "recordOne").
+// It delegates the whole decision to models.ResolvePassThrough — the single
+// off-aware, two-tier (user-beats-builtin) entry point — so this parser never
+// re-derives "does matched mean passthrough". A false result means either no
+// rule matched or the winning rule is mode:"off" (record normally). host is the
+// destination authority (request Host header preferred, URL host next); port
+// from dstCfg; method gates the built-ins (they are POST-only).
 func passThroughEgressDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL) (models.PassThroughRule, bool) {
 	if u == nil {
 		return models.PassThroughRule{}, false
 	}
-	reqPath := u.Path
-	// User rules + built-in telemetry defaults, matched by specificity.
-	rules := models.MergePassThroughDefaults(opts.PassThroughPorts, opts.PassThroughHosts)
-	if rule, ok := models.MatchPassThrough(rules, host, port, reqPath); ok {
-		// mode:"off" is an explicit opt-out: the rule matched (so it overrode any
-		// built-in default for this target), but the endpoint must NOT be passed
-		// through — record/replay it as a normal dependency. Return early so the
-		// legacy telemetry bypass below does not re-skip it.
-		if rule.Mode == models.PassThroughOff {
-			return models.PassThroughRule{}, false
-		}
-		return rule, true
-	}
-	// Belt-and-suspenders: the legacy exact-path+POST bypass (subset of defaults).
-	if isTelemetryEgress(method, u) {
-		return models.PassThroughRule{Mode: models.PassThroughSkip}, true
-	}
-	return models.PassThroughRule{}, false
+	// ResolvePassThrough is the whole decision — built-ins (incl. the legacy
+	// /v1/traces and /ingest paths) are in the default set, and a user off rule
+	// correctly overrides them. There is deliberately no separate legacy fallback:
+	// one existed and re-skipped those paths even when the user set mode:"off".
+	return models.ResolvePassThrough(opts.PassThroughPorts, opts.PassThroughHosts, host, port, method, u.Path)
 }
 
 // serveOnePassThroughMock returns the raw response bytes of ONE recorded HTTP

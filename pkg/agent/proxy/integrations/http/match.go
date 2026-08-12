@@ -1479,31 +1479,7 @@ func pickClosestCandidate(request *http.Request, schemaSurvivors, pool []*models
 	return closest
 }
 
-// telemetryEgressPaths are outgoing telemetry endpoints that carry large,
-// volatile bodies and are NOT real dependencies: OTLP/HTTP trace export
-// (/v1/traces) and the Pyroscope profiler ingest (/ingest). Recording them
-// stores big mocks that at replay schema-match the app's re-emitted telemetry
-// and fall into the fuzzy-matcher, which shingles the ~150–200 KB bodies and
-// OOMs the agent. Bypassing them keeps the pool clean and the matcher out of it.
-//
-// NOTE: both of these paths are now a strict subset of BuiltinTelemetryDefaults
-// (models.TelemetryDefaults), so passThroughEgressDecision already resolves them
-// to "skip" before this legacy check runs. isTelemetryEgress is kept only as a
-// belt-and-suspenders fallback for callers that bypass the rule set; it can be
-// removed once every path is confirmed to route through MergePassThroughDefaults.
-var telemetryEgressPaths = map[string]struct{}{
-	"/v1/traces": {}, // OpenTelemetry OTLP/HTTP trace export
-	"/ingest":    {}, // Pyroscope continuous-profiler upload
-}
-
-// isTelemetryEgress reports whether an outgoing request is a fire-and-forget
-// telemetry export (see telemetryEgressPaths). The record paths skip storing
-// these; decodeHTTP short-circuits them with a synthetic 200 so their large
-// bodies never reach the fuzzy-matcher.
-func isTelemetryEgress(method string, u *url.URL) bool {
-	if method != http.MethodPost || u == nil {
-		return false
-	}
-	_, ok := telemetryEgressPaths[u.Path]
-	return ok
-}
+// The former isTelemetryEgress / telemetryEgressPaths legacy bypass ({/v1/traces,
+// /ingest} POST) was removed: both paths are built-in telemetry defaults now, so
+// models.ResolvePassThrough handles them — and, unlike the legacy check, it
+// honours a user mode:"off" override instead of unconditionally re-skipping.
