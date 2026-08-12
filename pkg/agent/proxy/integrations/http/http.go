@@ -56,7 +56,7 @@ type HTTP struct {
 func New(logger *zap.Logger) integrations.Integrations {
 	return &HTTP{
 		Logger:     logger,
-		ptRecorder: &ptRecorder{},
+		ptRecorder: &ptRecorder{logger: logger},
 	}
 }
 
@@ -291,6 +291,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		}
 	}
 
+	ptLifetime := models.LifetimePerTest
+	if ptRecordOne {
+		ptLifetime = models.LifetimeSession
+	}
 	newMock := &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
@@ -316,15 +320,16 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			ReqTimestampMock: mock.ReqTimestampMock,
 			ResTimestampMock: mock.ResTimestampMock,
 		},
-		// HTTP is a request-response protocol — every exchange is per-test
-		// by construction. No handshake/session tier exists at the HTTP
-		// layer; outbound calls from an application under test are always
-		// bound to the current test window. Stamp LifetimePerTest + mark
-		// LifetimeDerived so DeriveLifetime's ingest-time classifier is a
-		// no-op (the recorder is authoritative at emit time). Leaves
-		// Metadata["type"] unchanged (legacy readers still see HTTPClient).
+		// HTTP is a request-response protocol — an ordinary exchange is per-test.
+		// A recordOne telemetry-passthrough mock (meta type:config) is the
+		// exception: it must be session-lifetime so it lives in the session pool
+		// and is served body-agnostically for every matching call (never
+		// window-filtered). Stamp the lifetime authoritatively here and mark
+		// LifetimeDerived so DeriveLifetime is a no-op at ingest (its config-tag
+		// branch is short-circuited by LifetimeDerived, so the in-process value
+		// must already be correct — hence keying it off ptRecordOne, not the tag).
 		TestModeInfo: models.TestModeInfo{
-			Lifetime:        models.LifetimePerTest,
+			Lifetime:        ptLifetime,
 			LifetimeDerived: true,
 		},
 	}

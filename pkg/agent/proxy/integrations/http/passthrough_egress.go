@@ -1,6 +1,7 @@
 package http
 
 import (
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // passThroughEgressDecision reports whether an outgoing HTTP request should be
@@ -130,24 +132,12 @@ func mockHostPortMatches(mockReq *models.HTTPReq, host string, port uint32) bool
 }
 
 // hostOnly strips a trailing :port from an authority (leaving bracketed IPv6 as
-// its hostname), for comparing against a mock URL's Hostname().
+// its bare hostname), for comparing against a mock URL's Hostname().
 func hostOnly(h string) string {
-	if hp, _, err := splitHostPortLenient(h); err == nil && hp != "" {
-		return hp
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		return host
 	}
-	return h
-}
-
-// splitHostPortLenient is net.SplitHostPort but returns the input host unchanged
-// (no port) instead of erroring when there is no port.
-func splitHostPortLenient(h string) (host, portStr string, err error) {
-	if !strings.Contains(h, ":") {
-		return h, "", nil
-	}
-	if u, perr := url.Parse("//" + h); perr == nil && u.Host != "" {
-		return u.Hostname(), u.Port(), nil
-	}
-	return h, "", nil
+	return strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
 }
 
 // mockQueryMatches reports whether a recorded mock and the live request agree on
@@ -204,8 +194,10 @@ func itoaU32(v uint32) string {
 const ptRecorderMaxKeys = 8192
 
 type ptRecorder struct {
-	mu   sync.Mutex
-	seen map[string]*ptSeenState
+	mu        sync.Mutex
+	seen      map[string]*ptSeenState
+	logger    *zap.Logger
+	capLogged bool // logged the cap-eviction warning once
 }
 
 type ptSeenState struct {
@@ -225,10 +217,20 @@ func (p *ptRecorder) shouldRecord(key string, statusCode int) bool {
 	if st == nil {
 		// Bound the map: in a long-lived multi-app/session agent (scope in the
 		// key) it would otherwise grow one entry per (scope × endpoint) forever.
-		// At the cap we stop tracking new keys and record them (fail toward
-		// capturing, not toward silently dropping).
+		// At the cap, EVICT one arbitrary entry and keep tracking — returning
+		// true here would fail toward unbounded recording of a hot endpoint, the
+		// exact mock-bloat this feature exists to prevent. Log once so the silent
+		// degradation is visible.
 		if len(p.seen) >= ptRecorderMaxKeys {
-			return true
+			for k := range p.seen {
+				delete(p.seen, k)
+				break
+			}
+			if !p.capLogged && p.logger != nil {
+				p.capLogged = true
+				p.logger.Warn("egress passthrough: recordOne dedup map hit cap; evicting (telemetry endpoint churn?)",
+					zap.Int("cap", ptRecorderMaxKeys))
+			}
 		}
 		st = &ptSeenState{}
 		p.seen[key] = st

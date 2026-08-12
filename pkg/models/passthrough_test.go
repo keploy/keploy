@@ -151,6 +151,34 @@ func TestMatchHostApexAndNormalizeIPv6(t *testing.T) {
 	}
 }
 
+// An {id, mode:"off"} override disables a built-in by identity — robust even for
+// the PathPrefix OTLP/gRPC rule that a field-reconstructed override would miss.
+func TestResolvePassThrough_DisableByID(t *testing.T) {
+	grpcPath := "/opentelemetry.proto.collector.trace.v1.TraceService/Export"
+	if _, ok := ResolvePassThrough(nil, nil, "", 0, "POST", grpcPath); !ok {
+		t.Fatal("OTLP/gRPC should be a built-in passthrough by default")
+	}
+	off := []PassThroughRule{{ID: "otlp-grpc", Mode: PassThroughOff}}
+	if _, ok := ResolvePassThrough(nil, off, "", 0, "POST", grpcPath); ok {
+		t.Fatal("id-based off must disable the OTLP/gRPC built-in (field override would miss it)")
+	}
+	// Disabling one built-in must not affect another.
+	if _, ok := ResolvePassThrough(nil, off, "", 0, "POST", "/v1/traces"); !ok {
+		t.Fatal("disabling otlp-grpc must not disable otlp-http-traces")
+	}
+	// Every built-in has a non-empty, unique ID.
+	seen := map[string]bool{}
+	for _, d := range TelemetryDefaults() {
+		if d.Rule.ID == "" {
+			t.Fatalf("built-in %q/%q missing ID", d.Provider, d.Label)
+		}
+		if seen[d.Rule.ID] {
+			t.Fatalf("duplicate built-in ID %q", d.Rule.ID)
+		}
+		seen[d.Rule.ID] = true
+	}
+}
+
 // UnmarshalJSON scalar shorthand is accepted on the JSON agent wire (NOT yaml).
 func TestPassThroughRule_UnmarshalJSON_Shorthand(t *testing.T) {
 	var list []PassThroughRule

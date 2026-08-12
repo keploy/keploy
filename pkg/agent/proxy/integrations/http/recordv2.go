@@ -545,6 +545,10 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 	}
 
+	ptLifetime := models.LifetimePerTest
+	if ptRecordOne {
+		ptLifetime = models.LifetimeSession
+	}
 	mock := &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
@@ -570,7 +574,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			ResTimestampMock: m.ResTimestampMock,
 		},
 		TestModeInfo: models.TestModeInfo{
-			Lifetime:        models.LifetimePerTest,
+			Lifetime:        ptLifetime,
 			LifetimeDerived: true,
 		},
 	}
