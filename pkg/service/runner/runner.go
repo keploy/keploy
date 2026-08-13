@@ -384,6 +384,20 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.SchemaNoiseStrict = r.config.Test.SchemaNoiseStrict
 		outOpts.MysqlPorts = r.config.MysqlPorts
 		outOpts.DisableMysqlAutoDetect = r.config.DisableMysqlAutoDetect
+		outOpts.PassThroughPorts = r.config.Record.PassThroughPorts
+		outOpts.PassThroughHosts = r.config.Record.PassThroughHosts
+		// Validate modes at load: NormalizeMode fails an unknown/typo'd mode CLOSED
+		// (to "off" = no passthrough), which means a mistyped rule silently
+		// suppresses the telemetry protection it meant to configure. Warn loudly so
+		// the typo is visible instead of only surfacing as unexpected replay.
+		for _, rule := range append(append([]models.PassThroughRule{}, outOpts.PassThroughPorts...), outOpts.PassThroughHosts...) {
+			switch rule.Mode {
+			case "", models.PassThroughSkip, models.PassThroughRecordOne, models.PassThroughOff:
+			default:
+				r.logger.Warn("passthrough: unrecognized mode, treated as no-passthrough (endpoint recorded normally); use skip|recordOne|off",
+					zap.String("mode", string(rule.Mode)), zap.String("host", rule.Host), zap.Uint32("port", rule.Port))
+			}
+		}
 	}
 	noiseCfg := map[string]map[string][]string{}
 	if headerNoise, ok := r.globalNoise["header"]; ok {

@@ -106,6 +106,23 @@ type OutgoingOptions struct {
 	// an escape hatch rather than a requirement: a port listed here
 	// skips the detection probe entirely. See DisableMysqlAutoDetect.
 	MysqlPorts []uint32
+	// PassThroughPorts / PassThroughHosts mark telemetry / noisy egress that
+	// keploy should not record normally (see PassThroughRule). Ports gate on the
+	// destination port; Hosts gate on the destination host/authority (needed for
+	// TLS egress where the port is not observable at capture). A matched rule is
+	// either "skip" (never record; synth success on replay) or "recordOne"
+	// (keep one exchange per (host,port,path,method); serve it body-agnostic on
+	// replay). Empty ⇒ built-in telemetry defaults only (see MergePassThroughDefaults).
+	PassThroughPorts []PassThroughRule
+	PassThroughHosts []PassThroughRule
+	// PassThroughScope isolates recordOne de-duplication to one app/session. The
+	// HTTP integration (and its ptRecorder) is a single instance shared across
+	// apps in a long-lived proxyless/DaemonSet agent, so without a scope the first
+	// app's recordOne capture would suppress a second app's identical endpoint.
+	// Callers that share a recorder across tenants (the enterprise DaemonSet gate)
+	// set this to a per-app/per-session key; the classic sidecar leaves it empty
+	// (process-per-session, so the plain key already isolates).
+	PassThroughScope string
 	// DisableMysqlAutoDetect turns off automatic MySQL port detection,
 	// restoring the strict "MysqlPorts or nothing" behaviour. With
 	// detection on (the default), a MySQL server on any port is

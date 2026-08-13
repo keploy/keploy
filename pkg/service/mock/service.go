@@ -82,4 +82,10 @@ type OutgoingConfig struct {
 	// restoring strict MysqlPorts matching. Mirrors
 	// Config.DisableMysqlAutoDetect.
 	DisableMysqlAutoDetect bool
+
+	// PassThroughPorts / PassThroughHosts mirror Config.Record.PassThroughPorts /
+	// PassThroughHosts so a standalone mock-serving session honours the same
+	// telemetry-egress passthrough rules as record/replay. See models.PassThroughRule.
+	PassThroughPorts []models.PassThroughRule
+	PassThroughHosts []models.PassThroughRule
 }

@@ -79,6 +79,8 @@ func (r *MockLoader) LoadMocks(ctx context.Context, testSetID string, testCaseNa
 		// honours neither the pinned ports nor disableMysqlAutoDetect.
 		MysqlPorts:             r.outgoingCfg.MysqlPorts,
 		DisableMysqlAutoDetect: r.outgoingCfg.DisableMysqlAutoDetect,
+		PassThroughPorts:       r.outgoingCfg.PassThroughPorts,
+		PassThroughHosts:       r.outgoingCfg.PassThroughHosts,
 	}); err != nil {
 		return fmt.Errorf("MockLoader: failed to enable mock-outgoing: %w", err)
 	}

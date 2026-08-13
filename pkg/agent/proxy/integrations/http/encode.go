@@ -64,6 +64,15 @@ func probeHTTP(ctx context.Context, logger *zap.Logger, phase string, fields ...
 func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, onMockRecorded integrations.PostRecordHook) error {
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
+	// Prefer the resolved destination port from DstCfg when present. In proxyless
+	// (observe-only) mode destConn is a SimulatedConn with no real upstream
+	// socket, so remoteAddr.Port is 0 — which would break port-keyed matching
+	// (telemetry passthrough rules, MySQL/bypass port checks). DstCfg.Port is set
+	// authoritatively by the classic proxy AND by the proxyless routeEgressToParser,
+	// and equals remoteAddr.Port on the classic path, so this is a no-op there.
+	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
+		destPort = opts.DstCfg.Port
+	}
 
 	probeHTTP(ctx, h.Logger, "encode-start",
 		zap.String("dstAddr", destConn.RemoteAddr().String()),

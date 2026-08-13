@@ -174,6 +174,17 @@ type Record struct {
 	// suit ~99% of workloads; only touch these if you see "mock
 	// incomplete" warnings with reason "per_conn_cap" in the agent logs.
 	RecordBuffer RecordBuffer `json:"recordBuffer" yaml:"recordBuffer" mapstructure:"recordBuffer"`
+
+	// PassThroughPorts / PassThroughHosts configure telemetry-egress passthrough:
+	// destinations keploy should not record as normal dependencies. Each rule is
+	// {port|host, mode} where mode is "skip" (never record; synthesize success on
+	// replay) or "recordOne" (record exactly one exchange per host/port/path/method
+	// and serve it body-agnostically for every matching call on replay). Hosts are
+	// required to catch TLS-encrypted telemetry whose port isn't observable at
+	// capture. Built-in telemetry defaults (OTLP /v1/traces, Pyroscope /ingest,
+	// Azure App Insights host) are merged in unless overridden. See models.PassThroughRule.
+	PassThroughPorts []models.PassThroughRule `json:"passThroughPorts,omitempty" yaml:"passThroughPorts,omitempty" mapstructure:"passThroughPorts"`
+	PassThroughHosts []models.PassThroughRule `json:"passThroughHosts,omitempty" yaml:"passThroughHosts,omitempty" mapstructure:"passThroughHosts"`
 }
 
 // UpstreamTLS configures the upstream (destination-side) leg of keploy's TLS

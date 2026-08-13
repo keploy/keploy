@@ -48,11 +48,15 @@ type HTTP struct {
 	Logger *zap.Logger
 	//opts  globalOptions //other global options set by the proxy
 	asyncEngine *async.Engine
+	// ptRecorder de-duplicates recordOne telemetry-passthrough captures to one
+	// representative exchange per endpoint (see passthrough_egress.go).
+	ptRecorder *ptRecorder
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
 	return &HTTP{
-		Logger: logger,
+		Logger:     logger,
+		ptRecorder: &ptRecorder{logger: logger},
 	}
 }
 
@@ -259,17 +263,38 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		return nil
 	}
 
-	// Do not record telemetry exports (POST /v1/traces, /ingest). They are live
-	// telemetry, not a dependency: recording them stores volatile, large
-	// config-tier mocks that at replay schema-match the app's re-emitted
-	// exports and fall into the fuzzy-matcher, which shingles the ~150 KB
-	// bodies and OOMs the sidecar. Keeping them out of the pool removes the
-	// candidates entirely. Hardcoded pending a configurable egress-bypass rule.
-	if isTelemetryEgress(req.Method, req.URL) {
-		h.Logger.Debug("egress bypass: not recording telemetry export (/v1/traces, /ingest)", zap.Any("metadata", utils.GetReqMeta(req)))
-		return nil
+	// Telemetry / noisy-egress passthrough (config-driven via
+	// opts.PassThroughPorts/Hosts, with built-in defaults as "skip"):
+	//   - skip:      do not record (live telemetry, not a dependency).
+	//   - recordOne: keep ONE representative exchange per (method,host,port,path),
+	//                preferring the first 2xx, tagged type:config so it becomes a
+	//                session-lifetime mock served body-agnostically on replay.
+	var ptRecordOne bool
+	var ptKey string
+	{
+		ptHost := req.Host
+		if ptHost == "" && req.URL != nil {
+			ptHost = req.URL.Host
+		}
+		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL); matched {
+			if rule.Mode == models.PassThroughSkip {
+				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
+				return nil
+			}
+			// recordOne: defer the dedup decision to emit time (below). Marking here
+			// would burn the one allowed representative even if the mock is never
+			// actually emitted, leaving the endpoint with zero mocks on replay.
+			ptRecordOne = true
+			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
+			meta["type"] = "config"
+			meta["passthrough"] = string(models.PassThroughRecordOne)
+		}
 	}
 
+	ptLifetime := models.LifetimePerTest
+	if ptRecordOne {
+		ptLifetime = models.LifetimeSession
+	}
 	newMock := &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
@@ -295,17 +320,25 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			ReqTimestampMock: mock.ReqTimestampMock,
 			ResTimestampMock: mock.ResTimestampMock,
 		},
-		// HTTP is a request-response protocol — every exchange is per-test
-		// by construction. No handshake/session tier exists at the HTTP
-		// layer; outbound calls from an application under test are always
-		// bound to the current test window. Stamp LifetimePerTest + mark
-		// LifetimeDerived so DeriveLifetime's ingest-time classifier is a
-		// no-op (the recorder is authoritative at emit time). Leaves
-		// Metadata["type"] unchanged (legacy readers still see HTTPClient).
+		// HTTP is a request-response protocol — an ordinary exchange is per-test.
+		// A recordOne telemetry-passthrough mock (meta type:config) is the
+		// exception: it must be session-lifetime so it lives in the session pool
+		// and is served body-agnostically for every matching call (never
+		// window-filtered). Stamp the lifetime authoritatively here and mark
+		// LifetimeDerived so DeriveLifetime is a no-op at ingest (its config-tag
+		// branch is short-circuited by LifetimeDerived, so the in-process value
+		// must already be correct — hence keying it off ptRecordOne, not the tag).
 		TestModeInfo: models.TestModeInfo{
-			Lifetime:        models.LifetimePerTest,
+			Lifetime:        ptLifetime,
 			LifetimeDerived: true,
 		},
+	}
+
+	// recordOne dedup, committed only now that a mock is actually being emitted:
+	// keep the first 2xx per (scope,method,host,port,path,queryKeys), drop the rest.
+	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
+		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+		return nil
 	}
 
 	if onMockRecorded != nil {
