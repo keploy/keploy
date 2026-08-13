@@ -35,6 +35,29 @@ func newTestTee(t *testing.T, capBytes int64, buf int, memCheck func() bool) (*t
 // newTestTeeWithConsumer is newTestTee plus control over the consumer's
 // liveness: closing the returned channel is what a parser abandoning its
 // FakeConn looks like to the tee.
+// newTestTeeQueued builds a tee whose drain loop is NOT started, so pushed
+// chunks stay in the queue.
+//
+// The per-connection cap is an OCCUPANCY cap: drain decrements qBytes as it
+// dequeues, so a delivered chunk stops counting against it — that is the
+// behaviour TestDrainingAChunkReturnsCapacity exists to pin, and it is correct.
+// The consequence is that any test asserting "this push is refused because the
+// earlier ones are still queued" is racing its own drainer. If drain wins, the
+// bytes are already released and the push legitimately succeeds; the test then
+// fails for a reason that has nothing to do with the cap. Measured at roughly
+// 1-in-40 runs, and 5-in-5 with a 50ms pause between the pushes.
+//
+// Not starting drain removes the race and lets those tests assert exactly what
+// the cap means. waitDone is deliberately absent from the cleanup: t.done is
+// closed by drain, which never runs here.
+func newTestTeeQueued(t *testing.T, capBytes int64, buf int) (*tee, *dropRecorder) {
+	t.Helper()
+	rec := &dropRecorder{}
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, nil, rec.record, nil)
+	t.Cleanup(t2.close)
+	return t2, rec
+}
+
 func newTestTeeWithConsumer(t *testing.T, capBytes int64, buf int) (*tee, *dropRecorder, chan struct{}) {
 	t.Helper()
 	rec := &dropRecorder{}
@@ -121,8 +144,11 @@ func TestTee_DropOnMemoryPressure(t *testing.T) {
 
 func TestTee_DropOnPerConnCap(t *testing.T) {
 	t.Parallel()
-	// Cap at 4 bytes; first 3-byte push fits, second also fits (6 > 4) → drop.
-	tt, _, rec := newTestTee(t, 4, 16, nil)
+	// Cap at 4 bytes; the first 3-byte push fits, the second would take the
+	// QUEUE to 6 > 4 → drop. Drain must not run: it releases bytes as it
+	// dequeues, which would let the second push through for reasons unrelated
+	// to the cap (see newTestTeeQueued).
+	tt, rec := newTestTeeQueued(t, 4, 16)
 
 	if !tt.push(mkChunk("abc")) {
 		t.Fatalf("first push should succeed")
@@ -261,8 +287,9 @@ func TestTee_CloseRacingSpillBacklog_Conserves(t *testing.T) {
 // without limit — preserving the OOM-safety contract.
 func TestTee_DropsWhenOverflowExceedsCap(t *testing.T) {
 	t.Parallel()
-	// cap=10 bytes, buf=1, no receiver. Each chunk is 4 bytes.
-	tt, _, rec := newTestTee(t, 10, 1, nil)
+	// cap=10 bytes, buf=1, no receiver. Each chunk is 4 bytes. Drain is not
+	// started so the queue actually accumulates (see newTestTeeQueued).
+	tt, rec := newTestTeeQueued(t, 10, 1)
 	// "aaaa" (staging) + "bbbb" (overflow, total 8) fit; "cccc" (total 12
 	// > 10) must drop on per_conn_cap.
 	if !tt.push(mkChunk("aaaa")) {
