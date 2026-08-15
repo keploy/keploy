@@ -2,9 +2,11 @@ package matcher
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"regexp"
+	"sync/atomic"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -754,26 +756,94 @@ func TestCompilePatterns_SentinelsAreNotRegexes(t *testing.T) {
 	}
 }
 
-// TestWarnIfIndexedPath pins the diagnostic for the one recorded shape that
-// silently stops matching: a noise path carrying an array position.
-func TestWarnIfIndexedPath(t *testing.T) {
-	core, logs := observer.New(zapcore.WarnLevel)
-	logger := zap.New(core)
+// TestWarnUnmatchableBodyNoise pins the diagnostic for the shape that silently
+// stops matching. It replaces an earlier warning that guessed from the string
+// alone: that one fired on any digit segment, so it both missed dead entries
+// with no digits in them and cried wolf over a genuinely numeric object key.
+// This one asks the document, so it is exact in both directions.
+func TestWarnUnmatchableBodyNoise(t *testing.T) {
+	const body = `{"items":[{"product":{"stock":99}}],"data":{"2026":{"count":1}}}`
 
-	SplitNoise(map[string][]string{"body": {"items.0.product.stock"}}, logger)
-	if logs.Len() != 1 {
-		t.Fatalf("emitted %d warnings, want 1: %v", logs.Len(), logs.All())
-	}
-	if got := logs.All()[0].ContextMap()["suggested"]; got != "items.product.stock" {
-		t.Errorf("suggested = %v, want the index-free path", got)
+	// The warning is deduped per (test case, entry) for the life of the process.
+	// `go test -count=2` re-runs this function in the SAME process, so a name
+	// derived from the test would collide with its own first run and the second
+	// would see no warnings at all. warnProbeSeq is package-level for exactly
+	// that reason — it keeps counting across re-runs. The dedup itself is
+	// asserted separately below.
+	warned := func(t *testing.T, noise map[string][]string) []string {
+		t.Helper()
+		core, logs := observer.New(zapcore.WarnLevel)
+		WarnUnmatchableBodyNoise(zap.New(core), nextWarnProbeCase(), noise, body)
+		var entries []string
+		for _, e := range logs.All() {
+			entries = append(entries, e.ContextMap()["entry"].(string))
+		}
+		return entries
 	}
 
-	// An index-free path is fine and must not warn.
-	core2, logs2 := observer.New(zapcore.WarnLevel)
-	SplitNoise(map[string][]string{"body": {"items.product.stock"}}, zap.New(core2))
-	if logs2.Len() != 0 {
-		t.Errorf("emitted %d warnings for an index-free path, want 0", logs2.Len())
-	}
+	t.Run("an indexed path is reported", func(t *testing.T) {
+		if got := warned(t, map[string][]string{"items.0.product.stock": {}}); len(got) != 1 {
+			t.Errorf("entries = %v, want the indexed path reported", got)
+		}
+	})
+
+	t.Run("an index-free path is silent", func(t *testing.T) {
+		if got := warned(t, map[string][]string{"items.product.stock": {}}); len(got) != 0 {
+			t.Errorf("entries = %v, want none", got)
+		}
+	})
+
+	t.Run("a numeric object key is silent", func(t *testing.T) {
+		// The old heuristic warned here and suggested "data.count", which names a
+		// different field: proof that a string cannot tell a position from a key.
+		if got := warned(t, map[string][]string{"data.2026.count": {}}); len(got) != 0 {
+			t.Errorf("entries = %v, want none for a real numeric object key", got)
+		}
+	})
+
+	t.Run("a dead path with no digits is reported", func(t *testing.T) {
+		// Invisible to the old heuristic.
+		if got := warned(t, map[string][]string{"items.produkt.stock": {}}); len(got) != 1 {
+			t.Errorf("entries = %v, want the typo reported", got)
+		}
+	})
+
+	t.Run("a nil logger is tolerated", func(t *testing.T) {
+		WarnUnmatchableBodyNoise(nil, t.Name(), map[string][]string{"items.0.x": {}}, body)
+	})
+
+	t.Run("the same entry warns once per test case, but once for each", func(t *testing.T) {
+		noise := map[string][]string{"items.0.dedupe.probe": {}}
+		caseA, caseB := nextWarnProbeCase(), nextWarnProbeCase()
+
+		core, logs := observer.New(zapcore.WarnLevel)
+		logger := zap.New(core)
+		WarnUnmatchableBodyNoise(logger, caseA, noise, body)
+		WarnUnmatchableBodyNoise(logger, caseA, noise, body)
+		if logs.Len() != 1 {
+			t.Errorf("emitted %d warnings for one case, want 1", logs.Len())
+		}
+
+		// A second case must still be told: the whole point of the field is that
+		// the reader can find which case the dead entry belongs to.
+		core2, logs2 := observer.New(zapcore.WarnLevel)
+		WarnUnmatchableBodyNoise(zap.New(core2), caseB, noise, body)
+		if logs2.Len() != 1 {
+			t.Fatalf("emitted %d warnings for a second case, want 1", logs2.Len())
+		}
+		if got := logs2.All()[0].ContextMap()["testCase"]; got != caseB {
+			t.Errorf("testCase = %v, want %v", got, caseB)
+		}
+	})
+}
+
+// warnProbeSeq hands out a test-case name that is unique for the whole process,
+// so these assertions survive `go test -count=N` against a dedup cache that
+// deliberately lives for the life of the process.
+var warnProbeSeq atomic.Int64
+
+func nextWarnProbeCase() string {
+	return fmt.Sprintf("warn-probe-case-%d", warnProbeSeq.Add(1))
 }
 
 // TestGetCompiledE_ReportsErrorOnCacheHit pins that the compile error survives
