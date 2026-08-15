@@ -1909,6 +1909,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		parserCtxCancel()
 
 		if srcConn != nil {
+			// Kernel-sourced network I/O: read this proxied connection's TCP_INFO
+			// byte totals (true wire volume, pre-dedup) into the usage-metering
+			// footprint just before closing. No-op unless a sink was installed.
+			recordConnNetworkIO(srcConn)
 			err := srcConn.Close()
 			if err != nil {
 				if !strings.Contains(err.Error(), "use of closed network connection") {
