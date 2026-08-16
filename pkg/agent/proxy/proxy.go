@@ -1786,6 +1786,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
+
+	// Keep a handle to the RAW accepted socket for kernel network-I/O accounting.
+	// srcConn gets reassigned to util.Conn / SafeConn wrappers below, and those
+	// embed net.Conn as an interface — so SyscallConn() is NOT promoted through
+	// them and RecordConnNetworkIO could not reach the fd. The entry value is the
+	// bare *net.TCPConn (the RemoteAddr type-assert below relies on that), so read
+	// TCP_INFO off it at teardown instead of the wrapped srcConn.
+	origSrcConn := srcConn
+
 	defer func(start time.Time) {
 		duration := time.Since(start)
 		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
@@ -1912,7 +1921,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// Kernel-sourced network I/O: read this proxied connection's TCP_INFO
 			// byte totals (true wire volume, pre-dedup) into the usage-metering
 			// footprint just before closing. No-op unless a sink was installed.
-			RecordConnNetworkIO(srcConn)
+			// Read the RAW accepted socket (origSrcConn), not the wrapped srcConn:
+			// the util.Conn/SafeConn wrappers embed net.Conn as an interface, so
+			// SyscallConn() is not reachable through them.
+			RecordConnNetworkIO(origSrcConn)
 			err := srcConn.Close()
 			if err != nil {
 				if !strings.Contains(err.Error(), "use of closed network connection") {

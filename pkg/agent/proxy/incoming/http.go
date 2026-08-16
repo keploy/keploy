@@ -1123,6 +1123,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// happened mid-iteration).
 	defer func() {
 		if h := upConnHolder.Load(); h != nil {
+			// Record kernel network I/O off the upstream socket BEFORE closing it.
+			// This is the real teardown for the zero-copy path: the caller's outer
+			// defer (handleHttp1Connection) runs after this and would only ever see
+			// an already-closed conn, so the accounting has to happen here. No-op
+			// unless a sink was installed.
+			ossproxy.RecordConnNetworkIO(h.c)
 			_ = h.c.Close()
 		}
 	}()
@@ -1145,6 +1151,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// shutdown sees a consistent view (either the old conn or the
 		// new one — never a torn pointer).
 		if h := upConnHolder.Load(); h != nil {
+			// Capture this upstream conn's byte totals before retiring it for a
+			// fresh one, so a mid-connection redial doesn't drop them.
+			ossproxy.RecordConnNetworkIO(h.c)
 			_ = h.c.Close()
 		}
 		// DialContext (instead of DialTimeout) so an in-flight dial
