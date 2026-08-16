@@ -146,6 +146,21 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	res.BodyResult[0].Normal = pass
 
+	// A body that failed while carrying noise is the one moment the user needs to
+	// know that some of that noise is inert: the report names a field they
+	// believe they already excluded. Only on a JSON failure — noise paths address
+	// JSON fields, so on any other body every entry would read as dead and the
+	// advice would be nonsense. Only on failure, so the happy path pays nothing
+	// for the extra walk.
+	//
+	// tcBodyNoise, not the merged map: a globalNoise entry applies to every
+	// endpoint by design, so naming it dead on each case that happens not to have
+	// that field would emit a line per failing case and bury the real failures.
+	// Only the test case's own recorded noise is a claim about THIS response.
+	if !pass && !skipBody && bodyType == models.JSON {
+		matcherUtils.WarnUnmatchableBodyNoise(logger, tc.Name, tcBodyNoise, tc.HTTPResp.Body, actualResponse.Body)
+	}
+
 	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
 		res.HeadersResult = *hRes
 

@@ -76,13 +76,22 @@ spec:
 		t.Fatalf("decoded noise[body] = %v, want the sectioned path list", got)
 	}
 
-	// An indexed path is what real recordings carry, and it matches nothing:
-	// the JSON walker keys array elements without a position, so the effective
-	// path is "items.product.stock". Silencing this by dropping numeric segments
-	// is unsafe under the matcher's substring semantics — see
-	// TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported. Until the walker
-	// carries positions, such a field fails loudly instead of passing silently,
-	// which is the upgrade impact for suites recorded with indexed noise paths.
+	// An indexed path is what recordings made before the producer fix carry, and
+	// it matches nothing: the JSON walker keys array elements without a position,
+	// so the effective path is "items.product.stock".
+	//
+	// The matcher deliberately still does not rewrite it. Dropping numeric
+	// segments from the STRING is unsafe — a string cannot tell an array position
+	// from a genuinely numeric object key, so "data.2026.count" would be
+	// corrupted into "data.count", which names a different field. See
+	// TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported.
+	//
+	// The fix therefore lives on the producing side: matcher.BodyNoiseFromJSONDiff
+	// derives paths by walking the two documents in step with this walker, so it
+	// distinguishes the two cases because it is looking at the document rather
+	// than at a string. Such a field keeps failing loudly here instead of passing
+	// silently, and matcher.WarnUnmatchableBodyNoise names the dead entry in the
+	// log — which is the upgrade path for suites recorded before that fix.
 	t.Run("indexed noise path does not silence its own field", func(t *testing.T) {
 		actual := tc.HTTPResp
 		actual.Body = strings.Replace(tc.HTTPResp.Body, `"stock":99`, `"stock":100`, 1)

@@ -235,7 +235,6 @@ func SplitNoise(noise map[string][]string, logger *zap.Logger) (bodyNoise map[st
 			}
 			for _, path := range values {
 				warnIfRegexShaped(logger, "body", path)
-				warnIfIndexedPath(logger, "body", path)
 				// An empty regex list means "ignore unconditionally", which is
 				// what a listed path is asking for.
 				bodyNoise[strings.ToLower(path)] = []string{}
@@ -284,31 +283,6 @@ var regexShapedTokens = []string{".*", ".+", `\d`, `\w`, `\s`, "[0-9", "[a-z", "
 // would emit one line per case and bury the actual failures.
 var warnedRegexShaped sync.Map
 
-// warnIfRegexShaped flags a sectioned noise value that looks like a regex
-// rather than a field path. Such a value used to be inert — it only tripped the
-// whole-section skip — so silently reinterpreting it as a path would turn a
-// green suite red with no explanation.
-// arrayIndexSegment matches a path segment that is only digits, i.e. an array
-// position. The JSON walker keys array elements without a position, so such a
-// path matches nothing and the field it names silently starts being compared.
-var arrayIndexSegment = regexp.MustCompile(`(^|\.)\d+(\.|$)`)
-
-// warnIfIndexedPath reports a noise path carrying an array position. Recorded
-// test cases do carry this shape, and it is exactly the one that goes red with
-// no explanation, so it is worth a line even though the fix is the user's.
-func warnIfIndexedPath(logger *zap.Logger, section, value string) {
-	if logger == nil || !arrayIndexSegment.MatchString(value) {
-		return
-	}
-	if _, seen := warnedRegexShaped.LoadOrStore("idx\x00"+section+"\x00"+value, struct{}{}); seen {
-		return
-	}
-	logger.Warn("noise path contains an array index, which matches nothing; drop the index to cover every element",
-		zap.String("section", section),
-		zap.String("value", value),
-		zap.String("suggested", arrayIndexSegment.ReplaceAllString(value, "$1")))
-}
-
 // containsWildcard reports whether a sectioned noise list is the documented
 // "ignore everything" wildcard.
 func containsWildcard(values []string) bool {
@@ -320,6 +294,10 @@ func containsWildcard(values []string) bool {
 	return false
 }
 
+// warnIfRegexShaped flags a sectioned noise value that looks like a regex
+// rather than a field path. Such a value used to be inert — it only tripped the
+// whole-section skip — so silently reinterpreting it as a path would turn a
+// green suite red with no explanation.
 func warnIfRegexShaped(logger *zap.Logger, section, value string) {
 	if logger == nil || !looksLikeRegex(value) {
 		return
