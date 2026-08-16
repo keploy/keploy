@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	Utils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	ossproxy "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -39,6 +40,13 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 			!strings.Contains(err.Error(), "use of closed network connection") {
 			logger.Debug("failed to close client connection", zap.Error(err))
 		}
+		// Ingress proxy: destConn is the app-facing socket (keploy → app). Record its
+		// TCP_INFO byte totals (true wire volume) into the usage-metering footprint
+		// before closing, so inbound gRPC serving traffic is metered too — the
+		// counterpart of the outgoing proxy's srcConn accounting. No-op unless a sink
+		// was installed. Best-effort: on ctx-cancel shutdown the socket may already be
+		// closed by the goroutine above, in which case the read is skipped.
+		ossproxy.RecordConnNetworkIO(destConn)
 		if err := destConn.Close(); err != nil &&
 			!strings.Contains(err.Error(), "use of closed network connection") {
 			logger.Debug("failed to close destination connection", zap.Error(err))
