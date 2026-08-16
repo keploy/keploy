@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	ossproxy "go.keploy.io/server/v3/pkg/agent/proxy"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -526,7 +527,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		)
 		return
 	}
-	defer upConn.Close()
+	defer func() {
+		// Ingress proxy: upConn is the app-facing socket (keploy → app on the
+		// redirected port). Record its TCP_INFO byte totals (true wire volume) into
+		// the usage-metering footprint before closing, so the app's inbound serving
+		// traffic is metered too — the counterpart of the outgoing proxy's srcConn
+		// accounting. No-op unless a sink was installed.
+		ossproxy.RecordConnNetworkIO(upConn)
+		_ = upConn.Close()
+	}()
 
 	// forceCloseMode: only sync mode needs the traditional HTTP parsing loop
 	// (strict one-at-a-time ordering with forced close). Sampling mode now

@@ -44,17 +44,19 @@ func SetNetworkIOSink(sink func(rx, tx uint64)) {
 	networkIOSink.Store(&sink)
 }
 
-// recordConnNetworkIO reads the kernel TCP_INFO byte counters off the app-facing
+// RecordConnNetworkIO reads the kernel TCP_INFO byte counters off an app-facing
 // socket and forwards them to the sink. Best-effort and cheap (one getsockopt);
 // a non-TCP conn or an unreadable fd is silently skipped. Call once per connection
-// just before closing srcConn.
+// just before closing it.
 //
-// Direction, from the proxy's srcConn (app ⇄ proxy):
-//   - Bytes_received = bytes the proxy RECEIVED on this socket = app → proxy = the
-//     app's EGRESS (its request).  → tx
-//   - Bytes_acked    = bytes the proxy SENT (and were acked) = proxy → app = the
-//     app's INGRESS (the response). → rx
-func recordConnNetworkIO(conn net.Conn) {
+// Pass the socket that keploy owns facing the APP — the outgoing proxy's srcConn
+// (app dials keploy) or the ingress proxy's upConn (keploy dials the app). In both
+// cases keploy is the app's peer, so the direction mapping is identical:
+//   - Bytes_received = bytes keploy RECEIVED on this socket = app → keploy = the
+//     app's EGRESS.  → tx
+//   - Bytes_acked    = bytes keploy SENT (and were acked) = keploy → app = the
+//     app's INGRESS. → rx
+func RecordConnNetworkIO(conn net.Conn) {
 	sinkP := networkIOSink.Load()
 	if sinkP == nil || conn == nil {
 		return

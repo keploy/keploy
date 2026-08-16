@@ -11,5 +11,5 @@ import "net"
 // SetNetworkIOSink is a no-op on non-Linux.
 func SetNetworkIOSink(_ func(rx, tx uint64)) {}
 
-// recordConnNetworkIO is a no-op on non-Linux.
-func recordConnNetworkIO(_ net.Conn) {}
+// RecordConnNetworkIO is a no-op on non-Linux.
+func RecordConnNetworkIO(_ net.Conn) {}
