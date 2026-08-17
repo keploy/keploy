@@ -1,6 +1,7 @@
 package mockdb
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1508,9 +1509,32 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
 				ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
 			}
+			// UseNumber, not a plain Unmarshal. mysql.Request.Message is
+			// an interface{}, so this first pass lands every packet body
+			// in a map[string]any — and encoding/json's reflective default
+			// puts every number in there as float64. retypeMySQL* then
+			// re-marshals that map and unmarshals it into the concrete
+			// packet type, so anything float64 cannot represent is already
+			// gone before ColumnEntry.UnmarshalJSON ever runs.
+			//
+			// A BIGINT UNSIGNED column is the case that breaks:
+			// 18446744073709551615 comes back as 1.8446744073709552e+19 and
+			// re-marshals as 18446744073709552000 — a literal that is now
+			// larger than MaxUint64, so no amount of care downstream can
+			// recover it. json.Number keeps the original text through the
+			// intermediate hop and re-marshals verbatim.
 			var s mySpec
-			if err := json.Unmarshal(m.Spec, &s); err != nil {
+			dec := json.NewDecoder(bytes.NewReader(m.Spec))
+			dec.UseNumber()
+			if err := dec.Decode(&s); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal mysql mock %q: %w", m.Name, err)
+			}
+			// Decode stops at the first complete value; json.Unmarshal
+			// rejects anything after it. Keep the stricter behaviour, so a
+			// truncated or concatenated spec still fails loudly instead of
+			// half-parsing into a mock with silently missing packets.
+			if dec.More() {
+				return nil, fmt.Errorf("failed to unmarshal mysql mock %q: unexpected trailing content after spec", m.Name)
 			}
 			for i := range s.Requests {
 				typed, err := retypeMySQLRequest(s.Requests[i].Header, s.Requests[i].Message)

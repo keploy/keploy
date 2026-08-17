@@ -1581,6 +1581,12 @@ func paramValueEqual(a, b interface{}, nc *util.NoiseChecker) bool {
 			// float64(9.99). Widening asks the float32 to carry precision
 			// it never had — float64(float32(9.99)) is 9.989999771118164,
 			// so a correctly recorded FLOAT param never matched itself.
+			//
+			// This is the same direction the int/uint arms below already
+			// take. Narrowing does collide for magnitudes float32 cannot
+			// hold (1e-300 compares equal to 0), but a float32 only ever
+			// enters here from a FieldTypeFloat decode and a MySQL FLOAT
+			// cannot carry those, so no real column reaches the collision.
 			return av == float32(bv)
 		case int:
 			return av == float32(bv)

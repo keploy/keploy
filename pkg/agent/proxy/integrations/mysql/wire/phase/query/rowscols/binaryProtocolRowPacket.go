@@ -393,24 +393,22 @@ func writeLenEncBytes(buf *bytes.Buffer, b []byte) error {
 
 // coerceToInt64 / coerceToFloat64 exist because ce.Value is an
 // interface{} that has been through a serializer, and no serializer
-// preserves Go's numeric types.
+// preserves Go's numeric types. yaml.v3 resolves an untagged scalar by
+// its shape rather than by the column's declared FieldType: `9.99`
+// comes back float64 and `10` comes back int, so a FieldTypeFloat
+// column yields float64 and an integral FieldTypeDouble yields int.
 //
-// YAML (mocks.yaml, the OSS record/replay store) resolves an untagged
-// scalar by shape, not by the column's declared FieldType: `9.99` comes
-// back float64 and `10` comes back int — so a FieldTypeFloat column
-// yields float64, and a FieldTypeDouble column whose value happens to be
-// integral yields int. JSON is worse: encoding/json gives float64 for
-// every number.
+// Type-asserting instead (`ce.Value.(float32)`) panics rather than
+// errors, and a panic here is not a failed row — it tears down the
+// proxy's connection handler, so the application under replay sees
+// "invalid connection" with nothing pointing at the cause.
 //
-// The old code type-asserted nakedly (`ce.Value.(float32)`), which
-// panics rather than errors. A panic here is not a failed row, it tears
-// down the proxy's connection handler and the application under replay
-// sees "invalid connection" with nothing pointing at the cause.
-//
-// pkg/models/mysql.coerceValueForFieldType solves the same problem for
-// the JSON path. It cannot be reused here without an import cycle, and
-// it does not cover the YAML path at all — which is the one the OSS
-// binary actually uses.
+// pkg/models/mysql.coerceValueForFieldType is a different job, not a
+// duplicate: it restores the Go type a JSON-recorded value should have
+// had (which decides what fmt.Sprint writes for a text-protocol row),
+// and it only runs on the JSON mock format. These two run on every
+// format and answer the narrower question of what integer or float the
+// binary encoder should write.
 func coerceToInt64(v interface{}) (int64, error) {
 	switch t := v.(type) {
 	case int:
@@ -437,12 +435,45 @@ func coerceToInt64(v interface{}) (int64, error) {
 		// so the bit pattern is what survives, not the sign.
 		return int64(t), nil
 	case float32:
-		return int64(t), nil
+		return exactInt64(float64(t))
 	case float64:
-		return int64(t), nil
+		return exactInt64(t)
 	default:
 		return 0, fmt.Errorf("cannot coerce %T to integer", v)
 	}
+}
+
+// exactInt64 converts only when the float names an integer that int64
+// can hold. Go leaves an out-of-range float→int conversion
+// implementation-defined — on amd64 it saturates to MinInt64, so
+// 1e300 and 1.8e19 both land on the same value and a corrupt mock
+// replays as a plausible-looking wrong number instead of an error.
+// Values above MaxInt64 that are genuinely wanted (BIGINT UNSIGNED)
+// reach the unsigned branch as uint64, not as a float.
+//
+// Erroring here is a deliberate trade and it is not free: the caller
+// fails the whole response, which drops the connection rather than the
+// row. A mock written by a keploy old enough to have stored the value
+// as a float (18446744073709551615 re-marshalled as
+// 1.8446744073709552e+19) is above MaxUint64 and unrecoverable — there
+// is no original left to encode. Replaying it as a different number
+// would be silent, undetectable corruption in a tool whose whole job
+// is fidelity, so the error names the column and says what to do. It
+// surfaces several frames up, where replayer/conn.go logs it and closes
+// the connection — the intermediate wrappers only add context.
+func exactInt64(f float64) (int64, error) {
+	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
+		return 0, fmt.Errorf("cannot coerce %v to integer: not a whole number; re-record this mock", f)
+	}
+	// 2^63 exactly. float64(math.MaxInt64) rounds *up* to this, so the
+	// upper bound has to be exclusive against 2^63 rather than
+	// inclusive against MaxInt64.
+	const twoPow63 = 9223372036854775808.0
+	if f < -twoPow63 || f >= twoPow63 {
+		return 0, fmt.Errorf("cannot coerce %v to integer: out of int64 range, "+
+			"the recorded value has already lost precision; re-record this mock", f)
+	}
+	return int64(f), nil
 }
 
 func coerceToFloat64(v interface{}) (float64, error) {
@@ -450,12 +481,7 @@ func coerceToFloat64(v interface{}) (float64, error) {
 	case float64:
 		return t, nil
 	case float32:
-		// Widen through the shortest decimal form. float64(float32(9.99))
-		// is 9.989999771118164; parsing "9.99" back gives the float64 a
-		// human wrote down. Narrowing to float32 later is exact either
-		// way, but DOUBLE columns holding a float32 must not inherit the
-		// float32 representation error.
-		return strconv.ParseFloat(strconv.FormatFloat(float64(t), 'g', -1, 32), 64)
+		return float64(t), nil
 	case int:
 		return float64(t), nil
 	case int8:

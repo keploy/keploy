@@ -95,6 +95,13 @@ jobs:
           - job: record_build_replay_build
             record_src: build-no-race
             replay_src: build-no-race
+            # FLOAT/DOUBLE column fidelity (keploy#4426) needs BOTH
+            # binaries to carry the fix: a record binary without it
+            # writes the IEEE-754 bit pattern into the mock, and a
+            # replay binary without it panics on a correctly recorded
+            # FLOAT. So only this cell exercises the fixture; the
+            # cross-version cells leave the flag unset and skip.
+            numeric_fidelity: "true"
     name: mysql-dual-conn (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
@@ -128,6 +135,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          MYSQL_NUMERIC_FIDELITY: ${{ matrix.config.numeric_fidelity }}
         run: |
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_dual_conn/java-linux.sh
