@@ -545,7 +545,45 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 	return release, nil
 }
 
-// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
+// ExtractCmdTypeFromArgs pulls an explicit --cmd-type out of raw argv.
+//
+// ShouldReexecWithSudo has to decide whether keploy needs root before cobra
+// has parsed anything and before any config file is read, so it cannot ask
+// the resolved config what the command type is. Returns "" when the flag is
+// absent; the caller decides what an unrecognised value means.
+func ExtractCmdTypeFromArgs(args []string) string {
+	// Both spellings: cli/provider's aliasNormalizeFunc maps cmdType ->
+	// cmd-type, so cobra accepts --cmdType and Changed("cmd-type") is true
+	// for it. Matching only the kebab form would let the camelCase spelling
+	// silently skip this privilege decision — and the repo's own CI scripts
+	// use camelCase aliases throughout.
+	names := []string{"--cmd-type", "--cmdType"}
+	// Last occurrence wins, matching how cobra resolves a repeated flag.
+	found := ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break // everything after the terminator is positional
+		}
+		for _, name := range names {
+			if arg == name {
+				if i+1 < len(args) {
+					found = args[i+1]
+					i++
+				} else {
+					found = ""
+				}
+				break
+			}
+			if strings.HasPrefix(arg, name+"=") {
+				found = arg[len(name)+1:]
+				break
+			}
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(found))
+}
+
 // ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
 // Returns empty string if not found.
 func ExtractCommandFromArgs(args []string) string {

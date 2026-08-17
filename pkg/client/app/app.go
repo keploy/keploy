@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -30,12 +31,31 @@ import (
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
+// resolveKind picks the launch mode for this App. opts.CommandType is the
+// value ValidateFlags already resolved — auto-detected from the command in
+// the ordinary case, but overridden when the user passed --cmd-type. Falling
+// back to FindDockerCmd(cmd) keeps every caller that leaves CommandType
+// unset behaving exactly as before.
+//
+// Deriving it from the command string again here was the reason --cmd-type
+// could not work end to end (#4399): agent.go honoured opts.CommandType
+// while this App did not, so `--cmd-type docker-compose -c "make up"` left
+// the agent expecting a compose project that SetupCompose was never asked to
+// create, and the run died waiting for an agent that could not appear.
+func resolveKind(commandType, cmd string) utils.CmdType {
+	switch kind := utils.CmdType(commandType); kind {
+	case utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose:
+		return kind
+	}
+	return utils.FindDockerCmd(cmd)
+}
+
 func NewApp(logger *zap.Logger, cmd string, client docker.Client, opts models.SetupOptions) *App {
 	app := &App{
 		logger:          logger,
 		cmd:             cmd,
 		docker:          client,
-		kind:            utils.FindDockerCmd(cmd),
+		kind:            resolveKind(opts.CommandType, cmd),
 		opts:            opts,
 		keployContainer: opts.KeployContainer,
 		container:       opts.Container,
@@ -222,13 +242,51 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	a.composeFile = newPath
 	a.logger.Debug("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
 
-	// Now replace the running command to run the docker-compose-tmp.yaml file instead of user docker compose file.
-	a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName)
+	newCmd, composeFileEnv := composeLaunchPlan(a.cmd, newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName)
+
+	if newCmd != "" {
+		// Literal compose command: our file is spliced in, as before.
+		a.cmd = newCmd
+		a.logger.Info(
+			"Running application using a temporary Keploy-generated Docker Compose file (will be cleaned up automatically)",
+			zap.String("cmd", a.cmd),
+			zap.String("composePath", newPath),
+		)
+		return nil
+	}
+
+	// A wrapper (make up, ./start.sh, an npm script) that runs compose
+	// internally. Nothing to splice into, so leave the command alone and let
+	// the compose it eventually runs find our file through the environment.
+	//
+	// This is process-global and inherited by every child keploy spawns from
+	// here on, not just the application command. That is tolerable because
+	// every compose invocation keploy makes itself passes -f explicitly, so
+	// none of them consult COMPOSE_FILE.
+	if previous, had := os.LookupEnv("COMPOSE_FILE"); had && previous != composeFileEnv {
+		a.logger.Warn("overriding an existing COMPOSE_FILE for this run; any files it named "+
+			"beyond the one keploy copied are not part of the application's configuration",
+			zap.String("previous", previous), zap.String("now", composeFileEnv))
+	}
+	if err := os.Setenv("COMPOSE_FILE", composeFileEnv); err != nil {
+		utils.LogError(a.logger, err, "failed to point the wrapper command at keploy's compose file")
+		return err
+	}
 
 	a.logger.Info(
-		"Running application using a temporary Keploy-generated Docker Compose file (will be cleaned up automatically)",
+		"Running application through your command with COMPOSE_FILE pointed at a temporary "+
+			"Keploy-generated Docker Compose file (will be cleaned up automatically)",
 		zap.String("cmd", a.cmd),
-		zap.String("composePath", newPath),
+		zap.String("composePath", composeFileEnv),
+	)
+	// Stated up front because each one otherwise fails a long way from its cause.
+	a.logger.Warn(
+		"the command is not a literal docker compose invocation, so keploy cannot modify it directly",
+		zap.String("cmd", a.cmd),
+		zap.String("if it passes its own -f", "COMPOSE_FILE is ignored and keploy's agent will not be injected"),
+		zap.String("if it runs compose detached (up -d)", "the command returns immediately and keploy stops, treating it as the app exiting"),
+		zap.String("if it sets its own project name", "keploy's teardown may not reach every container it started"),
+		zap.String("also", "--abort-on-container-exit cannot be added, so keploy will not exit on its own if the app container dies"),
 	)
 
 	return nil
@@ -1163,7 +1221,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// dockerRunName is the resolved user-app container name; reused by the
 	// post-run container-name-conflict retry below.
 	var dockerRunName string
-	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
+	if a.kind == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 		// Clear any container left over from a prior run with the same --name
 		// before starting. --rm removes the container on exit, but under heavy
@@ -1320,7 +1378,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	var err error
-	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
+	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent)
 	// A user-app `docker run --name X` can still lose the container-name race to
 	// the prior test-set's --rm reaper on a saturated CI daemon even after the
 	// pre-run ensureContainerNameFreeWithin verified the name was free — the
@@ -1340,7 +1398,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		a.logger.Warn("docker run exited 125 with the --name still in use (container-name conflict); force-removing the name and retrying",
 			zap.String("container", dockerRunName), zap.Int("attempt", attempt))
 		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
-		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
+		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent)
 	}
 
 	// Compose mode: a `docker compose up` can fail not because the user's app is
@@ -1413,7 +1471,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 			a.ensureContainerNameFreeWithin(a.keployContainer, preRunRemoveBudget)
 		}
 
-		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
+		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent)
 	}
 
 	if cmdErr.Err != nil {
