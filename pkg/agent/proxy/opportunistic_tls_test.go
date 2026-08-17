@@ -241,3 +241,324 @@ func TestOpportunisticTLSIntercept_NonTLS_BudgetExhaustedWithIdlePeer_KeepsRelay
 		t.Errorf("%d of %d healthy plaintext connections were torn down after budget exhaustion", tornDown, conns)
 	}
 }
+
+// waitForOther used to return only res.err, throwing away isTLS and the
+// buffered ClientHello with it. That mattered because only the src side
+// detects TLS: when dst reports first (budget or error) and src lands an
+// isTLS verdict a moment later, the caller saw err == nil, fell through to
+// continuePlainRelay, and the handshake bytes — which sniffAndRelayLoop had
+// deliberately withheld from the upstream so a hijack could replay them —
+// were gone. The relay stayed up but the two ends were permanently out of
+// sync: the app waited for a ServerHello that could never arrive.
+//
+// The race window is now microseconds wide (the parent's deadline poke
+// retires the peer almost immediately), which makes it impractical to drive
+// from an integration test. This pins the contract the parent depends on
+// instead; the dispatch that consumes it is the `other.isTLS` branch in
+// opportunisticTLSIntercept.
+func TestWaitForOther_PreservesTLSVerdictAndBufferedBytes(t *testing.T) {
+	hello := []byte{0x16, 0x03, 0x01, 0x00, 0x2a, 0x01}
+
+	ch := make(chan sniffResult, 2)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ch <- sniffResult{side: "src", isTLS: true, buffered: hello}
+	}()
+
+	got := waitForOther(context.Background(), ch, &wg)
+
+	if !got.isTLS {
+		t.Errorf("isTLS = false, want true — the TLS verdict was dropped and the caller " +
+			"will plain-relay a connection whose ClientHello has been swallowed")
+	}
+	if string(got.buffered) != string(hello) {
+		t.Errorf("buffered = %x, want %x — the withheld ClientHello must survive so "+
+			"hijackAndMITM can replay it", got.buffered, hello)
+	}
+	if got.err != nil {
+		t.Errorf("err = %v, want nil", got.err)
+	}
+}
+
+// A peer blocked in to.Write() is the #4398 leak from the other end. Nothing
+// used to set a write deadline, and cancelRelay is invisible to a blocked
+// Write — the parent's poke sets a READ deadline — so wg.Wait() never
+// returned and the connection's two goroutines and two sockets were pinned
+// for the life of the process.
+//
+// Here the client stops reading while the upstream is still sending, so the
+// dst-side loop is parked in Write when the src side exhausts its budget and
+// the parent cancels. The call must still come back.
+func TestOpportunisticTLSIntercept_NonTLS_PeerBlockedInWriteStillReturns(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	upCh := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		upCh <- conn
+	}()
+
+	srcConn, client := net.Pipe()
+	defer client.Close()
+	defer srcConn.Close()
+
+	p := &Proxy{logger: testLogger()}
+	resCh := make(chan error, 1)
+	go func() {
+		resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn,
+			ln.Addr().String(), time.Time{}, models.OutgoingOptions{})
+	}()
+
+	upstream := <-upCh
+	defer upstream.Close()
+	defer func() {
+		select {
+		case c := <-upCh:
+			_ = c.Close()
+		default:
+		}
+	}()
+
+	// Upstream sends first, and we then WAIT for proof the dst-side loop
+	// has taken those bytes and parked in Write before doing anything
+	// else. Without that wait the premise is merely likely: under load
+	// the dst loop can still be in Read when the parent cancels, in which
+	// case it returns via the cancelled-read path, the connection plain-
+	// relays forever, and the test fails with a message blaming the write
+	// deadline — indistinguishable in CI from a real regression.
+	//
+	// net.Pipe is unbuffered, so reading a single byte here proves the
+	// loop's 4096-byte Write is underway with the remainder outstanding.
+	// This client reads nothing after that, so the loop stays parked.
+	go func() { _, _ = upstream.Write(make([]byte, 4096)) }()
+	_ = client.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadFull(client, make([]byte, 1)); err != nil {
+		t.Fatalf("dst-side loop never reached its Write: %v", err)
+	}
+	_ = client.SetReadDeadline(time.Time{})
+
+	// Spend the src budget so the parent takes the non-TLS branch.
+	go func() {
+		payload := make([]byte, 4096)
+		for sent := 0; sent < opportunisticPeekMaxBytes; sent += len(payload) {
+			if _, err := client.Write(payload); err != nil {
+				return
+			}
+		}
+	}()
+
+	_ = upstream.SetReadDeadline(time.Now().Add(20 * time.Second))
+	if _, err := io.CopyN(io.Discard, upstream, opportunisticPeekMaxBytes); err != nil {
+		t.Fatalf("upstream did not receive the peek-window bytes: %v", err)
+	}
+
+	// Deliberately nothing here unsticks the dst loop — no close, no
+	// drain. Any such nudge would release the pre-fix code too and the
+	// test would pass either way. Only its own write deadline can.
+	//
+	// Once it fires, the partially-unwritten chunk is reported rather
+	// than dropped, so the parent closes both sockets and this call
+	// returns. Before the fix a blocked Write had no deadline to expire
+	// and could not see cancelRelay, so waitForOther never completed and
+	// the call hung with two goroutines and two sockets pinned.
+	const bound = opportunisticPeekChunkTimeout + 15*time.Second
+	select {
+	case <-resCh:
+	case <-time.After(bound):
+		t.Fatalf("opportunisticTLSIntercept did not return within %s while the peer was "+
+			"parked in Write — the write deadline is not bounding it and the connection "+
+			"leaks", bound)
+	}
+}
+
+// pushSignal used to select over ctx.Done() as well as the send. Once the
+// parent cancelled relayCtx both cases were runnable and Go chose uniformly
+// at random, so roughly half of all post-cancellation verdicts were silently
+// dropped — including an isTLS verdict carrying a ClientHello the loop had
+// already withheld from the upstream. The guard protected against nothing:
+// sniffCh has capacity 2, exactly two goroutines run, and each returns right
+// after publishing, so the send can never block.
+//
+// The invariant asserted here is exact rather than statistical. net.Pipe is
+// unbuffered, so a client write only completes if sniffAndRelayLoop actually
+// consumed those bytes. Having consumed a ClientHello, the loop owes the
+// parent a verdict — those bytes exist nowhere else. Iterations where
+// cancellation wins the race first are skipped, not counted as failures:
+// there the loop never read anything and owes nothing.
+func TestSniffAndRelayLoop_PublishesVerdictEvenWhenCancelled(t *testing.T) {
+	const iterations = 250
+	hello := []byte{0x16, 0x03, 0x01, 0x00, 0x2a, 0x01}
+
+	consumed, dropped := 0, 0
+	for i := 0; i < iterations; i++ {
+		srcConn, client := net.Pipe()
+		toConn, toPeer := net.Pipe()
+
+		ch := make(chan sniffResult, 2)
+		ctx, cancel := context.WithCancel(context.Background())
+
+		p := &Proxy{logger: testLogger()}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			p.sniffAndRelayLoop(ctx, "src", srcConn, toConn, ch)
+		}()
+
+		// Sweep the cancellation across the read/publish window instead
+		// of firing it at a fixed instant: at 0 it almost always beats
+		// the first Read (nothing consumed, iteration skipped), and by a
+		// few tens of microseconds it lands around the publish, which is
+		// the window that used to lose verdicts.
+		go func(d time.Duration) {
+			time.Sleep(d)
+			cancel()
+		}(time.Duration(i%25) * time.Microsecond)
+		_ = client.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+		_, werr := client.Write(hello)
+
+		<-done
+
+		if werr == nil {
+			// The loop took the bytes, so it must have published.
+			consumed++
+			select {
+			case res := <-ch:
+				if !res.isTLS || string(res.buffered) != string(hello) {
+					t.Errorf("iteration %d: got %+v, want the isTLS verdict carrying %x", i, res, hello)
+				}
+			default:
+				dropped++
+			}
+		}
+
+		cancel()
+		_ = client.Close()
+		_ = srcConn.Close()
+		_ = toConn.Close()
+		_ = toPeer.Close()
+	}
+
+	if consumed == 0 {
+		t.Fatalf("no iteration got the handshake into the loop; the test proved nothing")
+	}
+	if dropped > 0 {
+		t.Errorf("%d of %d consumed ClientHellos were never published — the loop swallowed "+
+			"handshake bytes it had already withheld from the upstream, so the parent will "+
+			"plain-relay a connection whose handshake no longer exists anywhere",
+			dropped, consumed)
+	}
+}
+
+// replayWithheldHandshake carries the bytes a sniffAndRelayLoop withheld
+// from the upstream when the parent gives up on interception after the peer
+// has already caught a ClientHello. Those bytes were consumed out of the
+// client socket and live only in memory, so failing to forward them corrupts
+// the stream rather than merely losing an optimisation.
+func TestReplayWithheldHandshake_ForwardsBytesAndBoundsTheWrite(t *testing.T) {
+	hello := []byte{0x16, 0x03, 0x01, 0x00, 0x2a, 0x01}
+
+	t.Run("forwards the withheld bytes", func(t *testing.T) {
+		dstConn, upstream := net.Pipe()
+		defer dstConn.Close()
+		defer upstream.Close()
+
+		got := make(chan []byte, 1)
+		go func() {
+			buf := make([]byte, len(hello))
+			if _, err := io.ReadFull(upstream, buf); err != nil {
+				got <- nil
+				return
+			}
+			got <- buf
+		}()
+
+		if err := replayWithheldHandshake(dstConn, hello); err != nil {
+			t.Fatalf("replayWithheldHandshake: %v", err)
+		}
+		if b := <-got; string(b) != string(hello) {
+			t.Errorf("upstream got %x, want %x", b, hello)
+		}
+	})
+
+	t.Run("bounded when the upstream never reads", func(t *testing.T) {
+		// This path runs only after the upstream has pushed a full
+		// opportunisticPeekMaxBytes — exactly the profile of a peer that
+		// may have stopped reading. An unbounded Write here would put the
+		// #4398 hang back, in the parent goroutine this time.
+		dstConn, upstream := net.Pipe()
+		defer dstConn.Close()
+		defer upstream.Close() // never read from
+
+		done := make(chan error, 1)
+		go func() { done <- replayWithheldHandshake(dstConn, hello) }()
+
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("want an error when the upstream never reads, got nil")
+			}
+		case <-time.After(opportunisticPeekChunkTimeout + 5*time.Second):
+			t.Fatal("replayWithheldHandshake blocked indefinitely on an upstream that " +
+				"never reads — the write is unbounded and re-creates #4398")
+		}
+
+		// The deadline must not outlive the call, or continuePlainRelay
+		// inherits it and dies on its first write.
+		var zero time.Time
+		if err := dstConn.SetWriteDeadline(zero); err != nil {
+			t.Fatalf("clearing deadline: %v", err)
+		}
+	})
+}
+
+// A peer that publishes and then exits leaves waitForOther with BOTH its
+// result buffered and wg at zero, so the <-ch and <-doneCh cases are ready
+// together and Go picks between them at random. Taking <-doneCh without
+// looking discarded whatever was already in the buffer — including an isTLS
+// verdict carrying a withheld ClientHello, which exists nowhere else once
+// dropped. Same defect pushSignal had, one level up.
+//
+// This is a probabilistic detector, not a proof. Hitting the race needs
+// waitForOther's internal wg.Wait goroutine to close doneCh before the select
+// runs, which is uncommon — the un-drained form loses roughly 1 in 20,000
+// here, hence the iteration count. A pass is therefore weak evidence; the
+// argument for the drain is the reachability above, not this test. It is kept
+// because it costs ~0.3s and does fail on the un-drained form.
+func TestWaitForOther_DrainsResultPublishedBeforeGoroutineExit(t *testing.T) {
+	const iterations = 500000
+	hello := []byte{0x16, 0x03, 0x01, 0x00, 0x2a, 0x01}
+
+	dropped := 0
+	for i := 0; i < iterations; i++ {
+		ch := make(chan sniffResult, 2)
+		var wg sync.WaitGroup
+
+		// Publish and exit before waitForOther is even called, so both
+		// of its cases are ready the moment it selects.
+		wg.Add(1)
+		func() {
+			defer wg.Done()
+			ch <- sniffResult{side: "src", isTLS: true, buffered: hello}
+		}()
+
+		got := waitForOther(context.Background(), ch, &wg)
+		if !got.isTLS || string(got.buffered) != string(hello) {
+			dropped++
+		}
+	}
+
+	if dropped > 0 {
+		t.Errorf("%d of %d already-published verdicts were discarded — waitForOther took its "+
+			"doneCh case without draining the buffer, losing a ClientHello that exists "+
+			"nowhere else", dropped, iterations)
+	}
+}
