@@ -1574,7 +1574,20 @@ func paramValueEqual(a, b interface{}, nc *util.NoiseChecker) bool {
 		case float32:
 			return av == bv
 		case float64:
-			return float64(av) == bv
+			// Compare at float32 precision, not float64. One side is
+			// genuinely a float32 (FieldTypeFloat off the wire) and the
+			// other has been through YAML, which writes a float32 in its
+			// shortest 32-bit form ("9.99") and reads it back as
+			// float64(9.99). Widening asks the float32 to carry precision
+			// it never had — float64(float32(9.99)) is 9.989999771118164,
+			// so a correctly recorded FLOAT param never matched itself.
+			//
+			// This is the same direction the int/uint arms below already
+			// take. Narrowing does collide for magnitudes float32 cannot
+			// hold (1e-300 compares equal to 0), but a float32 only ever
+			// enters here from a FieldTypeFloat decode and a MySQL FLOAT
+			// cannot carry those, so no real column reaches the collision.
+			return av == float32(bv)
 		case int:
 			return av == float32(bv)
 		case int32:
@@ -1591,7 +1604,8 @@ func paramValueEqual(a, b interface{}, nc *util.NoiseChecker) bool {
 		case float64:
 			return av == bv
 		case float32:
-			return av == float64(bv)
+			// Narrow, don't widen — see the float32 arm above.
+			return float32(av) == bv
 		case int:
 			return av == float64(bv)
 		case int32:
