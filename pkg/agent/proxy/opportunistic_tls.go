@@ -93,10 +93,11 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 		// setting an already-expired deadline. Without this, a goroutine
 		// blocked in from.Read() can't observe ctx cancellation until the
 		// opportunisticPeekChunkTimeout (5 s) fires — adding a 5 s stall
-		// to every TLS connection before hijackAndMITM can start. Safe to
-		// force here: once we've decided to hijack, any bytes the peer
-		// was mid-read on are discarded anyway (MITM starts fresh), so
-		// there's no in-flight progress to lose by cutting it off instantly.
+		// to every TLS connection before hijackAndMITM can start.
+		//
+		// Cutting a Read short loses nothing: the bytes stay in the
+		// kernel receive buffer, and the deadline clear below is what
+		// lets the next reader still get them.
 		_ = srcConn.SetReadDeadline(time.Now())
 		_ = dstConn.SetReadDeadline(time.Now())
 		wg.Wait()
@@ -137,19 +138,38 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 			// to send would never be told to stop and waitForOther would
 			// hang forever (#4398).
 			//
-			// Deliberately NOT forcing an expired read deadline here (as
-			// cleanup() does for the isTLS path): the peer may be mid-Read
-			// on a connection that's genuinely still relaying real bytes
-			// toward its own budget completion, not idle. Forcing an
-			// instant cutoff would abort that in-flight progress and turn
-			// a legitimate pass-through into a spurious timeout error.
-			// Cancelling relayCtx alone still bounds the wait to at most
-			// one opportunisticPeekChunkTimeout (5 s, the same per-read
-			// cap sniffAndRelayLoop already uses) instead of forever, while
-			// letting an actively-progressing peer finish naturally if it
-			// completes before that.
+			// Poke an expired read deadline, same as cleanup(), so a peer
+			// parked in Read wakes now instead of serving out the rest of
+			// its opportunisticPeekChunkTimeout. Otherwise every closing
+			// plaintext connection holds two goroutines and two sockets
+			// for up to 5 s more.
+			//
+			// The clear afterwards is not decoration — it is what makes
+			// the poke safe. An expired deadline is sticky: the goroutine
+			// that already reported clears only its OWN side (:221) before
+			// returning, so without the clear here continuePlainRelay
+			// inherits an expired deadline and dies on its first read with
+			// i/o timeout, relaying nothing. cleanup() clears for the same
+			// reason.
+			//
+			// No data is lost by cutting a Read short. An expired deadline
+			// makes Read return (0, timeout) even with bytes already in
+			// the socket buffer, but those bytes stay in the kernel buffer
+			// and the next read — continuePlainRelay's io.Copy — gets them
+			// intact.
+			//
+			// Two honest limits on "bounded". The poke is best-effort: a
+			// peer between its loop-top ctx check and its own
+			// SetReadDeadline (:213-219) will overwrite this deadline with
+			// a fresh 5 s one and park anyway. And it only bounds a peer
+			// blocked in Read — one blocked in to.Write() at :262 has no
+			// write deadline to expire and is not bounded at all.
 			cancelRelay()
+			_ = srcConn.SetReadDeadline(time.Now())
+			_ = dstConn.SetReadDeadline(time.Now())
 			otherErr := waitForOther(ctx, sniffCh, &wg)
+			_ = srcConn.SetReadDeadline(time.Time{})
+			_ = dstConn.SetReadDeadline(time.Time{})
 
 			if res.err == nil && otherErr == nil {
 				// Budget hit on both sides without TLS — the
@@ -212,9 +232,22 @@ func (p *Proxy) sniffAndRelayLoop(ctx context.Context, side string, from, to net
 		_ = from.SetReadDeadline(time.Time{})
 
 		if err != nil {
-			if isTimeoutErr(err) && ctx.Err() == nil {
-				// Idle on this side; just loop to re-check ctx.
-				continue
+			if isTimeoutErr(err) {
+				if ctx.Err() == nil {
+					// Idle on this side; just loop to re-check ctx.
+					continue
+				}
+				// Cancelled while parked in Read. Being told to stop is
+				// not a failure of this side, so exit without publishing.
+				//
+				// Publishing here would be read by waitForOther as "the
+				// peer errored", which flips a clean budget-exhaustion
+				// result onto the close-both-connections path and kills a
+				// perfectly healthy plaintext relay. Whether that happened
+				// was a coin flip: sniffCh is buffered, so pushSignal's
+				// select had both a ready send and a ready ctx.Done() and
+				// picked at random.
+				return
 			}
 			pushSignal(ctx, sniffCh, sniffResult{side: side, isTLS: false, err: err})
 			return
