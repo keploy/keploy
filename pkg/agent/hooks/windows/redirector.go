@@ -56,6 +56,15 @@ func StopRedirector() error {
 // Returns (destination, true) if found, or (empty, false) if not found
 func GetDestination(srcPort uint32) (WinDest, bool) {
 	dest := C.get_destination(C.uint(srcPort))
+	// The Rust side has no way to signal absence across the FFI boundary: a
+	// miss comes back as a zeroed WinDest, and ip_version is 0 only in that
+	// case (a real mapping is always 4 or 6). Returning true regardless made
+	// the miss indistinguishable from a hit, so callers built a destination
+	// out of the zero value and dialled 0.0.0.0:0 instead of taking their
+	// fallback path.
+	if dest.ip_version == 0 {
+		return WinDest{}, false
+	}
 	return WinDest{
 		IPVersion: uint32(dest.ip_version),
 		DestIP4:   uint32(dest.dest_ip4),
