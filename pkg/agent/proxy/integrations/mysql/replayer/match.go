@@ -2362,9 +2362,18 @@ func equalPayloadLength(expected, actual mysql.PacketBundle) int {
 //
 //   - IDENTIFIERS survive, so "SHOW FULL FIELDS FROM `invoices`" can never be
 //     answered by "... FROM `couriers`". This is the failure that byte-length
-//     scoring used to cause.
+//     scoring used to cause. Double-quoted tokens count as identifiers here
+//     precisely to keep this true under ANSI_QUOTES — see the case below.
 //   - The literal's TYPE survives (?s vs ?n), so "x = 1" and "x = '1'" stay
 //     distinct — MySQL does not treat them alike.
+//
+// What it does NOT preserve is WHICH rows the statement selects: "LIMIT 10" and
+// "LIMIT 20", "OFFSET 0" and "OFFSET 200", "status = 'active'" and
+// "status = 'deleted'" all mask alike. That is inherent to the tier — its whole
+// purpose is to serve a statement whose literal drifted — but it means a
+// paginated read can be answered with a different page's rows when the exact
+// recording is absent. It is why this tier is last, never definitive, and
+// scored below every tier that identifies a statement outright.
 //
 // It is computed lexically, with no SQL parser, deliberately: a parser renders
 // statements it does not model to a constant string, which would make unrelated
@@ -2383,8 +2392,29 @@ func maskSQLLiterals(sql string) string {
 			b.WriteString(sql[i:j])
 			i = j
 
-		// String literal, in either quoting style.
-		case c == '\'' || c == '"':
+		// Double-quoted token: AMBIGUOUS, so it is kept verbatim rather than
+		// masked. Under the default sql_mode it is a string literal, but under
+		// ANSI_QUOTES it is an IDENTIFIER — and nothing on the wire says which
+		// mode the session is in. Masking it would break the guarantee this
+		// whole tier rests on: with `"users"` and `"orders"` both collapsing to
+		// ?s, `SELECT id FROM "customers"` masks equal to `SELECT id FROM
+		// "orders"` and one table's rows get served for another's — the exact
+		// cross-serve this matcher exists to prevent, reached through a
+		// different quoting style.
+		//
+		// Keeping it verbatim costs only that a client which BOTH quotes its
+		// string literals with " AND interpolates them loses the drift tier for
+		// those statements: they stop matching instead of matching wrongly.
+		// That is this scanner's stated bias — ambiguity fails toward "no
+		// match" — and single-quoted literals, which is what drivers and ORMs
+		// actually emit, are unaffected.
+		case c == '"':
+			j := scanQuoted(sql, i, '"')
+			b.WriteString(sql[i:j])
+			i = j
+
+		// Single-quoted string literal: unambiguously a value.
+		case c == '\'':
 			i = scanQuoted(sql, i, c)
 			b.WriteString("?s")
 

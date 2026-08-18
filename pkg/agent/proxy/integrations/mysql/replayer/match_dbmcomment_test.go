@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
@@ -339,6 +341,13 @@ func TestMaskSQLLiterals(t *testing.T) {
 		differs(t, "SHOW FULL FIELDS FROM `invoices`", "SHOW FULL FIELDS FROM `couriers`")
 		differs(t, "SELECT a FROM t1", "SELECT a FROM t2")
 		differs(t, "SELECT `col1` FROM t", "SELECT `col2` FROM t")
+		// Under sql_mode=ANSI_QUOTES a double-quoted token is an IDENTIFIER,
+		// and nothing on the wire says which mode the session is in. Masking it
+		// as a string made two DIFFERENT TABLES mask alike, so one table's rows
+		// were served for another's — the very cross-serve this matcher exists
+		// to prevent, reached through a different quoting style.
+		differs(t, `SELECT id FROM "customers" WHERE id = 1`, `SELECT id FROM "orders" WHERE id = 1`)
+		differs(t, `SELECT "col1" FROM t`, `SELECT "col2" FROM t`)
 		// A digit inside an identifier is part of the name, not a literal.
 		if got := maskSQLLiterals("SET NAMES utf8mb4"); got != "SET NAMES utf8mb4" {
 			t.Errorf("identifier digits must survive, got %q", got)
@@ -374,5 +383,60 @@ func TestIsSessionControlStatement(t *testing.T) {
 		if isSessionControlStatement(q) {
 			t.Errorf("%q is not a session-control statement", q)
 		}
+	}
+}
+
+// TestMatchCommand_AnsiQuotedIdentifierIsNeverCrossServed is the regression for
+// the literal-drift tier's one blind spot.
+//
+// Under sql_mode=ANSI_QUOTES a double-quoted token is an IDENTIFIER, not a
+// string, and the wire carries nothing that says which mode the session is in.
+// While maskSQLLiterals masked `"..."` as a value, `SELECT id FROM "customers"`
+// and `SELECT id FROM "orders"` both became `SELECT id FROM ?s ...`, so a query
+// against one table was answered with the other table's recording — the same
+// silent wrong-table serve that equal-byte-length scoring used to cause, which
+// is exactly what this matcher exists to prevent.
+//
+// The backquoted form is asserted alongside it as the control: it was always
+// treated as an identifier and must stay that way.
+func TestMatchCommand_AnsiQuotedIdentifierIsNeverCrossServed(t *testing.T) {
+	logger := zap.NewNop()
+	base := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct{ name, recorded, live string }{
+		{
+			name:     "ansi quoted identifiers",
+			recorded: `SELECT id FROM "orders" WHERE id = 1`,
+			live:     `SELECT id FROM "customers" WHERE id = 1`,
+		},
+		{
+			name:     "backquoted identifiers",
+			recorded: "SELECT id FROM `orders` WHERE id = 1",
+			live:     "SELECT id FROM `customers` WHERE id = 1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &fakeMockDb{session: []*models.Mock{
+				readbackMock("orders", tc.recorded, "ROWS=orders", base),
+			}}
+
+			resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(tc.live), db, newDecodeCtx(), nil, nil)
+			if err != nil {
+				t.Fatalf("matchCommand: %v", err)
+			}
+			if ok && resp != nil {
+				t.Fatalf("cross-serve: a query against a different table was answered with %q; only the literal may drift, never the table", resp.Payload)
+			}
+		})
+	}
+
+	// The tier must still do its job: same table, drifted single-quoted literal.
+	db := &fakeMockDb{session: []*models.Mock{
+		readbackMock("orders", `SELECT id FROM "orders" WHERE ref = 'aaa'`, "ROWS=orders", base),
+	}}
+	resp, ok, _, err := matchCommand(context.Background(), logger,
+		comQueryReq(`SELECT id FROM "orders" WHERE ref = 'bbb'`), db, newDecodeCtx(), nil, nil)
+	if err != nil || !ok || resp == nil {
+		t.Fatalf("a drifted single-quoted literal on the SAME table must still resolve, got ok=%v err=%v", ok, err)
 	}
 }
