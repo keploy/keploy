@@ -68,6 +68,7 @@ var flakyHeaders = []string{
 	// ── W3C Trace Context / OpenTelemetry ────────────────────────────
 	"traceparent", // unique trace-id + span-id per request
 	"tracestate",  // vendor-specific trace context
+	"baggage",     // W3C Baggage — per-request correlation entries; tracers emit it inconsistently
 
 	// ── Zipkin B3 propagation ────────────────────────────────────────
 	"x-b3-traceid",
@@ -81,6 +82,7 @@ var flakyHeaders = []string{
 	"x-datadog-parent-id",
 	"x-datadog-sampling-priority",
 	"x-datadog-origin",
+	"x-datadog-tags", // propagated _dd.p.* tags; dd-trace emits it only on sampled/decorated spans, so it comes and goes per request
 
 	// ── Generic request/correlation IDs ──────────────────────────────
 	"x-request-id",     // Nginx, Envoy, HAProxy, AWS ALB, Heroku
