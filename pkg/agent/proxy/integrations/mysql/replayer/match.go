@@ -1229,6 +1229,62 @@ func getQueryStructure(sql string) (string, error) {
 	return strings.Join(structureParts, "->"), nil
 }
 
+// stripSQLComments removes plain block comments (/* ... */) from a SQL string so
+// that per-statement tracer annotations do not defeat mock matching. Datadog DBM
+// sqlcommenter, sqlcommenter and marginalia append a UNIQUE comment to every
+// execution (e.g. `SELECT ... /*traceparent='00-<trace>-<span>-01',dddbs='app'*/`),
+// so the recorded and replayed text of the SAME statement never match
+// byte-for-byte. Without this, a non-DML statement (SHOW FULL FIELDS, SHOW INDEX,
+// ...) can't reach the exact-text path and falls to equal-payload-length-alone,
+// where the first same-length mock is cross-served — the wrong table's columns.
+//
+// MySQL executable comments (/*! ... */) and optimizer hints (/*+ ... */) are
+// semantic and are preserved. Content inside string literals ('...', "...") and
+// quoted identifiers (`+"`"+`...`+"`"+`) is left untouched so a literal containing "/*"
+// is not mistaken for a comment. The removed comment becomes a single space; only
+// leading/trailing whitespace is trimmed (interior spacing is left as-is, so a
+// recorded and replayed statement with the comment in the same position remain
+// byte-equal after stripping).
+func stripSQLComments(sql string) string {
+	if !strings.Contains(sql, "/*") {
+		return strings.TrimSpace(sql)
+	}
+	var b strings.Builder
+	b.Grow(len(sql))
+	var quote byte // 0 when not inside a literal; else the opening ' " or `+"`"+`
+	for i := 0; i < len(sql); {
+		c := sql[i]
+		if quote != 0 {
+			b.WriteByte(c)
+			if c == quote {
+				quote = 0
+			}
+			i++
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			quote = c
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		if c == '/' && i+1 < len(sql) && sql[i+1] == '*' &&
+			!(i+2 < len(sql) && (sql[i+2] == '!' || sql[i+2] == '+')) {
+			end := strings.Index(sql[i+2:], "*/")
+			if end < 0 {
+				break // unterminated comment: drop the remainder
+			}
+			i = i + 2 + end + 2
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return strings.TrimSpace(b.String())
+}
+
 func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle, getQuery func(packet mysql.PacketBundle) string) (bool, int) {
 	matchCount := 0
 
@@ -1237,8 +1293,12 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		return false, 0
 	}
 
-	expectedQuery := getQuery(expected)
-	actualQuery := getQuery(actual)
+	// Normalize per-statement tracer comments out of both queries before any
+	// comparison (see stripSQLComments). A Datadog DBM / sqlcommenter build
+	// appends a unique /*traceparent=...*/ to every call, so without this the
+	// recorded and replayed text of the same statement never match.
+	expectedQuery := stripSQLComments(getQuery(expected))
+	actualQuery := stripSQLComments(getQuery(actual))
 
 	// Count placeholders in both queries - this is crucial for PREPARE statements
 	// to ensure we match mocks with the same number of parameters
@@ -1253,17 +1313,23 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		return false, 0
 	}
 
+	// Equal payload length is a weak similarity signal, kept for partial scoring —
+	// but it must NOT gate the exact-text match. The same statement carries a
+	// different-length trace comment from a writer (cluster-) vs reader
+	// (cluster-ro-) endpoint, so equal base SQL can have unequal packet lengths;
+	// gating exact match on length there sent the query to equal-length-alone
+	// cross-serving.
 	if actual.Header != nil && actual.Header.Header != nil &&
 		expected.Header != nil && expected.Header.Header != nil &&
 		actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
 		matchCount++
-		if expectedQuery == actualQuery {
-			matchCount++
-			log.Debug("Query Exact matched",
-				zap.String("expected query", expectedQuery),
-				zap.String("actual query", actualQuery))
-			return true, matchCount
-		}
+	}
+	if expectedQuery == actualQuery {
+		matchCount++
+		log.Debug("Query Exact matched (trace-comment normalized)",
+			zap.String("expected query", expectedQuery),
+			zap.String("actual query", actualQuery))
+		return true, matchCount
 	}
 
 	// A PURE single system-variable read (SELECT @@[session.]<var>, no columns
