@@ -240,7 +240,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("server-port", c.cfg.ServerPort, "Port used by the Keploy Agent server to intercept traffic")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
+		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker-run/docker-start/docker-compose)")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
@@ -695,6 +695,112 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	return nil
 }
 
+// mentionsDockerBinary reports whether the command actually invokes docker,
+// as opposed to merely containing the word. Substring matching let
+// "./run-docker.sh" through — a wrapper by any reading, and the exact naming
+// convention a docker wrapper script uses.
+func mentionsDockerBinary(command string) bool {
+	fields := strings.Fields(strings.ToLower(command))
+	for i, field := range fields {
+		base := field
+		if j := strings.LastIndex(base, "/"); j >= 0 {
+			base = base[j+1:] // /usr/bin/docker -> docker
+		}
+		// The v1 binary takes any subcommand, so the name alone is enough.
+		if base == "docker-compose" {
+			return true
+		}
+		// A bare "docker" token is not enough: `npm run docker` runs a script
+		// called docker. Require a subcommand that actually launches
+		// something, which is what the docker-run/docker-start modes rewrite.
+		if base == "docker" && i+1 < len(fields) {
+			switch fields[i+1] {
+			case "run", "start", "compose", "container":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolveCommandType decides the CommandType for a record/test run.
+//
+// Before #4399 this was unconditionally `FindDockerCmd(command)`, so the
+// --cmd-type flag — defined, kebab-aliased, viper-bound and unmarshalled —
+// was overwritten before anything read it. There was no way to tell keploy
+// "this launches a container" when the launch is wrapped in a script or a
+// Makefile target and the raw command string looks nothing like docker.
+//
+// Gated on Changed() rather than on the value being non-empty, because
+// config/default.go ships cmdType: "native" in every generated keploy.yml —
+// a non-empty check would read that baked-in default as a user choice and
+// break docker auto-detection for everyone who never touched the flag.
+//
+// Deliberately command-line only. A cmdType in keploy.yml cannot be honoured
+// even in principle: the sudo re-exec in main.go runs before any config is
+// read (utils.ShouldReexecWithSudo, which this change teaches to read the
+// flag out of os.Args), so a config-supplied docker type would decide the
+// mode without the root privileges that mode needs. A docker value sitting
+// in config is warned about rather than silently ignored, so the trap that
+// made this flag inert for so long is at least visible.
+func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configured string) (string, error) {
+	if cmd.Flags().Changed("cmd-type") {
+		// Normalised the same way FindDockerCmd normalises what it matches
+		// against, so `--cmd-type Docker-Compose` is not a fatal typo.
+		explicit := strings.ToLower(strings.TrimSpace(configured))
+		switch kind := utils.CmdType(explicit); kind {
+		case utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose:
+			// docker-run and docker-start need to REWRITE the command —
+			// SetupDocker splices `--pid=container:…  --network=container:…`
+			// into a `docker run` — and there is no way to do that to a
+			// wrapper, nor an environment variable that achieves the same.
+			// Point one at `make up` and modifyDockerRun either errors on
+			// the token count or splices flags into the middle of the
+			// wrapper. Refuse it here, where the message can say why.
+			//
+			// docker-compose has a way through: keploy's compose file is
+			// handed over via COMPOSE_FILE and the command runs untouched,
+			// so a wrapper is supported there (see App.SetupCompose).
+			if (kind == utils.DockerRun || kind == utils.DockerStart) && command != "" &&
+				!mentionsDockerBinary(command) {
+				return "", fmt.Errorf(
+					"--cmd-type %s has to rewrite the command to attach keploy's namespaces, "+
+						"which is only possible on a literal docker command, and %q is not one. "+
+						"Pass the underlying docker command with -c, or use --cmd-type %s if the "+
+						"wrapper brings up a compose project",
+					explicit, command, utils.DockerCompose)
+			}
+			return explicit, nil
+		case utils.Empty:
+			// `--cmd-type=""` used to be silently overwritten by
+			// auto-detection, so that is what it must keep doing. Rejecting
+			// it would break scripts that pass it; preserving it would be
+			// worse still — GetCommonServices reads "" as "not docker" and
+			// leaves the docker client nil, while resolveKind reads it as
+			// "detect", so a `--cmd-type= -c "docker compose up"` would
+			// reach SetupCompose with a nil client and panic. Treat an
+			// explicitly empty value as "not specified".
+			return string(utils.FindDockerCmd(command)), nil
+		default:
+			return "", fmt.Errorf(
+				"invalid --cmd-type value %q: allowed values are %q, %q, %q, and %q",
+				configured, utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose)
+		}
+	}
+
+	detected := utils.FindDockerCmd(command)
+	// Only warn when it would actually have made a difference. A config that
+	// merely agrees with auto-detection is not being ignored in any way the
+	// user can observe, and warning on every such run would be noise.
+	if kind := utils.CmdType(strings.ToLower(strings.TrimSpace(configured))); utils.IsDockerCmd(kind) && kind != detected {
+		logger.Warn("cmdType in the config file is not honoured; pass --cmd-type on the command line instead",
+			zap.String("cmdType", configured),
+			zap.String("using", string(detected)),
+			zap.String("reason", "the privilege decision happens before any config file is read"))
+	}
+	return string(detected), nil
+}
+
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	// The --json flag isn't registered on every subcommand (record / agent
 	// don't define it in enterprise builds), so Lookup + fallback avoids
@@ -1046,7 +1152,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		// set the command type
-		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+		commandType, err := resolveCommandType(c.logger, cmd, c.cfg.Command, c.cfg.CommandType)
+		if err != nil {
+			return err
+		}
+		c.cfg.CommandType = commandType
 		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
 			return fmt.Errorf("non docker command not supported for OS: %s , Arch: %s", runtime.GOOS, runtime.GOARCH)
 		}
@@ -1095,7 +1205,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				c.logger.Info(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
 				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
 			}
-			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
+			// Compare the resolved TYPE, not the raw command string — the
+			// latter is never equal to a CmdType, so this gate never fired
+			// and the missing --container-name surfaced much later, as
+			// "container name not found" from SetupCompose, after the sudo
+			// re-exec and agent start. It matters more now: a wrapper
+			// command has no container name to parse out of it, so this is
+			// the only place the user can be told what to pass.
+			if utils.CmdType(c.cfg.CommandType) == utils.DockerCompose {
 				if c.cfg.ContainerName == "" {
 					utils.LogError(c.logger, nil, "Couldn't find containerName")
 					c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
@@ -1114,7 +1231,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// Check and fix keploy folder permissions for native mode only
 		// (handles root-owned files from older sudo-based versions)
 		// Docker commands use sudo re-exec, so they run as root and don't need this
-		cmdType := utils.FindDockerCmd(c.cfg.Command)
+		// Use the resolved type, not a second derivation from the command
+		// string — otherwise an explicit --cmd-type docker-* would still be
+		// treated as native here and prompt for sudo it does not need.
+		cmdType := utils.CmdType(c.cfg.CommandType)
 		if !utils.IsDockerCmd(cmdType) {
 			// Native mode: fix permissions immediately (this caches sudo credentials)
 			if err := utils.EnsureKeployFolderPermissions(cmd.Context(), c.logger, c.cfg.Path); err != nil {
