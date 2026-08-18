@@ -81,6 +81,17 @@ var flakyHeaders = []string{
 	"x-datadog-parent-id",
 	"x-datadog-sampling-priority",
 	"x-datadog-origin",
+	"x-datadog-tags", // _dd.p.* propagation tags — emitted ONLY when the trace carries at least one (128-bit trace id, sampling decision). Absent whenever it carries none, so its very PRESENCE is per-request.
+
+	// ── Conditionally-emitted propagation headers ────────────────────
+	// Same class as the entries above, and listed separately because the
+	// hazard is different: these are absent outright on some requests rather
+	// than merely carrying a fresh value. HeadersContainKeys is presence-only,
+	// so a recorded header that the live request omits kills the candidate
+	// before any value comparison runs — a value-noise entry would not help.
+	"baggage",      // W3C Baggage (OpenTelemetry, Sentry) — present only when the context has baggage entries
+	"sentry-trace", // Sentry distributed tracing — present only when tracing is enabled for the transaction
+	"x-b3-flags",   // B3 debug flag — present only on debug-sampled traces
 
 	// ── Generic request/correlation IDs ──────────────────────────────
 	"x-request-id",     // Nginx, Envoy, HAProxy, AWS ALB, Heroku
