@@ -669,6 +669,33 @@ func IsTransportConnReset(err error) bool {
 	return false
 }
 
+// logSimulateSendFailure reports a failed test request at a level that matches
+// what can still be done about it.
+//
+// A transport-level connection reset is RECOVERABLE, not terminal: the replay
+// orchestration re-sends it once it can prove the app consumed nothing for the
+// failed request (see IsTransportConnReset and retryResetOnce), and the common
+// docker-proxy reset recovers on the first re-send. Reporting that at ERROR is
+// not a cosmetic choice — keploy's own e2e scripts fail a run on any ERROR line
+// in the REPLAY log (.github/workflows/test_workflow_scripts/golang/
+// http_pokeapi/golang-linux.sh and its python/node siblings all grep test_logs
+// for "ERROR"), so one recovered transient turns a suite whose every test passed
+// into a red build.
+//
+// Nothing is lost by reporting the recoverable class at Debug here. When the
+// re-send is refused or exhausted, RunTestSet logs the definitive
+// "failed to simulate request" / "failed to simulate streaming request" at
+// ERROR, and the non-replay caller (service/runner) returns the error in its
+// TestResult. Every other failure class is still an ERROR here.
+func logSimulateSendFailure(logger *zap.Logger, err error) {
+	if IsTransportConnReset(err) {
+		logger.Debug("test request failed with a transport reset; the caller decides whether to re-send",
+			zap.Error(err))
+		return
+	}
+	utils.LogError(logger, err, "failed to send testcase request to app")
+}
+
 // doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
 // pre-response connection-refused (bounded, ctx-aware backoff, request body
 // rewound via GetBody). Any other error, or a real response, returns
@@ -722,7 +749,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
 	if errHTTPReq != nil {
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		logSimulateSendFailure(logger, errHTTPReq)
 		return nil, errHTTPReq
 	}
 
@@ -799,7 +826,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
 	if errHTTPReq != nil {
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		logSimulateSendFailure(logger, errHTTPReq)
 		return nil, errHTTPReq
 	}
 

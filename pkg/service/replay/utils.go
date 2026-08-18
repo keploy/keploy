@@ -463,10 +463,14 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			if ctx.Err() != nil {
 				return false
 			}
-			// pollCeiling elapsed with no 2xx. Downgraded from Warn per
-			// repo logging guidelines; the message still tells operators
-			// exactly which knobs to turn.
-			logger.Info("health probe timed out, falling back to fixed delay — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) or point --health-url at an endpoint that returns 2xx sooner",
+			// pollCeiling elapsed with no 2xx. Warn, not Info, and it names
+			// the consequence: we are about to fire the whole suite at an app
+			// that never reported healthy, so the likely outcome is every test
+			// failing with no response at all. That is indistinguishable from a
+			// real regression unless this line is visible, and it is the same
+			// situation the sibling TCP port gate above already reports at Warn
+			// ("firing tests anyway (replay may see status_code got=0)").
+			logger.Warn("health probe timed out; firing tests anyway (replay may see status_code got=0) — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) or point --health-url at an endpoint that returns 2xx sooner",
 				zap.String("healthUrl", sanitizeHealthURL(cfg.Test.HealthURL)),
 				zap.Duration("pollTimeout", pollCeiling),
 				zap.Duration("fallbackDelay", delay),
