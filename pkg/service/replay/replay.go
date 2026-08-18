@@ -1236,19 +1236,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:                  r.config.BypassRules,
-			MongoPassword:          r.config.Test.MongoPassword,
-			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
-			Mocking:                r.config.Test.Mocking,
-			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            mockNoiseConfig,
-			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
-			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
-			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
-			MysqlPorts:             r.config.MysqlPorts,
-			DisableMysqlAutoDetect: r.config.DisableMysqlAutoDetect,
-			PassThroughPorts:       r.config.Record.PassThroughPorts,
-			PassThroughHosts:       r.config.Record.PassThroughHosts,
+			Rules:                     r.config.BypassRules,
+			MongoPassword:             r.config.Test.MongoPassword,
+			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
+			Mocking:                   r.config.Test.Mocking,
+			Backdate:                  testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:               mockNoiseConfig,
+			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
+			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
+			SchemaNoiseStrict:         r.config.Test.SchemaNoiseStrict,
+			MysqlPorts:                r.config.MysqlPorts,
+			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
+			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+			PassThroughPorts:          r.config.Record.PassThroughPorts,
+			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1439,19 +1440,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:                  r.config.BypassRules,
-			MongoPassword:          r.config.Test.MongoPassword,
-			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
-			Mocking:                r.config.Test.Mocking,
-			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            mockNoiseConfig,
-			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
-			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
-			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
-			MysqlPorts:             r.config.MysqlPorts,
-			DisableMysqlAutoDetect: r.config.DisableMysqlAutoDetect,
-			PassThroughPorts:       r.config.Record.PassThroughPorts,
-			PassThroughHosts:       r.config.Record.PassThroughHosts,
+			Rules:                     r.config.BypassRules,
+			MongoPassword:             r.config.Test.MongoPassword,
+			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
+			Mocking:                   r.config.Test.Mocking,
+			Backdate:                  testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:               mockNoiseConfig,
+			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
+			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
+			SchemaNoiseStrict:         r.config.Test.SchemaNoiseStrict,
+			MysqlPorts:                r.config.MysqlPorts,
+			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
+			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+			PassThroughPorts:          r.config.Record.PassThroughPorts,
+			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
