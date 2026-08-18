@@ -403,7 +403,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 			r.config.Test.Language = language
 		} else if language != r.config.Test.Language && language != models.Unknown {
-			utils.LogError(r.logger, nil, "language detected is different from the language provided")
+			// Warn: only coverage is dropped, the test results themselves are
+			// unaffected, so this must not read as a broken run.
+			utils.LogWarn(r.logger, nil, "language detected is different from the language provided; skipping coverage",
+				zap.String("detected", language.String()),
+				zap.String("provided", r.config.Test.Language.String()),
+				zap.String("next_step", "pass --language matching the app, or drop the flag to use detection"))
 			r.config.Test.SkipCoverage = true
 		}
 	}
@@ -794,7 +799,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 		err = r.hookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
+			utils.LogWarn(r.logger, err, "AfterTestSetRun hook failed; replay continues", zap.String("testSet", testSet))
 		}
 
 		if i == 0 && !r.config.Test.SkipCoverage {
@@ -910,7 +915,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if !r.afterTestRunCalled {
 			err = r.hookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to execute after test run hook")
+				utils.LogWarn(r.logger, err, "AfterTestRun hook failed; the run's results are unaffected")
 			}
 		}
 	}
@@ -1528,7 +1533,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if err := r.hookImpl.BeforeTestSetReplay(runTestSetCtx, testSetID); err != nil {
-		utils.LogError(r.logger, err, "BeforeTestSetReplay hook failed; inspect your custom hook implementation or disable it for this test set if this failure is expected",
+		utils.LogWarn(r.logger, err, "BeforeTestSetReplay hook failed; replay continues — inspect your custom hook implementation or disable it for this test set if this failure is expected",
 			zap.String("testSetID", testSetID),
 		)
 	}
@@ -1771,7 +1776,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if replay == 0 {
 				if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 					if err := mutator.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
-						utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
+						utils.LogWarn(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
 							zap.String("testcase", testCase.Name),
 							zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
 					}
@@ -2397,7 +2402,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// in Phase 1 is not needed here — each tc is executed exactly once.
 			if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 				if err := mutator.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
-					utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
+					utils.LogWarn(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
 						zap.String("testcase", tc.Name),
 						zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
 				}
@@ -3103,7 +3108,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.isLastTestSet && r.instrument && cmdType == utils.DockerCompose {
 		r.afterTestRunCalled = true
 		if hookErr := r.hookImpl.AfterTestRun(ctx, r.testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
-			utils.LogError(r.logger, hookErr, "failed to execute after test run hook")
+			utils.LogWarn(r.logger, hookErr, "AfterTestRun hook failed; the run's results are unaffected")
 		}
 	}
 

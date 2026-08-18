@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -46,7 +47,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 	switch tc.Kind {
 	case models.HTTP:
 		if err := h.instrumentation.BeforeSimulate(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
-			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+			h.warnHookFailed(err, "BeforeSimulate", tc.Name, testSetID)
 		}
 
 		hostToUse := h.cfg.Test.Host
@@ -76,7 +77,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			resp, err := pkg.SimulateHTTPStreaming(ctx, tc, testSetID, h.logger, cfg)
 
 			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
-				h.logger.Error("failed to call AfterSimulate hook", zap.Error(afterErr))
+				h.warnHookFailed(afterErr, "AfterSimulate", tc.Name, testSetID)
 			}
 
 			return resp, err
@@ -86,14 +87,14 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
-			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+			h.warnHookFailed(err, "AfterSimulate", tc.Name, testSetID)
 		}
 
 		return resp, err
 	case models.GRPC_EXPORT:
 
 		if err := h.instrumentation.BeforeSimulate(ctx, &tc.GrpcReq.Timestamp, testSetID, tc.Name); err != nil {
-			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+			h.warnHookFailed(err, "BeforeSimulate", tc.Name, testSetID)
 		}
 
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
@@ -115,7 +116,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
-			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+			h.warnHookFailed(err, "AfterSimulate", tc.Name, testSetID)
 		}
 
 		return resp, err
@@ -124,6 +125,27 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
 
+}
+
+// warnHookFailed reports a Before/AfterSimulate hook failure.
+//
+// Warn, not Error, because these hooks are best-effort by construction and the
+// replay result does not depend on them: the default OSS implementation is a
+// no-op extension point (service/agent.AgentHook), the agent client already
+// swallows a transport failure calling them (Debug + nil), and every call site
+// here ignores the returned error and carries on. Reporting a failure the run
+// recovers from at Error breaks the contract keploy's own e2e scripts rely on —
+// they grade a run by grepping its log for "ERROR".
+//
+// The failure is still worth seeing, with the test case that hit it, because in
+// builds that DO implement these hooks (e.g. the enterprise time-freeze anchor)
+// a silent failure can shift later results.
+func (h *Hooks) warnHookFailed(err error, hook, testCase, testSetID string) {
+	utils.LogWarn(h.logger, err, "agent hook failed; replay continues",
+		zap.String("hook", hook),
+		zap.String("testCase", testCase),
+		zap.String("testSetID", testSetID),
+		zap.String("next_step", "check the agent is reachable and healthy; a failed hook does not by itself invalidate this test's result"))
 }
 
 func effectiveHTTPConfigPort(tc *models.TestCase, cfg config.Test) uint32 {
@@ -200,7 +222,9 @@ func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
 
 	if err := h.instrumentation.BeforeTestRun(ctx, testRunID); err != nil {
-		h.logger.Error("failed to call BeforeTestRun hook", zap.Error(err))
+		utils.LogWarn(h.logger, err, "agent hook failed; replay continues",
+			zap.String("hook", "BeforeTestRun"),
+			zap.String("testRunID", testRunID))
 	}
 
 	return nil
@@ -215,7 +239,9 @@ func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, test
 	// (handled by HandleBeforeTestSetCompose in the agent process).
 
 	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, testSetID, firstRun); err != nil {
-		h.logger.Error("failed to call BeforeTestSetCompose hook", zap.Error(err))
+		utils.LogWarn(h.logger, err, "agent hook failed; replay continues",
+			zap.String("hook", "BeforeTestSetCompose"),
+			zap.String("testSetID", testSetID))
 	}
 
 	return nil
@@ -243,7 +269,9 @@ func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs [
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
 
 	if err := h.instrumentation.AfterTestRun(ctx, testRunID, testSetIDs, coverage); err != nil {
-		h.logger.Error("failed to call AfterTestRun hook", zap.Error(err))
+		utils.LogWarn(h.logger, err, "agent hook failed; replay continues",
+			zap.String("hook", "AfterTestRun"),
+			zap.String("testRunID", testRunID))
 	}
 	return nil
 }
@@ -251,7 +279,9 @@ func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs [
 func (h *Hooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	consumedMocks, err := h.instrumentation.GetConsumedMocks(ctx)
 	if err != nil {
-		h.logger.Error("failed to get consumed mocks", zap.Error(err))
+		// Deliberately not logged here: the error is returned, and every caller
+		// already decides how loud it should be — some report it, some carry on
+		// at Debug. Logging it as well produced two entries for one failure.
 		return nil, err
 	}
 	return consumedMocks, nil
