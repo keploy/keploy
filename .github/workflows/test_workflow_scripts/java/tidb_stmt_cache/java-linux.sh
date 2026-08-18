@@ -78,9 +78,59 @@ send_request() {
   for v in 100 200 300 400 500; do curl -sS "http://localhost:8080/api/kv/insert-select/$v" || true; echo; done
   echo "=== orphaned cross-query, identical param shape (/api/cross) ==="
   for v in 7 8 9; do curl -sS "http://localhost:8080/api/cross/$v" || true; echo; done
+
+  # Streamed-BLOB writes (keploy#4262). setBinaryStream makes Connector/J send
+  # the value out of band and pipeline COM_STMT_RESET -> COM_STMT_SEND_LONG_DATA
+  # -> COM_STMT_EXECUTE per re-execution. Driven repeatedly on purpose: the
+  # RESET only appears when the statement is re-executed from the cache.
+  echo "=== streamed BLOB via SEND_LONG_DATA (/api/blob) ==="
+  for _ in 1 2 3; do curl -sS "http://localhost:8080/api/blob/2048" || true; echo; done
+
   sleep 10
   echo "Sending SIGINT to keploy ($kp_pid) for graceful shutdown"
   sudo kill -INT "$kp_pid" 2>/dev/null || true
+}
+
+# Regression guard for keploy#4262 (streamed-BLOB EXECUTE dropped at record).
+#
+# Asserted on the RECORDED ARTIFACT, not just the replay report. A parameter
+# sent with COM_STMT_SEND_LONG_DATA is absent from the COM_STMT_EXECUTE
+# payload while still being non-NULL in the null bitmap, so a decoder that
+# reads a value for every non-NULL parameter runs off the end, rejects the
+# command, and the EXECUTE never reaches the recorder at all. The recording
+# then contains RESET and SEND_LONG_DATA mocks but no EXECUTE, and replay
+# fails with "Can not read response from server".
+assert_blob_execute_recorded() {
+  section "Guard: streamed-BLOB EXECUTE is recorded (keploy#4262)"
+  local mocks execs slds
+  mocks=$(find ./keploy -name 'mocks.yaml' -o -name 'mocks.json' 2>/dev/null)
+  if [[ -z "$mocks" ]]; then
+    echo "::error::keploy#4262 guard: no mock files under ./keploy"
+    endsec; return 1
+  fi
+
+  # grep -h | wc -l rather than summing per-file -c counts: no bc dependency
+  # (not installed on every runner) and it behaves the same for one file or
+  # several. An unreadable mocks file yields 0 and trips the vacuity check
+  # below rather than passing silently.
+  # shellcheck disable=SC2086
+  slds=$(grep -h 'requestOperation: COM_STMT_SEND_LONG_DATA' $mocks 2>/dev/null | wc -l)
+  # shellcheck disable=SC2086
+  execs=$(grep -h 'requestOperation: COM_STMT_EXECUTE' $mocks 2>/dev/null | wc -l)
+
+  if [[ "${slds:-0}" -eq 0 ]]; then
+    echo "::error::keploy#4262 guard: no COM_STMT_SEND_LONG_DATA mocks — /api/blob did not"
+    echo "::error::produce a streamed write, so this guard would assert nothing."
+    endsec; return 1
+  fi
+  if [[ "${execs:-0}" -eq 0 ]]; then
+    echo "::error::keploy#4262 regression: ${slds} SEND_LONG_DATA mocks but ZERO COM_STMT_EXECUTE"
+    echo "::error::mocks. The streamed-BLOB EXECUTE is being dropped at decode time; replay will"
+    echo "::error::fail with 'Can not read response from server'."
+    endsec; return 1
+  fi
+  echo "OK: ${execs} COM_STMT_EXECUTE and ${slds} COM_STMT_SEND_LONG_DATA mocks recorded."
+  endsec
 }
 
 # Drops the COM_STMT_PREPARE mock for "SELECT ? AS v" from every recorded
@@ -157,6 +207,9 @@ send_request "$KEPLOY_PID"
 set +e; wait "$KEPLOY_PID"; echo "Record exit: $?"; set -e
 if grep -q "WARNING: DATA RACE" record.txt; then echo "::error::Data race during record"; cat record.txt; exit 1; fi
 endsec
+
+# Before any mock mutation below, while the recording is still pristine.
+assert_blob_execute_recorded
 
 section "Shutdown TiDB before test mode"
 docker compose down || true
