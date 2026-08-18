@@ -1794,6 +1794,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// bare *net.TCPConn (the RemoteAddr type-assert below relies on that), so read
 	// TCP_INFO off it at teardown instead of the wrapped srcConn.
 	origSrcConn := srcConn
+	// Register the raw app-facing socket for continuous network-I/O sampling, so a
+	// long-lived proxied connection (e.g. an app→DB connection-pool socket that
+	// stays open for the whole recording) is metered throughout its life — not only
+	// by the teardown RecordConnNetworkIO(origSrcConn) in the defer below.
+	TrackConnNetworkIO(origSrcConn)
 
 	defer func(start time.Time) {
 		duration := time.Since(start)

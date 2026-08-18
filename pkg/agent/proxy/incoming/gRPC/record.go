@@ -35,6 +35,10 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		destConn.Close()
 	}()
 
+	// gRPC connections are long-lived (many multiplexed HTTP/2 streams over one
+	// socket), so sample destConn continuously while it's open rather than only at
+	// the teardown RecordConnNetworkIO below.
+	ossproxy.TrackConnNetworkIO(destConn)
 	defer func() {
 		if err := clientConn.Close(); err != nil &&
 			!strings.Contains(err.Error(), "use of closed network connection") {

@@ -13,3 +13,6 @@ func SetNetworkIOSink(_ func(rx, tx uint64)) {}
 
 // RecordConnNetworkIO is a no-op on non-Linux.
 func RecordConnNetworkIO(_ net.Conn) {}
+
+// TrackConnNetworkIO is a no-op on non-Linux.
+func TrackConnNetworkIO(_ net.Conn) {}

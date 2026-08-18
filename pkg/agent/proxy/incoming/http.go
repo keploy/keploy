@@ -527,6 +527,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		)
 		return
 	}
+	// Sample this app-facing socket continuously while it's open (a kept-alive
+	// serving connection can outlive many requests), so its bytes aren't withheld
+	// until the teardown RecordConnNetworkIO below.
+	ossproxy.TrackConnNetworkIO(upConn)
 	defer func() {
 		// Ingress proxy: upConn is the app-facing socket (keploy → app on the
 		// redirected port). Record its TCP_INFO byte totals (true wire volume) into
@@ -1169,6 +1173,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		upConn = newConn
 		upstreamReader = bufio.NewReader(upConn)
 		upConnHolder.Store(&connHolder{c: newConn})
+		// Track the redialed upstream socket too: a keep-alive upstream can serve
+		// many requests before it's retired, so sample it continuously rather than
+		// only at the redial/teardown RecordConnNetworkIO(h.c) above.
+		ossproxy.TrackConnNetworkIO(newConn)
 		return nil
 	}
 
