@@ -34,10 +34,15 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	return nil
 }
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
 	// Run the app as the user who invoked sudo
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
+	// Run through `sh -c` when a shell is available; fall back to a direct exec
+	// (no /bin/sh) on distroless images. See utils.CommandContext.
+	cmd, err := CommandContext(ctx, userCmd)
+	if err != nil {
+		return CmdError{Type: Init, Err: err}
+	}
 
 	// Set the cancel function for the command
 	cmd.Cancel = cancel(cmd)
@@ -45,8 +50,17 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = waitDelay
 
-	// Check if the command is docker-compose related and output is a TTY
-	cmdType := FindDockerCmd(userCmd)
+	// Check if the command is docker-compose related and output is a TTY.
+	//
+	// kind is the resolved command type, not a second guess from the command
+	// string. Re-deriving here mislabelled every command --cmd-type exists
+	// for — a wrapper like "make up", and `sudo -E docker compose up`, both
+	// come back "native" — which drops compose onto the Setpgid path and the
+	// background process group that SIGTTOU/SIGTTIN stalls.
+	cmdType := kind
+	if cmdType == Empty {
+		cmdType = FindDockerCmd(userCmd)
+	}
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
 	// When in-memory compose content is provided, pipe it via stdin and skip PTY.
@@ -85,7 +99,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
-	err := cmd.Start()
+	err = cmd.Start()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}

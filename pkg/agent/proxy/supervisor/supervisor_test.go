@@ -197,6 +197,50 @@ func TestHangNotDetectedWhenIdle(t *testing.T) {
 	}
 }
 
+// A long-poll request makes no byte progress for far longer than the hang
+// budget while the server holds the connection open. SuspendWatchdog disarms
+// the hang detection for that connection so the parser is not aborted (which
+// would fall through to passthrough and lose the mock), even though pending
+// work is armed.
+func TestHangNotDetectedWhenSuspended(t *testing.T) {
+	t.Parallel()
+	s := New(shortCfg(t)) // 50ms budget
+
+	// Arm pending work (as the relay does when the request bytes are teed),
+	// then suspend the watchdog (as the dispatcher does once the request is
+	// matched to a poll lane).
+	s.MarkPendingWork()
+	s.SuspendWatchdog()
+
+	done := make(chan Result, 1)
+	parserStarted := make(chan struct{})
+	go func() {
+		done <- s.Run(context.Background(),
+			func(ctx context.Context, sess *Session) error {
+				close(parserStarted)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			&Session{})
+	}()
+
+	<-parserStarted
+	// Pending is armed and several budgets elapse, but the watchdog is
+	// suspended for this poll connection, so it must not fire.
+	select {
+	case r := <-done:
+		t.Fatalf("watchdog fired while suspended: %+v", r)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	s.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("parser did not exit after Close")
+	}
+}
+
 func TestHangResetOnActivity(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
@@ -558,6 +602,43 @@ func TestMemCapAborts(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("mem cap did not abort parser")
+	}
+}
+
+// SuspendWatchdog disables ONLY no-progress hang detection. A suspended
+// (poll-lane) connection must still be aborted on a mem-cap breach — the
+// per-connection buffer cap protects memory regardless of poll status.
+func TestMemCapAbortsEvenWhenSuspended(t *testing.T) {
+	t.Parallel()
+	s := New(shortCfg(t))
+	s.MarkPendingWork()
+	s.SuspendWatchdog()
+
+	parserStarted := make(chan struct{})
+	done := make(chan Result, 1)
+	go func() {
+		done <- s.Run(context.Background(),
+			func(ctx context.Context, sess *Session) error {
+				close(parserStarted)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			&Session{})
+	}()
+
+	<-parserStarted
+	s.MarkMemCapExceeded()
+
+	select {
+	case res := <-done:
+		if res.Status != StatusMemCap {
+			t.Fatalf("status: got %s, want mem_cap (suspend must not disable mem-cap protection)", res.Status)
+		}
+		if !res.FallthroughToPassthrough {
+			t.Fatalf("fallthrough: got false, want true")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("mem cap did not abort a suspended parser")
 	}
 }
 

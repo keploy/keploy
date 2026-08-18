@@ -73,4 +73,19 @@ type OutgoingConfig struct {
 
 	// Mocking enables or disables mock interception entirely.
 	Mocking bool
+
+	// MysqlPorts pins extra destination ports to the MySQL parser,
+	// skipping auto-detection for them. Mirrors Config.MysqlPorts.
+	MysqlPorts []uint32
+
+	// DisableMysqlAutoDetect turns off automatic MySQL port detection,
+	// restoring strict MysqlPorts matching. Mirrors
+	// Config.DisableMysqlAutoDetect.
+	DisableMysqlAutoDetect bool
+
+	// PassThroughPorts / PassThroughHosts mirror Config.Record.PassThroughPorts /
+	// PassThroughHosts so a standalone mock-serving session honours the same
+	// telemetry-egress passthrough rules as record/replay. See models.PassThroughRule.
+	PassThroughPorts []models.PassThroughRule
+	PassThroughHosts []models.PassThroughRule
 }

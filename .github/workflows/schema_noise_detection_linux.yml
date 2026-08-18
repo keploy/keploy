@@ -5,7 +5,7 @@ name: Schema Noise Detection On Linux
 # created_at, so the outgoing Elasticsearch request body drifts every run):
 #
 #   --schema-noise-detection -> detect the drifting field (body.created_at) and
-#                               persist it as req_body_noise on the ES mock.
+#                               persist it under noise.req on the ES mock.
 #   test.schemaNoiseStrict    -> a drift on a NON-noise field is rejected.
 
 on:

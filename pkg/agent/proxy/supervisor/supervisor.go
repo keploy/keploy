@@ -97,6 +97,11 @@ type Supervisor struct {
 	// we can and cannot guarantee.
 	SessionOnAbort func()
 
+	// suspended, once set, permanently disarms the hang watchdog for
+	// this connection (see SuspendWatchdog). Panic and mem-cap
+	// protection are unaffected.
+	suspended atomic.Bool
+
 	// Watchdog lifecycle. wdStop is closed to signal the loop to
 	// exit; wdDone is closed when the loop returns.
 	wdOnce sync.Once
@@ -160,6 +165,28 @@ func (s *Supervisor) MarkPendingWork() {
 // (matches invariant: long-poll, LLM response, pg_sleep(45) are OK).
 func (s *Supervisor) ClearPendingWork() {
 	s.pending.Store(false)
+}
+
+// SuspendWatchdog permanently disarms the hang watchdog for this
+// connection. The dispatcher calls it (via Session.SuspendWatchdog)
+// once the in-flight request is matched to a long-poll async lane:
+// such a request legitimately makes no byte progress for far longer
+// than the hang budget while the server holds the connection open,
+// which is indistinguishable from a hung parser at the byte level.
+// Without this the watchdog would abort the parser and fall through
+// to passthrough before the delivery arrives, so the poll's mock would
+// never be recorded. Panic and mem-cap protection stay active; only
+// no-progress hang detection is disabled. Idempotent and concurrency-safe.
+//
+// The disarm is permanent for the connection, not scoped to the in-flight
+// request: on an HTTP/1.1 keep-alive connection that carried a poll, a
+// later genuinely-hung request on the same connection is no longer
+// hang-aborted. This is an accepted, bounded trade-off — the blast radius
+// is one connection, user bytes keep flowing via the relay, and the parked
+// read unblocks on connection close — because poll clients typically
+// dedicate a connection to the poll loop.
+func (s *Supervisor) SuspendWatchdog() {
+	s.suspended.Store(true)
 }
 
 // MarkMemCapExceeded is called by the relay when the per-connection
@@ -408,6 +435,11 @@ func (s *Supervisor) watchdogLoop() {
 			return
 		case <-t.C:
 			if !s.pending.Load() {
+				continue
+			}
+			// A poll-lane connection is expected to make no byte
+			// progress for a long time; do not treat that as a hang.
+			if s.suspended.Load() {
 				continue
 			}
 			last := s.lastProgressNano.Load()

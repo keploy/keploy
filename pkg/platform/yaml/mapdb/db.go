@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -96,9 +97,58 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	return nil
 }
 
-// Upsert updates a single test-mock mapping.
-// If the file doesn't exist, it creates it.
+// Upsert writes a single test's mock entries, creating the file if absent. It is a one-entry UpsertBatch —
+// prefer UpsertBatch when several mappings are ready at once, because each call
+// rewrites the whole file (see UpsertBatch's note on cost).
 func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string, mockEntries []models.MockEntry) error {
+	return db.UpsertBatch(ctx, testSetID, map[string][]models.MockEntry{testID: mockEntries})
+}
+
+// mergeMockEntries unions new entries into existing ones, keyed by mock name and
+// preserving recorded order (existing first, then genuinely new arrivals).
+//
+// A test's mapping is built up in more than one go: the agent emits a test's
+// mocks when its window resolves, and emits more later for mocks it retroactively
+// bins into that already-resolved window. Those later emissions are a DELTA, not
+// a replacement — overwriting on the second one silently deletes the mocks the
+// first one recorded, and the test then replays with a short pool or none at all,
+// which is a no_mocks failure. Union, never replace.
+func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry {
+	if len(existing) == 0 {
+		return incoming
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, e := range existing {
+		seen[e.Name] = struct{}{}
+	}
+	merged := existing
+	for _, e := range incoming {
+		if _, dup := seen[e.Name]; dup {
+			continue
+		}
+		seen[e.Name] = struct{}{}
+		merged = append(merged, e)
+	}
+	return merged
+}
+
+// UpsertBatch merges every supplied test's mock entries into mappings.yaml in a
+// SINGLE read-modify-write. Entries for a test already present are unioned with
+// what is on disk, never replaced — see mergeMockEntries.
+//
+// Why this exists: the file is stored as one document, so persisting a mapping
+// means reading, decoding, re-encoding and rewriting all of it. Doing that once
+// per mapping is quadratic in the number of tests — measured at 368 tests, the
+// first write costs 164us and the last 19.45ms, a 118x slowdown, ~2.7s of pure
+// rewriting. That is slow enough to back-pressure the agent's mapping stream,
+// and the agent DROPS mappings it cannot hand over (its send is non-blocking so
+// that capture is never stalled). The lost mappings then surface at replay as
+// "no_mocks" for the affected tests. Batching keeps the cost linear so the
+// stream is never the bottleneck.
+func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error {
+	if len(byTest) == 0 {
+		return nil
+	}
 
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
@@ -141,21 +191,30 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 		}
 	}
 
-	found := false
+	// Index the existing entries once so a batch of N tests costs one pass
+	// rather than N linear scans.
+	at := make(map[string]int, len(mapping.TestCases))
 	for i, t := range mapping.TestCases {
-		if t.ID == testID {
-			mapping.TestCases[i].Mocks = mockEntries
-			found = true
-			break
-		}
+		at[t.ID] = i
 	}
 
-	if !found {
-		newTest := models.MappedTestCase{
-			ID:    testID,
-			Mocks: mockEntries,
+	// Append in a stable order. Go randomises map iteration, and mappings.yaml
+	// is a recorded artifact that gets diffed and reviewed — an unstable test
+	// order would make every re-record look like a change.
+	newIDs := make([]string, 0, len(byTest))
+	for testID := range byTest {
+		if i, ok := at[testID]; ok {
+			mapping.TestCases[i].Mocks = mergeMockEntries(mapping.TestCases[i].Mocks, byTest[testID])
+			continue
 		}
-		mapping.TestCases = append(mapping.TestCases, newTest)
+		newIDs = append(newIDs, testID)
+	}
+	sort.Strings(newIDs)
+	for _, testID := range newIDs {
+		mapping.TestCases = append(mapping.TestCases, models.MappedTestCase{
+			ID:    testID,
+			Mocks: byTest[testID],
+		})
 	}
 
 	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
@@ -176,10 +235,9 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 		return err
 	}
 
-	db.logger.Debug("Successfully upserted test-mock mapping",
+	db.logger.Debug("Successfully upserted test-mock mappings",
 		zap.String("testSetID", testSetID),
-		zap.String("testID", testID),
-		zap.Int("mockCount", len(mockEntries)))
+		zap.Int("tests", len(byTest)))
 
 	return nil
 }

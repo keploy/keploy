@@ -39,6 +39,26 @@ const (
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
 	DNS         Kind = "DNS"
+
+	// Aerospike covers all Aerospike traffic — info text frames,
+	// AS_MSG binary frames, and their compressed wrapper. It is an
+	// ENTERPRISE-ONLY parser (enterprise-native tier, like Redis/Kafka):
+	// OSS core carries only this Kind string. The enterprise parser
+	// stores its captured frames in the generic GenericRequests /
+	// GenericResponses payload slices and owns the typed frame model +
+	// the YAML mapper, so no Aerospike-specific type lives in OSS core.
+	Aerospike Kind = "Aerospike"
+
+	// RevokedTests is a RESERVED control Kind — it is NOT a real mock and no
+	// traffic parser ever produces it. The recorder emits a Mock with this Kind
+	// on the /outgoing stream to tell the CLI to revoke (delete) test cases
+	// whose owned mock was capacity-dropped AFTER the TC had already streamed
+	// (the deferred-orphan case that stream-time suppression cannot catch). The
+	// revoked TC names ride in Spec.Metadata. The CLI diverts this frame into a
+	// revoke set instead of persisting it; the agent emits it ONLY to a CLI that
+	// negotiated OutgoingOptions.SupportsDroppedRevoke, so an older CLI (which
+	// never sets that flag) never receives it and cannot mis-persist it.
+	RevokedTests Kind = "keploy-revoked-tests"
 )
 
 // MockName constants for the PostgresV3 parser. The integrations-side
@@ -58,6 +78,18 @@ const (
 	MockNamePostgresV3Session = "PostgresV3Session"
 )
 
+// StartupMockTestCaseWindow is the number of leading UNIQUE recorded test cases
+// whose mocks are treated as "startup mocks". Every mock captured from app boot
+// up to and including the recording of the Nth unique test case is preserved
+// wholesale: it is exempt from the record-side static-dedup pruning (so dedup
+// effectively begins at test N+1) and from replay-side RemoveUnusedMocks
+// pruning. The record side keys off this via SyncMockManager.resolvedTestCount
+// (it tags such mocks TestModeInfo.IsStartup); the replay side derives an
+// equivalent timestamp boundary from the on-disk test cases. Both must agree on
+// N, so it lives here as the single source of truth. Fixed in code rather than
+// exposed as a flag — change here to retune.
+const StartupMockTestCaseWindow = 5
+
 type Mock struct {
 	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`
 	Name         string       `json:"Name,omitempty" bson:"Name,omitempty"`
@@ -70,6 +102,46 @@ type Mock struct {
 	// list is skipped (treated as noise). Written by the enterprise
 	// secret-protection obfuscator.
 	Noise []string `json:"Noise,omitempty" bson:"noise,omitempty" yaml:"noise,omitempty"`
+
+	// responseHydrator lazily loads an elided response (HTTPResp/MongoResponses)
+	// at serve time; set only for spilled per-test mocks by the agent disk store.
+	// Unexported so gob ignores it — never crosses the wire or a recording.
+	responseHydrator func() (*HTTPResp, []MongoResponse, error)
+}
+
+// SetResponseHydrator installs the lazy response loader (agent disk-residency).
+func (m *Mock) SetResponseHydrator(fn func() (*HTTPResp, []MongoResponse, error)) {
+	m.responseHydrator = fn
+}
+
+// HasSpilledResponse reports whether the response is elided (needs hydration).
+func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
+
+// IsAsync reports whether this mock is async-egress — i.e. it carries an
+// AsyncMeta block. Presence of the block IS the signal (see AsyncMeta); this
+// is the single predicate the record mapping, replay collection, and engine
+// load all discriminate on.
+func (m *Mock) IsAsync() bool { return m.Spec.Async != nil }
+
+// HydrateResponse loads an elided response into Spec; no-op if not spilled, so
+// serve paths can call it unconditionally before reading the response.
+func (m *Mock) HydrateResponse() error {
+	fn := m.responseHydrator
+	if fn == nil {
+		return nil
+	}
+	httpResp, mongoResp, err := fn()
+	if err != nil {
+		return err
+	}
+	if httpResp != nil {
+		m.Spec.HTTPResp = httpResp
+	}
+	if mongoResp != nil {
+		m.Spec.MongoResponses = mongoResp
+	}
+	m.responseHydrator = nil
+	return nil
 }
 
 // TestModeInfo is in-memory-only bookkeeping attached to each Mock once it
@@ -116,23 +188,28 @@ type TestModeInfo struct {
 	// a long-lived mock hints at dead recordings worth re-capturing.
 	HitCount uint64 `json:"-" bson:"-"`
 
-	// IsStartup marks app-bootstrap traffic captured before the first
-	// inbound request (e.g. an AWS Secret Manager fetch at process boot).
-	// Such an outbound call can never claim a per-test window — it ran
-	// before any test — so the record-side syncMock reapers (dedup
-	// cleanup, stale-cutoff, memory-pressure wipe) must rescue it to disk
-	// instead of dropping it as debris.
+	// IsStartup marks startup-window traffic: a mock captured either before
+	// the first inbound request (classic app-bootstrap, e.g. an AWS Secret
+	// Manager fetch at process boot) OR while fewer than
+	// StartupMockTestCaseWindow unique test cases have been recorded. Such
+	// mocks must survive the record-side syncMock reapers (dedup cleanup,
+	// the ResolveRange keep=false / out-of-window / stale-cutoff rescues, the
+	// memory-pressure wipe) rather than being dropped — that is what keeps
+	// the boot-through-Nth-test mock corpus complete and effectively defers
+	// static-dedup pruning to the (N+1)-th test case.
 	//
 	// This is a RECORD-side cleanup signal only, with no replay-time
 	// meaning, which is why it is NOT modelled as a Lifetime value:
 	// Lifetime is derived from the on-disk Spec.Metadata tag and drives
 	// replay-time pool routing, whereas IsStartup is set live at ingest in
 	// SyncMockManager.AddMock and is only ever read on buffered, live-
-	// captured mocks before they are persisted. Like the sibling
-	// runtime-only fields, the json/bson tags keep it out of the text
-	// formats; gob (which ignores struct tags) does encode it, but a value
-	// carried on a reloaded mock is inert — the reapers run only on the
-	// live record buffer, never on disk-loaded mocks.
+	// captured mocks before they are persisted. (Replay's own startup-mock
+	// preservation is timestamp-based — see replay.startupMockCutoff — not
+	// keyed off this flag.) Like the sibling runtime-only fields, the
+	// json/bson tags keep it out of the text formats; gob (which ignores
+	// struct tags) does encode it, but a value carried on a reloaded mock is
+	// inert — the reapers run only on the live record buffer, never on
+	// disk-loaded mocks.
 	IsStartup bool `json:"-" bson:"-"`
 }
 
@@ -167,6 +244,27 @@ type MockSpec struct {
 	// PostgresV3 is the single discriminated spec for the v3 Postgres parser.
 	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.
 	PostgresV3 *PostgresV3Spec `yaml:"postgresV3,omitempty" json:"postgresV3,omitempty" bson:"postgres_v3,omitempty"`
+
+	// Aerospike (enterprise-only) stores its captured frames in the
+	// generic GenericRequests / GenericResponses payload slices above,
+	// like Redis/Kafka — so OSS core needs no Aerospike-specific field.
+
+	// ReqBodyNoise is the single, kind-agnostic home for field-path request-body
+	// noise detected during schema-based auto-replay matching
+	// (config.Test.SchemaNoiseDetection). EVERY parser stores it here — HTTP and
+	// non-HTTP (Pulsar/Kafka/Redis/…) alike — so the learn/enforce flow is
+	// uniform across protocols (see pkg/agent/proxy/integrations/schemanoise).
+	// fieldpath ("body.user.id") -> regex list, where an empty list means
+	// "ignore this whole field". Distinct from Mock.Noise ([]string value-regexes
+	// written by the enterprise obfuscator): this records which request-body
+	// fields drift between recording and replay.
+	ReqBodyNoise map[string][]string `json:"ReqBodyNoise,omitempty" yaml:"req_body_noise,omitempty" bson:"req_body_noise,omitempty"`
+
+	// Async, when non-nil, marks this mock as async-egress and carries the
+	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
+	// block — kept OUT of the flat parser Metadata above. Serialized as a
+	// top-level `async:` block on the recorded doc. See AsyncMeta.
+	Async *AsyncMeta `json:"Async,omitempty" yaml:"async,omitempty" bson:"async,omitempty"`
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
@@ -381,6 +479,63 @@ type PostgresV3QuerySpec struct {
 
 	// State effects
 	SideEffects *PostgresV3SideEffects `json:"sideEffects,omitempty" yaml:"sideEffects,omitempty" bson:"side_effects,omitempty"`
+}
+
+// MarshalYAML — see PostgresV3Notice.MarshalYAML for the rationale.
+// SQLNormalized carries the recorded query text, which (after the
+// integrations restoreRawSQL pass) can preserve embedded tabs and
+// newlines from the original statement. Left as a plain string, the
+// yaml.v3 v3.0.1 encoder picks a literal block scalar (`|N-`) for such
+// values; because yaml.Node.Encode marshals then immediately re-parses
+// its own output, that block scalar fails to round-trip with "found a
+// tab character where an indentation space is expected" — and the
+// failure happens inside EncodeMock's `Spec.Encode`, BEFORE the
+// post-encode sanitizeYAMLStringNodes walk can run, so the node-tree
+// sanitizer cannot rescue it. Routing SQLNormalized through
+// PostgresV3SafeString forces DoubleQuotedStyle on the WRITE side
+// (escaping \t / \n) so the self-reparse and the on-disk re-read both
+// succeed. The model field stays `string` so the integrations
+// recorder/replayer assignment sites (NormalizeForHash results,
+// index_loader copies) keep compiling unchanged; the alias is
+// YAML-side only. The alias spells out every YAML field explicitly
+// (mirroring PostgresV3Notice/PostgresV3Error): yaml.v3 v3.0.1 panics
+// on a duplicated key, so the embed-and-shadow idiom is unavailable —
+// the only field whose type changes is SQLNormalized (to the safe
+// wrapper); every other field keeps its original type and tag so the
+// on-disk shape is byte-for-byte identical to the struct-tag encoding.
+func (q PostgresV3QuerySpec) MarshalYAML() (any, error) {
+	type alias struct {
+		Class             string                 `yaml:"class,omitempty"`
+		Lifetime          string                 `yaml:"lifetime,omitempty"`
+		SQLAstHash        string                 `yaml:"sqlAstHash"`
+		SQLNormalized     PostgresV3SafeString   `yaml:"sqlNormalized"`
+		Relations         []string               `yaml:"relations,omitempty"`
+		ParamOIDs         []uint32               `yaml:"paramOids,omitempty"`
+		VolatilePositions []int                  `yaml:"volatilePositions,omitempty"`
+		InvocationID      string                 `yaml:"invocationId"`
+		PrecedingTxState  string                 `yaml:"precedingTxState,omitempty"`
+		BindValues        PostgresV3Cells        `yaml:"bindValues,omitempty"`
+		BindFormats       []int                  `yaml:"bindFormats,omitempty"`
+		ResultFormats     []int                  `yaml:"resultFormats,omitempty"`
+		Response          *PostgresV3Response    `yaml:"response,omitempty"`
+		SideEffects       *PostgresV3SideEffects `yaml:"sideEffects,omitempty"`
+	}
+	return alias{
+		Class:             q.Class,
+		Lifetime:          q.Lifetime,
+		SQLAstHash:        q.SQLAstHash,
+		SQLNormalized:     PostgresV3SafeString(q.SQLNormalized),
+		Relations:         q.Relations,
+		ParamOIDs:         q.ParamOIDs,
+		VolatilePositions: q.VolatilePositions,
+		InvocationID:      q.InvocationID,
+		PrecedingTxState:  q.PrecedingTxState,
+		BindValues:        q.BindValues,
+		BindFormats:       q.BindFormats,
+		ResultFormats:     q.ResultFormats,
+		Response:          q.Response,
+		SideEffects:       q.SideEffects,
+	}, nil
 }
 
 type PostgresV3Response struct {
@@ -684,9 +839,11 @@ type MockState struct {
 	Lifetime Lifetime `json:"lifetime,omitempty"`
 	// ReqBodyNoise carries field-path request-body noise detected during
 	// schema-based auto-replay matching (config.Test.SchemaNoiseDetection)
-	// back from the agent to the replay service so UpdateMocks can persist
-	// it onto the mock's HTTPReq.ReqBodyNoise. fieldpath ("body.user.id")
-	// -> regex list; empty list means "ignore the whole field".
+	// back from the agent to the replay service so UpdateMocks /
+	// PersistMockNoise can persist it onto the mock. HTTP mocks store it on
+	// HTTPReq.ReqBodyNoise; non-HTTP integrations (Pulsar/Kafka/Redis/Generic)
+	// store it on the kind-agnostic MockSpec.ReqBodyNoise field. fieldpath
+	// ("body.user.id") -> regex list; empty list means "ignore the whole field".
 	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
 }
 
@@ -727,6 +884,9 @@ func (m *Mock) DeepCopy() *Mock {
 		ConnectionID: m.ConnectionID,
 	}
 
+	// Carry the loader so tree copies can still hydrate their elided response.
+	c.responseHydrator = m.responseHydrator
+
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {
 		c.Noise = make([]string, len(m.Noise))
@@ -738,6 +898,21 @@ func (m *Mock) DeepCopy() *Mock {
 		c.Spec.Metadata = make(map[string]string, len(m.Spec.Metadata))
 		for k, v := range m.Spec.Metadata {
 			c.Spec.Metadata[k] = v
+		}
+	}
+
+	// Deep copy the kind-agnostic request-body schema-noise map (used by EVERY
+	// parser — HTTP and non-HTTP alike). Started from m.Spec by value above, so
+	// the clone would otherwise share this map and its value slices — and
+	// DeepCopy runs before async gob writes and when building runtime mock
+	// pools, so a learned-noise mutation on one copy could bleed into another or
+	// race a persistence read.
+	if m.Spec.ReqBodyNoise != nil {
+		c.Spec.ReqBodyNoise = make(map[string][]string, len(m.Spec.ReqBodyNoise))
+		for k, v := range m.Spec.ReqBodyNoise {
+			vc := make([]string, len(v))
+			copy(vc, v)
+			c.Spec.ReqBodyNoise[k] = vc
 		}
 	}
 
@@ -770,21 +945,15 @@ func (m *Mock) DeepCopy() *Mock {
 	// 4. Deep copy all pointers by creating a new object and copying the value.
 	if m.Spec.HTTPReq != nil {
 		httpReqCopy := *m.Spec.HTTPReq
-		// Deep copy the request-body noise map so a clone's detected noise
-		// can't mutate the shared pooled mock's map (and vice versa).
-		if m.Spec.HTTPReq.ReqBodyNoise != nil {
-			httpReqCopy.ReqBodyNoise = make(map[string][]string, len(m.Spec.HTTPReq.ReqBodyNoise))
-			for k, v := range m.Spec.HTTPReq.ReqBodyNoise {
-				vc := make([]string, len(v))
-				copy(vc, v)
-				httpReqCopy.ReqBodyNoise[k] = vc
-			}
-		}
 		c.Spec.HTTPReq = &httpReqCopy
 	}
 	if m.Spec.HTTPResp != nil {
 		httpRespCopy := *m.Spec.HTTPResp
 		c.Spec.HTTPResp = &httpRespCopy
+	}
+	if m.Spec.Async != nil {
+		asyncCopy := *m.Spec.Async
+		c.Spec.Async = &asyncCopy
 	}
 	if m.Spec.GRPCReq != nil {
 		grpcReqCopy := *m.Spec.GRPCReq

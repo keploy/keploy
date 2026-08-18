@@ -348,7 +348,15 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	// "connect: connection refused" on the agent URL. Mirrors replay's
 	// pre-MockOutgoing AgentHealthTicker gate (replay.go:939-952).
 	if r.config != nil && r.config.Agent.AgentURI != "" {
-		agentCtx, cancel := context.WithTimeout(gCtx, 120*time.Second)
+		// Use the same contention-tuned budget as the record/replay/agent
+		// readiness gates (pkg.AgentReadyTimeout, default 330s, overridable via
+		// KEPLOY_AGENT_READY_TIMEOUT) rather than a hardcoded 120s. On a
+		// saturated CI daemon the agent container can take well over a minute
+		// just to start, so the 120s ceiling here fired prematurely and failed
+		// an otherwise-healthy sandbox/runner bring-up that the other gates
+		// would have waited out.
+		agentReadyTimeout := keployPkg.AgentReadyTimeout()
+		agentCtx, cancel := context.WithTimeout(gCtx, agentReadyTimeout)
 		agentReadyCh := make(chan bool, 1)
 		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
 		select {
@@ -357,7 +365,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			return nil, gCtx.Err()
 		case <-agentCtx.Done():
 			cancel()
-			return nil, fmt.Errorf("keploy-agent at %s did not become ready within 120s; check the agent container logs and ensure its host port is reachable", r.config.Agent.AgentURI)
+			return nil, fmt.Errorf("keploy-agent at %s did not become ready within %s; check the agent container logs and ensure its host port is reachable", r.config.Agent.AgentURI, agentReadyTimeout)
 		case <-agentReadyCh:
 		}
 		cancel()
@@ -375,9 +383,40 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.SchemaNoiseDetection = r.config.Test.SchemaNoiseDetection
 		outOpts.SchemaNoiseStrict = r.config.Test.SchemaNoiseStrict
 		outOpts.MysqlPorts = r.config.MysqlPorts
+		outOpts.DisableMysqlAutoDetect = r.config.DisableMysqlAutoDetect
+		outOpts.PassThroughPorts = r.config.Record.PassThroughPorts
+		outOpts.PassThroughHosts = r.config.Record.PassThroughHosts
+		// Validate modes at load: NormalizeMode fails an unknown/typo'd mode CLOSED
+		// (to "off" = no passthrough), which means a mistyped rule silently
+		// suppresses the telemetry protection it meant to configure. Warn loudly so
+		// the typo is visible instead of only surfacing as unexpected replay.
+		for _, rule := range append(append([]models.PassThroughRule{}, outOpts.PassThroughPorts...), outOpts.PassThroughHosts...) {
+			switch rule.Mode {
+			case "", models.PassThroughSkip, models.PassThroughRecordOne, models.PassThroughOff:
+			default:
+				r.logger.Warn("passthrough: unrecognized mode, treated as no-passthrough (endpoint recorded normally); use skip|recordOne|off",
+					zap.String("mode", string(rule.Mode)), zap.String("host", rule.Host), zap.Uint32("port", rule.Port))
+			}
+		}
 	}
+	noiseCfg := map[string]map[string][]string{}
 	if headerNoise, ok := r.globalNoise["header"]; ok {
-		outOpts.NoiseConfig = map[string]map[string][]string{"header": headerNoise}
+		noiseCfg["header"] = headerNoise
+	}
+	if bodyNoise, ok := r.globalNoise["body"]; ok {
+		// "body" feeds outgoing-payload matchers (e.g. the Pulsar SEND matcher)
+		// and stays the response-assertion bucket — it intentionally does NOT
+		// drive HTTP request-body matching anymore.
+		noiseCfg["body"] = bodyNoise
+	}
+	if reqBodyNoise, ok := r.globalNoise["requestbody"]; ok {
+		// Dedicated HTTP request-body matching noise (drift-detection
+		// exclusion + strict-noise allowance). Separate from "body" so
+		// response-assertion noise can't silently soften request matching.
+		noiseCfg["requestbody"] = reqBodyNoise
+	}
+	if len(noiseCfg) > 0 {
+		outOpts.NoiseConfig = noiseCfg
 	}
 	if err := r.instrumentation.MockOutgoing(gCtx, outOpts); err != nil {
 		return nil, fmt.Errorf("mock-outgoing failed: %w", err)

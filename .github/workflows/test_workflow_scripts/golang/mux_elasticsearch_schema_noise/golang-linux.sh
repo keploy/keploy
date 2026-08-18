@@ -7,9 +7,9 @@
 # OUTGOING Elasticsearch request body (POST /documents/_doc) carries a volatile
 # field that drifts between a keploy recording and each replay. Three scenarios:
 #
-#   Phase A — control (flag off): replay writes NO req_body_noise.
+#   Phase A — control (flag off): replay writes NO noise.req.
 #   Phase B — detect+persist (--schema-noise-detection): the body.created_at
-#             drift is detected and persisted as req_body_noise on the ES mock.
+#             drift is detected and persisted under noise.req on the ES mock.
 #   Phase C — strict (test.schemaNoiseStrict): a drift on a NON-noise field
 #             (content, induced by tampering the recorded mock) is rejected.
 #
@@ -109,21 +109,26 @@ checkout_passed() {  # post-documents testcase passed?
   grep -oE '"testcase id": "[^"]*document[^"]*".*"passed": "[^"]+"' "$1" \
     | strip_ansi | grep -q '"passed": "true"'
 }
-mock_has_created_at_noise() { grep -A5 'req_body_noise' "$(mock_file)" 2>/dev/null | grep -q 'body.created_at'; }
-mock_has_any_noise()        { grep -q 'req_body_noise' "$(mock_file)" 2>/dev/null; }
+# Request-body schema noise is written under the unified `noise:` block as a
+# `req:` list of field paths (this replaced the legacy top-level `req_body_noise:`
+# map). A learned path therefore appears as a `- body.<path>` list item, which is
+# unique to noise.req: the HTTP spec's own `req:` is a mapping (no body-path list
+# items) and obfuscator value-regexes live under noise.value.
+mock_has_created_at_noise() { grep -qE '^[[:space:]]*-[[:space:]]+body\.created_at([[:space:]]|$)' "$(mock_file)" 2>/dev/null; }
+mock_has_any_noise()        { grep -qE '^[[:space:]]*-[[:space:]]+body\.' "$(mock_file)" 2>/dev/null; }
 
 # ---------------------------------------------------------------------------
 # Phase A — control
 # ---------------------------------------------------------------------------
 step "Phase A — control (no --schema-noise-detection)"
 record_fresh
-mock_has_any_noise && fail "fresh recording already has req_body_noise" \
-                   || pass "fresh recording has no req_body_noise"
+mock_has_any_noise && fail "fresh recording already has noise.req" \
+                   || pass "fresh recording has no noise.req"
 replay "$APP_DIR/test_control.log" --remove-unused-mocks
 checkout_passed "$APP_DIR/test_control.log" && pass "replay passed with flag off" \
                                             || fail "replay should pass with flag off"
-mock_has_any_noise && fail "flag off must NOT write req_body_noise" \
-                   || pass "flag off wrote no req_body_noise (inert when disabled)"
+mock_has_any_noise && fail "flag off must NOT write noise.req" \
+                   || pass "flag off wrote no noise.req (inert when disabled)"
 
 # ---------------------------------------------------------------------------
 # Phase B — detect + persist
@@ -134,10 +139,10 @@ replay "$APP_DIR/test_detect.log" --schema-noise-detection --remove-unused-mocks
 checkout_passed "$APP_DIR/test_detect.log" && pass "replay passed with detection on" \
                                            || fail "replay should pass with detection on"
 if mock_has_created_at_noise; then
-  pass "ES mock persisted req_body_noise: body.created_at"
-  grep -B1 -A2 'req_body_noise' "$(mock_file)" | sed 's/^/    /'
+  pass "ES mock persisted noise.req: body.created_at"
+  grep -A3 '^noise:' "$(mock_file)" | sed 's/^/    /'
 else
-  fail "expected req_body_noise: body.created_at in the ES mock"
+  fail "expected noise.req: body.created_at in the ES mock"
   echo "  --- mocks.yaml ---"; cat "$(mock_file)" 2>/dev/null | sed 's/^/    /'
 fi
 

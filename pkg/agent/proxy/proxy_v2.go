@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -16,12 +18,86 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
+
+const (
+	// orphanIdleGrace is how long a retired connection must carry no bytes
+	// before its suppression window is closed. Longer than any plausible
+	// gap WITHIN one app request (the window must never close mid-request
+	// and let a half-covered test case through), short enough that a
+	// connection idling between bursts stops suppressing quickly.
+	orphanIdleGrace = 1 * time.Second
+
+	// orphanIdleCheck is how often idleness is re-evaluated. The window can
+	// therefore over-cover by up to orphanIdleCheck past the true idle
+	// point, which errs toward suppressing — the safe direction.
+	orphanIdleCheck = 250 * time.Millisecond
+)
+
+// orphanWindowOpener is the slice of supervisor.Session that trackOrphanWhileActive
+// needs, so the loop can be tested without a live connection.
+type orphanWindowOpener interface {
+	OpenOrphanWindow(start time.Time) func()
+}
+
+// trackOrphanWhileActive keeps a suppression window open only while a retired
+// connection is actually carrying bytes, and closes it whenever the connection
+// falls idle.
+//
+// A retired connection can no longer be captured, but that only costs a test
+// case if the app USED it while serving that test case. A single window held
+// from the fallthrough to end-of-session says "everything after this point is
+// unreliable", which for a connection that then sat idle for ten minutes
+// throws away ten minutes of perfectly good recording — and on a fallthrough
+// early in a run, the entire run. Following activity instead suppresses the
+// spans that can really have lost a mock and nothing else.
+//
+// It always returns with its window closed. stop must be closed by the caller
+// once the connection has ended.
+// idleGrace and checkEvery are parameters rather than the package constants
+// so the loop is testable in milliseconds; production passes
+// orphanIdleGrace / orphanIdleCheck.
+func trackOrphanWhileActive(stop <-chan struct{}, sess orphanWindowOpener, lastForwardNanos *atomic.Int64, idleGrace, checkEvery time.Duration) {
+	closeWindow := sess.OpenOrphanWindow(time.Now())
+	defer func() {
+		if closeWindow != nil {
+			closeWindow()
+		}
+	}()
+
+	ticker := time.NewTicker(checkEvery)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case now := <-ticker.C:
+			idle := now.Sub(time.Unix(0, lastForwardNanos.Load())) > idleGrace
+			switch {
+			case idle && closeWindow != nil:
+				closeWindow()
+				closeWindow = nil
+			case !idle && closeWindow == nil:
+				// Traffic resumed on a connection that still cannot be
+				// captured. Reopen from the RESUME instant, not from now:
+				// the tick only tells us traffic happened at some point in
+				// the last checkEvery, and bytes moved from
+				// lastForwardNanos onwards. Opening at `now` would leave up
+				// to checkEvery of live traffic uncovered, and a request
+				// served entirely inside that hole is exactly the
+				// mock-less test case this exists to catch.
+				closeWindow = sess.OpenOrphanWindow(time.Unix(0, lastForwardNanos.Load()))
+			}
+		}
+	}
+}
 
 // newRelayDisabled reports whether the new supervisor+relay architecture
 // is disabled via environment. Set KEPLOY_NEW_RELAY to 0/false/off/no to
@@ -89,6 +165,11 @@ func (p *Proxy) recordViaSupervisor(
 		DestConnID:       fmt.Sprint(destConnID),
 		Opts:             opts,
 		OnPendingCleared: sv.ClearPendingWork,
+		// A parser that identifies its in-flight request as a long-poll
+		// async lane calls this to disarm the hang watchdog for the
+		// connection (the poll makes no byte progress for far longer than
+		// the hang budget). See supervisor.SuspendWatchdog.
+		SuspendWatchdog: sv.SuspendWatchdog,
 		// Route EmitMock through the SyncMockManager (obtained via
 		// syncMock.Get(), then mgr.AddMock) so V2 parsers pick up the
 		// same firstReqSeen session-window buffering, lifetime
@@ -100,6 +181,10 @@ func (p *Proxy) recordViaSupervisor(
 		// integrations#133 (the app's startup DB queries never found
 		// their mocks).
 		RouteMocksViaSyncMock: true,
+		// Per-app manager carried on the parser ctx by a multi-app caller
+		// (nil otherwise ⇒ EmitMock uses the package-global). Routes V2
+		// parser mocks to the right app's manager, like the legacy parsers.
+		Mgr: syncMock.FromContext(ctx),
 		// Legacy fields kept populated so a migrated parser can still
 		// consult them for fields we haven't promoted yet. The parser
 		// must not touch Ingress/Egress net.Conn values on the V2 path.
@@ -153,20 +238,79 @@ func (p *Proxy) recordViaSupervisor(
 		realCertHook = p.cbshim.RegisterReal
 	}
 
+	// lastForwardNanos is when this connection last moved a byte in either
+	// direction, stamped by the wrapped BumpActivity below. Read by the
+	// activity-scoped suppression loop.
+	var lastForwardNanos atomic.Int64
+	lastForwardNanos.Store(time.Now().UnixNano())
+
+	// ONE suppression tracker per connection, started by whichever cause
+	// fires first and stopped when the connection ends.
+	//
+	// Both causes — a tee desync and a retired parser — leave the connection
+	// in the same state: it can no longer be captured. So they share one
+	// activity-scoped window rather than opening two. They are also not
+	// independent: the incident's chain was memory-pressure drop → parser
+	// starves mid-frame → hang watchdog → passthrough fallthrough, so the
+	// DESYNC fires first. Giving it a plain open-ended window of its own
+	// would subsume the fallthrough's scoped one (WasMockOrphanedInWindow
+	// ORs the ranges) and silently restore the whole-session suppression
+	// this design exists to avoid.
+	var (
+		trackerOnce sync.Once
+		trackerStop = make(chan struct{})
+	)
+	startOrphanTracking := func() {
+		trackerOnce.Do(func() {
+			go trackOrphanWhileActive(trackerStop, svSess, &lastForwardNanos, orphanIdleGrace, orphanIdleCheck)
+		})
+	}
+	// Safe whether or not the tracker ever started — closing a channel with
+	// no reader is a no-op — and it guarantees the goroutine cannot outlive
+	// the connection.
+	defer close(trackerStop)
+
 	r := relay.New(relay.Config{
-		Logger:               logger,
-		TLSUpgradeFn:         newProxyTLSUpgradeFn(logger),
-		BumpActivity:         sv.BumpActivity,
+		Logger: logger,
+		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
+		// captured once per connection: the relay calls the returned fn with
+		// no options in hand. With the flag unset this is the historic
+		// InsecureSkipVerify=true dial, unchanged.
+		TLSUpgradeFn: newProxyTLSUpgradeFn(logger, opts.UpstreamTLSVerify, opts.UpstreamTLSRootCAs, srcConn),
+		// Only when verification is on: run the client-side handshake first so
+		// the application's SNI is captured before keploy dials the upstream it
+		// has to verify. Off (the default) keeps the historic dest-first order
+		// untouched — a dest-side failure is survivable there. See
+		// relay.Config.ClientTLSFirst.
+		ClientTLSFirst: opts.UpstreamTLSVerify,
+		// Wrapped to also stamp when this connection last carried bytes.
+		// After a parser is retired the relay keeps forwarding, so this is
+		// the signal that says WHEN the dead connection was actually in
+		// use — which is what bounds the suppression window below to the
+		// periods that can really have cost a mock.
+		BumpActivity: func() {
+			sv.BumpActivity()
+			lastForwardNanos.Store(time.Now().UnixNano())
+		},
 		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
 		OnClientChunkTeed:    sv.MarkPendingWork,
 		RealCertHook:         realCertHook,
+		// A hole in this connection's capture. Remember when it opened so
+		// the teardown below can mark the whole span: from here on the
+		// parser frames from the wrong offset and emits nothing, so every
+		// test case overlapping the span must be suppressed rather than
+		// shipped mock-less (replay would report match_phase=no_mocks).
+		// Suppression is what closes the failure by construction —
+		// retirement below only restores capture for what follows.
+		OnCaptureDesync: func(string) { startOrphanTracking() },
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
 		// withDefaults() — preserving the zero-config path.
-		PerConnCap:       p.recordBufferCap,
-		TeeChanBuf:       p.recordBufferQueueSize,
-		PreDispatchPause: preDispatchPause,
+		PerConnCap:         p.recordBufferCap,
+		TeeChanBuf:         p.recordBufferQueueSize,
+		ConsumerStallGrace: p.recordBufferStallGrace,
+		PreDispatchPause:   preDispatchPause,
 	}, srcConn, dstConn)
 
 	svSess.ClientStream = r.ClientStream()
@@ -232,11 +376,47 @@ func (p *Proxy) recordViaSupervisor(
 	}, svSess)
 
 	if result.FallthroughToPassthrough {
+		// A cancel that lands after the supervisor's grace period is the
+		// NORMAL way a `keploy record` stop ends a live V2 connection —
+		// the parser is blocked in FakeConn.Read, which observes only
+		// Close and read deadlines, so it cannot return inside the grace.
+		// There is no "rest of the connection" left to lose, so neither
+		// the warning nor the suppression window applies: emitting them
+		// would tell the user their recording is broken at the exact
+		// moment they are reading the logs, on every clean stop.
+		shuttingDown := result.Status == supervisor.StatusCanceled && ctx.Err() != nil
+
+		if !shuttingDown {
+			// Warn, not Debug. This is permanent, silent capture loss for
+			// the rest of a connection's life, and several of the exits
+			// that land here (StatusError, StatusMemCap) log nothing of
+			// their own — so at Debug a whole recording could come back
+			// unreplayable without a single line above Debug to explain
+			// it. Bounded: one line per connection, only on a retired
+			// parser.
+			//
+			// result.Err is deliberately NOT attached here. For
+			// StatusPanicked it reads "supervisor: parser panic: ..."
+			// (wrapPanic), and the memory-load lane scripts grep record.txt
+			// for /panic:|fatal error:/ under `set -Eeuo pipefail` to catch
+			// a CRASHED keploy. A recovered, structured, handled panic is
+			// not a crash, but the token is the token: putting it in an
+			// Info-level line would convert "some tests failed" into "Fatal
+			// error detected in record.txt" and kill the lane before it
+			// reaches its report. Status names the mechanism; the full
+			// error follows at Debug.
+			logger.Warn("parser retired; this connection can no longer be recorded and its test cases will be suppressed",
+				zap.String("parser", string(parserType)),
+				zap.String("status", result.Status.String()),
+				zap.String("clientConnID", svSess.ClientConnID),
+				zap.String("next_step", "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection, so tests recorded against it are dropped rather than shipped unreplayable. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_NEW_RELAY=off to force the legacy path for this parser, or KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely"),
+			)
+		}
 		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close",
 			zap.String("parser", string(parserType)),
 			zap.String("status", result.Status.String()),
+			zap.Bool("shutting_down", shuttingDown),
 			zap.Error(result.Err),
-			zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force legacy path for this parser, or KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely"),
 		)
 		// Crucial invariant (I1): the relay keeps forwarding client↔dest
 		// bytes end-to-end during the fallback. We do NOT cancel it here
@@ -249,11 +429,55 @@ func (p *Proxy) recordViaSupervisor(
 		// relay's forwarder goroutines continue draining srcConn/dstConn
 		// until either peer closes the connection, which triggers a
 		// normal Run exit.
+		//
+		// That is correct for USER TRAFFIC and wrong for RECORDING, and
+		// until now nothing said so. From this instant the connection
+		// emits no further mock — there is no path anywhere that puts a
+		// parser back on a live connection — while the app keeps issuing
+		// requests over it perfectly happily. On a pooled client the peer
+		// never closes, so "until peer close" means "until shutdown": every
+		// test case recorded from here on is streamed with no mocks behind
+		// it and fails replay with match_phase=no_mocks. Left silent, that
+		// is indistinguishable from a healthy recording until replay.
+		//
+		// So mark the span un-capturable for as long as it lasts. The TC
+		// suppressor in pkg/agent/routes/record.go drops every test case
+		// whose window overlaps it, which is the same coverage-for-honesty
+		// trade the memory-pressure and resync-hole suppressors already
+		// make: a smaller recording in which every test replays, instead of
+		// a larger one that lies.
+		// The tracker goroutine owns its window and closes it on the way
+		// out; `defer close(trackerStop)` at the top of this function is
+		// what stops it, so the close survives a panic here rather than
+		// only the happy path. An orphan window that never closes would
+		// suppress every test case for the REST OF THE SESSION.
+		if !shuttingDown {
+			// Shared with the desync path — see startOrphanTracking. If a
+			// tee already desynced this connection the tracker is running,
+			// and this is a no-op rather than a second window.
+			startOrphanTracking()
+		}
 		<-relayDone
 		return nil
 	}
 
 	// Non-fallthrough path: parser returned normally or with an error.
+	//
+	// The parser has EXITED, so nothing will ever read these streams again.
+	// Say so, rather than leaving the relay to infer it: closing the
+	// FakeConns fires their Done() channels, which is what releases a tee
+	// drain still holding chunks for a full out channel. Without this the
+	// drain has no way to distinguish "parser is slow" from "parser is gone"
+	// and has to wait out ConsumerStallGrace — on a path where the answer is
+	// already known for certain. This is the same guarantee tokio gets for
+	// free when a Receiver is dropped; Go has no goroutine-death event, so
+	// the owner of the goroutine has to publish it.
+	//
+	// Ordering matters: this must precede <-relayDone, which is where the
+	// relay waits for the drains.
+	_ = r.ClientStream().Close()
+	_ = r.DestStream().Close()
+
 	// Cancel the relay and drain.
 	relayCancel()
 	relayErr := <-relayDone
@@ -281,57 +505,115 @@ func (p *Proxy) recordViaSupervisor(
 //   - For isClient=true (upgrading the destination side — keploy
 //     acts as TLS client to the real server), dials TLS over the
 //     existing conn using tls.Client and performs the handshake.
-//     Upstream cert verification is ALWAYS skipped here — see the
-//     dest-side InsecureSkipVerify rationale on the cfg clone below.
+//     Upstream cert verification is skipped unless the operator opted
+//     in — see the dest-side rationale on the cfg clone below.
 //   - For isClient=false (upgrading the client side — keploy acts
 //     as TLS server presenting the MITM cert), hands off to
 //     pTls.HandleTLSConnection which already implements the server-
 //     side handshake used elsewhere in the proxy.
 //
+// verify / rootCAs come from the session's OutgoingOptions
+// (record.upstreamTls.verify / .caCert, resolved once in Proxy.New).
+// They are captured at closure-construction time because the relay
+// calls this fn per connection with no options in hand.
+//
+// srcConn is the application-facing socket for THIS connection. It is
+// held only to recover the client's source port, which is the key
+// CertForClient files the application's SNI under; the fn never reads
+// or writes it (the relay owns it). Nil is safe.
+//
 // The conn pointer update (so the forwarders switch to the upgraded
 // conn on subsequent iterations) is the relay's responsibility; this
 // fn only performs the handshake and returns the new net.Conn —
 // hence it does not need the caller's *net.Conn handles.
-func newProxyTLSUpgradeFn(logger *zap.Logger) relay.TLSUpgradeFn {
+func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPool, srcConn net.Conn) relay.TLSUpgradeFn {
 	return func(ctx context.Context, conn net.Conn, isClient bool, cfg *tls.Config) (net.Conn, error) {
 		if cfg == nil {
 			return conn, nil
 		}
 		if isClient {
-			// Upstream identity verification is keploy's responsibility
-			// to NOT do. Keploy is a transparent MITM record/replay
-			// proxy: the real client (pgx, asyncpg, libpq, JDBC, mongo
-			// driver, etc.) already made its trust decision against
-			// keploy's minted cert when it dialed in, and the upstream
-			// it points at in record mode is whatever the application
-			// would have dialed itself — typically a self-signed dev /
-			// CI / staging Postgres or Mongo, or a Kubernetes service
-			// reachable only by ClusterIP. Either way the upstream
-			// cert's SAN/CN often does not match the IP literal keploy
-			// sees in `Destination Address` (e.g. cert valid for
-			// 127.0.0.1, dial target 10.224.0.152), and Go's default
-			// hostname/IP verification would surface that as
+			// By default, upstream identity verification is keploy's
+			// responsibility to NOT do. Keploy is a transparent MITM
+			// record/replay proxy: the real client (pgx, asyncpg, libpq,
+			// JDBC, mongo driver, etc.) already made its trust decision
+			// against keploy's minted cert when it dialed in, and the
+			// upstream it points at in record mode is whatever the
+			// application would have dialed itself — typically a
+			// self-signed dev / CI / staging Postgres or Mongo, or a
+			// Kubernetes service reachable only by ClusterIP. Either way
+			// the upstream cert's SAN/CN often does not match the IP
+			// literal keploy sees in `Destination Address` (e.g. cert
+			// valid for 127.0.0.1, dial target 10.224.0.152), and Go's
+			// default hostname/IP verification would surface that as
 			// `dest TLS handshake failed: x509: certificate is valid
 			// for X, not Y` and trip the parser supervisor's
 			// passthrough fallback — silently dropping all recording
-			// for that connection.
+			// for that connection. A recording proxy must not be
+			// stricter than the app it records.
 			//
-			// Parsers that build their DestTLSConfig already set
-			// InsecureSkipVerify on it (see e.g.
-			// integrations/pkg/postgres/v3/recorder.buildDestTLSConfigV2,
-			// keploy/pkg/agent/proxy/integrations/mysql/recorder.buildDestTLSConfigV2)
-			// — but if a parser ever forgets, or if some future call
-			// site lands here with a strict config, we still need the
-			// MITM-correct posture. So clone the parser's cfg, force
-			// InsecureSkipVerify=true on the clone, and dial against
-			// that. ServerName / RootCAs / NextProtos / ClientCert
-			// material on the parser-supplied cfg is preserved
-			// (shallow clone via tls.Config.Clone), so SNI for
+			// This used to be an UNCONDITIONAL override, justified by the
+			// claim that parsers set InsecureSkipVerify on their own
+			// DestTLSConfig anyway. That claim was false for the one OSS
+			// parser it named: mysql/recorder.buildDestTLSConfigV2 sets no
+			// such field, so the override was silently stripping a
+			// decision a layer above had already made — and that parser's
+			// docstring, which promised verification against the system
+			// trust store, described behaviour that had not existed for as
+			// long as this override had. Both are now driven by
+			// record.upstreamTls.verify: off reproduces the old behaviour
+			// exactly, on leaves the caller's cfg alone and lets Go verify.
+			//
+			// Either way the parser's cfg is CLONED, never mutated —
+			// ServerName / NextProtos / ClientCert material on it is
+			// preserved (shallow clone via tls.Config.Clone), so SNI for
 			// vhosted PG-as-a-service providers (RDS, Cloud SQL, Neon)
 			// and any upstream-mTLS material a parser might wire in
-			// still reaches the wire.
+			// still reaches the wire. RootCAs is only overwritten when
+			// the operator configured roots of their own; a parser that
+			// pinned its own pool keeps it otherwise.
 			dialCfg := cfg.Clone()
-			dialCfg.InsecureSkipVerify = true //#nosec G402 -- MITM record-time proxy: keploy intentionally never validates the upstream cert. See the docstring above.
+			dialCfg.InsecureSkipVerify = !verify //#nosec G402 -- MITM record-time proxy: upstream verification is opt-in via record.upstreamTls.verify. See the docstring above.
+			if verify {
+				if rootCAs != nil {
+					dialCfg.RootCAs = rootCAs
+				}
+				// ServerName, in descending order of trustworthiness:
+				//
+				//  1. The SNI the APPLICATION sent. Parsers derive their
+				//     ServerName from the destination ADDRESS — e.g.
+				//     mysql/recorder.buildDestTLSConfigV2 takes the host of
+				//     sess.Opts.DstCfg.Addr, which the proxy always sets to
+				//     the `ip:port` eBPF reported, never the hostname the
+				//     app dialled. Against a DNS-SAN-only upstream (a
+				//     hostname DSN, the normal shape outside dev) that IP
+				//     literal fails verification with `doesn't contain any
+				//     IP SANs`, the supervisor falls through to raw
+				//     passthrough, and the mock vanishes with a Debug log.
+				//     A NON-EMPTY parser ServerName is therefore not enough
+				//     to leave alone — it has to be overridden, not merely
+				//     backfilled. The relay runs the client-side handshake
+				//     first whenever verification is on (see
+				//     relay.Config.ClientTLSFirst) precisely so this value
+				//     exists by the time we get here.
+				//  2. The parser's own ServerName, for parsers that pin a
+				//     vhost name of their own (RDS/Cloud SQL/Neon proxies)
+				//     and for apps that sent no SNI at all.
+				//  3. The peer we are already connected to. An IP literal
+				//     is correct here, Go matches it against the
+				//     certificate's IP SANs; without it crypto/tls rejects
+				//     an empty ServerName outright ("either ServerName or
+				//     InsecureSkipVerify must be specified") before it
+				//     looks at any certificate.
+				//
+				// The whole ladder is guarded by `verify` so the default
+				// path never gains an SNI the application did not send.
+				if sni := capturedSNIForSrc(srcConn); sni != "" {
+					dialCfg.ServerName = sni
+				}
+				if dialCfg.ServerName == "" {
+					dialCfg.ServerName = hostFromConn(conn)
+				}
+			}
 			tlsConn := tls.Client(conn, dialCfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
 				return nil, fmt.Errorf("dest TLS handshake failed: %w", err)
@@ -350,6 +632,29 @@ func newProxyTLSUpgradeFn(logger *zap.Logger) relay.TLSUpgradeFn {
 		}
 		return wrapped, nil
 	}
+}
+
+// capturedSNIForSrc returns the SNI the application sent on srcConn's
+// connection, as filed by CertForClient under the client's source port
+// (pTls.SrcPortToDstURL). "" when the app sent none — the normal case for an
+// IP-literal destination, which RFC 6066 forbids in SNI — or when the value
+// has not been captured yet.
+//
+// srcConn is only ever asked for its RemoteAddr; the relay owns the socket.
+func capturedSNIForSrc(srcConn net.Conn) string {
+	if srcConn == nil {
+		return ""
+	}
+	tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr)
+	if !ok || tcpAddr == nil {
+		return ""
+	}
+	v, ok := pTls.SrcPortToDstURL.Load(tcpAddr.Port)
+	if !ok {
+		return ""
+	}
+	sni, _ := v.(string)
+	return sni
 }
 
 // Compile-time sanity: ensure the dispatcher-side V2 call site can be

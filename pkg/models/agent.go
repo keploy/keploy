@@ -32,6 +32,16 @@ type StoreMocksReq struct {
 	UnFiltered []*Mock `json:"unFiltered"`
 }
 
+const StoreMocksStreamContentType = "application/x-gob-stream"
+
+// MockStreamHeader is the first gob value on a /storemocks body; the counts
+// pre-size the agent's slices and split the following mocks into filtered then
+// unfiltered.
+type MockStreamHeader struct {
+	FilteredCount   int `json:"filteredCount"`
+	UnfilteredCount int `json:"unfilteredCount"`
+}
+
 type MockFilterParams struct {
 	AfterTime          time.Time            `json:"afterTime,omitempty"`
 	BeforeTime         time.Time            `json:"beforeTime,omitempty"`

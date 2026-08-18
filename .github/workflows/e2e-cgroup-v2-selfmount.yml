@@ -1,0 +1,72 @@
+# E2E guard for the cgroup2 self-mount fallback.
+#
+# On a legacy cgroup v1 host no cgroup2 (unified) hierarchy is visible, so the
+# keploy agent mounts one itself via the mount(2) syscall (pkg/agent/
+# cgroup_mount_linux.go) before attaching its eBPF cgroup hooks. This job builds
+# the root-only integration test (behind the cgroupmount_integration build tag,
+# so it never runs in the normal `go test ./...` job) and runs it as root, which
+# exercises the real mount syscall + cgroup2 verification + idempotency.
+#
+# The full end-to-end interception on a real cgroup v1 host is covered by the
+# enterprise cloud-replay e2e (it runs cloud replay under a DinD daemon that
+# presents a legacy cgroup view); this OSS job guards the mount primitive itself.
+#
+# NOTE: this repo carries no Woodpecker pipeline (only .github/workflows/*); if
+# Woodpecker is adopted, mirror this into .woodpecker/.
+name: e2e-cgroup-v2-selfmount
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pkg/agent/utils.go'
+      - 'pkg/agent/cgroup_mount_linux.go'
+      - 'pkg/agent/cgroup_mount_linux_test.go'
+      - '.github/workflows/e2e-cgroup-v2-selfmount.yml'
+  pull_request:
+    paths:
+      - 'pkg/agent/utils.go'
+      - 'pkg/agent/cgroup_mount_linux.go'
+      - 'pkg/agent/cgroup_mount_linux_test.go'
+      - '.github/workflows/e2e-cgroup-v2-selfmount.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  selfmount:
+    name: cgroup2 self-mount
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install build essentials
+        run: |
+          sudo apt -y update
+          sudo apt -y install build-essential gcc libc-dev pkg-config
+
+      - name: Install dependencies
+        run: go mod download
+
+      # Compile the tagged test binary as the runner user (build cache is
+      # available here), then run it as root — mounting cgroup2 needs
+      # CAP_SYS_ADMIN. Compiling and running are split so root never touches the
+      # user's Go cache.
+      - name: Build cgroup2 self-mount integration test
+        run: go test -c -tags cgroupmount_integration -o /tmp/cgroup-selfmount.test ./pkg/agent/
+
+      # Run as root (sudo => euid 0, so the test does not self-skip) and assert
+      # the test actually executed: `go test -c` still emits a binary and a
+      # -run that matches nothing exits 0, so grep for the explicit PASS line to
+      # fail loudly if the build tag ever drifts and the test silently vanishes.
+      - name: Run cgroup2 self-mount integration test (root)
+        run: |
+          sudo /tmp/cgroup-selfmount.test -test.run TestCgroupV2SelfMount -test.v | tee /tmp/cgroup-selfmount.out
+          grep -q 'PASS: TestCgroupV2SelfMount' /tmp/cgroup-selfmount.out

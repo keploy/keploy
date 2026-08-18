@@ -1,12 +1,14 @@
 package mockdb
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -34,8 +36,15 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		Version:      mock.Version,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
-		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
+		Async:        mock.Spec.Async,
+		// Unified noise block: the obfuscator value-regexes (mock.Noise) plus the
+		// request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys; regex
+		// values are dropped). Request-body noise is only non-empty for a kind whose
+		// parser implements the schema-noise adapter and learned drift (HTTP, plus
+		// Pulsar in enterprise). NewDocNoise returns nil when there is nothing to
+		// write, so omitempty keeps the noise key out of the doc entirely.
+		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
 	}
 
 	var spec any
@@ -218,6 +227,25 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		return nil, false, nil
 	}
 
+	// encoding/json has no lossless representation for a Go string holding
+	// invalid UTF-8: it substitutes U+FFFD for every bad byte and returns NO
+	// error. A gzip-encoded response body is perfectly valid HTTP and invalid
+	// UTF-8, so on this path the recorder would write a corrupted body, report
+	// success, and only fail at replay as an unexplained mismatch.
+	//
+	// Refuse instead. Tagged as a payload fault so the recorder skips and counts
+	// this one mock and keeps recording (see models.ErrMockEncode) — the same
+	// treatment the YAML path gives a body it cannot represent, except YAML CAN
+	// represent it (as !!binary) and therefore does.
+	if field, ok := firstNonUTF8Body(mock); !ok {
+		err := fmt.Errorf("%w: mockdb: %s is not valid UTF-8 and the json format cannot store it losslessly; record with storageFormat yaml to keep binary bodies", models.ErrMockEncode, field)
+		utils.LogError(logger, err, "refusing to write a binary body as JSON",
+			zap.String("mock_name", mock.Name),
+			zap.String("mock_kind", string(mock.Kind)),
+			zap.String("next_step", "set storageFormat to yaml; the yaml encoder stores binary bodies as !!binary without loss"))
+		return nil, true, err
+	}
+
 	specBytes, err := json.Marshal(spec)
 	if err != nil {
 		utils.LogError(logger, err, "failed to marshal mock spec to JSON")
@@ -227,18 +255,66 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 	return doc, true, nil
 }
 
+// firstNonUTF8Body reports whether every string field that can carry raw
+// response/request bytes is valid UTF-8, naming the first that is not.
+//
+// Covers every `string` field this encoder projects that can hold arbitrary
+// payload bytes: the HTTP and HTTP/2 request/response bodies. The remaining
+// projected fields are headers, URLs and timestamps, and []byte fields are not
+// at risk because encoding/json base64s them (Generic payloads take that path,
+// and gRPC DecodedData is protoscope text).
+func firstNonUTF8Body(mock *models.Mock) (string, bool) {
+	if mock == nil {
+		return "", true
+	}
+	if r := mock.Spec.HTTPReq; r != nil && !utf8.ValidString(r.Body) {
+		return "the request body", false
+	}
+	if r := mock.Spec.HTTPResp; r != nil && !utf8.ValidString(r.Body) {
+		return "the response body", false
+	}
+	if r := mock.Spec.HTTP2Req; r != nil && !utf8.ValidString(r.Body) {
+		return "the http2 request body", false
+	}
+	if r := mock.Spec.HTTP2Resp; r != nil && !utf8.ValidString(r.Body) {
+		return "the http2 response body", false
+	}
+	return "", true
+}
+
+// errMapperEncode marks a failure that came from a registered out-of-tree
+// MockYAMLMapper rather than from keploy's own encoders. See its use in
+// EncodeMock: mapper failures must stay fatal because they can be I/O.
+var errMapperEncode = errors.New("mock encode mapper failure")
+
 func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 
 	yamlDoc := yaml.NetworkTrafficDoc{
 		Version:      mock.Version,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
-		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
+		// Async-egress bookkeeping as a kind-agnostic top-level block, set on the
+		// envelope (like Noise) so it survives the per-kind spec projection. nil
+		// for ordinary mocks, so omitempty drops the key.
+		Async: mock.Spec.Async,
+		// Unified noise block (see DocNoise): obfuscator value-regexes (mock.Noise)
+		// plus request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys;
+		// regex values dropped). Set before the mapper/per-kind projection runs so it
+		// survives regardless of the spec envelope. NewDocNoise returns nil when
+		// empty, so omitempty drops the key.
+		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
 	}
 	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
-		wrapped := fmt.Errorf("mockdb: encode mapper for kind %q: %w", mock.Kind, err)
+		// Marked so callers do NOT classify this as a payload fault. A registered
+		// MockYAMLMapper is out-of-tree code that may touch the filesystem or the
+		// network (offloading large bodies to an assets dir, for example), so its
+		// failure can be environmental — ENOSPC, EACCES. Treating that as
+		// "skip this one mock and keep going" would silently drop EVERY mock and
+		// finish with an empty test set. Only keploy's own encoders below are
+		// pure enough to be safely skippable.
+		wrapped := fmt.Errorf("%w: mockdb: encode mapper for kind %q: %w", errMapperEncode, mock.Kind, err)
 		utils.LogError(logger, wrapped, "registered MockYAMLMapper.Encode returned an error; check the mapper for this kind", zap.String("kind", string(mock.Kind)))
 		return nil, wrapped
 	}
@@ -610,7 +686,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			Version:      m.Version,
 			Name:         m.Name,
 			Kind:         m.Kind,
-			Noise:        m.Noise,
+			Noise:        m.Noise.ValueNoise(),
 			ConnectionID: m.ConnectionID,
 		}
 		mapped, err := decodeWithMapper(m, &mock)
@@ -620,6 +696,18 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			return nil, wrapped
 		}
 		if mapped {
+			// Restore kind-agnostic schema-noise carried on the doc envelope
+			// (the per-kind mapper rebuilt mock.Spec and can't know about it).
+			// Sourced from the unified noise.req block.
+			if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
+				mock.Spec.ReqBodyNoise = rb
+			}
+			// Restore the kind-agnostic async block off the doc envelope
+			// (the per-kind mapper rebuilt mock.Spec and can't know about it).
+			// No in-tree kind is both mapper-registered AND async-capable today
+			// (only HTTP sets Async, and HTTP is a builtin that never takes this
+			// mapped branch) — this guards a future mapper-registered AsyncParser.
+			mock.Spec.Async = m.Async
 			mocks = append(mocks, &mock)
 			continue
 		}
@@ -787,6 +875,14 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.String("type", string(m.Kind)))
 			continue
 		}
+		// Restore kind-agnostic schema-noise carried on the doc envelope onto the
+		// freshly-built spec (the per-kind switch above replaced mock.Spec
+		// wholesale). Uniform across parsers — HTTP included. Sourced from the
+		// unified noise.req block.
+		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
+			mock.Spec.ReqBodyNoise = rb
+		}
+		mock.Spec.Async = m.Async // kind-agnostic async block off the doc envelope
 		mocks = append(mocks, &mock)
 	}
 
@@ -1255,7 +1351,7 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 			Version:      m.Version,
 			Name:         m.Name,
 			Kind:         m.Kind,
-			Noise:        m.Noise,
+			Noise:        m.Noise.ValueNoise(),
 			ConnectionID: m.ConnectionID,
 		}
 
@@ -1413,9 +1509,32 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
 				ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
 			}
+			// UseNumber, not a plain Unmarshal. mysql.Request.Message is
+			// an interface{}, so this first pass lands every packet body
+			// in a map[string]any — and encoding/json's reflective default
+			// puts every number in there as float64. retypeMySQL* then
+			// re-marshals that map and unmarshals it into the concrete
+			// packet type, so anything float64 cannot represent is already
+			// gone before ColumnEntry.UnmarshalJSON ever runs.
+			//
+			// A BIGINT UNSIGNED column is the case that breaks:
+			// 18446744073709551615 comes back as 1.8446744073709552e+19 and
+			// re-marshals as 18446744073709552000 — a literal that is now
+			// larger than MaxUint64, so no amount of care downstream can
+			// recover it. json.Number keeps the original text through the
+			// intermediate hop and re-marshals verbatim.
 			var s mySpec
-			if err := json.Unmarshal(m.Spec, &s); err != nil {
+			dec := json.NewDecoder(bytes.NewReader(m.Spec))
+			dec.UseNumber()
+			if err := dec.Decode(&s); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal mysql mock %q: %w", m.Name, err)
+			}
+			// Decode stops at the first complete value; json.Unmarshal
+			// rejects anything after it. Keep the stricter behaviour, so a
+			// truncated or concatenated spec still fails loudly instead of
+			// half-parsing into a mock with silently missing packets.
+			if dec.More() {
+				return nil, fmt.Errorf("failed to unmarshal mysql mock %q: unexpected trailing content after spec", m.Name)
 			}
 			for i := range s.Requests {
 				typed, err := retypeMySQLRequest(s.Requests[i].Header, s.Requests[i].Message)
@@ -1485,6 +1604,13 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 			logger.Debug("skipping unsupported mock kind on JSON read", zap.String("kind", string(m.Kind)))
 			continue
 		}
+		// Restore kind-agnostic schema-noise carried on the doc envelope (the
+		// per-kind switch above replaced mock.Spec wholesale). Uniform across
+		// parsers — HTTP included. Sourced from the unified noise.req block.
+		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
+			mock.Spec.ReqBodyNoise = rb
+		}
+		mock.Spec.Async = m.Async // kind-agnostic async block off the doc envelope
 		mocks = append(mocks, &mock)
 	}
 	return mocks, nil

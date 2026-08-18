@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.uber.org/zap"
@@ -38,6 +39,21 @@ const (
 	// large-result-set response without dropping. PerConnCap remains
 	// the byte-budget enforcer for memory bounds.
 	DefaultTeeChanBuf = 1024
+
+	// DefaultConsumerStallGrace is how long the tee waits for a parser that
+	// has stopped draining before giving up on the chunks it still holds.
+	//
+	// It bounds STALLED time, not elapsed time: the wait ends the moment the
+	// parser takes anything at all, so an arbitrarily slow parser still
+	// receives every chunk. It only elapses when the parser frees nothing at
+	// all for this long, which is taken as "gone" — the whole remaining
+	// queue is then abandoned at once and reported, rather than the wait
+	// being re-entered per chunk.
+	//
+	// Exposed as [Config.ConsumerStallGrace] rather than fixed in the tee so
+	// the owner picks the policy, the way net/http's Server.Shutdown takes
+	// its deadline from the caller's context.
+	DefaultConsumerStallGrace = 2 * time.Second
 
 	// DefaultForwardBuf is the size of the per-iteration Read/Write
 	// scratch buffer used by the forwarder goroutines.
@@ -84,6 +100,26 @@ type Config struct {
 	// "channel_full". Zero resolves to DefaultTeeChanBuf.
 	TeeChanBuf int
 
+	// ConsumerStallGrace bounds how long the tee waits on a parser that has
+	// stopped draining before abandoning the chunks it still holds. Zero
+	// resolves to [DefaultConsumerStallGrace]. See that constant for why the
+	// bound is on stalled time rather than total teardown time.
+	//
+	// The default suits every workload we have measured: the bound is only
+	// consulted AFTER close(), on a connection whose parser has stopped
+	// draining a full out channel, so waiting longer rarely recovers
+	// anything — the parser is usually not coming back. It is a field
+	// rather than a package constant so the owner picks the policy, in the
+	// spirit of net/http's Server.Shutdown taking its deadline from the
+	// caller: tests shorten it, and operators can override it through
+	// config.Record.RecordBuffer.ConsumerStallGrace (keploy.yml), the
+	// hidden --consumer-stall-grace flag, or
+	// KEPLOY_RECORD_CONSUMER_STALL_GRACE. Values GREATER THAN ZERO are
+	// clamped to a safe range by clampConsumerStallGrace in
+	// pkg/agent/proxy/proxy.go; zero and negative are passed through
+	// untouched so the default above applies.
+	ConsumerStallGrace time.Duration
+
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.
 	ForwardBuf int
@@ -98,6 +134,45 @@ type Config struct {
 	// KindUpgradeTLS directives. If nil, a KindUpgradeTLS directive
 	// is acked with OK=false and a wrapped ErrNoTLSUpgrader.
 	TLSUpgradeFn TLSUpgradeFn
+
+	// ClientTLSFirst swaps the order of the two handshakes performed for a
+	// KindUpgradeTLS directive: client side first, destination side second.
+	//
+	// Default (false) is destination-first, which is what every release before
+	// upstream verification existed did, and it stays the default so the
+	// overwhelmingly common path keeps its exact wire timing.
+	//
+	// It is set only when record.upstreamTls.verify is on, and only because of
+	// what the two handshakes KNOW. keploy learns the hostname the application
+	// intended — its SNI — by terminating the CLIENT side; on the destination
+	// side all it has is the IP:port eBPF reported. Verifying a hostname-
+	// addressed upstream against that IP fails against a DNS-SAN-only
+	// certificate, the supervisor falls through to raw passthrough, and the
+	// mock is dropped with only a Debug log. Running the client handshake
+	// first makes the real ServerName available to the destination dial.
+	//
+	// Safe in both orders: neither handshake depends on the other. Keploy is
+	// the TLS server for one and the TLS client for the other, over two
+	// separate sockets, and Step 1 has already exchanged whatever preamble
+	// the protocol needs before the client sends its ClientHello (Postgres'
+	// 'S'; MySQL sends its ClientHello straight after SSLRequest). Both conns
+	// are still published atomically after BOTH succeed, so the failure of
+	// either leaves the relay's published pointers exactly as it found them.
+	//
+	// It does change one thing, and only inside the opt-in: what a dest-side
+	// handshake FAILURE costs. Destination-first, keploy has not touched the
+	// client socket yet, so the supervisor's FallthroughToPassthrough can
+	// still relay the client's withheld ClientHello to the real server and
+	// the application's connection survives with its mock dropped.
+	// Client-first, keploy has already terminated TLS with the application,
+	// so there is no cleartext stream left to pass through and the connection
+	// is closed instead. That is the honest outcome of asking keploy to
+	// authenticate an upstream that does not authenticate: it is LOUD rather
+	// than a silently missing mock, it matches what the application's own
+	// strict TLS config would have done, and it is reachable only when the
+	// operator has explicitly set record.upstreamTls.verify. With the flag at
+	// its default the field is false and none of this applies.
+	ClientTLSFirst bool
 
 	// RealCertHook, if non-nil, is invoked after the V2 relay path
 	// completes the upstream TLS handshake (handleUpgradeTLS), with
@@ -123,6 +198,25 @@ type Config struct {
 	// KindAbortMock directive. The reason string is the same value
 	// the supervisor will record in telemetry. Nil is safe.
 	OnMarkMockIncomplete func(reason string)
+
+	// OnCaptureDesync is invoked at most once per direction, the first time
+	// a chunk is dropped on that tee. Nil is safe.
+	//
+	// It is NOT a louder OnMarkMockIncomplete. That one is per-mock and is
+	// cleared by Session.MarkMockComplete after each cycle; this one reports
+	// that the connection's byte stream now has a hole, which no later mock
+	// recovers from. Downstream parsers frame by length prefix, so after a
+	// hole the next header is read mid-body and every subsequent frame on
+	// the connection is garbage — the connection keeps carrying user traffic
+	// perfectly while producing zero further mocks, and the test cases
+	// recorded against it replay as match_phase=no_mocks.
+	//
+	// The expected implementation is to record the start of the hole and,
+	// when the connection ends, mark that whole span so the test cases
+	// overlapping it are suppressed instead of shipped mock-less. That is
+	// the half that closes the failure by construction; retirement (below)
+	// is the best-effort half that gets capture going again.
+	OnCaptureDesync func(reason string)
 
 	// OnClientChunkTeed is invoked after each successful tee of a
 	// client-to-dest chunk into the parser's FakeConn. Callers wire
@@ -185,6 +279,9 @@ func (c Config) withDefaults() Config {
 	}
 	if out.ForwardBuf <= 0 {
 		out.ForwardBuf = DefaultForwardBuf
+	}
+	if out.ConsumerStallGrace <= 0 {
+		out.ConsumerStallGrace = DefaultConsumerStallGrace
 	}
 	if out.MemoryGuardCheck == nil {
 		out.MemoryGuardCheck = memoryguard.IsRecordingPaused

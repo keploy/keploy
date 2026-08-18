@@ -420,3 +420,153 @@ var errFakeTLSFail = fakeTLSErr("fake handshake failure")
 type fakeTLSErr string
 
 func (e fakeTLSErr) Error() string { return string(e) }
+
+// postTLSCtx builds a context wired the way the enterprise SSL/GoTLS reader
+// callback wires it for a decrypted tls-* stream: PostTLSModeKey set, and a
+// TLSHandshakeStore seeded with the pre-TLS greeting (+ SSLRequest) under the
+// port-only key — exactly what handlePostTLSHandshakeV2 pops.
+func postTLSCtx(t *testing.T, greeting, sslRequest []byte, reqTs time.Time, dstPort uint16) context.Context {
+	t.Helper()
+	store := models.NewTLSHandshakeStore()
+	store.Push(models.HandshakeStoreKey("", dstPort), models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{greeting},
+		ReqPackets:   [][]byte{sslRequest},
+		ReqTimestamp: reqTs,
+	})
+	ctx := context.WithValue(context.Background(), models.PostTLSModeKey, true)
+	ctx = context.WithValue(ctx, models.TLSHandshakeStoreKey, store)
+	return ctx
+}
+
+// TestRecordV2_PostTLS_FreshConn covers the decrypted tls-* stream for a fresh
+// connection (HandshakeResponse41, seq>=1): the greeting is popped from the
+// store instead of read off DestStream, then auth + one query are recorded via
+// the normal V2 command loop.
+func TestRecordV2_PostTLS_FreshConn(t *testing.T) {
+	t.Parallel()
+	h := newV2Harness(t)
+	base := time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC)
+
+	handshakeBuf := cannedHandshakeV10(t)
+	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), handshakeBuf[4:])
+	if err != nil {
+		t.Fatalf("decode handshake v10: %v", err)
+	}
+	sslReq := cannedSSLRequest(t, 1)
+
+	// Decrypted stream: HandshakeResponse41 (seq>=1) then a query. No greeting
+	// on DestStream — the auth OK is the first dest packet.
+	h.pushClient(cannedHandshakeResponse41(t, 2, false), base.Add(5*time.Millisecond))
+	h.pushDest(cannedOK(t, 3, greeting.CapabilityFlags), base.Add(10*time.Millisecond))
+	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base.Add(20*time.Millisecond))
+	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
+
+	got := runPostTLS(t, h, postTLSCtx(t, handshakeBuf, sslReq, base, 3306), 2)
+
+	if got[0].Name != "config" {
+		t.Errorf("first mock = %q, want config", got[0].Name)
+	}
+	// Config mock must carry the popped greeting as a response.
+	if len(got[0].Spec.MySQLResponses) < 1 {
+		t.Fatalf("config mock has no responses (greeting not seeded from store)")
+	}
+	if got[0].Spec.ResTimestampMock.Before(got[0].Spec.ReqTimestampMock) {
+		t.Errorf("config res before req (clamp/order broken): req=%v res=%v", got[0].Spec.ReqTimestampMock, got[0].Spec.ResTimestampMock)
+	}
+	assertQueryMock(t, got[1])
+}
+
+// TestRecordV2_PostTLS_PooledConnSeq0 covers the pre-warmed pool case: the
+// decrypted stream is joined mid-command (seq==0, no HandshakeResponse41). The
+// first packet is a command, which must be threaded into the command loop via
+// firstCmd — and LastOp must be reset so it decodes as a command, not a
+// handshake response (the Copilot-flagged bug).
+func TestRecordV2_PostTLS_PooledConnSeq0(t *testing.T) {
+	t.Parallel()
+	h := newV2Harness(t)
+	base := time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC)
+
+	handshakeBuf := cannedHandshakeV10(t)
+	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), handshakeBuf[4:])
+	if err != nil {
+		t.Fatalf("decode handshake v10: %v", err)
+	}
+	sslReq := cannedSSLRequest(t, 1)
+
+	// No HandshakeResponse41 — first client packet is a COM_QUERY (seq==0).
+	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base.Add(20*time.Millisecond))
+	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
+
+	got := runPostTLS(t, h, postTLSCtx(t, handshakeBuf, sslReq, base, 3306), 2)
+
+	if got[0].Name != "config" {
+		t.Errorf("first mock = %q, want config", got[0].Name)
+	}
+	// The seq==0 config mock MUST carry a synthesized HandshakeResponse41 at
+	// requests[0] or [1] — the replayer matches a connection on it and errors
+	// otherwise (replayer/conn.go). Without the synthesis this config mock would
+	// only have [SSLRequest] and fail replay handshake matching.
+	if !configMockHasHR41(got[0]) {
+		t.Errorf("seq==0 config mock has no HandshakeResponse41 in requests[0]/[1] — would fail replay handshake matching; reqs=%d", len(got[0].Spec.MySQLRequests))
+	}
+	// The query mock proves the seq==0 firstCmd was decoded as a COMMAND (not
+	// mis-decoded as a handshake response because LastOp stayed HandshakeV10).
+	assertQueryMock(t, got[1])
+}
+
+// configMockHasHR41 reports whether the config mock carries a
+// HandshakeResponse41 at requests[0] or [1] (the replayer's match requirement).
+func configMockHasHR41(m *models.Mock) bool {
+	r := m.Spec.MySQLRequests
+	if len(r) > 0 && r[0].Header != nil && r[0].Header.Type == mysql.HandshakeResponse41 {
+		return true
+	}
+	if len(r) > 1 && r[1].Header != nil && r[1].Header.Type == mysql.HandshakeResponse41 {
+		return true
+	}
+	return false
+}
+
+// runPostTLS drives RecordV2 with the given post-TLS ctx and collects want mocks.
+func runPostTLS(t *testing.T, h *v2Harness, ctx context.Context, want int) []*models.Mock {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		done <- RecordV2(cctx, h.logger, h.sess)
+	}()
+	var got []*models.Mock
+	for len(got) < want {
+		select {
+		case m, ok := <-h.mocks:
+			if !ok {
+				t.Fatalf("mocks channel closed early (got %d, want %d)", len(got), want)
+			}
+			got = append(got, m)
+			if len(got) == want {
+				h.closeStreams()
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for mocks (got %d, want %d)", len(got), want)
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("RecordV2 (post-TLS) returned error: %v", err)
+	}
+	return got
+}
+
+// assertQueryMock checks a mock is the recorded COM_QUERY exchange.
+func assertQueryMock(t *testing.T, m *models.Mock) {
+	t.Helper()
+	if m.Kind != models.MySQL {
+		t.Errorf("query mock kind = %v, want MySQL", m.Kind)
+	}
+	if len(m.Spec.MySQLRequests) < 1 {
+		t.Fatalf("query mock has no requests")
+	}
+	if got := m.Spec.MySQLRequests[0].Header.Type; got != "COM_QUERY" {
+		t.Errorf("query mock request type = %q, want COM_QUERY (seq==0 firstCmd mis-decoded as handshake?)", got)
+	}
+}

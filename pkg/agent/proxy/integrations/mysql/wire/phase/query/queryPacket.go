@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 
 	intUtil "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -165,14 +166,18 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 				if len(data[pos:]) < 4 {
 					return nil, fmt.Errorf("malformed FieldTypeFloat value")
 				}
-				param.Value = float32(binary.LittleEndian.Uint32(data[pos : pos+4]))
+				// IEEE-754 reinterpret, NOT a numeric cast — the wire bytes
+				// encode the float's bit pattern. Same defect as the one
+				// fixed in stmtExecutePacket.go; query attributes carry it
+				// on both FLOAT and DOUBLE.
+				param.Value = math.Float32frombits(binary.LittleEndian.Uint32(data[pos : pos+4]))
 				pos += 4
 
 			case mysql.FieldTypeDouble:
 				if len(data[pos:]) < 8 {
 					return nil, fmt.Errorf("malformed FieldTypeDouble value")
 				}
-				param.Value = float64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+				param.Value = math.Float64frombits(binary.LittleEndian.Uint64(data[pos : pos+8]))
 				pos += 8
 
 			// Support DATE types in query attributes.

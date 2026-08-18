@@ -32,9 +32,15 @@ wait_for_postgres() {
   # exists. To avoid the race we wait for the entrypoint to finish by looking
   # for its completion log line, then verify the database is queryable.
   for i in {1..120}; do
-    # The official entrypoint prints this line once all init is done.
-    if docker logs mypostgres 2>&1 | grep -q "database system is ready to accept connections"; then
-      # Entrypoint finished — now verify the target DB is reachable.
+    # The official postgres image runs a TEMP server (which logs the FIRST
+    # "ready to accept connections") to create POSTGRES_DB and run init scripts,
+    # then restarts into the REAL server (the SECOND "ready"). Matching only the
+    # first "ready" races the restart: the temp server already has petclinic so
+    # SELECT 1 passes, the check returns "ready", and the next client immediately
+    # hits "FATAL: the database system is starting up". Require the line at least
+    # twice = the temp server has shut down and the real server is up.
+    if [ "$(docker logs mypostgres 2>&1 | grep -c 'database system is ready to accept connections')" -ge 2 ]; then
+      # Real server up — verify the target DB is queryable right now.
       if docker exec mypostgres psql -U petclinic -d petclinic -c "SELECT 1" >/dev/null 2>&1; then
         echo "Postgres is ready and petclinic database is available."
         endsec; return 0
@@ -58,6 +64,35 @@ wait_for_http_port() {
     sleep 1
   done
   echo "::error::App did not open HTTP port on 9966"
+  endsec; return 1
+}
+
+wait_for_port_free() {
+  # This job launches the app on the fixed port 9966 four times in sequence
+  # (yaml record, json record, yaml replay, json replay). Stopping keploy with
+  # `sudo kill` only signals keploy; the spring-boot JVM grandchild can still be
+  # closing its :9966 listening socket when the NEXT launch tries to bind it,
+  # and spring does not set SO_REUSEADDR — so the next app dies with
+  # "Port 9966 was already in use" (flaky, worse under loaded runners). Poll the
+  # actual kernel socket state until the port is free before each (re)launch,
+  # reaping a lingering JVM after a short grace so a wedged shutdown can't stall.
+  local port="${1:-9966}"
+  section "Ensure port ${port} is free before (re)launch"
+  local reaped=0
+  for i in $(seq 1 60); do
+    if ! ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN; then
+      echo "Port ${port} is free."
+      endsec; return 0
+    fi
+    if [[ "$i" -ge 5 && "$reaped" -eq 0 ]]; then
+      echo "Port ${port} still bound after ${i}s; reaping lingering spring-petclinic JVM"
+      sudo pkill -f 'spring-petclinic-rest.*jar' 2>/dev/null || true
+      reaped=1
+    fi
+    sleep 1
+  done
+  echo "::error::Port ${port} still bound after 60s"
+  ss -ltnp "sport = :${port}" 2>/dev/null || true
   endsec; return 1
 }
 
@@ -621,11 +656,17 @@ send_request() {
   # Run the user's transaction logic
   run_transactions
 
-  # Let keploy persist, then stop it
+  # Let keploy persist, then stop it and its JVM child deterministically.
   sleep 10
   echo "$kp_pid Keploy PID"
   echo "Killing keploy"
   sudo kill "$kp_pid" 2>/dev/null || true
+  # Wait for keploy to exit gracefully, then reap the spring-boot JVM grandchild
+  # and hard-kill keploy as a fallback, so port 9966 is actually released before
+  # the next launch rather than depending on incidental latency.
+  for _ in $(seq 1 15); do kill -0 "$kp_pid" 2>/dev/null || break; sleep 1; done
+  sudo pkill -f 'spring-petclinic-rest.*jar' 2>/dev/null || true
+  sudo kill -9 "$kp_pid" 2>/dev/null || true
 }
 
 # ----- main -----
@@ -661,6 +702,8 @@ do_record_iteration() {
   section "Record iteration $i${label:+ (json)}"
 
   run_maven_build
+
+  wait_for_port_free 9966
 
   # shellcheck disable=SC2086
   "$RECORD_BIN" record $extra_flags \
@@ -730,6 +773,8 @@ docker rm mypostgres || true
 echo "Postgres stopped - Keploy should now use mocks for database interactions"
 endsec
 
+wait_for_port_free 9966
+
 section "Replay"
 set +e
 "$REPLAY_BIN" test \
@@ -789,6 +834,8 @@ if [[ $REPLAY_RC -ne 0 ]]; then
 fi
 
 if json_pass_supported; then
+  wait_for_port_free 9966
+
   section "Replay (json)"
   set +e
   "$REPLAY_BIN" test --storage-format json \

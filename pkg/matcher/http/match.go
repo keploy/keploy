@@ -84,45 +84,45 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	}
 
 	noise := tc.Noise
+	// Copy the shared config maps before merging this test case's noise into
+	// them, otherwise each test case permanently widens the noise applied to
+	// every later one.
 	var (
-		bodyNoise   = noiseConfig["body"]
-		headerNoise = noiseConfig["header"]
+		bodyNoise    = matcherUtils.CloneNoiseMap(noiseConfig["body"])
+		headerNoise  = matcherUtils.CloneNoiseMap(noiseConfig["header"])
+		wildcardBody bool
 	)
-	if bodyNoise != nil {
-		if ignoreFields, ok := bodyNoise["*"]; ok && len(ignoreFields) > 0 && ignoreFields[0] == "*" {
-			if noise["body"] == nil {
-				noise["body"] = make([]string, 0)
-			}
-		}
-	} else {
-		bodyNoise = map[string][]string{}
-	}
-	if headerNoise == nil {
-		headerNoise = map[string][]string{}
-	}
+	// wildcardBody carries this on its own. Writing the sentinel back into
+	// tc.Noise used to be how it reached the body-skip check; that mutated the
+	// caller's test case, panicked when tc.Noise was nil, and could be persisted
+	// back to disk by a later re-encode.
+	ignoreFields, hasWildcard := bodyNoise["*"]
+	wildcardBody = hasWildcard && len(ignoreFields) > 0 && ignoreFields[0] == "*"
 
-	for field, regexArr := range noise {
-		a := strings.Split(field, ".")
-		if len(a) > 1 && a[0] == "body" {
-			x := strings.Join(a[1:], ".")
-			bodyNoise[strings.ToLower(x)] = regexArr
-		} else if a[0] == "header" {
-			headerNoise[strings.ToLower(a[len(a)-1])] = regexArr
-		}
+	tcBodyNoise, tcHeaderNoise, skipBody := matcherUtils.SplitNoise(noise, logger)
+	// The global wildcard means "ignore every response body" on its own; it
+	// must not depend on the test case also carrying a bare "body" key, which
+	// stops being the skip sentinel once that key lists field paths.
+	skipBody = skipBody || wildcardBody
+	for field, regexArr := range tcBodyNoise {
+		bodyNoise[field] = regexArr
+	}
+	for field, regexArr := range tcHeaderNoise {
+		headerNoise[field] = regexArr
 	}
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
 
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
-	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
+	if !skipBody && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
 		//validate the stored json
 		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
 			return false, res
 		}
 		if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)
 			pass = jsonComparisonResult.IsExact()
 			if err != nil {
 				return false, res
@@ -139,12 +139,27 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if !compareAll && bodyType != models.JSON {
 			logger.Debug("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
 			// Mark body as passing when compareAll is false and body is not JSON
-		} else if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
+		} else if !skipBody && tc.HTTPResp.Body != actualResponse.Body {
 			pass = false
 		}
 	}
 
 	res.BodyResult[0].Normal = pass
+
+	// A body that failed while carrying noise is the one moment the user needs to
+	// know that some of that noise is inert: the report names a field they
+	// believe they already excluded. Only on a JSON failure — noise paths address
+	// JSON fields, so on any other body every entry would read as dead and the
+	// advice would be nonsense. Only on failure, so the happy path pays nothing
+	// for the extra walk.
+	//
+	// tcBodyNoise, not the merged map: a globalNoise entry applies to every
+	// endpoint by design, so naming it dead on each case that happens not to have
+	// that field would emit a line per failing case and bury the real failures.
+	// Only the test case's own recorded noise is a claim about THIS response.
+	if !pass && !skipBody && bodyType == models.JSON {
+		matcherUtils.WarnUnmatchableBodyNoise(logger, tc.Name, tcBodyNoise, tc.HTTPResp.Body, actualResponse.Body)
+	}
 
 	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
 		res.HeadersResult = *hRes
@@ -318,7 +333,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 				isBodyMismatch = false
 				if validatedJSON.IsIdentical() {
-					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)
 					if err != nil {
 						return false, res
 					}

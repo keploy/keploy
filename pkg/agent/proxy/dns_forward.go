@@ -120,10 +120,12 @@ func (p *Proxy) hasDNSUpstream() bool {
 }
 
 // forwardDNSUpstream performs a single DNS Exchange against each
-// snapshotted upstream server in turn, returning the first Successful
-// response. On timeout or transport error we advance to the next
-// server; if all fail we return an error so the caller can fall
-// through to the legacy default response.
+// snapshotted upstream server in turn, returning the first non-nil
+// response regardless of rcode (NOERROR, NXDOMAIN, SERVFAIL, …) — the
+// caller discriminates on Rcode/Answer count (a valid answer vs NODATA
+// vs a genuinely negative rcode). On timeout or transport error we
+// advance to the next server; if all fail we return an error so the
+// caller can fall through to the legacy default response.
 //
 // Transport rules:
 //   - Start on UDP (cheapest).

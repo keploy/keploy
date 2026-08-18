@@ -39,6 +39,29 @@ wait_for_health() {
     return 1
 }
 
+wait_for_port_free() {
+    # The app (python3 main.py) is relaunched on the fixed port 8000 for every
+    # record/replay cycle. keploy is stopped between cycles, but the flask child
+    # can still be holding :8000 when the next launch tries to bind it, so the
+    # app dies at startup with "Address already in use" ->
+    # "user application terminated unexpectedly" (flaky, worse under load). Poll
+    # the actual socket state until the port is free before each (re)launch,
+    # reaping a lingering app after a short grace so a wedged shutdown can't stall.
+    local port="${1:-8000}"
+    for i in $(seq 1 60); do
+        if ! ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN; then
+            return 0
+        fi
+        if [ "$i" -ge 5 ]; then
+            sudo pkill -f 'python3 main.py' 2>/dev/null || true
+        fi
+        sleep 1
+    done
+    echo "::error::Port ${port} still bound after 60s"
+    ss -ltnp "sport = :${port}" 2>/dev/null || true
+    return 1
+}
+
 # Add coverage to requirements.txt
 echo "coverage" >> requirements.txt
 
@@ -113,6 +136,7 @@ for i in 1 2; do
     app_name="flaskSecret_${i}"
     send_request "secrets" &
     request_pid=$!
+    wait_for_port_free 8000 || true
     $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
     if grep "ERROR" "${app_name}.txt"; then exit 1; fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
@@ -133,6 +157,7 @@ sleep 5
 app_name="flaskAstro"
 send_request "astro" &
 request_pid=$!
+wait_for_port_free 8000 || true
 $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then exit 1; fi
 if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
@@ -158,6 +183,7 @@ else
 fi
 
 # Testing phase
+wait_for_port_free 8000 || true
 $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
 if grep "ERROR" "test_logs.txt"; then exit 1; fi
 if grep "WARNING: DATA RACE" "test_logs.txt"; then exit 1; fi
@@ -198,6 +224,7 @@ fi
 
 # Run test with config path pointing to the new location
 echo "Running test with --config-path $CONFIG_TEST_DIR"
+wait_for_port_free 8000 || true
 $REPLAY_BIN test -c "python3 main.py" --delay 10 --config-path "$CONFIG_TEST_DIR" 2>&1 | tee config_path_test_logs.txt
 
 # Check if keploy.yml was created in the original location (should NOT happen)
@@ -240,6 +267,7 @@ echo "Removing astro test-set-2 to focus normalize on secret sets"
 rm -rf keploy/test-set-2
 
 echo "Running test again, this will fail as expected"
+wait_for_port_free 8000 || true
 $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_fail.txt
 
 echo "Running the normalize command"
@@ -247,6 +275,7 @@ $REPLAY_BIN normalize 2>&1 | tee normalize_logs.txt
 if grep "ERROR" "normalize_logs.txt"; then exit 1; fi
 
 echo "Running test again, this time it will pass"
+wait_for_port_free 8000 || true
 $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_pass.txt
 if grep "ERROR" "test_logs_pass.txt"; then exit 1; fi
 
@@ -282,6 +311,7 @@ rm -rf keploy
 app_name="flaskMisc"
 send_request "misc" &
 request_pid=$!
+wait_for_port_free 8000 || true
 $RECORD_BIN record -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then
     echo "Error found in misc recording..."
@@ -307,6 +337,7 @@ if json_pass_supported; then
     app_name="flaskMisc_json"
     send_request "misc" &
     request_pid=$!
+    wait_for_port_free 8000 || true
     $RECORD_BIN record --storage-format json -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
     if grep "ERROR" "${app_name}.txt"; then exit 1; fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
@@ -328,6 +359,7 @@ fi
 
 # Final testing phase
 echo "Running test on the new 'misc' test suite..."
+wait_for_port_free 8000 || true
 $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee final_test_logs.txt
 if grep "ERROR" "final_test_logs.txt"; then
     echo "Error found in final test run..."
@@ -397,6 +429,7 @@ if [ "$final_test_passed" != true ]; then
 fi
 
 if json_pass_supported; then
+    wait_for_port_free 8000 || true
     $REPLAY_BIN test --storage-format json -c "python3 main.py" --delay 10 2>&1 | tee final_test_logs_json.txt
     if grep "ERROR" "final_test_logs_json.txt"; then
         cat final_test_logs_json.txt

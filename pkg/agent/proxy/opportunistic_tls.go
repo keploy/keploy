@@ -14,6 +14,7 @@ import (
 
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -59,7 +60,11 @@ type sniffResult struct {
 //   - cert pinning rejects keploy's MITM cert
 //   - SCRAM-*-PLUS and other channel-binding mechanisms break
 //   - apps without keploy's CA installed fail handshake
-func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn, dstAddr string, backdate time.Time) error {
+//
+// opts carries the session's resolved upstream-TLS trust material
+// (see Proxy.applyUpstreamTLSOptions); it is threaded down to
+// hijackAndMITM, which owns the only upstream tls.Config on this path.
+func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn, dstAddr string, backdate time.Time, opts models.OutgoingOptions) error {
 	dialCtx, dialCancel := context.WithTimeout(ctx, opportunisticDialTimeout)
 	defer dialCancel()
 	var dialer net.Dialer
@@ -89,6 +94,10 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 		// blocked in from.Read() can't observe ctx cancellation until the
 		// opportunisticPeekChunkTimeout (5 s) fires — adding a 5 s stall
 		// to every TLS connection before hijackAndMITM can start.
+		//
+		// Cutting a Read short loses nothing: the bytes stay in the
+		// kernel receive buffer, and the deadline clear below is what
+		// lets the next reader still get them.
 		_ = srcConn.SetReadDeadline(time.Now())
 		_ = dstConn.SetReadDeadline(time.Now())
 		wg.Wait()
@@ -112,7 +121,7 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 				// handshakes ourselves. Relay loops have already
 				// withheld the buffered ClientHello from the upstream.
 				cleanup()
-				return p.hijackAndMITM(ctx, srcConn, dstConn, res.buffered, dstAddr, backdate)
+				return p.hijackAndMITM(ctx, srcConn, dstConn, res.buffered, dstAddr, backdate, opts)
 			}
 
 			// One side reported "not TLS" — either it hit the byte
@@ -120,10 +129,78 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 			// Drain the OTHER side too so both goroutines exit; then
 			// either fall through to a pure relay (budget-exhaustion
 			// case) or close on the error path.
-			otherErr := waitForOther(ctx, sniffCh, &wg)
+			//
+			// cancelRelay runs BEFORE waitForOther, not after: waitForOther
+			// blocks until the peer's sniffAndRelayLoop goroutine exits,
+			// and that goroutine only checks ctx.Done() between reads —
+			// on every ordinary read timeout it just continues. If we
+			// waited first and cancelled after, a peer with nothing left
+			// to send would never be told to stop and waitForOther would
+			// hang forever (#4398).
+			//
+			// Poke an expired read deadline, same as cleanup(), so a peer
+			// parked in Read wakes now instead of serving out the rest of
+			// its opportunisticPeekChunkTimeout. Otherwise every closing
+			// plaintext connection holds two goroutines and two sockets
+			// for up to 5 s more.
+			//
+			// The clear afterwards is not decoration — it is what makes
+			// the poke safe. An expired deadline is sticky: the goroutine
+			// that already reported clears only its OWN side (:221) before
+			// returning, so without the clear here continuePlainRelay
+			// inherits an expired deadline and dies on its first read with
+			// i/o timeout, relaying nothing. cleanup() clears for the same
+			// reason.
+			//
+			// No data is lost by cutting a Read short. An expired deadline
+			// makes Read return (0, timeout) even with bytes already in
+			// the socket buffer, but those bytes stay in the kernel buffer
+			// and the next read — continuePlainRelay's io.Copy — gets them
+			// intact.
+			//
+			// The poke is best-effort, not a guarantee: a peer sitting
+			// between its loop-top ctx check and its own SetReadDeadline
+			// will overwrite this deadline with a fresh one and park
+			// anyway. It also only reaches a peer blocked in Read — one
+			// blocked in to.Write() is bounded by that call's own write
+			// deadline instead. Either way the wait is capped at one
+			// opportunisticPeekChunkTimeout rather than forever.
 			cancelRelay()
+			_ = srcConn.SetReadDeadline(time.Now())
+			_ = dstConn.SetReadDeadline(time.Now())
+			other := waitForOther(ctx, sniffCh, &wg)
+			_ = srcConn.SetReadDeadline(time.Time{})
+			_ = dstConn.SetReadDeadline(time.Time{})
 
-			if res.err == nil && otherErr == nil {
+			// The peer caught a ClientHello while we were taking the
+			// non-TLS branch on this side. Those bytes were withheld from
+			// the upstream so they could be replayed, and they exist
+			// nowhere else — dropping them leaves the upstream waiting
+			// for a handshake it will never see while the app waits for a
+			// ServerHello that can never come.
+			//
+			// Forward them and carry on as a plain relay rather than
+			// hijacking. Interception was already abandoned on this
+			// connection: only the src side sets isTLS, so res must be
+			// the dst result, and the res.err == nil guard narrows that
+			// to dst budget exhaustion — the upstream sent a full
+			// opportunisticPeekMaxBytes of pre-TLS bytes before the
+			// ClientHello landed. Real STARTTLS preambles are orders of
+			// magnitude under 64 KiB, so this is a defensive path, and
+			// handing an unexercised corner to hijackAndMITM would risk
+			// more than passing the handshake through costs. The app and
+			// the upstream then negotiate TLS directly; keploy simply
+			// does not intercept this one.
+			if res.err == nil && other.isTLS && len(other.buffered) > 0 {
+				if werr := replayWithheldHandshake(dstConn, other.buffered); werr != nil {
+					_ = srcConn.Close()
+					_ = dstConn.Close()
+					return firstNonShutdownErr(werr, nil)
+				}
+				return p.continuePlainRelay(ctx, srcConn, dstConn)
+			}
+
+			if res.err == nil && other.err == nil {
 				// Budget hit on both sides without TLS — the
 				// goroutines have already been forwarding bytes
 				// during their peek window. After they exit, finish
@@ -136,7 +213,7 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 			// at end-of-conversation; demote them to nil.
 			_ = srcConn.Close()
 			_ = dstConn.Close()
-			return firstNonShutdownErr(res.err, otherErr)
+			return firstNonShutdownErr(res.err, other.err)
 		}
 	}
 }
@@ -184,11 +261,24 @@ func (p *Proxy) sniffAndRelayLoop(ctx context.Context, side string, from, to net
 		_ = from.SetReadDeadline(time.Time{})
 
 		if err != nil {
-			if isTimeoutErr(err) && ctx.Err() == nil {
-				// Idle on this side; just loop to re-check ctx.
-				continue
+			if isTimeoutErr(err) {
+				if ctx.Err() == nil {
+					// Idle on this side; just loop to re-check ctx.
+					continue
+				}
+				// Cancelled while parked in Read. Being told to stop is
+				// not a failure of this side, so exit without publishing.
+				//
+				// Publishing here would be read by waitForOther as "the
+				// peer errored", which flips a clean budget-exhaustion
+				// result onto the close-both-connections path and kills a
+				// perfectly healthy plaintext relay. Whether that happened
+				// was a coin flip: sniffCh is buffered, so pushSignal's
+				// select had both a ready send and a ready ctx.Done() and
+				// picked at random.
+				return
 			}
-			pushSignal(ctx, sniffCh, sniffResult{side: side, isTLS: false, err: err})
+			pushSignal(sniffCh, sniffResult{side: side, isTLS: false, err: err})
 			return
 		}
 		if n == 0 {
@@ -204,13 +294,66 @@ func (p *Proxy) sniffAndRelayLoop(ctx context.Context, side string, from, to net
 		if side == "src" && pTls.IsTLSHandshake(chunk) {
 			persisted := make([]byte, n)
 			copy(persisted, chunk)
-			pushSignal(ctx, sniffCh, sniffResult{side: side, isTLS: true, buffered: persisted})
+			pushSignal(sniffCh, sniffResult{side: side, isTLS: true, buffered: persisted})
 			return
 		}
 
-		// Forward to the other side verbatim.
-		if _, werr := to.Write(chunk); werr != nil {
-			pushSignal(ctx, sniffCh, sniffResult{side: side, isTLS: false, err: werr})
+		// Forward to the other side verbatim, under a write deadline.
+		//
+		// Without one this is the #4398 leak again from the other end: a
+		// peer that has stopped reading fills the send buffer, Write
+		// blocks forever, and cancelRelay is invisible to a blocked
+		// Write — so wg.Wait() never returns and the connection's two
+		// goroutines and two sockets are pinned for the life of the
+		// process. The parent's expired-deadline poke does not help
+		// either; it sets a READ deadline.
+		//
+		// A timeout is retried rather than reported. A slow consumer is
+		// not an error, and abandoning a partially written chunk would
+		// punch a hole in a stream we are supposed to relay verbatim —
+		// these bytes are already out of the kernel buffer, so nothing
+		// else can re-send them. The deadline exists to regain control
+		// every opportunisticPeekChunkTimeout, not to cap the transfer.
+		//
+		// Once the context is cancelled we stop retrying, which bounds
+		// shutdown to one window. A peer draining too slowly to finish
+		// the chunk inside that window IS cut off — Write only returns a
+		// nil error once the whole slice is out — and the connection is
+		// then closed rather than relayed on with a hole in it.
+		written := 0
+		var werr error
+		for written < len(chunk) {
+			_ = to.SetWriteDeadline(time.Now().Add(opportunisticPeekChunkTimeout))
+			var wn int
+			wn, werr = to.Write(chunk[written:])
+			_ = to.SetWriteDeadline(time.Time{})
+			written += wn
+			if werr == nil {
+				continue
+			}
+			if isTimeoutErr(werr) && ctx.Err() == nil {
+				// Slow consumer; keep going now that ctx has been rechecked.
+				werr = nil
+				continue
+			}
+			if written == len(chunk) {
+				// Everything got out despite the error; nothing was lost,
+				// so don't fail a chunk that actually landed.
+				werr = nil
+				break
+			}
+			// A real write error, or cancellation with the chunk not fully
+			// out. Both are reported, including the written == 0 case:
+			// unlike a cut-short Read — whose bytes are still in the
+			// kernel buffer for continuePlainRelay to pick up — this chunk
+			// was already consumed out of `from` and lives only in buf, so
+			// returning quietly would punch a hole in a stream we are
+			// supposed to relay verbatim and leave the connection up to
+			// carry the corruption. Closing is the honest outcome.
+			break
+		}
+		if werr != nil {
+			pushSignal(sniffCh, sniffResult{side: side, isTLS: false, err: werr})
 			return
 		}
 
@@ -219,7 +362,7 @@ func (p *Proxy) sniffAndRelayLoop(ctx context.Context, side string, from, to net
 			// Budget exhausted; sniffCh "no TLS" but keep relaying
 			// until ctx is cancelled (the parent will start a clean
 			// io.Copy after both goroutines exit).
-			pushSignal(ctx, sniffCh, sniffResult{side: side, isTLS: false})
+			pushSignal(sniffCh, sniffResult{side: side, isTLS: false})
 			return
 		}
 	}
@@ -232,7 +375,7 @@ func (p *Proxy) sniffAndRelayLoop(ctx context.Context, side string, from, to net
 // upstream. After both handshakes complete it relays cleartext until
 // EOF on either side. There is no parser dispatch here — that's
 // what differentiates this mode from the default record path.
-func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bufferedClientHello []byte, dstAddr string, backdate time.Time) error {
+func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bufferedClientHello []byte, dstAddr string, backdate time.Time, opts models.OutgoingOptions) error {
 	defer srcConn.Close()
 	defer dstConn.Close()
 
@@ -257,12 +400,44 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	// Upstream handshake. The dst socket is in "expecting
 	// ClientHello" state because we deliberately did NOT forward
 	// the client's ClientHello — keploy starts a fresh TLS session
-	// of its own. ServerName is best-effort from the dial address;
-	// InsecureSkipVerify is required because keploy is not the
-	// authoritative CA for the upstream's chain.
+	// of its own.
+	//
+	// Verification is off unless the operator opted in via
+	// record.upstreamTls.verify, for the same reason as every other
+	// upstream dial in this package: keploy must never be stricter
+	// than the app it records. An app that chose not to authenticate
+	// its own upstream would have its connection broken by keploy
+	// doing it on its behalf, and the failure is silent — the
+	// handshake error drops this connection's recording entirely
+	// while the app itself keeps working. Not a CA-bundle
+	// limitation: crypto/tls uses the platform root pool when
+	// RootCAs is nil.
+	//
+	// ServerName:
+	//
+	//   - Default (verification off): hostFromAddr(dstAddr), byte for byte
+	//     what this site has always sent. dstAddr here is ALWAYS an
+	//     `ip:port` built from destInfo, so this is an IP literal and
+	//     crypto/tls omits SNI from the wire for it. Preserving that is the
+	//     whole point — the app never sent an SNI to the real server on this
+	//     path, and keploy must not invent one.
+	//   - Verifying: the SNI the APPLICATION sent, which the client-facing
+	//     handshake above has just recovered from its ClientHello, falling
+	//     back to the dial address only when the app sent none. "Never
+	//     empty" is not the same as "verifiable": a hostname-addressed
+	//     upstream presents a DNS-SAN-only certificate, and checking it
+	//     against the destination IP fails with `cannot validate certificate
+	//     for <ip> because it doesn't contain any IP SANs` — which on THIS
+	//     path is worse than a dropped mock, because the deferred
+	//     srcConn/dstConn closes above tear down the application's own
+	//     connection after it has already completed its handshake with us.
 	serverName := hostFromAddr(dstAddr)
+	if opts.UpstreamTLSVerify {
+		serverName = resolveUpstreamServerName(capturedClientSNI(tlsClient), "", dstAddr, true)
+	}
 	upstreamCfg := &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // lgtm[go/disabled-tls-certificate-check] — MITM proxy by design; keploy is not the authoritative CA for the upstream chain
+		InsecureSkipVerify: !opts.UpstreamTLSVerify, //nolint:gosec // MITM proxy by design; opt in with record.upstreamTls.verify
+		RootCAs:            opts.UpstreamTLSRootCAs,
 		ServerName:         serverName,
 		KeyLogWriter:       pTls.KeyLogWriter(),
 	}
@@ -419,37 +594,85 @@ func closeWriteIfPossible(c net.Conn) error {
 	return nil
 }
 
-// pushSignal sends a result on the channel unless ctx is cancelled.
-// The channel is buffered with capacity 2 so this never blocks in
-// the normal path; the ctx.Done branch is only there so a cancelled
-// goroutine doesn't deadlock if the parent has already moved on.
-func pushSignal(ctx context.Context, ch chan<- sniffResult, res sniffResult) {
-	select {
-	case ch <- res:
-	case <-ctx.Done():
-	}
+// pushSignal publishes a goroutine's verdict. The send is unguarded on
+// purpose: sniffCh has capacity 2, exactly two sniffAndRelayLoop
+// goroutines run per connection, and every call site returns
+// immediately afterwards — so at most two sends ever occur and the
+// buffer can never be full.
+//
+// This used to select over ctx.Done() as well, described as deadlock
+// protection for a cancelled goroutine. It protected against nothing
+// (the send cannot block) and cost correctness: once the parent
+// cancelled relayCtx, BOTH cases were runnable and Go chose uniformly
+// at random, so roughly half of all post-cancellation verdicts were
+// dropped. That included the isTLS verdict carrying a buffered
+// ClientHello — which the loop had withheld from the upstream
+// precisely so the parent could replay it — leaving the parent to
+// plain-relay a connection whose handshake had been swallowed.
+func pushSignal(ch chan<- sniffResult, res sniffResult) {
+	ch <- res
 }
 
 // waitForOther drains the second sniff result so both goroutines
-// always exit before we tear down the connection. Returns the err
-// field of the second result (nil on clean exit / budget hit).
-func waitForOther(ctx context.Context, ch <-chan sniffResult, wg *sync.WaitGroup) error {
+// always exit before we tear down the connection.
+//
+// It returns the whole sniffResult, not just its error. The peer can
+// still report a ClientHello here: only the src side detects TLS, so
+// when dst reports first (budget or error) the src side may be parked
+// mid-handshake and publish isTLS a moment later. Returning only .err
+// dropped that verdict AND the buffered ClientHello bytes the loop had
+// deliberately withheld from the upstream, so the caller plain-relayed
+// a stream whose handshake had been swallowed — the app then waited
+// forever for a ServerHello that could never arrive.
+func waitForOther(ctx context.Context, ch <-chan sniffResult, wg *sync.WaitGroup) sniffResult {
 	// Wait for either the second sniffCh or the goroutines to finish.
 	doneCh := make(chan struct{})
 	go func() { wg.Wait(); close(doneCh) }()
 
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return sniffResult{err: ctx.Err()}
 	case res := <-ch:
 		<-doneCh
-		return res.err
+		return res
 	case <-doneCh:
-		// Both goroutines exited without a second sniffCh — possible
-		// if the second one's result was dropped because the channel
-		// was full. Treat as no-error; pure-relay fallback handles it.
-		return nil
+		// Drain before giving up. This is not the rare path its name
+		// suggests — it is the common one, because a peer cancelled
+		// while parked in Read returns without publishing at all. But
+		// a peer that DID publish and then exited satisfies both this
+		// case and the one above, and Go picks between ready cases at
+		// random; taking this one without looking would throw away a
+		// verdict that is already sitting in the buffer, including an
+		// isTLS carrying a withheld ClientHello. Same defect pushSignal
+		// used to have, one level up.
+		select {
+		case res := <-ch:
+			return res
+		default:
+			return sniffResult{}
+		}
 	}
+}
+
+// replayWithheldHandshake forwards the ClientHello bytes a
+// sniffAndRelayLoop deliberately withheld from the upstream, so a
+// connection that stops being intercepted still carries a complete
+// stream. The bytes exist nowhere else — they were consumed out of the
+// client socket and held in memory — so failing to send them corrupts
+// the stream rather than merely losing an optimisation.
+//
+// Bounded by the same per-chunk window the relay loops use. This runs
+// only after the upstream has already pushed opportunisticPeekMaxBytes,
+// which is exactly the profile of a peer that may have stopped reading,
+// and an unbounded Write here would re-create the #4398 hang in the
+// parent goroutine.
+func replayWithheldHandshake(dstConn net.Conn, buffered []byte) error {
+	_ = dstConn.SetWriteDeadline(time.Now().Add(opportunisticPeekChunkTimeout))
+	defer func() { _ = dstConn.SetWriteDeadline(time.Time{}) }()
+	if _, err := dstConn.Write(buffered); err != nil {
+		return fmt.Errorf("replaying withheld ClientHello upstream: %w", err)
+	}
+	return nil
 }
 
 // hostFromAddr returns the host portion of "host:port" or
@@ -460,6 +683,42 @@ func hostFromAddr(addr string) string {
 		return addr
 	}
 	return host
+}
+
+// capturedClientSNI returns the ServerName the APPLICATION put in the
+// ClientHello it sent to keploy, or "" if it sent none (which is what
+// crypto/tls does for an IP-literal destination — RFC 6066 forbids IP
+// literals in SNI).
+//
+// Read straight off the completed client-facing *tls.Conn rather than through
+// pTls.SrcPortToDstURL: it is the same value CertForClient stored there
+// moments earlier, but it needs no source-port lookup and so cannot be
+// confused by a recycled port. Returns "" for anything that is not a
+// *tls.Conn, so callers degrade to their existing fallback.
+func capturedClientSNI(clientConn net.Conn) string {
+	tc, ok := clientConn.(*tls.Conn)
+	if !ok {
+		return ""
+	}
+	return tc.ConnectionState().ServerName
+}
+
+// hostFromConn is hostFromAddr over a connection's remote address — the peer
+// keploy is actually talking to. Used as the last-resort ServerName when the
+// caller had no SNI to reuse and verification is on.
+//
+// Returns "" for a nil conn or a nil RemoteAddr rather than panicking: the
+// callers feed the result straight to tls.Config.ServerName, and "" there is
+// exactly the state they were already in — no worse than not calling it.
+func hostFromConn(conn net.Conn) string {
+	if conn == nil {
+		return ""
+	}
+	addr := conn.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	return hostFromAddr(addr.String())
 }
 
 // isTimeoutErr matches the deadline-exceeded error returned by

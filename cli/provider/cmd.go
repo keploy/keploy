@@ -240,7 +240,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("server-port", c.cfg.ServerPort, "Port used by the Keploy Agent server to intercept traffic")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
+		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker-run/docker-start/docker-compose)")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
@@ -293,7 +293,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "agent":
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
-		cmd.Flags().Uint32("client-pid", 0, "must be provided (pgid of the keploy client)")
+		cmd.Flags().Uint32("client-pid", 0, "must be provided (pid of the keploy client process; the launcher passes os.Getpid())")
 		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.Agent.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -313,6 +313,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
+		// Agent-side mirrors of the record command's upstream-TLS flags.
+		// The agent is the process that actually dials the upstream, and
+		// on containerised runs it cannot read the host's keploy.yml, so
+		// argv is the only propagation channel. The CA path is resolved
+		// here, inside the agent's filesystem.
+		cmd.Flags().Bool("upstream-tls-verify", c.cfg.Agent.UpstreamTLSVerify, "Verify the real upstream server's TLS certificate on the agent's own outbound dials")
+		cmd.Flags().String("upstream-tls-ca-cert", c.cfg.Agent.UpstreamTLSCACert, "PEM file of extra trust anchors for --upstream-tls-verify, resolved on the agent's filesystem")
 		// Internal orchestrator→agent propagation flag. The user-
 		// facing surface for the channel-binding shim lives in the
 		// enterprise CLI provider; this flag exists on `keploy agent`
@@ -336,12 +343,14 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// — the host's keploy.yml is not bind-mounted into the agent
 		// container, so argv is the only propagation channel here.
 		// Hidden: only relevant when the operator already knows they
-		// need to bump these (saw drops with reason per_conn_cap /
-		// channel_full). See pkg/agent/proxy/relay/config.go.
+		// need to bump these (saw drops with reason per_conn_cap).
+		// See pkg/agent/proxy/relay/config.go.
 		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB).")
-		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recording queue (default 1024).")
+		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recorder-to-parser hand-off channel (default 1024).")
+		cmd.Flags().Duration("consumer-stall-grace", c.cfg.Record.RecordBuffer.ConsumerStallGrace, "How long a closing connection waits on a parser that has stopped draining before abandoning its queued chunks (default 2s).")
 		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
 		_ = cmd.Flags().MarkHidden("queue-size")
+		_ = cmd.Flags().MarkHidden("consumer-stall-grace")
 
 	default:
 		return errors.New("unknown command name")
@@ -360,17 +369,27 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
+		// Upstream (destination-side) TLS verification. Off by default:
+		// keploy must never be stricter than the app it records — an app
+		// on sslmode=require / tls=skip-verify chose not to authenticate
+		// its upstream, and a dest-side handshake failure falls through
+		// to raw passthrough, which drops the mock silently. Not a
+		// CA-bundle limitation; crypto/tls uses the system pool for free.
+		cmd.Flags().Bool("upstream-tls-verify", c.cfg.Record.UpstreamTLS.Verify, "Verify the real upstream server's TLS certificate on keploy's own outbound dials during record. Off by default so keploy is never stricter than the application it records.")
+		cmd.Flags().String("upstream-tls-ca-cert", c.cfg.Record.UpstreamTLS.CACert, "PEM file of extra trust anchors for --upstream-tls-verify, appended to the system pool. Resolved on the agent's filesystem, which for docker/k8s runs is not the host's.")
 		cmd.Flags().Bool("capture-packets", c.cfg.Record.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Record.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode. Bytes flow verbatim between app and upstream until a TLS ClientHello is seen; the proxy then MITM-terminates both halves so the captured pcap is decryptable. Independent of --global-passthrough.")
 		// Advanced record-buffer tuning. Hidden from --help: only relevant
 		// when the operator already knows they need to bump these (saw
-		// per_conn_cap / channel_full drops in agent logs). Env vars
+		// per_conn_cap drops in agent logs). Env vars
 		// KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
 		// override these flags.
 		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB). Bump if you see per_conn_cap drops.")
-		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recording queue (default 1024). Bump if you see channel_full drops.")
+		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recorder-to-parser hand-off channel (default 1024). Does not bound recording; raise max-memory-per-conn for per_conn_cap drops.")
+		cmd.Flags().Duration("consumer-stall-grace", c.cfg.Record.RecordBuffer.ConsumerStallGrace, "How long a closing connection waits on a parser that has stopped draining before abandoning its queued chunks (default 2s). Bounds stalled time, not elapsed time, and is only consulted after close.")
 		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
 		_ = cmd.Flags().MarkHidden("queue-size")
+		_ = cmd.Flags().MarkHidden("consumer-stall-grace")
 	case "test":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
@@ -414,7 +433,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
-		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) on HTTP mocks during auto-replay matching")
+		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared schema-noise adapter")
+		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared schema-noise adapter. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
 		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping (default behaviour demotes such cases to OBSOLETE). The per-test mappingDiff block is still written for diagnostics.")
 		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
 		// Start the user app ONCE for the whole replay run instead of
@@ -468,6 +488,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"memoryLimit":               "memory-limit",
 		"maxMemoryPerConnection":    "max-memory-per-conn",
 		"queueSize":                 "queue-size",
+		"consumerStallGrace":        "consumer-stall-grace",
 		"appId":                     "app-id",
 		"appName":                   "app-name",
 		"generateGithubActions":     "generate-github-actions",
@@ -493,10 +514,16 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"compareAll":                "compare-all",
 		"schemaMatch":               "schema-match",
 		"schemaNoiseDetection":      "schema-noise-detection",
+		"schemaNoiseStrict":         "schema-noise-strict",
 		"updateTestMapping":         "update-test-mapping",
 		"capturePackets":            "capture-packets",
 		"opportunisticTlsIntercept": "opportunistic-tls-intercept",
-		"keepAppAlive":              "keep-app-alive",
+		// record.upstreamTls is a nested block, so the keploy.yml key is
+		// dotted where the sibling entries above are single-segment. The
+		// alias is what lets a lookup by config key resolve to the flag.
+		"upstreamTls.verify": "upstream-tls-verify",
+		"upstreamTls.caCert": "upstream-tls-ca-cert",
+		"keepAppAlive":       "keep-app-alive",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -668,6 +695,112 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	return nil
 }
 
+// mentionsDockerBinary reports whether the command actually invokes docker,
+// as opposed to merely containing the word. Substring matching let
+// "./run-docker.sh" through — a wrapper by any reading, and the exact naming
+// convention a docker wrapper script uses.
+func mentionsDockerBinary(command string) bool {
+	fields := strings.Fields(strings.ToLower(command))
+	for i, field := range fields {
+		base := field
+		if j := strings.LastIndex(base, "/"); j >= 0 {
+			base = base[j+1:] // /usr/bin/docker -> docker
+		}
+		// The v1 binary takes any subcommand, so the name alone is enough.
+		if base == "docker-compose" {
+			return true
+		}
+		// A bare "docker" token is not enough: `npm run docker` runs a script
+		// called docker. Require a subcommand that actually launches
+		// something, which is what the docker-run/docker-start modes rewrite.
+		if base == "docker" && i+1 < len(fields) {
+			switch fields[i+1] {
+			case "run", "start", "compose", "container":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolveCommandType decides the CommandType for a record/test run.
+//
+// Before #4399 this was unconditionally `FindDockerCmd(command)`, so the
+// --cmd-type flag — defined, kebab-aliased, viper-bound and unmarshalled —
+// was overwritten before anything read it. There was no way to tell keploy
+// "this launches a container" when the launch is wrapped in a script or a
+// Makefile target and the raw command string looks nothing like docker.
+//
+// Gated on Changed() rather than on the value being non-empty, because
+// config/default.go ships cmdType: "native" in every generated keploy.yml —
+// a non-empty check would read that baked-in default as a user choice and
+// break docker auto-detection for everyone who never touched the flag.
+//
+// Deliberately command-line only. A cmdType in keploy.yml cannot be honoured
+// even in principle: the sudo re-exec in main.go runs before any config is
+// read (utils.ShouldReexecWithSudo, which this change teaches to read the
+// flag out of os.Args), so a config-supplied docker type would decide the
+// mode without the root privileges that mode needs. A docker value sitting
+// in config is warned about rather than silently ignored, so the trap that
+// made this flag inert for so long is at least visible.
+func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configured string) (string, error) {
+	if cmd.Flags().Changed("cmd-type") {
+		// Normalised the same way FindDockerCmd normalises what it matches
+		// against, so `--cmd-type Docker-Compose` is not a fatal typo.
+		explicit := strings.ToLower(strings.TrimSpace(configured))
+		switch kind := utils.CmdType(explicit); kind {
+		case utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose:
+			// docker-run and docker-start need to REWRITE the command —
+			// SetupDocker splices `--pid=container:…  --network=container:…`
+			// into a `docker run` — and there is no way to do that to a
+			// wrapper, nor an environment variable that achieves the same.
+			// Point one at `make up` and modifyDockerRun either errors on
+			// the token count or splices flags into the middle of the
+			// wrapper. Refuse it here, where the message can say why.
+			//
+			// docker-compose has a way through: keploy's compose file is
+			// handed over via COMPOSE_FILE and the command runs untouched,
+			// so a wrapper is supported there (see App.SetupCompose).
+			if (kind == utils.DockerRun || kind == utils.DockerStart) && command != "" &&
+				!mentionsDockerBinary(command) {
+				return "", fmt.Errorf(
+					"--cmd-type %s has to rewrite the command to attach keploy's namespaces, "+
+						"which is only possible on a literal docker command, and %q is not one. "+
+						"Pass the underlying docker command with -c, or use --cmd-type %s if the "+
+						"wrapper brings up a compose project",
+					explicit, command, utils.DockerCompose)
+			}
+			return explicit, nil
+		case utils.Empty:
+			// `--cmd-type=""` used to be silently overwritten by
+			// auto-detection, so that is what it must keep doing. Rejecting
+			// it would break scripts that pass it; preserving it would be
+			// worse still — GetCommonServices reads "" as "not docker" and
+			// leaves the docker client nil, while resolveKind reads it as
+			// "detect", so a `--cmd-type= -c "docker compose up"` would
+			// reach SetupCompose with a nil client and panic. Treat an
+			// explicitly empty value as "not specified".
+			return string(utils.FindDockerCmd(command)), nil
+		default:
+			return "", fmt.Errorf(
+				"invalid --cmd-type value %q: allowed values are %q, %q, %q, and %q",
+				configured, utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose)
+		}
+	}
+
+	detected := utils.FindDockerCmd(command)
+	// Only warn when it would actually have made a difference. A config that
+	// merely agrees with auto-detection is not being ignored in any way the
+	// user can observe, and warning on every such run would be noise.
+	if kind := utils.CmdType(strings.ToLower(strings.TrimSpace(configured))); utils.IsDockerCmd(kind) && kind != detected {
+		logger.Warn("cmdType in the config file is not honoured; pass --cmd-type on the command line instead",
+			zap.String("cmdType", configured),
+			zap.String("using", string(detected)),
+			zap.String("reason", "the privilege decision happens before any config file is read"))
+	}
+	return string(detected), nil
+}
+
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	// The --json flag isn't registered on every subcommand (record / agent
 	// don't define it in enterprise builds), so Lookup + fallback avoids
@@ -775,7 +908,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	}
 
-	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
+	// Redact the DB password before dumping the whole config at Debug — it would
+	// otherwise leak test.mongoPassword into any -debug capture.
+	redactedCfg := *c.cfg
+	if redactedCfg.Test.MongoPassword != "" {
+		redactedCfg.Test.MongoPassword = "****"
+	}
+	// InMemoryCompose can carry docker-compose YAML with embedded secrets/tokens;
+	// never dump its contents. redactedCfg is a shallow copy, so reassigning the
+	// slice header here leaves the live config untouched.
+	if len(redactedCfg.InMemoryCompose) > 0 {
+		redactedCfg.InMemoryCompose = []byte(fmt.Sprintf("**** (%d bytes redacted)", len(redactedCfg.InMemoryCompose)))
+	}
+	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", redactedCfg))
 
 	switch cmd.Name() {
 
@@ -1007,7 +1152,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		// set the command type
-		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+		commandType, err := resolveCommandType(c.logger, cmd, c.cfg.Command, c.cfg.CommandType)
+		if err != nil {
+			return err
+		}
+		c.cfg.CommandType = commandType
 		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
 			return fmt.Errorf("non docker command not supported for OS: %s , Arch: %s", runtime.GOOS, runtime.GOARCH)
 		}
@@ -1056,7 +1205,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				c.logger.Info(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
 				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
 			}
-			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
+			// Compare the resolved TYPE, not the raw command string — the
+			// latter is never equal to a CmdType, so this gate never fired
+			// and the missing --container-name surfaced much later, as
+			// "container name not found" from SetupCompose, after the sudo
+			// re-exec and agent start. It matters more now: a wrapper
+			// command has no container name to parse out of it, so this is
+			// the only place the user can be told what to pass.
+			if utils.CmdType(c.cfg.CommandType) == utils.DockerCompose {
 				if c.cfg.ContainerName == "" {
 					utils.LogError(c.logger, nil, "Couldn't find containerName")
 					c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
@@ -1075,7 +1231,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// Check and fix keploy folder permissions for native mode only
 		// (handles root-owned files from older sudo-based versions)
 		// Docker commands use sudo re-exec, so they run as root and don't need this
-		cmdType := utils.FindDockerCmd(c.cfg.Command)
+		// Use the resolved type, not a second derivation from the command
+		// string — otherwise an explicit --cmd-type docker-* would still be
+		// treated as native here and prompt for sudo it does not need.
+		cmdType := utils.CmdType(c.cfg.CommandType)
 		if !utils.IsDockerCmd(cmdType) {
 			// Native mode: fix permissions immediately (this caches sudo credentials)
 			if err := utils.EnsureKeployFolderPermissions(cmd.Context(), c.logger, c.cfg.Path); err != nil {
@@ -1146,6 +1305,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return err
 			}
 			if err := c.resolveRecordBufferInt(cmd, "queue-size", "KEPLOY_RECORD_QUEUE_SIZE", &c.cfg.Record.RecordBuffer.QueueSize); err != nil {
+				return err
+			}
+			if err := c.resolveRecordBufferDuration(cmd, "consumer-stall-grace", "KEPLOY_RECORD_CONSUMER_STALL_GRACE", &c.cfg.Record.RecordBuffer.ConsumerStallGrace); err != nil {
 				return err
 			}
 
@@ -1224,6 +1386,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				errMsg := "failed to read the --schema-noise-detection flag; check the flag name with --help and confirm this command supports it"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
+			}
+
+			// Only let the flag override when it was explicitly passed or
+			// the config file doesn't set the key — otherwise the flag's
+			// default would silently clobber a yaml-only configuration
+			// (same guard pattern as disable-mapping above).
+			if cmd.Flags().Changed("schema-noise-strict") || !viper.IsSet("test.schemaNoiseStrict") {
+				c.cfg.Test.SchemaNoiseStrict, err = cmd.Flags().GetBool("schema-noise-strict")
+				if err != nil {
+					errMsg := "failed to read the --schema-noise-strict flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 			}
 
 			// enforce that the test-sets are provided when --must-pass is set to true
@@ -1309,6 +1484,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			c.cfg.Record.OpportunisticTLSIntercept = opportunisticTLSIntercept
 
+			// Upstream TLS verification. Unlike the flat flags above these
+			// must be applied ONLY when the user actually typed them.
+			// record.upstreamTls is a nested block, and utils.BindFlagsToViper
+			// derives its viper key from the kebab flag name
+			// (upstream-tls-verify → record.upstreamTlsVerify), which does not
+			// address record.upstreamTls.verify — so viper.Unmarshal cannot
+			// carry the flag into the struct and this assignment is the only
+			// path. Flags are registered before keploy.yml is read, so an
+			// unconditional assignment would push the flag DEFAULT over a value
+			// the user set in keploy.yml. Gating on Changed() keeps the
+			// precedence flag > yaml > default.
+			if cmd.Flags().Changed("upstream-tls-verify") {
+				upstreamTLSVerify, err := cmd.Flags().GetBool("upstream-tls-verify")
+				if err != nil {
+					errMsg := "failed to read the upstream-tls-verify flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Record.UpstreamTLS.Verify = upstreamTLSVerify
+			}
+			if cmd.Flags().Changed("upstream-tls-ca-cert") {
+				upstreamTLSCACert, err := cmd.Flags().GetString("upstream-tls-ca-cert")
+				if err != nil {
+					errMsg := "failed to read the upstream-tls-ca-cert flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Record.UpstreamTLS.CACert = upstreamTLSCACert
+			}
+
 			// Read --disable-mapping if the user explicitly passed it on
 			// `keploy record`, or if keploy.yml hasn't set the field at
 			// all (so we fall back to the flag's default). Matches the
@@ -1384,6 +1589,40 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.ChannelBindingShim = channelBindingShim
+
+		// Upstream TLS verification, forwarded from the orchestrator. Gated on
+		// Changed() — but the gate now records that the flag was PRESENT
+		// (…Set) rather than leaving the agent to guess. The orchestrator
+		// forwards its own already-resolved value unconditionally as
+		// --upstream-tls-verify=%t (see pkg/platform/http/agent.go and
+		// pkg/platform/docker), so for an orchestrator-spawned agent the flag
+		// is always present and always wins over the keploy.yml the agent
+		// happens to share with the CLI on a native run. Without the marker an
+		// explicit `--upstream-tls-verify=false` is indistinguishable from
+		// "not specified" and cannot switch a yaml `verify: true` back off —
+		// which it CAN under docker, where the container never sees the file.
+		// One config must not mean two things. See
+		// proxy.resolveUpstreamTLSConfig for the consumer.
+		if cmd.Flags().Changed("upstream-tls-verify") {
+			upstreamTLSVerify, err := cmd.Flags().GetBool("upstream-tls-verify")
+			if err != nil {
+				errMsg := "failed to read the upstream-tls-verify flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Agent.UpstreamTLSVerify = upstreamTLSVerify
+			c.cfg.Agent.UpstreamTLSVerifySet = true
+		}
+		if cmd.Flags().Changed("upstream-tls-ca-cert") {
+			upstreamTLSCACert, err := cmd.Flags().GetString("upstream-tls-ca-cert")
+			if err != nil {
+				errMsg := "failed to read the upstream-tls-ca-cert flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Agent.UpstreamTLSCACert = upstreamTLSCACert
+			c.cfg.Agent.UpstreamTLSCACertSet = true
+		}
 
 		isdocker, err := cmd.Flags().GetBool("is-docker")
 		if err != nil {
@@ -1520,12 +1759,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if err := c.resolveRecordBufferInt(cmd, "queue-size", "KEPLOY_RECORD_QUEUE_SIZE", &c.cfg.Record.RecordBuffer.QueueSize); err != nil {
 			return err
 		}
+		if err := c.resolveRecordBufferDuration(cmd, "consumer-stall-grace", "KEPLOY_RECORD_CONSUMER_STALL_GRACE", &c.cfg.Record.RecordBuffer.ConsumerStallGrace); err != nil {
+			return err
+		}
 
 		// Cross-check: max-memory-per-conn must not exceed the agent's
-		// memory limit. The agent's --memory-limit (Agent.MemoryLimit in
-		// MB) is what memoryguard enforces; if the per-connection buffer
-		// alone is larger than the agent's whole budget, a single large
-		// response will OOM the recording loop before any concurrency.
+		// memory limit. --memory-limit (Agent.MemoryLimit in MB) is what
+		// memoryguard budgets against; in a k8s injection it now carries the
+		// container LIMIT (2× the request), i.e. the real OOM boundary, so
+		// checking the per-connection buffer against it is the correct bound —
+		// k8s-proxy validates the same limit at record-start (ApplyRecordConfig).
+		// If the per-connection buffer alone exceeds the whole budget, a single
+		// large response will OOM the recording loop before any concurrency.
 		// Skip when MemoryLimit=0 (uncapped); proxy.go's
 		// clampRecordBuffer still applies the 2 GiB upper bound there.
 		if c.cfg.Agent.MemoryLimit > 0 && c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > 0 {
@@ -1599,6 +1844,37 @@ func (c *CmdConfigurator) resolveRecordBufferInt(cmd *cobra.Command, flagName, e
 		v, err := strconv.Atoi(envVal)
 		if err != nil {
 			c.logger.Debug("ignoring malformed env var; expected integer",
+				zap.String("envVar", envName),
+				zap.String("value", envVal),
+				zap.Error(err))
+		} else {
+			*target = v
+		}
+	}
+	return nil
+}
+
+// resolveRecordBufferDuration is the time.Duration sibling of
+// resolveRecordBufferUint64. Same precedence (flag, then env) and the same
+// tolerance for a malformed env var: log at debug and keep the previous
+// value rather than failing the command, because a typo'd tuning knob must
+// not stop a recording. The env value accepts any time.ParseDuration form
+// ("2s", "500ms", "1m30s"); a bare integer is rejected as malformed rather
+// than guessed at, since the unit is exactly the thing worth being explicit
+// about.
+func (c *CmdConfigurator) resolveRecordBufferDuration(cmd *cobra.Command, flagName, envName string, target *time.Duration) error {
+	if cmd.Flags().Changed(flagName) {
+		v, err := cmd.Flags().GetDuration(flagName)
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get "+flagName+" flag")
+			return fmt.Errorf("failed to get %s flag: %w", flagName, err)
+		}
+		*target = v
+	}
+	if envVal := os.Getenv(envName); envVal != "" {
+		v, err := time.ParseDuration(envVal)
+		if err != nil {
+			c.logger.Debug("ignoring malformed env var; expected a duration such as \"2s\"",
 				zap.String("envVar", envName),
 				zap.String("value", envVal),
 				zap.Error(err))

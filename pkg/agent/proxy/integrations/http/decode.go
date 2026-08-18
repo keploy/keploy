@@ -22,9 +22,10 @@ import (
 )
 
 // ErrMockNotMatched is returned by decodeHTTP when no recorded mock
-// matches the outgoing HTTP request. Callers can check for this with
-// errors.Is to distinguish a mock-miss from a real proxy error.
-var ErrMockNotMatched = errors.New("no matching mock found")
+// matches the outgoing HTTP request. It aliases models.ErrNoMockMatched so
+// callers can errors.Is against either symbol to distinguish a mock-miss
+// from a real proxy error.
+var ErrMockNotMatched = models.ErrNoMockMatched
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
@@ -105,7 +106,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			if input.header.Get("Content-Encoding") != "" {
-				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body)
+				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body, pkg.MaxDecompressedSize)
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(request)))
 					errCh <- err
@@ -153,16 +154,169 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if headerNoise == nil {
 					headerNoise = make(map[string][]string)
 				}
-				for _, hdr := range flakyHeaders {
+				for hdr, noise := range flakyHeaderNoise() {
 					if _, exists := headerNoise[hdr]; !exists {
-						headerNoise[hdr] = []string{}
+						headerNoise[hdr] = noise
+					}
+				}
+			}
+
+			// User request-body noise from test.globalNoise.requestBody
+			// (root-relative dotted paths). This is a DEDICATED bucket,
+			// distinct from the "body" bucket that governs RESPONSE
+			// assertions: request-matching noise and response-assertion noise
+			// are separate axes. Reusing the response "body" bucket here would
+			// let a field noised only because it is dynamic in the response
+			// silently soften request matching too (e.g. excusing a wrong
+			// user-id under --schema-noise-strict). Keeping them separate makes
+			// strict matching a real guarantee — a path can only weaken request
+			// matching if the user puts it under requestBody on purpose.
+			//
+			// Lowercased copy for the same reason as headerNoise: the matcher's
+			// noise index matches lowercased paths. Entries are normalized to
+			// presence-only (empty regex list): request-body mock matching and
+			// drift detection are path-based, so a value-regex cannot gate here.
+			var bodyNoise map[string][]string
+			if opts.NoiseConfig != nil {
+				if bn, ok := opts.NoiseConfig["requestbody"]; ok {
+					bodyNoise = make(map[string][]string, len(bn))
+					for k, v := range bn {
+						if len(v) > 0 {
+							h.Logger.Debug("body-noise value regexes are ignored for mock matching; the field is skipped by path",
+								zap.String("field", k))
+						}
+						bodyNoise[strings.ToLower(k)] = []string{}
+					}
+				}
+			}
+
+			// User URL-path noise from test.globalNoise.url. The URL path is the
+			// one request field matched by EXACT value with no noise hook, so a
+			// non-deterministic path segment (id/uuid/timestamp/object key) made
+			// the recorded mock unmatchable and produced a "no matching mock -> 502"
+			// on replay. Each key here is a regex that wildcards the matching
+			// segment in both the mock and request paths (see MatchURLPath). The
+			// value slice is unused — like requestbody, matching is by pattern, not
+			// by a value-regex — so an entry is presence-only.
+			var urlNoise []string
+			if opts.NoiseConfig != nil {
+				if un, ok := opts.NoiseConfig["url"]; ok {
+					urlNoise = make([]string, 0, len(un))
+					for k := range un {
+						urlNoise = append(urlNoise, k)
 					}
 				}
 			}
 
 			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
+			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
+			h.Logger.Debug("url noise", zap.Any("url noise", urlNoise))
 
-			ok, stub, err := h.match(ctx, input, mockDb, headerNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
+			// Telemetry / noisy-egress passthrough. Configurable via
+			// record.passThroughPorts / passThroughHosts (see models.PassThroughRule),
+			// with built-in defaults (POST /v1/traces, /ingest) as a "skip" fallback.
+			// These are live, fire-and-forget telemetry the app emits every run, not
+			// recorded dependencies — matching them falls through to the HTTP
+			// fuzzy-matcher, which shingles the large (~150–200 KB) bodies and OOMs
+			// the sidecar (measured: ~432 MB of a ~1.1 GB peak). We short-circuit
+			// BEFORE h.match:
+			//   - skip:      synthesize a bare 200 (OTLP/HTTP & Pyroscope treat any
+			//                2xx as success); no mock is consulted.
+			//   - recordOne: serve ONE recorded response for (method,path)
+			//                body-agnostically for every matching call (never
+			//                consumed), falling back to a synthetic 200 when nothing
+			//                was recorded — so replay never errors and the body is
+			//                never fuzzy-matched.
+			ptHost := request.Host
+			if ptHost == "" && input.url != nil {
+				ptHost = input.url.Host
+			}
+			var ptPort uint32
+			if dstCfg != nil {
+				ptPort = uint32(dstCfg.Port)
+			}
+			if rule, matched := passThroughEgressDecision(opts, ptHost, ptPort, input.method, input.url); matched {
+				mode := rule.Mode
+				out := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+				served := "synthetic-200"
+				// Serve a recorded mock when one exists — for recordOne always, and
+				// for skip too: an existing test-set may have legitimately recorded
+				// this endpoint (before it became a skip default), and synthesizing a
+				// 200 over it would change replay behaviour on unchanged test data.
+				// Non-consuming; falls back to the synthetic 200 when nothing matches.
+				if recorded := h.serveOnePassThroughMock(mockDb, input, ptHost, ptPort, rule.QueryKeys); recorded != nil {
+					out = recorded
+					served = "recorded"
+				}
+				h.Logger.Debug("egress passthrough: serving without mock match",
+					zap.String("mode", string(mode)), zap.String("served", served),
+					zap.String("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
+				if _, werr := clientConn.Write(out); werr != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					utils.LogError(h.Logger, werr, "egress passthrough: failed to write response", zap.Any("metadata", utils.GetReqMeta(request)))
+					errCh <- werr
+					return
+				}
+				// Read the next request on this keep-alive connection and loop,
+				// mirroring the matched-response path below.
+				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+				if err != nil {
+					h.Logger.Debug("egress passthrough: client closed connection", zap.Error(err))
+					errCh <- nil
+					return
+				}
+				continue
+			}
+
+			// Async serving short-circuit. When this outgoing request routes to
+			// a configured async lane, the transport-agnostic engine — not the
+			// normal mock matcher — decides what to serve: either a recorded
+			// delivery (once its anchor position has been reached) or a
+			// keep-alive payload to keep the client polling. Mirrors the
+			// telemetry short-circuit above: write, read the next poll, continue.
+			if h.asyncEngine != nil {
+				live := liveReqToMock(input)
+				if lane, laneOK := h.asyncEngine.LaneFor(live); laneOK {
+					// failAsync reports err via errCh unless the context is
+					// already cancelled; the caller returns right after.
+					failAsync := func(e error, msg string) {
+						if ctx.Err() != nil {
+							return
+						}
+						utils.LogError(h.Logger, e, msg, zap.Any("metadata", utils.GetReqMeta(request)))
+						errCh <- e
+					}
+					recorded, keepAlive, derr := h.asyncEngine.Decide(ctx, lane, live)
+					if derr != nil {
+						failAsync(derr, "async: engine decide failed")
+						return
+					}
+					out := keepAlive
+					if recorded != nil {
+						if out, derr = h.buildMockResponseBytes(recorded); derr != nil {
+							failAsync(derr, "async: failed to serialize recorded delivery")
+							return
+						}
+					}
+					if _, werr := clientConn.Write(out); werr != nil {
+						failAsync(werr, "async: failed to write delivery/keep-alive to client")
+						return
+					}
+					// Read the next poll on this keep-alive connection and loop,
+					// mirroring the telemetry short-circuit and matched-response paths.
+					reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+					if err != nil {
+						h.Logger.Debug("async: client closed connection after delivery/keep-alive", zap.Error(err))
+						errCh <- nil
+						return
+					}
+					continue
+				}
+			}
+
+			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -171,16 +325,23 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
-				h.Logger.Debug("no matching http mock found", zap.Any("metadata", utils.GetReqMeta(request)))
-
-				// Build mismatch report for the user (surfaced in the mismatch table)
-				report := h.buildHTTPMismatchReport(request, mockDb, nil)
+				// Build mismatch report for the user (surfaced in the mismatch
+				// table, the report yaml and `keploy report`).
+				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				if report != nil {
-					h.Logger.Debug("mock miss",
+					// Per-call HTTP detail at Debug; the canonical, protocol-
+					// agnostic mock-mismatch WARN is emitted once in
+					// proxy.sendMockNotFoundError (where every parser's miss
+					// funnels), so this stays Debug to avoid double-logging.
+					h.Logger.Debug("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),
+						zap.String("destination", report.Destination),
 						zap.String("actual", report.ActualSummary),
+						zap.String("match_phase", report.MatchPhase),
+						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
-						zap.String("diff", report.Diff))
+						zap.String("diff", report.Diff),
+						zap.String("next_step", report.NextSteps))
 				}
 
 				// No mock matched — send a 502 so the application gets a
@@ -202,44 +363,19 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor, stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
-
-			body := stub.Spec.HTTPResp.Body
-			var respBody string
-			var responseString string
-
-			// Fetching the response headers
-			header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
-
-			//Check if the content encoding is present in the header
-			if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-				compressedBody, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", utils.GetReqMeta(request)))
-					errCh <- err
-					return
-				}
-				h.Logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBody)))
-				respBody = string(compressedBody)
-			} else {
-				respBody = body
+			// Serialize the matched mock's response to wire bytes (hydrates a
+			// spilled body, recomputes Content-Length, compresses per
+			// Content-Encoding). Shared with the async serving branch above.
+			respBytes, err := h.buildMockResponseBytes(stub)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
+				errCh <- err
+				return
 			}
-
-			var headers string
-			for key, values := range header {
-				if key == "Content-Length" {
-					values = []string{strconv.Itoa(len(respBody))}
-				}
-				for _, value := range values {
-					headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
-					headers += headerLine
-				}
-			}
-			responseString = statusLine + headers + "\r\n" + "" + respBody
-
+			responseString := string(respBytes)
 			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
 
-			_, err = clientConn.Write([]byte(responseString))
+			_, err = clientConn.Write(respBytes)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -268,4 +404,50 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		}
 		return err
 	}
+}
+
+// buildMockResponseBytes serializes a recorded HTTP mock's response to raw
+// wire bytes (status line + headers + recomputed Content-Length + body,
+// compressing the body when Content-Encoding is set). It lives here (not in
+// async.go) because it is the shared serializer for BOTH the ordinary
+// matched-mock path and the async serving branch.
+func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
+	name := ""
+	if stub != nil {
+		name = stub.Name
+	}
+	if stub == nil || stub.Spec.HTTPResp == nil {
+		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
+	}
+	if err := stub.HydrateResponse(); err != nil {
+		return nil, err
+	}
+	protoMajor, protoMinor := 1, 1
+	if stub.Spec.HTTPReq != nil {
+		protoMajor, protoMinor = stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor
+	}
+	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
+		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
+	body := stub.Spec.HTTPResp.Body
+	header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+	var respBody string
+	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
+		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
+		if err != nil {
+			return nil, err
+		}
+		respBody = string(compressed)
+	} else {
+		respBody = body
+	}
+	var headers string
+	for key, values := range header {
+		if key == "Content-Length" {
+			values = []string{strconv.Itoa(len(respBody))}
+		}
+		for _, value := range values {
+			headers += fmt.Sprintf("%s: %s\r\n", key, value)
+		}
+	}
+	return []byte(statusLine + headers + "\r\n" + respBody), nil
 }

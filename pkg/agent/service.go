@@ -52,6 +52,15 @@ type Proxy interface {
 	GetDestInfo() DestInfo
 	GetIntegrations() map[integrations.IntegrationType]integrations.Integrations
 	GetSession() *Session
+	// GetSessionFor returns the session that owns the connection from tgid.
+	// With no resolver installed it returns the single session (the
+	// single-app default); a multi-app composer installs a resolver via
+	// SetSessionResolver to route per app.
+	GetSessionFor(tgid uint32) *Session
+	// SetSessionResolver installs a per-TGID session resolver (nil reverts
+	// to single-session mode). The seam by which an external composer routes
+	// per-app traffic without this package knowing what an "app" is.
+	SetSessionResolver(fn func(tgid uint32) *Session)
 	SetAuxiliaryHook(h AuxiliaryProxyHook)
 }
 
@@ -92,6 +101,14 @@ type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.
 	SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error
+}
+
+// AsyncMockLoader is an optional Proxy capability. The agent hands the proxy
+// the COMPLETE async-mock corpus exactly once (at mock-store time) so the
+// async engine can build its per-lane ordered streams. Proxies without async
+// support simply don't implement it.
+type AsyncMockLoader interface {
+	LoadAsyncMocks(mocks []*models.Mock)
 }
 
 // FirstWindowStartReader is an optional extension implemented by proxies

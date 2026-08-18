@@ -789,6 +789,11 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 	sb.WriteString(header + "\n")
 
+	// Mock-miss diagnostics FIRST: when an outgoing call had no matching
+	// mock, the response diff below is usually a downstream symptom (the app
+	// reacting to keploy's synthetic error), so lead with the root cause.
+	renderUnmatchedCalls(sb, test)
+
 	// Status & header diffs (compact)
 	metaDiff := GenerateStatusAndHeadersTableDiff(test)
 
@@ -851,6 +856,52 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 	}
 	sb.WriteString("\n--------------------------------------------------------------------\n")
 	return nil
+}
+
+// renderUnmatchedCalls writes the structured mock-miss diagnostics
+// (FailureInfo.UnmatchedCalls) for a test. Field-diff paths use the noise
+// vocabulary, so the rendered output doubles as copy-paste material for
+// test.globalNoise / spec.assertions.noise.
+func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
+	if len(test.FailureInfo.UnmatchedCalls) == 0 {
+		return
+	}
+	sb.WriteString("=== OUTGOING CALLS WITH NO MATCHING MOCK (likely root cause) ===\n")
+	for _, uc := range test.FailureInfo.UnmatchedCalls {
+		sb.WriteString(fmt.Sprintf("  [%s] %s", uc.Protocol, uc.ActualSummary))
+		if uc.MatchPhase != "" {
+			sb.WriteString(fmt.Sprintf(" (match stopped at: %s", uc.MatchPhase))
+			if uc.CandidateCount > 0 {
+				sb.WriteString(fmt.Sprintf(", %d candidate mock(s)", uc.CandidateCount))
+			}
+			sb.WriteString(")")
+		}
+		sb.WriteString("\n")
+		if uc.ClosestMock != "" {
+			sb.WriteString(fmt.Sprintf("    closest mock: %s\n", uc.ClosestMock))
+		}
+		if len(uc.FieldDiffs) > 0 {
+			sb.WriteString("    field differences (paths are noise-config compatible):\n")
+			for _, d := range uc.FieldDiffs {
+				switch d.Kind {
+				case models.DiffKindMissingInLive:
+					sb.WriteString(fmt.Sprintf("      %s: recorded %q, absent in live call\n", d.Path, d.Expected))
+				case models.DiffKindMissingInMock:
+					sb.WriteString(fmt.Sprintf("      %s: live %q, absent in recording\n", d.Path, d.Actual))
+				case models.DiffKindTypeChanged:
+					sb.WriteString(fmt.Sprintf("      %s: type changed (recorded %s, live %s)\n", d.Path, d.Expected, d.Actual))
+				default:
+					sb.WriteString(fmt.Sprintf("      %s: recorded %q, live %q\n", d.Path, d.Expected, d.Actual))
+				}
+			}
+		} else if uc.Diff != "" {
+			sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))
+		}
+		if uc.NextSteps != "" {
+			sb.WriteString(fmt.Sprintf("    next steps: %s\n", uc.NextSteps))
+		}
+	}
+	sb.WriteString("\n")
 }
 
 // writerAdapter lets us reuse a bufio.Writer on top of strings.Builder.

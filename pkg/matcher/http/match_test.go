@@ -1,6 +1,7 @@
 package http
 
 import (
+	"strings"
 	"testing"
 
 	"errors"
@@ -11,7 +12,15 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestMatch_HeaderNoiseUpdate_123 ensures that the `headerNoise` map is updated correctly when the `noise` map contains a "header" key.
+// TestMatch_HeaderNoiseUpdate_123 ensures a test case's "header.<name>" noise is
+// applied when comparing headers.
+//
+// This used to assert that Match wrote the merged entry back into the caller's
+// noiseConfig map. That was only observable because Match merged into the
+// caller's map in place, which let one test case's noise leak into every later
+// one in the same run. Match now merges into a copy, so the merge is asserted
+// through its effect on the comparison instead, and the absence of the leak is
+// asserted explicitly.
 func TestMatch_HeaderNoiseUpdate_123(t *testing.T) {
 	// Arrange
 	logger := zap.NewNop()
@@ -22,12 +31,13 @@ func TestMatch_HeaderNoiseUpdate_123(t *testing.T) {
 			Body:       `{"key":"value"}`,
 		},
 		Noise: map[string][]string{
-			"header.Content-Type": {"regex"},
+			"header.Content-Type": {".*"},
 		},
 	}
+	// Content-Type differs; the test case's header noise must absorb it.
 	actualResponse := &models.HTTPResp{
 		StatusCode: 200,
-		Header:     map[string]string{"Content-Type": "application/json"},
+		Header:     map[string]string{"Content-Type": "text/plain"},
 		Body:       `{"key":"value"}`,
 	}
 	noiseConfig := map[string]map[string][]string{
@@ -40,9 +50,8 @@ func TestMatch_HeaderNoiseUpdate_123(t *testing.T) {
 
 	// Assert
 	require.NotNil(t, result)
-	assert.True(t, pass)
-	assert.Contains(t, noiseConfig["header"], "content-type")
-	assert.Equal(t, []string{"regex"}, noiseConfig["header"]["content-type"])
+	assert.True(t, pass, "the differing Content-Type is covered by the test case's header noise")
+	assert.Empty(t, noiseConfig["header"], "the caller's noise config must not be mutated")
 }
 
 // TestMatch_FailureAndDiffLogging_890 tests the Match function with comprehensive failures
@@ -235,8 +244,10 @@ func TestMatch_BodyNoiseWildcard_789(t *testing.T) {
 	require.NotNil(t, result)
 	assert.True(t, result.StatusCode.Normal)
 	assert.True(t, result.BodyResult[0].Normal)
-	// Check that tc.Noise["body"] was initialized
-	assert.NotNil(t, tc.Noise["body"])
+	// Match used to record the wildcard by writing a sentinel into tc.Noise.
+	// That mutated the caller's test case (and panicked when tc.Noise was nil),
+	// so the wildcard is now tracked locally and tc.Noise is left alone.
+	assert.NotContains(t, tc.Noise, "body")
 }
 
 // TestMatch_CompareAll_Disabled tests that when compareAll is false (default),
@@ -318,4 +329,371 @@ func TestMatch_CompareAll_JSONStillCompared(t *testing.T) {
 	require.NotNil(t, result)
 	assert.True(t, result.StatusCode.Normal)
 	assert.False(t, result.BodyResult[0].Normal)
+}
+
+// The tests below cover the "sectioned" noise shape, where the key is the bare
+// section name and the value lists the field paths to ignore:
+//
+//	noise:
+//	  body:
+//	    - items.product.stock
+//	  header:
+//	    - X-Request-Id
+//
+// This is the shape recorded test cases carry. It has
+// to mean "ignore these paths", not "ignore this whole section" — the bare key
+// only means whole-section when its list is empty (the wildcard sentinel that
+// TestMatch_BodyNoiseWildcard_789 covers).
+
+// TestMatch_SectionedBodyNoise_DoesNotDisableWholeBody is a regression test for
+// a silent false negative: a sectioned body-noise entry disabled the body
+// assertion entirely, so a test case with any auto-detected noisy field passed
+// no matter what the handler returned.
+func TestMatch_SectionedBodyNoise_DoesNotDisableWholeBody(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-sectioned-body-noise",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"items":[{"product":{"name":"Laptop","price":1200,"stock":99}}]}`,
+		},
+		Noise: map[string][]string{
+			"body": {"items.product.stock"},
+		},
+	}
+	// stock is noise, but name and price are real regressions.
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `{"items":[{"product":{"name":"Tablet","price":1999,"stock":100}}]}`,
+	}
+
+	pass, result := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, true)
+
+	assert.False(t, pass, "should fail: name and price differ and are not listed as noise")
+	require.NotNil(t, result)
+	assert.False(t, result.BodyResult[0].Normal)
+}
+
+// TestMatch_SectionedBodyNoise_IgnoresListedPaths is the other half of the
+// contract: the paths that ARE listed must still be ignored.
+func TestMatch_SectionedBodyNoise_IgnoresListedPaths(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-sectioned-body-noise-ignored",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"items":[{"product":{"name":"Laptop","price":1200,"stock":99}}]}`,
+		},
+		Noise: map[string][]string{
+			"body": {"items.product.stock"},
+		},
+	}
+	// Only the noisy field differs.
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `{"items":[{"product":{"name":"Laptop","price":1200,"stock":100}}]}`,
+	}
+
+	pass, result := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, true)
+
+	assert.True(t, pass, "should pass: the only difference is the listed noisy path")
+	require.NotNil(t, result)
+	assert.True(t, result.BodyResult[0].Normal)
+}
+
+// TestMatch_SectionedBodyNoise_MixedWithDottedKeys covers the shape a real
+// recorded test case has, where both key styles appear together.
+func TestMatch_SectionedBodyNoise_MixedWithDottedKeys(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-sectioned-and-dotted-noise",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"created_at":"2026-08-05T08:22:51Z","stock":99,"name":"Laptop"}`,
+		},
+		Noise: map[string][]string{
+			"body":            {"stock"},
+			"body.created_at": {},
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `{"created_at":"2027-01-01T00:00:00Z","stock":100,"name":"Tablet"}`,
+	}
+
+	pass, result := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, true)
+
+	assert.False(t, pass, "should fail on name; created_at and stock are both noise")
+	require.NotNil(t, result)
+	assert.False(t, result.BodyResult[0].Normal)
+}
+
+// TestMatch_EmptySectionedBodyNoise_IgnoresWholeBody pins the sentinel meaning
+// of the bare key with an empty list, so the fix above cannot regress it.
+func TestMatch_EmptySectionedBodyNoise_IgnoresWholeBody(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-empty-sectioned-body-noise",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"id":1,"name":"keploy"}`,
+		},
+		Noise: map[string][]string{
+			"body": {},
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `{"id":2,"name":"totally-different"}`,
+	}
+
+	pass, result := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, true)
+
+	assert.True(t, pass, "an empty list on the bare key still means ignore the whole body")
+	require.NotNil(t, result)
+	assert.True(t, result.BodyResult[0].Normal)
+}
+
+// TestMatch_SectionedHeaderNoise_DoesNotDisableAllHeaders is the header analog
+// of the body regression: `header: [X-Request-Id]` silenced every header.
+func TestMatch_SectionedHeaderNoise_DoesNotDisableAllHeaders(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-sectioned-header-noise",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Header: map[string]string{
+				"X-Request-Id": "abc",
+				"Content-Type": "application/json",
+			},
+			Body: `{"ok":true}`,
+		},
+		Noise: map[string][]string{
+			"header": {"X-Request-Id"},
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Header: map[string]string{
+			"X-Request-Id": "zzz",        // noise
+			"Content-Type": "text/plain", // real regression
+		},
+		Body: `{"ok":true}`,
+	}
+
+	pass, result := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, true)
+
+	assert.False(t, pass, "should fail: Content-Type differs and is not listed as noise")
+	require.NotNil(t, result)
+}
+
+// TestMatch_SectionedHeaderNoise_IgnoresListedHeaders is the other half.
+func TestMatch_SectionedHeaderNoise_IgnoresListedHeaders(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-sectioned-header-noise-ignored",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Header: map[string]string{
+				"X-Request-Id": "abc",
+				"Content-Type": "application/json",
+			},
+			Body: `{"ok":true}`,
+		},
+		Noise: map[string][]string{
+			"header": {"X-Request-Id"},
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Header: map[string]string{
+			"X-Request-Id": "zzz",
+			"Content-Type": "application/json",
+		},
+		Body: `{"ok":true}`,
+	}
+
+	pass, result := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, true)
+
+	assert.True(t, pass, "should pass: the only differing header is listed as noise")
+	require.NotNil(t, result)
+}
+
+// Real payloads captured from a keploy cloud replay of order-service-4,
+// test case get-api-v1-orders-by-id-details-1.
+const realWorldRecordedBody = `{"created_at":"2026-08-05T08:22:51Z","id":"5978a5ae-792b-4a19-a97b-d2802674b467","items":[{"product":{"description":"A powerful and portable laptop.","id":"26c7d38d-8b7d-11f1-a6c8-da00f699ab49","name":"Laptop","price":1200,"stock":99},"productId":"26c7d38d-8b7d-11f1-a6c8-da00f699ab49","quantity":1}],"status":"PENDING","total_amount":1200,"updated_at":"2026-08-05T08:22:51Z","user":{"created_at":"2026-08-05T08:22:50Z","email":"alice_1785918170@example.com","id":"669e858c-b6ee-4313-b59d-f6fa1f51e33f","username":"alice_1785918170"},"userId":"669e858c-b6ee-4313-b59d-f6fa1f51e33f"}`
+
+// Untampered replay: stock drifts 99 -> 100 (the field marked as noise).
+const realWorldUntamperedBody = `{"created_at":"2026-08-05T08:22:51Z","id":"5978a5ae-792b-4a19-a97b-d2802674b467","items":[{"product":{"description":"A powerful and portable laptop.","id":"26c7d38d-8b7d-11f1-a6c8-da00f699ab49","name":"Laptop","price":1200,"stock":100},"productId":"26c7d38d-8b7d-11f1-a6c8-da00f699ab49","quantity":1}],"status":"PENDING","total_amount":1200,"updated_at":"2026-08-05T08:22:51Z","user":{"created_at":"2026-08-05T08:22:50Z","email":"alice_1785918170@example.com","id":"669e858c-b6ee-4313-b59d-f6fa1f51e33f","username":"alice_1785918170"},"userId":"669e858c-b6ee-4313-b59d-f6fa1f51e33f"}`
+
+// Tampered replay: product mock returned Tablet/1999, user mock returned zzzzz.
+const realWorldTamperedBody = `{"created_at":"2026-08-05T08:22:51Z","id":"5978a5ae-792b-4a19-a97b-d2802674b467","items":[{"product":{"description":"A powerful and portable laptop.","id":"26c7d38d-8b7d-11f1-a6c8-da00f699ab49","name":"Tablet","price":1999,"stock":100},"productId":"26c7d38d-8b7d-11f1-a6c8-da00f699ab49","quantity":1}],"status":"PENDING","total_amount":1200,"updated_at":"2026-08-05T08:22:51Z","user":{"created_at":"2026-08-05T08:22:50Z","email":"zzzzz_1785918170@example.com","id":"669e858c-b6ee-4313-b59d-f6fa1f51e33f","username":"zzzzz_1785918170"},"userId":"669e858c-b6ee-4313-b59d-f6fa1f51e33f"}`
+
+func realWorldNoise() map[string][]string {
+	return map[string][]string{
+		"body":                 {"items.product.stock"},
+		"body.created_at":      {},
+		"body.updated_at":      {},
+		"body.user.created_at": {},
+		"header":               {"X-Request-Id"},
+		"header.Date":          {},
+	}
+}
+
+func TestMatch_RealWorldRecordedNoise(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		actual   string
+		wantPass bool
+	}{
+		{"untampered replay passes (only the noisy stock drifts)", realWorldUntamperedBody, true},
+		{"tampered downstream mock is caught", realWorldTamperedBody, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{
+				Name: "get-api-v1-orders-by-id-details-1",
+				HTTPResp: models.HTTPResp{
+					StatusCode: 200,
+					Header: map[string]string{
+						"Content-Type": "application/json; charset=utf-8",
+						"Date":         "Wed, 05 Aug 2026 08:22:51 GMT",
+						"X-Request-Id": "req-recorded",
+					},
+					Body: realWorldRecordedBody,
+				},
+				Noise: realWorldNoise(),
+			}
+			// Date and X-Request-Id drift on every replay and are both noise;
+			// Content-Type is not, and is identical here.
+			actual := &models.HTTPResp{
+				StatusCode: 200,
+				Header: map[string]string{
+					"Content-Type": "application/json; charset=utf-8",
+					"Date":         "Thu, 06 Aug 2026 09:00:00 GMT",
+					"X-Request-Id": "req-replayed",
+				},
+				Body: c.actual,
+			}
+			pass, _ := Match(tc, actual, map[string]map[string][]string{}, false, false, zap.NewNop(), false)
+			if pass != c.wantPass {
+				t.Errorf("pass = %v, want %v", pass, c.wantPass)
+			}
+		})
+	}
+}
+
+// TestMatch_SectionedBodyNoise_ShortPathDoesNotLeak guards against a tempting
+// but wrong "fix" for indexed noise paths: dropping the numeric segment from
+// "0.id" yields the bare segment "id", and because noise keys are matched with
+// strings.Contains that would silence every field whose name merely contains
+// "id" — "width", "video" and "paid" all do.
+func TestMatch_SectionedBodyNoise_ShortPathDoesNotLeak(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-short-stripped-path",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"width":10,"video":"a","paid":true}`,
+		},
+		Noise: map[string][]string{"body": {"0.id"}},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `{"width":99,"video":"b","paid":false}`,
+	}
+
+	pass, _ := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, false)
+
+	assert.False(t, pass, "width/video/paid must not be silenced by a noise path that strips to \"id\"")
+}
+
+// TestMatch_GlobalWildcardBody_SurvivesSectionedNoise pins that the global
+// "ignore every body" config keeps working on a test case that also carries a
+// sectioned body-noise key — that key is no longer the skip sentinel itself.
+func TestMatch_GlobalWildcardBody_SurvivesSectionedNoise(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-wildcard-with-sectioned-noise",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"id":1,"name":"keploy","stock":99}`,
+		},
+		Noise: map[string][]string{"body": {"stock"}},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `{"id":2,"name":"totally-different","stock":100}`,
+	}
+	noiseConfig := map[string]map[string][]string{"body": {"*": {"*"}}}
+
+	pass, _ := Match(tc, actualResponse, noiseConfig, false, false, logger, false)
+
+	assert.True(t, pass, "the global body wildcard still means ignore the whole body")
+}
+
+// TestMatch_DoesNotMutateSharedNoiseConfig pins that a test case's own noise
+// does not leak into the caller's global config and soften every later case.
+func TestMatch_DoesNotMutateSharedNoiseConfig(t *testing.T) {
+	logger := zap.NewNop()
+	shared := map[string]map[string][]string{
+		"body":   {},
+		"header": {},
+	}
+
+	// Both key shapes are merged in, so both must be copied. The dotted shape is
+	// the one that leaked before this change; the sectioned shape leaks only now
+	// that it produces entries at all.
+	noisy := &models.TestCase{
+		Name:     "case-with-noise",
+		HTTPResp: models.HTTPResp{StatusCode: 200, Body: `{"total":1,"stock":1}`},
+		Noise:    map[string][]string{"body": {"total"}, "body.stock": {}},
+	}
+	Match(noisy, &models.HTTPResp{StatusCode: 200, Body: `{"total":2,"stock":2}`}, shared, false, false, logger, false)
+
+	assert.Empty(t, shared["body"], "the shared global noise config must be left untouched")
+
+	// A later test case that declares no noise must still catch both differences.
+	clean := &models.TestCase{
+		Name:     "case-without-noise",
+		HTTPResp: models.HTTPResp{StatusCode: 200, Body: `{"total":1,"stock":1}`},
+	}
+	pass, _ := Match(clean, &models.HTTPResp{StatusCode: 200, Body: `{"total":2,"stock":2}`}, shared, false, false, logger, false)
+
+	assert.False(t, pass, "noise from an earlier test case must not carry over")
+}
+
+// TestMatch_SectionedHeaderNoise_ScopesToTheListedHeader asserts on the
+// per-header verdicts rather than only the overall pass flag, so the test
+// cannot be satisfied by the body assertion failing instead.
+func TestMatch_SectionedHeaderNoise_ScopesToTheListedHeader(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-sectioned-header-scope",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Header:     map[string]string{"X-Request-Id": "abc", "Content-Type": "application/json"},
+			Body:       `{"ok":true}`,
+		},
+		Noise: map[string][]string{"header": {"X-Request-Id"}},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"X-Request-Id": "zzz", "Content-Type": "text/plain"},
+		Body:       `{"ok":true}`,
+	}
+
+	pass, result := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, false)
+
+	assert.False(t, pass)
+	require.NotNil(t, result)
+	verdicts := map[string]bool{}
+	for _, h := range result.HeadersResult {
+		verdicts[strings.ToLower(h.Expected.Key)] = h.Normal
+	}
+	normal, ok := verdicts["content-type"]
+	require.True(t, ok, "Content-Type should be reported, got %v", verdicts)
+	assert.False(t, normal, "Content-Type is not noise and differs")
+	normal, ok = verdicts["x-request-id"]
+	require.True(t, ok, "X-Request-Id should be reported, got %v", verdicts)
+	assert.True(t, normal, "X-Request-Id is listed as noise")
 }

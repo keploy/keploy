@@ -16,13 +16,39 @@ import (
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
+// maxMockDownloadBytes caps the decompressed size of a downloaded mock
+// archive. Mock sets legitimately reach hundreds of MB, so this is far
+// looser than pkg.MaxDecompressedSize while still bounding a decompression
+// bomb from a malicious or compromised server (#3867).
+const maxMockDownloadBytes = 1 << 30 // 1 GiB
+
 type Storage struct {
 	serverURL string
 	logger    *zap.Logger
+}
+
+// gzipBodyReadCloser decompresses through gz and closes BOTH the gzip
+// reader and the underlying HTTP response body — gzip.Reader.Close alone
+// does not close its source, which previously leaked the connection.
+type gzipBodyReadCloser struct {
+	gz   *gzip.Reader
+	body io.ReadCloser
+}
+
+func (g *gzipBodyReadCloser) Read(p []byte) (int, error) { return g.gz.Read(p) }
+
+func (g *gzipBodyReadCloser) Close() error {
+	gzErr := g.gz.Close()
+	bodyErr := g.body.Close()
+	if gzErr != nil {
+		return gzErr
+	}
+	return bodyErr
 }
 
 type MockUploadResponse struct {
@@ -197,7 +223,13 @@ func (s *Storage) Download(ctx context.Context, mockName string, appName string,
 			}()
 			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 		}
-		return gr, nil // gr is an io.Reader, decompressing transparently
+		// Cap decompressed output so a malicious/compromised server cannot
+		// OOM the client with a decompression bomb (#3867). The reader
+		// decompresses transparently; reads past the cap fail with
+		// pkg.ErrDecompressedTooLarge. Returned as a ReadCloser whose Close
+		// releases both the gzip reader and the HTTP connection — matching
+		// the non-gzip branch, which hands back resp.Body directly.
+		return pkg.NewCappedReadCloser(&gzipBodyReadCloser{gz: gr, body: resp.Body}, maxMockDownloadBytes), nil
 	}
 
 	return resp.Body, nil

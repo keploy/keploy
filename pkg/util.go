@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -29,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -612,6 +614,104 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	}, nil
 }
 
+// maxConnRefusedRetries bounds how many times a replay test request is re-sent
+// when the connection is REFUSED before the app accepts it. A refused connection
+// proves the app never received the request — zero bytes sent, zero single-use
+// mocks consumed — so re-sending is safe and does NOT fabricate a result: it
+// obtains the real response the suite must assert on instead of a false
+// status_code=0. We deliberately do NOT retry a mid-response reset (ECONNRESET),
+// EOF, or broken pipe: those can occur AFTER the app read the request and
+// consumed mocks, where a retry would re-run non-idempotent logic against
+// exhausted mocks and fabricate a verdict. Under CI contention an app container
+// can briefly refuse while still coming up; this turns that transient transport
+// failure into the real comparison rather than a flaky false regression.
+const (
+	maxConnRefusedRetries   = 3
+	connRefusedRetryBackoff = 150 * time.Millisecond
+)
+
+// isPreResponseConnRefused reports whether err is a pure "connection refused".
+// errors.Is unwraps the *url.Error -> *net.OpError -> *os.SyscallError ->
+// syscall.Errno chain, so no manual unwrapping is needed.
+func isPreResponseConnRefused(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// IsTransportConnReset reports whether err is a transport-level connection
+// reset / unexpected close while exchanging the request with the app — i.e.
+// "connection reset by peer" (ECONNRESET), a broken pipe (EPIPE), or a bare
+// io.EOF / io.ErrUnexpectedEOF surfaced by net/http when the peer dropped the
+// connection.
+//
+// This class is dominated, under loaded CI replaying a DOCKER app, by docker's
+// userland proxy (docker-proxy) resetting a freshly-accepted host-side
+// connection during connection setup / before the backend app ever processes
+// the request. The CLI dials the published host port ([::1]:<port>) and sees
+//
+//	read tcp [::1]:<ephem>-><[::1]:<port>: read: connection reset by peer
+//
+// even for a request whose handler makes no downstream calls — proving the
+// reset is in the host<->proxy hop, not the app's response logic.
+//
+// IMPORTANT: a reset is, by the error alone, AMBIGUOUS about whether the app
+// already consumed single-use mocks (a mid-stream reset after the handler ran
+// looks identical). So this predicate only CLASSIFIES the error; the decision
+// to re-send is made by the caller (replay orchestration) and is gated on the
+// app having consumed ZERO new mocks for this request — the same "provably
+// nothing irreversible happened" invariant that makes the ECONNREFUSED re-send
+// safe. Without that gate this must NEVER drive a retry.
+func IsTransportConnReset(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	// net/http surfaces a peer-side drop during the response read as a bare
+	// io.EOF / io.ErrUnexpectedEOF (no syscall in the chain) — the docker-proxy
+	// reset frequently lands here too (see the "EOF" hits in the reproduction).
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return false
+}
+
+// doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
+// pre-response connection-refused (bounded, ctx-aware backoff, request body
+// rewound via GetBody). Any other error, or a real response, returns
+// immediately — so a genuinely crashed/unreachable app still fails fast after
+// the bounded retries, and a mid-response reset is never retried.
+func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		if attempt >= maxConnRefusedRetries || !isPreResponseConnRefused(err) {
+			return nil, err
+		}
+		// Only retry if we can faithfully re-send the body; otherwise stop so we
+		// never send a truncated/empty body (which would fabricate a result).
+		if req.Body != nil && req.GetBody == nil {
+			return nil, err
+		}
+		if req.GetBody != nil {
+			body, gbErr := req.GetBody()
+			if gbErr != nil {
+				return nil, err
+			}
+			req.Body = body
+		}
+		logger.Warn("test request refused by app (app not yet accepting connections); re-sending — the request was never processed, so this is not a retry of an assertion",
+			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(err))
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(connRefusedRetryBackoff * time.Duration(attempt+1)):
+		}
+	}
+}
+
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -626,8 +726,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
-	// Execute the request
-	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
+	// Execute the request (re-sending only on a pre-response connection-refused)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -650,7 +750,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	// Decompress if needed
 	if httpResp.Header.Get("Content-Encoding") != "" {
-		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody, MaxDecompressedSize)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decode response body")
 			return nil, err
@@ -703,8 +803,8 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
-	// Execute the request
-	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
+	// Execute the request (re-sending only on a pre-response connection-refused)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -729,9 +829,11 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
 			return nil, gzErr
 		}
-		streamReader = &gzipReadCloser{gzipReader: gzipReader, underlying: httpResp.Body}
+		// Cap decompressed output so a bomb fails the test instead of
+		// OOMing while CompareHTTPStream accumulates the body (#3867).
+		streamReader = NewCappedReadCloser(&gzipReadCloser{gzipReader: gzipReader, underlying: httpResp.Body}, MaxDecompressedSize)
 	case "br":
-		streamReader = &brotliReadCloser{reader: brotli.NewReader(httpResp.Body), underlying: httpResp.Body}
+		streamReader = NewCappedReadCloser(&brotliReadCloser{reader: brotli.NewReader(httpResp.Body), underlying: httpResp.Body}, MaxDecompressedSize)
 	case "":
 		// no-op, use httpResp.Body directly
 	default:
@@ -2369,112 +2471,6 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 	return &rendered, nil
 }
 
-// DetectNoiseFieldsInResp inspects a rendered HTTP response and returns a map
-// of noise fields that should be marked on the testcase so matchers ignore
-// them during comparison. It uses current templated values from utils.
-func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
-	noise := make(map[string][]string)
-	if resp == nil {
-		return noise
-	}
-
-	templatedValues, _ := snapshotTemplateState()
-
-	// headers: if a header value contains a templated value, mark header.<name>
-	for hk, hv := range resp.Header {
-		for _, v := range templatedValues {
-			if v == nil {
-				continue
-			}
-			lit := fmt.Sprintf("%v", v)
-			if lit == "" {
-				continue
-			}
-			if strings.Contains(hv, lit) {
-				key := fmt.Sprintf("header.%s", strings.ToLower(hk))
-				noise[key] = []string{}
-				break
-			}
-		}
-	}
-
-	// body: if JSON, traverse and mark specific json paths where templated values appear
-	var parsed interface{}
-	if json.Valid([]byte(resp.Body)) {
-		if err := json.Unmarshal([]byte(resp.Body), &parsed); err == nil {
-			for _, v := range templatedValues {
-				if v == nil {
-					continue
-				}
-				lit := fmt.Sprintf("%v", v)
-				if lit == "" {
-					continue
-				}
-				paths := findJSONPathsWithValue(parsed, lit, "")
-				for _, p := range paths {
-					key := fmt.Sprintf("body.%s", p)
-					noise[key] = []string{}
-				}
-				// also mark literal occurrences in raw body (fallback)
-				if strings.Contains(resp.Body, lit) && len(paths) == 0 {
-					noise["body"] = []string{}
-				}
-			}
-		}
-	} else {
-		// non-json body: if any templated literal present, mark the full body as noisy
-		for _, v := range templatedValues {
-			if v == nil {
-				continue
-			}
-			lit := fmt.Sprintf("%v", v)
-			if lit == "" {
-				continue
-			}
-			if strings.Contains(resp.Body, lit) {
-				noise["body"] = []string{}
-				break
-			}
-		}
-	}
-
-	return noise
-}
-
-// findJSONPathsWithValue recursively searches parsed JSON for values equal to target
-// and returns dot-separated paths (no leading dot). For arrays, indices are used.
-func findJSONPathsWithValue(node interface{}, target, prefix string) []string {
-	var paths []string
-	switch t := node.(type) {
-	case map[string]interface{}:
-		for k, v := range t {
-			p := k
-			if prefix != "" {
-				p = prefix + "." + k
-			}
-			paths = append(paths, findJSONPathsWithValue(v, target, p)...)
-		}
-	case []interface{}:
-		for i, v := range t {
-			idx := fmt.Sprintf("%d", i)
-			p := idx
-			if prefix != "" {
-				p = prefix + "." + idx
-			}
-			paths = append(paths, findJSONPathsWithValue(v, target, p)...)
-		}
-	case string:
-		if t == target {
-			paths = append(paths, prefix)
-		}
-	case float64, bool, nil:
-		if fmt.Sprintf("%v", t) == target {
-			paths = append(paths, prefix)
-		}
-	}
-	return paths
-}
-
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
@@ -2660,6 +2656,18 @@ func ExtractHostAndPort(curlCmd string) (string, string, error) {
 }
 
 func WaitForPort(ctx context.Context, host string, port string, timeout time.Duration) error {
+	addr := net.JoinHostPort(host, port)
+	// Probe once up front so an already-listening port returns without paying
+	// the ticker's first-tick (1s) latency below — this is what makes the
+	// readiness gates truly instant for an app that is already accepting.
+	if conn, err := net.DialTimeout("tcp", addr, 800*time.Millisecond); err == nil {
+		_ = conn.Close()
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -2670,7 +2678,7 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 800*time.Millisecond)
+			conn, err := net.DialTimeout("tcp", addr, 800*time.Millisecond)
 			if err == nil {
 				err := conn.Close()
 				if err != nil {
@@ -2683,6 +2691,30 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 			return fmt.Errorf("timeout after %v waiting for port %s:%s, %s", timeout, host, port, msg)
 		}
 	}
+}
+
+// DefaultAgentReadyTimeout is how long keploy waits for the in-docker
+// keploy-agent to report ready before giving up. It is sized to the agent
+// container's OWN healthcheck budget (start_period 10s + interval 5s × retries
+// 60 ≈ 310s, see pkg/platform/docker): under heavy CI docker-daemon contention
+// the agent container can take ~2 minutes just to start — observed in CI as a
+// `docker run` of an already-local image taking 126s before the agent process
+// ran. A shorter CLI wait gives up while the agent's own healthcheck still
+// considers it starting, tearing down a bring-up that would have succeeded.
+const DefaultAgentReadyTimeout = 330 * time.Second
+
+// AgentReadyTimeout returns how long to wait for the keploy-agent to become
+// ready. It defaults to DefaultAgentReadyTimeout and is overridable via the
+// KEPLOY_AGENT_READY_TIMEOUT env var (whole seconds) for tuning on unusually
+// slow or fast hosts. A non-positive / unparsable value falls back to the
+// default.
+func AgentReadyTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("KEPLOY_AGENT_READY_TIMEOUT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return DefaultAgentReadyTimeout
 }
 
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
@@ -3506,14 +3538,124 @@ func IsCSV(data []byte) bool {
 	return false
 }
 
-func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
-	switch encoding {
+// MaxDecompressedSize caps Decompress on paths with no downstream size limit
+// (replay, mock decode, SimulateHTTP) so a decompression bomb errors instead
+// of OOMing. The capture path passes the tighter conn.MaxTestCaseSize, since
+// larger testcases are dropped anyway. See #3867.
+const MaxDecompressedSize = 100 * 1024 * 1024 // 100 MiB
+
+// ErrDecompressedTooLarge reports that a body inflated past the caller's
+// limit during Decompress. Callers use errors.Is against it to distinguish
+// an oversized (but valid) body from a corrupt stream, which deserve
+// different handling (e.g. capture drops oversized bodies with the regular
+// size-limit message instead of a scary bomb error).
+var ErrDecompressedTooLarge = errors.New("decompressed size exceeds limit")
+
+// NewCappedReader wraps r so cumulative reads past limit fail with an error
+// wrapping ErrDecompressedTooLarge instead of streaming unbounded data. It
+// bounds streaming decompression (replay streams, mock downloads, archive
+// extraction) where readAllCapped's materialize-everything shape doesn't
+// fit. A stream of exactly limit bytes still reaches its natural EOF; the
+// error surfaces only when the stream holds at least one byte more.
+func NewCappedReader(r io.Reader, limit int64) io.Reader {
+	return &cappedReader{r: r, limit: limit}
+}
+
+type cappedReader struct {
+	r     io.Reader
+	read  int64
+	limit int64
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.read > c.limit {
+		return 0, fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, c.limit)
+	}
+	// Budget reads to limit+1: an exactly-limit stream hits its natural
+	// EOF, while a single extra byte reveals an oversized stream.
+	if max := c.limit + 1 - c.read; int64(len(p)) > max {
+		p = p[:max]
+	}
+	n, err := c.r.Read(p)
+	c.read += int64(n)
+	if c.read > c.limit {
+		return 0, fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, c.limit)
+	}
+	return n, err
+}
+
+// NewCappedReadCloser applies NewCappedReader to a ReadCloser, preserving
+// Close so consumers can still release the underlying resource (e.g. an
+// HTTP response body) after a capped read.
+func NewCappedReadCloser(rc io.ReadCloser, limit int64) io.ReadCloser {
+	return &cappedReadCloser{Reader: NewCappedReader(rc, limit), closer: rc}
+}
+
+type cappedReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (c *cappedReadCloser) Close() error { return c.closer.Close() }
+
+// readAllCapped reads r to EOF, failing with ErrDecompressedTooLarge once
+// the stream exceeds limit bytes. Unlike io.ReadAll, buffer capacity is
+// never grown past limit+1, so at most limit+1 bytes are read from r and
+// the returned slice retains no doubling slack (io.ReadAll can retain ~2x
+// the limit near the cap).
+func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
+	errTooLarge := fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, limit)
+	startCap := int64(64 * 1024)
+	if startCap > limit+1 {
+		startCap = limit + 1
+	}
+	data := make([]byte, 0, startCap)
+	for {
+		if len(data) == cap(data) {
+			if int64(len(data)) > limit {
+				return nil, errTooLarge
+			}
+			newCap := int64(cap(data)) * 2
+			if newCap > limit+1 {
+				newCap = limit + 1
+			}
+			grown := make([]byte, len(data), newCap)
+			copy(grown, data)
+			data = grown
+		}
+		n, err := r.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err == io.EOF {
+			if int64(len(data)) > limit {
+				return nil, errTooLarge
+			}
+			return data, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// Decompress inflates data per the given Content-Encoding, reading at most
+// limit bytes (see MaxDecompressedSize) so a bomb errors instead of OOMing;
+// errors.Is(err, ErrDecompressedTooLarge) distinguishes that from a corrupt
+// stream. The encoding is matched case-insensitively after trimming —
+// Compress uses the same matching, so a recorded body round-trips at replay.
+// An unsupported encoding (e.g. zstd, deflate) is returned undecompressed.
+func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "br":
 		logger.Debug("decompressing brotli compressed data")
 		reader := brotli.NewReader(bytes.NewReader(data))
-		decodedData, err := io.ReadAll(reader)
+		decodedData, err := readAllCapped(reader, limit)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the brotli compressed data")
+			// Over-limit is reported by the caller (e.g. Capture logs it as
+			// the regular size-limit drop) — logging it here too would
+			// double-report every oversized body as a decode failure.
+			if !errors.Is(err, ErrDecompressedTooLarge) {
+				utils.LogError(logger, err, "failed to read the brotli compressed data")
+			}
 			return nil, err
 		}
 		return decodedData, nil
@@ -3525,18 +3667,35 @@ func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error
 			return nil, err
 		}
 		defer reader.Close()
-		decodedData, err := io.ReadAll(reader)
+		decodedData, err := readAllCapped(reader, limit)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the gzip compressed data")
+			// See the brotli branch: over-limit is the caller's to report.
+			if !errors.Is(err, ErrDecompressedTooLarge) {
+				utils.LogError(logger, err, "failed to read the gzip compressed data")
+			}
 			return nil, err
 		}
 		return decodedData, nil
+	case "", "identity":
+		// No Content-Encoding, or "identity" (RFC 9110 §8.4.1): the body
+		// is already uncompressed.
+		return data, nil
+	default:
+		// Common on proxied traffic (zstd, deflate, ...) — debug, not warn,
+		// matching the streaming path in SimulateHTTPStreaming.
+		logger.Debug("unsupported Content-Encoding; storing body without decompression",
+			zap.String("encoding", encoding))
+		return data, nil
 	}
-	return data, nil
 }
 
+// Compress deflates data per the given Content-Encoding. The encoding is
+// matched case-insensitively after trimming — symmetric with Decompress, so
+// a body stored decompressed at record time is re-compressed at replay even
+// when the recorded header used a non-canonical spelling (e.g. "GZIP").
+// An unsupported encoding is returned uncompressed, mirroring Decompress.
 func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
-	switch encoding {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "gzip":
 		logger.Debug("compressing data using gzip")
 		var compressedBuffer bytes.Buffer

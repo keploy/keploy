@@ -7,12 +7,49 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"sync"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 )
 
 var cancel context.CancelFunc
+
+// preCancelHooks are callbacks fired by NewCtx's signal handler in the
+// instant BEFORE cancel() is called. The handler runs them synchronously,
+// in registration order, so subsystems can read live state (e.g. the
+// agent's syncMock buffer length) at the exact moment of shutdown —
+// before any goroutine has reacted to ctx cancellation.
+//
+// Use case (added for the mongo teardown-orphan investigation): the
+// agent registers a hook that writes the syncMock buffer state to
+// stderr via fmt.Fprintf (NOT zap, which is buffered and silently
+// drops messages when the process dies before the next flush). This
+// gives a definitive answer to "did the agent have unsent mocks at
+// the moment of shutdown" without depending on the structured logger.
+//
+// Hooks MUST be fast (no blocking I/O, no network calls) — they run
+// on the signal-delivery goroutine and any blocking work delays the
+// cancellation and increases the chance of SIGKILL truncation.
+var (
+	preCancelMu    sync.Mutex
+	preCancelHooks []func()
+)
+
+// RegisterPreCancelHook appends fn to the list of callbacks NewCtx's
+// signal handler runs synchronously before cancel(). Safe to call
+// from any goroutine at any time after NewCtx; hooks registered after
+// the signal has fired will not run.
+func RegisterPreCancelHook(fn func()) {
+	if fn == nil {
+		return
+	}
+	preCancelMu.Lock()
+	preCancelHooks = append(preCancelHooks, fn)
+	preCancelMu.Unlock()
+}
 
 func NewCtx() context.Context {
 	// Create a context that can be canceled
@@ -29,6 +66,65 @@ func NewCtx() context.Context {
 	go func() {
 		sig := <-sigs // this received signal will be inside keploy docker container if running in docker else on the host.
 		fmt.Printf("Signal received: %s, canceling context...\n", sig)
+
+		// App-managed graceful-shutdown drain (Kubernetes sidecar path).
+		// When the injecting webhook runs in app-managed-drain mode it sets
+		// KEPLOY_SIDECAR_DRAIN_SECONDS on the agent instead of a native
+		// `sleep` lifecycle (SleepAction) preStop hook — that field is GA
+		// only in k8s 1.30 and some older apiservers reject it, which would
+		// fail pod admission. We honour the drain HERE, before cancel(): the
+		// proxy and every parser goroutine are still live (ctx not yet
+		// cancelled), so in-flight streams keep completing for the window —
+		// exactly what a preStop sleep bought — and only then do we tear
+		// down.
+		//
+		// The drain window is RESPECTED: additional SIGTERM/SIGINT signals
+		// that arrive while draining are logged but do NOT cut it short.
+		// The kubelet sends exactly one SIGTERM and never a second one — it
+		// escalates to SIGKILL at terminationGracePeriodSeconds, which is
+		// uncatchable and is the real hard stop (so keep the pod's
+		// terminationGracePeriodSeconds >= this drain; the webhook bumps it
+		// to 45s for a 15s drain). A repeat `kubectl delete` (the usual
+		// source of a second SIGTERM) therefore won't truncate an in-flight
+		// drain; an operator who truly wants an immediate kill uses
+		// `kubectl delete --grace-period=0 --force`. Unset / zero (the
+		// default, and every non-sidecar invocation) skips the wait
+		// entirely, preserving the historical immediate-cancel behaviour.
+		if d := sidecarDrainDuration(); d > 0 {
+			fmt.Printf("Draining in-flight connections for %s before shutdown (KEPLOY_SIDECAR_DRAIN_SECONDS)...\n", d)
+			drainTimer := time.NewTimer(d)
+			for draining := true; draining; {
+				select {
+				case <-drainTimer.C:
+					draining = false
+				case sig2 := <-sigs:
+					fmt.Printf("Signal %s received during shutdown drain; ignoring to honour the %s drain window "+
+						"(SIGKILL at terminationGracePeriodSeconds is the hard stop; use "+
+						"`kubectl delete --grace-period=0 --force` to force an immediate kill).\n", sig2, d)
+				}
+			}
+			drainTimer.Stop()
+			fmt.Printf("Drain window elapsed; proceeding with shutdown.\n")
+		}
+
+		// Run pre-cancel hooks SYNCHRONOUSLY while live state is still
+		// readable. fmt.Fprintf to stderr inside hooks is the right
+		// choice — it goes straight to the syscall and survives even
+		// if the process is SIGKILL'd microseconds later (zap's async
+		// logger does not survive that race). See RegisterPreCancelHook
+		// doc comment for the investigation context.
+		preCancelMu.Lock()
+		hooks := append([]func(){}, preCancelHooks...)
+		preCancelMu.Unlock()
+		for _, fn := range hooks {
+			func() {
+				defer func() {
+					_ = recover()
+				}()
+				fn()
+			}()
+		}
+
 		cancel()
 	}()
 
@@ -66,4 +162,25 @@ func ExecCancel() {
 
 func SetCancel(c context.CancelFunc) {
 	cancel = c
+}
+
+// sidecarDrainDuration returns the graceful-shutdown drain window the
+// Kubernetes injecting webhook sets, in app-managed-drain mode, via the
+// KEPLOY_SIDECAR_DRAIN_SECONDS env var. It is the in-process replacement for
+// a native `sleep` lifecycle preStop hook on the keploy-agent sidecar.
+//
+// Returns 0 (no wait) when the var is unset, non-numeric, or non-positive —
+// so only an explicit positive value can delay shutdown, and every
+// non-sidecar / older-deployment invocation keeps the historical
+// cancel-immediately-on-signal behaviour.
+func sidecarDrainDuration() time.Duration {
+	v := os.Getenv("KEPLOY_SIDECAR_DRAIN_SECONDS")
+	if v == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }

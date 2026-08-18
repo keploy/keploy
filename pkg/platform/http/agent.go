@@ -37,7 +37,6 @@ import (
 )
 
 const (
-	agentReadyTimeout       = 2 * time.Minute
 	agentReadyRetryInterval = 2 * time.Second
 )
 
@@ -637,41 +636,148 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 	return nil
 
 }
+
+// StoreMocks sends the mock corpus to the agent. It streams by default (a gob
+// MockStreamHeader over an io.Pipe, then filtered then unfiltered mocks, one gob
+// frame each) — streaming was added (#4327) so the agent doesn't buffer the
+// whole corpus and OOM on large recordings.
+//
+// Backward compatibility: a pre-streaming agent (keploy <= v3.5.84) gob-decodes
+// the request body as a single StoreMocksReq and fails the instant it meets the
+// MockStreamHeader ("type mismatch: no fields matched"), returning HTTP 400.
+// Rather than lockstep-break every rolling upgrade where the deployed agent
+// image lags the controller (a fresh streaming controller talking to an
+// already-running old agent), StoreMocks transparently retries such a 400 with
+// the legacy single-shot framing the old agent understands. An agent old enough
+// to reject the stream is old enough to have handled single-shot before — and
+// predates the large-corpus recordings streaming exists for — so the fallback
+// is safe; a genuine bad-request 400 simply fails again on the retry.
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	requestBody := models.StoreMocksReq{
+	// A dedicated cancelable context for the stream request: cancelling it tears
+	// down the transport's read of the io.Pipe body, which unblocks the encoder
+	// goroutine's pw.Write if the agent responded (e.g. 400) before consuming the
+	// whole stream — so the fallback path can't leak that goroutine.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+
+	res, err := a.storeMocksStream(streamCtx, filtered, unFiltered)
+	if err != nil {
+		cancelStream()
+		return err
+	}
+
+	if res.StatusCode == http.StatusBadRequest {
+		_, _ = io.Copy(io.Discard, res.Body)
+		_ = res.Body.Close()
+		cancelStream()
+		a.logger.Warn("agent rejected streaming /storemocks with HTTP 400; retrying with legacy single-shot framing. The usual cause is a deployed agent that predates streaming (keploy <= v3.5.84) during a rolling upgrade — align the agent image with the controller's keploy version to use streaming and avoid buffering the whole mock corpus. (A new agent that returns 400 for another reason will simply fail the legacy retry too, surfacing the real error.)")
+		return a.storeMocksLegacy(ctx, filtered, unFiltered)
+	}
+
+	defer cancelStream()
+	defer res.Body.Close()
+	return decodeStoreMocksResp(res)
+}
+
+// storeMocksStream POSTs the corpus as a gob stream (MockStreamHeader + one
+// frame per mock) and returns the raw response so the caller can decide whether
+// to fall back on a 400.
+func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) (*http.Response, error) {
+	pr, pw := io.Pipe()
+	go func() {
+		enc := gob.NewEncoder(pw)
+		if err := enc.Encode(models.MockStreamHeader{
+			FilteredCount:   len(filtered),
+			UnfilteredCount: len(unFiltered),
+		}); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		i := 0
+		encodeAll := func(mocks []*models.Mock) error {
+			for _, m := range mocks {
+				if i%1024 == 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+				}
+				i++
+				if err := enc.Encode(m); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := encodeAll(filtered); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		if err := encodeAll(unFiltered); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		_ = pw.Close()
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI), pr)
+	if err != nil {
+		// The transport never took ownership of pr, so nothing else will ever
+		// close it — close the pipe so the encoder goroutine's blocked pw.Write
+		// returns instead of leaking. (Do() closes req.Body itself on its own
+		// error path per the RoundTripper contract, but here Do was never
+		// reached.)
+		_ = pw.CloseWithError(err)
+		utils.LogError(a.logger, err, "failed to create request for storemocks")
+		return nil, fmt.Errorf("create request for storemocks: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", models.StoreMocksStreamContentType)
+	req.Header.Set("Accept", "application/x-gob")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send request for storemocks: %s", err.Error())
+	}
+	return res, nil
+}
+
+// storeMocksLegacy POSTs the corpus in the pre-streaming single-shot framing:
+// one gob-encoded StoreMocksReq with Content-Type application/x-gob. Used only
+// as the compatibility fallback when a deployed agent rejects the stream (see
+// StoreMocks). It buffers the whole corpus in memory the way the pre-#4327 path
+// did — acceptable here because it only runs against an old agent that never
+// supported streaming anyway.
+func (a *AgentClient) storeMocksLegacy(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(models.StoreMocksReq{
 		Filtered:   filtered,
 		UnFiltered: unFiltered,
+	}); err != nil {
+		utils.LogError(a.logger, err, "failed to gob-encode request body for storemocks (legacy)")
+		return fmt.Errorf("gob encode request for storemocks (legacy): %s", err.Error())
 	}
 
-	// gob-encode the body
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(requestBody); err != nil {
-		utils.LogError(a.logger, err, "failed to gob-encode request body for storemocks")
-		return fmt.Errorf("gob encode request for storemocks: %s", err.Error())
-	}
-
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI),
-		&buf,
-	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI), &buf)
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to create request for storemocks")
-		return fmt.Errorf("create request for storemocks: %s", err.Error())
+		utils.LogError(a.logger, err, "failed to create legacy request for storemocks")
+		return fmt.Errorf("create legacy request for storemocks: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/x-gob")
 	req.Header.Set("Accept", "application/x-gob")
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send request for storemocks: %s", err.Error())
+		return fmt.Errorf("send legacy request for storemocks: %s", err.Error())
 	}
 	defer res.Body.Close()
+	return decodeStoreMocksResp(res)
+}
 
-	// Non-200? Try to decode anyway; if that fails, return status text
+// decodeStoreMocksResp reads the agent's single AgentResp gob reply, shared by
+// the streaming and legacy paths so their response handling is identical.
+func decodeStoreMocksResp(res *http.Response) error {
+	// Non-2xx? Try to decode anyway; if that fails, return status text.
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		// Best-effort decode; fall back to status if it fails
 		var fail models.AgentResp
 		if err := gob.NewDecoder(res.Body).Decode(&fail); err != nil {
 			return fmt.Errorf("storemocks http %d", res.StatusCode)
@@ -686,7 +792,6 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	if err := gob.NewDecoder(res.Body).Decode(&mockResp); err != nil {
 		return fmt.Errorf("decode gob response for storemocks: %s", err.Error())
 	}
-
 	if mockResp.Error != nil {
 		return mockResp.Error
 	}
@@ -924,6 +1029,20 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.ChannelBindingShim {
 		args = append(args, "--channel-binding-shim")
 	}
+	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
+	// pattern (and for the same reason) as --disable-mapping above: the
+	// orchestrator has already applied flag > yaml > default, and the native
+	// agent inherits the very same keploy.yml through --config-path below. If
+	// we only sent the flag when it was true, an explicit
+	// `--upstream-tls-verify=false` over a keploy.yml `verify: true` would be
+	// indistinguishable from "not specified" and the agent would re-derive
+	// true from the file — while the identical command under docker (no
+	// keploy.yml in the container) would correctly record with verification
+	// off. The CA path travels the same way so that clearing it is expressible
+	// too; `--flag=value` keeps an empty or space-bearing path a single argv
+	// element (no shell is involved on this path).
+	args = append(args, fmt.Sprintf("--upstream-tls-verify=%t", opts.UpstreamTLSVerify))
+	args = append(args, fmt.Sprintf("--upstream-tls-ca-cert=%s", opts.UpstreamTLSCACert))
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}
@@ -947,6 +1066,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 	if opts.RecordBufferQueueSize > 0 {
 		args = append(args, "--queue-size", strconv.Itoa(opts.RecordBufferQueueSize))
+	}
+	if opts.RecordBufferConsumerStallGrace > 0 {
+		args = append(args, "--consumer-stall-grace", opts.RecordBufferConsumerStallGrace.String())
 	}
 	a.logger.Debug("Starting native agent with args", zap.Strings("args", args))
 
@@ -1232,9 +1354,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		// Lower perf_event_paranoid to allow eBPF programs to attach to syscall tracepoints
 		// like sys_socket via perf_event_open. Ubuntu/Debian default (4) blocks this for
 		// unprivileged users, so setting 2 relaxes the restriction and enables tracing.
+		// Write the value straight to the procfs knob instead of shelling out to the
+		// `sysctl` binary, which isn't guaranteed to be present in minimal images.
 		if runtime.GOOS == "linux" {
-			cmd := exec.Command("sysctl", "-w", "kernel.perf_event_paranoid=2")
-			if err := cmd.Run(); err != nil {
+			const perfEventParanoidPath = "/proc/sys/kernel/perf_event_paranoid"
+			if err := os.WriteFile(perfEventParanoidPath, []byte("2\n"), 0644); err != nil {
 				a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
 				return err
 			}
@@ -1249,7 +1373,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		agentCtx, cancel := context.WithTimeout(ctx, 60*time.Second) // we will wait for 1 minute for the agent to get ready
+		// Wait up to the agent's own healthcheck budget for it to become ready.
+		// Under heavy CI docker-daemon contention the agent container can take
+		// well over a minute just to start (observed: a local-image `docker run`
+		// taking 126s), so a 60s wait gave up prematurely and tore down a
+		// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
+		agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -1310,6 +1439,21 @@ func (a *AgentClient) getApp() (*app.App, error) {
 	return h, nil
 }
 
+// ComposeDownOnSetupFailure tears down the managed docker-compose stack so a
+// retry after a per-test-set setup failure (e.g. agent-readiness timeout) does
+// not hit a "container name already in use" conflict from the dependency
+// containers/network left behind. No-op when there is no managed app or it is
+// not a compose app (App.ComposeDown self-guards on kind == DockerCompose).
+func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
+	ap, err := a.getApp()
+	if err != nil {
+		a.logger.Debug("ComposeDownOnSetupFailure: no managed app to tear down")
+		return nil
+	}
+	ap.ComposeDown()
+	return nil
+}
+
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
 	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
@@ -1319,7 +1463,11 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return err
 	}
 
-	cmd := kdocker.PrepareDockerCommand(ctx, keployAlias)
+	cmd, err := kdocker.PrepareDockerCommand(ctx, keployAlias)
+	if err != nil {
+		utils.LogError(logger, err, "failed to prepare docker command")
+		return err
+	}
 
 	cmd.Cancel = func() error {
 		logger.Debug("Context cancelled. Explicitly stopping the 'keploy-v3' Docker container.")
@@ -1458,6 +1606,37 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 	return mockErrors, nil
 }
 
+// BeginTestErrorCapture asks the agent to open a per-test mock-error capture
+// window so the next GetMockErrors returns only this test's misses. A missing
+// endpoint (older agent) returns 404 and is treated as a no-op, preserving the
+// legacy global-queue behaviour.
+func (a *AgentClient) BeginTestErrorCapture(ctx context.Context) error {
+	url := fmt.Sprintf("%s/test-capture/begin", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to begin test error capture: %s", err.Error())
+	}
+	defer func() {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			utils.LogError(a.logger, closeErr, "failed to close response body for begin-test-error-capture; safe to ignore once")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound {
+		return nil // older agent without the endpoint — fall back to legacy behaviour
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("begin test error capture returned status %d: %s", res.StatusCode, string(body))
+	}
+	return nil
+}
+
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
 // This should be called before cancelling contexts during application shutdown.
 // When the flag is set, connection errors will be logged as debug instead of error.
@@ -1500,7 +1679,8 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 }
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, agentReadyTimeout)
+	// Aligned with the agent's own healthcheck budget; see pkg.AgentReadyTimeout.
+	ctx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
 	defer cancel()
 
 	ticker := time.NewTicker(agentReadyRetryInterval)

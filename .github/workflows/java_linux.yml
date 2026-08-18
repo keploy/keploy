@@ -95,6 +95,13 @@ jobs:
           - job: record_build_replay_build
             record_src: build-no-race
             replay_src: build-no-race
+            # FLOAT/DOUBLE column fidelity (keploy#4426) needs BOTH
+            # binaries to carry the fix: a record binary without it
+            # writes the IEEE-754 bit pattern into the mock, and a
+            # replay binary without it panics on a correctly recorded
+            # FLOAT. So only this cell exercises the fixture; the
+            # cross-version cells leave the flag unset and skip.
+            numeric_fidelity: "true"
     name: mysql-dual-conn (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
@@ -128,6 +135,243 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          MYSQL_NUMERIC_FIDELITY: ${{ matrix.config.numeric_fidelity }}
         run: |
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_dual_conn/java-linux.sh
+
+  # Automatic MySQL port detection: same sample, relocated to :3307 by the
+  # script so nothing in the default port list or the config covers it.
+  # The cross-version cells self-skip via a capability probe — the feature
+  # needs detection at record time AND mock-derived recall at replay time,
+  # so a mixed-version pair cannot exercise it. See the script header.
+  mysql_auto_port:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_latest
+            record_src: build-no-race
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+            # Both binaries come from this commit, so the capability
+            # probe must succeed. Setting this turns a probe failure
+            # into a hard error instead of a silent skip, so this cell
+            # can never go green without asserting the behaviour.
+            require_auto_detect: "true"
+    name: mysql-auto-port (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout samples-java repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-java
+          path: samples-java
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: samples-java/mysql-dual-conn/pom.xml
+
+      - name: Run mysql-dual-conn app on a non-default MySQL port
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          REQUIRE_MYSQL_AUTO_DETECT: ${{ matrix.config.require_auto_detect }}
+        run: |
+          cd samples-java/mysql-dual-conn
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_auto_port/java-linux.sh
+
+      - name: Upload mysql-auto-port recordings and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-auto-port-${{ matrix.config.job }}-recordings
+          path: |
+            samples-java/mysql-dual-conn/keploy/
+            samples-java/mysql-dual-conn/test_logs.txt
+            samples-java/mysql-dual-conn/autoPort_record.txt
+            samples-java/mysql-dual-conn/mvn_build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  tidb_stmt_cache:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # NOTE: this job intentionally OMITS the record_build_replay_latest
+        # cell (record with this build, replay with the latest *release*).
+        # tidb-stmt-cache exercises the COM_QUERY stateful read-back fix this PR
+        # introduces; the latest released binary does not have it yet, so
+        # replaying these recordings with it reproduces the very bug being fixed
+        # (read-back returns the first row — e.g. 100 for every test) and the
+        # cell can never be green until the fix ships in a release. The two
+        # remaining cells both replay with the fixed build binary and fully
+        # validate the fix (record_latest_replay_build also confirms the new
+        # binary replays mocks recorded by the previous release). Re-add
+        # record_build_replay_latest for forward-compat once the fix is released.
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+    name: tidb-stmt-cache (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout samples-java repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-java
+          path: samples-java
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: samples-java/tidb-stmt-cache/pom.xml
+
+      - name: Run tidb-stmt-cache app
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-java/tidb-stmt-cache
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/tidb_stmt_cache/java-linux.sh
+
+      - name: Upload tidb-stmt-cache recordings and replay logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tidb-stmt-cache-${{ matrix.config.job }}-recordings
+          path: |
+            samples-java/tidb-stmt-cache/keploy/
+            samples-java/tidb-stmt-cache/test_logs_*.txt
+            samples-java/tidb-stmt-cache/record.txt
+            samples-java/tidb-stmt-cache/mvn_build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  async_config_poll:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The async-egress engine (keploy#4368) ships in no released binary, so
+        # BOTH record and replay use this build. The record_*_latest /
+        # replay_latest cells are intentionally omitted: the released binary can
+        # neither stamp async mocks (record) nor serve them (replay), so those
+        # cells could never validate the feature. Re-add them once async ships.
+        config:
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+        # periodic:      fast poller, stub answers immediately, lane type http ->
+        #   asserts the async engine SERVED the polls (served >= 1).
+        # httppoll:      one held long-poll (server timeout), lane type httpPoll ->
+        #   asserts it is recorded as a collapsed value epoch (kind Http, async
+        #   poll: true, no pollDurationMs) and SERVED on replay (served >= 1).
+        # boot_blocking: record as httppoll, but replay with the app boot-blocking
+        #   synchronously on the watch (BLOCK_BOOT_ON_WATCH) -> asserts the value-
+        #   epoch engine serves the startup epoch so the app boots and ingress
+        #   PASSES (the old anchor-hold engine would park it -> boot deadlock).
+        #   Needs keploy/samples-java#148 (the BLOCK_BOOT_ON_WATCH app support).
+        scenario: [periodic, httppoll, boot_blocking]
+    name: async-config-poll (${{ matrix.scenario }} / ${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout samples-java repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-java
+          path: samples-java
+
+      # Spring Boot 1.5 sample -> Java 8 (not the Java 17 the other jobs use);
+      # the run script deliberately does not source update-java.sh.
+      - name: Set up Java 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+          cache: maven
+          cache-dependency-path: samples-java/async-config-poll/pom.xml
+
+      - name: Set up Go (for the config-service stub)
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.21"
+
+      - name: Run async-config-poll app
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          cd samples-java/async-config-poll
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/async_config_poll/java-linux.sh
+
+      - name: Upload async-config-poll recordings and replay logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: async-config-poll-${{ matrix.config.job }}-recordings
+          path: |
+            samples-java/async-config-poll/keploy/
+            samples-java/async-config-poll/test_logs.txt
+            samples-java/async-config-poll/record.txt
+            samples-java/async-config-poll/mvn_build.log
+            samples-java/async-config-poll/config-stub.log
+          if-no-files-found: warn
+          retention-days: 7

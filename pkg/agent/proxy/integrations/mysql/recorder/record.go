@@ -97,6 +97,18 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 					zap.String("connKey", opts.ConnKey))
 				return nil
 			}
+			// A connection whose first captured server packet is not the
+			// HandshakeV10 greeting was joined mid-stream (opened before
+			// recording started, e.g. a pre-warmed connection pool). Its
+			// greeting — and thus the server capability flags needed to
+			// decode any of its packets — can never be recovered, so skip it
+			// gracefully instead of failing the capture. Connections captured
+			// from their first byte are unaffected.
+			if errors.Is(err, wire.ErrServerGreetingNotFound) {
+				logger.Warn("skipping MySQL connection joined mid-stream: no server greeting was captured, so it cannot be recorded. This connection was opened before recording started (e.g. a pre-warmed connection pool). To capture it, restart the application after starting the recording so its connections are re-established and captured from the greeting.",
+					zap.String("connKey", opts.ConnKey))
+				return nil
+			}
 			utils.LogError(logger, err, "failed to handle initial handshake")
 			errCh <- err
 			return nil
@@ -157,6 +169,18 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 }
 
 func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time, resTimestampMock time.Time, opts models.OutgoingOptions) {
+	// Clamp res >= req for EVERY mysql mock (query, handshake/config, no-response).
+	// On a reused/keepalive connection CapturedRespTime can carry over the
+	// previous exchange's response time, producing an invalid res<req order that
+	// the replay mock-load filters (filterByTimeStamp / MockManager) silently
+	// drop — orphaning the mock (a dropped config/handshake mock even breaks
+	// connection setup at replay). Response time only feeds ordering/windowing,
+	// so pinning it to the request time when the captured value is stale keeps the
+	// mock valid without loss. Done here, at the single choke point, rather than
+	// per call site.
+	if resTimestampMock.Before(reqTimestampMock) {
+		resTimestampMock = reqTimestampMock
+	}
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  requestOperation,
@@ -203,7 +227,7 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 		},
 	}
 
-	if mgr := syncMock.Get(); mgr != nil {
+	if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
 		mgr.AddMock(mysqlMock)
 		return
 	}

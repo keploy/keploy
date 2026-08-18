@@ -95,6 +95,25 @@ send_request() {
   echo "=== /api/oms/stmt-reset/5 (trigger COM_STMT_RESET) ==="
   curl -sS http://localhost:8080/api/oms/stmt-reset/5 || true
 
+  # Column-type fidelity (keploy#4426). Both endpoints bind a parameter,
+  # so Connector/J issues COM_STMT_EXECUTE and MySQL answers with a
+  # BINARY-protocol result set — the format whose FLOAT/DOUBLE columns
+  # carry raw IEEE-754 bytes. An unparameterised SELECT would come back
+  # as a text result set (every value a string) and would not touch this
+  # code path at all.
+  #
+  # Gated: see the MYSQL_NUMERIC_FIDELITY note at the guard below.
+  if [[ "${MYSQL_NUMERIC_FIDELITY:-}" == "true" ]]; then
+    echo "=== /api/oms/numerics (FLOAT/DOUBLE/BIGINT UNSIGNED, binary rows) ==="
+    curl -sS http://localhost:8080/api/oms/numerics || true
+
+    # Binds a FLOAT parameter: float32 on the wire, float64 out of the
+    # mock file. Exercises the COM_STMT_EXECUTE parameter decode and the
+    # matcher's mixed-width float comparison.
+    echo "=== /api/oms/float-param/9.99 (FLOAT bound parameter) ==="
+    curl -sS http://localhost:8080/api/oms/float-param/9.99 || true
+  fi
+
   # Let keploy persist, then gracefully stop it
   sleep 10
   echo "$kp_pid Keploy PID"
@@ -177,6 +196,103 @@ fi
 
 sleep 5
 
+# --- Regression guard for keploy#4426 (FLOAT/DOUBLE decoded as bit patterns) ---
+# This one has to be asserted on the RECORDED ARTIFACT, not on the replay
+# report. The defect corrupted values at record time: a FLOAT column
+# holding 9.99 was written to the mock as 1.0926057e+09 and a DOUBLE as
+# 4.621813488089437e+18, because the wire bytes were converted numerically
+# instead of reinterpreted as IEEE-754. Record and replay were wrong in the
+# same direction, so a report-status check alone can pass while every
+# recorded row is nonsense.
+#
+# Compat matrix: this needs BOTH binaries to carry the fix. A record
+# binary without it writes the bit pattern into the mock; a replay
+# binary without it type-asserts ce.Value.(float32) on a correctly
+# recorded FLOAT and panics, tearing down the connection. So a
+# mixed-version cell cannot exercise the fixture either way, and
+# MYSQL_NUMERIC_FIDELITY is set only on record_build_replay_build —
+# exactly the pattern mysql_auto_port uses for port detection.
+#
+# There is no CLI capability to probe here (the fix adds no flag), so
+# the matrix cell states the fact directly rather than a probe guessing
+# at it. The flag being unset therefore means "skewed cell", never
+# "feature missing", so this cannot silently go green on the cell that
+# is supposed to assert.
+section "Guard: FLOAT/DOUBLE column fidelity (keploy#4426)"
+if [[ "${MYSQL_NUMERIC_FIDELITY:-}" != "true" ]]; then
+  echo "Skipping: FLOAT/DOUBLE column fidelity needs BOTH the record and replay"
+  echo "binaries to carry the keploy#4426 fix. Expected for cross-version cells."
+  endsec
+else
+  # Closes the ::group:: before exiting, so the ::error:: annotations
+  # don't render inside a collapsed section.
+  guard_fail() {
+    echo "::error::$*"
+    endsec
+    exit 1
+  }
+
+  mapfile -t mock_files < <(find ./keploy \( -name 'mocks.yaml' -o -name 'mocks.json' \) | sort)
+  if [[ ${#mock_files[@]} -eq 0 ]]; then
+    guard_fail "keploy#4426 guard: no mock files found under ./keploy"
+  fi
+
+  # The negative check runs on every file. The positive checks run only on
+  # files that actually captured the fixture, so adding a future test-set
+  # that doesn't hit /api/oms/numerics can't turn this into a false
+  # failure — but at least one file must carry it, or the negative check
+  # would be vacuous.
+  #
+  # Per file rather than across the set: the YAML and JSON storage formats
+  # decode numbers through different code, so a JSON-only regression must
+  # not be masked by the YAML file happening to hold the right value.
+  fixture_seen=false
+  for mf in "${mock_files[@]}"; do
+    echo "--- checking $mf"
+
+    # The exact corruptions this bug produced for a column holding 9.99.
+    if grep -qE '1\.0926057e\+09|4\.621813488089437e\+18' "$mf"; then
+      grep -nE '1\.0926057e\+09|4\.621813488089437e\+18' "$mf" | head -10
+      guard_fail "keploy#4426 regression in $mf: a FLOAT/DOUBLE column was recorded as its IEEE-754 bit pattern"
+    fi
+
+    # Optional space after the colon so this keeps working if the JSON
+    # mock writer ever gains SetIndent.
+    if ! grep -qE '"?table"?: ?"?numeric_fidelity"?' "$mf"; then
+      echo "    (no numeric_fidelity rows in this file — skipping positive checks)"
+      continue
+    fi
+    fixture_seen=true
+
+    if ! grep -qE '"?name"?: ?"?price_f"?' "$mf"; then
+      guard_fail "keploy#4426 guard: numeric_fidelity present in $mf but no price_f column"
+    fi
+
+    # Unquoted 9.99. A quoted "9.99" means the row arrived as a TEXT result
+    # set, whose values are length-encoded strings — that path never touches
+    # the binary decode this guard exists to protect.
+    if ! grep -qE '(value: 9\.99$|"value": ?9\.99)' "$mf"; then
+      grep -nE '"?name"?: ?"?(price_f|ratio_d)"?' -A 1 "$mf" | head -20
+      guard_fail "keploy#4426 guard: no unquoted 9.99 in $mf — a quoted \"9.99\" means a TEXT result set, which does not exercise the binary decode path"
+    fi
+
+    # BIGINT UNSIGNED above MaxInt64 has no lossless float64 form, so a
+    # format that routes it through one collapses distinct rows onto the
+    # same number (18446744073709551615 -> 18446744073709552000, or
+    # -9223372036854775808 once that float is narrowed to an integer).
+    if ! grep -q '18446744073709551615' "$mf"; then
+      grep -nE '"?name"?: ?"?big_u"?' -A 1 "$mf" | head -20
+      guard_fail "keploy#4426 guard: BIGINT UNSIGNED max lost precision in $mf"
+    fi
+  done
+
+  if [[ "$fixture_seen" != "true" ]]; then
+    guard_fail "keploy#4426 guard: no mock file captured the numeric_fidelity table — /api/oms/numerics was never recorded, so this guard asserted nothing"
+  fi
+  echo "OK: FLOAT/DOUBLE/BIGINT UNSIGNED columns recorded with their real values."
+  endsec
+fi
+
 section "Shutdown MySQL before test mode"
 docker compose down || true
 echo "MySQL stopped — Keploy should now use mocks for database interactions"
@@ -225,6 +341,22 @@ fi
 if [[ $REPLAY_RC -ne 0 ]]; then
   echo "Replay exited with code $REPLAY_RC but all tests passed. Ignoring exit code."
 fi
+
+# --- Regression guard for keploy#4372 (MySQL system-variable matcher) ---
+# Connector/J issues a live `SELECT @@session.transaction_isolation` during pool
+# setup. Before #4372 an unrecorded read of it could be cross-served a DIFFERENT
+# system variable's mock, and Connector/J then threw "Could not map transaction
+# isolation '<value>'" and the pool never initialised. The report status alone
+# would not always surface this, so assert the marker never appears in the replay
+# log. This is additive — it does not alter the existing report-status gate above.
+section "Guard: system-variable matcher (keploy#4372)"
+if grep -qi "Could not map transaction isolation" test_logs.txt 2>/dev/null; then
+  echo "::error::keploy#4372 regression: 'Could not map transaction isolation' in replay log — a system-variable read was cross-served the wrong mock"
+  grep -i "Could not map transaction isolation" test_logs.txt | head -5
+  exit 1
+fi
+echo "OK: no transaction-isolation cross-match marker in replay log."
+endsec
 
 if json_pass_supported; then
   section "Replay (json)"

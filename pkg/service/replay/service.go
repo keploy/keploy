@@ -34,6 +34,11 @@ type Instrumentation interface {
 	// NotifyGracefulShutdown notifies the agent that the application is shutting down gracefully.
 	// When this is called, connection errors will be logged as debug instead of error.
 	NotifyGracefulShutdown(ctx context.Context) error
+	// ComposeDownOnSetupFailure tears down the docker-compose stack (agent + app
+	// + dependency containers + project network) when per-test-set setup fails
+	// (e.g. agent-readiness timeout), so a retry's `compose up` does not hit a
+	// "container name already in use" conflict. No-op for non-compose apps.
+	ComposeDownOnSetupFailure(ctx context.Context) error
 }
 
 type Service interface {
@@ -74,7 +79,7 @@ type TestDB interface {
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
-	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, firstTestCaseTime time.Time) error
+	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, startupCutoffTime time.Time) error
 }
 
 type ReportDB interface {
@@ -96,6 +101,10 @@ type TestSetConfig interface {
 type Telemetry interface {
 	TestSetRun(success int, failure int, testSet string, runStatus string)
 	TestRun(success int, failure int, testSets int, mocksConsumed int, runStatus string, metadata map[string]interface{})
+	// TestRunAborted records a graceful replay stop that happened before the
+	// TestRun summary was emitted (e.g. setup/instrumentation failed before
+	// any test set ran), carrying a categorized stop_reason for the funnel.
+	TestRunAborted(stopReason string)
 	MockTestRun(utilizedMocks int)
 }
 
@@ -112,6 +121,29 @@ type TestHooks interface {
 	BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
+}
+
+// TestCaseMutator is an optional extension to TestHooks.
+// RunTestSet detects it via type assertion; implementations that do not need
+// per-test-case mutations can safely omit it without breaking existing code.
+type TestCaseMutator interface {
+	// BeforeTestCaseRun is invoked once per test case, before SimulateRequest.
+	// Implementations may mutate tc in-place (e.g. decrypt protected fields,
+	// inject headers). It is called at most once per test case even when
+	// RetryPassing is enabled.
+	BeforeTestCaseRun(ctx context.Context, tc *models.TestCase, testSetID string) error
+}
+
+// MockMutator is an optional extension to TestHooks.
+// RunTestSet detects it via type assertion after GetMocks returns and before
+// StoreMocks pushes mocks to the proxy. Implementations may mutate mocks
+// in-place (e.g. decrypt ENC: fields) so the proxy always receives plaintext
+// values without ever writing plaintext to disk.
+type MockMutator interface {
+	// AfterGetMocks is invoked once per test set, after all mocks are loaded
+	// from disk and before they are sent to the proxy. Both slices may be
+	// mutated in-place; nil slices are a no-op.
+	AfterGetMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error
 }
 
 type Storage interface {

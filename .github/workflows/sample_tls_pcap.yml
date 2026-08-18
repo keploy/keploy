@@ -1,11 +1,30 @@
 name: TLS pcap + keylog (sample-tls-app)
 
 # End-to-end coverage for keploy's TLS capture features. The job
-# exercises the proxy in two modes against a heterogeneous workload:
+# exercises the proxy in four modes against a heterogeneous workload:
 #
 #   1. capture-only       (--capture-packets, default record path)
 #   2. with-opportunistic (--capture-packets --opportunistic-tls-intercept,
 #                          peek-and-hijack passthrough variant)
+#   3. verify-upstream    (--capture-packets --upstream-tls-verify, the
+#                          opt-in record.upstreamTls.verify path where
+#                          keploy authenticates the REAL upstream on its
+#                          own outbound dials instead of skipping)
+#   4. verify-upstream-opportunistic
+#                         (--capture-packets --opportunistic-tls-intercept
+#                          --upstream-tls-verify — the hijack path owns a
+#                          SEPARATE upstream tls.Config that mode 3 can
+#                          never reach, because the opportunistic branch
+#                          short-circuits handleConnection)
+#
+# The upstream HTTPS certificate carries DNS SANs ONLY (no IP:127.0.0.1).
+# That is deliberate and load-bearing for modes 3 and 4: the workload
+# reaches those hostnames over loopback, so an IP SAN would let keploy
+# verify against the destination ADDRESS and every SNI-plumbing defect
+# would pass CI while breaking every hostname-addressed upstream in
+# production. The DB cert keeps its IP SAN — MySQL is dialled at an IP
+# literal and sends no SNI, which is the other path that must keep
+# working.
 #
 # Workload: ayush3160/sample-tls-app, which emits real outbound
 # TLS to:
@@ -56,6 +75,50 @@ jobs:
           - name: with-opportunistic
             flags: "--capture-packets --opportunistic-tls-intercept"
             description: "peek-and-hijack passthrough; no parser dispatch after MITM"
+        # Upstream TLS verification gets TWO extra jobs, not a third column.
+        # A third `mode` entry would fan out across all three binary configs
+        # for coverage a single run already gives: the flag is read once, by
+        # the recording binary, and the replaying binary never sees it (this
+        # script does not invoke $REPLAY_BIN at all).
+        #
+        # `include` entries whose keys ALL collide with an existing matrix
+        # dimension cannot be merged into any generated combination — every
+        # combination already has its own `config` and `mode` — so GitHub
+        # appends these as standalone jobs instead. 6 jobs -> 8.
+        #
+        # record_src MUST be `build`: --upstream-tls-verify does not exist in
+        # the published `latest` binary, so a latest-recorder variant would
+        # die on an unknown flag rather than test anything.
+        #
+        # Two entries, because there are two INDEPENDENT upstream tls.Config
+        # sites and one job cannot reach both. The default record path and the
+        # opportunistic peek-and-hijack path build their dial configs in
+        # different functions (proxy.handleConnection vs
+        # opportunistic_tls.hijackAndMITM), and --opportunistic-tls-intercept
+        # short-circuits handleConnection before it ever reaches the first —
+        # so a verify job without the opportunistic flag leaves hijackAndMITM's
+        # dial completely untested, and vice versa. That gap is not
+        # hypothetical: hijackAndMITM shipped hard-coding its ServerName to the
+        # destination IP literal, which breaks EVERY hostname-addressed
+        # upstream under verification, and the single verify-upstream job stayed
+        # green throughout.
+        include:
+          - config:
+              job: record_build_replay_build
+              record_src: build
+              replay_src: build
+            mode:
+              name: verify-upstream
+              flags: "--capture-packets --upstream-tls-verify"
+              description: "keploy verifies the real upstream's certificate on the default record path"
+          - config:
+              job: record_build_replay_build
+              record_src: build
+              replay_src: build
+            mode:
+              name: verify-upstream-opportunistic
+              flags: "--capture-packets --opportunistic-tls-intercept --upstream-tls-verify"
+              description: "keploy verifies the real upstream's certificate on the peek-and-hijack path"
     name: ${{ matrix.config.job }} (${{ matrix.mode.name }})
     steps:
       - name: Checkout keploy repository
@@ -80,6 +143,20 @@ jobs:
 
       - name: Install tshark + openssl for pcap decryption check
         run: |
+          # GitHub's ubuntu-24.04 runner image ships third-party apt
+          # repositories (packages.microsoft.com — azure-cli + prod) that this
+          # job does not use: tshark and openssl come from the Ubuntu
+          # main/universe archives. That host intermittently serves a corrupt
+          # InRelease ("Clearsigned file isn't valid, got 'NOSPLIT'"), which
+          # makes `apt-get update` exit 100 and — under this step's default
+          # `bash -eo pipefail` shell — takes the whole job down before keploy
+          # ever runs. Drop every apt source pointing at that host so
+          # `apt-get update` only consults the repos we actually depend on.
+          # The `|| true` keeps a benign no-match (grep exit 1, which pipefail
+          # would otherwise propagate) from aborting the step, while a real
+          # `rm` failure still surfaces. Deterministic — no retry, no sleep.
+          { sudo grep -rlZ 'packages.microsoft.com' /etc/apt/sources.list.d/ 2>/dev/null || true; } \
+            | sudo xargs -0r rm -f
           sudo apt-get update -qq
           # Pre-accept the wireshark-common dump-cap suid prompt so the
           # apt install runs non-interactively.

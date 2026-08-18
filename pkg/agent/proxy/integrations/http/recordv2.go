@@ -50,6 +50,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 
 	destPort := destPortFromAddr(sess.DestStream)
 
+	// watchdogSuspended latches once this connection's watchdog has been
+	// disarmed for a poll lane, so we don't re-parse and re-match every
+	// subsequent request on a keep-alive poll-poll-poll connection.
+	watchdogSuspended := false
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -96,6 +101,18 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			sess.MarkMockIncomplete("http decode error: request read failed: " + err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to read full request")
 			return err
+		}
+
+		// If this request routes to a long-poll async lane, disarm the
+		// supervisor's hang watchdog for this connection before we block on
+		// the response: a poll legitimately holds the connection open with no
+		// byte progress for far longer than the hang budget, and would
+		// otherwise be aborted (falling through to passthrough) before the
+		// delivery arrives — so the poll's mock would never be recorded.
+		if !watchdogSuspended && sess.SuspendWatchdog != nil && h.isPollLaneRequest(finalReq) {
+			logger.Debug("V2 HTTP record: request matched a poll lane; suspending hang watchdog for this connection")
+			sess.SuspendWatchdog()
+			watchdogSuspended = true
 		}
 
 		// --- Response side --------------------------------------------
@@ -401,6 +418,33 @@ func destPortFromAddr(conn net.Conn) uint {
 	return 0
 }
 
+// isPollLaneRequest reports whether the raw HTTP request routes to a
+// configured async lane whose type is a poll variant (lane.IsPoll()).
+// Matching is by request shape only (host/path/query, via the engine's
+// LaneFor), so it is valid at record time before any mock is emitted.
+// recordV2 uses it to disarm the supervisor's hang watchdog for long-poll
+// connections. Returns false when no async engine is configured or the
+// request is malformed.
+func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
+	if h.asyncEngine == nil || !h.asyncEngine.HasPollLanes() {
+		return false
+	}
+	parsed, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
+	if err != nil {
+		return false
+	}
+	// Reuse liveReqToMock (the same request→mock shaping the replay LaneFor
+	// path uses in decode.go) so record- and replay-time lane matching stay
+	// consistent — in particular it leaves URLParams unset so queryOf does the
+	// full multi-value query parse rather than a truncated first-value view.
+	lane, ok := h.asyncEngine.LaneFor(liveReqToMock(&req{
+		method: parsed.Method,
+		url:    parsed.URL,
+		header: parsed.Header,
+	}))
+	return ok && lane.IsPoll()
+}
+
 // buildHTTPMock constructs a *models.Mock with the same shape the legacy
 // parseFinalHTTP produces. Returns (nil, nil) when the request is a
 // pass-through (IsPassThrough true) so the caller skips emission.
@@ -413,6 +457,14 @@ func destPortFromAddr(conn net.Conn) uint {
 // input bytes (modulo timestamps, which are allowed to differ because
 // legacy uses time.Now() and V2 uses chunk timestamps).
 func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
+	// Prefer the resolved destination port. The V2 recorder derives destPort from
+	// the DestStream FakeConn, which in proxyless (observe-only) capture has no
+	// real remote port (0) — breaking port-keyed telemetry-passthrough matching.
+	// routeEgressToParser sets DstCfg.Port authoritatively; equal to the FakeConn
+	// port on the proxy path, so this is a no-op there.
+	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
+		destPort = opts.DstCfg.Port
+	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
@@ -426,7 +478,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			return nil, fmt.Errorf("read request body: %w", err)
 		}
 		if req.Header.Get("Content-Encoding") != "" {
-			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody)
+			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody, pkg.MaxDecompressedSize)
 			if err != nil {
 				return nil, fmt.Errorf("decompress request body: %w", err)
 			}
@@ -445,7 +497,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			return nil, fmt.Errorf("read response body: %w", err)
 		}
 		if respParsed.Header.Get("Content-Encoding") != "" {
-			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody)
+			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody, pkg.MaxDecompressedSize)
 			if err != nil {
 				return nil, fmt.Errorf("decompress response body: %w", err)
 			}
@@ -466,6 +518,37 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		return nil, nil
 	}
 
+	// Telemetry / noisy-egress passthrough (config-driven via
+	// opts.PassThroughPorts/Hosts, with built-in defaults as "skip"):
+	//   - skip:      do not record (live telemetry, not a dependency).
+	//   - recordOne: keep ONE representative exchange per (method,host,port,path),
+	//                preferring the first 2xx, tagged type:config so it becomes a
+	//                session-lifetime mock served body-agnostically on replay.
+	var ptRecordOne bool
+	var ptKey string
+	{
+		ptHost := req.Host
+		if ptHost == "" && req.URL != nil {
+			ptHost = req.URL.Host
+		}
+		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL); matched {
+			if rule.Mode == models.PassThroughSkip {
+				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
+				return nil, nil
+			}
+			// recordOne: defer the dedup decision to emit time (below) so a later
+			// drop can't burn the one representative and leave zero mocks.
+			ptRecordOne = true
+			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
+			meta["type"] = "config"
+			meta["passthrough"] = string(models.PassThroughRecordOne)
+		}
+	}
+
+	ptLifetime := models.LifetimePerTest
+	if ptRecordOne {
+		ptLifetime = models.LifetimeSession
+	}
 	mock := &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
@@ -491,9 +574,14 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			ResTimestampMock: m.ResTimestampMock,
 		},
 		TestModeInfo: models.TestModeInfo{
-			Lifetime:        models.LifetimePerTest,
+			Lifetime:        ptLifetime,
 			LifetimeDerived: true,
 		},
+	}
+	// recordOne dedup, committed only now that a mock is actually being emitted.
+	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
+		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+		return nil, nil
 	}
 	return mock, nil
 }

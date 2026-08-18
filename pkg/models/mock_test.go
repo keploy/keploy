@@ -8,39 +8,34 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-// TestDeepCopyPreservesReqBodyNoise verifies Mock.DeepCopy deep-copies
-// HTTPReq.ReqBodyNoise: the clone must carry the same paths/regexes as the
-// original, and mutating either side's map (keys or per-path regex slices)
-// must not leak across to the other. Without an independent backing map the
-// gob async-writer / pool clones would silently share — and drop — the
-// schema-detected noise.
-func TestDeepCopyPreservesReqBodyNoise(t *testing.T) {
+// TestDeepCopyPreservesSpecReqBodyNoise verifies Mock.DeepCopy deep-copies the
+// kind-agnostic MockSpec.ReqBodyNoise map — the single schema-noise store used
+// by every parser (HTTP, Pulsar, Kafka, Redis, Generic). Mock.DeepCopy starts
+// from m.Spec by value, so without an explicit deep copy the clone would share
+// this map and its per-path slices — and DeepCopy runs before async gob writes
+// and when building runtime mock pools, so a learned-noise mutation on one copy
+// could bleed into another or race a persistence read.
+func TestDeepCopyPreservesSpecReqBodyNoise(t *testing.T) {
 	orig := &Mock{
-		Kind: Kind(HTTP),
+		Kind: GENERIC,
 		Spec: MockSpec{
-			HTTPReq: &HTTPReq{
-				Body:         `{"id":"a"}`,
-				ReqBodyNoise: map[string][]string{"body.id": {}, "body.ts": {"re"}},
-			},
+			ReqBodyNoise: map[string][]string{"body.eventTs": {}, "body.traceId": {"re"}},
 		},
 	}
 
 	c := orig.DeepCopy()
-	if c.Spec.HTTPReq == nil {
-		t.Fatal("DeepCopy dropped HTTPReq")
-	}
-	if len(c.Spec.HTTPReq.ReqBodyNoise) != 2 {
-		t.Fatalf("DeepCopy dropped ReqBodyNoise: %v", c.Spec.HTTPReq.ReqBodyNoise)
+	if len(c.Spec.ReqBodyNoise) != 2 {
+		t.Fatalf("DeepCopy dropped Spec.ReqBodyNoise: %v", c.Spec.ReqBodyNoise)
 	}
 
 	// Mutating the copy must not affect the original (independent backing maps).
-	c.Spec.HTTPReq.ReqBodyNoise["body.new"] = []string{}
-	c.Spec.HTTPReq.ReqBodyNoise["body.ts"] = append(c.Spec.HTTPReq.ReqBodyNoise["body.ts"], "x")
-	if _, ok := orig.Spec.HTTPReq.ReqBodyNoise["body.new"]; ok {
-		t.Fatal("DeepCopy shared the noise map with the original")
+	c.Spec.ReqBodyNoise["body.new"] = []string{}
+	c.Spec.ReqBodyNoise["body.traceId"] = append(c.Spec.ReqBodyNoise["body.traceId"], "x")
+	if _, ok := orig.Spec.ReqBodyNoise["body.new"]; ok {
+		t.Fatal("DeepCopy shared the Spec.ReqBodyNoise map with the original")
 	}
-	if len(orig.Spec.HTTPReq.ReqBodyNoise["body.ts"]) != 1 {
-		t.Fatal("DeepCopy shared a noise slice with the original")
+	if len(orig.Spec.ReqBodyNoise["body.traceId"]) != 1 {
+		t.Fatal("DeepCopy shared a Spec.ReqBodyNoise slice with the original")
 	}
 }
 

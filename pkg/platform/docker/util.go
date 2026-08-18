@@ -26,6 +26,50 @@ var DockerConfig = DockerConfigStruct{
 	DockerImage: "ghcr.io/keploy/keploy",
 }
 
+// shellQuote renders s as a single POSIX shell word.
+//
+// getAlias builds ONE command string that is later executed through a shell
+// (pkg/platform/docker/util_others.go → utils.CommandContext → `sh -c`, or its
+// shlex fallback when the image has no /bin/sh — both implement the same
+// single-quote rules). Any value interpolated into it that the operator can
+// choose has to be quoted, or a space splits it into two arguments and a
+// metacharacter runs as a command inside a sudo'd `docker run`.
+//
+// POSIX single quotes suppress every expansion; the only character that cannot
+// appear inside them is the single quote itself, so each one is spliced in as
+// close-quote, backslash-quote, reopen-quote.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// buildUpstreamTLSFlags renders the --upstream-tls-* argv for the containerised
+// agent. The host's keploy.yml is not visible inside the agent container, so
+// argv is the only propagation channel; the CA path is resolved on the AGENT's
+// filesystem, which means the operator must bind-mount the PEM or point at a
+// path that already exists in the image.
+//
+// Both flags are emitted UNCONDITIONALLY in `--flag=value` form so the
+// precedence flag > yaml > default resolves identically on docker, on
+// docker-compose and on a native run — see proxy.resolveUpstreamTLSConfig for
+// why "append only when true" silently broke the off switch.
+func buildUpstreamTLSFlags(opts models.SetupOptions) (string, error) {
+	flags := fmt.Sprintf(" --upstream-tls-verify=%t", opts.UpstreamTLSVerify)
+
+	if runtime.GOOS == "windows" {
+		// The windows runner (util_windows.go) hands the alias to cmd.exe as
+		// strings.Split(alias, " ") — there is no quoting layer for any
+		// escaping to survive, which is also why GenerateDockerEnvs above
+		// skips quoting on windows. Refuse with an actionable message rather
+		// than emit a docker run that silently loses half the path.
+		if strings.ContainsAny(opts.UpstreamTLSCACert, " \t\"^&|<>") {
+			return "", fmt.Errorf("upstream TLS CA certificate path %q cannot be forwarded to the keploy agent container on windows: the docker alias is split on spaces, so the path must contain no spaces or cmd.exe metacharacters — move the PEM somewhere without them, or bake it into the agent image", opts.UpstreamTLSCACert)
+		}
+		return flags + " --upstream-tls-ca-cert=" + opts.UpstreamTLSCACert, nil
+	}
+
+	return flags + " --upstream-tls-ca-cert=" + shellQuote(opts.UpstreamTLSCACert), nil
+}
+
 func GenerateDockerEnvs(config DockerConfigStruct) string {
 	var envs []string
 	for key, value := range config.Envs {
@@ -116,6 +160,17 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	if opts.RecordBufferQueueSize > 0 {
 		recordBufferFlags += " --queue-size " + strconv.Itoa(opts.RecordBufferQueueSize)
 	}
+	if opts.RecordBufferConsumerStallGrace > 0 {
+		recordBufferFlags += " --consumer-stall-grace " + opts.RecordBufferConsumerStallGrace.String()
+	}
+
+	// Forward upstream TLS verification to the containerised agent — same
+	// argv-only propagation channel as recordBufferFlags above.
+	upstreamTLSFlags, err := buildUpstreamTLSFlags(opts)
+	if err != nil {
+		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
+		return "", err
+	}
 
 	Volumes := ""
 	for i, volume := range DockerConfig.VolumeMounts {
@@ -172,6 +227,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		alias += agentMemoryLimitFlag
 		alias += recordBufferFlags
+		alias += upstreamTLSFlags
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}
@@ -249,6 +305,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			alias += agentMemoryLimitFlag
 			alias += recordBufferFlags
+			alias += upstreamTLSFlags
 			if models.IsAnsiDisabled {
 				alias += " --disable-ansi"
 			}
@@ -311,6 +368,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		alias += agentMemoryLimitFlag
 		alias += recordBufferFlags
+		alias += upstreamTLSFlags
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}
@@ -388,6 +446,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			alias += agentMemoryLimitFlag
 			alias += recordBufferFlags
+			alias += upstreamTLSFlags
 			if models.IsAnsiDisabled {
 				alias += " --disable-ansi"
 			}
@@ -449,6 +508,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		alias += agentMemoryLimitFlag
 		alias += recordBufferFlags
+		alias += upstreamTLSFlags
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}

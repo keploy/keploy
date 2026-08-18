@@ -3,6 +3,8 @@ package wire
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 
@@ -18,6 +20,15 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
+
+// ErrServerGreetingNotFound is returned when a packet is decoded on a
+// connection for which no server greeting (HandshakeV10) was ever captured.
+// The greeting carries the server capability flags every later packet is
+// decoded against, so without it the connection is un-decodable. In practice
+// this means recording joined the connection mid-stream — it was opened before
+// recording started, e.g. a pre-warmed JDBC connection pool. Callers should
+// treat it as a signal to skip that connection, not as a hard error.
+var ErrServerGreetingNotFound = errors.New("server Greetings not found")
 
 // DecodePayload is used to decode mysql packets that don't consist of multiple packets within them, because we are reading per packet.
 func DecodePayload(ctx context.Context, logger *zap.Logger, data []byte, clientConn net.Conn, decodeCtx *DecodeContext) (*mysql.PacketBundle, error) {
@@ -67,7 +78,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 	sg, ok := decodeCtx.ServerGreetings.Load(clientConn)
 	if !ok {
-		return parsedPacket, fmt.Errorf("server Greetings not found")
+		return parsedPacket, ErrServerGreetingNotFound
 	}
 
 	logger.Debug("Last operation when handling client query", zap.Any("last operation", mysql.CommandStatusToString(lastOp)))
@@ -145,7 +156,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	if payloadType != mysql.HandshakeV10 {
 		sg, ok = decodeCtx.ServerGreetings.Load(clientConn)
 		if !ok {
-			return parsedPacket, fmt.Errorf("server Greetings not found")
+			return parsedPacket, ErrServerGreetingNotFound
 		}
 	}
 
@@ -386,7 +397,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	case payloadType == mysql.COM_STMT_EXECUTE:
 		logger.Debug("COM_STMT_EXECUTE packet", zap.Any("Type", payloadType))
-		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements, decodeCtx.ClientCapabilities)
+		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements, decodeCtx.ClientCapabilities, decodeCtx.LongDataParams[stmtIDFromExecute(payload)])
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_EXECUTE packet: %w", err)
 		}
@@ -412,6 +423,11 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_RESET packet: %w", err)
 		}
 
+		// COM_STMT_RESET discards any long data buffered on the server, so
+		// drop our record of it too — otherwise the next EXECUTE would skip a
+		// parameter whose value is genuinely in the payload.
+		delete(decodeCtx.LongDataParams, pkt.StatementID)
+
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_RESET), clientConn, mysql.COM_STMT_RESET, decodeCtx)
 
 		logger.Debug("COM_STMT_RESET decoded", zap.Any("parsed packet", parsedPacket))
@@ -423,6 +439,16 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_SEND_LONG_DATA packet: %w", err)
 		}
 
+		// Remember that this parameter's value travelled out of band, so the
+		// following COM_STMT_EXECUTE knows not to look for it in its payload.
+		if decodeCtx.LongDataParams == nil {
+			decodeCtx.LongDataParams = make(map[uint32]map[uint16]bool)
+		}
+		if decodeCtx.LongDataParams[pkt.StatementID] == nil {
+			decodeCtx.LongDataParams[pkt.StatementID] = make(map[uint16]bool)
+		}
+		decodeCtx.LongDataParams[pkt.StatementID][pkt.ParameterID] = true
+
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA), clientConn, mysql.COM_STMT_SEND_LONG_DATA, decodeCtx)
 		logger.Debug("COM_STMT_SEND_LONG_DATA decoded", zap.Any("parsed packet", parsedPacket))
 	default:
@@ -431,4 +457,15 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	}
 
 	return parsedPacket, nil
+}
+
+// stmtIDFromExecute peeks the statement id out of a COM_STMT_EXECUTE payload
+// so the caller can look up which of its parameters arrived earlier via
+// COM_STMT_SEND_LONG_DATA. Returns 0 for a payload too short to carry one,
+// which simply means "no long data recorded".
+func stmtIDFromExecute(payload []byte) uint32 {
+	if len(payload) < 5 {
+		return 0
+	}
+	return binary.LittleEndian.Uint32(payload[1:5])
 }

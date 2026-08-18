@@ -40,6 +40,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	yaml "gopkg.in/yaml.v3"
@@ -312,11 +313,46 @@ func scalarFloatNode(f float64) *yaml.Node {
 }
 
 func scalarStrNode(s string) *yaml.Node {
+	// Same hazard as models.stringNode: an explicit !!str tag makes yaml.v3
+	// hard-fail on invalid UTF-8 ("cannot marshal invalid UTF-8 data as
+	// !!str"), which surfaces as a failed mock insert. Reachable here from
+	// hstore values and TSVector lexemes carrying non-UTF-8 bytes. !!binary
+	// stores them losslessly and yaml.v3 decodes it back on read.
+	if !utf8.ValidString(s) {
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!binary", Value: base64.StdEncoding.EncodeToString([]byte(s))}
+	}
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: s}
 }
 
 func scalarKeyNode(s string) *yaml.Node {
+	// Mapping KEYS need the same non-UTF-8 handling as values (scalarStrNode),
+	// but for a different reason: an untagged key never aborts the encoder, so
+	// nothing here is load-bearing for the recording surviving. What bites is
+	// the READ side, and decodeYAMLScalarKey is what fixes that.
+	//
+	// This arm only makes the on-disk tag explicit instead of leaving it to
+	// yaml.v3's auto-binarize-on-emit behaviour — the file is identical either
+	// way today. It is kept so the encoding is stated by this package rather
+	// than inherited from an emitter heuristic that a library upgrade could
+	// change underneath us.
+	if !utf8.ValidString(s) {
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!binary", Value: base64.StdEncoding.EncodeToString([]byte(s))}
+	}
 	return &yaml.Node{Kind: yaml.ScalarNode, Value: s}
+}
+
+// decodeYAMLScalarKey returns a mapping key's real bytes, undoing the !!binary
+// encoding scalarKeyNode applies to non-UTF-8 keys.
+func decodeYAMLScalarKey(k *yaml.Node) string {
+	if k != nil && k.Tag == "!!binary" {
+		if raw, err := base64.StdEncoding.DecodeString(stripBase64Whitespace(k.Value)); err == nil {
+			return string(raw)
+		}
+	}
+	if k == nil {
+		return ""
+	}
+	return k.Value
 }
 
 func marshalVec2Node(v pgtype.Vec2) *yaml.Node {
@@ -1563,16 +1599,17 @@ func decodePgHstoreMapping(node *yaml.Node) (pgtype.Hstore, error) {
 		if k.Kind != yaml.ScalarNode {
 			return nil, fmt.Errorf("pg/hstore: non-scalar key (kind=%d)", k.Kind)
 		}
+		key := decodeYAMLScalarKey(k)
 		if v.Kind == yaml.ScalarNode && v.Tag == "!!null" {
-			out[k.Value] = nil
+			out[key] = nil
 			continue
 		}
 		var s string
 		if err := v.Decode(&s); err != nil {
-			return nil, fmt.Errorf("pg/hstore value for %q: %w", k.Value, err)
+			return nil, fmt.Errorf("pg/hstore value for %q: %w", key, err)
 		}
 		sv := s
-		out[k.Value] = &sv
+		out[key] = &sv
 	}
 	return out, nil
 }

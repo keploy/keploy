@@ -19,13 +19,22 @@ container_kill() {
 }
 
 send_request(){
+    # The app's /health does a DB ping and the app only starts after postgres
+    # is service_healthy; under CI contention + keploy interception this startup
+    # occasionally exceeds the old 120s budget, so give it generous headroom.
     sleep 10
-    max_attempts=40
+    max_attempts=80
     attempt=0
     while ! curl -sf --max-time 5 http://localhost:8080/health > /dev/null 2>&1; do
         attempt=$((attempt + 1))
         if [ "$attempt" -ge "$max_attempts" ]; then
             echo "App failed to start"
+            # CRITICAL: stop keploy before bailing. send_request runs in the
+            # background; the foreground `keploy record` only stops on this
+            # SIGINT. Without it, a flaky slow app-start left keploy recording
+            # forever — observed as a ~6h CI hang ending only at the job
+            # timeout (3 SIGINTs delivered for 4 record iterations).
+            container_kill
             exit 1
         fi
         sleep 3
@@ -48,8 +57,12 @@ do_record_iteration() {
     local label="${extra_flags:+_json}"
     local log="${container_name}${label}.txt"
     send_request &
+    # timeout -s INT: a hard ceiling so a never-stopped record can never hang
+    # the job for hours, even if send_request dies before reaching container_kill.
+    # SIGINT is the graceful keploy stop; a normal iteration is well under a
+    # minute, so 600s is generous headroom over the 80x3s health budget.
     # shellcheck disable=SC2086
-    $RECORD_BIN record $extra_flags -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "$log"
+    timeout -s INT 600 $RECORD_BIN record $extra_flags -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "$log"
     if grep "WARNING: DATA RACE" "$log"; then
         echo "FAIL: Data race during recording${label:+ (json)}"; exit 1
     fi
@@ -76,7 +89,7 @@ if json_pass_supported; then
     # fails at replay-time with "no recorded invocation shares this SQL
     # hash". `docker compose down -v` clears the named volumes so the
     # json record pass starts from the same blank state.
-    docker compose down -v || true
+    timeout 120 docker compose down -v || true
     sleep 2
     for i in {1..2}; do
         do_record_iteration "$i" "--storage-format json"
@@ -90,11 +103,13 @@ echo "Total recorded test cases: $test_count"
 if [ "$test_count" -eq 0 ]; then echo "FAIL: No test cases recorded"; exit 1; fi
 
 echo "Shutting down services before test mode..."
-docker compose down
+timeout 120 docker compose down || true
 echo "Services stopped"
 
 test_container="proxyStressApp"
-$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}.txt" || true
+# timeout -s INT: hard ceiling so a stuck replay can't hang the job (matches the
+# record path); the "No reports — replay hung" guard below then fails it fast.
+timeout -s INT 600 $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}.txt" || true
 
 if grep "WARNING: DATA RACE" "${test_container}.txt"; then echo "FAIL: Data race during replay"; exit 1; fi
 if grep -q "panic:" "${test_container}.txt"; then echo "FAIL: Panic during replay"; cat "${test_container}.txt"; exit 1; fi
@@ -115,7 +130,7 @@ if json_pass_supported; then
     # auto-detected per file by NewMockReaderAny / GetTestCases on the
     # replay side, so the --storage-format flag here only affects what
     # extension the json *report* gets written under.
-    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}_json.txt" || true
+    timeout -s INT 600 $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}_json.txt" || true
     if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then echo "FAIL: Data race during json replay"; exit 1; fi
     if grep -q "panic:" "${test_container}_json.txt"; then echo "FAIL: Panic during json replay"; cat "${test_container}_json.txt"; exit 1; fi
     json_scan_reports || true

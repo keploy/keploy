@@ -22,7 +22,19 @@ if (-not $env:USERPROFILE -or $env:USERPROFILE -eq '') {
   if ($candidate -and $candidate -ne '') { $env:USERPROFILE = $candidate }
 }
 
-# Create Keploy config/home so docker doesn’t fall back to NetworkService
+# Create Keploy config/home so docker doesn’t fall back to NetworkService.
+#
+# Concurrency note: $USERPROFILE\.keploy(-config) is shared across all
+# jobs on this VM user, but that is SAFE. Recorded testcases/mocks/
+# reports land in the per-workspace ./keploy dir (cfg.Path defaults to
+# the CWD, which is this runner's own workspace) — NOT here. The only
+# thing keploy ever writes under ~/.keploy is keploy.yaml, a single
+# non-critical "update available" prompt flag (installation id is
+# machine-derived, not file-based). Worst case if two jobs race that
+# write is a re-shown update prompt; it never corrupts test data or
+# leaks state across jobs. Isolating it would mean overriding
+# USERPROFILE, which would break the docker volume-mount semantics this
+# block exists for, for zero correctness benefit — so it is left shared.
 try {
   if ($env:USERPROFILE -and $env:USERPROFILE -ne '') {
     $keployCfg = Join-Path $env:USERPROFILE ".keploy-config"
@@ -49,16 +61,33 @@ function Get-RunnerWorkPath {
 function Remove-KeployDirs {
   param([string[]]$Candidates)
 
-  # Stop any leftover keploy processes so files aren't locked
+  # Stop any leftover keploy processes so files aren't locked — but ONLY
+  # THIS job's own keploy, identified by executable path. Four runners
+  # share one VM; the old bare name/path/cmdline match would taskkill a
+  # sibling job's keploy (same exe name from its own workspace) mid-run.
+  # Our keploy exes live in the per-workspace bin dir
+  # ($GITHUB_WORKSPACE\bin\keploy-*.exe); when run locally (no
+  # workspace) fall back to the resolved RECORD_BIN/REPLAY_BIN paths.
+  $binDir = if ($env:GITHUB_WORKSPACE) { Join-Path $env:GITHUB_WORKSPACE 'bin' } else { $null }
+  # Trailing separator so a bin dir can't prefix-match a sibling dir.
+  $binDirPrefix = if ($binDir) { $binDir.TrimEnd('\','/') + '\' } else { $null }
+  $ownExePaths = @()
+  foreach ($b in @($env:RECORD_BIN, $env:REPLAY_BIN)) {
+    if ($b) {
+      $resolved = (Get-Command $b -ErrorAction SilentlyContinue).Source
+      if ($resolved) { $ownExePaths += $resolved }
+    }
+  }
   try {
     Get-Process -ErrorAction SilentlyContinue |
+      Where-Object { $_.ProcessName -like 'keploy*' -and $_.Path } |
       Where-Object {
-        $_.ProcessName -in @('keploy','keploy-record','keploy-replay') -or
-        $_.Path -like '*\keploy*.exe' -or
-        $_.CommandLine -like '*keploy*'
+        ($ownExePaths -contains $_.Path) -or
+        ($binDirPrefix -and $_.Path.StartsWith($binDirPrefix, [System.StringComparison]::OrdinalIgnoreCase))
       } |
       Sort-Object StartTime -Descending |
       ForEach-Object {
+        Write-Host "Stopping this job's leftover keploy pid=$($_.Id) path=$($_.Path)"
         taskkill /PID $_.Id /T /F | Out-Null 2>$null
       }
   } catch {}
@@ -103,9 +132,59 @@ function Find-FreePort {
   throw 'No free TCP port found'
 }
 
-$appPort = Find-FreePort
+# Allocate FOUR distinct free ports up-front so concurrent jobs on the
+# same self-hosted VM never share a port:
+#   $appPort      - host port docker publishes the sample on
+#   $proxyPort    - keploy --proxy-port       (see below - HOST-published)
+#   $incomingPort - keploy --incoming-proxy-port
+#   $dnsPort      - keploy --dns-port
+#
+# In docker-compose mode keploy injects a per-job `keploy-agent`
+# container into the compose project and intercepts via eBPF INSIDE the
+# compose network (pkg/client/app AddKeployAgentToCompose). That agent
+# container publishes only {AgentPort, ProxyPort, AppPorts} to the host
+# (pkg/platform/docker/docker.go GenerateKeployAgentService); dns-port
+# is forwarded to the container but bound in the container's own netns,
+# and incoming-proxy-port is not forwarded at all. So:
+#   - --proxy-port is the ESSENTIAL fix: it is host-published as
+#     `-p <proxyPort>:<proxyPort>`, so two jobs on the default 16789
+#     make the second `docker compose up` fail with "port is already
+#     allocated". AgentPort is separately OS-assigned (unique), and the
+#     app host port is $appPort. Making --proxy-port unique per job is
+#     what actually unblocks concurrency here.
+#   - --dns-port / --incoming-proxy-port are container-scoped in this
+#     mode and do NOT collide across jobs; we still pass unique values
+#     as harmless belt-and-suspenders (deterministic, and correct if a
+#     future/native path ever binds them on the host).
+# Each Find-FreePort call re-probes OS availability from a fresh random
+# high port; we de-dup so the four never coincide.
+function New-UniqueFreePort {
+  param([int[]]$Exclude = @())
+  while ($true) {
+    $p = Find-FreePort
+    if ($Exclude -notcontains $p) { return $p }
+  }
+}
+$appPort      = New-UniqueFreePort
+$proxyPort    = New-UniqueFreePort -Exclude @($appPort)
+$incomingPort = New-UniqueFreePort -Exclude @($appPort, $proxyPort)
+$dnsPort      = New-UniqueFreePort -Exclude @($appPort, $proxyPort, $incomingPort)
+
 $id = ([guid]::NewGuid()).ToString().Split('-')[0]
 $containerName = "dedup-go-$id"
+
+# Unique docker-compose PROJECT per job. Compose derives the project
+# name (and thus the default network `<project>_default` plus any named
+# volumes) from the working-directory BASENAME, which is `go-dedup` for
+# EVERY concurrent runner (each runner's workspace has a different
+# parent path but the same leaf dir). Without an explicit project name,
+# one job's `docker compose down` would tear down a sibling job's
+# network/containers. Pin the project to the per-job guid and EXPORT it
+# so every `docker compose` call in this script AND the `docker compose
+# up` that keploy spawns share the same, job-unique project.
+$env:COMPOSE_PROJECT_NAME = "keploy-$id"
+Write-Host "Using COMPOSE_PROJECT_NAME = $env:COMPOSE_PROJECT_NAME"
+Write-Host "Allocated ports -> app:$appPort proxy:$proxyPort incoming:$incomingPort dns:$dnsPort"
 
 $dcFile = Join-Path (Get-Location) 'docker-compose.yml'
 if (Test-Path $dcFile) {
@@ -226,6 +305,11 @@ $recArgs = @(
   'record',
   '-c', '"docker compose up"',
   '--container-name', $containerName,
+  # Per-job unique keploy ports so concurrent runs on the shared VM do
+  # not collide on bind (see the allocation block above).
+  '--proxy-port', "$proxyPort",
+  '--incoming-proxy-port', "$incomingPort",
+  '--dns-port', "$dnsPort",
   '--generate-github-actions=false'
 )
 
@@ -368,12 +452,31 @@ do {
 
 
 
-# If we don't have a PID (some environments), try a short polling fallback to find the process
+# If we don't have a PID (some environments), try a short polling
+# fallback to find the process. Scope the name match to THIS job's own
+# keploy exe path — a bare `Get-Process -Name keploy-record` would also
+# match a sibling job's keploy-record.exe (same name, own workspace) on
+# the shared VM and we'd end up killing the wrong process tree.
 if (-not $REC_PID -or $REC_PID -eq 0) {
   $exeName = [System.IO.Path]::GetFileNameWithoutExtension($env:RECORD_BIN)
+  $recBinDir = if ($env:GITHUB_WORKSPACE) { Join-Path $env:GITHUB_WORKSPACE 'bin' } else { $null }
+  # Trailing separator so a bin dir can't prefix-match a sibling dir.
+  $recBinDirPrefix = if ($recBinDir) { $recBinDir.TrimEnd('\','/') + '\' } else { $null }
+  $ownRecord = (Get-Command $env:RECORD_BIN -ErrorAction SilentlyContinue).Source
   for ($i = 0; $i -lt 10; $i++) {
     Start-Sleep -Seconds 1
-    $p = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Sort-Object StartTime -Descending | Select-Object -First 1
+    # Wrapped so a property access on an exiting process can't turn into
+    # a terminating error under $ErrorActionPreference='Stop'.
+    try {
+      $p = Get-Process -Name $exeName -ErrorAction SilentlyContinue |
+        Where-Object {
+          $_.Path -and (
+            ($ownRecord -and $_.Path -eq $ownRecord) -or
+            ($recBinDirPrefix -and $_.Path.StartsWith($recBinDirPrefix, [System.StringComparison]::OrdinalIgnoreCase))
+          )
+        } |
+        Sort-Object StartTime -Descending | Select-Object -First 1
+    } catch { $p = $null }
     if ($p) { $REC_PID = $p.Id; break }
   }
 }
@@ -435,6 +538,11 @@ $testArgs = @(
   # reachable listener on the host. Without this flag replay
   # dials :8080 and gets TCP RST (run 24630753752, tests 1-9).
   '--port', "$appPort",
+  # Per-job unique keploy ports (must match the record phase's isolation
+  # so concurrent replays on the shared VM never collide on bind).
+  '--proxy-port', "$proxyPort",
+  '--incoming-proxy-port', "$incomingPort",
+  '--dns-port', "$dnsPort",
   '--generate-github-actions=false'
 )
 
@@ -491,6 +599,10 @@ $testArgsJson = @(
   '--api-timeout', '60',
   '--delay', '30',
   '--port', "$appPort",
+  # Per-job unique keploy ports (same isolation as the yaml replay).
+  '--proxy-port', "$proxyPort",
+  '--incoming-proxy-port', "$incomingPort",
+  '--dns-port', "$dnsPort",
   '--generate-github-actions=false'
 )
 $prevEap = $ErrorActionPreference

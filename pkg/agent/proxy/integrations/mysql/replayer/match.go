@@ -7,11 +7,13 @@ import (
 	"io"
 	"reflect"
 	"strings"
-	"sync"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	mysqlutils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -20,7 +22,42 @@ import (
 	"vitess.io/vitess/go/vt/sqlparser"
 )
 
-var querySigCache sync.Map // map[string]string
+// querySigCacheSize bounds querySigCache.
+//
+// The cache is keyed by the RAW SQL text, and that key space is NOT finite:
+// a client that inlines literals (`... WHERE id = 91827`) mints a brand new
+// key for every request, so a sync.Map here grows for as long as the agent
+// runs. The value, by contrast, is a pure memo — getQueryStructure builds a
+// fresh parser, parses, and joins the AST node type names, with no package or
+// closure state — so evicting an entry only costs one re-parse and can never
+// change a match verdict.
+//
+// Entry cost, measured against the pinned vitess: the signature runs 3-13x the
+// length of the SQL text (it is the joined reflect type name of every AST
+// node), so a realistic entry is 0.5-1.8 KB and this cap is a few MB. Multi-KB
+// ORM statements cost proportionally more; the cap is on entries, not bytes.
+const querySigCacheSize = 2048
+
+var querySigCache = newQuerySigCache()
+
+// newQuerySigCache builds the memo as a 2Q cache rather than a plain LRU.
+// matchCommand rescans the entire candidate mock pool for every live command
+// and looks up the live query's signature once per candidate, so a pool with
+// more distinct SQL texts than the cap would evict the live query between
+// candidates under plain-LRU recency and re-parse it N times per command —
+// strictly worse than the unbounded map this replaces. 2Q keeps the
+// repeatedly-touched live query in its frequent list while the once-touched
+// candidates churn through the smaller recent list.
+func newQuerySigCache() *lru.TwoQueueCache[string, string] {
+	c, err := lru.New2Q[string, string](querySigCacheSize)
+	if err != nil {
+		// New2Q only errors on a non-positive size and querySigCacheSize is a
+		// const > 0, so this is unreachable — but fail loudly rather than
+		// leave a nil cache that panics on the first match.
+		panic(fmt.Sprintf("mysql replayer: invalid querySigCacheSize %d: %v", querySigCacheSize, err))
+	}
+	return c
+}
 
 // recorded PREP registry per recorded connection
 type prepEntry struct { // minimal, enough for lookup
@@ -49,12 +86,12 @@ func hasPrefixFold(s, p string) bool {
 }
 
 func getQueryStructureCached(sql string) (string, error) {
-	if v, ok := querySigCache.Load(sql); ok {
-		return v.(string), nil
+	if v, ok := querySigCache.Get(sql); ok {
+		return v, nil
 	}
 	sig, err := getQueryStructure(sql)
 	if err == nil {
-		querySigCache.Store(sql, sig)
+		querySigCache.Add(sql, sig)
 	}
 	return sig, err
 }
@@ -208,7 +245,13 @@ func isSessionReusableCommandMock(mock *models.Mock) bool {
 	return strings.HasPrefix(hdr.Type, "COM_")
 }
 
-func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (*mysql.Response, bool, string, string, error) {
+// matchCommand matches one live command-phase request against the mock pool.
+// noiseEngine carries the resolved schema-noise flags (nil-safe: a nil engine
+// disables both detection and strict). userBodyNoise is the user's
+// test.globalNoise.requestBody bucket (root-relative lowercased paths) so
+// configured noise participates in strict gating with the same vocabulary as
+// learned req_body_noise. miss is non-nil only when ok is false without error.
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	// Precompute string constants once (avoid frequent map lookups)
 	var (
 		sCOM_QUIT       = mysql.CommandStatusToString(mysql.COM_QUIT)
@@ -222,11 +265,12 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		sCOM_PING       = mysql.CommandStatusToString(mysql.COM_PING)
 		sCOM_RESET_CONN = mysql.CommandStatusToString(mysql.COM_RESET_CONNECTION)
 		sCOM_STMT_RESET = mysql.CommandStatusToString(mysql.COM_STMT_RESET)
+		sCOM_STMT_SLD   = mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA)
 	)
 
 	// Fast path: QUIT may have no mock
 	if req.Header.Type == sCOM_QUIT {
-		return nil, false, "", "", io.EOF
+		return nil, false, nil, io.EOF
 	}
 
 	// Fetch THREE pools and merge. Under strict-mode default and the
@@ -243,18 +287,18 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, false, "", "", ctx.Err()
+			return nil, false, nil, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to get per-test mocks")
-		return nil, false, "", "", err
+		return nil, false, nil, err
 	}
 	sessionMocks, err := mockDb.GetSessionMocks()
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, false, "", "", ctx.Err()
+			return nil, false, nil, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to get session mocks")
-		return nil, false, "", "", err
+		return nil, false, nil, err
 	}
 
 	// Unification Phase 2.5: prepared-statement setup mocks are tagged
@@ -281,7 +325,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			// (connection pool is advisory for them) — log + continue.
 			if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
 				utils.LogError(logger, cerr, "failed to get mysql connection mocks", zap.String("connID", connID))
-				return nil, false, "", "", fmt.Errorf("failed to get mysql connection mocks for connID %q: %w", connID, cerr)
+				return nil, false, nil, fmt.Errorf("failed to get mysql connection mocks for connID %q: %w", connID, cerr)
 			}
 			logger.Debug("failed to get mysql connection mocks; proceeding without per-connID pool",
 				zap.String("connID", connID),
@@ -327,7 +371,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 	if len(pool) == 0 {
 		utils.LogError(logger, nil, "no mysql mocks found")
-		return nil, false, "", "", fmt.Errorf("no mysql mocks found")
+		return nil, false, nil, fmt.Errorf("no mysql mocks found")
 	}
 
 	// remove this block
@@ -368,7 +412,29 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		logger.Debug("recorded prepEntries", zap.String("entries", strings.Join(allEntries, " | ")))
 	}
 
+	// Canonical JSON body of the live request for the schema-noise engine.
+	// liveBodyOK is false for packets with no drift-capable body (utility
+	// commands, CLOSE/RESET) — the engine no-ops for those.
+	liveBody, liveBodyOK := mysqlRequestBodyJSON(&req.PacketBundle)
+
+	// Strict-enforcement gate (see strictGate in schema_noise.go): consulted
+	// before a mock may become a match candidate, and accumulates the
+	// rejection diagnostics (count / closest mock / field-level diffs) the
+	// mismatch report renders on a miss.
+	gate := newStrictGate(noiseEngine, logger, req.Header.Type, liveBody, liveBodyOK, userBodyNoise)
+
 	var (
+		// Score-based candidate tracking. Every non-definitive matcher returns
+		// a similarity score for its candidate; the trio below carries the best
+		// one seen so far across the whole pool scan:
+		//   maxMatchedCount — highest similarity score so far; a later
+		//                     candidate replaces the pick only with a
+		//                     STRICTLY higher score.
+		//   matchedResp     — the response of that best-scoring candidate;
+		//                     this is what gets served when no definitive
+		//                     (exact) match is found anywhere in the pool.
+		//   matchedMock     — the mock owning matchedResp; consumed/updated
+		//                     via updateMock once selected.
 		maxMatchedCount  int
 		matchedResp      *mysql.Response
 		matchedMock      *models.Mock
@@ -403,6 +469,22 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		// reusable read still resolves while an in-window row always wins.
 		defExecResp *mysql.Response
 		defExecMock *models.Mock
+
+		// COM_QUERY in-window preference (parity with the COM_STMT_EXECUTE
+		// branch from #4235). A parameterless statement (Spring
+		// JdbcTemplate without bind args → COM_QUERY, not a prepared
+		// statement) that issues the SAME SQL text across tests but returns
+		// a DIFFERENT row each time — e.g. an INSERT read-back
+		// "SELECT v FROM kv ORDER BY id DESC LIMIT 1" — records one data
+		// mock per call. The matcher used to take the FIRST exact-text
+		// match in pool order and (because lax-promoted data mocks live in
+		// the reusable session tier and are never consumed by updateMock)
+		// served that same first row to every later test. We instead prefer
+		// the exact-text match recorded INSIDE the current test window, and
+		// keep the first out-of-window exact match only as a fallback for a
+		// genuinely reusable single-recording query.
+		queryExactResp *mysql.Response
+		queryExactMock *models.Mock
 	)
 
 	// Single pass: filter & match on the fly. Iterates the merged pool
@@ -426,7 +508,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		for _, mockReq := range mock.Spec.MySQLRequests {
 			select {
 			case <-ctx.Done():
-				return nil, false, "", "", ctx.Err()
+				return nil, false, nil, ctx.Err()
 			default:
 			}
 			switch req.Header.Type {
@@ -446,24 +528,83 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 			case sCOM_QUERY:
 				if ok, c := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
-					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
+					// Exact query-text match. Prefer the candidate recorded
+					// inside the current test window so a repeated stateful
+					// read-back (same SQL, different row per call) resolves to
+					// THIS test's row instead of the first one recorded. An
+					// out-of-window exact match is kept only as a fallback for
+					// a genuinely reusable single-recording query. When no
+					// window is active (windowActive==false) this collapses to
+					// the previous first-exact-match-wins behaviour.
+					//
+					// Even an exact-text match is strict-gated: the query
+					// attributes (CLIENT_QUERY_ATTRIBUTES) live outside the
+					// text and may still drift.
+					if !gate.allows(mock) {
+						// A strict-rejected exact-text candidate is still the
+						// closest mock for the mismatch report (parity with
+						// the EXECUTE branch) — without this the miss diff
+						// renders an empty "closest" query.
+						if bestPartialMock == nil || bestPartialQuery == "" {
+							bestPartialMock = mock
+							if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
+								bestPartialQuery = qp.Query
+							}
+						}
+						continue
+					}
+					if windowActive && !mockInCurrentWindow(mock) {
+						if queryExactMock == nil {
+							queryExactResp, queryExactMock = &mock.Spec.MySQLResponses[0], mock
+						}
+					} else {
+						matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
+					}
 				} else if c > maxMatchedCount {
-					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+					// Track the closest candidate for the mismatch report even
+					// when strict rejects it as a servable match below.
 					bestPartialMock = mock
 					if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
 						bestPartialQuery = qp.Query
 					}
+					// Structure-matched-but-text-drifted candidate: under
+					// strict it may only be served when the drift (body.query
+					// / attribute values) is covered by learned/user noise.
+					if !gate.allows(mock) {
+						continue
+					}
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 				}
 
 			case sCOM_STMT_PREP:
 				if ok, c := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
+					if !gate.allows(mock) {
+						// Same as COM_QUERY above: keep the strict-rejected
+						// exact-text PREPARE as the closest candidate so the
+						// miss diff names the query instead of rendering empty.
+						if bestPartialMock == nil || bestPartialQuery == "" {
+							bestPartialMock = mock
+							if sp, spOk := mockReq.PacketBundle.Message.(*mysql.StmtPreparePacket); spOk {
+								bestPartialQuery = sp.Query
+							}
+						}
+						continue
+					}
 					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 				} else if c > maxMatchedCount {
-					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+					// Track the closest candidate for the mismatch report even
+					// when strict rejects it as a servable match below.
 					bestPartialMock = mock
 					if sp, spOk := mockReq.PacketBundle.Message.(*mysql.StmtPreparePacket); spOk {
 						bestPartialQuery = sp.Query
 					}
+					// Structure-matched-but-text-drifted PREPARE (dynamic SQL:
+					// trace comments, generated clauses): strict serves it only
+					// when body.query is covered by learned/user noise.
+					if !gate.allows(mock) {
+						continue
+					}
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 				}
 
 			case sCOM_STMT_EXEC:
@@ -524,6 +665,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// lookup recorded before the first test window) is kept only
 					// as a last-resort fallback so a genuinely unique reusable
 					// read still resolves.
+					if !gate.allows(mock) {
+						continue
+					}
 					if windowActive && mockInCurrentWindow(mock) {
 						matchedResp, matchedMock, stmtMatched = &mock.Spec.MySQLResponses[0], mock, true
 					} else if defExecMock == nil {
@@ -539,6 +683,24 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// matches no recorded parameter) serve the row recorded
 					// for that read-back position rather than an arbitrary
 					// same-shape row chosen by score/first-wins.
+					//
+					// Track the closest candidate for the mismatch report even
+					// when strict rejects it below — a query-exact candidate
+					// beats a score-based one. Pre-strict, EXECUTE mismatches
+					// reported an empty closest mock; this fills it.
+					if queryExact && (bestPartialMock == nil || bestPartialQuery == "") {
+						bestPartialMock, bestPartialQuery = mock, expectedQuery
+					} else if bestPartialMock == nil && c > 0 {
+						bestPartialMock, bestPartialQuery = mock, expectedQuery
+					}
+					// Strict gate: a query-exact candidate with drifted bound
+					// parameters may only become a FIFO/score candidate when
+					// the drifting params (body.parameters.N.value) are
+					// covered by learned/user noise. One gate call covers both
+					// the FIFO and score branches below.
+					if (queryExact || c > maxMatchedCount) && !gate.allows(mock) {
+						continue
+					}
 					if queryExact {
 						if windowActive && mockInCurrentWindow(mock) {
 							if fifoExecMockWindow == nil {
@@ -579,6 +741,16 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		if queryMatched || stmtMatched {
 			break
 		}
+	}
+
+	// COM_QUERY in-window fallback. The scan above takes an in-window
+	// exact-text match eagerly (queryMatched=true, loop broken). If it
+	// found ONLY an out-of-window exact-text match (a reusable
+	// single-recording query, or a stateful read whose matching row was
+	// recorded in a different test's window), serve that recorded
+	// candidate rather than dropping to the score-based partial pick.
+	if req.Header.Type == sCOM_QUERY && !queryMatched && queryExactMock != nil {
+		matchedResp, matchedMock, queryMatched = queryExactResp, queryExactMock, true
 	}
 
 	// COM_STMT_EXECUTE FIFO fallback. If the scan found no definitive
@@ -628,9 +800,35 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 
 	if matchedResp == nil {
-		// Graceful generic OK for common control statements (no mocks)
+		// System-variable read (SELECT @@[session.|global.]<var>) with no exact
+		// mock. Connector/J issues these LIVE during connection setup
+		// (useLocalSessionState=false) — e.g. getTransactionIsolation() →
+		// "SELECT @@session.transaction_isolation" — and they are frequently
+		// absent from the recording (read at replay, not at record). Their value
+		// IS recorded, though: the connection-setup probe
+		// "SELECT @@... AS <var>, ..." captured every session variable in one
+		// result set. Serve <var>'s REAL recorded value as a correctly-framed
+		// single-column result set, instead of cross-serving a different var's
+		// mock (see Part A in matchQuery). Same spirit as the graceful
+		// control-statement OK just below — deterministic, recorded data, no
+		// fabrication. Only runs when no exact mock matched, so recorded
+		// system-var reads are unaffected.
 		if req.Header.Type == sCOM_QUERY {
 			if qp, ok := req.Message.(*mysql.QueryPacket); ok {
+				// First: an unrecorded single system-variable read is resolved
+				// from the connection-setup probe (see the block comment above
+				// and Part A in matchQuery). Ordered BEFORE the control-statement
+				// OK so the read is answered with its REAL recorded value rather
+				// than a bare OK.
+				if varName, isVarRead := parseSingleSystemVarRead(qp.Query); isVarRead {
+					if resp := buildSessionVarResponse(logger, pool, varName, decodeCtx); resp != nil {
+						logger.Debug("served system-variable read from recorded session probe",
+							zap.String("var", varName))
+						return resp, true, nil, nil
+					}
+				}
+
+				// Graceful generic OK for common control statements (no mocks)
 				q := strings.TrimSpace(qp.Query)
 				switch {
 				case strings.EqualFold(q, "BEGIN"),
@@ -672,9 +870,93 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}
 					logger.Debug("Returning synthetic OK for unmocked control/DDL", zap.String("query", q))
 
-					return generic, true, "", "", nil
+					return generic, true, nil, nil
 				}
 			}
+		}
+
+		// COM_STMT_SEND_LONG_DATA streams a single parameter value to the
+		// server ahead of COM_STMT_EXECUTE and, per the MySQL protocol, has
+		// NO server response. Connector/J emits it for stream-bound
+		// parameters (setBinaryStream / setBlob / setCharacterStream / large
+		// setBytes), so any Java app writing a BLOB/CLOB hits this path. The
+		// matcher has no per-mock comparison for it (the payload is just the
+		// streamed bytes, already reflected in the subsequent EXECUTE's
+		// recorded response), and the record window may legitimately not hold
+		// a mock for it. Without graceful handling matchCommand falls through
+		// to matchedResp==nil and query.go drops the connection with
+		// "no matching mock" BEFORE its IsNoResponseCommand check — surfacing
+		// to the client as SQLSTATE 08S01. Acknowledge it here: query.go sees
+		// ok==true, runs no prepared-stmt cleanup, then its
+		// IsNoResponseCommand branch continues without sending anything.
+		if req.Header.Type == sCOM_STMT_SLD {
+			// Consume the first recorded SEND_LONG_DATA mock (in-window
+			// preferred, recorded order otherwise) so the recorder's
+			// no-response SLD mocks are marked used instead of being flagged
+			// unused / pruned. Fall back to plain synthetic acceptance when
+			// the record window captured none.
+			//
+			// Historically the streamed payload was never content-compared at
+			// all. Under schemaNoiseStrict each candidate is now gated through
+			// the engine: a chunk whose data drifted outside learned/user
+			// noise (body.data) cannot be consumed, and when every recorded
+			// candidate is rejected that way the command is a real mismatch
+			// instead of a silent pass. Detection diffs the consumed chunk and
+			// learns the drift, so a later strict replay tolerates it.
+			var sldMock, sldMockWindow, sldClosest *models.Mock
+			for _, mock := range pool {
+				if mock.Kind != models.MySQL {
+					continue
+				}
+				isSLD := false
+				for _, mr := range mock.Spec.MySQLRequests {
+					if mr.PacketBundle.Header != nil && mr.PacketBundle.Header.Type == sCOM_STMT_SLD {
+						isSLD = true
+						break
+					}
+				}
+				if !isSLD {
+					continue
+				}
+				if sldClosest == nil {
+					sldClosest = mock
+				}
+				if !gate.allows(mock) {
+					continue
+				}
+				if windowActive && mockInCurrentWindow(mock) {
+					if sldMockWindow == nil {
+						sldMockWindow = mock
+					}
+				} else if sldMock == nil {
+					sldMock = mock
+				}
+			}
+			chosen := sldMockWindow
+			if chosen == nil {
+				chosen = sldMock
+			}
+			if chosen == nil && sldClosest != nil {
+				// Recorded SLD mocks exist but strict rejected every one:
+				// unmarked payload drift is a real mismatch, not a pass.
+				logger.Debug("schema-noise strict: all recorded COM_STMT_SEND_LONG_DATA candidates rejected",
+					zap.String("closest_mock", sldClosest.Name))
+				return nil, false, &mockMiss{
+					closestMock:    sldClosest.Name,
+					fieldDiffs:     gate.fieldDiffs,
+					strictRejected: gate.rejected,
+				}, nil
+			}
+			if chosen != nil {
+				var detected map[string][]string
+				if liveBodyOK {
+					detected, _ = noiseEngine.Detect(chosen, liveBody, userBodyNoise)
+				}
+				updateMock(ctx, logger, chosen, mockDb, detected)
+			}
+			logger.Debug("Accepting COM_STMT_SEND_LONG_DATA (no-response command)",
+				zap.Bool("consumed_recorded_mock", chosen != nil))
+			return &mysql.Response{}, true, nil, nil
 		}
 
 		// COM_STMT_RESET clears the cursor / long-data state of a server
@@ -715,7 +997,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			}
 			logger.Debug("Returning synthetic OK for unmocked COM_STMT_RESET",
 				zap.Uint32("statement_id", stmtID))
-			return generic, true, "", "", nil
+			return generic, true, nil, nil
 		}
 
 		if req.Header.Type == sCOM_STMT_PREP {
@@ -786,7 +1068,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					zap.String("query", truncate(strings.TrimSpace(sp.Query), 200)),
 					zap.Uint32("synthetic_stmt_id", newStmtID),
 					zap.Uint16("num_params", numParams))
-				return synthetic, true, "", "", nil
+				return synthetic, true, nil, nil
 			}
 		}
 
@@ -814,15 +1096,46 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		if bestPartialMock != nil {
 			bestPartialMockName = bestPartialMock.Name
 		}
-		return nil, false, bestPartialQuery, bestPartialMockName, nil
+		if bestPartialMockName == "" {
+			bestPartialMockName = gate.closestMock
+		}
+		return nil, false, &mockMiss{
+			closestQuery:   bestPartialQuery,
+			closestMock:    bestPartialMockName,
+			fieldDiffs:     gate.fieldDiffs,
+			strictRejected: gate.rejected,
+		}, nil
+	}
+
+	// Schema-noise detection: diff the winning mock's recorded request body
+	// against the live one and learn any NEW drifted field paths (beyond
+	// user-configured noise and anything already learned) as req_body_noise.
+	// A mock served via the lenient score/FIFO fallbacks is exactly a mock
+	// whose request drifted — this is where that drift gets named. Detect
+	// no-ops when detection is disabled or the winner has no diffable body
+	// (utility commands). The learn is carried out on fresh copies inside
+	// updateMock, never on the shared pooled mock.
+	var detectedNoise map[string][]string
+	if liveBodyOK {
+		detectedNoise, _ = noiseEngine.Detect(matchedMock, liveBody, userBodyNoise)
+		if len(detectedNoise) > 0 {
+			paths := make([]string, 0, len(detectedNoise))
+			for p := range detectedNoise {
+				paths = append(paths, p)
+			}
+			logger.Debug("schema-noise detection: learned request-body drift on matched mock",
+				zap.String("mock", matchedMock.Name),
+				zap.String("request_type", req.Header.Type),
+				zap.Strings("fields", paths))
+		}
 	}
 
 	// Update the mock in the database BEFORE modifying the response
 	// This ensures we update using the original mock state
-	if okk := updateMock(ctx, logger, matchedMock, mockDb); !okk {
+	if okk := updateMock(ctx, logger, matchedMock, mockDb, detectedNoise); !okk {
 		logger.Debug("failed to update the matched mock")
 		// Re-fetch once to avoid spin
-		return nil, false, "", "", fmt.Errorf("failed to update matched mock")
+		return nil, false, nil, fmt.Errorf("failed to update matched mock")
 	}
 
 	// Create a copy of the response to avoid modifying the original mock
@@ -866,7 +1179,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 
 	logger.Debug("matched command with the mock", zap.Any("mock", matchedMock.Name))
-	return responseCopy, true, "", "", nil
+	return responseCopy, true, nil, nil
 }
 
 // func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
@@ -951,6 +1264,46 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 				zap.String("actual query", actualQuery))
 			return true, matchCount
 		}
+	}
+
+	// A PURE single system-variable read (SELECT @@[session.]<var>, no columns
+	// list / FROM / expression) is matched by EXACT text ONLY: it is semantically
+	// identified by WHICH variable it reads, so a different @@var must never be
+	// served as a length/structure "fallback". This is the exact defect behind
+	// "Could not map transaction isolation '0'": SELECT @@session.transaction_
+	// isolation (unrecorded, issued live by Connector/J) was cross-served the
+	// recorded SELECT @@session.transaction_read_only mock's value "0" purely
+	// because both are 38-byte non-DML SELECTs (matchCount==1 on equal
+	// PayloadLength). Returning score 0 keeps this candidate out of the
+	// score-based fallback; an un-matched read is resolved from the recorded
+	// session probe in matchCommand. Scoped via parseSingleSystemVarRead (NOT a
+	// bare "SELECT @@" prefix) so a real DML query that merely projects a
+	// variable — e.g. "SELECT @@version, u.name FROM users u WHERE ..." — keeps
+	// its normal DML fuzzy-matching.
+	//
+	// The cheap string inequality is checked FIRST so parseSingleSystemVarRead
+	// is not even called on an equal-query candidate. On non-equal candidates
+	// the parse early-exits after a couple of prefix comparisons for anything
+	// that is not "SELECT @@...", so it is strictly cheaper than the
+	// sqlparser.IsDML parse that already runs per candidate just below.
+	//
+	// The rejection is narrowed to a DIFFERENT variable rather than applied to any
+	// textual difference. matchQuery is the SHARED MySQL replay path, used by proxy
+	// (MITM) and DaemonSet recordings as well as the proxyless capture this change
+	// targets, and rejecting on text alone is subtractive: a recorded read of the
+	// SAME variable whose text differs only cosmetically (extra whitespace, a
+	// `session.` qualifier on one side, a stripped comment) previously reached the
+	// score-based fallback and matched. Hard-rejecting it would make replay depend
+	// on buildSessionVarResponse succeeding, which itself bails out when the
+	// connection did not negotiate CLIENT_DEPRECATE_EOF or when no recorded result
+	// set carries that column — i.e. it could fail an existing recording that
+	// passes today, in modes this change is not meant to touch.
+	//
+	// Comparing the parsed variable NAMES keeps the defect fixed (a different @@var
+	// is still never cross-served) while leaving same-variable candidates eligible
+	// for normal matching.
+	if rejectsCrossVariableRead(expectedQuery, actualQuery) {
+		return false, 0
 	}
 
 	// check if any of them the query is dml and other is not, then there is no match.
@@ -1221,7 +1574,20 @@ func paramValueEqual(a, b interface{}, nc *util.NoiseChecker) bool {
 		case float32:
 			return av == bv
 		case float64:
-			return float64(av) == bv
+			// Compare at float32 precision, not float64. One side is
+			// genuinely a float32 (FieldTypeFloat off the wire) and the
+			// other has been through YAML, which writes a float32 in its
+			// shortest 32-bit form ("9.99") and reads it back as
+			// float64(9.99). Widening asks the float32 to carry precision
+			// it never had — float64(float32(9.99)) is 9.989999771118164,
+			// so a correctly recorded FLOAT param never matched itself.
+			//
+			// This is the same direction the int/uint arms below already
+			// take. Narrowing does collide for magnitudes float32 cannot
+			// hold (1e-300 compares equal to 0), but a float32 only ever
+			// enters here from a FieldTypeFloat decode and a MySQL FLOAT
+			// cannot carry those, so no real column reaches the collision.
+			return av == float32(bv)
 		case int:
 			return av == float32(bv)
 		case int32:
@@ -1238,7 +1604,8 @@ func paramValueEqual(a, b interface{}, nc *util.NoiseChecker) bool {
 		case float64:
 			return av == bv
 		case float32:
-			return av == float64(bv)
+			// Narrow, don't widen — see the float32 arm above.
+			return float32(av) == bv
 		case int:
 			return av == float64(bv)
 		case int32:
@@ -1397,10 +1764,19 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // match.go for the rationale — we build a fresh copy and mutate the
 // copy rather than the pool pointer, so concurrent goroutines that
 // match the same session-lifetime mock don't race on TestModeInfo.
-func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
+// updateMock processes the matched mock based on its Lifetime. detectedNoise
+// carries any request-body drift the schema-noise engine detected this match;
+// it is merged onto FRESH copies only (never the shared pooled mock's map —
+// see the HTTP updateMock's concurrency note, the same pooled-pointer race
+// applies here) and reaches persistence through the same
+// DeleteFilteredMock/UpdateUnFilteredMock paths as HTTP's learned noise.
+func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	if len(detectedNoise) > 0 {
+		updatedMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(updatedMock.Spec.ReqBodyNoise, detectedNoise)
+	}
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
 	rawConfig := false
@@ -1427,7 +1803,16 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	// SetMocksWithWindow's isInitialStaging branch) — the mock is
 	// still classified as LifetimePerTest but physically lives in
 	// the session tree until the first real test's re-partition.
-	if mockDb.DeleteFilteredMock(*matchedMock) {
+	//
+	// DeleteFilteredMock keys the tree lookup on TestModeInfo, so the
+	// delete-key mock keeps the original (unmutated) TestModeInfo but
+	// carries the detected noise on a fresh ReqBodyNoise map — this is how
+	// the noise gets reported on the consumed per-test mock (mirrors HTTP).
+	deleteMock := *matchedMock
+	if len(detectedNoise) > 0 {
+		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
+	}
+	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
 	}
 	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) {
@@ -1604,4 +1989,233 @@ func matchCloseWithQuery(expected, actual mysql.PacketBundle, expectedQuery, act
 		}
 	}
 	return score
+}
+
+// rejectsCrossVariableRead reports whether a candidate must be excluded from
+// matching because it would serve one system variable's recorded value in answer
+// to a read of a DIFFERENT variable.
+//
+// A pure single system-variable read is identified by WHICH variable it reads, so
+// it may only be answered by a recorded read of that same variable. Without this,
+// two equal-length non-DML SELECTs score as interchangeable and
+// "SELECT @@session.transaction_isolation" gets served the recorded
+// "SELECT @@session.transaction_read_only" value, which is the defect behind
+// "Could not map transaction isolation '0'".
+//
+// It deliberately compares parsed variable NAMES rather than raw text. matchQuery
+// is the shared MySQL replay path used by proxy (MITM) and DaemonSet recordings as
+// well as proxyless capture, and rejecting on any textual difference would be
+// subtractive: a recorded read of the SAME variable differing only cosmetically (a
+// `session.` qualifier, extra whitespace, a stripped comment, a trailing
+// semicolon) previously remained eligible and could match. Rejecting those would
+// make replay depend on buildSessionVarResponse succeeding, and that bails out for
+// a connection without CLIENT_DEPRECATE_EOF or a variable absent from every
+// recorded result set, so an existing recording that passes today could start
+// failing.
+//
+// Returns false for identical text, which is the common case and costs one string
+// comparison.
+func rejectsCrossVariableRead(expectedQuery, actualQuery string) bool {
+	if expectedQuery == actualQuery {
+		return false
+	}
+	actualVar, isPureVarRead := parseSingleSystemVarRead(actualQuery)
+	if !isPureVarRead {
+		return false
+	}
+	expectedVar, expectedIsVarRead := parseSingleSystemVarRead(expectedQuery)
+	return !expectedIsVarRead || !strings.EqualFold(expectedVar, actualVar)
+}
+
+// sqlWhitespace is the single definition of "whitespace" used by the
+// system-variable parsing below. Keeping one set avoids the class of bug where the
+// keyword check accepts \r but the trimming does not, leaving it attached to the
+// parsed variable name.
+const sqlWhitespace = " \t\r\n"
+
+// stripLeadingSQLComment removes leading /* ... */ blocks (Connector/J prepends
+// a version banner and a "/* ping */" marker) plus surrounding whitespace.
+func stripLeadingSQLComment(s string) string {
+	s = strings.TrimSpace(s)
+	for strings.HasPrefix(s, "/*") {
+		i := strings.Index(s, "*/")
+		if i < 0 {
+			break
+		}
+		s = strings.TrimSpace(s[i+2:])
+	}
+	return s
+}
+
+// parseSingleSystemVarRead parses "SELECT @@[session.|global.|local.]<var>" and
+// returns the bare variable name (e.g. "transaction_isolation"). ok is false for
+// anything that isn't a SINGLE bare variable read (multi-column, AS aliases,
+// expressions, function calls) — so it only fires for the deterministic
+// single-variable probes Connector/J issues at connection setup.
+func parseSingleSystemVarRead(query string) (string, bool) {
+	s := stripLeadingSQLComment(query)
+	// Require the SELECT keyword followed by at least one whitespace character.
+	// Match any whitespace (space, tab, CR, LF) rather than a single literal
+	// space, so "SELECT\t@@x" is recognised too.
+	const kw = "SELECT"
+	if len(s) <= len(kw) || !strings.EqualFold(s[:len(kw)], kw) {
+		return "", false
+	}
+	if !strings.ContainsRune(sqlWhitespace, rune(s[len(kw)])) {
+		return "", false
+	}
+	rest := strings.TrimSpace(s[len(kw):])
+	if !strings.HasPrefix(rest, "@@") {
+		return "", false
+	}
+	rest = strings.TrimPrefix(rest, "@@")
+	// Single variable only: reject multi-column / AS / expressions / calls.
+	// The whitespace set matches sqlWhitespace used for the SELECT keyword check
+	// above, \r included, so "SELECT @@a\r@@b" is rejected like its \n counterpart.
+	if strings.ContainsAny(rest, ",()"+sqlWhitespace) {
+		return "", false
+	}
+	if low := strings.ToLower(rest); strings.HasPrefix(low, "session.") {
+		rest = rest[len("session."):]
+	} else if strings.HasPrefix(low, "global.") {
+		rest = rest[len("global."):]
+	} else if strings.HasPrefix(low, "local.") {
+		rest = rest[len("local."):]
+	}
+	// Trim the statement terminator plus ANY trailing whitespace, using the same
+	// set as above: trimming only "; " left "\r" and "\t" attached to the returned
+	// variable name, which then failed every lookup.
+	rest = strings.TrimRight(rest, ";"+sqlWhitespace)
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
+// resolveVarFromProbe scans the mock pool for a recorded result set carrying a
+// column whose label equals varName, returning the REAL recorded column
+// definition, value, AND that result set's own terminator (so the caller can
+// preserve the recorded server status flags rather than fabricating them).
+//
+// The connection-setup probe ("SELECT @@... AS <var>, ...") aliases every
+// column to its bare variable name, so col.Name is normally the bare name; some
+// probe forms omit the alias and leave the raw "@@<var>" label, so both are
+// matched.
+//
+// Assumption: system variables read at connection setup (transaction_isolation,
+// transaction_read_only, sql_mode, ...) are session-invariant, so the FIRST
+// recorded result set carrying the column is authoritative. The pool is already
+// ordered per-test, then session, then connection, so the most specific probe
+// is consulted first. If a variable legitimately differed across connections
+// this would return the first recorded value; that does not occur for the
+// setup-probe variables this path serves.
+func resolveVarFromProbe(pool []*models.Mock, varName string) (*mysql.ColumnDefinition41, mysql.ColumnEntry, *mysql.GenericResponse, bool) {
+	for _, m := range pool {
+		if m == nil {
+			continue
+		}
+		for ri := range m.Spec.MySQLResponses {
+			trs, ok := m.Spec.MySQLResponses[ri].PacketBundle.Message.(*mysql.TextResultSet)
+			if !ok || len(trs.Rows) == 0 {
+				continue
+			}
+			for ci, col := range trs.Columns {
+				if col == nil || ci >= len(trs.Rows[0].Values) {
+					continue
+				}
+				if strings.EqualFold(col.Name, varName) || strings.EqualFold(col.Name, "@@"+varName) {
+					return col, trs.Rows[0].Values[ci], trs.FinalResponse, true
+				}
+			}
+		}
+	}
+	return nil, mysql.ColumnEntry{}, nil, false
+}
+
+// fallbackOKReplacingEOFTerminator is the deprecate-EOF result-set terminator at
+// sequence 4 used ONLY when the recorded probe carried no reusable terminator:
+// 0xFE + affected_rows(0) + last_insert_id(0) +
+// status_flags(SERVER_STATUS_AUTOCOMMIT=0x0002) + warnings(0).
+var fallbackOKReplacingEOFTerminator = []byte{0x07, 0x00, 0x00, 0x04, 0xfe, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}
+
+// terminatorForSingleColumn returns the result-set terminator to emit for the
+// synthesized single-column response. It PREFERS the probe's own recorded
+// OK-replacing-EOF terminator (preserving the real recorded status flags,
+// warnings and any session-state trailer), only rewriting its sequence-ID byte
+// to 4 for the single-column framing — the terminator's structure is
+// independent of column count, so this is valid. It falls back to a synthesized
+// autocommit terminator only when the probe carried none or it was not an
+// OK-replacing-EOF (e.g. a legacy plain EOF), so the status is honest when we
+// have it and deterministic when we don't.
+func terminatorForSingleColumn(probe *mysql.GenericResponse) *mysql.GenericResponse {
+	if probe != nil && mysqlutils.IsOKReplacingEOF(probe.Data) {
+		d := make([]byte, len(probe.Data))
+		copy(d, probe.Data)
+		d[3] = 0x04 // sequence ID of the terminator in a 1-column result set
+		return &mysql.GenericResponse{Type: probe.Type, Data: d}
+	}
+	d := make([]byte, len(fallbackOKReplacingEOFTerminator))
+	copy(d, fallbackOKReplacingEOFTerminator)
+	return &mysql.GenericResponse{Type: "OK", Data: d}
+}
+
+// buildSessionVarResponse builds a single-column text result set carrying the
+// recorded value of varName (from resolveVarFromProbe). It reuses the probe's
+// real column definition (correct type/charset) and value, framed with the
+// sequence IDs of a 1-column result set (col-count=1, column=2, row=3,
+// OK-terminator=4). The wire encoder recomputes packet lengths from the encoded
+// bodies, so only the sequence IDs must be set here. Returns nil when varName
+// isn't present in any recorded result set (caller falls through to its normal
+// no-match handling).
+func buildSessionVarResponse(logger *zap.Logger, pool []*models.Mock, varName string, decodeCtx *wire.DecodeContext) *mysql.Response {
+	// The single-column framing built below is the CLIENT_DEPRECATE_EOF form
+	// (no intermediate EOF after the column; an OK-replacing-EOF terminator at
+	// sequence 4). Every modern JVM MySQL driver (Connector/J 8.x, MariaDB
+	// Connector/J) negotiates deprecate-EOF, which is the only case this
+	// proxyless-JSSE path targets. If a connection did NOT negotiate it, DON'T
+	// synthesize — fall through to normal no-match handling — rather than emit a
+	// mis-sequenced result set. This keeps the fix from being wrong on a
+	// non-deprecate-EOF driver instead of silently corrupting its framing.
+	if decodeCtx == nil || !decodeCtx.DeprecateEOF() {
+		if logger != nil {
+			logger.Debug("session-variable resolver skipped: connection did not negotiate CLIENT_DEPRECATE_EOF",
+				zap.String("var", varName))
+		}
+		return nil
+	}
+	col, val, probeTerminator, found := resolveVarFromProbe(pool, varName)
+	if !found || col == nil {
+		return nil
+	}
+	c := *col // copy; we only overwrite header/name, keeping the probe's type/charset/length
+	c.Header = mysql.Header{SequenceID: 2}
+	c.Name = varName
+	c.OrgName = varName
+	trs := &mysql.TextResultSet{
+		ColumnCount:     1,
+		Columns:         []*mysql.ColumnDefinition41{&c},
+		EOFAfterColumns: nil, // CLIENT_DEPRECATE_EOF (Connector/J 8.x): no intermediate EOF
+		Rows: []*mysql.TextRow{{
+			Header: mysql.Header{SequenceID: 3},
+			Values: []mysql.ColumnEntry{val},
+		}},
+		// Result-set terminator at sequence 4. Reuses the probe's own recorded
+		// OK-replacing-EOF terminator (real status flags/warnings) when present,
+		// falling back to a synthesized autocommit terminator otherwise.
+		FinalResponse: terminatorForSingleColumn(probeTerminator),
+	}
+	if logger != nil {
+		logger.Debug("built single-column session-variable result set",
+			zap.String("var", varName), zap.Any("value", val.Value))
+	}
+	return &mysql.Response{
+		PacketBundle: mysql.PacketBundle{
+			Header: &mysql.PacketInfo{
+				// Frames the FIRST sub-packet (column-count = 1 byte) at seq 1.
+				Header: &mysql.Header{PayloadLength: 1, SequenceID: 1},
+				Type:   mysql.StatusToString(mysql.OK), // cosmetic; encoder dispatches on Message type
+			},
+			Message: trs,
+		},
+	}
 }

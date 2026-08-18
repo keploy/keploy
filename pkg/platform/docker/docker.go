@@ -40,9 +40,19 @@ const (
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
-// ComposeServiceHook is called after the keploy-agent Docker Compose service
-// node is built, allowing downstream callers to mutate it.
-var ComposeServiceHook func(serviceNode *yaml.Node)
+// ComposeServiceHook is called for each keploy-managed Docker Compose service
+// node during generation so a downstream caller (the enterprise low-latency hook)
+// can mutate the right one. E.g. it adds the deterministic JVM agent (-javaagent
+// in JAVA_TOOL_OPTIONS, jar delivered via the shared keploy-tls volume) to the APP
+// service, and low-latency caps/tmpfs to the AGENT service.
+//
+// The identifier passed is what the downstream matches on, NOT the compose map
+// key: "keploy-agent" for the agent service, and the caller-supplied
+// appContainerName (the --container-name value) for the recorded app service. This
+// matters because the app service can be selected by its `container_name` rather
+// than its service key, so passing the map key would make the app hook silently
+// miss (and Java TLS would go uncaptured) whenever the two differ.
+var ComposeServiceHook func(serviceIdentifier string, serviceNode *yaml.Node)
 
 type Impl struct {
 	nativeDockerClient.APIClient
@@ -627,6 +637,15 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.ChannelBindingShim {
 		command = append(command, "--channel-binding-shim")
 	}
+	// Upstream TLS verification. Forwarded unconditionally as =%t, matching
+	// --disable-mapping above and the native launcher, so that the precedence
+	// flag > yaml > default resolves IDENTICALLY here and on a native run —
+	// see proxy.resolveUpstreamTLSConfig. The CA path is resolved inside the
+	// agent container, so the operator must bind-mount the PEM (or point at a
+	// path that already exists in the image); the host's keploy.yml is not
+	// visible here either, which is why this travels over argv at all.
+	command = append(command, fmt.Sprintf("--upstream-tls-verify=%t", opts.UpstreamTLSVerify))
+	command = append(command, fmt.Sprintf("--upstream-tls-ca-cert=%s", opts.UpstreamTLSCACert))
 
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
@@ -661,8 +680,19 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		// tls-server-end-point digest with bpf_probe_write_user, which the
 		// verifier gates behind CAP_SYS_ADMIN — CAP_BPF/CAP_PERFMON alone are
 		// insufficient. Only grant it when the shim is explicitly enabled.
-		capAdd = append(capAdd, &yaml.Node{Kind: yaml.ScalarNode, Value: "SYS_ADMIN",
-			LineComment: "required by the channel-binding shim (bpf_probe_write_user)"})
+		capAdd = appendCapIfMissing(capAdd, "SYS_ADMIN",
+			"required by the channel-binding shim (bpf_probe_write_user)")
+	}
+
+	// On a host without a cgroup2 (unified) hierarchy (legacy cgroup v1), the
+	// agent mounts one itself at runtime for its eBPF cgroup hooks
+	// (agent.DetectCgroupPath). mount(2) needs CAP_SYS_ADMIN and an unconfined
+	// seccomp/AppArmor profile, so grant them — but only in that case, to keep
+	// the agent least-privileged on the common cgroup v2 host.
+	needsCgroupV2Mount := !cgroupV2AvailableOnHost()
+	if needsCgroupV2Mount {
+		capAdd = appendCapIfMissing(capAdd, "SYS_ADMIN",
+			"required to mount a cgroup2 hierarchy for eBPF hooks (host uses legacy cgroup v1)")
 	}
 
 	// Create the service YAML node structure
@@ -682,6 +712,20 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 				"Review and allow only what your security policy permits."},
 			{Kind: yaml.SequenceNode, Content: capAdd},
 		},
+	}
+
+	if needsCgroupV2Mount {
+		// Docker's default seccomp profile already permits mount(2) once
+		// CAP_SYS_ADMIN is granted (the mount rule includes CAP_SYS_ADMIN), so
+		// seccomp need not be relaxed. Its default AppArmor profile, however,
+		// denies mount outright, so AppArmor must be unconfined for the agent to
+		// mount a cgroup2 hierarchy on a legacy cgroup v1 host.
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "security_opt", HeadComment: "Required to mount a cgroup2 hierarchy for eBPF hooks on a legacy cgroup v1 host."},
+			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
+			}},
+		)
 	}
 
 	// Add environment variables
@@ -889,7 +933,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Allow callers to mutate the fully-built service node. This runs last
 	// so the hook can see and modify all fields including volumes.
 	if ComposeServiceHook != nil {
-		ComposeServiceHook(serviceNode)
+		ComposeServiceHook("keploy-agent", serviceNode)
 	}
 
 	return serviceNode, nil
@@ -1053,6 +1097,19 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 
 			// Add network mode sharing
 			idc.addServiceProperty(serviceContentNode, "network_mode", fmt.Sprintf("service:%s", "keploy-agent"))
+
+			// Let a downstream caller mutate the APP service too — the enterprise
+			// low-latency hook uses this to append the deterministic JVM agent
+			// (-javaagent in JAVA_TOOL_OPTIONS). The app shares keploy-agent's PID
+			// AND network namespace (set above), so the JVM reaches the JSSE
+			// listener on 127.0.0.1 and its PID is directly resolvable — no jattach.
+			// Pass appContainerName (the --container-name value the downstream
+			// matches on), NOT serviceName (the compose map key): this service may
+			// have been selected by its container_name, in which case the key differs
+			// and the app hook would silently miss.
+			if ComposeServiceHook != nil {
+				ComposeServiceHook(appContainerName, serviceContentNode)
+			}
 
 			break
 		}

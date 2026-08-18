@@ -125,6 +125,16 @@ type Session struct {
 	// Nil is safe.
 	OnPendingCleared func()
 
+	// SuspendWatchdog, when non-nil, permanently disarms the hang
+	// watchdog for this connection. A parser calls it once it identifies
+	// the in-flight request as a long-poll (e.g. an async httpPoll lane):
+	// such a request holds the connection open with no byte progress for
+	// far longer than the hang budget, which the watchdog would otherwise
+	// abort as a hang (falling through to passthrough and losing the
+	// mock). Typically wired to supervisor.SuspendWatchdog by the
+	// dispatcher. Nil is safe.
+	SuspendWatchdog func()
+
 	// RouteMocksViaSyncMock, when true, makes EmitMock deliver the
 	// mock via the package-singleton syncMock.SyncMockManager
 	// (AddMock) instead of directly sending on s.Mocks. Production
@@ -142,6 +152,12 @@ type Session struct {
 	// / monotonic-timestamp normalisation — they only differ on the
 	// final handoff.
 	RouteMocksViaSyncMock bool
+
+	// Mgr is the per-session sync-mock manager EmitMock routes through when
+	// RouteMocksViaSyncMock is set. Lets a multi-app caller give each app its
+	// own manager (so the V2 emit path is per-app, matching the legacy
+	// parsers). nil ⇒ the package-global manager (single-session default).
+	Mgr *syncMock.SyncMockManager
 
 	// --- Internal bookkeeping ---
 
@@ -216,6 +232,56 @@ func (s *Session) IsMockIncomplete() bool {
 		return false
 	}
 	return s.mockIncomplete.Load()
+}
+
+// RecordOrphanWindow marks a [start,end] interval during which a mock could not
+// be framed for a NON-pressure reason (currently a mongo/v2 reassembly resync
+// hole — a dropped chunk desyncs the framer, so a message delivered during the
+// hole is never turned into a mock). It routes to the session's
+// SyncMockManager (the per-app s.Mgr, or the package singleton) — matching how
+// EmitMock resolves the manager — so record.go's TC-suppression treats the hole
+// like a memory-pressure interval and suppresses every TC whose window overlaps
+// it, instead of shipping that TC mock-less (replay would then report
+// match_phase=no_mocks). This is the keploy side of the enterprise mongo
+// parser's OPTIONAL orphanWindowRecorder capability (integrations pkg/mongo/v2):
+// the parser probes for this method via an interface assertion, so pins without
+// it simply degrade resync-orphan suppression to a no-op. RecordOrphanWindow
+// itself no-ops on a zero start and a nil manager.
+//
+// Reader/writer symmetry: the suppressor (routes/record.go) must query
+// WasMockOrphanedInWindow on the SAME manager this writes to. In OSS that always
+// holds — nothing calls syncMock.NewContext, so s.Mgr is always nil and both the
+// write here and the read there resolve to syncMock.Get(). A multi-app composer
+// that sets a per-app s.Mgr must likewise give its suppressor a per-app reader;
+// there is no global fan-out for orphan windows (unlike memory pressure).
+func (s *Session) RecordOrphanWindow(start, end time.Time) {
+	if s == nil {
+		return
+	}
+	mgr := s.Mgr
+	if mgr == nil {
+		mgr = syncMock.Get()
+	}
+	mgr.RecordOrphanWindow(start, end)
+}
+
+// OpenOrphanWindow is the open-ended twin of RecordOrphanWindow, for a hole
+// whose end is not yet known. It resolves the manager the same way and returns
+// the closer; see SyncMockManager.OpenOrphanWindow.
+//
+// The caller is the V2 dispatcher on a passthrough fallthrough: once a parser
+// is retired the relay raw-forwards the rest of that connection, so it emits no
+// further mock and every test case recorded against it would otherwise ship
+// mock-less and replay as match_phase=no_mocks.
+func (s *Session) OpenOrphanWindow(start time.Time) func() {
+	if s == nil {
+		return func() {}
+	}
+	mgr := s.Mgr
+	if mgr == nil {
+		mgr = syncMock.Get()
+	}
+	return mgr.OpenOrphanWindow(start)
 }
 
 // EmitMock sends m to the mocks channel. If the session's active mock
@@ -368,7 +434,13 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	// the direct-channel fallback below runs. Production
 	// recordViaSupervisor sets it true.
 	if s.RouteMocksViaSyncMock {
-		if mgr := syncMock.Get(); mgr != nil {
+		// Prefer this session's own manager (per-app); fall back to the
+		// package-global for the single-session default.
+		mgr := s.Mgr
+		if mgr == nil {
+			mgr = syncMock.Get()
+		}
+		if mgr != nil {
 			// Best-effort ctx probe. mgr.AddMock (the SyncMock
 			// manager method obtained from syncMock.Get()) doesn't
 			// observe s.Ctx — it takes its own mutex and may sit

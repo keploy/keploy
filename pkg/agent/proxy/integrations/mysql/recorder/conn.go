@@ -3,6 +3,7 @@ package recorder
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -65,7 +66,12 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	// Decode server handshake packet
 	handshakePkt, err := wire.DecodePayload(ctx, logger, handshake, clientConn, decodeCtx)
 	if err != nil {
-		utils.LogError(logger, err, "failed to decode handshake packet")
+		// A mid-stream join (first captured server packet is not the greeting)
+		// is an expected condition the caller skips gracefully — don't log it
+		// as an error. Any other decode failure is a genuine error.
+		if !errors.Is(err, wire.ErrServerGreetingNotFound) {
+			utils.LogError(logger, err, "failed to decode handshake packet")
+		}
 		return res, err
 	}
 
@@ -212,9 +218,23 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 				return res, fmt.Errorf("failed to type cast destination url for source port %d", sourcePort)
 			}
 
+			// dstURL is the client's own SNI and is empty for every
+			// IP-dialled MySQL — see resolveDestServerName for why that
+			// blocks verification and what it falls back to.
+			serverName := resolveDestServerName(dstURL, destConn, opts.UpstreamTLSVerify)
+
 			tlsConfig := &tls.Config{
-				InsecureSkipVerify: true,
-				ServerName:         dstURL,
+				// Off by default: keploy must never be stricter than the app
+				// it records. A MySQL client on tls=skip-verify chose not to
+				// authenticate its upstream, and a failure here is silent —
+				// the handshake error trips the supervisor's passthrough
+				// fallback, the app keeps working and the mock is DROPPED.
+				// Opt in with record.upstreamTls.verify. Not a CA-bundle
+				// limitation: crypto/tls uses the platform root pool when
+				// RootCAs is nil.
+				InsecureSkipVerify: !opts.UpstreamTLSVerify, //nolint:gosec
+				RootCAs:            opts.UpstreamTLSRootCAs,
+				ServerName:         serverName,
 				KeyLogWriter:       pTls.KeyLogWriter(),
 			}
 			logger.Debug("Upgrading the destination connection to TLS", zap.String("ServerName", tlsConfig.ServerName))
@@ -420,6 +440,48 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	setHandshakeResult(&res, authRes)
 
 	return res, nil
+}
+
+// resolveDestServerName decides the ServerName keploy puts on its own TLS
+// dial to the real MySQL server.
+//
+// capturedSNI is the SNI CertForClient recovered from the client's
+// ClientHello (pTls.SrcPortToDstURL). SrcPortToDstURL stores it
+// unconditionally — the empty string included — and MySQL clients
+// overwhelmingly dial by IP (keploy's own e2e uses tcp(127.0.0.1:3306)),
+// while RFC 6066 forbids IP literals in SNI so the client sends none. Empty
+// is therefore the NORMAL case here, not an edge case, and this site has
+// never had any fallback at all.
+//
+// That is fatal the moment verification is on: crypto/tls rejects a config
+// with an empty ServerName and InsecureSkipVerify=false outright ("either
+// ServerName or InsecureSkipVerify must be specified") before it examines any
+// certificate, so record.upstreamTls.verify would be unusable against every
+// IP-dialled MySQL. Falling back to the peer keploy is already connected to
+// fixes that; an IP literal is the RIGHT value, Go matches it against the
+// certificate's IP SANs.
+//
+// Scoped to the verifying path on purpose: with verification off, ServerName
+// only feeds the SNI extension, so filling it in would put an SNI on the wire
+// that the application itself never sent. The default must stay byte-identical.
+func resolveDestServerName(capturedSNI string, destConn net.Conn, verify bool) string {
+	if capturedSNI != "" || !verify {
+		return capturedSNI
+	}
+	if destConn == nil {
+		return ""
+	}
+	addr := destConn.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	// Addresses that carry no port (unix sockets, anything SplitHostPort
+	// rejects) are used verbatim, matching proxy.hostFromAddr.
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
 }
 
 func setHandshakeResult(res *handshakeRes, authRes handshakeRes) {
@@ -1019,15 +1081,21 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 // (seq=0). It synthesizes a HandshakeResponse41 from the SSLRequest fields
 // and fabricates fast-auth success responses so that test mode can replay
 // the initial handshake.
-func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, greetingPkt *mysql.PacketBundle, entry models.TLSHandshakeEntry, opts models.OutgoingOptions) error {
-	// Decode the stored SSLRequest.
-	sslReqPkt, err := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientConn, decodeCtx)
-	if err != nil {
-		return fmt.Errorf("failed to decode stored SSLRequest: %w", err)
-	}
+// buildSyntheticPostTLSConfig synthesizes the config-mock request/response
+// bundles for a post-TLS connection joined mid-stream (seq==0), where no real
+// HandshakeResponse41 / auth exchange was captured (the connection was already
+// authenticated before interception). It reconstructs a HandshakeResponse41
+// from the stored SSLRequest's fields, plus AuthMoreData(FastAuthSuccess) + OK,
+// so the config mock carries an HR41 at requests[1] — which the replayer
+// REQUIRES to match the connection at test time (see replayer/conn.go: it
+// looks for HandshakeResponse41 at requests[0] or [1] and errors otherwise).
+// sslReqPkt must already be decoded. Shared by the legacy recorder
+// (recordSyntheticConfigMock) and the V2 post-TLS handshake so both emit an
+// identical, replay-compatible seq==0 config mock.
+func buildSyntheticPostTLSConfig(ctx context.Context, logger *zap.Logger, decodeCtx *wire.DecodeContext, greetingPkt, sslReqPkt *mysql.PacketBundle) ([]mysql.Request, []mysql.Response, string, error) {
 	sslReq, ok := sslReqPkt.Message.(*mysql.SSLRequestPacket)
 	if !ok {
-		return fmt.Errorf("stored packet is not SSLRequest, got %T", sslReqPkt.Message)
+		return nil, nil, "", fmt.Errorf("stored packet is not SSLRequest, got %T", sslReqPkt.Message)
 	}
 
 	// Synthesize a HandshakeResponse41 from the SSLRequest fields.
@@ -1042,7 +1110,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 	}
 	hr41Payload, err := connPhase.EncodeHandshakeResponse41(ctx, logger, syntheticHR41)
 	if err != nil {
-		return fmt.Errorf("failed to encode synthetic HandshakeResponse41: %w", err)
+		return nil, nil, "", fmt.Errorf("failed to encode synthetic HandshakeResponse41: %w", err)
 	}
 
 	authMorePacket := &mysql.AuthMoreDataPacket{
@@ -1051,7 +1119,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 	}
 	authMorePayload, err := connPhase.EncodeAuthMoreData(ctx, authMorePacket)
 	if err != nil {
-		return fmt.Errorf("failed to encode synthetic AuthMoreData: %w", err)
+		return nil, nil, "", fmt.Errorf("failed to encode synthetic AuthMoreData: %w", err)
 	}
 
 	okPacket := &mysql.OKPacket{
@@ -1064,7 +1132,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 	}
 	okPayload, err := phase.EncodeOk(ctx, okPacket, serverCaps)
 	if err != nil {
-		return fmt.Errorf("failed to encode synthetic OK packet: %w", err)
+		return nil, nil, "", fmt.Errorf("failed to encode synthetic OK packet: %w", err)
 	}
 
 	sslReqSeq := byte(1) // Default sequence for SSLRequest in the SSL handshake path.
@@ -1108,9 +1176,22 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 		{PacketBundle: authMoreBundle},
 		{PacketBundle: okBundle},
 	}
+	return requests, responses, mysql.StatusToString(mysql.OK), nil
+}
+
+func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, greetingPkt *mysql.PacketBundle, entry models.TLSHandshakeEntry, opts models.OutgoingOptions) error {
+	// Decode the stored SSLRequest, then build the synthetic HR41 + auth bundles.
+	sslReqPkt, err := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientConn, decodeCtx)
+	if err != nil {
+		return fmt.Errorf("failed to decode stored SSLRequest: %w", err)
+	}
+	requests, responses, respOp, err := buildSyntheticPostTLSConfig(ctx, logger, decodeCtx, greetingPkt, sslReqPkt)
+	if err != nil {
+		return err
+	}
 
 	recordMock(ctx, requests, responses, "config",
-		sslReqPkt.Header.Type, mysql.StatusToString(mysql.OK),
+		sslReqPkt.Header.Type, respOp,
 		mocks, entry.ReqTimestamp, models.CapturedRespTime(ctx), opts)
 
 	logger.Debug("Post-TLS MySQL: recorded synthetic config mock for seq=0 path")

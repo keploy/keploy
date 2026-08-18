@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/url"
 	"strings"
@@ -224,6 +225,21 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 			}
 			if f.StreamEnded() {
 				s.respEndStreamReceived = true
+				// gRPC error responses send a single HEADERS frame with END_STREAM
+				// that merges initial headers and trailers (grpc-status, grpc-message).
+				// processHeaderBlock treated it as initial headers, so respTrailersReceived
+				// is still false. Promote the initial headers to trailers so that
+				// checkStreamCompletion can mark the stream complete.
+				if s.respHeadersReceived && !s.respTrailersReceived {
+					if s.grpcResp == nil {
+						s.grpcResp = &models.GrpcResp{}
+					}
+					s.grpcResp.Trailers = models.GrpcHeaders{
+						PseudoHeaders:   maps.Clone(s.grpcResp.Headers.PseudoHeaders),
+						OrdinaryHeaders: maps.Clone(s.grpcResp.Headers.OrdinaryHeaders),
+					}
+					s.respTrailersReceived = true
+				}
 				if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
 					return err
 				}
@@ -432,15 +448,16 @@ func (sm *DefaultStreamManager) CleanupStream(streamID uint32) {
 // processCompleteMessage assembles DATA frames for the given side and parses gRPC payload
 func (sm *DefaultStreamManager) processCompleteMessage(s *HTTP2StreamState, isOutgoing bool) error {
 	if isOutgoing {
+		if s.grpcResp == nil {
+			s.grpcResp = &models.GrpcResp{}
+		}
 		if len(s.respDataFrames) == 0 {
+			// gRPC error responses have no DATA frame — body is empty.
+			// Leave grpcResp.Body as zero value so the stream is still marked complete.
 			return nil
 		}
 		data := bytes.Join(s.respDataFrames, nil)
 		s.respDataFrames = nil
-
-		if s.grpcResp == nil {
-			s.grpcResp = &models.GrpcResp{}
-		}
 		s.grpcResp.Body = CreateLengthPrefixedMessageFromPayload(data)
 		return nil
 
@@ -517,6 +534,30 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
+// dialTCPWithConnRefusedRetry dials authority over TCP, retrying a pure
+// connection-refused (the app is still coming up) up to maxConnRefusedRetries
+// with the shared growing backoff. A refused dial sent zero bytes and consumed
+// zero mocks, so the re-dial is idempotent; any other dial error, exhaustion of
+// the attempts, or a cancelled context returns immediately.
+func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, authority string) (net.Conn, error) {
+	for attempt := 0; ; attempt++ {
+		conn, err := net.Dial("tcp", authority)
+		if err == nil {
+			return conn, nil
+		}
+		if attempt >= maxConnRefusedRetries || !isPreResponseConnRefused(err) {
+			return nil, err
+		}
+		logger.Debug("gRPC dial refused; the app may still be coming up — retrying",
+			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(err))
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(connRefusedRetryBackoff * time.Duration(attempt+1)):
+		}
+	}
+}
+
 func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger, cfg SimulationConfig) (*models.GrpcResp, error) {
 	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
@@ -570,8 +611,13 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		return nil, fmt.Errorf("missing :path header")
 	}
 
-	// Create a TCP connection
-	conn, err := net.Dial("tcp", authority)
+	// Create a TCP connection, retrying a pure connection-refused. A slow-starting
+	// gRPC app (especially a docker app under CI load) can briefly refuse
+	// connections while still coming up; a refused dial sent zero bytes and
+	// consumed zero mocks, so the re-dial is safe. Mirrors the HTTP replay path's
+	// doRequestWithConnRefusedRetry — a genuinely-down app still fails fast after
+	// the bounded attempts.
+	conn, err := dialTCPWithConnRefusedRetry(ctx, logger, authority)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
@@ -763,6 +809,16 @@ func CreatePayloadFromLengthPrefixedMessage(msg models.GrpcLengthPrefixedMessage
 	return payload, nil
 }
 
+// MaxGRPCFrameLength bounds the message length ReadGRPCFrame is willing to
+// allocate for. The length prefix is 4 attacker-supplied bytes off the wire,
+// so without a bound a single frame header asks for up to 4 GiB before any of
+// the payload has been read — a trivial remote memory-exhaustion of the proxy.
+// The bound matches the other wire-buffer caps in this repo (relay
+// DefaultPerConnCap, the agent's outgoing mock buffer) and is an order of
+// magnitude above grpc-go's own 4 MiB default receive limit, so it cannot
+// reject a message a real gRPC peer would have accepted.
+const MaxGRPCFrameLength = 64 * 1024 * 1024
+
 // ReadGRPCFrame reads a gRPC frame from the given reader and returns it as a byte array
 func ReadGRPCFrame(r io.Reader) ([]byte, error) {
 	// Read compression flag (1 byte)
@@ -780,6 +836,14 @@ func ReadGRPCFrame(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read message length: %w", err)
 	}
 	msgLen := binary.BigEndian.Uint32(lenBuf)
+	// Bound BEFORE allocating: io.ReadFull can only reject an oversized
+	// frame after make() has already committed the memory. The check also
+	// keeps the 5+msgLen below from wrapping — in uint32 arithmetic
+	// 5+0xFFFFFFFF is 4, which then panics in copy(frame[5:], msgBuf) with
+	// "slice bounds out of range".
+	if msgLen > MaxGRPCFrameLength {
+		return nil, fmt.Errorf("grpc frame message length %d exceeds the %d byte limit", msgLen, MaxGRPCFrameLength)
+	}
 
 	// Read message data
 	msgBuf := make([]byte, msgLen)
@@ -787,8 +851,10 @@ func ReadGRPCFrame(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read message: %w", err)
 	}
 
-	// Combine all parts
-	frame := make([]byte, 5+msgLen)
+	// Combine all parts. int arithmetic, not uint32: msgLen is bounded
+	// above, but the widening makes the absence of wraparound local and
+	// obvious rather than dependent on a check ten lines up.
+	frame := make([]byte, 5+int(msgLen))
 	frame[0] = compFlag[0]
 	copy(frame[1:5], lenBuf)
 	copy(frame[5:], msgBuf)

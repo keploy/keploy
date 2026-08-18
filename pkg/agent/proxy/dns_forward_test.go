@@ -431,6 +431,181 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNXDOMAIN_FallsBackToProxyIP
 	}
 }
 
+// TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_RelayedAsIs is the
+// regression test for the NODATA relay fix. An AAAA query for an IPv4-only
+// cluster service returns NOERROR with zero Answer RRs (NODATA) — a *valid*
+// negative answer, not a resolution failure. Before the fix this fell through
+// to ErrMockNotFound / the proxy-IP fallback, breaking replay for every app
+// whose libc issues A+AAAA in parallel (glibc getaddrinfo). After the fix the
+// empty NOERROR is relayed as-is, with mocking enabled, and the SOA in the
+// authority section preserved.
+func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_RelayedAsIs(t *testing.T) {
+	// Fake upstream: NOERROR + zero answers + an SOA in the authority section,
+	// exactly what a resolver returns for an AAAA query on an IPv4-only name.
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeSuccess // NOERROR
+		// No Answer RRs — NODATA.
+		soa, _ := dns.NewRR("cluster.local.\t30\tIN\tSOA\tns.cluster.local. hostmaster.cluster.local. 1 3600 600 86400 30")
+		if soa != nil {
+			m.Ns = []dns.RR{soa}
+		}
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyWithUpstream(t, addr, 2*time.Second)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+
+	q := dns.Question{Name: "postgres.checkr.svc.cluster.local.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
+
+	if entry.Msg == nil {
+		t.Fatal("expected the relayed NODATA response, got nil Msg (ErrMockNotFound path?)")
+	}
+	if entry.Msg.Rcode != dns.RcodeSuccess {
+		t.Errorf("Rcode = %d, want %d (NOERROR relayed as-is, NOT steered to proxy IP)", entry.Msg.Rcode, dns.RcodeSuccess)
+	}
+	if len(entry.Msg.Answer) != 0 {
+		t.Errorf("expected 0 answers (NODATA), got %d", len(entry.Msg.Answer))
+	}
+	if len(entry.Msg.Ns) == 0 {
+		t.Error("SOA authority record was dropped; NODATA relay should preserve it")
+	}
+	if !entry.FromUpstream {
+		t.Error("entry.FromUpstream = false; a relayed upstream NODATA must be cached as FromUpstream")
+	}
+}
+
+// TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_AQuery_RelayedNotSteered
+// pins the deliberate, qtype-agnostic scope of the NODATA relay. An A-query
+// NODATA (name exists, no A record) is relayed as an honest empty answer rather
+// than steered to the proxy IP (#2006). This is the one behavioral change to the
+// steering path: previously a bare-name A that didn't resolve fell through to
+// the synthetic proxy-IP A. The decision is that NODATA means the name
+// authoritatively has no A record, so fabricating a proxy IP would be less
+// correct than the truthful empty answer; genuinely-absent names still return
+// NXDOMAIN and are still steered (covered by the NXDOMAIN test above).
+func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_AQuery_RelayedNotSteered(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeSuccess // NOERROR, zero answers -> NODATA on the A query
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyWithUpstream(t, addr, 2*time.Second)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+
+	q := dns.Question{Name: "localstack.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
+
+	if entry.Msg == nil {
+		t.Fatal("expected the relayed NODATA response, got nil Msg")
+	}
+	if entry.Msg.Rcode != dns.RcodeSuccess {
+		t.Errorf("Rcode = %d, want RcodeSuccess (empty NOERROR relayed, not steered)", entry.Msg.Rcode)
+	}
+	if len(entry.Msg.Answer) != 0 {
+		t.Fatalf("A-query NODATA must be relayed empty, not steered to a synthetic proxy-IP A; got %d answers: %v",
+			len(entry.Msg.Answer), entry.Msg.Answer)
+	}
+	if !entry.FromUpstream {
+		t.Error("relayed NODATA must be cached as FromUpstream")
+	}
+}
+
+// TestGenerateCacheKey_QtypeIsolated locks the invariant that makes the
+// qtype-agnostic NODATA relay safe: an AAAA NODATA cached under one key must not
+// be served for a following A query on the same name. The cache key includes the
+// qtype today; this guards it against a future cache-key refactor.
+func TestGenerateCacheKey_QtypeIsolated(t *testing.T) {
+	name := "postgres.checkr.svc.cluster.local"
+	aKey := generateCacheKey(name, dns.TypeA)
+	aaaaKey := generateCacheKey(name, dns.TypeAAAA)
+	if aKey == aaaaKey {
+		t.Fatalf("A and AAAA cache keys must differ (else an AAAA NODATA would be served for an A query); both = %q", aKey)
+	}
+}
+
+// TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_DualEmpty documents the
+// intended behavior for a name that returns NODATA on BOTH A and AAAA (unmocked):
+// each leg is relayed as an honest empty answer rather than steered. The net app
+// effect is EAI_NODATA (no address) — an accepted trade for the mocked-service
+// case, since a genuinely-needed unmocked name resolves to NXDOMAIN (still
+// steered), not NODATA.
+func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_DualEmpty(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeSuccess // NODATA for whatever qtype is asked
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyWithUpstream(t, addr, 2*time.Second)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+
+	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		q := dns.Question{Name: "ipv-less.svc.", Qtype: qtype, Qclass: dns.ClassINET}
+		entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+		if entry.Msg == nil || entry.Msg.Rcode != dns.RcodeSuccess || len(entry.Msg.Answer) != 0 {
+			t.Fatalf("%s: expected relayed empty NOERROR, got %+v", dns.TypeToString[qtype], entry.Msg)
+		}
+		if !entry.FromUpstream {
+			t.Errorf("%s: relayed NODATA must be FromUpstream", dns.TypeToString[qtype])
+		}
+	}
+}
+
+// TestResolveUncachedDNSResponse_TestMode_UpstreamSERVFAIL_FallsBackToProxyIP
+// pins that non-success rcodes OTHER than NXDOMAIN still steer to the proxy IP
+// after the branch restructure. SERVFAIL (like NXDOMAIN, REFUSED, …) is a
+// genuinely-negative answer and must NOT slip into the NODATA relay branch —
+// it falls through to the synthetic proxy-IP fallback so eBPF can intercept
+// and match a recorded mock (#2006).
+func TestResolveUncachedDNSResponse_TestMode_UpstreamSERVFAIL_FallsBackToProxyIP(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeServerFailure // SERVFAIL
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyWithUpstream(t, addr, 2*time.Second)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+
+	q := dns.Question{Name: "flaky.svc.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+
+	if entry.Msg == nil {
+		t.Fatal("expected synthetic proxy-IP fallback, got nil Msg")
+	}
+	if entry.Msg.Rcode != dns.RcodeSuccess {
+		t.Errorf("SERVFAIL must be steered to a synthetic success response, got rcode %d", entry.Msg.Rcode)
+	}
+	if len(entry.Msg.Answer) != 1 {
+		t.Fatalf("expected 1 synthetic A answer (steered), got %d", len(entry.Msg.Answer))
+	}
+	if a, ok := entry.Msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("127.0.0.1")) {
+		t.Errorf("expected synthetic A 127.0.0.1 (proxy steering), got %v", entry.Msg.Answer[0])
+	}
+	if entry.FromUpstream {
+		t.Error("steered synthetic response must not be marked FromUpstream")
+	}
+}
+
 // TestResolveUncachedDNSResponse_TestMode_UpstreamSuccessPassesThrough
 // confirms that a *valid* upstream answer (Rcode=0, with Answer RRs) for a
 // real cluster-internal name still passes through unchanged after Fix B.

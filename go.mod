@@ -111,6 +111,8 @@ require (
 	vitess.io/vitess v0.23.3
 )
 
+require github.com/keploy/shlex v1.0.0
+
 require (
 	charm.land/lipgloss/v2 v2.0.0 // indirect
 	dario.cat/mergo v1.0.1 // indirect
