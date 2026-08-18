@@ -2881,8 +2881,15 @@ func FilterConfigMocksTierAware(ctx context.Context, logger *zap.Logger, m []*mo
 	return append(filteredMocks, unfilteredMocks...)
 }
 
+// FilterTcsMocksMapping selects the per-test cohort for a mapping-based replay.
+// Its result is handed to the agent as the PER-TEST pool, so every mock it
+// returns is stamped IsFiltered=true to match that destination.
 func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
 	filteredMocks, _ := filterByMapping(ctx, logger, m, mocksPresentInMapping)
+
+	for _, mk := range filteredMocks {
+		mk.TestModeInfo.IsFiltered = true
+	}
 
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
@@ -2891,6 +2898,23 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 	return filteredMocks
 }
 
+// FilterConfigMocksMapping selects the session/config cohort for a mapping-based
+// replay. Its ENTIRE result — both the mapped and the unmapped group — is handed
+// to the agent as the SESSION pool, so every mock it returns is stamped
+// IsFiltered=false to match that destination.
+//
+// Previously the label came from filterByMapping, i.e. from mapping MEMBERSHIP,
+// so a session mock that some earlier replay had consumed (and which therefore
+// appears in mappings.yaml) was labelled IsFiltered=true while physically living
+// in the session tree. Matchers that pick a consume target from IsFiltered then
+// deleted from the per-test tree instead — and because both trees are keyed on
+// TestModeInfo (SortOrder, ID) stamped from independent 0-based slice indices,
+// that key exists in both trees, so the delete evicted an unrelated per-test mock
+// rather than missing cleanly. The session mock was also left unconsumed.
+//
+// Mapping membership drives selection and ordering here; it must not redefine
+// which tier a mock belongs to. This now matches FilterConfigMocksTierAware,
+// which sets exactly IsFiltered=false for exactly these mocks.
 func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
 	filteredMocks, unfilteredMocks := filterByMapping(ctx, logger, m, mocksPresentInMapping)
 
@@ -2902,7 +2926,11 @@ func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*mode
 		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
 	})
 
-	return append(filteredMocks, unfilteredMocks...)
+	out := append(filteredMocks, unfilteredMocks...)
+	for _, mk := range out {
+		mk.TestModeInfo.IsFiltered = false
+	}
+	return out
 }
 
 // strictWindowEnvOverride holds the result of one-time env-var parsing
@@ -3457,12 +3485,16 @@ func effectiveLifetimeForRouting(m *models.Mock) models.Lifetime {
 	return models.LifetimePerTest
 }
 
-func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
+// filterByMapping partitions mocks purely by mapping MEMBERSHIP: the first
+// return holds the mocks named in mappings.yaml, the second holds the rest.
+//
+// It does not classify mocks by tier and does not touch TestModeInfo.IsFiltered
+// — see the note in the loop body. Callers own the labelling.
+func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) (inMapping []*models.Mock, notInMapping []*models.Mock) {
 	mapping := make(map[string]bool, len(mocksPresentInMapping))
 	for _, name := range mocksPresentInMapping {
 		mapping[name] = true
 	}
-	var filtered, unfiltered []*models.Mock
 	isNonKeploy := false
 	for _, mock := range m {
 		if mock == nil {
@@ -3472,18 +3504,24 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
+		// NOTE: TestModeInfo.IsFiltered is deliberately NOT set here.
+		//
+		// IsFiltered records which POOL a mock lives in (true = per-test tree,
+		// false = session/startup tree) and matchers rely on it to pick which
+		// tree to consume from. This function answers a different question —
+		// "is this name in mappings.yaml" — and its two callers route their
+		// output to OPPOSITE pools, so there is no single correct value to
+		// stamp here. Each caller sets the label for its own destination.
 		if mapping[p.Name] {
-			p.TestModeInfo.IsFiltered = true
-			filtered = append(filtered, p)
+			inMapping = append(inMapping, p)
 		} else {
-			p.TestModeInfo.IsFiltered = false
-			unfiltered = append(unfiltered, p)
+			notInMapping = append(notInMapping, p)
 		}
 	}
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
-	return filtered, unfiltered
+	return inMapping, notInMapping
 }
 
 func GuessContentType(data []byte) models.BodyType {
