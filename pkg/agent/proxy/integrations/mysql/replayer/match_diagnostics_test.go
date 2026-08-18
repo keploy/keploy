@@ -2,6 +2,7 @@ package replayer
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
@@ -137,5 +138,43 @@ func TestMatchCommand_NoMocksPhaseStillReachable(t *testing.T) {
 	if miss.matchPhase != models.MatchPhaseNoMocks {
 		t.Errorf("matchPhase = %q, want %q — otherwise the REPLAY-ORPHAN diagnostic can never fire",
 			miss.matchPhase, models.MatchPhaseNoMocks)
+	}
+}
+
+// TestMatchCommand_LiteralDriftPicksTheRightShape drives the whole matchCommand
+// path for the interpolated-literal case, with a decoy of a DIFFERENT table
+// sitting first in the pool.
+//
+// Both mocks declare the same wire payload length, so byte-length scoring — the
+// signal this change removed — would have handed the decoy the win on pool
+// order. The literal-drift tier keeps identifiers, so only the right table can
+// answer, and the drifted id still resolves instead of tearing the connection
+// down.
+func TestMatchCommand_LiteralDriftPicksTheRightShape(t *testing.T) {
+	logger := zap.NewNop()
+
+	const shape = "SELECT `id`, `email` FROM `customers` WHERE `id` = '%s'"
+	const decoy = "SELECT `id`, `email` FROM `couriers` WHERE `id` = '%s'"
+
+	db := &fakeMockDb{session: []*models.Mock{
+		readbackMock("m-decoy", fmt.Sprintf(decoy, "1dc32a3c-a50c-5e92-9797-a6b6c4c7156e"), "decoy-row", zeroTime()),
+		readbackMock("m-target", fmt.Sprintf(shape, "1dc32a3c-a50c-5e92-9797-a6b6c4c7156e"), "target-row", zeroTime()),
+	}}
+	eng := schemanoise.New(mysqlNoiseAdapter{}, false, false)
+
+	live := comQueryReq(fmt.Sprintf(shape, "2a22d715-4799-5150-80d6-a0dd935fbda2"))
+	resp, ok, _, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), eng, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("a re-issued statement whose interpolated id drifted must still be served")
+	}
+	if resp == nil || resp.Payload != "target-row" {
+		got := "<nil>"
+		if resp != nil {
+			got = resp.Payload
+		}
+		t.Errorf("served %q, want \"target-row\" — a different table's recorded response was returned", got)
 	}
 }

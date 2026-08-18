@@ -120,11 +120,10 @@ func TestMatchQueryPacket_EqualLengthDifferentStatementsNeverMatch(t *testing.T)
 		{"SHOW FULL FIELDS FROM `invoices`", "SHOW FULL FIELDS FROM `couriers`"},
 		{"SHOW FULL FIELDS FROM `payments`", "SHOW FULL FIELDS FROM `receipts`"},
 		{"SELECT `id` FROM `invoices` WHERE `id` = 1", "SELECT `id` FROM `couriers` WHERE `id` = 1"},
-		// Same table, different inline literal: still a different statement,
-		// because the recorded response is a different row.
+		// Same shape, different COLUMN: an identifier, so never interchangeable.
 		{
 			"SELECT `total` FROM `invoices` WHERE `external_id` = 'aaaaaaaaaaaaaaaaaaaaaaaa'",
-			"SELECT `total` FROM `invoices` WHERE `external_id` = 'bbbbbbbbbbbbbbbbbbbbbbbb'",
+			"SELECT `total` FROM `invoices` WHERE `internal_id` = 'aaaaaaaaaaaaaaaaaaaaaaaa'",
 		},
 	}
 
@@ -276,5 +275,104 @@ func TestMatchQueryPacket_LiteralTypeIsPartOfTheStatement(t *testing.T) {
 				t.Errorf("score = %d, want %d", score, tc.wantScore)
 			}
 		})
+	}
+}
+
+// TestMatchQueryPacket_InlineLiteralDriftIsServable is the case keploy's own
+// go-memory-load-mysql suite exercises: a client that interpolates its values
+// instead of binding them re-issues the same statement with a freshly generated
+// id on every run.
+//
+//	recorded: SELECT ... FROM customers WHERE id = '<uuid A>'
+//	replayed: SELECT ... FROM customers WHERE id = '<uuid B>'
+//
+// There is no exact match and a SELECT never reaches the DML parse-tree tier, so
+// without a literal-drift tier the candidate scores 0, matchCommand finds no
+// candidate at all, and the MySQL connection is torn down mid-suite.
+//
+// It must be servable — but only as a last resort, never as a definitive match,
+// because the recorded response is a different row.
+func TestMatchQueryPacket_InlineLiteralDriftIsServable(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	const shape = "SELECT `id`, `email`, `full_name` FROM `customers` WHERE `id` = '%s'"
+	recorded := queryBundle(dbmWriter + fmt.Sprintf(shape, "1dc32a3c-a50c-5e92-9797-a6b6c4c7156e"))
+	live := queryBundle(dbmReader + fmt.Sprintf(shape, "2a22d715-4799-5150-80d6-a0dd935fbda2"))
+
+	ok, score := matchQueryPacket(ctx, logger, recorded, live)
+	if ok {
+		t.Error("a different id is a different row: this must not be a definitive match")
+	}
+	if score == 0 {
+		t.Fatal("a re-issued statement whose inline literal drifted must stay servable as a last " +
+			"resort; scoring 0 leaves matchCommand with no candidate and tears the connection down")
+	}
+	if score >= scoreQueryStructure {
+		t.Errorf("score = %d, must rank below the DML parse-tree tier (%d)", score, scoreQueryStructure)
+	}
+}
+
+// TestMaskSQLLiterals pins what the literal-drift tier will and will not equate.
+func TestMaskSQLLiterals(t *testing.T) {
+	sameShape := func(t *testing.T, a, b string) {
+		t.Helper()
+		if maskSQLLiterals(a) != maskSQLLiterals(b) {
+			t.Errorf("must be the same shape:\n  %s -> %s\n  %s -> %s", a, maskSQLLiterals(a), b, maskSQLLiterals(b))
+		}
+	}
+	differs := func(t *testing.T, a, b string) {
+		t.Helper()
+		if maskSQLLiterals(a) == maskSQLLiterals(b) {
+			t.Errorf("must NOT be equated (both mask to %q):\n  %s\n  %s", maskSQLLiterals(a), a, b)
+		}
+	}
+
+	t.Run("drifted values are the same shape", func(t *testing.T) {
+		sameShape(t, "SELECT * FROM t WHERE id = 'aaa'", "SELECT * FROM t WHERE id = 'bbb'")
+		sameShape(t, "SELECT * FROM t WHERE id = 5", "SELECT * FROM t WHERE id = 61234")
+		sameShape(t, "SELECT * FROM t WHERE a = 1.5 AND b = 'x'", "SELECT * FROM t WHERE a = 9.25 AND b = 'y'")
+		sameShape(t, "SELECT * FROM t WHERE h = 0x1F", "SELECT * FROM t WHERE h = 0xAB09")
+	})
+
+	t.Run("identifiers are never masked", func(t *testing.T) {
+		differs(t, "SHOW FULL FIELDS FROM `invoices`", "SHOW FULL FIELDS FROM `couriers`")
+		differs(t, "SELECT a FROM t1", "SELECT a FROM t2")
+		differs(t, "SELECT `col1` FROM t", "SELECT `col2` FROM t")
+		// A digit inside an identifier is part of the name, not a literal.
+		if got := maskSQLLiterals("SET NAMES utf8mb4"); got != "SET NAMES utf8mb4" {
+			t.Errorf("identifier digits must survive, got %q", got)
+		}
+	})
+
+	t.Run("literal type is preserved", func(t *testing.T) {
+		differs(t, "SELECT * FROM t WHERE x = 1", "SELECT * FROM t WHERE x = '1'")
+	})
+
+	t.Run("quote-awareness", func(t *testing.T) {
+		// A quote inside a literal must not end it early.
+		sameShape(t, `SELECT * FROM t WHERE s = 'it\'s a'`, `SELECT * FROM t WHERE s = 'other'`)
+		sameShape(t, "SELECT * FROM t WHERE s = 'it''s a'", "SELECT * FROM t WHERE s = 'other'")
+		// Backquoted identifiers containing digits or quotes stay intact.
+		differs(t, "SELECT `we'ird1` FROM t", "SELECT `we'ird2` FROM t")
+	})
+
+	t.Run("executable comments are copied through", func(t *testing.T) {
+		differs(t, "/*!40101 SET NAMES utf8 */", "/*!80000 SET NAMES utf8 */")
+	})
+}
+
+// TestIsSessionControlStatement pins the exclusion that keeps the literal-drift
+// tier away from statements whose literal is their meaning.
+func TestIsSessionControlStatement(t *testing.T) {
+	for _, q := range []string{"SET NAMES utf8mb4", "set autocommit = 0", "SET\n@@sql_mode = 'X'", "SET\t@@x = 1", "SET"} {
+		if !isSessionControlStatement(q) {
+			t.Errorf("%q is a session-control statement", q)
+		}
+	}
+	for _, q := range []string{"SELECT 1", "SETTINGS", "SETUP", "settle up"} {
+		if isSessionControlStatement(q) {
+			t.Errorf("%q is not a session-control statement", q)
+		}
 	}
 }

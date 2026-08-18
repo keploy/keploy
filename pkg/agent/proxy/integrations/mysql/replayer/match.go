@@ -1353,6 +1353,10 @@ const (
 	// ok=true, which makes the caller take the definitive path and ignore the
 	// score entirely, so the value is informational only.
 	scoreQueryExact = 2
+	// scoreQueryLiteralDrift — same statement, drifted inline literal values.
+	// Last resort, never definitive, and deliberately below scoreQueryStructure
+	// so DML selection is unchanged.
+	scoreQueryLiteralDrift = 3
 	// scoreQueryStructure — both DML with an identical parse-tree shape.
 	// Pre-existing tier, never definitive.
 	scoreQueryStructure = 6
@@ -1459,11 +1463,25 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		return false, 0
 	}
 
-	// Non-DML and not textually identical: nothing further establishes that
-	// these are the same statement, so the candidate is not servable. The
-	// mismatch report still names the nearest recorded query — matchCommand
-	// tracks that separately from the score.
 	if !(sqlparser.IsDML(expectedQuery) && sqlparser.IsDML(actualQuery)) {
+		// Non-DML. sqlparser.IsDML covers only INSERT/UPDATE/DELETE, so this is
+		// where every SELECT and SHOW lands, and the parse-tree tier below never
+		// sees them. Last resort: the same statement with a drifted inline
+		// literal — a client that interpolates a freshly generated id instead of
+		// binding it re-issues exactly this shape on every run, and refusing it
+		// tears the connection down.
+		//
+		// Not definitive: the recorded response belongs to a different row, so it
+		// only scores, and only wins when nothing matched exactly.
+		if !isSessionControlStatement(expectedQuery) && !isSessionControlStatement(actualQuery) &&
+			maskSQLLiterals(expectedQuery) == maskSQLLiterals(actualQuery) {
+			log.Debug("query matched with drifted inline literals",
+				zap.String("expected query", expectedQuery),
+				zap.String("actual query", actualQuery))
+			// The payload-length tie-break only ranks candidates already known to
+			// share every keyword, identifier and literal type.
+			return false, scoreQueryLiteralDrift + equalPayloadLength(expected, actual)
+		}
 		log.Debug("No Query is dml",
 			zap.String("expected query", expectedQuery),
 			zap.String("actual query", actualQuery))
@@ -2326,6 +2344,165 @@ func equalPayloadLength(expected, actual mysql.PacketBundle) int {
 		return 1
 	}
 	return 0
+}
+
+// maskSQLLiterals returns the statement with every inline literal VALUE replaced
+// by a type-tagged placeholder, leaving keywords, identifiers and punctuation
+// exactly as they were.
+//
+//	SELECT id FROM customers WHERE id = 'a3f...'   ->  SELECT id FROM customers WHERE id = ?s
+//	SELECT id FROM customers WHERE id = 'b71...'   ->  SELECT id FROM customers WHERE id = ?s
+//
+// This is the last-resort tier for a client that inlines its literals instead of
+// binding them: the same statement re-issued with a freshly generated id is the
+// same statement, and refusing to serve it tears the connection down.
+//
+// It is emphatically NOT a general similarity measure, and the two things it
+// keeps are what make it safe:
+//
+//   - IDENTIFIERS survive, so "SHOW FULL FIELDS FROM `invoices`" can never be
+//     answered by "... FROM `couriers`". This is the failure that byte-length
+//     scoring used to cause.
+//   - The literal's TYPE survives (?s vs ?n), so "x = 1" and "x = '1'" stay
+//     distinct — MySQL does not treat them alike.
+//
+// It is computed lexically, with no SQL parser, deliberately: a parser renders
+// statements it does not model to a constant string, which would make unrelated
+// statements compare equal. Anything this scanner is unsure of is copied
+// verbatim, so ambiguity fails toward "no match" rather than a false one.
+func maskSQLLiterals(sql string) string {
+	var b strings.Builder
+	b.Grow(len(sql))
+
+	for i := 0; i < len(sql); {
+		c := sql[i]
+		switch {
+		// Backquoted identifier: a value's name, not a value. Keep it.
+		case c == '`':
+			j := scanQuoted(sql, i, '`')
+			b.WriteString(sql[i:j])
+			i = j
+
+		// String literal, in either quoting style.
+		case c == '\'' || c == '"':
+			i = scanQuoted(sql, i, c)
+			b.WriteString("?s")
+
+		// Executable comment ("/*!", "/*+") — the identity keeps these, so copy
+		// the span through untouched rather than masking inside it.
+		case c == '/' && i+1 < len(sql) && sql[i+1] == '*':
+			if closeAt := strings.Index(sql[i+2:], "*/"); closeAt >= 0 {
+				end := i + 2 + closeAt + 2
+				b.WriteString(sql[i:end])
+				i = end
+				continue
+			}
+			b.WriteString(sql[i:])
+			i = len(sql)
+
+		case isNumericLiteralStart(sql, i):
+			j := scanNumericLiteral(sql, i)
+			// A digit run that runs straight into an identifier character was
+			// never a literal (a quirky column name); copy it verbatim.
+			if j < len(sql) && isIdentByte(sql[j]) {
+				b.WriteByte(c)
+				i++
+				continue
+			}
+			b.WriteString("?n")
+			i = j
+
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
+}
+
+// scanQuoted returns the index just past the token opened by quote q at sql[i],
+// honouring backslash escapes (not inside backquotes) and doubled quotes. An
+// unterminated token runs to the end of the input.
+func scanQuoted(sql string, i int, q byte) int {
+	j := i + 1
+	for j < len(sql) {
+		if sql[j] == '\\' && q != '`' {
+			j += 2
+			continue
+		}
+		if sql[j] == q {
+			if j+1 < len(sql) && sql[j+1] == q {
+				j += 2
+				continue
+			}
+			return j + 1
+		}
+		j++
+	}
+	return len(sql)
+}
+
+func isIdentByte(c byte) bool {
+	return c == '_' || c == '$' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// isNumericLiteralStart reports whether a numeric literal begins at sql[i]. A
+// digit that continues an identifier (the "8" in "utf8mb4") does not.
+func isNumericLiteralStart(sql string, i int) bool {
+	if sql[i] < '0' || sql[i] > '9' {
+		return false
+	}
+	return i == 0 || !isIdentByte(sql[i-1])
+}
+
+// scanNumericLiteral returns the index just past the numeric literal at sql[i],
+// covering hex (0x1F), decimals and exponents.
+func scanNumericLiteral(sql string, i int) int {
+	j := i
+	if sql[j] == '0' && j+1 < len(sql) && (sql[j+1] == 'x' || sql[j+1] == 'X') {
+		j += 2
+		for j < len(sql) && isHexByte(sql[j]) {
+			j++
+		}
+		return j
+	}
+	for j < len(sql) && sql[j] >= '0' && sql[j] <= '9' {
+		j++
+	}
+	if j < len(sql) && sql[j] == '.' {
+		j++
+		for j < len(sql) && sql[j] >= '0' && sql[j] <= '9' {
+			j++
+		}
+	}
+	// Exponent, only when it is actually followed by digits.
+	if j < len(sql) && (sql[j] == 'e' || sql[j] == 'E') {
+		k := j + 1
+		if k < len(sql) && (sql[k] == '+' || sql[k] == '-') {
+			k++
+		}
+		if k < len(sql) && sql[k] >= '0' && sql[k] <= '9' {
+			for k < len(sql) && sql[k] >= '0' && sql[k] <= '9' {
+				k++
+			}
+			j = k
+		}
+	}
+	return j
+}
+
+func isHexByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// isSessionControlStatement reports whether the statement configures the session
+// rather than reading or writing rows. Its literal IS its meaning — "SET NAMES
+// utf8mb4" and "SET NAMES latin1" do different things — so it is excluded from
+// literal-drift matching.
+func isSessionControlStatement(sql string) bool {
+	s := strings.TrimLeft(sql, sqlWhitespace)
+	return hasPrefixFold(s, "SET") && (len(s) == 3 || strings.ContainsRune(sqlWhitespace, rune(s[3])))
 }
 
 // isLineCommentAt reports whether a MySQL line comment starts at sql[i].
