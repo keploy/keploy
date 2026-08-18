@@ -16,7 +16,10 @@ import (
 
 // COM_STMT_EXECUTE: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_execute.html
 
-func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket, clientCapabilities uint32) (*mysql.StmtExecutePacket, error) {
+// longDataParams names the parameters whose value was streamed ahead with
+// COM_STMT_SEND_LONG_DATA and is therefore ABSENT from this packet, even
+// though the null bitmap reports them as non-NULL. May be nil.
+func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket, clientCapabilities uint32, longDataParams map[uint16]bool) (*mysql.StmtExecutePacket, error) {
 	if len(data) < 10 {
 		return &mysql.StmtExecutePacket{}, fmt.Errorf("packet length too short for COM_STMT_EXECUTE")
 	}
@@ -169,6 +172,17 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 			bitIndex := i % 8
 			if byteIndex < len(packet.NullBitmap) && (packet.NullBitmap[byteIndex]&(1<<bitIndex)) != 0 {
 				// Parameter is NULL, set value to nil and continue
+				packet.Parameters[i].Value = nil
+				continue
+			}
+
+			// A parameter sent with COM_STMT_SEND_LONG_DATA has no value in
+			// this packet — the server already holds it — but it is not NULL
+			// either, so the bitmap check above does not catch it. Reading a
+			// value here is what made every streamed-BLOB EXECUTE fail to
+			// decode and vanish from the recording (#4262). The bytes live in
+			// the SEND_LONG_DATA mock that precedes this one.
+			if longDataParams[uint16(i)] {
 				packet.Parameters[i].Value = nil
 				continue
 			}
