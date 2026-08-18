@@ -137,14 +137,28 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			if !ok {
 				// Build mismatch report for propagation
 				if miss == nil {
-					miss = &mockMiss{}
+					// Defensive: matchCommand always returns a miss alongside a
+					// nil error. matchPhase is set explicitly so an unexpected
+					// path cannot masquerade as an empty mock pool.
+					miss = &mockMiss{matchPhase: models.MatchPhaseExhausted}
 				}
+				// Report the STATEMENT, not the wire text. A Datadog DBM /
+				// sqlcommenter comment runs to a couple of hundred bytes in front
+				// of the SQL, so every truncation below would otherwise clip
+				// inside it and the report would name no SQL at all — which is how
+				// this class of miss gets read as "the mock was never recorded"
+				// instead of "this query drifted".
+				//
+				// The comment stripper is applied to SQL ONLY, never to the
+				// rendered bound parameters appended below: those are arbitrary
+				// user data, and a value containing "#" or "-- " would have the
+				// rest of the parameter list silently deleted from the report.
 				actualQuery := ""
 				switch msg := req.Message.(type) {
 				case *mysql.QueryPacket:
-					actualQuery = msg.Query
+					actualQuery = sqlStatementIdentity(msg.Query)
 				case *mysql.StmtPreparePacket:
-					actualQuery = msg.Query
+					actualQuery = sqlStatementIdentity(msg.Query)
 				case *mysql.StmtExecutePacket:
 					// EXECUTE carries no SQL text of its own — resolve the
 					// prepared query via the runtime stmtID map and show the
@@ -152,7 +166,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// "COM_STMT_EXECUTE".
 					if msg != nil {
 						if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
-							actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[msg.StatementID])
+							actualQuery = sqlStatementIdentity(decodeCtx.StmtIDToQuery[msg.StatementID])
 						}
 						actualQuery = strings.TrimSpace(actualQuery + " " + formatExecParams(msg.Parameters))
 					}
@@ -161,9 +175,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 						actualQuery = fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
 					}
 				}
+				closestQuery := sqlStatementIdentity(miss.closestQuery)
 				diff := ""
-				if actualQuery != "" || miss.closestQuery != "" {
-					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(miss.closestQuery, 200))
+				if actualQuery != "" || closestQuery != "" {
+					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200))
 				}
 				// Under schemaNoiseStrict a rejection is a drift verdict, not a
 				// missing recording — say WHICH fields drifted (FieldDiffs) and
@@ -179,21 +194,28 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					Diff:          diff,
 					FieldDiffs:    miss.fieldDiffs,
 					NextSteps:     nextSteps,
+					MatchPhase:    miss.matchPhase,
+					// Both of these used to be left at their zero value while the
+					// log printed them as if measured, so every MySQL miss
+					// reported "match_phase":"" and "candidates":0 — indistinguishable
+					// from an empty mock pool.
+					CandidateCount: miss.candidateCount,
 				}
-				if miss.closestMock == "" {
-					// closest_mock=="" → no candidate mock exists for this query at all.
-					// The TC is failing because its mock was NEVER RECORDED — lost at
-					// record time (teardown decode-lag or memory-pressure drop).
-					// Log the SQL query so you know exactly which query has no mock.
-					sqlSnippet := actualQuery
-					if len(sqlSnippet) > 150 {
-						sqlSnippet = sqlSnippet[:150] + "…"
-					}
-					logger.Error("REPLAY-ORPHAN: TC failing — mock NEVER RECORDED for this query (lost at record time, not a content mismatch)",
-						zap.String("sql_query", sqlSnippet),
+				if miss.matchPhase == models.MatchPhaseNoMocks {
+					// The pool held no data mock for the command phase to compare
+					// against — only handshake/config mocks survived the lifetime
+					// filter. That is a recording-side shortfall, not a content
+					// mismatch.
+					//
+					// This is asserted on the MEASURED phase, never on an empty
+					// closest_mock: nothing scoring is the NORMAL shape of a query
+					// that merely drifted from its recording, and reporting that as
+					// a lost mock sends the reader hunting for the wrong bug.
+					logger.Error("REPLAY-ORPHAN: TC failing — no data mock available for this query, so it was never recorded or was dropped at record time",
+						zap.String("sql_query", truncate(actualQuery, 300)),
 						zap.String("request_type", req.Header.Type),
 						zap.Int("commands_processed", commandCount),
-						zap.String("hint", "check mappings.yaml: this TC has 0 mock_entries — its mock was dropped at record time (teardown lag or memory pressure)"),
+						zap.String("hint", "check mappings.yaml: this test set has no MySQL data mock for the command phase — either the query was never recorded, or its mock was dropped at record time (teardown lag or memory pressure)"),
 					)
 				}
 				// next_step reuses the strict-aware guidance computed for the
@@ -203,6 +225,8 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					zap.Int("commands_processed", commandCount),
 					zap.String("request_type", req.Header.Type),
 					zap.String("closest_mock", miss.closestMock),
+					zap.Int("candidates", miss.candidateCount),
+					zap.String("match_phase", miss.matchPhase),
 					zap.Int("strict_rejected_candidates", miss.strictRejected),
 					zap.String("next_step", nextSteps))
 				baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)

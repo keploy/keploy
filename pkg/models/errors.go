@@ -58,7 +58,7 @@ type MockFieldDiff struct {
 // the user how far the matcher got before giving up, which determines the
 // right remediation (re-record vs add noise vs fix candidate selection).
 const (
-	MatchPhaseNoMocks    = "no_mocks"             // mock pool for this protocol is empty
+	MatchPhaseNoMocks    = "no_mocks"             // no mocks were available to compare for this protocol: the pool is empty, or none survived filtering
 	MatchPhaseSchema     = "no_schema_candidates" // nothing matched method/path/header-keys/query-keys
 	MatchPhaseBody       = "body_mismatch"        // schema candidates existed, request body ruled them all out
 	MatchPhaseStrict     = "strict_noise_reject"  // candidates rejected by strict req-body-noise enforcement
