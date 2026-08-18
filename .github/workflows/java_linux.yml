@@ -234,6 +234,11 @@ jobs:
         # validate the fix (record_latest_replay_build also confirms the new
         # binary replays mocks recorded by the previous release). Re-add
         # record_build_replay_latest for forward-compat once the fix is released.
+        #
+        # For the same reason the script gates the /api/blob traffic (keploy#4262,
+        # streamed-BLOB EXECUTE dropped at record) on RECORD_BIN being this build:
+        # the released recorder cannot capture those EXECUTEs, so driving them in
+        # record_latest_replay_build would make that cell permanently red too.
         config:
           - job: record_latest_replay_build
             record_src: latest

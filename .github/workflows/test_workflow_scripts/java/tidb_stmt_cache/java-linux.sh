@@ -20,6 +20,26 @@
 
 set -Eeuo pipefail
 
+# Number of /api/blob requests driven below; the guard asserts at least this many
+# blob COM_STMT_EXECUTE mocks, so the two can never drift apart.
+BLOB_REQUESTS=3
+
+# Capability gate for keploy#4262 (streamed-BLOB EXECUTE dropped at record).
+# The fix lives in this build and ships in no released binary yet, so a 'latest'
+# RECORD_BIN cannot capture the COM_STMT_EXECUTE at all: the recording holds the
+# RESET and SEND_LONG_DATA mocks but no EXECUTE, and replaying it reproduces the
+# very bug being fixed (the /api/blob tests fail with "Can not read response from
+# server"). Drive the blob traffic -- and its guard -- only when the recorder is
+# this build, so the record_latest_replay_build cell still validates the other
+# paths instead of being permanently red. Drop this gate once the fix ships in a
+# release. Mirrors the RECORD_BIN capability gate in golang/connect_tunnel.
+recorder_streams_blobs() {
+  case "${RECORD_BIN:-}" in
+    */build/keploy|*/build-no-race/keploy) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
@@ -83,8 +103,14 @@ send_request() {
   # the value out of band and pipeline COM_STMT_RESET -> COM_STMT_SEND_LONG_DATA
   # -> COM_STMT_EXECUTE per re-execution. Driven repeatedly on purpose: the
   # RESET only appears when the statement is re-executed from the cache.
-  echo "=== streamed BLOB via SEND_LONG_DATA (/api/blob) ==="
-  for _ in 1 2 3; do curl -sS "http://localhost:8080/api/blob/2048" || true; echo; done
+  if recorder_streams_blobs; then
+    echo "=== streamed BLOB via SEND_LONG_DATA (/api/blob) ==="
+    for _ in $(seq 1 "$BLOB_REQUESTS"); do curl -sS "http://localhost:8080/api/blob/2048" || true; echo; done
+  else
+    echo "=== streamed BLOB via SEND_LONG_DATA (/api/blob): SKIPPED ==="
+    echo "RECORD_BIN (${RECORD_BIN:-unset}) predates the keploy#4262 record fix and cannot"
+    echo "capture the streamed EXECUTE; not driving /api/blob."
+  fi
 
   sleep 10
   echo "Sending SIGINT to keploy ($kp_pid) for graceful shutdown"
@@ -102,7 +128,13 @@ send_request() {
 # fails with "Can not read response from server".
 assert_blob_execute_recorded() {
   section "Guard: streamed-BLOB EXECUTE is recorded (keploy#4262)"
-  local mocks execs slds
+  if ! recorder_streams_blobs; then
+    echo "SKIP: RECORD_BIN (${RECORD_BIN:-unset}) predates the keploy#4262 record fix, so"
+    echo "      /api/blob was not driven and there is nothing to assert."
+    endsec; return 0
+  fi
+
+  local mocks slds blobout blobid blobexecs
   mocks=$(find ./keploy -name 'mocks.yaml' -o -name 'mocks.json' 2>/dev/null)
   if [[ -z "$mocks" ]]; then
     echo "::error::keploy#4262 guard: no mock files under ./keploy"
@@ -111,25 +143,84 @@ assert_blob_execute_recorded() {
 
   # grep -h | wc -l rather than summing per-file -c counts: no bc dependency
   # (not installed on every runner) and it behaves the same for one file or
-  # several. An unreadable mocks file yields 0 and trips the vacuity check
-  # below rather than passing silently.
+  # several. A mocks file that cannot be read raises grep's exit 2 through
+  # pipefail into the ERR trap, so it is never mistaken for a count of zero.
   # shellcheck disable=SC2086
   slds=$(grep -h 'requestOperation: COM_STMT_SEND_LONG_DATA' $mocks 2>/dev/null | wc -l)
-  # shellcheck disable=SC2086
-  execs=$(grep -h 'requestOperation: COM_STMT_EXECUTE' $mocks 2>/dev/null | wc -l)
-
   if [[ "${slds:-0}" -eq 0 ]]; then
     echo "::error::keploy#4262 guard: no COM_STMT_SEND_LONG_DATA mocks — /api/blob did not"
     echo "::error::produce a streamed write, so this guard would assert nothing."
     endsec; return 1
   fi
-  if [[ "${execs:-0}" -eq 0 ]]; then
-    echo "::error::keploy#4262 regression: ${slds} SEND_LONG_DATA mocks but ZERO COM_STMT_EXECUTE"
-    echo "::error::mocks. The streamed-BLOB EXECUTE is being dropped at decode time; replay will"
-    echo "::error::fail with 'Can not read response from server'."
+
+  # Count the blob EXECUTEs specifically, rather than COM_STMT_EXECUTE across all
+  # mocks: /api/kv and /api/cross contribute ~19 non-blob EXECUTEs, so a plain
+  # total stays comfortably non-zero even when every blob EXECUTE has been
+  # dropped — which is exactly the shape of the bug, and exactly what a recording
+  # made by the pre-fix release looks like (19 EXECUTEs, 3 SEND_LONG_DATA, none
+  # of them for blob_stream). An EXECUTE names its statement only by id, so learn
+  # the id the "INSERT INTO blob_stream" COM_STMT_PREPARE was handed back in its
+  # PREPARE_OK and count the EXECUTEs that reference it.
+  #
+  # Two things the obvious version gets wrong:
+  #   - ids are scoped to a connection and restart at 1 on each, and connIDs in
+  #     turn restart at 0 in every recording, so the key is file+connID+id. A
+  #     bare id would let a second pooled connection's statement 1 be counted as
+  #     the first connection's blob statement 1 (false green) and would miss blob
+  #     EXECUTEs issued on that second connection (false red); dropping the file
+  #     would do the same across two test-sets. connID is emitted in each mock's
+  #     metadata, ahead of the requests it scopes, and is reset per document so a
+  #     document without one cannot inherit a neighbour's — an inherited connID
+  #     is what turns a dropped EXECUTE into a false green. The sample drives one
+  #     HikariCP connection and records a single test-set today; none of this
+  #     depends on that staying true.
+  #   - mocks are not guaranteed to be emitted in wire order, so an EXECUTE can
+  #     be read before the PREPARE naming its id. Ids are therefore resolved at
+  #     END rather than inline. The one thing this cannot model is a statement id
+  #     retired by COM_STMT_CLOSE and handed to a different statement later on
+  #     the same connection, which needs wire order to disambiguate; TiDB and
+  #     MySQL allocate ids from a monotonic per-session counter and the sample
+  #     never closes a statement, so no recording here can hit it.
+  # shellcheck disable=SC2086
+  blobout=$(awk '
+    FNR==1 || /^---$/                { mode=""; isblob=0; conn="" }
+    /^ *connID: / { conn=$0; sub(/^ *connID: */, "", conn); gsub(/"/, "", conn); next }
+    /packet_type: COM_STMT_PREPARE$/ { mode="prep"; isblob=0; next }
+    mode=="prep" && /query: .*INSERT INTO `?blob_stream/ { isblob=1; next }
+    /packet_type: COM_STMT_PREPARE_OK/ { if (mode=="prep") mode="prepok"; next }
+    mode=="prepok" && /statement_id: [0-9]+$/ {
+      if (isblob && !((FILENAME SUBSEP conn SUBSEP $NF) in blob)) {
+        blob[FILENAME SUBSEP conn SUBSEP $NF] = 1
+        ids = (ids == "" ? "" : ids "/") conn ":" $NF
+      }
+      mode=""; next
+    }
+    /packet_type: COM_STMT_EXECUTE/  { mode="exec"; next }
+    mode=="exec" && /statement_id: [0-9]+$/ { seen[++k] = FILENAME SUBSEP conn SUBSEP $NF; mode=""; next }
+    END {
+      for (i = 1; i <= k; i++) if (seen[i] in blob) n++
+      print (ids == "" ? "none" : ids), n+0
+    }
+  ' $mocks)
+  read -r blobid blobexecs <<<"$blobout"
+
+  if [[ "$blobid" == "none" ]]; then
+    echo "::error::keploy#4262 guard: no COM_STMT_PREPARE for 'INSERT INTO blob_stream' was"
+    echo "::error::recorded, so blob EXECUTEs cannot be told apart from the other statements'."
     endsec; return 1
   fi
-  echo "OK: ${execs} COM_STMT_EXECUTE and ${slds} COM_STMT_SEND_LONG_DATA mocks recorded."
+  # -lt, not -ne: the only failure keploy#4262 can produce is under-recording, and
+  # an overcount would not be that bug.
+  if [[ "$blobexecs" -lt "$BLOB_REQUESTS" ]]; then
+    echo "::error::keploy#4262 regression: ${BLOB_REQUESTS} /api/blob requests produced only"
+    echo "::error::${blobexecs} COM_STMT_EXECUTE mocks for the blob_stream statement"
+    echo "::error::(conn:stmt ${blobid}), alongside ${slds} COM_STMT_SEND_LONG_DATA mocks. The"
+    echo "::error::streamed-BLOB EXECUTE is being dropped at decode time; replay will fail"
+    echo "::error::with 'Can not read response from server'."
+    endsec; return 1
+  fi
+  echo "OK: ${blobexecs}/${BLOB_REQUESTS} COM_STMT_EXECUTE mocks for blob_stream"
+  echo "    (conn:stmt ${blobid}) alongside ${slds} COM_STMT_SEND_LONG_DATA mocks."
   endsec
 }
 
