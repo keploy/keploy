@@ -248,6 +248,34 @@ func TestHeadersContainKeys_FlakyHeaderSkippedByNoise(t *testing.T) {
 	}
 }
 
+func TestHeadersContainKeys_DatadogTagsAndBaggageAreFlaky(t *testing.T) {
+	// dd-trace-rb (and other tracers) emit x-datadog-tags and W3C baggage on some
+	// outbound calls and omit them on others, non-deterministically. A JWKS fetch
+	// recorded WITH them but replayed WITHOUT must still match its mock — otherwise
+	// the app never receives the verification key and returns 401. Regression for
+	// the auto-replay 401s where the report showed both headers as
+	// `recorded "", absent in live call`.
+	h := newHTTP()
+	mockHeaders := map[string]string{
+		"Host":           "oauth2.example.com",
+		"Accept":         "application/json",
+		"X-Datadog-Tags": "_dd.p.dm=-1,_dd.p.tid=66b0f1e300000000",
+		"Baggage":        "session.id=abc123",
+	}
+	actualHeaders := http.Header{
+		"Host":   {"oauth2.example.com"},
+		"Accept": {"application/json"},
+		// X-Datadog-Tags and Baggage are absent on this replay call.
+	}
+	noise := make(map[string][]string)
+	for _, hdr := range flakyHeaders {
+		noise[hdr] = []string{}
+	}
+	if !h.HeadersContainKeys(mockHeaders, actualHeaders, noise) {
+		t.Error("expected the JWKS mock to match when x-datadog-tags / baggage are absent at replay; these are non-deterministic trace headers and must be flaky-noise")
+	}
+}
+
 func TestHeadersContainKeys_StrictMode_FlakyHeaderCausesMismatch(t *testing.T) {
 	// Same setup as above but with empty noise (simulates --disableAutoHeaderNoise).
 	// Mock has X-Amz-Security-Token but request doesn't → should fail.
