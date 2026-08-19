@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -101,6 +102,30 @@ func TestListenWithRetry_ReturnsImmediatelyOnNonAddrInUse(t *testing.T) {
 	}
 }
 
+// TestAgentBindAddr_NativeModeIsLoopbackOnly guards the fix for the
+// unauthenticated-agent-exposure report: native mode must never bind every
+// interface, since /agent/pcap/keylog, /agent/stop, and /agent/storemocks
+// have no auth and would otherwise be reachable by any local or
+// network-adjacent process.
+func TestAgentBindAddr_NativeModeIsLoopbackOnly(t *testing.T) {
+	addr := agentBindAddr(12345, false)
+	if !strings.HasPrefix(addr, "127.0.0.1:") {
+		t.Fatalf("native mode must bind loopback only, got addr %q", addr)
+	}
+}
+
+// TestAgentBindAddr_DockerModeBindsAllInterfaces documents the accepted
+// trade-off in docker mode: the container's internal listener must stay on
+// every interface for the docker proxy to forward the published port in.
+// Host-network exposure is closed at the publish step instead (see
+// GenerateKeployAgentService), not here.
+func TestAgentBindAddr_DockerModeBindsAllInterfaces(t *testing.T) {
+	addr := agentBindAddr(12345, true)
+	if strings.HasPrefix(addr, "127.0.0.1:") {
+		t.Fatalf("docker mode must stay reachable on the container's non-loopback interface, got addr %q", addr)
+	}
+}
+
 // TestStartAgentServer_ServesAfterTransientPortConflict is the end-to-end proof:
 // the agent HTTP server starts while the port is still held, and begins serving
 // once it frees — exactly the previous-session-teardown race from CI.
@@ -120,7 +145,7 @@ func TestStartAgentServer_ServesAfterTransientPortConflict(t *testing.T) {
 		_ = holder.Close()
 	}()
 
-	go StartAgentServer(ctx, zap.NewNop(), port, handler)
+	go StartAgentServer(ctx, zap.NewNop(), port, false, handler)
 
 	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
 	client := &http.Client{Timeout: 500 * time.Millisecond}
