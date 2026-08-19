@@ -68,6 +68,28 @@ const (
 	// so a lost tail is visible the way a BPF ring buffer's lost-sample
 	// count is.
 	DropConsumerGone = "consumer_gone"
+
+	// DropDesynced — the tee had already desynced permanently (see
+	// [isDesyncingDrop]) and the parser on the other end cannot re-anchor
+	// its framer after a hole, so there is nothing left worth delivering.
+	//
+	// This is a CONSEQUENCE reason, not a cause: the loss that mattered was
+	// reported once as [DropPerConnCap] or [DropMemoryPressure], and
+	// [tee.onDesync] already fired for it. Everything after that would be
+	// framed from the wrong offset — a length header read out of the middle
+	// of a body — which yields no mocks and, in the postgres case that
+	// motivated this, an attempted multi-gigabyte allocation from four bytes
+	// of misread row data. So the chunk is refused instead of admitted.
+	//
+	// Deliberately NOT part of [isDesyncingDrop]: treating it as a desync
+	// would re-enter the very branch that produced it. The desync latch is
+	// one-shot so onDesync could not double-fire, but excluding it keeps the
+	// predicate honest — this reason reports a connection that is ALREADY
+	// desynced, it never establishes one.
+	//
+	// The forward path is untouched. A chunk refused here has already been
+	// written to the real peer; only capture stops.
+	DropDesynced = "desynced"
 )
 
 // tee is the accounting buffer between the forwarder goroutines and the
@@ -121,7 +143,22 @@ type tee struct {
 	// mock-less for replay to fail on.
 	onDesync func(reason string)
 	// desynced makes onDesync and its log fire once, not once per chunk.
+	// It is also the latch push consults for [DropDesynced]: it is set for
+	// good on the first desyncing drop and never cleared, which is exactly
+	// right — the stream position is lost permanently, so there is no event
+	// that could legitimately clear it.
 	desynced atomic.Bool
+
+	// parserCanResync records whether the parser consuming this tee can
+	// re-anchor its framer after a hole (integrations.GapResyncCapable).
+	// Set by [New] from [Config.ParserCanResyncAfterGap]; the zero value is
+	// the SAFE one — "cannot resync" — so a tee built without the answer
+	// stops feeding rather than feeding garbage.
+	//
+	// Read-only after construction, so a plain bool rather than an atomic:
+	// [New] sets it before the forwarder goroutines that call push exist,
+	// and the relay never changes it mid-connection.
+	parserCanResync bool
 
 	// mu guards q, qBytes and closed. It is never held across a send on
 	// out, so a stalled consumer cannot block push.
@@ -232,6 +269,12 @@ func (t *tee) setPaused(p bool) { t.paused.Store(p) }
 // the forwarder — it can only fill the queue until the per-connection cap
 // refuses further chunks.
 //
+// push also refuses a chunk once the tee has DESYNCED permanently and the
+// parser cannot re-anchor after a hole — reason [DropDesynced]. This changes
+// only what is captured: the forwarder has already written the payload to
+// the real peer by the time it calls push, so the application sees the same
+// bytes at the same time either way.
+//
 // Once the tee has been closed push silently returns false without
 // invoking onDrop: the mock is already abandoned at that point, so
 // additional "drop" notifications would just add noise. The same applies
@@ -247,6 +290,23 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 	}
 	if t.paused.Load() {
 		t.drop(DropPaused)
+		return false
+	}
+	// Permanently desynced AND the parser has no way back. Refuse.
+	//
+	// Ordered AFTER the pause check so a paused tee keeps reporting
+	// DropPaused exactly as before — a pause is requested, and the
+	// SessionOnAbort path depends on that cheap reason — and BEFORE the
+	// memory and cap checks so the remainder of a dead connection is
+	// attributed to the desync that killed it instead of re-reporting
+	// per_conn_cap / memory_pressure for every later chunk.
+	//
+	// The check is per DIRECTION, because a tee is: a hole in C2D corrupts
+	// only the request framer, and the response direction of the same
+	// connection may still be framing perfectly. Gating both on either
+	// would throw away capture that is still good.
+	if !t.parserCanResync && t.desynced.Load() {
+		t.drop(DropDesynced)
 		return false
 	}
 	if t.memCheck != nil && t.memCheck() {
@@ -296,6 +356,8 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 // need", not "was a mock affected". [DropPerConnCap] and
 // [DropMemoryPressure] are both unilateral: the parser is mid-stream and
 // simply never receives those bytes. [DropPaused] is not — see the caller.
+// Nor is [DropDesynced]: that one is emitted BECAUSE the tee is already
+// desynced, so counting it here would make the predicate self-feeding.
 func isDesyncingDrop(reason string) bool {
 	return reason == DropPerConnCap || reason == DropMemoryPressure
 }

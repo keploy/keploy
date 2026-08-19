@@ -177,6 +177,12 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	r.teeC2D.onDesync = cfg.OnCaptureDesync
 	r.teeD2C.onDesync = cfg.OnCaptureDesync
 
+	// Whether a desynced tee keeps feeding its parser. Assigned here, before
+	// Run spawns any forwarder, so push can read it without synchronisation.
+	// See [Config.ParserCanResyncAfterGap] for why the default is "cannot".
+	r.teeC2D.parserCanResync = cfg.ParserCanResyncAfterGap
+	r.teeD2C.parserCanResync = cfg.ParserCanResyncAfterGap
+
 	var localAddr, remoteAddr net.Addr
 	if src != nil {
 		localAddr = src.LocalAddr()
