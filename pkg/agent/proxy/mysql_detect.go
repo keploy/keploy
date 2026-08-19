@@ -314,6 +314,13 @@ func (r *mysqlPortRegistry) IsInferred(dstAddr string) bool {
 // its original close-once semantics.
 //
 // Ports learned by probing a live server during a record session are never
+// dropped: those are facts about a real server, not about a recording.
+func (r *mysqlPortRegistry) MarkSessionStale() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sessionStale = true
+}
+
 // MockPorts returns the ports that came from a recording, as opposed to ones
 // learned by probing during a record session.
 func (r *mysqlPortRegistry) MockPorts() []uint32 {
@@ -341,13 +348,7 @@ func (r *mysqlPortRegistry) Ports() []uint32 {
 // destAddr metadata and marks derivation complete, releasing any
 // replay connections parked in WaitDerived. It is safe to call
 // repeatedly (once per test-set); later calls union additional ports
-// and are no-ops for the completion signal.// dropped: those are facts about a real server, not about a recording.
-func (r *mysqlPortRegistry) MarkSessionStale() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sessionStale = true
-}
-
+// and are no-ops for the completion signal.
 func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32 {
 	var added []uint32
 
