@@ -17,7 +17,6 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
-	ossproxy "go.keploy.io/server/v3/pkg/agent/proxy"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -528,12 +527,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		return
 	}
 	defer func() {
-		// Ingress proxy: upConn is the app-facing socket (keploy → app on the
-		// redirected port). Record its TCP_INFO byte totals (true wire volume) into
-		// the usage-metering footprint before closing, so the app's inbound serving
-		// traffic is metered too — the counterpart of the outgoing proxy's srcConn
-		// accounting. No-op unless a sink was installed.
-		ossproxy.RecordConnNetworkIO(upConn)
 		_ = upConn.Close()
 	}()
 
@@ -1123,12 +1116,6 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// happened mid-iteration).
 	defer func() {
 		if h := upConnHolder.Load(); h != nil {
-			// Record kernel network I/O off the upstream socket BEFORE closing it.
-			// This is the real teardown for the zero-copy path: the caller's outer
-			// defer (handleHttp1Connection) runs after this and would only ever see
-			// an already-closed conn, so the accounting has to happen here. No-op
-			// unless a sink was installed.
-			ossproxy.RecordConnNetworkIO(h.c)
 			_ = h.c.Close()
 		}
 	}()
@@ -1151,9 +1138,6 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// shutdown sees a consistent view (either the old conn or the
 		// new one — never a torn pointer).
 		if h := upConnHolder.Load(); h != nil {
-			// Capture this upstream conn's byte totals before retiring it for a
-			// fresh one, so a mid-connection redial doesn't drop them.
-			ossproxy.RecordConnNetworkIO(h.c)
 			_ = h.c.Close()
 		}
 		// DialContext (instead of DialTimeout) so an in-flight dial
