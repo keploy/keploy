@@ -1111,3 +1111,120 @@ func TestDirectiveUpgradeTLS_PreDispatch_FlushesC2DStashBeforePreambleRead(t *te
 		t.Fatalf("no UpgradeTLS ack — handler hung (likely a regression: C2D stash not flushed before preamble read)")
 	}
 }
+
+// waitForCond polls cond until it holds or the budget expires. Used where the
+// observable effect is produced by the forwarder goroutine, so there is no
+// synchronisation point the test can join on.
+func waitForCond(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// TestDesyncedRelayKeepsForwardingButStopsCapturing is the invariant that makes
+// the whole gate safe to ship: cutting a desynced parser's feed changes what is
+// CAPTURED and nothing else. The application's bytes still cross the proxy,
+// unchanged and in order, after capture has stopped.
+//
+// That holds by construction — the forwarder writes the payload to the real
+// peer BEFORE it ever offers the chunk to a tee, so push's verdict cannot
+// reach the wire — but "by construction" is exactly the kind of claim that
+// quietly stops being true, so it is pinned end to end through real sockets.
+func TestDesyncedRelayKeepsForwardingButStopsCapturing(t *testing.T) {
+	t.Parallel()
+	drops := newDropSink()
+
+	h := newHarness(t, Config{
+		// Small enough that the first client write blows straight through it.
+		PerConnCap:           4,
+		TeeChanBuf:           64,
+		OnMarkMockIncomplete: drops.record,
+		// ParserCanResyncAfterGap left false: the default, and what every
+		// parser but mongo/v2 gets.
+	})
+
+	// Round 1 — the loss. Oversized for the cap, so the tee drops it and
+	// latches the desync. The destination must still receive every byte.
+	first := []byte("0123456789")
+	go h.writeClient(first)
+	if got := h.readDest(len(first)); string(got) != string(first) {
+		t.Fatalf("dest got %q, want %q: a tee drop must never touch the forward path",
+			got, first)
+	}
+	waitForCond(t, "the c2d tee to latch its desync", h.r.teeC2D.desynced.Load)
+	if drops.count(DropPerConnCap) == 0 {
+		t.Fatalf("expected a %s drop, got %v", DropPerConnCap, drops.snapshot())
+	}
+
+	// Round 2 — after the desync. Two bytes fit the 4-byte cap with room to
+	// spare and the queue is empty, so the ONLY thing that can refuse this
+	// chunk is the desync gate.
+	second := []byte("ok")
+	go h.writeClient(second)
+	if got := h.readDest(len(second)); string(got) != string(second) {
+		t.Fatalf("dest got %q, want %q: the application must keep seeing its own "+
+			"traffic long after keploy has given up recording the connection", got, second)
+	}
+	waitForCond(t, "the post-desync chunk to be refused", func() bool {
+		return drops.count(DropDesynced) > 0
+	})
+
+	// And the parser was fed nothing at all — not the lost chunk (it never
+	// had it) and not the one after it (it could only mis-frame it).
+	_ = h.r.ClientStream().SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if c, err := h.r.ClientStream().ReadChunk(); err == nil {
+		t.Fatalf("ClientStream delivered %q after the connection desynced; the parser "+
+			"would frame it from the wrong offset, read a length prefix out of the middle "+
+			"of a body, and emit nothing but garbage", c.Bytes)
+	}
+}
+
+// TestDesyncedRelayKeepsFeedingAResyncCapableParser is the other half, and the
+// reason the gate is a capability rather than a blanket stop.
+//
+// mongo/v2 recovers from a hole by content-scanning the bytes that arrive
+// AFTER it for a chain-validated message header. Those bytes are the only
+// evidence it has. Cutting its feed at the desync would leave it resyncing
+// forever on a pooled connection — a regression of the fix that the resync
+// machinery is.
+func TestDesyncedRelayKeepsFeedingAResyncCapableParser(t *testing.T) {
+	t.Parallel()
+	drops := newDropSink()
+
+	h := newHarness(t, Config{
+		PerConnCap:              4,
+		TeeChanBuf:              64,
+		OnMarkMockIncomplete:    drops.record,
+		ParserCanResyncAfterGap: true,
+	})
+
+	first := []byte("0123456789")
+	go h.writeClient(first)
+	_ = h.readDest(len(first))
+	waitForCond(t, "the c2d tee to latch its desync", h.r.teeC2D.desynced.Load)
+
+	second := []byte("ok")
+	go h.writeClient(second)
+	_ = h.readDest(len(second))
+
+	_ = h.r.ClientStream().SetReadDeadline(time.Now().Add(2 * time.Second))
+	c, err := h.r.ClientStream().ReadChunk()
+	if err != nil {
+		t.Fatalf("ReadChunk after desync: %v — a resync-capable parser must keep "+
+			"receiving, because the post-hole bytes are the only thing it can re-anchor on",
+			err)
+	}
+	if string(c.Bytes) != string(second) {
+		t.Fatalf("parser got %q, want %q", c.Bytes, second)
+	}
+	if got := drops.count(DropDesynced); got != 0 {
+		t.Fatalf("%s drops = %d, want 0 for a resync-capable parser; reasons=%v",
+			DropDesynced, got, drops.snapshot())
+	}
+}

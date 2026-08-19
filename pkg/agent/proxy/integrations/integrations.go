@@ -64,6 +64,48 @@ type IntegrationsV2 interface {
 	IsV2() bool
 }
 
+// GapResyncCapable is the optional capability interface implemented by
+// parsers that can recover a byte stream after a HOLE in capture — bytes
+// the proxy observed on the wire, forwarded to the real peer, but never
+// delivered to the parser.
+//
+// Optional by design, in the same style as agent.WindowedProxy (pkg/agent/service.go): the
+// relay type-asserts for it and falls back to the conservative answer when
+// the assertion fails, so no existing parser breaks and third-party parsers
+// keep compiling.
+//
+// # Why the relay needs to ask
+//
+// Every V2 parser frames a length-prefixed byte stream (mongo, mysql,
+// postgres all read a header, then that many bytes). A hole therefore does
+// not cost one message: the next header is read from the middle of a body,
+// so every subsequent frame on the connection is garbage. That garbage is
+// not inert — a Postgres framer once read four bytes of misread row data as
+// a uint32 length and tried to allocate multiple gigabytes. So once the tee
+// has permanently desynced, continuing to feed the parser produces no mocks
+// and can produce a pathological allocation.
+//
+// Returning true asserts that the parser DETECTS the hole (the relay stamps
+// a monotonic fakeconn.Chunk.SeqNo per direction, and a dropped chunk
+// still consumes its ordinal, so a gap is visible as a SeqNo discontinuity)
+// and re-anchors on a real message boundary before framing resumes. mongo/v2
+// is the in-tree example: resyncReassemblyOnGap → beginResync →
+// resyncToNextHeader. Such a parser MUST keep receiving bytes after the
+// hole — that is the only way it can find the next boundary — so the relay
+// keeps feeding it.
+//
+// Returning false, or not implementing this at all, means the parser has no
+// recovery path. The relay then stops feeding that direction once it has
+// desynced. Forwarding to the real peer is unaffected either way: this
+// changes only what is CAPTURED, never what the application sees.
+type GapResyncCapable interface {
+	// CanResyncAfterGap reports whether this parser re-anchors its framer
+	// after a hole in the delivered byte stream. It is consulted once per
+	// connection, before the relay starts, so it must not depend on
+	// per-connection state.
+	CanResyncAfterGap() bool
+}
+
 func Register(name IntegrationType, p *Parsers) {
 	Registered[name] = p
 }

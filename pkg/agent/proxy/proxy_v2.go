@@ -227,6 +227,9 @@ func (p *Proxy) recordViaSupervisor(
 		preDispatchPause = pp.WantsPreDispatchPause()
 	}
 
+	// Opt-in gap resync. See [parserCanResyncAfterGap].
+	canResyncAfterGap := parserCanResyncAfterGap(parser)
+
 	// RealCertHook wires the V2-relay upstream-TLS chokepoint into
 	// the cbshim. The post-handshake upgradeDstConn carries the real
 	// upstream cert; we publish (connID = source-port-as-string,
@@ -311,6 +314,10 @@ func (p *Proxy) recordViaSupervisor(
 		TeeChanBuf:         p.recordBufferQueueSize,
 		ConsumerStallGrace: p.recordBufferStallGrace,
 		PreDispatchPause:   preDispatchPause,
+		// Default false — see relay.Config.ParserCanResyncAfterGap for why
+		// "cannot resync" is the safe default for everything that has not
+		// explicitly claimed otherwise.
+		ParserCanResyncAfterGap: canResyncAfterGap,
 	}, srcConn, dstConn)
 
 	svSess.ClientStream = r.ClientStream()
@@ -689,4 +696,36 @@ func (p *Proxy) waitForConnDrain(ctx context.Context) {
 		p.logger.Debug("shutdown drain grace expired; remaining connections will exit via ctx cancellation")
 		return
 	}
+}
+
+// parserCanResyncAfterGap reports whether parser can re-anchor its framer
+// after a HOLE in capture — bytes the proxy observed and forwarded but never
+// delivered to the parser, because a tee dropped them.
+//
+// The relay uses the answer to decide whether to keep feeding a tee that has
+// already desynced permanently. For a parser that cannot recover, feeding it
+// is worse than useless: every subsequent length prefix is read out of the
+// middle of a body, so the connection produces no further mocks, and a
+// postgres framer that read four bytes of misread row data as a uint32 length
+// once tried to allocate multiple gigabytes. For a parser that CAN recover it
+// is mandatory — mongo/v2 finds the next message boundary by content-scanning
+// the bytes that arrive after the hole, so cutting its feed would strand it
+// desynced for the life of a pooled connection.
+//
+// Absent the capability the answer is FALSE. A parser that has never heard of
+// this mechanism is precisely the one least likely to have a resync path, so
+// omission must not be an opt-in.
+//
+// The parser is already chosen by the time recordViaSupervisor builds the
+// relay, so the answer rides in through relay.Config exactly like
+// WantsPreDispatchPause — no post-construction setter is needed, and none is
+// offered: relay's tees read the flag from their forwarder goroutines without
+// synchronisation precisely because it is fixed before Run starts them.
+//
+// Asserted against the named [integrations.GapResyncCapable] rather than an
+// anonymous interface so the contract has one documented home; the assertion
+// still keeps non-implementers compiling.
+func parserCanResyncAfterGap(parser integrations.Integrations) bool {
+	gr, ok := parser.(integrations.GapResyncCapable)
+	return ok && gr.CanResyncAfterGap()
 }
