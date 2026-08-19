@@ -3137,6 +3137,26 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
+	// Forget the previous recording's MySQL ports before this test set derives
+	// its own. The agent is a single long-lived process and this registry is
+	// allocated once, so without the reset the derived port set — and the
+	// endpoint-drift inference it arms — would mean "any recording this process
+	// has ever replayed" rather than "the recording being replayed now": a test
+	// set holding MySQL mocks would arm the inference for a later one holding
+	// none, and a silent connection there would be routed to a replayer with
+	// nothing to serve.
+	//
+	// Mock() is the hook because it is what the replayer reaches once per test
+	// set (Agent.MockOutgoing → here), and it runs before that set's first
+	// UpdateMockParams → SetMocksWithWindow delivers any mocks. SetMocks is NOT
+	// a candidate despite appearances: it is only the fallback arm for a
+	// third-party proxy that does not implement WindowedProxy, and this proxy
+	// does, so a stock agent never calls it. SetMocksWithWindow is not one
+	// either — it arrives repeatedly with a per-test SUBSET.
+	//
+	// This only marks; the swap happens when the replacement mocks arrive, so
+	// the boundary leaves no window in which known ports are forgotten.
+	p.mysqlPorts.MarkSessionStale()
 	// Mock is replay; no pcap capture during replay. Tear down any
 	// capture left over from a previous record session.
 	p.stopPacketCapture()
@@ -3218,22 +3238,6 @@ func (p *Proxy) LoadAsyncMocks(mocks []*models.Mock) {
 }
 
 func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	// Forget the previous recording's MySQL ports before deriving this one's.
-	// The agent is a single long-lived process and this registry is allocated
-	// once, so without the reset the port set — and the endpoint-drift
-	// inference it arms — would mean "any recording this process has ever
-	// replayed" rather than "the recording being replayed now": a test set
-	// holding MySQL mocks would arm the inference for a later one holding
-	// none, and a silent connection there would be routed to a replayer with
-	// nothing to serve.
-	//
-	// This is the right hook rather than Mock(): RunTestSet has one branch that
-	// calls StoreMocks (→ here) BEFORE MockOutgoing (→ Mock), so resetting
-	// there would discard the ports this very test set had just derived. It is
-	// also not SetMocksWithWindow, which arrives repeatedly with a per-test
-	// SUBSET — resetting on those would drop ports mid-run.
-	p.mysqlPorts.ResetSession()
-
 	// Replay cannot detect MySQL from content — no upstream exists to
 	// send a handshake — so the port set is recovered here, from the
 	// destAddr every MySQL mock records. Must happen before the mocks
