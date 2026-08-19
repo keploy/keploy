@@ -20,8 +20,8 @@ import (
 type Response struct {
 	Code    int
 	Message string
-	Types   map[string]map[string]interface{}
-	Body    map[string]interface{}
+	Schema  models.Schema
+	Body    interface{}
 }
 
 // ExtractVariableTypes returns the type of each variable in the object.
@@ -83,16 +83,49 @@ func ExtractVariableTypes(obj map[string]interface{}) map[string]map[string]inte
 	return types
 }
 
+// SchemaForBody builds an OpenAPI schema for a decoded JSON body whose root
+// may be either an object or an array. For an object root it returns a
+// {type: object, properties: ...} schema (properties precomputed by the
+// caller via ExtractVariableTypes). For an array root it returns a
+// {type: array, items: ...} schema, inferring the item schema from the first
+// element. Any other root (or an empty body) falls back to an object schema so
+// existing behaviour is preserved.
+func SchemaForBody(body interface{}, objectProps map[string]map[string]interface{}) models.Schema {
+	arr, ok := body.([]interface{})
+	if !ok {
+		// Object root (or nil/empty body): keep the original object schema.
+		return models.Schema{Type: "object", Properties: objectProps}
+	}
+
+	items := &models.Schema{Type: "string"} // default for an empty array
+	if len(arr) > 0 {
+		switch first := arr[0].(type) {
+		case map[string]interface{}:
+			items = &models.Schema{
+				Type:       "object",
+				Properties: ExtractVariableTypes(first),
+			}
+		case []interface{}:
+			nested := SchemaForBody(first, nil)
+			items = &nested
+		case float64:
+			items = &models.Schema{Type: "number"}
+		case bool:
+			items = &models.Schema{Type: "boolean"}
+		case string:
+			items = &models.Schema{Type: "string"}
+		}
+	}
+	return models.Schema{Type: "array", Items: items}
+}
+
 func GenerateResponse(response Response) map[string]models.ResponseItem {
 	byCode := map[string]models.ResponseItem{
 		fmt.Sprintf("%d", response.Code): {
 			Description: response.Message,
 			Content: map[string]models.MediaType{
 				"application/json": {
-					Schema: models.Schema{
-						Type:       "object",
-						Properties: response.Types,
-					},
+					Schema:  response.Schema,
 					Example: (response.Body),
 				},
 			},
