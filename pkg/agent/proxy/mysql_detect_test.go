@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
 	"go.keploy.io/server/v3/pkg/models"
@@ -33,6 +34,16 @@ func testProxy(t *testing.T) *Proxy {
 	return &Proxy{
 		logger:     zap.NewNop(),
 		mysqlPorts: newMysqlPortRegistry(),
+		// Built the way proxy.New does, so tests can drive SetMocksWithWindow —
+		// the call a stock agent actually makes to publish a test set's mocks.
+		dnsCache: newDNSCache(),
+		// Preseeded so Mock() skips setupNsswitchConfig, which rewrites
+		// /etc/nsswitch.conf and only restores it on proxy shutdown — a unit
+		// test never shuts the proxy down, so as root this would permanently
+		// replace the host's DNS configuration, and as non-root it would fail
+		// the write and abort Mock() early. Either way the test's verdict would
+		// depend on privileges rather than on the code under test.
+		nsswitchData: []byte("preseeded-by-test"),
 		Integrations: map[integrations.IntegrationType]integrations.Integrations{
 			integrations.MYSQL: mysql.New(zap.NewNop()),
 		},
@@ -862,6 +873,13 @@ func TestProbeUnblocksOnContextCancel(t *testing.T) {
 // replayed": a test set holding MySQL mocks would arm the inference for a later
 // test set holding none, and a silent connection there would be routed to a
 // replayer with nothing to serve.
+//
+// Session 2 publishes its mocks through SetMocksWithWindow because that is the
+// call a stock agent makes — Agent.UpdateMockParams takes the WindowedProxy arm
+// and *Proxy implements it, so the SetMocks arm exists only for a third-party
+// proxy that does not. An earlier version of this test drove SetMocks and was
+// green while the production path leaked; TestProxyTakesTheWindowedMocksPath
+// below keeps that mistake from being made again.
 func TestDriftGateIsScopedToTheCurrentRecording(t *testing.T) {
 	shortWindows(t)
 	p := testProxy(t)
@@ -874,14 +892,23 @@ func TestDriftGateIsScopedToTheCurrentRecording(t *testing.T) {
 		t.Fatalf("session 1 should have derived one port, got %v", p.mysqlPorts.MockPorts())
 	}
 
-	// Session 2: a different app, whose recording contains no MySQL at all.
-	// Driving this through SetMocks rather than calling ResetSession() directly
-	// is the point — it pins that the reset is wired into the call the replayer
-	// actually makes for each test set.
-	if err := p.SetMocks(context.Background(),
+	// Session 2 begins. Going through Mock() rather than calling the registry
+	// directly is the point: it pins that the per-test-set entry point the
+	// replayer actually reaches is the one wired up.
+	if err := p.Mock(context.Background(), models.OutgoingOptions{}); err != nil {
+		t.Fatalf("Mock: %v", err)
+	}
+	// The previous recording's ports are still usable here, on purpose: the
+	// swap waits for the replacement so a pool reconnecting during the gap
+	// between Mock() and the first mock delivery keeps its fast path.
+	if got := p.mysqlPorts.MockPorts(); len(got) != 1 {
+		t.Fatalf("ports were dropped before the replacement arrived, leaving a blind window: %v", got)
+	}
+	// Now session 2's recording arrives, and it contains no MySQL at all.
+	if err := p.SetMocksWithWindow(context.Background(),
 		[]*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:8080"}}}},
-		nil); err != nil {
-		t.Fatalf("SetMocks: %v", err)
+		nil, time.Time{}, time.Time{}); err != nil {
+		t.Fatalf("SetMocksWithWindow: %v", err)
 	}
 	if got := p.mysqlPorts.MockPorts(); len(got) != 0 {
 		t.Fatalf("session 1's mock-derived ports survived into session 2: %v", got)
@@ -895,6 +922,19 @@ func TestDriftGateIsScopedToTheCurrentRecording(t *testing.T) {
 	}
 	if probe.IsMySQL {
 		t.Fatalf("IsMySQL=true reason=%q: this recording has no MySQL mocks to serve", probe.Reason)
+	}
+}
+
+// The reset above is only worth anything on the code path a real agent takes.
+// Agent.UpdateMockParams publishes mocks through SetMocksWithWindow when the
+// proxy implements WindowedProxy and through SetMocks when it does not, so if
+// this proxy ever stopped implementing it, every per-test-set guarantee in this
+// file would quietly move to a branch nothing exercises.
+func TestProxyTakesTheWindowedMocksPath(t *testing.T) {
+	var p interface{} = &Proxy{}
+	if _, ok := p.(agent.WindowedProxy); !ok {
+		t.Fatal("*Proxy no longer implements WindowedProxy: a stock agent would fall back to SetMocks, " +
+			"and any per-test-set reset wired into Mock() would need revisiting")
 	}
 }
 
@@ -962,5 +1002,62 @@ func TestReadWithinLeavesNoDeadlineBehind(t *testing.T) {
 		}
 		_ = srcConn.Close()
 		_ = client.Close()
+	}
+}
+
+// The session swap has to clear the inferred endpoints too, not just the ports.
+// An inference is evidence about the previous recording's environment; carrying
+// it into the next test set would let one connection's guess shorten the
+// confirmation for an endpoint the new recording never mentioned.
+func TestSessionSwapClearsInferredEndpoints(t *testing.T) {
+	shortWindows(t)
+	p := testProxy(t)
+	p.deriveMysqlPorts([]*models.Mock{
+		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
+	})
+
+	_, silent := clientPair(t)
+	if probe, err := p.probeMysql(context.Background(), silent, "172.20.0.2:283", 283,
+		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop()); err != nil || !probe.IsMySQL {
+		t.Fatalf("setup probe: err=%v IsMySQL=%v", err, probe.IsMySQL)
+	}
+	if !p.mysqlPorts.IsInferred("172.20.0.2:283") {
+		t.Fatal("setup: endpoint should have been recorded as inferred")
+	}
+
+	p.mysqlPorts.MarkSessionStale()
+	p.deriveMysqlPorts([]*models.Mock{
+		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
+	})
+	if p.mysqlPorts.IsInferred("172.20.0.2:283") {
+		t.Error("an inference from the previous recording survived the session swap")
+	}
+}
+
+// Deferring the swap to derive time is what keeps derivedCh close-once. If a
+// future change re-armed it at the boundary instead, a connection already
+// parked in WaitDerived would be left on the orphaned channel: the derive
+// closes the replacement, the waiter sleeps out the whole deadline and is then
+// told the mocks never arrived — the connection gets no MySQL and the test
+// reports status_code 0, which is the failure this mechanism exists to prevent.
+func TestSessionSwapDoesNotStrandDerivedWaiters(t *testing.T) {
+	p := testProxy(t)
+
+	parked := make(chan bool, 1)
+	go func() { parked <- p.mysqlPorts.WaitDerived(context.Background(), 5*time.Second) }()
+	time.Sleep(50 * time.Millisecond) // let it park on the current channel
+
+	p.mysqlPorts.MarkSessionStale()
+	p.deriveMysqlPorts([]*models.Mock{
+		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
+	})
+
+	select {
+	case ok := <-parked:
+		if !ok {
+			t.Fatal("waiter woke reporting the mocks never derived")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter stranded across the session boundary: it is still parked on a channel nothing will close")
 	}
 }

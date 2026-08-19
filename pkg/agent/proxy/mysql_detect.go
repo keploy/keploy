@@ -188,7 +188,11 @@ type mysqlPortRegistry struct {
 	// mocks at all, and the connection would be routed to a replayer with
 	// nothing to serve.
 	fromMocks map[uint32]struct{}
-	derived   bool
+	// sessionStale is set when a new replay session begins and consumed by the
+	// next DeriveFromMocks. See MarkSessionStale for why the swap is deferred
+	// to derive time rather than done eagerly.
+	sessionStale bool
+	derived      bool
 	// derivedCh is closed the first time DeriveFromMocks runs, so a
 	// replay connection that arrives before mocks are stored can block
 	// on it instead of guessing. Never closed twice (guarded by mu +
@@ -279,31 +283,37 @@ func (r *mysqlPortRegistry) IsInferred(dstAddr string) bool {
 	return ok
 }
 
-// ResetSession forgets everything learned from a recording: the ports derived
-// from mocks and the endpoints inferred while serving them. The agent is one
-// long-lived process and this registry is allocated once, so without this the
-// gate on the drift inference would mean "any recording this process has ever
-// replayed" rather than "the recording being replayed now" — a test set holding
-// MySQL mocks would arm the inference for a later one that holds none, and a
-// silent connection there would be routed to a replayer with nothing to serve.
+// MarkSessionStale says that the recording in force is about to be replaced, so
+// the next set of mocks should supersede rather than accumulate. The agent is a
+// single long-lived process and this registry is allocated once, so without it
+// the gate on the drift inference would mean "any recording this process has
+// ever replayed" rather than "the recording being replayed now" — a test set
+// holding MySQL mocks would arm the inference for a later one that holds none,
+// and a silent connection there would be routed to a replayer with nothing to
+// serve.
 //
-// Ports learned by probing a live server during a record session are kept:
-// those are facts about a real server, not about a recording.
-func (r *mysqlPortRegistry) ResetSession() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for port := range r.fromMocks {
-		delete(r.ports, port)
-	}
-	r.fromMocks = make(map[uint32]struct{})
-	r.inferred = make(map[string]struct{})
-	// Re-arm the derivation gate so a connection arriving before this
-	// session's mocks are stored parks instead of being decided against the
-	// previous session's port set.
-	r.derived = false
-	r.derivedCh = make(chan struct{})
-}
-
+// It only marks. The actual swap happens in DeriveFromMocks, when the
+// replacement is in hand, and that ordering is the whole point:
+//
+//   - Clearing here instead would blind the registry for the entire gap between
+//     Mock() and this test set's first mock delivery — which spans reading the
+//     whole recorded corpus off disk and shipping it to the agent. A connection
+//     opened in that gap loses the known-port fast path and parks in
+//     WaitDerived. That gap is real traffic: a reused compose stack or
+//     --keep-app-alive holds the application and its connection pool open
+//     across test-set boundaries, and a pool reconnecting there would stall.
+//   - Clearing here would also have to re-arm derivedCh, and replacing that
+//     channel strands anyone already parked on the old one: DeriveFromMocks
+//     closes the NEW channel, so the old waiter sleeps out the full derive
+//     deadline and is then told the mocks never arrived — which is precisely
+//     the "connection gets no MySQL and the test reports status_code 0"
+//     failure this whole mechanism exists to prevent.
+//
+// Swapping at derive time avoids both: the previous recording's ports stay
+// usable right up to the instant the new ones replace them, and derivedCh keeps
+// its original close-once semantics.
+//
+// Ports learned by probing a live server during a record session are never
 // MockPorts returns the ports that came from a recording, as opposed to ones
 // learned by probing during a record session.
 func (r *mysqlPortRegistry) MockPorts() []uint32 {
@@ -331,11 +341,27 @@ func (r *mysqlPortRegistry) Ports() []uint32 {
 // destAddr metadata and marks derivation complete, releasing any
 // replay connections parked in WaitDerived. It is safe to call
 // repeatedly (once per test-set); later calls union additional ports
-// and are no-ops for the completion signal.
+// and are no-ops for the completion signal.// dropped: those are facts about a real server, not about a recording.
+func (r *mysqlPortRegistry) MarkSessionStale() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sessionStale = true
+}
+
 func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32 {
 	var added []uint32
 
 	r.mu.Lock()
+	// Consume the stale mark: this delivery is the replacement, so drop what the
+	// previous recording taught us before unioning in what this one does.
+	if r.sessionStale {
+		for port := range r.fromMocks {
+			delete(r.ports, port)
+		}
+		r.fromMocks = make(map[uint32]struct{})
+		r.inferred = make(map[string]struct{})
+		r.sessionStale = false
+	}
 	for _, mocks := range mockSets {
 		for _, m := range mocks {
 			if m == nil || m.Kind != models.MySQL {
