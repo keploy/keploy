@@ -386,6 +386,13 @@ func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 		// Cobra caught SIGINT (Ctrl+C) and cancelled its root context
 		return false, nil
 	case err := <-errCh:
+		// A closed / non-TTY stdin (io.EOF) is not a failure: there is simply
+		// nobody to answer. Decline, exactly as the ctx.Done() branch above
+		// does for Ctrl+C, so non-interactive callers get the safe default
+		// instead of a hard error.
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
 		return false, err
 	case response := <-respCh:
 		response = strings.ToLower(strings.TrimSpace(response))
