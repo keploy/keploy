@@ -84,6 +84,12 @@ type Hooks struct {
 
 	BindEvents *ebpf.Map
 	sockops    link.Link
+
+	// App network-I/O counter links (fexit/tcp_sendmsg, fexit/tcp_recvmsg,
+	// tp_btf/cgroup_rmdir). Best-effort; nil when the kernel can't load them.
+	netioSend  link.Link
+	netioRecv  link.Link
+	netioRmdir link.Link
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -128,6 +134,10 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
 			LogSizeStart: 1 * 1024 * 1024,
 		},
+		// keploy_netio_bytes is LIBBPF_PIN_BY_NAME → auto-pins under this dir so the
+		// userspace netio drain (pkg/agent/proxy) opens it by path. Only that map
+		// carries the pin directive; the others are unaffected.
+		Maps: ebpf.MapOptions{PinPath: bpffsRoot},
 	}
 
 	spec, err := loadBpf()
@@ -151,15 +161,36 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		}
 	}
 
+	// Keep only the tcp_recvmsg fexit wrapper whose arg count matches this kernel
+	// (the other is stubbed) so LoadAndAssign accepts the netio spec.
+	netioRecvName := selectNetioRecvmsgVariant(spec, h.logger)
+
 	// Now load and assign into the kernel with the corrected spec
 	if err := spec.LoadAndAssign(&objs, bpfopts); err != nil {
-		var ve *ebpf.VerifierError
-		if errors.As(err, &ve) {
-			fmt.Printf("VERIFIER FAILURE:\n%s\n", strings.Join(ve.Log, "\n"))
-		} else {
-			fmt.Printf("SYSCALL FAILURE: %v\n", err)
+		// The app network-I/O counter uses fentry/fexit + tp_btf, which need kernel
+		// BTF (>= 5.5). If the load fails, disable it (stub its programs) and retry
+		// so the core agent still loads — the userspace TCP_INFO path stays the
+		// fallback. A non-netio failure falls through to the original error handling.
+		h.logger.Warn("BPF load failed; retrying with the app network-I/O counter disabled", zap.Error(err))
+		for _, n := range []string{"keploy_netio_tcp_sendmsg", "keploy_netio_tcp_recvmsg", "keploy_netio_tcp_recvmsg_v6", "keploy_netio_cgroup_rmdir"} {
+			stubProgram(spec, n)
 		}
-		return err
+		netioRecvName = ""
+		objs = bpfObjects{}
+		if err := spec.LoadAndAssign(&objs, bpfopts); err != nil {
+			var ve *ebpf.VerifierError
+			if errors.As(err, &ve) {
+				fmt.Printf("VERIFIER FAILURE:\n%s\n", strings.Join(ve.Log, "\n"))
+			} else {
+				fmt.Printf("SYSCALL FAILURE: %v\n", err)
+			}
+			return err
+		}
+	}
+
+	// Attach the app network-I/O counter (best-effort; nil links when unavailable).
+	if netioRecvName != "" {
+		h.attachNetio(&objs, netioRecvName, h.logger)
 	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
@@ -502,6 +533,13 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.socket != nil {
 		if err := h.socket.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the tracepoint hook on sys_socket")
+		}
+	}
+
+	// App network-I/O counter links (best-effort; nil when the kernel couldn't load them).
+	for _, l := range []link.Link{h.netioSend, h.netioRecv, h.netioRmdir} {
+		if l != nil {
+			_ = l.Close()
 		}
 	}
 

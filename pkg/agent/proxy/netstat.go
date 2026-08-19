@@ -57,6 +57,12 @@ func SetNetworkIOSink(sink func(rx, tx uint64)) {
 //   - Bytes_acked    = bytes keploy SENT (and were acked) = keploy → app = the
 //     app's INGRESS. → rx
 func RecordConnNetworkIO(conn net.Conn) {
+	// When the in-kernel netio counter is live it is authoritative for the app's
+	// wire volume, so the userspace TCP_INFO path stands down to avoid double
+	// counting the same traffic. See StartKernelNetioDrain.
+	if kernelNetioActive.Load() {
+		return
+	}
 	sinkP := networkIOSink.Load()
 	if sinkP == nil || conn == nil {
 		return

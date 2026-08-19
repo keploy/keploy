@@ -67,6 +67,10 @@ type bpfProgramSpecs struct {
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_recvmsg"`
 	K_udp6Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_sendmsg"`
+	KeployNetioCgroupRmdir  *ebpf.ProgramSpec `ebpf:"keploy_netio_cgroup_rmdir"`
+	KeployNetioTcpRecvmsg   *ebpf.ProgramSpec `ebpf:"keploy_netio_tcp_recvmsg"`
+	KeployNetioTcpRecvmsgV6 *ebpf.ProgramSpec `ebpf:"keploy_netio_tcp_recvmsg_v6"`
+	KeployNetioTcpSendmsg   *ebpf.ProgramSpec `ebpf:"keploy_netio_tcp_sendmsg"`
 	SyscallProbeEntrySocket *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
 }
 
@@ -81,9 +85,11 @@ type bpfMapSpecs struct {
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
+	KeployNetioBytes            *ebpf.MapSpec `ebpf:"keploy_netio_bytes"`
 	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.MapSpec `ebpf:"pending_binds"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
+	TargetCgroupIds             *ebpf.MapSpec `ebpf:"target_cgroup_ids"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 }
 
@@ -120,9 +126,11 @@ type bpfMaps struct {
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
+	KeployNetioBytes            *ebpf.Map `ebpf:"keploy_netio_bytes"`
 	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.Map `ebpf:"pending_binds"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
+	TargetCgroupIds             *ebpf.Map `ebpf:"target_cgroup_ids"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 }
 
@@ -135,9 +143,11 @@ func (m *bpfMaps) Close() error {
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
+		m.KeployNetioBytes,
 		m.OrigDstByCookie,
 		m.PendingBinds,
 		m.RedirectProxyMap,
+		m.TargetCgroupIds,
 		m.TargetNamespacePids,
 	)
 }
@@ -165,6 +175,10 @@ type bpfPrograms struct {
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.Program `ebpf:"k_udp6_recvmsg"`
 	K_udp6Sendmsg           *ebpf.Program `ebpf:"k_udp6_sendmsg"`
+	KeployNetioCgroupRmdir  *ebpf.Program `ebpf:"keploy_netio_cgroup_rmdir"`
+	KeployNetioTcpRecvmsg   *ebpf.Program `ebpf:"keploy_netio_tcp_recvmsg"`
+	KeployNetioTcpRecvmsgV6 *ebpf.Program `ebpf:"keploy_netio_tcp_recvmsg_v6"`
+	KeployNetioTcpSendmsg   *ebpf.Program `ebpf:"keploy_netio_tcp_sendmsg"`
 	SyscallProbeEntrySocket *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
 }
 
@@ -183,6 +197,10 @@ func (p *bpfPrograms) Close() error {
 		p.K_udp4Sendmsg,
 		p.K_udp6Recvmsg,
 		p.K_udp6Sendmsg,
+		p.KeployNetioCgroupRmdir,
+		p.KeployNetioTcpRecvmsg,
+		p.KeployNetioTcpRecvmsgV6,
+		p.KeployNetioTcpSendmsg,
 		p.SyscallProbeEntrySocket,
 	)
 }

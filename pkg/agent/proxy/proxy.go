@@ -1293,6 +1293,11 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// This must happen before any connections are handled.
 	p.StartErrorDrain(ctx)
 
+	// Drain the in-kernel app network-I/O counter (keploy_netio_bytes) into the
+	// resource footprint. No-op until the netio eBPF programs are loaded; once its
+	// counter is live it takes over from the userspace TCP_INFO accounting.
+	StartKernelNetioDrain(ctx, p.logger)
+
 	// set up the CA for tls connections.
 	//
 	// On failure we record the terminal error via MarkCAFailed so the
