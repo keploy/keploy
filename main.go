@@ -52,6 +52,7 @@ func start(ctx context.Context) {
 	logger, logFile, err := log.New()
 	if err != nil {
 		fmt.Println("Failed to start the logger for the CLI", err)
+		utils.ErrCode = 1
 		return
 	}
 	utils.LogFile = logFile
