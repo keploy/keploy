@@ -169,6 +169,36 @@ function Sync-Logs {
     } catch {}
 }
 
+# Print keploy's logs by reading the FILES, not by draining the tail job.
+#
+# Sync-Logs is the only route keploy output has into CI, and it depends on a
+# background `Get-Content -Wait` that is known to exit on its own. When it does,
+# Receive-Job returns nothing and everything keploy writes afterwards is lost —
+# which is how a failure here came to show six identical HTTP errors and no
+# cause. The files outlive the tail job, so on any failure path read them.
+function Show-KeployLogFiles {
+    param([string]$Reason)
+    Write-Host "`n=========================================================="
+    Write-Host "KEPLOY LOGS (read from disk) — $Reason"
+    Write-Host "=========================================================="
+    foreach ($f in @($logPath, ".\keploy_agent.log")) {
+        if ($f -and (Test-Path $f)) {
+            $content = Get-Content -Path $f -ErrorAction SilentlyContinue
+            if ($content) {
+                Write-Host "--- $f ---"
+                $content | ForEach-Object { Write-Host $_ }
+            } else {
+                # An empty log is itself the finding: keploy blocked before its
+                # first line, which is what a wedged startup looks like.
+                Write-Host "--- $f --- (EMPTY: keploy produced no output at all)"
+            }
+        } else {
+            Write-Host "--- $f --- (MISSING)"
+        }
+    }
+    Write-Host "=========================================================="
+}
+
 # Wait for app readiness — same stability window + settle +
 # per-request retry scheme as the docker variant. See that
 # script's comment for the keploy#4076 flake that drove this.
@@ -204,6 +234,7 @@ do {
 
 if ($okStreak -lt $stabilityCount) {
   Write-Warning "App readiness probe did not reach ${stabilityCount} consecutive 200s before deadline; continuing with traffic anyway — downstream record validation will surface the failure."
+  Show-KeployLogFiles -Reason "app readiness probe timed out"
 } else {
   Write-Host "App readiness confirmed ($stabilityCount consecutive 200s). Settling ${settleSec}s before sending traffic…"
   Start-Sleep -Seconds $settleSec
@@ -243,6 +274,9 @@ if (Invoke-WithRetry -Name "DELETE products/…"  -Action { Invoke-RestMethod -M
 if (Invoke-WithRetry -Name "GET api/v2/users"   -Action { Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users" -TimeoutSec 30 })                                                                                                           { $sent++ }
 
 Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
+if ($sent -eq 0) {
+  Show-KeployLogFiles -Reason "every request failed; 0 of the intended requests were sent"
+}
 
 $pollUntil = (Get-Date).AddSeconds(60)
 do {
@@ -286,9 +320,15 @@ if ($REC_PID -and $REC_PID -ne 0) {
 
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
-if (-not (Test-Path $testSetPath)) { Write-Error "Test directory not found at $testSetPath"; Get-Content .\keploy_agent.log; exit 1 }
+if (-not (Test-Path $testSetPath)) {
+  Show-KeployLogFiles -Reason "no test directory was created at $testSetPath"
+  Write-Error "Test directory not found at $testSetPath"; exit 1
+}
 $testCount = (Get-ChildItem -Path $testSetPath -Filter "*.yaml").Count
-if ($testCount -eq 0) { Write-Error "No test files were created. Review the full logs in the file '$logPath'"; exit 1 }
+if ($testCount -eq 0) {
+  Show-KeployLogFiles -Reason "no test files were created"
+  Write-Error "No test files were created; keploy's own logs are printed above."; exit 1
+}
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
 

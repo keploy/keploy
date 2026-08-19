@@ -342,6 +342,51 @@ function Sync-Logs {
     } catch {}
 }
 
+# Print keploy's logs by reading the FILES, not by draining the tail job.
+#
+# Sync-Logs is the only way keploy output reaches CI, and it depends on a
+# background `Get-Content -Wait` that is known to exit on its own — the comment
+# above the readiness loop documents exactly that, and run 24630134970 is the
+# example. When it dies, Receive-Job returns nothing and every subsequent line
+# keploy writes is lost. That is precisely what happened to the runs this
+# function exists for: the agent container reported
+# "dependency failed to start: container keploy-v3-… is unhealthy" into
+# $errLogPath, the file kept it, and CI printed none of it — so the visible
+# symptom was six failed HTTP requests and no cause. The reader was told to
+# "review the full logs in the file", on a CI runner they cannot log into.
+#
+# The files outlive the tail job, so on any failure path read them directly.
+function Show-KeployLogFiles {
+    param([string]$Reason)
+    Write-Host "`n=========================================================="
+    Write-Host "KEPLOY LOGS (read from disk) — $Reason"
+    Write-Host "  stdout: $logPath"
+    Write-Host "  stderr: $errLogPath"
+    Write-Host "=========================================================="
+    foreach ($f in @($logPath, $errLogPath)) {
+        if (Test-Path $f) {
+            $content = Get-Content -Path $f -ErrorAction SilentlyContinue
+            if ($content) {
+                Write-Host "--- $f ---"
+                $content | ForEach-Object { Write-Host $_ }
+            } else {
+                # An empty stdout log is itself the finding: it means keploy
+                # blocked before its first line, which is what a wedged
+                # bpf(BPF_PROG_LOAD) looks like from outside.
+                Write-Host "--- $f --- (EMPTY: keploy produced no output at all)"
+            }
+        } else {
+            Write-Host "--- $f --- (MISSING)"
+        }
+    }
+    Write-Host "=========================================================="
+    # Container state explains the compose-level failures the log text alone
+    # does not (unhealthy dependency, app container stuck in Created).
+    Write-Host "--- docker ps -a ---"
+    try { docker ps -a --format "{{.Names}} :: {{.Status}}" 2>&1 | ForEach-Object { Write-Host $_ } } catch {}
+    Write-Host "=========================================================="
+}
+
 # Wait for app readiness.
 #
 # Previous implementation broke on the first 200 response and sent
@@ -398,6 +443,10 @@ do {
 
 if ($okStreak -lt $stabilityCount) {
   Write-Warning "App readiness probe did not reach ${stabilityCount} consecutive 200s before deadline; continuing with traffic anyway — downstream record validation will surface the failure."
+  # The app never came up. Whatever explains that is in keploy's logs, and this
+  # is the last moment it is worth reading them before the traffic phase buries
+  # it under six identical connection failures.
+  Show-KeployLogFiles -Reason "app readiness probe timed out"
 } else {
   Write-Host "App readiness confirmed ($stabilityCount consecutive 200s). Settling ${settleSec}s before sending traffic…"
   Start-Sleep -Seconds $settleSec
@@ -442,6 +491,11 @@ if (Invoke-WithRetry -Name "DELETE products/…"  -Action { Invoke-RestMethod -M
 if (Invoke-WithRetry -Name "GET api/v2/users"   -Action { Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users" -TimeoutSec 30 })                                                                                                           { $sent++ }
 
 Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
+if ($sent -eq 0) {
+  # Zero requests means nothing can possibly have been recorded, so the run has
+  # already failed; everything after this is consequence, not cause.
+  Show-KeployLogFiles -Reason "every request failed; 0 of the intended requests were sent"
+}
 
 $pollUntil = (Get-Date).AddSeconds(60)
 do {
@@ -501,9 +555,15 @@ if ($REC_PID -and $REC_PID -ne 0) {
 
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
-if (-not (Test-Path $testSetPath)) { Write-Error "Test directory not found at $testSetPath"; exit 1 }
+if (-not (Test-Path $testSetPath)) {
+  Show-KeployLogFiles -Reason "no test directory was created at $testSetPath"
+  Write-Error "Test directory not found at $testSetPath"; exit 1
+}
 $testCount = (Get-ChildItem -Path $testSetPath -Filter "*.yaml").Count
-if ($testCount -eq 0) { Write-Error "No test files were created. Review the full logs in the file '$logPath'"; exit 1 }
+if ($testCount -eq 0) {
+  Show-KeployLogFiles -Reason "no test files were created"
+  Write-Error "No test files were created; keploy's own logs are printed above."; exit 1
+}
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
 
