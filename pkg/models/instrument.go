@@ -129,6 +129,11 @@ type OutgoingOptions struct {
 	// identified from its handshake at record time and recalled from
 	// the recorded mocks' destAddr at replay time.
 	DisableMysqlAutoDetect bool
+	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
+	// mocks on a port the recording never saw. Detection still runs; only the
+	// inference that covers a moved endpoint is turned off. See
+	// Config.DisableMysqlEndpointDrift.
+	DisableMysqlEndpointDrift bool
 	// SupportsDroppedRevoke is a capability flag set by the CLI on the
 	// /outgoing request: when true, the CLI understands the reserved
 	// Kind=RevokedTests control frame (it diverts it into a revoke set and

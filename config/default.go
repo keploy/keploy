@@ -149,6 +149,13 @@ mysqlPorts: []
 # Set to true to turn detection off and go back to matching mysqlPorts
 # strictly. MySQL on any other port will then hang its handshake.
 disableMysqlAutoDetect: false
+# During replay, keploy serves recorded MySQL mocks even when the app
+# connects to a port the recording never saw — an app whose environment
+# was rebuilt does not always get the endpoint it had while recording,
+# and refusing would leave it waiting for a greeting only keploy can
+# send. Set to true if a non-MySQL dependency is being misread as MySQL;
+# unlike disableMysqlAutoDetect this keeps record-time detection on.
+disableMysqlEndpointDrift: false
 disableMapping: false
 contract:
   driven: "consumer"

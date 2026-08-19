@@ -212,6 +212,8 @@ jobs:
           path: |
             samples-java/mysql-dual-conn/keploy/
             samples-java/mysql-dual-conn/test_logs.txt
+            samples-java/mysql-dual-conn/test_logs_drift.txt
+            samples-java/mysql-dual-conn/application.properties
             samples-java/mysql-dual-conn/autoPort_record.txt
             samples-java/mysql-dual-conn/mvn_build.log
           if-no-files-found: warn

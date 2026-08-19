@@ -77,10 +77,11 @@ func (r *MockLoader) LoadMocks(ctx context.Context, testSetID string, testCaseNa
 		// Same MySQL routing knobs the record/replay paths pass. Without
 		// them a MockLoader session ignores mysqlPorts entirely and
 		// honours neither the pinned ports nor disableMysqlAutoDetect.
-		MysqlPorts:             r.outgoingCfg.MysqlPorts,
-		DisableMysqlAutoDetect: r.outgoingCfg.DisableMysqlAutoDetect,
-		PassThroughPorts:       r.outgoingCfg.PassThroughPorts,
-		PassThroughHosts:       r.outgoingCfg.PassThroughHosts,
+		MysqlPorts:                r.outgoingCfg.MysqlPorts,
+		DisableMysqlAutoDetect:    r.outgoingCfg.DisableMysqlAutoDetect,
+		DisableMysqlEndpointDrift: r.outgoingCfg.DisableMysqlEndpointDrift,
+		PassThroughPorts:          r.outgoingCfg.PassThroughPorts,
+		PassThroughHosts:          r.outgoingCfg.PassThroughHosts,
 	}); err != nil {
 		return fmt.Errorf("MockLoader: failed to enable mock-outgoing: %w", err)
 	}

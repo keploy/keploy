@@ -1467,11 +1467,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// record.upstreamTls.caCert on its own filesystem — the path precedence
 		// at proxy.New, the pool itself lazily on the first record session —
 		// and stamps it onto these options in Proxy.Record.
-		UpstreamTLSVerify:      r.config.Record.UpstreamTLS.Verify,
-		MysqlPorts:             r.config.MysqlPorts,
-		DisableMysqlAutoDetect: r.config.DisableMysqlAutoDetect,
-		PassThroughPorts:       r.config.Record.PassThroughPorts,
-		PassThroughHosts:       r.config.Record.PassThroughHosts,
+		UpstreamTLSVerify:         r.config.Record.UpstreamTLS.Verify,
+		MysqlPorts:                r.config.MysqlPorts,
+		DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
+		DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+		PassThroughPorts:          r.config.Record.PassThroughPorts,
+		PassThroughHosts:          r.config.Record.PassThroughHosts,
 		// Advertise that this CLI understands the reserved Kind=RevokedTests
 		// control frame: it diverts such a frame into a revoke set and deletes
 		// those deferred-orphan test cases at finalize instead of persisting it

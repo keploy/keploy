@@ -82,6 +82,8 @@ type OutgoingConfig struct {
 	// restoring strict MysqlPorts matching. Mirrors
 	// Config.DisableMysqlAutoDetect.
 	DisableMysqlAutoDetect bool
+	// DisableMysqlEndpointDrift mirrors Config.DisableMysqlEndpointDrift.
+	DisableMysqlEndpointDrift bool
 
 	// PassThroughPorts / PassThroughHosts mirror Config.Record.PassThroughPorts /
 	// PassThroughHosts so a standalone mock-serving session honours the same

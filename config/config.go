@@ -49,21 +49,34 @@ type Config struct {
 	// recalling the port from recorded mocks during replay. Turn it off
 	// to restore the strict port-list behaviour — then MySQL on a port
 	// outside MysqlPorts will hang its handshake.
-	DisableMysqlAutoDetect bool     `json:"disableMysqlAutoDetect" yaml:"disableMysqlAutoDetect" mapstructure:"disableMysqlAutoDetect"`
-	EnableTesting          bool     `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
-	GenerateGithubActions  bool     `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
-	KeployContainer        string   `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
-	KeployNetwork          string   `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
-	CommandType            string   `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
-	Contract               Contract `json:"contract" yaml:"contract" mapstructure:"contract"`
-	Agent                  Agent    `json:"agent" yaml:"agent" mapstructure:"agent"`
-	Async                  Async    `json:"async" yaml:"async" mapstructure:"async"`
-	InCi                   bool     `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
-	InstallationID         string   `json:"-" yaml:"-" mapstructure:"-"`
-	ServerPort             uint32   `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
-	Version                string   `json:"-" yaml:"-" mapstructure:"-"`
-	APIServerURL           string   `json:"-" yaml:"-" mapstructure:"-"`
-	GitHubClientID         string   `json:"-" yaml:"-" mapstructure:"-"`
+	DisableMysqlAutoDetect bool `json:"disableMysqlAutoDetect" yaml:"disableMysqlAutoDetect" mapstructure:"disableMysqlAutoDetect"`
+	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
+	// mocks on a port the recording never saw. Detection still runs; only
+	// the inference is turned off.
+	//
+	// Leave it on (the default) unless a dependency is being misread. The
+	// inference fires when a replayed app opens a connection to an unknown
+	// port and says nothing, which is the MySQL signature — but a client that
+	// stays silent for the whole confirmation window and only then speaks
+	// looks the same, and it will be answered with a handshake it did not ask
+	// for. Pinning the real mapping with MysqlPorts is the better fix when you
+	// know it; this is the escape hatch when you do not, and unlike
+	// DisableMysqlAutoDetect it keeps record-time detection working.
+	DisableMysqlEndpointDrift bool     `json:"disableMysqlEndpointDrift" yaml:"disableMysqlEndpointDrift" mapstructure:"disableMysqlEndpointDrift"`
+	EnableTesting             bool     `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
+	GenerateGithubActions     bool     `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
+	KeployContainer           string   `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
+	KeployNetwork             string   `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
+	CommandType               string   `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+	Contract                  Contract `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Agent                     Agent    `json:"agent" yaml:"agent" mapstructure:"agent"`
+	Async                     Async    `json:"async" yaml:"async" mapstructure:"async"`
+	InCi                      bool     `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	InstallationID            string   `json:"-" yaml:"-" mapstructure:"-"`
+	ServerPort                uint32   `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
+	Version                   string   `json:"-" yaml:"-" mapstructure:"-"`
+	APIServerURL              string   `json:"-" yaml:"-" mapstructure:"-"`
+	GitHubClientID            string   `json:"-" yaml:"-" mapstructure:"-"`
 	// InMemoryCompose holds docker-compose YAML content in memory to avoid writing
 	// sensitive environment variables (secrets, tokens) to disk. When set, the
 	// compose command uses "-f -" and pipes this content via stdin.
