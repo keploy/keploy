@@ -342,6 +342,12 @@ jobs:
         shell: bash
         run: gcc --version
 
+      # Pinned + digest-checked; the .a is not committed. Must precede the build,
+      # whose cgo LDFLAGS resolve -l:libwindows_redirector.a out of ${SRCDIR}.
+      - name: Fetch Windows redirector
+        shell: bash
+        run: go run ./tools/fetchredirector
+
       - name: Build keploy.exe
         shell: bash
         env:
