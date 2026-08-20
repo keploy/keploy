@@ -128,7 +128,7 @@ jobs:
 
       - name: Install necessary dependencies
         run: |
-          sudo apt-get install -y build-essential gcc python3-dev libpq-dev pkg-config
+          sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y build-essential gcc python3-dev libpq-dev pkg-config
 
       - id: record
         uses: ./.github/actions/download-binary

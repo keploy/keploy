@@ -41,6 +41,10 @@ jobs:
   # -------------------------------------------------------------------
 
   build-and-upload:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     # Linux amd64 binaries (race + non-race). `build` = race,
     # consumed by most linux docker tests via download-binary.
     # `build-no-race` = non-race, consumed by the linux/amd64
@@ -89,6 +93,10 @@ jobs:
           path: out/build/keploy
 
   build-linux-arm64:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     # Non-race native arm64 linux build — consumed only by the
     # linux/arm64 docker image (which the macOS self-hosted runner
     # loads). Native build avoids qemu emulation on amd64 runners.
@@ -131,6 +139,10 @@ jobs:
           path: out/build-no-race-linux-arm64/keploy
 
   build-darwin-arm64:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     # darwin/arm64 binary for the macOS self-hosted native tests.
     #
     # Session P: moved from ubuntu-latest (linux→darwin/arm64
@@ -563,6 +575,10 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   upload-latest:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
       - name: Upload latest release
@@ -596,6 +612,10 @@ jobs:
   # -------------------------------------------------------------------
 
   build-docker-image-amd64:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     # Fork-guard: linux/amd64 consumers (run_*_docker) all skip on
     # fork PRs, and the Windows self-hosted leg is gated too. Building
     # and uploading an image tarball that no downstream job will load
@@ -639,6 +659,10 @@ jobs:
           retention-days: 7
 
   build-docker-image-arm64:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     needs: [build-linux-arm64]
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-24.04-arm
@@ -1159,6 +1183,10 @@ jobs:
   # -------------------------------------------------------------------
 
   gate:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     name: CI Gate (Linux)
     if: always()
     needs:
@@ -1213,6 +1241,10 @@ jobs:
           echo "All jobs passed."
 
   gate_macos:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     name: CI Gate (macOS)
     if: always()
     needs:
@@ -1245,6 +1277,10 @@ jobs:
           echo "All jobs passed."
 
   gate_windows:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     name: CI Gate (Windows)
     if: always()
     needs:
