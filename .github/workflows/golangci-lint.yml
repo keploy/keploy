@@ -67,6 +67,15 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
+          # PINNED, not floating. golangci-lint v2.13.0 (released 2026-08-19,
+          # 23:29 UTC) bundles honnef.co/go/tools v0.8.0-rc.1, whose nilness
+          # analyzer panics with "internal error: unhandled builtin recover" on
+          # Go 1.26 — reproduced locally against the sentry dependency. Because
+          # the action resolves the newest release at run time, that single
+          # upstream publish turned every PR in this repo red within hours,
+          # including PRs containing no Go code at all. A pin means an upstream
+          # release can no longer break CI without someone choosing it.
+          version: v2.12.2
           only-new-issues: true
           args: --timeout=5m
 
