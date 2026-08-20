@@ -705,6 +705,27 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 	}
 }
 
+// logSendFailure reports a failed test request at the severity its finality
+// actually warrants. A transport-level reset (IsTransportConnReset — dominated
+// under loaded CI by docker's userland proxy resetting a freshly-accepted
+// host-side connection before the app processes it) is not yet a final
+// failure: the replay orchestration (Replayer.retryResetOnce) safely re-sends
+// this exact error class once it proves zero mocks were consumed, and usually
+// recovers it. Logging ERROR here — before that caller has any chance to
+// retry — makes a routine, self-healing retry indistinguishable from a fatal
+// crash to anything scanning logs for "ERROR" (several downstream CI lanes did
+// exactly that, treating an already-recovered retry as a hard pipeline
+// failure). Every other error here (DNS failure, TLS failure, or an
+// ECONNREFUSED that already exhausted doRequestWithConnRefusedRetry's own
+// retries) is not retried by anything upstream, so it keeps logging at ERROR.
+func logSendFailure(logger *zap.Logger, err error) {
+	if IsTransportConnReset(err) {
+		logger.Warn("failed to send testcase request to app (transport reset; may be retried by the caller)", zap.Error(err))
+		return
+	}
+	utils.LogError(logger, err, "failed to send testcase request to app")
+}
+
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -722,7 +743,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
 	if errHTTPReq != nil {
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		logSendFailure(logger, errHTTPReq)
 		return nil, errHTTPReq
 	}
 
@@ -799,7 +820,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
 	if errHTTPReq != nil {
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		logSendFailure(logger, errHTTPReq)
 		return nil, errHTTPReq
 	}
 
