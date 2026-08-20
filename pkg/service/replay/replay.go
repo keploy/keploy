@@ -1355,7 +1355,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// runs every test-set, matching the historical lifecycle.
 		if serveTest && !r.isFirstTestSet {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
+		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, testCases, testSetID) {
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 	}
@@ -1522,7 +1522,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// one-shot spawn actually fired.
 			if serveTest && !r.isFirstTestSet {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
+			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, testCases, testSetID) {
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
 
