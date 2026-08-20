@@ -128,7 +128,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 		if decodeCtx.UseSSL {
 			if result.tlsClientConn == nil || result.tlsDestConn == nil {
-				// TLS connections are nil — this is expected in sockmap
+				// TLS connections are nil — this is expected in observe-only
 				// mode where the proxy doesn't MITM the TLS session. The pre-TLS
 				// config mock has already been recorded above. Post-TLS command
 				// phase data is captured by SSL/GoTLS uprobes independently.

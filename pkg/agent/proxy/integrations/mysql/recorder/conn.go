@@ -176,8 +176,8 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 				zap.String("connKey", opts.ConnKey),
 				zap.Uint16("dstPort", dstPort))
 			// Also push under the port-only fallback key. The proxy and uprobe
-			// see different TCP connections (different ephemeral ports) due to
-			// sockmap/eBPF redirection, so conn-specific keys won't match.
+			// see different TCP connections (different ephemeral ports), so
+			// conn-specific keys won't match.
 			// The port-only key ensures the post-TLS path can find the entry.
 			portKey := models.HandshakeStoreKey("", dstPort)
 			if portKey != storeKey {
@@ -192,7 +192,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		}
 
 		if tlsUpgrader == nil {
-			logger.Debug("TLS upgrade requested but no TLSUpgrader available (sockmap/non-MITM path)")
+			logger.Debug("TLS upgrade requested but no TLSUpgrader available (non-MITM path)")
 			return res, nil
 		}
 
