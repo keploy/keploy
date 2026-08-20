@@ -95,8 +95,8 @@ type RequestBody struct {
 }
 
 type MediaType struct {
-	Schema  Schema                 `json:"schema" yaml:"schema"`
-	Example map[string]interface{} `json:"example" yaml:"example"`
+	Schema  Schema      `json:"schema" yaml:"schema"`
+	Example interface{} `json:"example" yaml:"example"`
 }
 
 type ResponseItem struct {
@@ -106,7 +106,9 @@ type ResponseItem struct {
 
 type Schema struct {
 	Type       string                            `json:"type" yaml:"type"`
-	Properties map[string]map[string]interface{} `json:"properties" yaml:"properties"`
+	Properties map[string]map[string]interface{} `json:"properties,omitempty" yaml:"properties,omitempty"`
+	Items      *Schema                           `json:"items,omitempty" yaml:"items,omitempty"`
+	Nullable   bool                              `json:"nullable,omitempty" yaml:"nullable,omitempty"`
 }
 
 type ParamSchema struct {

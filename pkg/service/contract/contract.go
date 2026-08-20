@@ -48,8 +48,11 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, openAPIDB OpenAPIDB, 
 func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (models.OpenAPI, error) {
 
 	var err error
-	// Convert response body to an object
-	var responseBodyObject map[string]interface{}
+	// Convert response body to an object (root may be an object or an array).
+	// Defaults to an empty object so a body-less doc still serializes its
+	// example as {} rather than null, as it did before array roots were
+	// supported.
+	var responseBodyObject interface{} = map[string]interface{}{}
 	if custom.Spec.Response.Body != "" {
 		err := json.Unmarshal([]byte(custom.Spec.Response.Body), &responseBodyObject)
 		if err != nil {
@@ -58,11 +61,16 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 
 	}
 
-	// Get the type of each value in the response body object
-	responseTypes := ExtractVariableTypes(responseBodyObject)
+	// Build the response schema, supporting both object and array roots.
+	var responseObjectProps map[string]map[string]interface{}
+	if obj, ok := responseBodyObject.(map[string]interface{}); ok {
+		responseObjectProps = ExtractVariableTypes(obj)
+	}
+	responseSchema := SchemaForBody(responseBodyObject, responseObjectProps)
 
-	// Convert request body to an object
-	var requestBodyObject map[string]interface{}
+	// Convert request body to an object (root may be an object or an array).
+	// Defaults to an empty object for the same reason as the response body.
+	var requestBodyObject interface{} = map[string]interface{}{}
 	if custom.Spec.Request.Body != "" {
 		err := json.Unmarshal([]byte(custom.Spec.Request.Body), &requestBodyObject)
 		if err != nil {
@@ -71,14 +79,18 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 
 	}
 
-	// Get the type of each value in the request body object
-	requestTypes := ExtractVariableTypes(requestBodyObject)
+	// Build the request schema, supporting both object and array roots.
+	var requestObjectProps map[string]map[string]interface{}
+	if obj, ok := requestBodyObject.(map[string]interface{}); ok {
+		requestObjectProps = ExtractVariableTypes(obj)
+	}
+	requestSchema := SchemaForBody(requestBodyObject, requestObjectProps)
 
 	// Generate response by status code
 	byCode := GenerateResponse(Response{
 		Code:    custom.Spec.Response.StatusCode,
 		Message: custom.Spec.Response.StatusMessage,
-		Types:   responseTypes,
+		Schema:  responseSchema,
 		Body:    responseBodyObject,
 	})
 
@@ -133,10 +145,7 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 				RequestBody: &models.RequestBody{
 					Content: map[string]models.MediaType{
 						"application/json": {
-							Schema: models.Schema{
-								Type:       "object",
-								Properties: requestTypes,
-							},
+							Schema:  requestSchema,
 							Example: requestBodyObject,
 						},
 					},
@@ -153,10 +162,7 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 			RequestBody: &models.RequestBody{
 				Content: map[string]models.MediaType{
 					"application/json": {
-						Schema: models.Schema{
-							Type:       "object",
-							Properties: requestTypes,
-						},
+						Schema:  requestSchema,
 						Example: (requestBodyObject),
 					},
 				},
@@ -172,10 +178,7 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 			RequestBody: &models.RequestBody{
 				Content: map[string]models.MediaType{
 					"application/json": {
-						Schema: models.Schema{
-							Type:       "object",
-							Properties: requestTypes,
-						},
+						Schema:  requestSchema,
 						Example: (requestBodyObject),
 					},
 				},
