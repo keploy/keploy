@@ -2542,15 +2542,12 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 func NextID(IDs []string, identifier string) string {
 	latestIndx := 0
 	for _, ID := range IDs {
-		namePackets := strings.Split(ID, "-")
-		if len(namePackets) == 3 {
-			Indx, err := strconv.Atoi(namePackets[2])
-			if err != nil {
-				continue
-			}
-			if latestIndx < Indx+1 {
-				latestIndx = Indx + 1
-			}
+		Indx, ok := parseIDIndex(ID, identifier)
+		if !ok {
+			continue
+		}
+		if latestIndx < Indx+1 {
+			latestIndx = Indx + 1
 		}
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
@@ -2559,18 +2556,34 @@ func NextID(IDs []string, identifier string) string {
 func LastID(IDs []string, identifier string) string {
 	latestIndx := 0
 	for _, ID := range IDs {
-		namePackets := strings.Split(ID, "-")
-		if len(namePackets) == 3 {
-			Indx, err := strconv.Atoi(namePackets[2])
-			if err != nil {
-				continue
-			}
-			if latestIndx < Indx {
-				latestIndx = Indx
-			}
+		Indx, ok := parseIDIndex(ID, identifier)
+		if !ok {
+			continue
+		}
+		if latestIndx < Indx {
+			latestIndx = Indx
 		}
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
+}
+
+func parseIDIndex(ID, identifier string) (int, bool) {
+	if !strings.HasPrefix(ID, identifier) {
+		return 0, false
+	}
+	suffix := strings.TrimPrefix(ID, identifier)
+	// Digits only. strconv.Atoi accepts a leading sign, so without this a
+	// directory literally named "test-set--1" would parse as index -1 and a
+	// "test-set-+5" as 5. Neither is an ID keploy generates, and the old
+	// len(Split(ID, "-")) == 3 check rejected both.
+	if suffix == "" || strings.ContainsFunc(suffix, func(r rune) bool { return r < '0' || r > '9' }) {
+		return 0, false
+	}
+	Indx, err := strconv.Atoi(suffix)
+	if err != nil {
+		return 0, false
+	}
+	return Indx, true
 }
 
 var (
