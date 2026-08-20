@@ -108,6 +108,7 @@ type Schema struct {
 	Type       string                            `json:"type" yaml:"type"`
 	Properties map[string]map[string]interface{} `json:"properties,omitempty" yaml:"properties,omitempty"`
 	Items      *Schema                           `json:"items,omitempty" yaml:"items,omitempty"`
+	Nullable   bool                              `json:"nullable,omitempty" yaml:"nullable,omitempty"`
 }
 
 type ParamSchema struct {

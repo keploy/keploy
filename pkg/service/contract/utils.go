@@ -48,6 +48,16 @@ func ExtractVariableTypes(obj map[string]interface{}) map[string]map[string]inte
 	}
 
 	for key, value := range obj {
+		// A JSON null carries no type. OpenAPI 3.0 still requires one, so keep
+		// the historical "string" default but mark the property nullable -
+		// without it the untouched example holds a null that kin-openapi
+		// rejects with `Value is not nullable`, aborting contract generation
+		// for any payload with a null field.
+		if value == nil {
+			types[key] = map[string]interface{}{"type": "string", "nullable": true}
+			continue
+		}
+
 		valueType := getType(value)
 		responseType := map[string]interface{}{
 			"type": valueType,
@@ -60,27 +70,55 @@ func ExtractVariableTypes(obj map[string]interface{}) map[string]map[string]inte
 			arrayItems := value.([]interface{})
 			arrayType := "string" // Default to string if array is empty
 
-			if len(arrayItems) > 0 {
-				firstElement := arrayItems[0]
+			// Infer from the first non-null element; a null anywhere in the
+			// array only means the items are nullable.
+			firstElement, nullable := firstNonNil(arrayItems)
+			if firstElement != nil {
 				arrayType = getType(firstElement)
 				if arrayType == "object" {
-					responseType["items"] = map[string]interface{}{
+					items := map[string]interface{}{
 						"type":       arrayType,
 						"properties": ExtractVariableTypes(firstElement.(map[string]interface{})),
 					}
+					if nullable {
+						items["nullable"] = true
+					}
+					responseType["items"] = items
 					types[key] = responseType
 					continue
 				}
 			}
-			responseType["items"] = map[string]interface{}{
+			items := map[string]interface{}{
 				"type": arrayType,
 			}
+			if nullable {
+				items["nullable"] = true
+			}
+			responseType["items"] = items
 		}
 
 		types[key] = responseType
 	}
 
 	return types
+}
+
+// firstNonNil returns the first non-null element of items along with whether
+// any element was null, so callers can infer an item type from real data while
+// still marking the schema nullable.
+func firstNonNil(items []interface{}) (interface{}, bool) {
+	var first interface{}
+	nullable := false
+	for _, item := range items {
+		if item == nil {
+			nullable = true
+			continue
+		}
+		if first == nil {
+			first = item
+		}
+	}
+	return first, nullable
 }
 
 // SchemaForBody builds an OpenAPI schema for a decoded JSON body whose root
@@ -98,24 +136,27 @@ func SchemaForBody(body interface{}, objectProps map[string]map[string]interface
 	}
 
 	items := &models.Schema{Type: "string"} // default for an empty array
-	if len(arr) > 0 {
-		switch first := arr[0].(type) {
-		case map[string]interface{}:
-			items = &models.Schema{
-				Type:       "object",
-				Properties: ExtractVariableTypes(first),
-			}
-		case []interface{}:
-			nested := SchemaForBody(first, nil)
-			items = &nested
-		case float64:
-			items = &models.Schema{Type: "number"}
-		case bool:
-			items = &models.Schema{Type: "boolean"}
-		case string:
-			items = &models.Schema{Type: "string"}
+	// Infer from the first non-null element; a null anywhere in the array only
+	// means the items are nullable, and inferring "string" from it would make
+	// kin-openapi reject the untouched example.
+	first, nullable := firstNonNil(arr)
+	switch v := first.(type) {
+	case map[string]interface{}:
+		items = &models.Schema{
+			Type:       "object",
+			Properties: ExtractVariableTypes(v),
 		}
+	case []interface{}:
+		nested := SchemaForBody(v, nil)
+		items = &nested
+	case float64:
+		items = &models.Schema{Type: "number"}
+	case bool:
+		items = &models.Schema{Type: "boolean"}
+	case string:
+		items = &models.Schema{Type: "string"}
 	}
+	items.Nullable = nullable
 	return models.Schema{Type: "array", Items: items}
 }
 
