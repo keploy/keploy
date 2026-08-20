@@ -52,7 +52,20 @@ FROM debian:trixie-slim
 
 ENV KEPLOY_INDOCKER=true
 
-# Update the package lists and install required packages
+# Update the package lists and install required packages.
+# One RUN, not two: a separate `apt-get update` layer bakes its ~22MB of
+# /var/lib/apt/lists into the image - the later `rm -rf` only masks it
+# from the upper layer, it cannot reclaim it - and a cached update layer
+# can feed `install` from stale indices. Merging cuts ~17MB off the
+# pulled image and ~22MB off it unpacked.
+# --no-install-recommends skips five packages nothing here uses
+# (bash-completion, krb5-locales, libldap-common, libsasl2-modules,
+# publicsuffix), a further ~3.6MB unpacked. Keep ca-certificates in the
+# explicit list: it is only a Recommends of libcurl4t64, so dropping it
+# would silently remove every trusted root.
+# apt-get clean is unnecessary: the base image ships
+# /etc/apt/apt.conf.d/docker-clean, which already discards the .deb cache
+# after every install.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
