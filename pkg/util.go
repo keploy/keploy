@@ -2572,7 +2572,11 @@ func parseIDIndex(ID, identifier string) (int, bool) {
 		return 0, false
 	}
 	suffix := strings.TrimPrefix(ID, identifier)
-	if suffix == "" {
+	// Digits only. strconv.Atoi accepts a leading sign, so without this a
+	// directory literally named "test-set--1" would parse as index -1 and a
+	// "test-set-+5" as 5. Neither is an ID keploy generates, and the old
+	// len(Split(ID, "-")) == 3 check rejected both.
+	if suffix == "" || strings.ContainsFunc(suffix, func(r rune) bool { return r < '0' || r > '9' }) {
 		return 0, false
 	}
 	Indx, err := strconv.Atoi(suffix)

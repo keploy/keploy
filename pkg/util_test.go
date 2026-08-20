@@ -50,6 +50,24 @@ func TestNextIDIgnoresOtherPrefixes(t *testing.T) {
 			identifier: models.TestSetPattern,
 			want:       "test-set-1",
 		},
+		{
+			name:       "signed suffixes are not indices",
+			ids:        []string{"test-set-0", "test-set--1", "test-set-+5"},
+			identifier: models.TestSetPattern,
+			want:       "test-set-1",
+		},
+		{
+			name:       "empty set starts at zero",
+			ids:        nil,
+			identifier: models.TestSetPattern,
+			want:       "test-set-0",
+		},
+		{
+			name:       "bare prefix is not an index",
+			ids:        []string{"test-set-"},
+			identifier: models.TestSetPattern,
+			want:       "test-set-0",
+		},
 	}
 
 	for _, tt := range tests {
