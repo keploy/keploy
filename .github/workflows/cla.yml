@@ -12,6 +12,10 @@ on:
 
 jobs:
   cla-assistant:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@v4

@@ -53,6 +53,10 @@ on:
 
 jobs:
   sample_tls_pcap:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -157,11 +161,11 @@ jobs:
           # `rm` failure still surfaces. Deterministic — no retry, no sleep.
           { sudo grep -rlZ 'packages.microsoft.com' /etc/apt/sources.list.d/ 2>/dev/null || true; } \
             | sudo xargs -0r rm -f
-          sudo apt-get update -qq
+          sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -qq
           # Pre-accept the wireshark-common dump-cap suid prompt so the
           # apt install runs non-interactively.
           echo 'wireshark-common wireshark-common/install-setuid boolean false' | sudo debconf-set-selections
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tshark openssl
+          sudo DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y -qq tshark openssl
 
       - name: Run sample-tls-app under keploy (${{ matrix.mode.name }})
         env:

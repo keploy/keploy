@@ -33,8 +33,8 @@ if [[ "$java_setup_done" != "true" ]] && command -v java >/dev/null 2>&1; then
 fi
 
 if [[ "$java_setup_done" != "true" ]]; then
-  sudo apt-get update
-  sudo apt-get install openjdk-17-jdk-headless -y
+  sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120
+  sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 openjdk-17-jdk-headless -y
   export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
   export PATH="${JAVA_HOME}/bin:${PATH}"
 fi
