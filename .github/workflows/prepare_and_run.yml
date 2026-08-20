@@ -553,6 +553,14 @@ jobs:
           gcc --version
           go env CGO_ENABLED CC CXX GOOS GOARCH
 
+      # Pinned + digest-checked; the .a is not committed. Must precede the build,
+      # whose cgo LDFLAGS resolve -l:libwindows_redirector.a out of ${SRCDIR}.
+      - name: Fetch Windows redirector
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          go run ./tools/fetchredirector
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build Keploy (PR) - Windows (windows/amd64)
         shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |
