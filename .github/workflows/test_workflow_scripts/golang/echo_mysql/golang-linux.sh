@@ -7,6 +7,22 @@ git checkout origin/add-ssl-mysql
 # ----- helpers -----
 section()  { echo "::group::$*"; }
 endsec()   { echo "::endgroup::"; }
+# Retry a command with backoff to ride out transient Docker Hub registry blips
+# (e.g. registry-1.docker.io timeouts pulling mysql:latest), which otherwise
+# fail the whole job on a flake unrelated to the code under test.
+retry() {
+  local max=5 delay=10 attempt=1
+  until "$@"; do
+    if [ "$attempt" -ge "$max" ]; then
+      echo "::error::command failed after ${max} attempts: $*"
+      return 1
+    fi
+    echo "attempt ${attempt}/${max} failed: $* — retrying in ${delay}s..."
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+}
 dump_logs() {
   rc=$?
   echo "Dumping logs and artifacts (exit code: $rc)"
@@ -168,6 +184,7 @@ if ! docker ps --format '{{.Names}}' | grep -q '^mysql-container$'; then
     echo "Starting MySQL with standard Docker run (no SSL)"
     sed -i 's/MYSQL_SSL_MODE=production/MYSQL_SSL_MODE=false/' .env
     cat .env
+    retry docker pull mysql:latest
     docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss \
       -p 3306:3306 --rm -d mysql:latest
     wait_for_mysql
@@ -196,6 +213,7 @@ if json_pass_supported; then
     docker compose up -d
     wait_for_mysql
   else
+    retry docker pull mysql:latest
     docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss \
       -p 3306:3306 --rm -d mysql:latest
     wait_for_mysql
