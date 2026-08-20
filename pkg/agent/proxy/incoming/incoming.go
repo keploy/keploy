@@ -24,8 +24,8 @@ import (
 type proxyStop func() error
 
 // IngressHook defines the interface for ingress forwarding implementations.
-// Both the default Go TCP forwarder and external components (e.g. enterprise
-// sockmap proxy) implement this interface.
+// Both the default Go TCP forwarder and external components (e.g. an
+// enterprise ingress handler) implement this interface.
 type IngressHook interface {
 	// StartIngress begins ingress forwarding for the given port pair.
 	// The provided context should be used for lifetime management of the
@@ -114,7 +114,7 @@ func (pm *IngressProxyManager) loadIncomingOpts() models.IncomingOptions {
 }
 
 // SetIngressHook replaces the default Go TCP forwarder with an external
-// ingress handler (e.g. enterprise sockmap proxy).
+// ingress handler supplied by an enterprise build.
 func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -142,7 +142,7 @@ func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOp
 }
 
 // TCChan returns the test case channel for direct use by external consumers
-// (e.g., the enterprise sockmap proxy) without going through Start().
+// (e.g., the enterprise proxyless agent) without going through Start().
 func (pm *IngressProxyManager) TCChan() chan *models.TestCase {
 	return pm.tcChan
 }

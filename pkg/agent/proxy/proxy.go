@@ -1488,7 +1488,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 			// Do NOT swallow the error. An auxiliary hook only gets
 			// registered when a caller has explicitly opted into the
 			// feature it implements (currently: --low-latency, which
-			// registers the proxyless / sockmap BPF startup). Silently
+			// registers the proxyless BPF startup). Silently
 			// continuing into userspace-proxy mode after the hook has
 			// declared a failure would give the user a mode they
 			// didn't ask for and no deterministic signal that the
@@ -1496,7 +1496,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 			//
 			// The hook itself is expected to embed actionable
 			// remediation in the returned error (e.g. the enterprise
-			// proxyless/sockmap hook wraps the BPF verifier error
+			// proxyless hook wraps the BPF verifier error
 			// with a "Next steps: upgrade kernel / drop --low-latency
 			// / rebuild without the BPF variant" message). Log once
 			// here with the hook's message visible in zap.Error and

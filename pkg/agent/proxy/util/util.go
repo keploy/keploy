@@ -208,7 +208,7 @@ func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
 // need to pre-allocate fresh slices per chunk; they can reuse a
 // scratch buffer.
 //
-// Real net.Conns (TCP/TLS/sockmap-ingress) do not implement this
+// Real net.Conns (TCP/TLS/ingress) do not implement this
 // interface and continue through the ReadBytes loop unchanged.
 type DirectChunkReader interface {
 	DirectChunks() <-chan []byte
