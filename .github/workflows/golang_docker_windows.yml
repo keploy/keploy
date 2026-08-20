@@ -79,6 +79,17 @@ jobs:
       # clean:true fails at "git config --local" with "not a git repository".
       # Wipe in that case so checkout starts fresh; healthy workspaces are
       # left alone.
+      - name: Reap leaked keploy agent containers
+        # Runs BEFORE the job's work and fails it if any container survives
+        # removal: a wedged Docker VM makes every keploy run on this runner
+        # report connection failures, so starting work on one only produces a
+        # misleading result. The guaranteed sweep after a run lives in
+        # cleanup-windows.ps1, which warns instead of failing.
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\reap-keploy-containers.ps1" -FailOnStuck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Recover stale runner state
         continue-on-error: true
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
