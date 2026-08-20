@@ -80,6 +80,10 @@ jobs:
           retention-days: 7
 
   mysql_dual_conn:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -146,6 +150,10 @@ jobs:
   # needs detection at record time AND mock-derived recall at replay time,
   # so a mixed-version pair cannot exercise it. See the script header.
   mysql_auto_port:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -220,6 +228,10 @@ jobs:
           retention-days: 7
 
   tidb_stmt_cache:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -294,6 +306,10 @@ jobs:
           retention-days: 7
 
   async_config_poll:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:

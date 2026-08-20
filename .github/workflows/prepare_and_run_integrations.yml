@@ -15,6 +15,10 @@ on:
 
 jobs:
   build-and-upload:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     runs-on: ${{ inputs.runner }} 
     steps:
       - uses: actions/checkout@v4
@@ -23,8 +27,8 @@ jobs:
 
       - name: Installing build Essentials and gcc
         run: |
-          sudo apt -y update
-          sudo apt -y install build-essential gcc libc-dev     
+          sudo timeout 600 apt-get -y update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120
+          sudo timeout 600 apt-get -y install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 build-essential gcc libc-dev     
 
       - name: Add Private Parsers
         if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -63,6 +67,10 @@ jobs:
 
 
   upload-latest:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     runs-on: ${{ inputs.runner }} 
     steps:
       - name: Upload latest release

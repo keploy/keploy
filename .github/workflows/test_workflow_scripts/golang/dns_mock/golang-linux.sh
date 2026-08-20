@@ -4,7 +4,7 @@ set -Eeuxo pipefail
 
 # Ensure jq is installed
 if ! command -v jq &> /dev/null; then
-    sudo apt-get update && sudo apt-get install -y jq
+    sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 && sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y jq
 fi
 
 # --- Helper Functions ---

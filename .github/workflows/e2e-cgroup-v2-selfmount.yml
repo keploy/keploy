@@ -35,6 +35,10 @@ permissions:
 
 jobs:
   selfmount:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     name: cgroup2 self-mount
     runs-on: ubuntu-latest
     env:
@@ -49,8 +53,8 @@ jobs:
 
       - name: Install build essentials
         run: |
-          sudo apt -y update
-          sudo apt -y install build-essential gcc libc-dev pkg-config
+          sudo timeout 600 apt-get -y update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120
+          sudo timeout 600 apt-get -y install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 build-essential gcc libc-dev pkg-config
 
       - name: Install dependencies
         run: go mod download
