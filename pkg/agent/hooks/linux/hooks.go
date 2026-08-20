@@ -151,8 +151,22 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		}
 	}
 
-	// Now load and assign into the kernel with the corrected spec
-	if err := spec.LoadAndAssign(&objs, bpfopts); err != nil {
+	// Now load and assign into the kernel with the corrected spec.
+	//
+	// This is the one call in agent startup that can block forever without
+	// saying anything: BPF_PROG_LOAD is uninterruptible, so a wedged kernel
+	// leaves the agent with no log output at all and the container merely
+	// "not ready". watchStall makes that state describe itself.
+	// Scoped to this one call by a closure rather than a plain defer: the rest of
+	// load() attaches tracepoints and resolves cgroups, and a watchdog left
+	// running across that would blame BPF_PROG_LOAD for whatever else was slow.
+	// The defer inside the closure keeps it from leaking if LoadAndAssign panics.
+	err = func() error {
+		stopStallWatch := watchStall(h.logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", stallFirstReport, stallRepeatReport)
+		defer stopStallWatch()
+		return spec.LoadAndAssign(&objs, bpfopts)
+	}()
+	if err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			fmt.Printf("VERIFIER FAILURE:\n%s\n", strings.Join(ve.Log, "\n"))
