@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -300,6 +302,24 @@ func (m *MockManager) IsClosed() bool {
 // previous test-set's connection pools into the next one.
 //
 // What it clears:
+//   - filtered / unfiltered / startup trees (+ their per-kind and
+//     stateless companions) and hitIdx: the previous test-set's mock
+//     pool. Freed HERE — at the boundary, before the controller ships
+//     and this manager decodes the NEXT set — rather than waiting for
+//     the next SetMocksWithWindow swap. That wait is the transition
+//     double-residency that drives the auto-replay agent OOM: with the
+//     old set's trees still resident while the next set's whole pool is
+//     gob-decoded and rebuilt, peak RSS is ~2× a single set's
+//     footprint. Swapping to fresh empties here (under the same
+//     swapMu→treesMu order SetMocksWithWindow uses) lets the old pool
+//     be reclaimed by the FreeOSMemory below before the next decode
+//     begins. Revisions are bumped so revision-gated parsers
+//     (keploy/integrations#203) drop their derived per-set indexes too
+//     instead of pinning the old cohort. Serving an empty pool in the
+//     brief reset→StoreMocks→SetMocksWithWindow gap is CORRECT: no test
+//     is active then, and the prior behaviour of serving the previous
+//     set's stale mocks in that gap was cross-test bleed, not a
+//     feature.
 //   - connectionTrees / connectionLastTs: per-connID dedicated trees
 //     populated by AddConnectionMock from the previous test-set's
 //     LifetimeConnection mocks. SetMocksWithWindow only seeds new
@@ -309,6 +329,9 @@ func (m *MockManager) IsClosed() bool {
 //     N+1's, and GetConnectionMocks (which returns the cached tree
 //     without consulting the freshly swapped unfiltered tree) would
 //     keep matching stale entries.
+//   - rebuildable parser caches (mongo/v2's encoded-section LRU, etc.)
+//     via integrations.RunBoundaryResetHooks — same rationale: valid
+//     only for the set just served, so drop them before the next set.
 //   - noConnMocks: the negative cache paired with connectionTrees;
 //     stale entries from the previous test-set would suppress fallback
 //     scans for connIDs that now legitimately have connection-scoped
@@ -325,21 +348,49 @@ func (m *MockManager) IsClosed() bool {
 //     test-sets' pre-firstTest mocks accidentally be classified as
 //     startup-init when they're really stale bleed from the previous
 //     test-set's tail.
-//   - filtered / unfiltered / startup trees: SetMocksWithWindow swaps
-//     these atomically on the next call from the orchestrator, so
-//     clearing them here would just briefly serve an empty pool to
-//     any parser racing the reset.
 //   - sweeperStop / closed: the idle sweeper goroutine keeps running
 //     across the reset; closing it would stop the per-connection
 //     idle reaping for the rest of the replay.
-//   - hitIdx: rebuilt by SetFilteredMocks/SetUnFilteredMocks on the
-//     next mock load, so an explicit clear here is redundant.
+//   - firstWindowStart: see the note above.
 //
-// Safe to call concurrently with active matchers — connMu guards
-// the maps and noConnMocks is a sync.Map. Matchers holding stale
-// references to the cleared trees still observe valid (empty) trees
-// rather than panicking.
+// Safe to call concurrently with active matchers — every field is
+// swapped under the lock that guards it (swapMu→treesMu for the pool
+// trees, hitMu for hitIdx, connMu for the connection maps), and
+// noConnMocks is a sync.Map. A matcher holding a stale reference to a
+// swapped-out tree still observes a valid (now-detached, non-empty)
+// tree rather than panicking; the GC reclaims it once that matcher
+// releases it. New lookups see the fresh empty trees.
 func (m *MockManager) ResetForReplaySession() {
+	// Free the previous test-set's mock pool NOW, before the controller
+	// decodes + ships the next set into this same manager. Swap to fresh
+	// empties under the documented swapMu→treesMu order so a concurrent
+	// GetFilteredMocksInWindow (swapMu.RLock) or GetFilteredMocks
+	// (treesMu.RLock) cannot observe a torn state.
+	m.swapMu.Lock()
+	m.treesMu.Lock()
+	m.filtered = NewTreeDb(customComparator)
+	m.unfiltered = NewTreeDb(customComparator)
+	m.startup = NewTreeDb(customComparator)
+	m.filteredByKind = make(map[models.Kind]*TreeDb)
+	m.unfilteredByKind = make(map[models.Kind]*TreeDb)
+	m.statelessFiltered = make(map[models.Kind]map[string][]*models.Mock)
+	m.statelessUnfiltered = make(map[models.Kind]map[string][]*models.Mock)
+	m.treesMu.Unlock()
+	m.swapMu.Unlock()
+
+	// hitIdx is guarded by its own leaf lock (hitMu), not treesMu.
+	m.hitMu.Lock()
+	m.hitIdx = make(map[string]*models.Mock)
+	m.hitMu.Unlock()
+
+	// Keep the (trees, revision) invariant the setters maintain: the pool
+	// changed, so every revision must advance. Revision-gated parsers
+	// (keploy/integrations#203) then rebuild their derived per-set indexes
+	// off the empty pool instead of pinning the old set's cohort alive
+	// through the next set's decode.
+	m.bumpRevisionAll()
+	m.bumpAllKindRevisions()
+
 	m.connMu.Lock()
 	m.connectionTrees = make(map[string]*TreeDb)
 	m.connectionLastTs = make(map[string]time.Time)
@@ -354,6 +405,35 @@ func (m *MockManager) ResetForReplaySession() {
 		return true
 	})
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
+
+	// Drop rebuildable per-session parser caches (mongo/v2 encoded-section
+	// LRU, etc.). keploy cannot import the private integrations module, so
+	// parsers self-register these via integrations.RegisterBoundaryResetHook.
+	integrations.RunBoundaryResetHooks()
+
+	// Return the just-freed heap to the OS so the next set's bulk decode
+	// starts from a low RSS baseline instead of stacking on the previous
+	// set's high-water mark. This is the one point in the replay loop where
+	// a synchronous STW GC is worth its cost: it runs once per test-set
+	// boundary, while no test is active.
+	debug.FreeOSMemory()
+}
+
+// bumpAllKindRevisions advances every per-kind revision counter that has
+// ever been created on this manager. Used by ResetForReplaySession so a
+// parser gated on RevisionByKind (not just the global Revision) also sees
+// the boundary pool-swap and rebuilds. Snapshots the keys under revMu
+// before bumping because bumpRevisionKind takes revMu itself.
+func (m *MockManager) bumpAllKindRevisions() {
+	m.revMu.RLock()
+	kinds := make([]models.Kind, 0, len(m.revByKind))
+	for k := range m.revByKind {
+		kinds = append(kinds, k)
+	}
+	m.revMu.RUnlock()
+	for _, k := range kinds {
+		m.bumpRevisionKind(k)
+	}
 }
 
 // runIdleSweeper is the background loop that calls SweepIdleConnections
