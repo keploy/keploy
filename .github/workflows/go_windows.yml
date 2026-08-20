@@ -21,6 +21,15 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # `go build ./...` discards its objects, but it still LINKS the main
+      # package, so the cgo LDFLAGS in pkg/agent/hooks/windows apply and the
+      # .a — which is no longer committed — has to be on disk first. Verified:
+      # without this the amd64 step fails with
+      # "cannot find -l:libwindows_redirector.a".
+      - name: Fetch Windows redirector
+        run: go run ./tools/fetchredirector
+        shell: bash
+
       - name: Build amd64
         run: |
           set GOARCH=amd64

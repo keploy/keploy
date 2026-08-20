@@ -1,5 +1,13 @@
 # GoReleaser configuration
 
+before:
+  hooks:
+    # The keploy-windows build links libwindows_redirector.a via cgo. It is no
+    # longer committed to this repository (see pkg/agent/hooks/windows/
+    # redirector.lock); fetch the pinned, digest-checked copy first. Writes it
+    # next to redirector.go, which is the ${SRCDIR} the #cgo line searches.
+    - go run ./tools/fetchredirector
+
 release:
   # If the tag has a pre-release part (e.g. -beta1), this becomes a GitHub pre-release.
   prerelease: auto

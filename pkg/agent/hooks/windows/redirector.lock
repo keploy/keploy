@@ -1,0 +1,24 @@
+# Pins the prebuilt Windows redirector static library that cgo links into the
+# windows/amd64 build (see redirector.go's #cgo LDFLAGS).
+#
+# The .a is NOT committed. Ten commits have touched it, leaving seven distinct
+# ~20 MB blobs that account for roughly 24 MiB of the pack (132 MiB before delta
+# compression) and grow by another copy on every redirector update. That alone
+# would be a weak reason to move it; the deciding problem was provenance. A
+# checked-in binary records nothing about which redirector commit produced it,
+# and the copy this replaces had silently gone stale, still carrying code from
+# #4045 long after the source had moved on. A digest pinned to a released tag
+# says exactly what is being linked.
+#
+# Fetched from https://keploy.io/ent/dl/windows-redirector/<version>/ — the same
+# world-readable container that serves the enterprise binaries. Not the GitHub
+# release: keploy/windows-redirector is private and this repository is public,
+# so a release asset there is unreachable for a fork CI run or an outside
+# contributor.
+#
+# Refresh: tag keploy/windows-redirector; its publish-azure job uploads the .a
+# and verifies it is publicly fetchable, then prints the exact two lines to put
+# here. The fetcher refuses any artifact whose digest does not match, so a bad
+# or tampered download fails loudly instead of being linked.
+version = v1.1.0
+sha256  = 03e2f549f3fdd9a17afc975b82e0edbdb2203130f42f34462e94753e77596228
