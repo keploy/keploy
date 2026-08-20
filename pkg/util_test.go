@@ -2240,3 +2240,97 @@ func TestAgentReadyTimeout(t *testing.T) {
 		t.Fatalf("DefaultAgentReadyTimeout %v is shorter than the agent healthcheck budget (~310s)", DefaultAgentReadyTimeout)
 	}
 }
+
+func TestNextID(t *testing.T) {
+	tests := []struct {
+		name       string
+		ids        []string
+		identifier string
+		want       string
+	}{
+		{
+			name:       "issue 4377: ignores custom metadata ending in numbers with 3 packets",
+			ids:        []string{"test-set-0", "checkout-flow-999"},
+			identifier: "test-set-",
+			want:       "test-set-1",
+		},
+		{
+			name:       "sequential test sets",
+			ids:        []string{"test-set-0", "test-set-1", "test-set-2"},
+			identifier: "test-set-",
+			want:       "test-set-3",
+		},
+		{
+			name:       "unrelated prefixes and non-matching patterns are ignored",
+			ids:        []string{"other-0", "custom-name", "test-set-custom-99"},
+			identifier: "test-set-",
+			want:       "test-set-0",
+		},
+		{
+			name:       "gaps in sequence",
+			ids:        []string{"test-set-0", "test-set-5"},
+			identifier: "test-set-",
+			want:       "test-set-6",
+		},
+		{
+			name:       "out of order sequence",
+			ids:        []string{"test-set-10", "test-set-2"},
+			identifier: "test-set-",
+			want:       "test-set-11",
+		},
+		{
+			name:       "exact prefix without suffix or with non-numeric suffix",
+			ids:        []string{"test-set-", "test-set-abc", "test-set-1-mock"},
+			identifier: "test-set-",
+			want:       "test-set-0",
+		},
+		{
+			name:       "test-run identifier with unrelated test-set and custom IDs",
+			ids:        []string{"test-run-0", "test-run-1", "test-set-999", "checkout-flow-888"},
+			identifier: "test-run-",
+			want:       "test-run-2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NextID(tt.ids, tt.identifier)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestLastID(t *testing.T) {
+	tests := []struct {
+		name       string
+		ids        []string
+		identifier string
+		want       string
+	}{
+		{
+			name:       "ignores unrelated custom names and test sets",
+			ids:        []string{"test-run-0", "test-run-1", "checkout-flow-999", "test-set-50"},
+			identifier: "test-run-",
+			want:       "test-run-1",
+		},
+		{
+			name:       "highest ID returned with out of order sequence",
+			ids:        []string{"test-run-0", "test-run-12", "test-run-3"},
+			identifier: "test-run-",
+			want:       "test-run-12",
+		},
+		{
+			name:       "exact prefix or non-numeric suffixes ignored",
+			ids:        []string{"test-run-", "test-run-abc", "test-run-old-1"},
+			identifier: "test-run-",
+			want:       "test-run-0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LastID(tt.ids, tt.identifier)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

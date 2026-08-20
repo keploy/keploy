@@ -2542,15 +2542,16 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 func NextID(IDs []string, identifier string) string {
 	latestIndx := 0
 	for _, ID := range IDs {
-		namePackets := strings.Split(ID, "-")
-		if len(namePackets) == 3 {
-			Indx, err := strconv.Atoi(namePackets[2])
-			if err != nil {
-				continue
-			}
-			if latestIndx < Indx+1 {
-				latestIndx = Indx + 1
-			}
+		if !strings.HasPrefix(ID, identifier) {
+			continue
+		}
+		suffix := ID[len(identifier):]
+		indx, err := strconv.Atoi(suffix)
+		if err != nil {
+			continue
+		}
+		if latestIndx < indx+1 {
+			latestIndx = indx + 1
 		}
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
@@ -2559,15 +2560,16 @@ func NextID(IDs []string, identifier string) string {
 func LastID(IDs []string, identifier string) string {
 	latestIndx := 0
 	for _, ID := range IDs {
-		namePackets := strings.Split(ID, "-")
-		if len(namePackets) == 3 {
-			Indx, err := strconv.Atoi(namePackets[2])
-			if err != nil {
-				continue
-			}
-			if latestIndx < Indx {
-				latestIndx = Indx
-			}
+		if !strings.HasPrefix(ID, identifier) {
+			continue
+		}
+		suffix := ID[len(identifier):]
+		indx, err := strconv.Atoi(suffix)
+		if err != nil {
+			continue
+		}
+		if latestIndx < indx {
+			latestIndx = indx
 		}
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
