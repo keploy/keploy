@@ -1076,13 +1076,22 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
 
-	// Check if sudo credentials are already cached (e.g., from permission fix)
-	// If cached, we can use sudo -n (non-interactive) and skip PTY
-	sudoCached := utils.AreSudoCredentialsCached()
+	// The PTY and the cached-credentials probe both exist for one reason: sudo
+	// may prompt for a password. On a platform where the agent is never
+	// elevated (darwin) there is no prompt, and taking the PTY path anyway is
+	// pure cost — startNativeAgentWithPTY puts the user's real terminal into
+	// raw mode for the whole run, swallows their keystrokes into a pty nothing
+	// reads, and closes the master on stop, which delivers SIGHUP to an agent
+	// that would otherwise have shut down gracefully.
+	elevates := agentUtils.AgentNeedsElevation(runtime.GOOS)
 
-	// Check if we need PTY for interactive input (e.g., sudo password)
-	// Skip PTY if credentials are already cached - use non-interactive sudo instead
-	if agentUtils.NeedsPTY() && !sudoCached {
+	sudoCached := false
+	if elevates {
+		// Cached credentials mean we can use sudo -n and skip the prompt.
+		sudoCached = utils.AreSudoCredentialsCached()
+	}
+
+	if elevates && agentUtils.NeedsPTY() && !sudoCached {
 		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp)
 	}
 
