@@ -167,7 +167,16 @@ function Show-Logs {
 
 # Wait for app readiness - http-pokeapi has a 2-second sleep at startup
 Write-Host "Waiting for app to respond on $base/api/greet..."
-$deadline = (Get-Date).AddMinutes(5)
+# 7 minutes, same value and same reasoning as the go-dedup docker lane.
+# This lane is native: there is no agent container and no compose
+# healthcheck. What still applies is keploy's own wait - it gives the
+# native agent up to pkg.DefaultAgentReadyTimeout (330s, pkg/util.go) to
+# report ready before launching `go run .`. That is a ceiling polled on a
+# 1s ticker, not a fixed cost, which is why healthy runs here finish in
+# 2-6 minutes. But when the agent does not come up, the old 5-minute
+# deadline expired before keploy had reported anything, and the probe fell
+# through to fire traffic at a port nothing was listening on.
+$deadline = (Get-Date).AddMinutes(7)
 $ready = $false
 do {
   # Check if the process is still running

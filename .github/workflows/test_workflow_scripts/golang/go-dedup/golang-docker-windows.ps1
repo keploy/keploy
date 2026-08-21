@@ -235,8 +235,99 @@ $env:APP_BASE_URL = "http://localhost:$appPort"
 Write-Host "Chosen app port: $appPort"
 Write-Host "Chosen container name: $containerName"
 
+# Build the sample image, retrying only a Docker Hub rate limit.
+#
+# Two independent failures used to compound here, and between them they
+# hid the real cause for nine minutes on run 32388095493 / job
+# 96488562918:
+#
+#   1. `docker compose build` ran bare. A native command's non-zero exit
+#      does NOT raise a terminating error in PowerShell 5.1 even under
+#      $ErrorActionPreference = 'Stop', so the script sailed straight past
+#      a build that had produced no image, waited out the full app
+#      readiness deadline, then sent six requests that could only fail
+#      with "Unable to connect to the remote server". The job's *reported*
+#      error was an unrelated taskkill on an already-dead PID. The 429 was
+#      still in the log, ~9 minutes further up.
+#
+#   2. Nothing retried. Docker Hub meters anonymous pulls at 100 manifest
+#      requests per rolling 3600s window keyed to the *egress IP*, and the
+#      self-hosted runners on this VM share one office NAT address — so
+#      the budget is routinely spent by traffic this repo never generated.
+#      Because the window rolls rather than resetting hourly, capacity
+#      trickles back continuously and a short backoff has a real chance of
+#      clearing it. It is a mitigation, not a cure: a retry cannot
+#      manufacture pull budget.
+#
+# Only a rate limit is retried. Retrying every failure would turn a
+# genuine 30-second compile break into a multi-minute one and push the
+# compiler error far up the log, so anything else throws on attempt 1.
+function Invoke-DockerBuildWithRetry {
+  param(
+    [string[]]$BuildArgs = @('compose', 'build'),
+    [int]$MaxAttempts = 4,
+    [int]$InitialBackoffSec = 15
+  )
+
+  $backoff = $InitialBackoffSec
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    Write-Host "docker $($BuildArgs -join ' ') (attempt $attempt/$MaxAttempts)…"
+
+    # docker writes all of its build progress to stderr, and under
+    # $ErrorActionPreference = 'Stop' the `2>&1` merge below turns the very
+    # first stderr line into a terminating NativeCommandError — which would
+    # abort here before the output could be examined for a 429 at all.
+    # Drop to 'Continue' for the duration of the call only.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    # Stream each line as it arrives AND accumulate it. Two reasons not to
+    # capture with `| Out-String` and print at the end:
+    #
+    # It would buffer the whole build, so a build that HANGS - the case the
+    # 330s agent budget exists to tolerate - would print nothing at all, and a
+    # cancelled or timed-out job would lose the build log entirely.
+    #
+    # And Out-String renders stderr ErrorRecords through the formatter, which
+    # hard-wraps at $Host.UI.RawUI.BufferSize.Width (120 on these runners, even
+    # with stdout redirected). Measured on the runner: that splits
+    # "Too Many Requests" across a line break for 17 of 81 realistic line
+    # lengths, so the match below would silently fail and report a 429 as "not
+    # a rate limit". It also injects a NativeCommandError block into every
+    # green build log that reads as though this helper crashed.
+    $sb = New-Object System.Text.StringBuilder
+    try {
+      & docker @BuildArgs 2>&1 | ForEach-Object {
+        $line = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { [string]$_ }
+        [void]$sb.AppendLine($line)
+        Write-Host $line
+      }
+      $rc = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $prevEap
+    }
+    $output = $sb.ToString()
+
+    if ($rc -eq 0) { return }
+
+    # Match the wording, never a bare "429": those digits also appear in
+    # ISO-8601 timestamps and layer byte counts in this same output, and
+    # matching them would reclassify real breakage as a rate limit.
+    if ($output -match 'toomanyrequests|too\s+many\s+requests|pull\s+rate\s+limit|rate\s+limit\s+exceeded') {
+      if ($attempt -lt $MaxAttempts) {
+        Write-Warning "Docker Hub pull rate limit hit (exit $rc). Retrying in ${backoff}s…"
+        Start-Sleep -Seconds $backoff
+        $backoff = $backoff * 2
+        continue
+      }
+      throw "docker $($BuildArgs -join ' ') failed after $MaxAttempts attempts: the Docker Hub pull rate limit (HTTP 429) did not clear. This is an infrastructure limit on the runner's egress IP, not a defect in the change under test."
+    }
+
+    throw "docker $($BuildArgs -join ' ') failed with exit code $rc. The output above is the build error; this is not a Docker Hub rate limit, so it was not retried."
+  }
+}
+
 Write-Host "Building Docker image(s) with docker compose..."
-docker compose build
+Invoke-DockerBuildWithRetry
 
 # --- Clean previous keploy outputs ---
 $candidates = @(".\keploy")
@@ -408,7 +499,26 @@ function Show-KeployLogFiles {
 #      the remaining five — the prior `try { req1; req2; ... } catch`
 #      swallowed the first failure and sent $sent=0 requests.
 Write-Host "Waiting for app to respond on $base/hello/keploy …"
-$deadline       = (Get-Date).AddMinutes(5)
+# 7 minutes, not 5, because this probe races keploy's own agent-readiness
+# wait and used to lose. On the compose lane keploy waits
+# pkg.DefaultAgentReadyTimeout (330s, pkg/util.go) for the in-docker
+# keploy-agent to report healthy, and only reports the real failure after
+# that. At 5 minutes this loop gave up 30s BEFORE keploy could speak, so a
+# genuinely failed bring-up surfaced as six "Unable to connect to the
+# remote server" retries instead of the actual cause — observed on run
+# 32388095493 / job 96488562918.
+#
+# This costs a genuinely-failing job about 35s: the probe now waits for
+# keploy to die at ~335s rather than giving up at 300s while keploy is
+# still silent, and the traffic phase below still runs either way. What is
+# bought is the diagnostic - Show-KeployLogFiles now dumps a log that
+# contains keploy's own error instead of a mid-flight snapshot taken
+# before it had written one.
+# Raising it here rather than shrinking the agent's healthcheck budget is
+# deliberate — that budget ships to every user and exists to tolerate slow
+# docker daemons; buying prettier CI logs with product tolerance is the
+# wrong trade.
+$deadline       = (Get-Date).AddMinutes(7)
 $stabilityCount = 3
 $settleSec      = 5
 $okStreak       = 0
