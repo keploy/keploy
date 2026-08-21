@@ -199,6 +199,18 @@ type MockManager struct {
 // integration tests that sleep between requests.
 const defaultConnectionIdleRetention = 5 * time.Minute
 
+// recordOrderInversionTolerance bounds how much a mock's response timestamp
+// may precede its request timestamp before we treat the recording as genuinely
+// corrupt and drop it. The proxy stamps BOTH timestamps from its own single
+// clock, so a small res<req gap is never real clock skew — it's a recorder
+// ordering artifact for fast request/response round-trips (notably PostgresV3
+// extended-query mocks, where the response can be stamped a few hundred µs
+// before the request record is finalized). Such mocks are valid and must be
+// kept (windowing is on the request timestamp anyway); only an inversion larger
+// than this tolerance indicates a truly corrupt/misordered recording worth
+// dropping.
+const recordOrderInversionTolerance = 2 * time.Second
+
 // connectionIdleRetentionNanos is the current per-process retention
 // stored as nanoseconds in an atomic so the setter and the sweeper
 // goroutine can race-freely read/write it. Initialised at package-
@@ -588,12 +600,11 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 			continue
 		}
 		// Defensive sanity check: a mock whose response-timestamp is
-		// BEFORE its request-timestamp is inconsistent (clock skew,
-		// serialisation bug, or corrupted recording). Drop it — keeping
-		// it would just confuse downstream scoring. Counted separately
-		// from the window-containment drops so the per-test counter
-		// and debug log can distinguish the two root causes.
-		if res.Before(req) {
+		// BEFORE its request-timestamp by more than recordOrderInversionTolerance
+		// is a genuinely corrupted/misordered recording — drop it. A sub-tolerance
+		// inversion is just a same-clock recorder ordering artifact (e.g. PostgresV3
+		// query mocks) and the mock is valid; keep it and window on the request ts.
+		if res.Before(req) && req.Sub(res) > recordOrderInversionTolerance {
 			droppedInvalidOrder++
 			continue
 		}
@@ -769,7 +780,7 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 			// the fix; subsequent drops stay on the per-call counter
 			// + Debug summary below so a pathological recording
 			// doesn't spam logs.
-			if res.Before(req) {
+			if res.Before(req) && req.Sub(res) > recordOrderInversionTolerance {
 				droppedInvalid++
 				if m.logger != nil {
 					mockName := mock.Name
@@ -777,10 +788,10 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 					res := res
 					m.invalidOrderWarnOnce.Do(func() {
 						m.logger.Info(
-							"mock dropped: response timestamp precedes request timestamp (inconsistent recording). "+
-								"This usually indicates clock skew at record time. Mocks with this pattern are "+
-								"dropped to avoid confusing the matcher; re-record with a synchronised clock if "+
-								"these mocks are needed. Further instances will only be counted (see Debug summary).",
+							"mock dropped: response timestamp precedes request timestamp by more than the tolerance "+
+								"(corrupt/misordered recording). Sub-tolerance inversions are same-clock recorder "+
+								"artifacts and are kept; only a large inversion is dropped. Further instances will "+
+								"only be counted (see Debug summary).",
 							zap.String("mock", mockName),
 							zap.Time("req", req),
 							zap.Time("res", res))
