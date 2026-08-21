@@ -371,13 +371,23 @@ func extractVariableTypes(obj map[string]interface{}) map[string]map[string]inte
 // {type: object, properties: ...} schema (properties precomputed by the
 // caller via ExtractVariableTypes). For an array root it returns a
 // {type: array, items: ...} schema whose item schema is folded over every
-// element. Any other root (or an empty body) falls back to an object schema so
-// existing behaviour is preserved.
+// element. A scalar root is described by its own type.
 func SchemaForBody(body interface{}, objectProps map[string]map[string]interface{}) models.Schema {
 	arr, ok := body.([]interface{})
 	if !ok {
-		// Object root (or nil/empty body): keep the original object schema.
-		return models.Schema{Type: "object", Properties: objectProps}
+		// An object root keeps the properties the caller already extracted, and
+		// a nil body (no body recorded) stays an empty object so it still
+		// serializes its example as {}.
+		if _, isObject := body.(map[string]interface{}); isObject || body == nil {
+			return models.Schema{Type: "object", Properties: objectProps}
+		}
+		// A scalar root - 5, "ok", true - was previously described as an
+		// object, producing a schema its own example violates and aborting
+		// generation the same way the array shapes above did. JSON allows any
+		// value as a document, and an API answering `5` or `true` is ordinary.
+		scalar := schemaForValue(body)
+		finalizeSchema(scalar)
+		return schemaFromMap(scalar)
 	}
 
 	items := itemSchema(arr)

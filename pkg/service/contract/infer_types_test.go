@@ -92,6 +92,14 @@ func TestInferSchema_AgreesWithHTTPDocToOpenAPI(t *testing.T) {
 		`{"empty":[]}`,
 		`{"maybe":null}`,
 		`{"rows":[{"id":1},{"id":1.5}]}`,
+		`{"deep":{"inner":{"n":1,"f":1.5}}}`,
+		`{"aoa":[[1,2]]}`,
+		`{"rows":[{"v":[1,1.5]}]}`,
+		`[{"id":1,"tags":["a"]}]`,
+		`[1,2,3]`,
+		`5`,
+		`"hello"`,
+		`true`,
 	}
 
 	svc := &contract{}
@@ -105,13 +113,11 @@ func TestInferSchema_AgreesWithHTTPDocToOpenAPI(t *testing.T) {
 			}
 			generated := oapi.Paths["/users"].Post.Responses["200"].Content["application/json"].Schema
 
-			for name, prop := range inferred.Properties {
-				got := typeOf(t, prop.Value)
-				want, _ := generated.Properties[name]["type"].(string)
-				if got != want {
-					t.Errorf("property %q: InferSchema says %q, HTTPDocToOpenAPI says %q", name, got, want)
-				}
-			}
+			// Compare the whole tree, not just the top level: a depth-1
+			// comparison passes while the two surfaces disagree about a
+			// nested property or an array's item type, which is exactly the
+			// kind of drift this test exists to catch.
+			diffSchemaTrees(t, "", inferred, &generated)
 		})
 	}
 }
@@ -250,5 +256,73 @@ func TestInferSchema_UndescribableBodyIsSkipped(t *testing.T) {
 				t.Error("an undescribable response body produced response content")
 			}
 		})
+	}
+}
+
+// diffSchemaTrees walks an InferSchema result and its HTTPDocToOpenAPI
+// counterpart together, reporting the first type disagreement at any depth.
+// The two surfaces use different schema representations, so this compares the
+// type strings structurally rather than the structs.
+func diffSchemaTrees(t *testing.T, path string, inferred *openapi3.Schema, generated *models.Schema) {
+	t.Helper()
+	if inferred == nil || generated == nil {
+		return
+	}
+
+	at := path
+	if at == "" {
+		at = "<root>"
+	}
+	if got, want := typeOf(t, inferred), generated.Type; got != want {
+		t.Errorf("%s: InferSchema says %q, HTTPDocToOpenAPI says %q", at, got, want)
+		return
+	}
+
+	if inferred.Items != nil {
+		diffSchemaTrees(t, path+"[]", inferred.Items.Value, generated.Items)
+	}
+
+	for name, prop := range inferred.Properties {
+		want, ok := generated.Properties[name]["type"].(string)
+		if !ok {
+			t.Errorf("%s.%s: HTTPDocToOpenAPI has no type for this property", at, name)
+			continue
+		}
+		if got := typeOf(t, prop.Value); got != want {
+			t.Errorf("%s.%s: InferSchema says %q, HTTPDocToOpenAPI says %q", at, name, got, want)
+			continue
+		}
+		// Descend through the map-shaped representation the other surface uses.
+		diffPropTrees(t, at+"."+name, prop, generated.Properties[name])
+	}
+}
+
+func diffPropTrees(t *testing.T, path string, inferred *openapi3.SchemaRef, generated map[string]interface{}) {
+	t.Helper()
+	if inferred == nil || inferred.Value == nil || generated == nil {
+		return
+	}
+
+	if items, ok := generated["items"].(map[string]interface{}); ok && inferred.Value.Items != nil {
+		want, _ := items["type"].(string)
+		if got := typeOf(t, inferred.Value.Items.Value); got != want {
+			t.Errorf("%s[]: InferSchema says %q, HTTPDocToOpenAPI says %q", path, got, want)
+			return
+		}
+		diffPropTrees(t, path+"[]", inferred.Value.Items, items)
+	}
+
+	if props, ok := generated["properties"].(map[string]map[string]interface{}); ok {
+		for name, sub := range inferred.Value.Properties {
+			want, ok := props[name]["type"].(string)
+			if !ok {
+				continue
+			}
+			if got := typeOf(t, sub.Value); got != want {
+				t.Errorf("%s.%s: InferSchema says %q, HTTPDocToOpenAPI says %q", path, name, got, want)
+				continue
+			}
+			diffPropTrees(t, path+"."+name, sub, props[name])
+		}
 	}
 }
