@@ -489,50 +489,88 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	return true
 }
 
-func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
-	// Helper function to check if a header should be ignored
-	shouldIgnoreHeader := func(key string) bool {
-		lkey := strings.ToLower(key)
-		return strings.HasPrefix(lkey, "keploy")
+// QueryParamsMatch reports whether the recorded query params (mockParams) and the
+// live request's query (reqQuery) match on BOTH key set AND value.
+//
+// MapsHaveSameKeys — the previous gate here — compared only key presence/counts,
+// never VALUES: a mock recorded for /search?id=A would satisfy a live request for
+// /search?id=B, so a distinct query could be served the wrong recorded response.
+// QueryParamsMatch keeps the exact same bidirectional key-set contract (ignoring
+// keploy-prefixed keys) and additionally compares each shared key's value.
+//
+// Values are compared in the recorded form: pkg.URLParams stores a recorded param
+// as ", "-joined (map[string]string), so the live side is joined the same way
+// (strings.Join(reqQuery[key], ", ")). urlNoise is applied to BOTH sides before
+// comparison using the same compile + ReplaceAllString-to-placeholder approach
+// MatchURLPath uses, so a param value covered by url noise still matches while a
+// genuinely different value does not.
+func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Values, urlNoise []string) bool {
+	shouldIgnore := func(key string) bool {
+		return strings.HasPrefix(strings.ToLower(key), "keploy")
 	}
 
-	// Count non-ignored keys in map1
-	map1Count := 0
-	for key := range map1 {
-		if !shouldIgnoreHeader(key) {
-			map1Count++
+	// Enforce the same bidirectional key-set contract as MapsHaveSameKeys.
+	mockCount := 0
+	for key := range mockParams {
+		if !shouldIgnore(key) {
+			mockCount++
 		}
 	}
-
-	// Count non-ignored keys in map2
-	map2Count := 0
-	for key := range map2 {
-		if !shouldIgnoreHeader(key) {
-			map2Count++
+	reqCount := 0
+	for key := range reqQuery {
+		if !shouldIgnore(key) {
+			reqCount++
 		}
 	}
-
-	// Check if counts match
-	if map1Count != map2Count {
+	if mockCount != reqCount {
 		return false
 	}
-
-	// Check if all non-ignored keys in map1 exist in map2
-	for key := range map1 {
-		if shouldIgnoreHeader(key) {
+	for key := range mockParams {
+		if shouldIgnore(key) {
 			continue
 		}
-		if _, exists := map2[key]; !exists {
+		if _, exists := reqQuery[key]; !exists {
+			return false
+		}
+	}
+	for key := range reqQuery {
+		if shouldIgnore(key) {
+			continue
+		}
+		if _, exists := mockParams[key]; !exists {
 			return false
 		}
 	}
 
-	// Check if all non-ignored keys in map2 exist in map1
-	for key := range map2 {
-		if shouldIgnoreHeader(key) {
+	// Pre-compile url-noise patterns once (mirrors MatchURLPath).
+	const ph = "{{keploy.urlnoise}}"
+	var noiseRes []*regexp.Regexp
+	for _, pat := range urlNoise {
+		re, cerr := regexp.Compile(pat)
+		if cerr != nil {
+			h.Logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(cerr))
 			continue
 		}
-		if _, exists := map1[key]; !exists {
+		noiseRes = append(noiseRes, re)
+	}
+
+	// Value compare for each shared, non-keploy key.
+	for key, recorded := range mockParams {
+		if shouldIgnore(key) {
+			continue
+		}
+		actual := strings.Join(reqQuery[key], ", ")
+		if recorded == actual {
+			continue
+		}
+		// Apply url noise to BOTH sides before comparing so a value covered by
+		// url noise still matches.
+		rv, av := recorded, actual
+		for _, re := range noiseRes {
+			rv = re.ReplaceAllString(rv, ph)
+			av = re.ReplaceAllString(av, ph)
+		}
+		if rv != av {
 			return false
 		}
 	}
@@ -595,8 +633,8 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			continue
 		}
 
-		// Query parameter match
-		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.URLParams, input.url.Query()) {
+		// Query parameter match (key set AND value; url noise aware)
+		if !h.QueryParamsMatch(mock.Spec.HTTPReq.URLParams, input.url.Query(), urlNoise) {
 			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
