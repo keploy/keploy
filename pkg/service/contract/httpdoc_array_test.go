@@ -43,8 +43,16 @@ func TestHTTPDocToOpenAPI_TopLevelArrayResponse(t *testing.T) {
 	if got.Items.Type != "object" {
 		t.Fatalf("array items type = %q, want \"object\"", got.Items.Type)
 	}
-	if _, ok := got.Items.Properties["id"]; !ok {
+	idProp, ok := got.Items.Properties["id"]
+	if !ok {
 		t.Fatalf("array items schema missing inferred property \"id\": %+v", got.Items.Properties)
+	}
+	// Pin the inferred type, not just the key: an items schema that names the
+	// property but types it wrong still produces a spec that lies about the
+	// endpoint. JSON numbers decode to float64, so "number" is the expected
+	// inference for {"id":1}.
+	if idProp["type"] != "number" {
+		t.Errorf("array items property \"id\" type = %v, want \"number\"", idProp["type"])
 	}
 
 	// The generated document must be a valid OpenAPI spec.
