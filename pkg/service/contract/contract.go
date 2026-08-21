@@ -3,7 +3,6 @@ package contract
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,18 +46,12 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, openAPIDB OpenAPIDB, 
 
 func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (models.OpenAPI, error) {
 
-	var err error
-	// Convert response body to an object (root may be an object or an array).
-	// Defaults to an empty object so a body-less doc still serializes its
-	// example as {} rather than null, as it did before array roots were
-	// supported.
-	var responseBodyObject interface{} = map[string]interface{}{}
-	if custom.Spec.Response.Body != "" {
-		err := json.Unmarshal([]byte(custom.Spec.Response.Body), &responseBodyObject)
-		if err != nil {
-			return models.OpenAPI{}, err
-		}
-
+	// Decode the response body (root may be an object or an array). Empty
+	// bodies decode to an empty object so a body-less doc still serializes its
+	// example as {} rather than null.
+	responseBodyObject, err := decodeJSONBody(custom.Spec.Response.Body)
+	if err != nil {
+		return models.OpenAPI{}, err
 	}
 
 	// Build the response schema, supporting both object and array roots.
@@ -68,15 +61,10 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 	}
 	responseSchema := SchemaForBody(responseBodyObject, responseObjectProps)
 
-	// Convert request body to an object (root may be an object or an array).
-	// Defaults to an empty object for the same reason as the response body.
-	var requestBodyObject interface{} = map[string]interface{}{}
-	if custom.Spec.Request.Body != "" {
-		err := json.Unmarshal([]byte(custom.Spec.Request.Body), &requestBodyObject)
-		if err != nil {
-			return models.OpenAPI{}, err
-		}
-
+	// Same for the request body.
+	requestBodyObject, err := decodeJSONBody(custom.Spec.Request.Body)
+	if err != nil {
+		return models.OpenAPI{}, err
 	}
 
 	// Build the request schema, supporting both object and array roots.

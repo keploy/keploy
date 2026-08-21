@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -22,6 +23,152 @@ type Response struct {
 	Message string
 	Schema  models.Schema
 	Body    interface{}
+}
+
+// normalizeJSONNumbers rewrites the json.Number values produced by a decoder
+// with UseNumber: an integer literal that fits becomes int64, anything else
+// becomes float64. Returns an error for a literal that fits neither.
+//
+// Decoding straight into interface{} makes every JSON number a float64, which
+// costs two things. The schema says "number" for a field that is plainly an
+// integer, so a client generated from the contract gets a float where the API
+// returns an int - getType's int/int32/int64 case was unreachable for exactly
+// this reason. And the example loses precision above 2^53: an id of
+// 9007199254740993 was being written to the contract as 9.007199254740992e+15.
+//
+// json.Number itself cannot be carried through: it is a string type, so YAML
+// marshals it quoted and the example turns into "1" instead of 1.
+func normalizeJSONNumbers(v interface{}) (interface{}, error) {
+	switch t := v.(type) {
+	case json.Number:
+		// An integer literal that fits becomes int64, which is what makes
+		// getType report "integer" and keeps the example exact.
+		if i, err := t.Int64(); err == nil {
+			return i, nil
+		}
+		// Anything else - fractional, exponent notation, or an integer wider
+		// than int64 - becomes float64. That last case is still lossy above
+		// 2^53, so the exactly-representable range widens from 2^53 to int64
+		// rather than becoming unbounded.
+		f, err := t.Float64()
+		if err != nil {
+			// A literal that overflows float64 (1e400). Plain json.Unmarshal
+			// rejected this too; keep it an error rather than silently
+			// recording the number as a string field.
+			return nil, fmt.Errorf("cannot represent JSON number %s: %w", t.String(), err)
+		}
+		return f, nil
+	case map[string]interface{}:
+		for k, val := range t {
+			n, err := normalizeJSONNumbers(val)
+			if err != nil {
+				return nil, err
+			}
+			t[k] = n
+		}
+		return t, nil
+	case []interface{}:
+		for i, val := range t {
+			n, err := normalizeJSONNumbers(val)
+			if err != nil {
+				return nil, err
+			}
+			t[i] = n
+		}
+		return t, nil
+	}
+	return v, nil
+}
+
+// decodeJSONBody decodes a recorded request/response body the way contract
+// generation needs it: numbers kept exact and integer literals distinguishable
+// from fractional ones. An empty body decodes to an empty object so a body-less
+// doc still serializes its example as {}.
+func decodeJSONBody(body string) (interface{}, error) {
+	if body == "" {
+		return map[string]interface{}{}, nil
+	}
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	// json.Unmarshal rejects trailing data; Decoder does not. Without this a
+	// concatenated or NDJSON body would silently yield a contract describing
+	// only its first document.
+	if dec.More() {
+		return nil, fmt.Errorf("unexpected trailing data after JSON body")
+	}
+	return normalizeJSONNumbers(v)
+}
+
+// widenSchemaForValue widens an item schema, inferred from one element of an
+// array, so that it also describes v.
+//
+// Item schemas are inferred from a single element while MediaType.Example
+// carries the whole body, and kin-openapi validates the example against the
+// schema. Without widening, [1, 1.5] infers items:integer from the first
+// element and then fails validation on the second - and a validateSchema
+// failure aborts the whole `keploy contract generate` run, so one
+// {"prices":[10, 9.99]} in a recorded response would take the command down.
+//
+// Widening the schema rather than rewriting the decoded body keeps every
+// recorded value exact, and does not depend on sibling elements lining up
+// positionally with the one the schema came from - a null anywhere in either
+// array would break that alignment.
+func widenSchemaForValue(s *models.Schema, v interface{}) {
+	if s == nil {
+		return
+	}
+	switch val := v.(type) {
+	case float64:
+		if s.Type == "integer" {
+			s.Type = "number"
+		}
+	case map[string]interface{}:
+		for k, vv := range val {
+			if prop, ok := s.Properties[k]; ok {
+				widenPropertyForValue(prop, vv)
+			}
+		}
+	case []interface{}:
+		for _, el := range val {
+			widenSchemaForValue(s.Items, el)
+		}
+	}
+}
+
+// widenPropertyForValue is widenSchemaForValue for the map-shaped property
+// schemas ExtractVariableTypes produces.
+func widenPropertyForValue(prop map[string]interface{}, v interface{}) {
+	if prop == nil {
+		return
+	}
+	switch val := v.(type) {
+	case float64:
+		if prop["type"] == "integer" {
+			prop["type"] = "number"
+		}
+	case map[string]interface{}:
+		sub, ok := prop["properties"].(map[string]map[string]interface{})
+		if !ok {
+			return
+		}
+		for k, vv := range val {
+			if p, ok := sub[k]; ok {
+				widenPropertyForValue(p, vv)
+			}
+		}
+	case []interface{}:
+		items, ok := prop["items"].(map[string]interface{})
+		if !ok {
+			return
+		}
+		for _, el := range val {
+			widenPropertyForValue(items, el)
+		}
+	}
 }
 
 // ExtractVariableTypes returns the type of each variable in the object.
@@ -83,6 +230,9 @@ func ExtractVariableTypes(obj map[string]interface{}) map[string]map[string]inte
 					if nullable {
 						items["nullable"] = true
 					}
+					for _, el := range arrayItems {
+						widenPropertyForValue(items, el)
+					}
 					responseType["items"] = items
 					types[key] = responseType
 					continue
@@ -93,6 +243,9 @@ func ExtractVariableTypes(obj map[string]interface{}) map[string]map[string]inte
 			}
 			if nullable {
 				items["nullable"] = true
+			}
+			for _, el := range arrayItems {
+				widenPropertyForValue(items, el)
 			}
 			responseType["items"] = items
 		}
@@ -149,6 +302,8 @@ func SchemaForBody(body interface{}, objectProps map[string]map[string]interface
 	case []interface{}:
 		nested := SchemaForBody(v, nil)
 		items = &nested
+	case int64:
+		items = &models.Schema{Type: "integer"}
 	case float64:
 		items = &models.Schema{Type: "number"}
 	case bool:
@@ -157,6 +312,10 @@ func SchemaForBody(body interface{}, objectProps map[string]map[string]interface
 		items = &models.Schema{Type: "string"}
 	}
 	items.Nullable = nullable
+	// The schema came from one element; widen it until it describes them all.
+	for _, el := range arr {
+		widenSchemaForValue(items, el)
+	}
 	return models.Schema{Type: "array", Items: items}
 }
 

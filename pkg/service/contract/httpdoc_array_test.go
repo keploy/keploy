@@ -49,10 +49,10 @@ func TestHTTPDocToOpenAPI_TopLevelArrayResponse(t *testing.T) {
 	}
 	// Pin the inferred type, not just the key: an items schema that names the
 	// property but types it wrong still produces a spec that lies about the
-	// endpoint. JSON numbers decode to float64, so "number" is the expected
-	// inference for {"id":1}.
-	if idProp["type"] != "number" {
-		t.Errorf("array items property \"id\" type = %v, want \"number\"", idProp["type"])
+	// endpoint. 1 is an integer literal, so "integer" is the expected
+	// inference - see TestHTTPDocToOpenAPI_NumberInference.
+	if idProp["type"] != "integer" {
+		t.Errorf("array items property \"id\" type = %v, want \"integer\"", idProp["type"])
 	}
 
 	// The generated document must be a valid OpenAPI spec.
@@ -68,9 +68,11 @@ func TestHTTPDocToOpenAPI_TopLevelArrayRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HTTPDocToOpenAPI failed on top-level array request body: %v", err)
 	}
+	// [1,2,3] are integer literals, so the items schema is "integer" rather
+	// than "number" - see TestHTTPDocToOpenAPI_NumberInference.
 	got := oapi.Paths["/users"].Post.RequestBody.Content["application/json"].Schema
-	if got.Type != "array" || got.Items == nil || got.Items.Type != "number" {
-		t.Fatalf("request schema = %+v, want type array with number items", got)
+	if got.Type != "array" || got.Items == nil || got.Items.Type != "integer" {
+		t.Fatalf("request schema = %+v, want type array with integer items", got)
 	}
 	if err := validateSchema(oapi); err != nil {
 		t.Fatalf("generated OpenAPI for array request body is invalid: %v", err)
