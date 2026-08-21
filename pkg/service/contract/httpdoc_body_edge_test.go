@@ -56,7 +56,8 @@ func TestHTTPDocToOpenAPI_ArrayBodyEdgeCases(t *testing.T) {
 		{name: "empty array", body: `[]`, wantItems: "string"},
 		{name: "array of strings", body: `["a","b"]`, wantItems: "string"},
 		{name: "array of booleans", body: `[true]`, wantItems: "boolean"},
-		{name: "array of arrays", body: `[[1,2]]`, wantItems: "array", nested: "number"},
+		{name: "array of arrays", body: `[[1,2]]`, wantItems: "array", nested: "integer"},
+		{name: "array of floats", body: `[1.5]`, wantItems: "number"},
 	}
 
 	for _, tt := range tests {
