@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -141,6 +142,24 @@ type ProxyOptions struct {
 type DestInfo interface {
 	Get(ctx context.Context, srcPort uint16) (*NetworkAddress, error)
 	Delete(ctx context.Context, srcPort uint16) error
+}
+
+// DestInfoByPeer is an OPTIONAL extension of DestInfo for datapaths where a
+// source port is not unique on its own.
+//
+// The eBPF datapath keys destinations per network namespace, so a source port
+// identifies one connection and DestInfo is sufficient. A userspace datapath
+// shared by many pods (one agent per NODE rather than one per pod) sees the same
+// ephemeral port from several network namespaces at once, and needs the peer
+// address to tell those connections apart.
+//
+// Implementing it is optional on purpose: this interface is a cross-repo contract
+// whose changes have to ship in lockstep, so adding a method to DestInfo would
+// break every implementation at once. Callers should type-assert and fall back
+// to DestInfo.Get, which is exactly what proxy.handleConnection does.
+type DestInfoByPeer interface {
+	GetByPeer(ctx context.Context, peerIP net.IP, srcPort uint16) (*NetworkAddress, error)
+	DeleteByPeer(ctx context.Context, peerIP net.IP, srcPort uint16) error
 }
 
 type TestBenchInfo interface {
