@@ -5,6 +5,7 @@ set -euo pipefail
 
 # for the below source make it such a way that if the file is not present or already present it does not error
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # ---------------------------------------------------------------------------
 # Docker daemon readiness barrier. On the self-hosted macOS runner Docker
@@ -124,7 +125,7 @@ for cf in docker-compose.yml docker-compose.yaml; do
 done
 
 # Build Docker Image(s)
-docker compose build
+docker_build_retry docker compose build
 
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/

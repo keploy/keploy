@@ -5,6 +5,7 @@ set -euo pipefail
 
 # for the below shource make it such a way that if the file is not present or already present it does not error
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # Function to find available port
 find_available_port() {
@@ -77,7 +78,7 @@ docker run --name "$DB_CONTAINER" --rm \
 rm -rf keploy/  # Clean up old test data
 rm ./keploy.yml >/dev/null 2>&1 || true
 
-docker build -t $APP_IMAGE .
+docker_build_retry docker build -t $APP_IMAGE .
 
 
 # Generate the keploy-config file.
