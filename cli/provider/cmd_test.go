@@ -211,6 +211,14 @@ func TestValidateFlags_HonoursCmdTypeEndToEnd(t *testing.T) {
 		{"generated default + docker command still auto-detects", "docker compose up", "", "native", "docker-compose"},
 		{"generated default + plain command stays native", "python app.py", "", "native", "native"},
 	}
+	// Two of these cases resolve to "native", which ValidateFlags refuses on a
+	// platform with no interception backend — so on macOS this test failed for
+	// a reason that has nothing to do with what it is checking. Pin the gate
+	// open: the platform policy has its own coverage in hooks_test.go.
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return true })
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.New()
