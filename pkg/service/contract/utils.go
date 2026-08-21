@@ -103,182 +103,274 @@ func decodeJSONBody(body string) (interface{}, error) {
 	return normalizeJSONNumbers(v)
 }
 
-// widenSchemaForValue widens an item schema, inferred from one element of an
-// array, so that it also describes v.
+// Inference distinguishes three states that OpenAPI 3.0 itself cannot spell,
+// so they are carried as internal type markers and resolved by finalizeSchema.
+// Both are deliberately illegal type names: they can never collide with a type
+// inferred from data, and a leak into a generated contract is unmistakable.
 //
-// Item schemas are inferred from a single element while MediaType.Example
-// carries the whole body, and kin-openapi validates the example against the
-// schema. Without widening, [1, 1.5] infers items:integer from the first
-// element and then fails validation on the second - and a validateSchema
-// failure aborts the whole `keploy contract generate` run, so one
-// {"prices":[10, 9.99]} in a recorded response would take the command down.
+// Keeping them explicit - rather than encoding "unknown" as a missing type key -
+// is what makes finalizeSchema idempotent. Absence of a type would otherwise
+// mean both "nothing observed yet" and "already resolved to untyped", and a
+// second pass over a resolved node would turn an untyped schema into a string.
+const (
+	// unknownType means no element has been observed yet: an empty array, or a
+	// JSON null, which carries no type of its own. It is the identity element
+	// of mergeSchemas, so uninformative elements contribute nothing but
+	// nullability instead of pinning down a type there is no evidence for.
+	unknownType = "\x00unknown"
+	// anyType means the observations conflict, so no single OpenAPI 3.0 type
+	// describes them all.
+	anyType = "\x00conflict"
+)
+
+// getType maps a decoded JSON value onto an OpenAPI 3.0 type name.
 //
-// Widening the schema rather than rewriting the decoded body keeps every
-// recorded value exact, and does not depend on sibling elements lining up
-// positionally with the one the schema came from - a null anywhere in either
-// array would break that alignment.
-func widenSchemaForValue(s *models.Schema, v interface{}) {
-	if s == nil {
-		return
-	}
-	switch val := v.(type) {
+// int64 is produced by decodeJSONBody for integer literals; plain
+// encoding/json would make every number a float64 and this case unreachable.
+func getType(value interface{}) string {
+	switch value.(type) {
 	case float64:
-		if s.Type == "integer" {
-			s.Type = "number"
-		}
+		return "number"
+	case int, int32, int64:
+		return "integer"
+	case string:
+		return "string"
+	case bool:
+		return "boolean"
 	case map[string]interface{}:
-		for k, vv := range val {
-			if prop, ok := s.Properties[k]; ok {
-				widenPropertyForValue(prop, vv)
-			}
-		}
+		return "object"
 	case []interface{}:
-		for _, el := range val {
-			widenSchemaForValue(s.Items, el)
-		}
+		return "array"
+	default:
+		return "string"
 	}
 }
 
-// widenPropertyForValue is widenSchemaForValue for the map-shaped property
-// schemas ExtractVariableTypes produces.
-func widenPropertyForValue(prop map[string]interface{}, v interface{}) {
-	if prop == nil {
+// schemaForValue returns a map-form schema describing exactly v.
+//
+// The map form is canonical throughout inference because models.Schema's own
+// Properties field already is a map[string]map[string]interface{} - every
+// schema below the root is a map anyway, and the struct exists only because
+// models.MediaType.Schema is typed. Converting once at the root (schemaFromMap)
+// avoids maintaining the same merge rules over two representations.
+//
+// A JSON null carries no type, so it yields the unknownType marker plus
+// nullable: "unknown but nullable". See the marker constants for why that is
+// spelled out rather than left implicit.
+func schemaForValue(v interface{}) map[string]interface{} {
+	switch val := v.(type) {
+	case nil:
+		return map[string]interface{}{"type": unknownType, "nullable": true}
+	case map[string]interface{}:
+		return map[string]interface{}{"type": "object", "properties": extractVariableTypes(val)}
+	case []interface{}:
+		return map[string]interface{}{"type": "array", "items": itemSchema(val)}
+	default:
+		return map[string]interface{}{"type": getType(v)}
+	}
+}
+
+// itemSchema folds every element of arr into a single item schema.
+//
+// Inferring from one chosen element and patching the result afterwards cannot
+// work: an empty array, a null, or an element that simply lacks a key reveals
+// nothing, and no amount of patching recovers a type that was never observed.
+// [[], [1]] inferred "string" from the empty first element and then emitted a
+// schema its own example violated, which aborts `keploy contract generate`.
+// Folding instead makes "no evidence" the identity element, so uninformative
+// elements are skipped rather than believed.
+//
+// A nil accumulator means "nothing observed yet", which is why merging with it
+// yields the other side untouched.
+func itemSchema(arr []interface{}) map[string]interface{} {
+	var acc map[string]interface{}
+	for _, el := range arr {
+		acc = mergeSchemas(acc, schemaForValue(el))
+	}
+	if acc == nil {
+		// An empty array: no element was ever observed.
+		acc = map[string]interface{}{"type": unknownType}
+	}
+	return acc
+}
+
+// mergeSchemas returns the least schema that describes everything both a and b
+// describe. Nullability is the union of both sides.
+func mergeSchemas(a, b map[string]interface{}) map[string]interface{} {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+
+	nullable := a["nullable"] == true || b["nullable"] == true
+
+	aType, _ := a["type"].(string)
+	bType, _ := b["type"].(string)
+
+	var out map[string]interface{}
+	switch {
+	case aType == unknownType:
+		// Nothing was observed on this side, so it constrains nothing.
+		out = cloneSchema(b)
+	case bType == unknownType:
+		out = cloneSchema(a)
+	case aType == anyType || bType == anyType:
+		out = map[string]interface{}{"type": anyType}
+	case aType == bType:
+		switch aType {
+		case "object":
+			out = mergeObjectSchemas(a, b)
+		case "array":
+			out = map[string]interface{}{
+				"type":  "array",
+				"items": mergeSchemas(itemsOf(a), itemsOf(b)),
+			}
+		default:
+			out = map[string]interface{}{"type": aType}
+		}
+	case isNumericType(aType) && isNumericType(bType):
+		// The only widening OpenAPI 3.0 can express: every integer is a
+		// number, so [1, 1.5] is an array of number.
+		out = map[string]interface{}{"type": "number"}
+	default:
+		// string vs integer and friends. OpenAPI 3.0 has no single type for
+		// this; oneOf would be the honest encoding and is out of scope here,
+		// so record the conflict and let finalizeSchema emit an untyped schema
+		// rather than a typed one the recorded example would violate.
+		out = map[string]interface{}{"type": anyType}
+	}
+
+	if nullable {
+		out["nullable"] = true
+	} else {
+		delete(out, "nullable")
+	}
+	return out
+}
+
+// mergeObjectSchemas merges the properties of two object schemas.
+//
+// Only keys already present in a are kept, which is the historical behaviour:
+// an item schema describes the keys the first object showed, and OpenAPI allows
+// undeclared properties, so a later element with extra keys is still valid
+// against it. Unioning the keys would be better inference but changes the
+// schema emitted for bodies that generate fine today.
+func mergeObjectSchemas(a, b map[string]interface{}) map[string]interface{} {
+	aProps := propertiesOf(a)
+	bProps := propertiesOf(b)
+	merged := make(map[string]map[string]interface{}, len(aProps))
+	for key, aProp := range aProps {
+		if bProp, ok := bProps[key]; ok {
+			merged[key] = mergeSchemas(aProp, bProp)
+			continue
+		}
+		merged[key] = aProp
+	}
+	return map[string]interface{}{"type": "object", "properties": merged}
+}
+
+func propertiesOf(s map[string]interface{}) map[string]map[string]interface{} {
+	props, _ := s["properties"].(map[string]map[string]interface{})
+	return props
+}
+
+func itemsOf(s map[string]interface{}) map[string]interface{} {
+	items, _ := s["items"].(map[string]interface{})
+	return items
+}
+
+func isNumericType(t string) bool { return t == "integer" || t == "number" }
+
+func cloneSchema(s map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(s))
+	for k, v := range s {
+		out[k] = v
+	}
+	return out
+}
+
+// finalizeSchema fills in what the fold could not determine, in place.
+//
+// It must run exactly once, on the completed schema, never inside the
+// recursion. Materialising a default early turns "unknown" back into a real
+// type, and merging that with the first informative element then reads as a
+// conflict - which is precisely the bug this replaces.
+func finalizeSchema(s map[string]interface{}) {
+	if s == nil {
 		return
 	}
-	switch val := v.(type) {
-	case float64:
-		if prop["type"] == "integer" {
-			prop["type"] = "number"
+	switch t, _ := s["type"].(string); t {
+	case anyType:
+		// An untyped schema accepts any kind. Emitting a concrete type here
+		// would knowingly produce a document its own example violates.
+		delete(s, "type")
+	case unknownType:
+		// Zero evidence: [] or [null] never showed an element type. "string"
+		// is the historical default and is vacuously correct - there is no
+		// element for it to be wrong about.
+		s["type"] = "string"
+	case "object":
+		for _, prop := range propertiesOf(s) {
+			finalizeSchema(prop)
 		}
-	case map[string]interface{}:
-		sub, ok := prop["properties"].(map[string]map[string]interface{})
-		if !ok {
-			return
+	case "array":
+		items := itemsOf(s)
+		if items == nil {
+			// OpenAPI 3.0 rejects an array schema without items.
+			items = map[string]interface{}{"type": "string"}
+			s["items"] = items
 		}
-		for k, vv := range val {
-			if p, ok := sub[k]; ok {
-				widenPropertyForValue(p, vv)
-			}
-		}
-	case []interface{}:
-		items, ok := prop["items"].(map[string]interface{})
-		if !ok {
-			return
-		}
-		for _, el := range val {
-			widenPropertyForValue(items, el)
-		}
+		finalizeSchema(items)
 	}
+}
+
+// schemaFromMap converts a finalized map-form schema to the struct form
+// models.MediaType requires. Only the root needs it; everything below stays a
+// map, which is what models.Schema.Properties already holds.
+func schemaFromMap(s map[string]interface{}) models.Schema {
+	out := models.Schema{}
+	if t, ok := s["type"].(string); ok {
+		out.Type = t
+	}
+	if n, ok := s["nullable"].(bool); ok {
+		out.Nullable = n
+	}
+	if props := propertiesOf(s); props != nil {
+		out.Properties = props
+	}
+	if items := itemsOf(s); items != nil {
+		nested := schemaFromMap(items)
+		out.Items = &nested
+	}
+	return out
 }
 
 // ExtractVariableTypes returns the type of each variable in the object.
 func ExtractVariableTypes(obj map[string]interface{}) map[string]map[string]interface{} {
-	types := make(map[string]map[string]interface{}, len(obj))
-
-	getType := func(value interface{}) string {
-		switch value.(type) {
-		case float64:
-			return "number"
-		case int, int32, int64:
-			return "integer"
-		case string:
-			return "string"
-		case bool:
-			return "boolean"
-		case map[string]interface{}:
-			return "object"
-		case []interface{}:
-			return "array"
-		default:
-			return "string"
-		}
+	types := extractVariableTypes(obj)
+	for _, prop := range types {
+		finalizeSchema(prop)
 	}
-
-	for key, value := range obj {
-		// A JSON null carries no type. OpenAPI 3.0 still requires one, so keep
-		// the historical "string" default but mark the property nullable -
-		// without it the untouched example holds a null that kin-openapi
-		// rejects with `Value is not nullable`, aborting contract generation
-		// for any payload with a null field.
-		if value == nil {
-			types[key] = map[string]interface{}{"type": "string", "nullable": true}
-			continue
-		}
-
-		valueType := getType(value)
-		responseType := map[string]interface{}{
-			"type": valueType,
-		}
-
-		switch valueType {
-		case "object":
-			responseType["properties"] = ExtractVariableTypes(value.(map[string]interface{}))
-		case "array":
-			arrayItems := value.([]interface{})
-			arrayType := "string" // Default to string if array is empty
-
-			// Infer from the first non-null element; a null anywhere in the
-			// array only means the items are nullable.
-			firstElement, nullable := firstNonNil(arrayItems)
-			if firstElement != nil {
-				arrayType = getType(firstElement)
-				if arrayType == "object" {
-					items := map[string]interface{}{
-						"type":       arrayType,
-						"properties": ExtractVariableTypes(firstElement.(map[string]interface{})),
-					}
-					if nullable {
-						items["nullable"] = true
-					}
-					for _, el := range arrayItems {
-						widenPropertyForValue(items, el)
-					}
-					responseType["items"] = items
-					types[key] = responseType
-					continue
-				}
-			}
-			items := map[string]interface{}{
-				"type": arrayType,
-			}
-			if nullable {
-				items["nullable"] = true
-			}
-			for _, el := range arrayItems {
-				widenPropertyForValue(items, el)
-			}
-			responseType["items"] = items
-		}
-
-		types[key] = responseType
-	}
-
 	return types
 }
 
-// firstNonNil returns the first non-null element of items along with whether
-// any element was null, so callers can infer an item type from real data while
-// still marking the schema nullable.
-func firstNonNil(items []interface{}) (interface{}, bool) {
-	var first interface{}
-	nullable := false
-	for _, item := range items {
-		if item == nil {
-			nullable = true
-			continue
-		}
-		if first == nil {
-			first = item
-		}
+// extractVariableTypes is ExtractVariableTypes without finalization, for use
+// inside the fold. See finalizeSchema for why the two must stay separate.
+func extractVariableTypes(obj map[string]interface{}) map[string]map[string]interface{} {
+	types := make(map[string]map[string]interface{}, len(obj))
+	for key, value := range obj {
+		types[key] = schemaForValue(value)
 	}
-	return first, nullable
+	return types
 }
 
 // SchemaForBody builds an OpenAPI schema for a decoded JSON body whose root
 // may be either an object or an array. For an object root it returns a
 // {type: object, properties: ...} schema (properties precomputed by the
 // caller via ExtractVariableTypes). For an array root it returns a
-// {type: array, items: ...} schema, inferring the item schema from the first
+// {type: array, items: ...} schema whose item schema is folded over every
 // element. Any other root (or an empty body) falls back to an object schema so
 // existing behaviour is preserved.
 func SchemaForBody(body interface{}, objectProps map[string]map[string]interface{}) models.Schema {
@@ -288,35 +380,10 @@ func SchemaForBody(body interface{}, objectProps map[string]map[string]interface
 		return models.Schema{Type: "object", Properties: objectProps}
 	}
 
-	items := &models.Schema{Type: "string"} // default for an empty array
-	// Infer from the first non-null element; a null anywhere in the array only
-	// means the items are nullable, and inferring "string" from it would make
-	// kin-openapi reject the untouched example.
-	first, nullable := firstNonNil(arr)
-	switch v := first.(type) {
-	case map[string]interface{}:
-		items = &models.Schema{
-			Type:       "object",
-			Properties: ExtractVariableTypes(v),
-		}
-	case []interface{}:
-		nested := SchemaForBody(v, nil)
-		items = &nested
-	case int64:
-		items = &models.Schema{Type: "integer"}
-	case float64:
-		items = &models.Schema{Type: "number"}
-	case bool:
-		items = &models.Schema{Type: "boolean"}
-	case string:
-		items = &models.Schema{Type: "string"}
-	}
-	items.Nullable = nullable
-	// The schema came from one element; widen it until it describes them all.
-	for _, el := range arr {
-		widenSchemaForValue(items, el)
-	}
-	return models.Schema{Type: "array", Items: items}
+	items := itemSchema(arr)
+	finalizeSchema(items)
+	nested := schemaFromMap(items)
+	return models.Schema{Type: "array", Items: &nested}
 }
 
 func GenerateResponse(response Response) map[string]models.ResponseItem {
