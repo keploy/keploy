@@ -1029,6 +1029,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.ChannelBindingShim {
 		args = append(args, "--channel-binding-shim")
 	}
+	if opts.MockMode {
+		args = append(args, "--mock-mode")
+	}
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
 	// pattern (and for the same reason) as --disable-mapping above: the
 	// orchestrator has already applied flag > yaml > default, and the native
@@ -1423,6 +1426,25 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return err
 	}
 
+	// Mock mode: export the agent's scope-API address into the wrapped
+	// command's environment so a test-runner plugin / glue-code can mark
+	// per-test boundaries (POST {KEPLOY_MOCK_AGENT}/agent/scope/begin|end).
+	// The child inherits this process's environment. Native + docker-run put
+	// the child in the agent's netns, so localhost:<agentPort> reaches it;
+	// docker-compose shares the host loopback. Harmless when unused.
+	if opts.MockMode {
+		if err := os.Setenv("KEPLOY_MOCK_AGENT", fmt.Sprintf("http://localhost:%d", agentPort)); err != nil {
+			a.logger.Debug("failed to export KEPLOY_MOCK_AGENT", zap.Error(err))
+		}
+		session := "record"
+		if opts.Mode == models.MODE_TEST {
+			session = "replay"
+		}
+		if err := os.Setenv("KEPLOY_MOCK_SESSION", session); err != nil {
+			a.logger.Debug("failed to export KEPLOY_MOCK_SESSION", zap.Error(err))
+		}
+	}
+
 	err = usrApp.Setup(ctx)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to setup app")
@@ -1815,4 +1837,98 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 		return copyErr
 	}
 	return nil
+}
+
+// GetScopeWindows fetches the per-test scope windows the wrapped runner reported
+// during a `keploy mock record` session (via /agent/scope/*), so the CLI can
+// correlate captured mocks into mappings.yaml. A missing endpoint (older agent)
+// returns an empty slice, degrading to suite-level recording.
+func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	url := fmt.Sprintf("%s/scope/windows", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create scope-windows request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get scope windows: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return nil, fmt.Errorf("scope windows returned status %d: %s", res.StatusCode, string(body))
+	}
+	var windows []models.ScopeWindow
+	if err := json.NewDecoder(res.Body).Decode(&windows); err != nil {
+		return nil, fmt.Errorf("failed to decode scope windows: %w", err)
+	}
+	return windows, nil
+}
+
+// PushScopeTable hands the agent the replay-time per-test name→mock-names table
+// (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
+// served pool per test. A missing endpoint (older agent) is a no-op.
+func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string) error {
+	url := fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI)
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table})
+	if err != nil {
+		return fmt.Errorf("failed to marshal scope table: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create scope-table request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push scope table: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("scope table returned status %d: %s", res.StatusCode, string(b))
+	}
+	return nil
+}
+
+// DrainCapturedMocks fetches (and clears) the mocks the proxy captured on miss
+// during a `--on-miss record` replay session. The CLI appends them to the set.
+func (a *AgentClient) DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error) {
+	url := fmt.Sprintf("%s/mock/captured", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create captured-mocks request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get captured mocks: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return nil, fmt.Errorf("captured mocks returned status %d: %s", res.StatusCode, string(b))
+	}
+	var mocks []*models.Mock
+	if err := gob.NewDecoder(res.Body).Decode(&mocks); err != nil {
+		return nil, fmt.Errorf("failed to decode captured mocks: %w", err)
+	}
+	return mocks, nil
 }

@@ -730,6 +730,9 @@ jobs:
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
+  run_mock_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/mock_linux.yml
   run_http_stale_pool_race_linux:
     # Regression guard for issue #4165 (upstream-pool half-close race
     # in handleHttp1ZeroCopy). Bursty client + gunicorn --keep-alive 2
@@ -1208,6 +1211,7 @@ jobs:
       - run_node_docker
       - run_python_docker
       - run_python_linux
+      - run_mock_linux
       - run_http_stale_pool_race_linux
       - run_outbound_fin_stall_linux
       - run_startup_mock_capture_linux
@@ -1231,6 +1235,7 @@ jobs:
             "${{ needs.run_node_docker.result }}" \
             "${{ needs.run_python_docker.result }}" \
             "${{ needs.run_python_linux.result }}" \
+            "${{ needs.run_mock_linux.result }}" \
             "${{ needs.run_http_stale_pool_race_linux.result }}" \
             "${{ needs.run_outbound_fin_stall_linux.result }}" \
             "${{ needs.run_startup_mock_capture_linux.result }}" \

@@ -22,6 +22,38 @@ type TestMockMapping struct {
 	MockIDs  []string `json:"mock_ids"`
 }
 
+// ScopeReq is the body of POST /agent/scope/begin and /agent/scope/end — a
+// test-runner plugin / glue-code marks a named per-test scope so the mock flow
+// can attribute captured mocks to a test (record) or restrict the served pool
+// to that test (replay).
+type ScopeReq struct {
+	Name string `json:"name"`
+}
+
+// ScopeWindow is one recorded per-test scope: the agent-clock interval during
+// which the named test made its outgoing calls. Record correlates captured
+// mocks into these windows by request timestamp to build mappings.yaml.
+type ScopeWindow struct {
+	Name  string    `json:"name"`
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+}
+
+// ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
+// the agent the per-test name→mock-names table (from mappings.yaml) so the
+// runner's /agent/scope/begin calls can restrict the served pool per test.
+type ScopeTableReq struct {
+	Mappings map[string][]string `json:"mappings"`
+}
+
+// MockStats is the body of GET /agent/mock/stats — a non-draining snapshot of
+// the mock session for the runner or the CLI end-of-run summary.
+type MockStats struct {
+	Loaded   int `json:"loaded"`
+	Consumed int `json:"consumed"`
+	Missed   int `json:"missed"`
+}
+
 type SetMocksReq struct {
 	Filtered   []*Mock `json:"filtered"`
 	UnFiltered []*Mock `json:"unFiltered"`

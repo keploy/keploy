@@ -157,6 +157,12 @@ disableMysqlAutoDetect: false
 # unlike disableMysqlAutoDetect this keeps record-time detection on.
 disableMysqlEndpointDrift: false
 disableMapping: false
+mock:
+  name: "default"
+  onMiss: "fail"
+  strict: false
+  local: false
+  recordTimer: 0s
 contract:
   driven: "consumer"
   mappings:

@@ -16,6 +16,7 @@ import (
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
@@ -127,6 +128,17 @@ type Agent struct {
 	// with different IncomingOptions still update the proxy's filtering
 	// behavior instead of being silently ignored.
 	incomingMu sync.Mutex
+
+	// scope state backs the /agent/scope/* and /agent/mock/stats API that a
+	// user's test runner (pytest / go test / jest / glue-code) calls to mark
+	// per-test boundaries. In record mode it collects the agent-clock window for
+	// each named test; in test (replay) mode it uses the CLI-supplied table to
+	// restrict the served pool to one test's mocks. All fields guarded by scopeMu.
+	scopeMu      sync.Mutex
+	scopeOpen    map[string]time.Time // record: name -> begin time (agent clock)
+	scopeWindows []models.ScopeWindow // record: closed per-test windows
+	scopeTable   map[string][]string  // replay: test name -> mock names (from mappings.yaml)
+	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -502,6 +514,12 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	}
 	a.logger.Debug("MockOutgoing function called", zap.Any("options", redactedOpts))
 
+	// A new mock-serving session begins here (called once per replay). Clear the
+	// on-miss capture buffer so a reused / long-lived agent process (compose,
+	// standalone) never drains one replay's captured-on-miss mocks into a later,
+	// unrelated set. Harmless when --on-miss is not "record" (buffer stays empty).
+	httpparser.ResetCaptured()
+
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
 		return err
@@ -740,6 +758,14 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 		}
 	}
 	a.clientMocks.Store(uint64(0), storage)
+
+	// Track the loaded count for /agent/mock/stats.
+	a.scopeMu.Lock()
+	a.loadedMocks = len(storage.filtered) + len(storage.unfiltered)
+	if storage.diskMocks != nil {
+		a.loadedMocks += storage.diskMocks.Len()
+	}
+	a.scopeMu.Unlock()
 
 	// Seed the freeze anchor from the earliest request timestamp across the WHOLE
 	// pool, including on-disk mocks (they often carry the earliest, boot, times).

@@ -9,6 +9,13 @@ type AppError struct {
 	AppErrorType AppErrorType
 	Err          error
 	AppLogs      string
+	// ExitCode is the wrapped application/test-runner's process exit code
+	// when it is known (a Runtime exit carrying an *exec.ExitError). It is
+	// -1 when no exit code is available (the command never started, was
+	// killed by a signal, or exited cleanly with code 0 via ErrAppStopped).
+	// The mock record/replay flows propagate this as keploy's own exit code
+	// so a wrapped `pytest`/`go test` failure fails the keploy process too.
+	ExitCode int
 }
 
 type AppErrorType string
