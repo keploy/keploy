@@ -825,3 +825,198 @@ func TestForwardDNSUpstream_NoUpstreamConfigured(t *testing.T) {
 		t.Errorf("err = %v; want message containing 'no upstream'", err)
 	}
 }
+
+// collectDNSMismatchReports drains p.errChannel and returns the DNS
+// MockMismatchReports that resolveUncachedDNSResponse pushed onto it. The
+// steering-vs-reporting split of issue #4474 is only observable here: the
+// returned dnsCacheEntry looks identical whether or not a mismatch was
+// reported, so the assertions have to read the error channel.
+func collectDNSMismatchReports(t *testing.T, p *Proxy) []models.MockMismatchReport {
+	t.Helper()
+	var reports []models.MockMismatchReport
+	for {
+		select {
+		case err := <-p.errChannel:
+			parserErr, ok := err.(models.ParserError)
+			if !ok {
+				t.Fatalf("unexpected error type on errChannel: %T (%v)", err, err)
+			}
+			if parserErr.ParserErrorType != models.ErrMockNotFound {
+				t.Fatalf("unexpected parser error type on errChannel: %q", parserErr.ParserErrorType)
+			}
+			if parserErr.MismatchReport == nil {
+				t.Fatalf("ErrMockNotFound without a MismatchReport: %v", parserErr.Err)
+			}
+			reports = append(reports, *parserErr.MismatchReport)
+		default:
+			return reports
+		}
+	}
+}
+
+// newProxyForMismatchReporting is newProxyWithUpstream plus the two fields a
+// mock-miss needs to be observable: an empty mock manager (so every query is a
+// miss) and a buffered errChannel (SendError drops to the "channel full" log
+// branch when it is nil).
+func newProxyForMismatchReporting(t *testing.T, addr string, timeout time.Duration) *Proxy {
+	t.Helper()
+	p := newProxyWithUpstream(t, addr, timeout)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+	p.errChannel = make(chan error, 16)
+	return p
+}
+
+// TestResolveUncachedDNSResponse_TestMode_UpstreamNXDOMAIN_NoMockMismatch is the
+// regression test for issue #4474.
+//
+// Capture deliberately drops non-Success rcodes (enterprise
+// dns_capture.go: "skip non-Success rcodes (NXDOMAIN, SERVFAIL, REFUSED) …
+// would pollute mocks.yaml"), so for a name upstream reports as absent there
+// was never a mock to record — its absence at replay is expected, not a
+// defect. Replay used to report it as a mock mismatch anyway, and with the
+// Kubernetes default ndots:5 every hostname emits 2-3 search-expansion probes
+// that NXDOMAIN before the absolute name resolves, so a single lookup could
+// fail a whole test set on names that never resolved in production either.
+//
+// Both halves of the fix are asserted here: the #2006 proxy-IP steering is
+// untouched (the app still gets a synthetic A, never the NXDOMAIN), and no
+// MockMismatchReport is emitted.
+func TestResolveUncachedDNSResponse_TestMode_UpstreamNXDOMAIN_NoMockMismatch(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeNameError // NXDOMAIN
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyForMismatchReporting(t, addr, 2*time.Second)
+
+	// A doubled search-expanded name, exactly the shape the resolver probes
+	// first under ndots:5 and the shape of all 16 mismatches in #4474.
+	q := dns.Question{
+		Name:   "mongo.prod.svc.cluster.local.prod.svc.cluster.local.",
+		Qtype:  dns.TypeA,
+		Qclass: dns.ClassINET,
+	}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
+
+	// #2006 steering must be unchanged: the app still gets the synthetic
+	// proxy-IP answer so eBPF can intercept the connection.
+	if entry.Msg == nil {
+		t.Fatal("expected the synthetic proxy-IP fallback, got nil Msg")
+	}
+	if entry.Msg.Rcode != dns.RcodeSuccess {
+		t.Errorf("Rcode = %d, want %d — upstream NXDOMAIN must not reach the app (#2006)", entry.Msg.Rcode, dns.RcodeSuccess)
+	}
+	if len(entry.Msg.Answer) != 1 {
+		t.Fatalf("expected 1 synthetic A answer (steering intact), got %d", len(entry.Msg.Answer))
+	}
+	if a, ok := entry.Msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("127.0.0.1")) {
+		t.Errorf("expected synthetic A 127.0.0.1 (proxy steering), got %v", entry.Msg.Answer[0])
+	}
+	if entry.FromUpstream {
+		t.Error("steered synthetic response must not be marked FromUpstream")
+	}
+
+	// …and the expected negative must not be reported as a mock mismatch.
+	if reports := collectDNSMismatchReports(t, p); len(reports) != 0 {
+		t.Errorf("upstream NXDOMAIN reported as a mock mismatch (%d report(s)): %+v — capture never records such a name, so replay must not fail on its absence (#4474)",
+			len(reports), reports)
+	}
+}
+
+// TestResolveUncachedDNSResponse_TestMode_UpstreamSERVFAIL_NoMockMismatch pins
+// that the #4474 suppression covers every definitive non-Success rcode, not
+// just NXDOMAIN: capture skips SERVFAIL and REFUSED on the same grounds, so
+// there is no mock for such a name either. The steering is unchanged.
+func TestResolveUncachedDNSResponse_TestMode_UpstreamSERVFAIL_NoMockMismatch(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeServerFailure // SERVFAIL
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyForMismatchReporting(t, addr, 2*time.Second)
+
+	q := dns.Question{Name: "flaky.svc.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+
+	if entry.Msg == nil || len(entry.Msg.Answer) != 1 {
+		t.Fatalf("expected the synthetic proxy-IP fallback to survive, got %+v", entry.Msg)
+	}
+	if reports := collectDNSMismatchReports(t, p); len(reports) != 0 {
+		t.Errorf("upstream SERVFAIL reported as a mock mismatch (%d report(s)): %+v", len(reports), reports)
+	}
+}
+
+// TestResolveUncachedDNSResponse_TestMode_UpstreamUnreachable_ReportsMismatch
+// pins the deliberate limit of the #4474 suppression. When the forward fails
+// we never learn whether the name would have resolved, so a missing mock is
+// still a candidate defect and must keep being reported — otherwise a broken
+// upstream would silently swallow every genuine DNS mock miss.
+func TestResolveUncachedDNSResponse_TestMode_UpstreamUnreachable_ReportsMismatch(t *testing.T) {
+	// Stall every real query past the forwarder deadline; answer only the
+	// readiness probe so startFakeUpstream returns promptly.
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		if len(r.Question) > 0 && strings.HasPrefix(r.Question[0].Name, "probe.test") {
+			m := new(dns.Msg)
+			m.SetReply(r)
+			_ = w.WriteMsg(m)
+			return
+		}
+		time.Sleep(400 * time.Millisecond)
+	})
+	defer stop()
+
+	p := newProxyForMismatchReporting(t, addr, 80*time.Millisecond)
+
+	q := dns.Question{Name: "unreachable.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+
+	if entry.Msg == nil || len(entry.Msg.Answer) != 1 {
+		t.Fatalf("expected the synthetic proxy-IP fallback, got %+v", entry.Msg)
+	}
+	reports := collectDNSMismatchReports(t, p)
+	if len(reports) != 1 {
+		t.Fatalf("expected exactly 1 mismatch report when upstream is unreachable, got %d: %+v", len(reports), reports)
+	}
+	if reports[0].Protocol != "DNS" {
+		t.Errorf("report protocol = %q, want %q", reports[0].Protocol, "DNS")
+	}
+	if !strings.Contains(reports[0].ActualSummary, "unreachable.example.com.") {
+		t.Errorf("report ActualSummary = %q; want it to name the query", reports[0].ActualSummary)
+	}
+}
+
+// TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_NoMockMismatch pins
+// that the NODATA branch is untouched by #4474: it already returned early
+// without reporting, and it still relays the honest empty NOERROR.
+func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_NoMockMismatch(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeSuccess // NOERROR + zero answers -> NODATA
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyForMismatchReporting(t, addr, 2*time.Second)
+
+	q := dns.Question{Name: "postgres.checkr.svc.cluster.local.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+
+	if entry.Msg == nil || entry.Msg.Rcode != dns.RcodeSuccess || len(entry.Msg.Answer) != 0 {
+		t.Fatalf("expected the relayed empty NOERROR, got %+v", entry.Msg)
+	}
+	if !entry.FromUpstream {
+		t.Error("relayed NODATA must be cached as FromUpstream")
+	}
+	if reports := collectDNSMismatchReports(t, p); len(reports) != 0 {
+		t.Errorf("NODATA relay reported a mock mismatch (%d report(s)): %+v", len(reports), reports)
+	}
+}
