@@ -135,10 +135,10 @@ type Agent struct {
 	// each named test; in test (replay) mode it uses the CLI-supplied table to
 	// restrict the served pool to one test's mocks. All fields guarded by scopeMu.
 	scopeMu      sync.Mutex
-	scopeOpen    map[string]time.Time // record: name -> begin time (agent clock)
-	scopeWindows []models.ScopeWindow // record: closed per-test windows
-	scopeTable   map[string][]string  // replay: test name -> mock names (from mappings.yaml)
-	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
+	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
+	scopeWindows []models.ScopeWindow   // record: closed per-test windows
+	scopeTable   map[string][]string    // replay: test name -> mock names (from mappings.yaml)
+	loadedMocks  int                    // replay: count of mocks stored, for /agent/mock/stats
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {

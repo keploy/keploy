@@ -17,10 +17,10 @@ import (
 // agent.Service interface stays unchanged (same pattern as BeginTestErrorCapture).
 
 type scopeBeginner interface {
-	BeginScope(ctx context.Context, name string) error
+	BeginScope(ctx context.Context, name string, pid int) error
 }
 type scopeEnder interface {
-	EndScope(ctx context.Context, name string) error
+	EndScope(ctx context.Context, name string, pid int) error
 }
 type scopeWindowReader interface {
 	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
@@ -43,7 +43,7 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s, ok := a.svc.(scopeBeginner); ok {
-		if err := s.BeginScope(r.Context(), req.Name); err != nil {
+		if err := s.BeginScope(r.Context(), req.Name, req.Pid); err != nil {
 			a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -61,7 +61,7 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s, ok := a.svc.(scopeEnder); ok {
-		if err := s.EndScope(r.Context(), req.Name); err != nil {
+		if err := s.EndScope(r.Context(), req.Name, req.Pid); err != nil {
 			a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

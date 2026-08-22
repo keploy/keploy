@@ -21,11 +21,25 @@ import (
 // Scoping is entirely optional: with no scope calls the set records/replays
 // suite-level, which is still correct.
 
-// BeginScope opens a per-test scope. In record mode it stamps the begin time
-// (agent clock) so captured mocks can later be bucketed to this test. In test
-// mode it restricts the served pool to this test's mocks when the CLI supplied
-// a mapping table for it.
-func (a *Agent) BeginScope(ctx context.Context, name string) error {
+// scopeKey identifies an open record-mode scope by (reporting worker PID, test
+// name). Keying by BOTH — not PID alone — keeps two things correct at once:
+// parallel workers don't collide (distinct PIDs), and a single worker's nested
+// or overlapping named scopes (or the legacy pid==0 path) don't clobber each
+// other the way a PID-only key would.
+type scopeKey struct {
+	pid  uint32
+	name string
+}
+
+// BeginScope opens a per-test scope. In record mode it stamps the begin time so
+// captured mocks can later be bucketed to this test. In test mode it restricts
+// the served pool to this test's mocks when the CLI supplied a mapping table.
+//
+// pid is the calling worker's PID (ScopeReq.Pid). When > 0 the scope is keyed to
+// that worker so PARALLEL workers each get their own served view without
+// stomping each other (Design A); pid == 0 falls back to the single global
+// scope (sequential single-worker runs, and the suite-level default).
+func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
 	if name == "" {
 		return nil
 	}
@@ -37,6 +51,15 @@ func (a *Agent) BeginScope(ctx context.Context, name string) error {
 			// No per-test mapping for this test — leave the whole pool armed.
 			return nil
 		}
+		if pid > 0 {
+			// Parallel-safe: narrow ONLY this worker's served view, keyed by its
+			// PID, so concurrent workers never overwrite one shared filter.
+			a.logger.Debug("scope begin: worker-scoped pool", zap.String("test", name), zap.Int("worker", pid), zap.Int("mocks", len(names)))
+			a.SetWorkerScope(uint32(pid), names)
+			return nil
+		}
+		// No worker PID reported — restrict the single global pool (correct for
+		// a sequential single-worker suite, the pre-Design-A behavior).
 		a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)))
 		return a.UpdateMockParams(ctx, models.MockFilterParams{
 			MockMapping:     names,
@@ -46,24 +69,25 @@ func (a *Agent) BeginScope(ctx context.Context, name string) error {
 		})
 	}
 
-	// Record mode: mark the window start (agent clock). We deliberately do NOT
+	// Record mode: mark the window start (agent clock), keyed by worker PID so
+	// overlapping windows from parallel workers stay distinguishable. We do NOT
 	// touch the syncMock ingress-correlation machinery here — that is driven by
-	// incoming requests, which mock mode has none of. The window is correlated
-	// to captured mocks purely by request timestamp after the run.
+	// incoming requests, which mock mode has none of.
 	a.scopeMu.Lock()
-	if a.scopeOpen == nil {
-		a.scopeOpen = make(map[string]time.Time)
+	if a.workerOpen == nil {
+		a.workerOpen = make(map[scopeKey]time.Time)
 	}
-	a.scopeOpen[name] = time.Now()
+	a.workerOpen[scopeKey{pid: uint32(pid), name: name}] = time.Now()
 	a.scopeMu.Unlock()
-	a.logger.Debug("scope begin (record)", zap.String("test", name))
+	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
 }
 
 // EndScope closes a per-test scope. In record mode it records the [begin, now]
-// window for later correlation. In test mode it restores the whole pool so a
-// call made between tests still matches.
-func (a *Agent) EndScope(ctx context.Context, name string) error {
+// window (tagged with the worker PID) for later correlation. In test mode it
+// restores this worker's whole-pool view so a call made between tests still
+// matches.
+func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 	if name == "" {
 		return nil
 	}
@@ -74,6 +98,11 @@ func (a *Agent) EndScope(ctx context.Context, name string) error {
 		if !scoped {
 			return nil
 		}
+		if pid > 0 {
+			a.logger.Debug("scope end: clearing worker scope", zap.String("test", name), zap.Int("worker", pid))
+			a.ClearWorkerScope(uint32(pid))
+			return nil
+		}
 		a.logger.Debug("scope end: restoring whole pool", zap.String("test", name))
 		return a.UpdateMockParams(ctx, models.MockFilterParams{
 			AfterTime:  models.BaseTime,
@@ -82,13 +111,14 @@ func (a *Agent) EndScope(ctx context.Context, name string) error {
 	}
 
 	a.scopeMu.Lock()
-	start, ok := a.scopeOpen[name]
+	k := scopeKey{pid: uint32(pid), name: name}
+	start, ok := a.workerOpen[k]
 	if ok {
-		delete(a.scopeOpen, name)
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: time.Now()})
+		delete(a.workerOpen, k)
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: time.Now(), PID: uint32(pid)})
 	}
 	a.scopeMu.Unlock()
-	a.logger.Debug("scope end (record)", zap.String("test", name))
+	a.logger.Debug("scope end (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
 }
 
@@ -108,6 +138,21 @@ func (a *Agent) SetScopeTable(_ context.Context, table map[string][]string) erro
 	a.scopeMu.Lock()
 	a.scopeTable = table
 	a.scopeMu.Unlock()
+
+	// Push the union of every test's mapped mock names to the proxy so a scoped
+	// worker can tell another test's mock (hide) from a genuinely-shared,
+	// unmapped recording (keep). De-duplicated across tests.
+	seen := make(map[string]struct{})
+	universe := make([]string, 0)
+	for _, names := range table {
+		for _, n := range names {
+			if _, ok := seen[n]; !ok {
+				seen[n] = struct{}{}
+				universe = append(universe, n)
+			}
+		}
+	}
+	a.SetMappedUniverse(universe)
 	return nil
 }
 

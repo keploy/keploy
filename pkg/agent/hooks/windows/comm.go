@@ -25,10 +25,11 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 	}
 
 	return &agent.NetworkAddress{
-		Version:  d.IPVersion,
-		IPv4Addr: d.DestIP4,
-		IPv6Addr: d.DestIP6,
-		Port:     d.DestPort,
+		Version:   d.IPVersion,
+		IPv4Addr:  d.DestIP4,
+		IPv6Addr:  d.DestIP6,
+		Port:      d.DestPort,
+		KernelPid: d.KernelPid,
 	}, nil
 }
 

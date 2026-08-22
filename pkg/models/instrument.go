@@ -213,6 +213,14 @@ type OutgoingOptions struct {
 	// only the argv-vs-yaml precedence for the CA PATH, and the pool itself is
 	// read from disk lazily, under a sync.Once, on the first record session.
 	UpstreamTLSRootCAs *x509.CertPool `json:"-"`
+	// SrcPid is the kernel (root-namespace) PID of the process that opened THIS
+	// outgoing connection, taken from the eBPF redirect map per connection. It
+	// is a runtime, per-connection value — never session config — so it is
+	// json:"-" (OutgoingOptions is JSON-marshaled CLI→agent and this must not
+	// travel as a rule). The proxy stamps it on its per-connection copy of the
+	// options and uses it to pick the worker's scoped mock view (per-PID
+	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
+	SrcPid uint32 `json:"-"`
 }
 
 type ConditionalDstCfg struct {
