@@ -27,7 +27,28 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
-func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+// MatchOption tunes Match without changing its signature — enterprise and
+// k8s-proxy both call Match, so a new parameter would break them on their next
+// OSS bump.
+type MatchOption func(*matchOptions)
+
+type matchOptions struct{ autoHeaderNoise bool }
+
+// WithAutoHeaderNoise forgives a VALUE difference on response headers the server
+// mints fresh on every call — the HTTP date, request/correlation ids and
+// distributed-trace ids (models.IsVolatileResponseHeader).
+//
+// Presence is still asserted: a header that only one side carries stays a
+// failure. Off unless the caller asks.
+func WithAutoHeaderNoise(enabled bool) MatchOption {
+	return func(o *matchOptions) { o.autoHeaderNoise = enabled }
+}
+
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool, opts ...MatchOption) (bool, *models.Result) {
+	var mo matchOptions
+	for _, opt := range opts {
+		opt(&mo)
+	}
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
 	var bodySizeResult models.IntResult
@@ -163,6 +184,49 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
 		res.HeadersResult = *hRes
+
+		// Forgive a VALUE difference on a header the server mints fresh per call.
+		//
+		// Applied to the comparison RESULT, deliberately not by seeding
+		// headerNoise: that map is resolved by matcher.SubstringKeyMatch, which
+		// uses strings.Contains, so a "date" entry would also swallow
+		// "X-Candidate-Id" and "X-Validate-Token" — headers that merely contain
+		// the word. Matching the result's key exactly confines the forgiveness to
+		// the header it was meant for.
+		//
+		// Only when BOTH sides carried the header. CompareHeaders reports a
+		// missing or unexpected header with a nil Value on the absent side, and
+		// those stay failures: a server that stops emitting X-Request-Id, or
+		// starts emitting one it never did, is a real change and must not be
+		// hidden by a rule about values.
+		if mo.autoHeaderNoise {
+			for i := range res.HeadersResult {
+				hr := &res.HeadersResult[i]
+				if hr.Normal || hr.Expected.Value == nil || hr.Actual.Value == nil {
+					continue
+				}
+				name := hr.Expected.Key
+				if name == "" {
+					name = hr.Actual.Key
+				}
+				// An explicit user pattern outranks this. If the user wrote a
+				// regex for this header they narrowed it on purpose, and
+				// CompareHeaders already judged the replayed value against it —
+				// widening that into a blanket ignore would silently discard the
+				// constraint. Resolved through SubstringKeyMatch so the lookup
+				// sees the entry exactly as CompareHeaders did, whatever the
+				// user's casing. (An UNCONDITIONAL user entry never reaches here:
+				// CompareHeaders would already have marked the header normal.)
+				if patterns, constrained := matcherUtils.SubstringKeyMatch(name, headerNoise); constrained && len(patterns) > 0 {
+					continue
+				}
+				if models.IsVolatileResponseHeader(name) {
+					logger.Debug("ignoring value drift on a per-request-volatile response header",
+						zap.String("header", name))
+					hr.Normal = true
+				}
+			}
+		}
 
 		// If body matches but content-length differs, ignore the content-length difference
 		if res.BodyResult[0].Normal {
