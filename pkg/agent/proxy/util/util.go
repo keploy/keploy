@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -858,6 +859,14 @@ func IsJava(input string) bool {
 
 // IsJavaInstalled checks if java is installed on the system
 func IsJavaInstalled() bool {
+	// On macOS, /usr/bin/java is a launcher STUB shipped with the OS on every
+	// machine, JDK or not (it defers to /usr/libexec/java_home). A bare
+	// LookPath would therefore report Java present on every Mac and make
+	// callers spawn keytool/JVMs pointlessly. Ask java_home, which exits
+	// non-zero when no real JDK is installed.
+	if runtime.GOOS == "darwin" {
+		return exec.Command("/usr/libexec/java_home").Run() == nil
+	}
 	_, err := exec.LookPath("java")
 	return err == nil
 }

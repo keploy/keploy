@@ -653,6 +653,67 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 	return nil
 }
 
+// setupNativeDarwin installs the keploy CA for a native macOS run.
+//
+// It exists as its own function so it can be unit-tested on Linux (the darwin
+// build's tests never run in CI — go_macos.yaml only builds).
+//
+// Why this is not the Linux path: that path writes into
+// /usr/local/share/ca-certificates or /etc/ssl/certs and runs
+// update-ca-certificates. On macOS the only one of those directories that
+// exists is /etc/ssl/certs, it is root-owned, and none of the update commands
+// exist — so falling through left a stray root-owned file or an EACCES, and in
+// both cases markCAReady was never reached and the run reported a CA failure.
+//
+// What each runtime needs, and how it is met here (all measured against a
+// keploy MITM leaf on macOS):
+//
+//	Node    NODE_EXTRA_CA_CERTS   set by the CLIENT (SetupCaCertEnv), works
+//	Python  SSL_CERT_FILE etc.    set by the CLIENT (SetupCaCertEnv), works
+//	Java    the JDK's cacerts     imported here, works
+//	Go      Security.framework    handled by the injected shim's SecTrust
+//	                              override, not by any CA env var — Go on darwin
+//	                              ignores SSL_CERT_FILE entirely
+//
+// So the only thing this function must do on the AGENT side is the Java
+// keystore import; the Node/Python env vars are the client's job (a separate
+// process — the agent's own environment never reaches the app), and Go is the
+// shim's. The Java import is best-effort: a machine with no JDK, or a Go/Node
+// developer who is not testing Java, must not have CA setup fail underneath
+// them, so a keystore failure is logged and the run proceeds.
+func setupNativeDarwin(ctx context.Context, logger *zap.Logger, javaHome string) error {
+	// Import into the JDK's cacerts if a real JDK is present. IsJavaInstalled
+	// is darwin-aware: /usr/bin/java is a launcher stub shipped on every Mac,
+	// so a bare LookPath("java") would fire a JVM spawn on every native run,
+	// even for a Go or Node app on a machine with no JDK at all.
+	if util.IsJavaInstalled() {
+		tempCertPath, err := extractCertToTemp()
+		if err != nil {
+			utils.LogError(logger, err, "Failed to extract certificate to temp folder for the Java keystore import")
+		} else {
+			// The temp file is only the -file argument to keytool; once the
+			// cert is in the JDK's cacerts it is dead, so it does not leak.
+			defer func() {
+				if rmErr := os.Remove(tempCertPath); rmErr != nil {
+					logger.Debug("could not remove the temporary CA file", zap.String("path", tempCertPath), zap.Error(rmErr))
+				}
+			}()
+			if err := installJavaCAForHome(ctx, logger, tempCertPath, javaHome); err != nil {
+				// Non-fatal: Java is one optional runtime, and a root-owned
+				// system JDK (now that the agent runs unprivileged on macOS) or
+				// a missing keytool must not fail CA setup for a Node/Python/Go
+				// app that does not touch Java.
+				logger.Warn("could not import the keploy CA into the Java keystore; Java HTTPS interception will not work, but other runtimes are unaffected",
+					zap.Error(err))
+			}
+		}
+	}
+
+	logger.Debug("macOS native CA setup complete")
+	markCAReady()
+	return nil
+}
+
 func setupNative(ctx context.Context, logger *zap.Logger) error {
 	return setupNativeForApp(ctx, logger, 0, "")
 }
@@ -707,6 +768,10 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, appPID int, java
 		return nil
 	}
 
+	// macOS Specific Logic
+	if runtime.GOOS == "darwin" {
+		return setupNativeDarwin(ctx, logger, resolvedJavaHome)
+	}
 	// Linux/Unix Specific Logic
 	caPaths, err := getCaPaths()
 	if err != nil {
