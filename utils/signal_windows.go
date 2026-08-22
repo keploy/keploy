@@ -70,8 +70,13 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 
 	logger.Info("Starting Application (Windows):", zap.String("executing_cli", cmd.String()))
 
-	// Start the command
-	err := cmd.Start()
+	// Start the command. On a native run this goes through the registered
+	// starter, which creates the process suspended, loads the interception shim
+	// into it and then resumes it — Windows has no DYLD_INSERT_LIBRARIES, so
+	// that has to happen at process creation. With no starter registered (a
+	// docker command, or interception disabled) this is exactly the cmd.Start()
+	// it always was.
+	err := startApplication(cmd, kind)
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}

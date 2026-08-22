@@ -59,9 +59,15 @@ testdata
 *.c
 *.h
 
+# The Windows interception shim is an exception to the blanket *.c and *.dll
+# rules above: it is C source that is committed, and a prebuilt DLL built from
+# it that is committed too (the Windows release binaries are cross-compiled and
+# cannot build C). Without these negations `git add` silently skips both, so a
+# rebuild would look committed while the tree still carried the old asset.
+!pkg/agent/hooks/winshim/shim/keploy_winshim.c
+!pkg/agent/hooks/winshim/assets/keploy_winshim.dll
+
 # Ignore the debug_bin
 __debug_bin*
 keploy
 extraparsers.go
-# fetched at build time by tools/fetchredirector, pinned in redirector.lock
-pkg/agent/hooks/windows/libwindows_redirector.a

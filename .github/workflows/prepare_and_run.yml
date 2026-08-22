@@ -181,10 +181,8 @@ jobs:
     # Native windows/amd64 cgo build on self-hosted runner.
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
-    # Bound wall-clock so a hung cgo link step (historically: a
-    # deadlock inside libwindows_redirector.a's shutdown path) cannot
-    # sit on a self-hosted Windows runner for 6h. Healthy runs are
-    # ~5 min; 30 gives 6x headroom.
+    # Bound wall-clock so a hung build cannot sit on a self-hosted Windows
+    # runner for 6h. Healthy runs are ~5 min; 30 gives 6x headroom.
     timeout-minutes: 30
     steps:
       # Bootstrap a consistent shell environment on every self-hosted
@@ -552,14 +550,6 @@ jobs:
           where.exe gcc
           gcc --version
           go env CGO_ENABLED CC CXX GOOS GOARCH
-
-      # Pinned + digest-checked; the .a is not committed. Must precede the build,
-      # whose cgo LDFLAGS resolve -l:libwindows_redirector.a out of ${SRCDIR}.
-      - name: Fetch Windows redirector
-        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
-        run: |
-          go run ./tools/fetchredirector
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Keploy (PR) - Windows (windows/amd64)
         shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
