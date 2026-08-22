@@ -1477,7 +1477,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:
-			return models.AppError{AppErrorType: models.ErrCommandError, Err: cmdErr.Err, AppLogs: a.recentAppLogs(ctx)}
+			return models.AppError{AppErrorType: models.ErrCommandError, Err: cmdErr.Err, AppLogs: a.recentAppLogs(ctx), ExitCode: exitCodeFromErr(cmdErr.Err)}
 		case utils.Runtime:
 			err = cmdErr.Err
 		}
@@ -1506,8 +1506,34 @@ func (a *App) run(ctx context.Context) models.AppError {
 		}
 
 		if err != nil {
-			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err, AppLogs: appLogs}
+			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err, AppLogs: appLogs, ExitCode: exitCodeFromErr(err)}
 		}
-		return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil, AppLogs: appLogs}
+		return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil, AppLogs: appLogs, ExitCode: 0}
 	}
+}
+
+// exitCodeFromErr extracts the process exit code from a command-wait error.
+// It returns the child's exit status for a normal non-zero exit (the case a
+// wrapped `pytest`/`go test` failure produces), 128+signal for a signalled
+// exit where the runtime exposes it, and -1 when no code can be determined
+// (nil error, or an error that is not an *exec.ExitError). The mock
+// record/replay flows use this to mirror the wrapped runner's exit status.
+func exitCodeFromErr(err error) int {
+	if err == nil {
+		return -1
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		// ExitCode() is -1 when the process was terminated by a signal; in
+		// that case fall back to the conventional 128+signal shell encoding
+		// so callers still get a non-zero, non-(-1) status to propagate.
+		if code := exitErr.ExitCode(); code >= 0 {
+			return code
+		}
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			return 128 + int(ws.Signal())
+		}
+		return 1
+	}
+	return -1
 }

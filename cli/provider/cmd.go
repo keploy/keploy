@@ -179,6 +179,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)
 	cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 
+	// `keploy mock record` / `keploy mock replay` — the subcommands are named
+	// "record"/"replay" so they would otherwise fall into the record/test flag
+	// branch (or the default error). Intercept them here.
+	if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		return c.addMockFlags(cmd)
+	}
+
 	switch cmd.Name() {
 	case "generate", "download":
 		cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate/download contracts")
@@ -328,6 +335,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// the value flows through but produces a no-op at proxy.New.
 		cmd.Flags().Bool("channel-binding-shim", c.cfg.Agent.ChannelBindingShim, "Internal: agent-side mirror of the channel-binding shim flag. Set by the orchestrator subprocess spawn; not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden("channel-binding-shim")
+		// Internal orchestrator→agent flag: mock mode skips ingress/bind port
+		// relocation (the wrapped process is a test runner, not a server).
+		cmd.Flags().Bool("mock-mode", c.cfg.Agent.MockMode, "Internal: agent-side mirror of `keploy mock` mode; disables ingress port relocation. Set by the orchestrator, not by users.")
+		_ = cmd.Flags().MarkHidden("mock-mode")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -921,6 +932,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		redactedCfg.InMemoryCompose = []byte(fmt.Sprintf("**** (%d bytes redacted)", len(redactedCfg.InMemoryCompose)))
 	}
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", redactedCfg))
+
+	// `keploy mock record` / `keploy mock replay` validation runs on its own
+	// path (see addMockFlags) — the subcommands are named "record"/"replay".
+	if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		return c.validateMockFlags(ctx, cmd)
+	}
 
 	switch cmd.Name() {
 
@@ -1590,6 +1607,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.ChannelBindingShim = channelBindingShim
 
+		mockMode, err := cmd.Flags().GetBool("mock-mode")
+		if err != nil {
+			errMsg := "failed to read the mock-mode flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.MockMode = mockMode
+
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on
 		// Changed() — but the gate now records that the flag was PRESENT
 		// (…Set) rather than leaving the agent to guess. The orchestrator
@@ -1937,4 +1962,146 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	defaultCfg.Test.DisableLineCoverage = c.cfg.Test.DisableLineCoverage
 	defaultCfg.StorageFormat = c.cfg.StorageFormat
 	return defaultCfg
+}
+
+// addMockFlags registers the flags for `keploy mock record` and
+// `keploy mock replay`. The set is intentionally small: two verbs, --name,
+// --on-miss, plus the command/path/docker knobs record and test already use.
+func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
+	cmd.Flags().StringP("command", "c", c.cfg.Command, "Command that runs your test suite, e.g. \"pytest\" or \"go test ./...\"")
+	cmd.Flags().StringP("path", "p", ".", "Path to the local directory where the mock set is stored (keploy/<name>/)")
+	cmd.Flags().String("name", c.cfg.Mock.Name, "Name of the mock set to record into / replay from (default \"default\")")
+	cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker-run/docker-start/docker-compose)")
+	cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container (docker/compose runs)")
+	cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
+	cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "Time to wait for a docker container to build")
+	cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy to intercept outgoing calls")
+	cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server")
+	cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Destination ports to leave untouched (never mocked)")
+	cmd.Flags().Bool("local", c.cfg.Mock.Local, "Use the local file-backed mock store even when a cloud registry is configured")
+
+	switch cmd.Name() {
+	case "record":
+		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
+	case "replay":
+		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
+		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
+		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
+	}
+	return nil
+}
+
+// validateMockFlags resolves and validates flags for the mock record/replay
+// subcommands. It mirrors the record/test path (command type, platform gate,
+// keploy folder resolution + permissions) but reads the mock-specific flags.
+func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Command) error {
+	// Resolve the command type (native vs docker-*).
+	commandType, err := resolveCommandType(c.logger, cmd, c.cfg.Command, c.cfg.CommandType)
+	if err != nil {
+		return err
+	}
+	c.cfg.CommandType = commandType
+	if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) &&
+		!(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
+		return fmt.Errorf("a native command is not supported on OS %s/%s for `keploy mock`; on macOS run your tests through a docker command (e.g. -c \"docker compose run tests\")", runtime.GOOS, runtime.GOARCH)
+	}
+
+	// Resolve the keploy folder path.
+	path, err := cmd.Flags().GetString("path")
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the path")
+		return errors.New("failed to get the path")
+	}
+	absPath, err := utils.GetAbsPath(path)
+	if err != nil {
+		utils.LogError(c.logger, err, "error while getting absolute path")
+		return errors.New("failed to get the absolute path")
+	}
+	c.cfg.Path = absPath + "/keploy"
+
+	// Fix folder permissions (and cache sudo creds) for native runs.
+	if !utils.IsDockerCmd(utils.CmdType(c.cfg.CommandType)) {
+		if err := utils.EnsureKeployFolderPermissions(cmd.Context(), c.logger, c.cfg.Path); err != nil {
+			utils.LogError(c.logger, err, "failed to ensure keploy folder permissions")
+			return err
+		}
+	}
+
+	if c.cfg.Command == "" {
+		utils.LogError(c.logger, nil, "missing required -c flag or command in config file")
+		c.logger.Info(`Example usage: keploy mock record -c "pytest"`)
+		return errors.New("command is required for keploy mock")
+	}
+
+	// Pass-through ports.
+	bypassPorts, err := cmd.Flags().GetUintSlice("pass-through-ports")
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to read pass-through-ports")
+		return errors.New("failed to read pass-through-ports")
+	}
+	config.SetByPassPorts(c.cfg, bypassPorts)
+
+	// Mock-set name.
+	name, err := cmd.Flags().GetString("name")
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the name flag")
+		return errors.New("failed to get the name flag")
+	}
+	if name != "" {
+		c.cfg.Mock.Name = name
+	}
+	if c.cfg.Mock.Name == "" {
+		c.cfg.Mock.Name = "default"
+	}
+
+	local, err := cmd.Flags().GetBool("local")
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the local flag")
+		return errors.New("failed to get the local flag")
+	}
+	c.cfg.Mock.Local = local
+
+	switch cmd.Name() {
+	case "record":
+		if cmd.Flags().Changed("record-timer") {
+			d, err := cmd.Flags().GetDuration("record-timer")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the record-timer flag")
+				return errors.New("failed to get the record-timer flag")
+			}
+			c.cfg.Mock.RecordTimer = d
+		}
+	case "replay":
+		onMiss, err := cmd.Flags().GetString("on-miss")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the on-miss flag")
+			return errors.New("failed to get the on-miss flag")
+		}
+		onMiss = strings.ToLower(strings.TrimSpace(onMiss))
+		if onMiss == "" {
+			onMiss = string(models.MissFail)
+		}
+		if !models.MissPolicy(onMiss).Valid() {
+			return fmt.Errorf("invalid --on-miss value %q: allowed values are fail, passthrough, record", onMiss)
+		}
+		c.cfg.Mock.OnMiss = onMiss
+
+		strict, err := cmd.Flags().GetBool("strict")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the strict flag")
+			return errors.New("failed to get the strict flag")
+		}
+		c.cfg.Mock.Strict = strict
+
+		if cmd.Flags().Changed("delay") {
+			d, err := cmd.Flags().GetUint64("delay")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the delay flag")
+				return errors.New("failed to get the delay flag")
+			}
+			c.cfg.Test.Delay = d
+		}
+	}
+
+	return nil
 }
