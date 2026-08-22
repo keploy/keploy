@@ -30,6 +30,9 @@ type fakeDecider struct {
 	listenOrig  uint16
 	listenMoved uint16
 	listenSeen  int
+
+	dnsHost string
+	dnsAddr string
 }
 
 func (f *fakeDecider) onHello(pid uint32, prog string) {
@@ -50,6 +53,11 @@ func (f *fakeDecider) onBind(pid uint32, origPort uint16) uint16 {
 func (f *fakeDecider) onListen(pid uint32, origPort, movedPort uint16) {
 	f.listenPID, f.listenOrig, f.listenMoved = pid, origPort, movedPort
 	f.listenSeen++
+}
+
+func (f *fakeDecider) onDNS(hostname string) string {
+	f.dnsHost = hostname
+	return f.dnsAddr
 }
 
 func newTestServer(d controlDecider) *controlServer {
@@ -153,6 +161,32 @@ func TestDispatchListen(t *testing.T) {
 	}
 	if d2.listenSeen != 0 {
 		t.Fatal("a malformed LISTEN reached the decider")
+	}
+}
+
+func TestDispatchDNS(t *testing.T) {
+	// A name the agent can substitute: the application gets an address it can
+	// actually connect to, so the mock behind it is reachable.
+	d := &fakeDecider{dnsAddr: "127.0.0.3"}
+	if got := newTestServer(d).dispatch("DNS api.example.com"); got != "IP 127.0.0.3" {
+		t.Fatalf("dispatch(DNS) = %q, want %q", got, "IP 127.0.0.3")
+	}
+	if d.dnsHost != "api.example.com" {
+		t.Fatalf("decider saw hostname %q", d.dnsHost)
+	}
+
+	// No substitution: the application's own resolution failure must stand.
+	if got := newTestServer(&fakeDecider{}).dispatch("DNS api.example.com"); got != ReplyPass {
+		t.Fatalf("dispatch(DNS) with no substitute = %q, want %q", got, ReplyPass)
+	}
+
+	// Malformed requests must not reach the decider.
+	d3 := &fakeDecider{dnsAddr: "127.0.0.3"}
+	if got := newTestServer(d3).dispatch("DNS"); got != ReplyPass {
+		t.Fatalf("dispatch(bare DNS) = %q, want %q", got, ReplyPass)
+	}
+	if d3.dnsHost != "" {
+		t.Fatal("a malformed DNS request reached the decider")
 	}
 }
 

@@ -1,18 +1,17 @@
 //go:build windows && amd64
 
-// Package winshim implements Keploy's Windows-native traffic interception
-// without Administrator privileges.
+// Package winshim implements Keploy's Windows-native traffic interception.
 //
-// The existing Windows backend (pkg/agent/hooks/windows) redirects traffic with
-// WinDivert, which is a kernel driver: loading it requires Administrator, and
-// without it a native Windows run cannot start at all. This package is the
-// unprivileged alternative. Instead of filtering packets in the kernel, it
-// injects a small DLL (shim/keploy_winshim.c) into the application under test
-// and hooks Winsock's connect paths in user space. The shim asks this package,
-// over a named pipe, what to do with each outgoing connection; the answers
-// reproduce exactly what the eBPF hooks provide on Linux and the dylib shim
+// Windows has no eBPF. Keploy previously reached for a kernel packet filter
+// here, which meant a native run needed Administrator and simply refused to
+// start without it. This package replaces that: it loads a small DLL
+// (shim/keploy_winshim.c) into the application under test and hooks Winsock in
+// user space. The shim asks this package, over a named pipe, what to do with
+// each outgoing connection, each server bind, and each name it cannot resolve.
+// The answers reproduce what the eBPF hooks provide on Linux and the dylib shim
 // provides on macOS — egress redirected to the proxy with the original
-// destination recoverable by source port — so the entire existing proxy, TLS and
+// destination recoverable by source port, the app's listener moved so Keploy can
+// own the port it advertises — so the entire existing proxy, TLS and
 // mock-matching stack runs unchanged.
 //
 // Nothing here needs elevation: no driver is loaded, nothing is installed
@@ -35,6 +34,7 @@ import (
 //	CONNECT <srcPort> <ipVersion> <destIP> <destPort>    -> OK <proxyPort> | BYPASS
 //	BIND    <pid> <origPort>                             -> PORT <newPort> | KEEP
 //	LISTEN  <pid> <origPort> <movedPort>                 -> OK
+//	DNS     <hostname>                                   -> IP <addr>      | PASS
 //
 // CONNECT returns the proxy port rather than reading it from the shim's
 // environment because the client has to stage the shim before the agent has
@@ -45,15 +45,19 @@ import (
 // application that simply made no dependency calls: the run goes green with zero
 // mocks and nothing explains why.
 //
-// BIND and LISTEN are how record mode captures incoming requests. WinDivert can
-// leave the application on its advertised port and redirect inbound packets in
-// the kernel; user space has no such lever, so the application's server bind is
+// BIND and LISTEN are how record mode captures incoming requests. A kernel
+// filter can leave the application on its advertised port and redirect inbound
+// packets; user space has no such lever, so the application's server bind is
 // moved to a port the agent picks and Keploy takes over the advertised one.
 // LISTEN exists because at bind time a server socket and a client that merely
 // pinned an explicit source port are indistinguishable; the ingress event is
 // published only once the socket actually listens.
 //
-// Anything unrecognised is answered with BYPASS/KEEP semantics so that a
+// DNS supplies an address for a name the application could not resolve, so that
+// a replay against a dependency that no longer exists reaches connect() — where
+// a mock can answer — instead of failing inside the resolver.
+//
+// Anything unrecognised is answered with BYPASS/KEEP/PASS semantics so that a
 // version-skewed shim degrades to leaving the application's traffic alone rather
 // than breaking it.
 const (
@@ -61,11 +65,14 @@ const (
 	CmdConnect = "CONNECT"
 	CmdBind    = "BIND"
 	CmdListen  = "LISTEN"
+	CmdDNS     = "DNS"
 
 	ReplyOK     = "OK"
 	ReplyBypass = "BYPASS"
 	ReplyKeep   = "KEEP"
 	ReplyPort   = "PORT"
+	ReplyPass   = "PASS"
+	ReplyIP     = "IP"
 )
 
 // Environment variables read by the shim. They are optional: the control pipe
@@ -81,10 +88,9 @@ const (
 	EnvShimLog = "KEPLOY_SHIM_LOG"
 )
 
-// EnvForceUserspace opts into the unprivileged backend even when keploy is
-// running elevated, so the userspace path can be exercised (and its CI lane run)
-// on a machine that could have used WinDivert.
-const EnvForceUserspace = "KEPLOY_WINDOWS_USERSPACE"
+// EnvDisable turns interception off entirely, launching the application
+// uninstrumented. An escape hatch, not a supported mode — see Enabled.
+const EnvDisable = "KEPLOY_WINDOWS_NO_INTERCEPT"
 
 // Fixed names within a session directory, so the agent and the client can both
 // derive every path from the client PID alone with no handshake between the two

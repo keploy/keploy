@@ -29,7 +29,7 @@ import (
 // is trustworthy.
 const instrumentationGrace = 90 * time.Second
 
-// Hooks is the unprivileged Windows implementation of agent.Hooks.
+// Hooks is the Windows implementation of agent.Hooks.
 //
 // It answers the same question the Linux eBPF hooks answer — where was this
 // connection really going — but sources it from the injected shim over a named
@@ -75,6 +75,11 @@ type Hooks struct {
 	movedPorts map[uint16]uint16
 	published  map[uint16]bool
 
+	// synthetic addresses handed out for names the app could not resolve.
+	dnsMu     sync.Mutex
+	synthetic map[string]string
+	nextSynth uint32
+
 	// armed records that the shim announced itself from at least one process.
 	armed atomic.Bool
 
@@ -101,15 +106,15 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		bindEvents:        make(chan models.IngressEvent, 128),
 		movedPorts:        make(map[uint16]uint16),
 		published:         make(map[uint16]bool),
+		synthetic:         make(map[string]string),
 	}
 }
 
 // Load prepares the interception session: it stages the shim the client injects
 // into the application and starts the control pipe the shim talks to.
 //
-// Unlike the WinDivert backend this needs no privileges. No driver is loaded,
-// nothing is installed system-wide, and the blast radius is a single process
-// tree.
+// This needs no privileges. No driver is loaded, nothing is installed
+// system-wide, and the blast radius is a single process tree.
 func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Agent) error {
 	h.mode = setupOpts.Mode
 	if h.mode == "" {
@@ -185,7 +190,7 @@ func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Ag
 		return nil
 	})
 
-	h.logger.Info("Keploy is intercepting this application natively on Windows, without Administrator",
+	h.logger.Info("Keploy is intercepting this application natively on Windows",
 		zap.String("shim", h.shimPath),
 		zap.String("control_pipe", h.pipeName),
 		zap.Uint32("proxy_port", h.proxyPort))
@@ -206,7 +211,7 @@ func (h *Hooks) unLoad() {
 }
 
 // Record is not used here; ingress test cases are produced by the shared
-// incoming proxy, driven by WatchBindEvents. Mirrors the WinDivert backend.
+// incoming proxy, driven by WatchBindEvents.
 func (h *Hooks) Record(_ context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
 	return nil, nil
 }
@@ -214,13 +219,11 @@ func (h *Hooks) Record(_ context.Context, _ models.IncomingOptions) (<-chan *mod
 // WatchBindEvents streams the app's server binds as they are intercepted, so the
 // incoming proxy can take over each advertised port.
 //
-// This is the one place where the userspace backend cannot mirror WinDivert.
-// WinDivert leaves the application on its advertised port and redirects inbound
-// packets to a fixed proxy port in the kernel, publishing a single static event
-// to arm that listener. User space has no way to redirect a port the application
-// already owns, so — exactly like the macOS backend — the application's listener
-// is moved and Keploy binds the port it advertises, publishing one event per
-// real server socket.
+// A kernel filter could leave the application on its advertised port and
+// redirect inbound packets to a fixed proxy port. User space has no way to
+// redirect a port the application already owns, so — exactly like the macOS
+// backend — the application's listener is moved and Keploy binds the port it
+// advertises, publishing one event per real server socket.
 func (h *Hooks) WatchBindEvents(_ context.Context) (<-chan models.IngressEvent, error) {
 	return h.bindEvents, nil
 }
@@ -245,14 +248,13 @@ func (h *Hooks) Delete(_ context.Context, srcPort uint16) error {
 	return nil
 }
 
-// CleanProxyEntry mirrors the WinDivert backend's method of the same name.
+// CleanProxyEntry releases a destination entry by source port.
 func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 	h.dests.Delete(srcPort)
 	return nil
 }
 
-// SendAgentInfo is part of the hooks surface the WinDivert backend implements;
-// there is nothing to send on this path.
+// SendAgentInfo is part of the hooks surface; there is nothing to send here.
 func (h *Hooks) SendAgentInfo(_ structs.AgentInfo) error { return nil }
 
 // Armed reports whether the shim has announced itself from at least one process.
@@ -469,6 +471,45 @@ func (h *Hooks) watchForInstrumentation(ctx context.Context, within time.Duratio
 		zap.Duration("waited", within),
 		zap.String("next_step", "Run the application's real executable directly rather than through a launcher that replaces its own process, "+
 			"and make sure the application is a 64-bit program. Re-run with --debug to see the shim's own log."))
+}
+
+// onDNS hands back a synthetic loopback address for a name the application could
+// not resolve.
+//
+// Only during replay: a recorded dependency may no longer exist (or the machine
+// may be offline), and without an address the app fails inside the resolver,
+// before it ever reaches connect() — so the mock that would have answered is
+// never consulted. During record a resolution failure is a real failure and must
+// surface as one.
+func (h *Hooks) onDNS(hostname string) string {
+	if h.mode != models.MODE_TEST {
+		return ""
+	}
+
+	h.dnsMu.Lock()
+	defer h.dnsMu.Unlock()
+
+	if existing, ok := h.synthetic[hostname]; ok {
+		return existing
+	}
+
+	// 127.0.0.0/8 is entirely routed to loopback, so any address in it reaches
+	// the local machine — and every connection to it is redirected to the proxy
+	// by the shim anyway. Start above 127.0.0.1 to avoid colliding with a real
+	// localhost dependency.
+	const syntheticBase = 2
+	offset := syntheticBase + h.nextSynth + 1
+	if offset > 0x00FFFFFF {
+		h.logger.Warn("exhausted the synthetic loopback address range", zap.String("hostname", hostname))
+		return ""
+	}
+	h.nextSynth++
+	addr := net.IPv4(127, byte(offset>>16), byte(offset>>8), byte(offset)).String()
+
+	h.synthetic[hostname] = addr
+	h.logger.Debug("handed the application a synthetic address for an unresolvable dependency",
+		zap.String("hostname", hostname), zap.String("address", addr))
+	return addr
 }
 
 // isBypassed reports whether a destination matches one of the configured bypass

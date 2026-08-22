@@ -63,11 +63,10 @@ func TestHelperServer(t *testing.T) {
 // it advertises, and the ingress event that drives Keploy's forwarder is
 // published only once the socket really listens.
 //
-// This is the piece WinDivert gets from the kernel — it can leave the app in
-// place and redirect inbound packets — and which user space has to do by moving
-// the listener instead.
+// A kernel filter would get this for free by redirecting inbound packets; user
+// space has to move the listener instead.
 func TestShimMovesApplicationListener(t *testing.T) {
-	if os.Getenv(helperEnv) != "" || os.Getenv(helperListenEnv) != "" {
+	if os.Getenv(helperEnv) != "" || os.Getenv(helperListenEnv) != "" || os.Getenv(helperDNSEnv) != "" {
 		t.Skip("helper process")
 	}
 

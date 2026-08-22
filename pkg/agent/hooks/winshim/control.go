@@ -55,6 +55,9 @@ type controlDecider interface {
 	// onListen confirms a moved socket really is a server, and is what publishes
 	// the ingress event.
 	onListen(pid uint32, origPort, movedPort uint16)
+	// onDNS supplies a synthetic address for a hostname the application could
+	// not resolve. An empty return lets the original failure stand.
+	onDNS(hostname string) string
 }
 
 // controlServer accepts shim connections on a named pipe and dispatches each
@@ -428,6 +431,8 @@ func (c *controlServer) dispatch(line string) string {
 		return c.dispatchBind(fields)
 	case CmdListen:
 		return c.dispatchListen(fields)
+	case CmdDNS:
+		return c.dispatchDNS(fields)
 	default:
 		c.logger.Debug("ignoring an unrecognised shim control request", zap.String("verb", fields[0]))
 		return ReplyBypass
@@ -520,6 +525,18 @@ func (c *controlServer) dispatchListen(fields []string) string {
 	}
 	c.decider.onListen(uint32(pid), origPort, movedPort)
 	return ReplyOK
+}
+
+func (c *controlServer) dispatchDNS(fields []string) string {
+	// DNS <hostname>
+	if len(fields) != 2 {
+		return ReplyPass
+	}
+	addr := c.decider.onDNS(fields[1])
+	if addr == "" {
+		return ReplyPass
+	}
+	return ReplyIP + " " + addr
 }
 
 func (c *controlServer) stopped() bool { return c.closed.Load() }

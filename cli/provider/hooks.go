@@ -20,8 +20,8 @@ import "runtime"
 var NativeCommandSupported = DefaultNativeCommandSupported
 
 // DefaultNativeCommandSupported is the set of platforms with an in-tree
-// interception backend: eBPF on Linux (pkg/agent/hooks/linux) and the WinDivert
-// redirector on Windows/amd64 (pkg/agent/hooks/windows).
+// interception backend: eBPF on Linux (pkg/agent/hooks/linux) and userspace
+// interception on Windows/amd64 (pkg/agent/hooks/winshim).
 //
 // macOS and Windows/arm64 have none — both resolve to the pkg/agent/hooks/others
 // stub, whose Load returns "eBPF hooks are not supported on non-Linux

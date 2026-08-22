@@ -97,6 +97,8 @@ typedef int(WSAAPI *WSAIoctl_t)(SOCKET, DWORD, LPVOID, DWORD, LPVOID, DWORD, LPD
 typedef int(WSAAPI *bind_t)(SOCKET, const struct sockaddr *, int);
 typedef int(WSAAPI *listen_t)(SOCKET, int);
 typedef int(WSAAPI *closesocket_t)(SOCKET);
+typedef int(WSAAPI *getaddrinfo_t)(PCSTR, PCSTR, const ADDRINFOA *, PADDRINFOA *);
+typedef INT(WSAAPI *GetAddrInfoW_t)(PCWSTR, PCWSTR, const ADDRINFOW *, PADDRINFOW *);
 typedef BOOL(WINAPI *CreateProcessW_t)(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
 typedef BOOL(WINAPI *CreateProcessA_t)(LPCSTR, LPSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID, LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION);
 
@@ -107,6 +109,8 @@ static LPFN_CONNECTEX   real_ConnectEx      = NULL;
 static bind_t           real_bind           = NULL;
 static listen_t         real_listen         = NULL;
 static closesocket_t    real_closesocket    = NULL;
+static getaddrinfo_t    real_getaddrinfo    = NULL;
+static GetAddrInfoW_t   real_GetAddrInfoW   = NULL;
 static CreateProcessW_t real_CreateProcessW = NULL;
 static CreateProcessA_t real_CreateProcessA = NULL;
 
@@ -329,26 +333,23 @@ static int redirect(SOCKET s, const struct sockaddr *name, int namelen,
     unsigned short realPort;
     char realIp[64] = {0};
     int ipver, family = name->sa_family, mapped = 0;
+    // Loopback is deliberately NOT filtered here. Two reasons: a dependency the
+    // application reaches on localhost (a local database, a sidecar) is traffic
+    // Keploy should record like any other, and — critically — the synthetic
+    // addresses handed out for names that no longer resolve are themselves in
+    // 127.0.0.0/8. Skipping loopback would make every mocked-by-DNS dependency
+    // connect to nothing. The agent is the one that decides what to leave alone;
+    // it knows its own proxy, agent and DNS ports, and this shim does not.
     if (family == AF_INET) {
         if (namelen < (int)sizeof(struct sockaddr_in)) return 0;
         const struct sockaddr_in *a = (const struct sockaddr_in *)name;
-        // Never redirect loopback connections: that is the agent, the proxy
-        // itself, and keploy's own control plane.
-        if ((ntohl(a->sin_addr.s_addr) >> 24) == 127) return 0;
         inet_ntop(AF_INET, (void *)&a->sin_addr, realIp, sizeof(realIp));
         realPort = ntohs(a->sin_port);
         ipver = 4;
     } else if (family == AF_INET6) {
         if (namelen < (int)sizeof(struct sockaddr_in6)) return 0;
         const struct sockaddr_in6 *a = (const struct sockaddr_in6 *)name;
-        if (IN6_IS_ADDR_LOOPBACK(&a->sin6_addr)) return 0;
         mapped = isV4Mapped(&a->sin6_addr);
-        // A dual-stack socket reaching an IPv4 host carries ::ffff:127.0.0.1 for
-        // loopback, which the IPv4 test above would not catch.
-        if (mapped) {
-            const unsigned char *b = (const unsigned char *)&a->sin6_addr;
-            if (b[12] == 127) return 0;
-        }
         inet_ntop(AF_INET6, (void *)&a->sin6_addr, realIp, sizeof(realIp));
         realPort = ntohs(a->sin6_port);
         ipver = 6;
@@ -376,6 +377,88 @@ static int redirect(SOCKET s, const struct sockaddr *name, int namelen,
     logline("redirect srcPort=%u -> %s:%u via proxy %u\n", srcPort, realIp, realPort, proxyPort);
     proxyAddr(out, outLen, family, mapped, (unsigned short)proxyPort);
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Name resolution
+//
+// During replay a recorded dependency may no longer exist, or the machine may
+// be offline. The application then fails inside the resolver, before it ever
+// reaches connect(), so the mock that would have answered is never consulted.
+// Asking the agent for a synthetic address keeps the application moving to the
+// connect() the shim can actually intercept.
+//
+// Only the real lookup's FAILURE is substituted — a name that resolves is left
+// entirely alone — which is why this is safe to leave armed during recording
+// too: there, a resolution failure is a real failure and the agent declines.
+//
+// The substitution re-runs the real resolver with the synthetic address as a
+// numeric host rather than hand-building an addrinfo chain. That matters: the
+// application frees the result with freeaddrinfo/FreeAddrInfoW, which can only
+// be handed memory the system itself allocated.
+// ---------------------------------------------------------------------------
+
+// askDNS returns 0 and fills ip when the agent supplies a synthetic address.
+static int askDNS(const char *host, char *ip, int ipLen) {
+    if (!g_enabled || !host || !host[0]) return -1;
+    char req[320], reply[128];
+    snprintf(req, sizeof(req), "DNS %s\n", host);
+    if (askAgent(req, reply, sizeof(reply)) != 0) return -1;
+    if (sscanf(reply, "IP %45s", ip) != 1) return -1;
+    (void)ipLen;
+    return 0;
+}
+
+static int WSAAPI hook_getaddrinfo(PCSTR node, PCSTR service, const ADDRINFOA *hints, PADDRINFOA *res) {
+    int rc = real_getaddrinfo(node, service, hints, res);
+    if (rc == 0 || !g_enabled || !node || !node[0]) return rc;
+
+    char ip[64] = {0};
+    if (askDNS(node, ip, sizeof(ip)) != 0) return rc;
+
+    ADDRINFOA numeric;
+    if (hints) {
+        memcpy(&numeric, hints, sizeof(numeric));
+    } else {
+        ZeroMemory(&numeric, sizeof(numeric));
+        numeric.ai_socktype = SOCK_STREAM;
+    }
+    numeric.ai_flags |= AI_NUMERICHOST;
+    // The synthetic address is always IPv4 loopback, so drop any AF_INET6 or
+    // AF_UNSPEC preference that would make the numeric parse fail.
+    numeric.ai_family = AF_INET;
+
+    if (real_getaddrinfo(ip, service, &numeric, res) != 0) return rc;
+    logline("resolved %s -> %s via agent (real lookup failed: %d)\n", node, ip, rc);
+    return 0;
+}
+
+static INT WSAAPI hook_GetAddrInfoW(PCWSTR node, PCWSTR service, const ADDRINFOW *hints, PADDRINFOW *res) {
+    INT rc = real_GetAddrInfoW(node, service, hints, res);
+    if (rc == 0 || !g_enabled || !node || !node[0]) return rc;
+
+    char host[256] = {0};
+    if (WideCharToMultiByte(CP_UTF8, 0, node, -1, host, sizeof(host) - 1, NULL, NULL) == 0) return rc;
+
+    char ip[64] = {0};
+    if (askDNS(host, ip, sizeof(ip)) != 0) return rc;
+
+    WCHAR wideIP[64] = {0};
+    if (MultiByteToWideChar(CP_UTF8, 0, ip, -1, wideIP, 63) == 0) return rc;
+
+    ADDRINFOW numeric;
+    if (hints) {
+        memcpy(&numeric, hints, sizeof(numeric));
+    } else {
+        ZeroMemory(&numeric, sizeof(numeric));
+        numeric.ai_socktype = SOCK_STREAM;
+    }
+    numeric.ai_flags |= AI_NUMERICHOST;
+    numeric.ai_family = AF_INET;
+
+    if (real_GetAddrInfoW(wideIP, service, &numeric, res) != 0) return rc;
+    logline("resolved %s -> %s via agent (real lookup failed: %d)\n", host, ip, rc);
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -821,6 +904,8 @@ static DWORD WINAPI armThread(LPVOID unused) {
     createHook("ws2_32.dll", "bind", (void *)hook_bind, (void **)&real_bind);
     createHook("ws2_32.dll", "listen", (void *)hook_listen, (void **)&real_listen);
     createHook("ws2_32.dll", "closesocket", (void *)hook_closesocket, (void **)&real_closesocket);
+    createHook("ws2_32.dll", "getaddrinfo", (void *)hook_getaddrinfo, (void **)&real_getaddrinfo);
+    createHook("ws2_32.dll", "GetAddrInfoW", (void *)hook_GetAddrInfoW, (void **)&real_GetAddrInfoW);
     createHook("kernel32.dll", "CreateProcessW", (void *)hook_CreateProcessW, (void **)&real_CreateProcessW);
     createHook("kernel32.dll", "CreateProcessA", (void *)hook_CreateProcessA, (void **)&real_CreateProcessA);
 

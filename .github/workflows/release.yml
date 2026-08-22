@@ -342,15 +342,11 @@ jobs:
         shell: bash
         run: gcc --version
 
-      # Pinned + digest-checked; the .a is not committed. Must precede the build,
-      # whose cgo LDFLAGS resolve -l:libwindows_redirector.a out of ${SRCDIR}.
-      - name: Fetch Windows redirector
-        shell: bash
-        run: go run ./tools/fetchredirector
-
       - name: Build keploy.exe
         shell: bash
         env:
+          # The interception backend is pure Go, but the Postgres integration
+          # pulls pg_query_go, which is cgo.
           CGO_ENABLED: "1"
           GOOS: windows
           GOARCH: amd64

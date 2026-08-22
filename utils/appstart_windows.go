@@ -18,9 +18,8 @@ import (
 // pkg/agent/hooks/winshim, which imports this package. A registered function
 // inverts the dependency.
 //
-// It is nil unless the unprivileged Windows backend was selected, so an elevated
-// (WinDivert) run and every non-Windows platform take exactly the path they took
-// before.
+// It is nil unless Windows interception is active, so a docker run and every
+// non-Windows platform take exactly the path they took before.
 var nativeAppStarter atomic.Pointer[func(cmd *exec.Cmd) error]
 
 // SetNativeAppStarter installs the starter used for the application launch.

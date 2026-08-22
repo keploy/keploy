@@ -28,7 +28,13 @@ import (
 // Best-effort by design. Any failure here leaves the run on exactly the path it
 // would have taken without this backend rather than aborting it.
 func (a *AgentClient) prepareNativeInterception(opts models.SetupOptions) {
-	if opts.IsDocker || !winshim.Selected(a.logger) {
+	if opts.IsDocker {
+		// Docker runs the agent inside the Linux VM, where the eBPF hooks apply;
+		// there is no host process to instrument.
+		return
+	}
+	if !winshim.Enabled() {
+		a.logger.Warn("Keploy interception is disabled by " + winshim.EnvDisable + "; the application will run without being recorded or mocked")
 		return
 	}
 
@@ -62,10 +68,6 @@ func (a *AgentClient) prepareNativeInterception(opts models.SetupOptions) {
 		return winshim.StartInstrumented(logger, cmd, dll)
 	})
 
-	// Announced here, once, rather than inside Selected(): both this process and
-	// the agent consult that predicate, and the user should be told once, by the
-	// process they are actually looking at.
-	a.logger.Info("Keploy is not running as Administrator, so it will intercept this application in user space rather than loading the WinDivert network driver.")
-	a.logger.Debug("armed unprivileged Windows interception for the application launch",
+	a.logger.Debug("armed Windows interception for the application launch",
 		zap.String("shim", dll), zap.String("control_pipe", pipeName))
 }

@@ -60,7 +60,7 @@ func TestHelperApp(t *testing.T) {
 // through `cmd /C` exactly as utils.ExecuteCommand does, so the shim's
 // propagation from that shell into the real application is under test too.
 func TestShimInterceptsOutgoingConnections(t *testing.T) {
-	if os.Getenv(helperEnv) != "" {
+	if os.Getenv(helperEnv) != "" || os.Getenv(helperListenEnv) != "" || os.Getenv(helperDNSEnv) != "" {
 		t.Skip("helper process")
 	}
 
