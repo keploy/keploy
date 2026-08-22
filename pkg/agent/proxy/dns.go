@@ -290,6 +290,18 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// "mock not found" path: same error, same log line, same
 		// NXDOMAIN / synthetic fallback. Forwarding is strictly
 		// additive.
+		//
+		// Set when upstream gives a DEFINITIVE negative answer for this name.
+		// Capture deliberately drops non-Success rcodes (dns_capture.go: "skip
+		// non-Success rcodes (NXDOMAIN, SERVFAIL, REFUSED) … would pollute
+		// mocks.yaml"), so for such a name there was never a mock to record and
+		// its absence at replay is EXPECTED, not a defect. Reporting a mismatch
+		// here fails tests for names the resolver was only probing — with
+		// ndots:5 every hostname emits 2-3 search-expansion misses, so a single
+		// app doing one lookup can fail a test set on names that never resolved
+		// in production either. NODATA already relays without reporting (below);
+		// this makes NXDOMAIN consistent with it.
+		upstreamSaysAbsent := false
 		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
 			// A RcodeSuccess response splits into two cases by answer count:
 			// resolved (>=1 RR) vs NODATA (0 RRs). Both are relayed as-is; only
@@ -367,6 +379,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					zap.Int("rcode", fwdResp.Rcode))
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 			}
+			upstreamSaysAbsent = true
 			p.logger.Debug("DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response",
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
@@ -377,7 +390,11 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.Error(fwdErr))
 		}
-		if mockingEnabled {
+		// Still steer to the proxy IP below (issue #2006: relaying NXDOMAIN
+		// crashes apps using bare service names), but do NOT count an expected
+		// negative as a mock mismatch. If upstream was unreachable we cannot
+		// tell, so we keep reporting in that case.
+		if mockingEnabled && !upstreamSaysAbsent {
 			// Send mock not found error if we couldn't match any DNS
 			// mock and upstream forwarding also failed.
 			p.logger.Debug("mock miss",
