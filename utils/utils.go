@@ -315,6 +315,30 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
+// LogWarn is the Warn-level sibling of LogError, for a failure the caller
+// deliberately continues past.
+//
+// It exists so that downgrading such a site does not silently lose LogError's
+// context.Canceled suppression: on shutdown every in-flight operation fails with
+// context.Canceled, and reporting that as a problem is noise either way.
+//
+// Use it when the run carries on and the outcome is still trustworthy — a
+// best-effort hook, a degraded optional feature. Keep utils.LogError for
+// anything that makes the run's result unreliable; keploy's e2e scripts grade a
+// run by grepping its log for "ERROR", so that level is a contract.
+func LogWarn(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
+	if logger == nil {
+		fmt.Println("Failed to log warning. Logger is nil.")
+		return
+	}
+	if !errors.Is(err, context.Canceled) {
+		if err != nil {
+			fields = append(fields, zap.Error(err))
+		}
+		logger.Warn(msg, fields...)
+	}
+}
+
 // RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
 // This function handles cases where the templating engine fails to parse values containing both single and double quotes.
 // For example:

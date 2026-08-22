@@ -182,7 +182,10 @@ func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.TimeStamp, req.TestSetID, req.TestCaseName); err != nil {
-		a.logger.Error("failed to execute before simulate hook", zap.Error(err))
+		// Warn: the caller treats a failed simulate hook as non-fatal and
+		// carries on, so this must not claim the run is broken. The 500 below
+		// still reports the failure to it.
+		utils.LogWarn(a.logger, err, "failed to execute before simulate hook")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -197,7 +200,10 @@ func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.ActiveHooks.AfterSimulate(r.Context(), req.TestSetID, req.TestCaseName); err != nil {
-		a.logger.Error("failed to execute after simulate hook", zap.Error(err))
+		// Warn: the caller treats a failed simulate hook as non-fatal and
+		// carries on, so this must not claim the run is broken. The 500 below
+		// still reports the failure to it.
+		utils.LogWarn(a.logger, err, "failed to execute after simulate hook")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
