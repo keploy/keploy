@@ -126,7 +126,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 			}
 			mockCount++
-			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock})
+			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID})
 		}
 	}()
 
@@ -196,11 +196,12 @@ func (m *mockService) Record(ctx context.Context) error {
 	return nil
 }
 
-// capturedMock is one recorded mock's name + request timestamp, used to
-// correlate mocks into per-test scope windows.
+// capturedMock is one recorded mock's name + request timestamp + source worker
+// PID, used to correlate mocks into per-test scope windows.
 type capturedMock struct {
 	name string
 	ts   time.Time
+	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
 }
 
 // correlateScopes buckets each recorded mock into the per-test scope window its
@@ -208,20 +209,49 @@ type capturedMock struct {
 // that matches no window (e.g. a boot-time handshake before the first scope)
 // is left out of every test's mapping — it stays reusable/session-tier at
 // replay, exactly as the timestamp-based fallback would treat it.
+//
+// When a mock carries a source PID it is attributed to the SAME worker's window
+// (exact, so overlapping parallel windows don't steal each other's mocks). That
+// PID match is exact only when the worker made the call itself and the agent
+// shares its PID namespace (the normal `keploy mock <cmd>` wrap); a call made by
+// a CHILD of the worker, or a containerized/cross-namespace worker whose
+// self-reported PID differs from the kernel PID, falls back to the timestamp
+// scan — which is exact for sequential record and best-effort under overlap.
 func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[string][]models.MockEntry {
 	// Sort windows by start so overlapping scopes resolve to the innermost
 	// (latest-started) window deterministically.
 	sort.SliceStable(windows, func(i, j int) bool { return windows[i].Start.Before(windows[j].Start) })
 	byTest := make(map[string][]models.MockEntry)
-	for _, mk := range mocks {
+	// containingWindow returns the innermost (latest-started) window that contains
+	// the mock's timestamp. When sameWorkerOnly is set (the mock carries a PID),
+	// only windows recorded by that exact worker are considered — so overlapping
+	// windows from OTHER parallel workers never steal the mock.
+	containingWindow := func(mk capturedMock, sameWorkerOnly bool) int {
 		best := -1
 		for i, w := range windows {
+			if sameWorkerOnly && w.PID != mk.pid {
+				continue
+			}
 			if mk.ts.Before(w.Start) || mk.ts.After(w.End) {
 				continue
 			}
 			if best == -1 || windows[i].Start.After(windows[best].Start) {
 				best = i
 			}
+		}
+		return best
+	}
+	for _, mk := range mocks {
+		best := -1
+		if mk.pid != 0 {
+			// Exact, parallel-safe: attribute to the same worker's window.
+			best = containingWindow(mk, true)
+		}
+		if best == -1 {
+			// No same-worker window (PID-less mock/windows, or the call came from
+			// a child process): fall back to a pure timestamp scan — correct when
+			// windows don't overlap, i.e. sequential record.
+			best = containingWindow(mk, false)
 		}
 		if best == -1 {
 			continue

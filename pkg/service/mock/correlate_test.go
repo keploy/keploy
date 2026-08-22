@@ -90,3 +90,39 @@ func TestMissPolicyValidAndBehaviour(t *testing.T) {
 	require.False(t, models.MissPassthrough.RecordsOnMiss())
 	require.True(t, models.MissRecord.RecordsOnMiss())
 }
+
+// TestCorrelateScopesParallelPID is the case Design A (per-PID attribution)
+// fixes: two workers' scope windows OVERLAP in time, so a pure timestamp scan
+// would attribute both workers' mocks to whichever window started later. The
+// source PID disambiguates them exactly.
+func TestCorrelateScopesParallelPID(t *testing.T) {
+	// worker A (pid 100) ran test "a" over [10,30]; worker B (pid 200) ran test
+	// "b" over [15,35] — the two windows overlap on [15,30].
+	windows := []models.ScopeWindow{
+		{Name: "a", Start: ts(10), End: ts(30), PID: 100},
+		{Name: "b", Start: ts(15), End: ts(35), PID: 200},
+	}
+	mocks := []capturedMock{
+		{name: "a-call", ts: ts(20), pid: 100}, // in BOTH by time; PID => "a"
+		{name: "b-call", ts: ts(25), pid: 200}, // in BOTH by time; PID => "b"
+	}
+	got := correlateScopes(windows, mocks)
+
+	require.ElementsMatch(t, []string{"a-call"}, names(got["a"]),
+		"worker A's call must attribute to test a, not the later-started overlapping window b")
+	require.ElementsMatch(t, []string{"b-call"}, names(got["b"]))
+
+	// A PID-less mock (e.g. a child process's call) falls back to the timestamp
+	// scan: the innermost (latest-started) containing window wins.
+	fallback := correlateScopes(windows, []capturedMock{{name: "orphan", ts: ts(20), pid: 0}})
+	require.ElementsMatch(t, []string{"orphan"}, names(fallback["b"]),
+		"PID-less mock should fall back to the innermost time window")
+}
+
+func names(entries []models.MockEntry) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Name)
+	}
+	return out
+}

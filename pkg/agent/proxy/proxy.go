@@ -164,6 +164,21 @@ type Proxy struct {
 	session     *agent.Session
 	mockManager *MockManager
 
+	// workerScope holds per-test-worker mock allowlists for parallel replay
+	// (Design A). Key is the worker's self-reported PID (ScopeReq.Pid); value is
+	// the set of per-test mock names that worker's current test is allowed to
+	// see. An outgoing call's origin PID (OutgoingOptions.SrcPid) is resolved up
+	// the /proc tree to the nearest registered ancestor, and its per-test view
+	// is intersected with that worker's set — so concurrent workers never stomp
+	// each other's pool. Empty/absent ⇒ the worker serves the whole pool
+	// (backward compatible with suite-level and single-worker sequential scope).
+	workerScopeMu sync.RWMutex
+	workerScope   map[uint32]map[string]struct{}
+	// mappedUniverse is the union of every test's mapped mock names; lets a
+	// scoped worker distinguish "another test's mock" from an unmapped shared
+	// recording. Guarded by workerScopeMu.
+	mappedUniverse map[string]struct{}
+
 	// asyncEngine, when non-nil (config.Async.Lanes non-empty), tracks
 	// async-lane replay state: registered parsers and the per-test
 	// position counter consumed by Engine.Decide's anchor gating. The
@@ -1860,6 +1875,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Create a local copy of OutgoingOptions to avoid data race when multiple
 	// goroutines handle connections concurrently and modify DstCfg/Synchronous
 	outgoingOpts := rule.OutgoingOptions
+	// Stamp this connection's origin PID (eBPF redirect map) on the per-conn
+	// copy so the mock-serve and record-capture paths can attribute the call to
+	// the test worker that made it (per-PID scoping). 0 when unavailable.
+	outgoingOpts.SrcPid = destInfo.KernelPid
 
 	mgr := syncMock.Get()
 	mgr.SetOutputChannel(rule.MC)
@@ -2051,7 +2070,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		//mock the outgoing message
-		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m, outgoingOpts)
+		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
 			p.sendMockNotFoundError(err)
@@ -2820,7 +2839,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// reconnect the producer and crash on a nil schema); such a parser
 			// reports via this hook, replies normally, and keeps serving.
 			testCtx := models.WithMockMismatchReporter(parserCtx, p.sendMockNotFoundError)
-			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, m, outgoingOpts)
+			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
@@ -2840,7 +2859,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 		} else {
-			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
+			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
@@ -3205,6 +3224,11 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	} else {
 		mm.ResetForReplaySession()
 	}
+
+	// Drop any per-worker scopes from a prior session so a crashed worker that
+	// never sent /agent/scope/end cannot leak an allowlist that mis-scopes a
+	// recycled PID in this session.
+	p.ClearAllWorkerScopes()
 
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")

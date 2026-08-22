@@ -97,6 +97,12 @@ type Mock struct {
 	Spec         MockSpec     `json:"Spec,omitempty" bson:"Spec,omitempty"`
 	TestModeInfo TestModeInfo `json:"TestModeInfo,omitempty"  bson:"TestModeInfo,omitempty"` // Map for additional test mode information
 	ConnectionID string       `json:"ConnectionId,omitempty" bson:"ConnectionId,omitempty"`
+	// SourcePID is the kernel PID of the process that made this outgoing call,
+	// carried transiently from capture to the recorder so `keploy mock record`
+	// can attribute the mock to the test WORKER that made it (per-PID scoping
+	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
+	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
+	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
 	// Noise holds exact-match regex patterns for obfuscated values.
 	// During mock matching, any stored value matching a pattern in this
 	// list is skipped (treated as noise). Written by the enterprise
