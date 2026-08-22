@@ -148,9 +148,12 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 }
 
 // dialUpstream opens a connection to the real dependency, wrapping it in TLS
-// when the original client connection was TLS (dstCfg.TLSCfg set). It mirrors
-// keploy's record-time posture of not being stricter than the app it stands in
-// for, so the upstream cert is not verified here.
+// when the original client connection was TLS (dstCfg.TLSCfg set). The upstream
+// certificate is verified against the system trust store (ServerName carried
+// over from the client's SNI). A dependency with a self-signed / untrusted cert
+// therefore fails the handshake here and the caller falls back to the hard miss
+// (502) rather than the proxy silently trusting an unverified upstream — this
+// on-miss path dials the real network, so it must not disable verification.
 func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCfg) (net.Conn, error) {
 	d := &net.Dialer{Timeout: 30 * time.Second}
 	raw, err := d.DialContext(ctx, "tcp", dstCfg.Addr)
@@ -160,9 +163,11 @@ func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCf
 	if dstCfg.TLSCfg == nil {
 		return raw, nil
 	}
-	cfg := dstCfg.TLSCfg.Clone()
-	cfg.InsecureSkipVerify = true
-	tlsConn := tls.Client(raw, cfg)
+	// Minimal upstream client config: verify against the system trust store
+	// (RootCAs nil) with the app's SNI as ServerName. We deliberately do NOT
+	// reuse dstCfg.TLSCfg — that is keploy's MITM SERVER config (leaf cert, CA)
+	// and must not leak into an upstream client dial. No skip-verify.
+	tlsConn := tls.Client(raw, &tls.Config{ServerName: dstCfg.TLSCfg.ServerName, MinVersion: tls.VersionTLS12})
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		_ = raw.Close()
 		return nil, err
