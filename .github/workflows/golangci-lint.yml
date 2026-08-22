@@ -67,15 +67,24 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          # PINNED, not floating. golangci-lint v2.13.0 (released 2026-08-19,
-          # 23:29 UTC) bundles honnef.co/go/tools v0.8.0-rc.1, whose nilness
-          # analyzer panics with "internal error: unhandled builtin recover" on
-          # Go 1.26 — reproduced locally against the sentry dependency. Because
-          # the action resolves the newest release at run time, that single
-          # upstream publish turned every PR in this repo red within hours,
-          # including PRs containing no Go code at all. A pin means an upstream
-          # release can no longer break CI without someone choosing it.
-          version: v2.12.2
+          # PINNED, not floating: the action resolves the newest release at
+          # run time, so a single upstream publish can turn every PR in this
+          # repo red (that is exactly what v2.13.0 did — see below). A pin
+          # means an upstream release can no longer break CI without someone
+          # choosing it.
+          #
+          # This pin is coupled to the Go toolchain in go.mod and cannot lag
+          # behind it. Each release here bundles a fixed honnef.co/go/tools
+          # (staticcheck), whose IR builder must understand the stdlib of the
+          # Go version it analyzes:
+          #   v2.12.2  -> honnef v0.7.0      crashes on Go 1.27: "buildir:
+          #               package "poll" ... unexpected expr: *ast.KeyValueExpr"
+          #               (reproduced locally on go1.27.0).
+          #   v2.13.0  -> honnef v0.8.0-rc.1 nilness panics with "internal
+          #               error: unhandled builtin recover" on Go 1.26.
+          #   v2.13.1  -> honnef v0.8.0      clean on go1.27.0 (verified
+          #               locally: `golangci-lint run` reports 0 issues).
+          version: v2.13.1
           only-new-issues: true
           args: --timeout=5m
 
