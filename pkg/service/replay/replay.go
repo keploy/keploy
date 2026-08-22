@@ -3198,7 +3198,7 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 		return pass, result
 	}
 
-	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, r.autoHeaderNoiseOpt())
 	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 
 	return pass, result
@@ -3215,7 +3215,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	}
 
 	if emitFailureLogs {
-		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false)
+		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, r.autoHeaderNoiseOpt())
 		if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return true, result
@@ -3226,13 +3226,24 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 		}
 	}
 
-	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, r.autoHeaderNoiseOpt())
 	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 	if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 		return true, result
 	}
 
 	return pass, result
+}
+
+// autoHeaderNoiseOpt ignores response headers Keploy already treats as
+// per-request volatile for egress mock matching — X-Request-Id, Date, W3C and
+// Datadog trace ids, cloud signing headers — so a test whose status and body
+// match cannot fail on a value the application mints fresh every call.
+//
+// Honours the existing --disableAutoHeaderNoise flag, which until now only
+// covered mock matching. One switch, both places.
+func (r *Replayer) autoHeaderNoiseOpt() httpMatcher.MatchOption {
+	return httpMatcher.WithAutoHeaderNoise(!r.config.Test.DisableAutoHeaderNoise)
 }
 
 func (r *Replayer) httpNoiseConfig(testSetID string) map[string]map[string][]string {
