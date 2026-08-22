@@ -10,15 +10,15 @@
 # This Dockerfile keeps the in-container `go build` path because
 # external users still need a single-command "build from source"
 # entry point. libpg_query / pg_query_go v6.2.2 requires CGo, so
-# the builder image MUST carry a working gcc — golang:1.26 (Debian
-# bookworm base) already ships gcc, so no extra apt install is
+# the builder image MUST carry a working gcc — golang:1.27 (Debian
+# trixie base) already ships gcc, so no extra apt install is
 # needed. CGO_ENABLED=1 is set explicitly so a mis-configured
 # builder (someone passing CGO_ENABLED=0 as a docker build-arg)
 # fails loud rather than producing a non-cgo binary that crashes
 # the moment the classifier tries to pg_query.Parse.
 #
 # === Build Stage ===
-FROM golang:1.26 AS build
+FROM golang:1.27 AS build
 
 # Set the working directory
 WORKDIR /app
@@ -29,7 +29,7 @@ ARG VERSION
 ARG SERVER_URL
 ARG GITHUB_APP_CLIENT_ID
 
-# pg_query_go links libpg_query via CGo. golang:1.26 (bookworm)
+# pg_query_go links libpg_query via CGo. golang:1.27 (trixie)
 # ships gcc; we set CGO_ENABLED=1 explicitly so ARG overrides can't
 # accidentally disable it. GOMAXPROCS=2 stays to avoid crashing qemu
 # under buildx multi-arch builds.
