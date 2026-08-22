@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	_ "embed"
+	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -262,7 +264,103 @@ func SetupCaCertEnv(logger *zap.Logger) error {
 		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
 		return err
 	}
-	return SetEnvForPath(logger, tempPath)
+	if err := SetEnvForPath(logger, tempPath); err != nil {
+		return err
+	}
+	// Java: point the JVM at a merged truststore via JAVA_TOOL_OPTIONS instead of
+	// importing the keploy CA into the JDK's own cacerts. Best-effort and additive
+	// — a machine with no JDK, or a failure to build the store, must not fail CA
+	// setup for a Node/Python/Go app, and any existing JAVA_TOOL_OPTIONS is kept.
+	if err := setupJavaTrustStoreEnv(logger); err != nil {
+		logger.Warn("could not set up the Java truststore via JAVA_TOOL_OPTIONS; Java HTTPS interception may not work, but other runtimes are unaffected",
+			zap.Error(err))
+	}
+	return nil
+}
+
+// EnvJavaToolOptions is the environment variable a JVM reads extra launch flags
+// from at startup. Keploy uses it to point Java at a merged truststore instead
+// of importing its CA into the JDK's cacerts, which mutated the user's JDK with
+// no uninstall path and needed a keytool that is not always present.
+const EnvJavaToolOptions = "JAVA_TOOL_OPTIONS"
+
+// setupJavaTrustStoreEnv builds a merged Java truststore — the system roots plus
+// the keploy MITM CA — in pure Go, and points the application's JVM at it via
+// JAVA_TOOL_OPTIONS. -Djavax.net.ssl.trustStore REPLACES the JDK's default
+// cacerts wholesale, so the store must carry the system roots too or a Java app
+// could no longer validate any non-keploy-proxied HTTPS.
+//
+// Nothing in the JDK is modified: the store lives in a temp file and is thrown
+// away with it. keploy's flags are appended to any JAVA_TOOL_OPTIONS the user
+// already set rather than replacing it.
+//
+// Note: every JVM the app spawns prints "Picked up JAVA_TOOL_OPTIONS: ..." to
+// its stderr — harmless, but a build tool that parses child-JVM stderr may see
+// it. That is inherent to JAVA_TOOL_OPTIONS and is the accepted cost of not
+// mutating the JDK.
+func setupJavaTrustStoreEnv(logger *zap.Logger) error {
+	systemBundle, srcPath := loadSystemCABundleFn(logger)
+	merged := make([]byte, 0, len(systemBundle)+len(caCrt)+1)
+	merged = append(merged, systemBundle...)
+	if len(merged) > 0 && merged[len(merged)-1] != '\n' {
+		merged = append(merged, '\n')
+	}
+	merged = append(merged, caCrt...)
+
+	mergedPEM, err := os.CreateTemp("", "keploy-java-cas-*.pem")
+	if err != nil {
+		return fmt.Errorf("failed to create the merged CA pem: %w", err)
+	}
+	mergedPath := mergedPEM.Name()
+	// The merged PEM is only the input to generateTrustStore; the JKS is what
+	// the JVM reads, so the PEM can go once the store is built.
+	defer func() { _ = os.Remove(mergedPath) }()
+	if _, err := mergedPEM.Write(merged); err != nil {
+		_ = mergedPEM.Close()
+		return fmt.Errorf("failed to write the merged CA pem: %w", err)
+	}
+	if err := mergedPEM.Close(); err != nil {
+		return fmt.Errorf("failed to write the merged CA pem: %w", err)
+	}
+
+	// Deterministic per-user path, overwritten each run, so runs do not
+	// accumulate a new JKS in the temp dir every time (there is no teardown hook
+	// to remove a random-named one). The contents are the same public bundle
+	// each run, so a concurrent overwrite is harmless.
+	jksPath := filepath.Join(os.TempDir(), "keploy-java-truststore.jks")
+	if err := generateTrustStore(mergedPath, jksPath); err != nil {
+		return fmt.Errorf("failed to build the Java truststore: %w", err)
+	}
+	// Readable by the app, which may run as the same user; the store contains
+	// only public certificates, no secrets.
+	if err := os.Chmod(jksPath, 0644); err != nil {
+		logger.Debug("could not chmod the Java truststore", zap.String("path", jksPath), zap.Error(err))
+	}
+
+	// The JVM splits JAVA_TOOL_OPTIONS on whitespace with no quoting, so a store
+	// path containing a space would make the JVM refuse to start. Rather than
+	// ever break a Java app, decline when the path cannot be made space-free
+	// (Windows still has its keytool/cacerts path as a fallback; other platforms
+	// simply get no Java interception, which is the pre-existing behaviour for a
+	// machine without keytool).
+	safePath, ok := envSafePath(jksPath)
+	if !ok {
+		logger.Warn("the Java truststore path contains a space and cannot be made space-free; skipping JAVA_TOOL_OPTIONS so the JVM still starts",
+			zap.String("truststore", jksPath))
+		return nil
+	}
+	opts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", safePath)
+	if existing := os.Getenv(EnvJavaToolOptions); existing != "" {
+		if strings.Contains(existing, "-Djavax.net.ssl.trustStore=") {
+			// Already set (a second SetupCaCertEnv in the same process): leave it
+			// rather than appending a duplicate flag and leaking work.
+			return nil
+		}
+		opts = existing + " " + opts
+	}
+	logger.Info("pointing Java at a merged keploy truststore via JAVA_TOOL_OPTIONS (the JDK's cacerts is left untouched)",
+		zap.String("truststore", safePath), zap.String("system_source", srcPath))
+	return os.Setenv(EnvJavaToolOptions, opts)
 }
 
 // SetEnvForPath sets the environment variables to point to a SPECIFIC path.
@@ -653,6 +751,46 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 	return nil
 }
 
+// setupNativeDarwin installs the keploy CA for a native macOS run.
+//
+// It exists as its own function so it can be unit-tested on Linux (the darwin
+// build's tests never run in CI — go_macos.yaml only builds).
+//
+// Why this is not the Linux path: that path writes into
+// /usr/local/share/ca-certificates or /etc/ssl/certs and runs
+// update-ca-certificates. On macOS the only one of those directories that
+// exists is /etc/ssl/certs, it is root-owned, and none of the update commands
+// exist — so falling through left a stray root-owned file or an EACCES, and in
+// both cases markCAReady was never reached and the run reported a CA failure.
+//
+// What each runtime needs, and how it is met here (all measured against a
+// keploy MITM leaf on macOS):
+//
+//	Node    NODE_EXTRA_CA_CERTS   set by the CLIENT (SetupCaCertEnv), works
+//	Python  SSL_CERT_FILE etc.    set by the CLIENT (SetupCaCertEnv), works
+//	Java    the JDK's cacerts     imported here, works
+//	Go      Security.framework    handled by the injected shim's SecTrust
+//	                              override, not by any CA env var — Go on darwin
+//	                              ignores SSL_CERT_FILE entirely
+//
+// So the only thing this function must do on the AGENT side is the Java
+// keystore import; the Node/Python env vars are the client's job (a separate
+// process — the agent's own environment never reaches the app), and Go is the
+// shim's. The Java import is best-effort: a machine with no JDK, or a Go/Node
+// developer who is not testing Java, must not have CA setup fail underneath
+// them, so a keystore failure is logged and the run proceeds.
+func setupNativeDarwin(_ context.Context, logger *zap.Logger, _ string) error {
+	// Nothing to do on the agent side. Node/Python get their CA via client env
+	// vars (SetupCaCertEnv), Go via the injected shim's SecTrust override, and
+	// Java via a merged truststore the client points JAVA_TOOL_OPTIONS at
+	// (setupJavaTrustStoreEnv) — none of which touches this machine's JDK, CA
+	// store, or requires keytool. Keeping this as its own function preserves the
+	// darwin-specific readiness path (the Linux CA-store writes do not apply).
+	logger.Debug("macOS native CA setup complete (Java via JAVA_TOOL_OPTIONS, no JDK cacerts change)")
+	markCAReady()
+	return nil
+}
+
 func setupNative(ctx context.Context, logger *zap.Logger) error {
 	return setupNativeForApp(ctx, logger, 0, "")
 }
@@ -690,10 +828,12 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, appPID int, java
 			return err
 		}
 
-		// install CA in the java keystore if java is installed
+		// install CA in the java keystore if java is installed. Non-fatal: Java
+		// also trusts the keploy CA via the JAVA_TOOL_OPTIONS merged truststore
+		// the client sets (SetupCaCertEnv), so a missing/failing keytool must not
+		// fail CA setup for a run that may not even use Java.
 		if err = installJavaCAForHome(ctx, logger, tempCertPath, resolvedJavaHome); err != nil {
-			utils.LogError(logger, err, "Failed to install CA in the java keystore")
-			return err
+			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
 		}
 
 		// Set environment variables for Node.js and Python to use the custom CA
@@ -707,6 +847,10 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, appPID int, java
 		return nil
 	}
 
+	// macOS Specific Logic
+	if runtime.GOOS == "darwin" {
+		return setupNativeDarwin(ctx, logger, resolvedJavaHome)
+	}
 	// Linux/Unix Specific Logic
 	caPaths, err := getCaPaths()
 	if err != nil {
@@ -732,12 +876,11 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, appPID int, java
 		}
 		fs.Close()
 
-		// install CA in the java keystore if java is installed.
-		// resolvedJavaHome may be "" — installJavaCAForHome falls back
-		// to PATH keytool in that case, preserving legacy behaviour.
+		// install CA in the java keystore if java is installed. Non-fatal for the
+		// same reason as the Windows path above: JAVA_TOOL_OPTIONS is the primary
+		// Java mechanism now, so a missing keytool degrades gracefully.
 		if err := installJavaCAForHome(ctx, logger, caPath, resolvedJavaHome); err != nil {
-			utils.LogError(logger, err, "Failed to install CA in the java keystore")
-			return err
+			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
 		}
 	}
 
@@ -823,6 +966,20 @@ func extractCertToTemp() (string, error) {
 // the trailing unparsed bytes is likewise treated as a fatal error
 // (otherwise pem.Decode's nil-on-malformed return would let the last
 // certificate in a corrupted bundle disappear from the JKS silently).
+// looksLikeCertificate reports whether der is structurally an X.509 certificate
+// — a SEQUENCE of { tbsCertificate, signatureAlgorithm, signatureValue } — using
+// only the shape, not Go's strict field validation (which is what rejected the
+// certificate in the first place, e.g. a negative serial number inside the TBS).
+func looksLikeCertificate(der []byte) bool {
+	var shape struct {
+		TBS      asn1.RawValue
+		SigAlg   asn1.RawValue
+		SigValue asn1.BitString
+	}
+	rest, err := asn1.Unmarshal(der, &shape)
+	return err == nil && len(rest) == 0
+}
+
 func generateTrustStore(certPath, jksPath string) error {
 	pemBytes, err := os.ReadFile(certPath)
 	if err != nil {
@@ -868,22 +1025,38 @@ func generateTrustStore(certPath, jksPath string) error {
 		if block.Type != "CERTIFICATE" {
 			continue
 		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return fmt.Errorf("failed to parse x509 certificate at PEM block #%d (type=%q): %w", pemBlockIdx, block.Type, err)
+		// The keystore entry only needs the DER, and the alias is derived from it,
+		// so a full parse is not required — and must not be stricter than keytool.
+		// A real trust bundle can carry a root Go's parser rejects but Java
+		// accepts, most commonly a negative serial number, which macOS's
+		// /etc/ssl/cert.pem still ships. Parse only to drop genuine garbage:
+		// on a parse error keep the DER anyway if it is at least an ASN.1
+		// SEQUENCE, so one legacy root can no longer sink the whole store.
+		der := block.Bytes
+		if _, err := x509.ParseCertificate(der); err != nil {
+			// Go's strict parser rejects some real roots a JVM accepts (most
+			// commonly a negative serial number, which macOS's /etc/ssl/cert.pem
+			// ships). Keep such a root — but ONLY if the DER is structurally an
+			// X.509 certificate. A well-formed but non-certificate SEQUENCE must
+			// be dropped: Java's keystore load is all-or-nothing, so one bad
+			// entry would make KeyStore.load throw and break ALL of the app's
+			// Java TLS — far worse than losing one legacy root.
+			if !looksLikeCertificate(der) {
+				continue
+			}
 		}
 
 		alias := ""
-		if sha256.Sum256(cert.Raw) == keployFingerprint {
+		if sha256.Sum256(der) == keployFingerprint {
 			alias = "keploy-root"
 		} else {
-			alias = fmt.Sprintf("system-%x", sha256.Sum256(cert.Raw))
+			alias = fmt.Sprintf("system-%x", sha256.Sum256(der))
 		}
 
 		ks.SetTrustedCertificateEntry(alias, keystore.TrustedCertificateEntry{
 			Certificate: keystore.Certificate{
 				Type:    "X.509",
-				Content: cert.Raw,
+				Content: der,
 			},
 		})
 		added++
