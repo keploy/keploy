@@ -34,12 +34,13 @@ PY
 # Record driver: one process, two SEQUENTIAL scopes each reporting its PID, so
 # the mapping ends up t1->[/a mock], t2->[/b mock].
 cat > rec.py <<'PY'
-import os, json, urllib.request, sys
+import os, json, urllib.request, sys, time
 AG = os.environ["KEPLOY_MOCK_AGENT"]; PORT = sys.argv[1]; pid = os.getpid()
 def scope(path, name):
     d = json.dumps({"name": name, "pid": pid}).encode()
     urllib.request.urlopen(urllib.request.Request(AG + path, data=d, headers={"Content-Type": "application/json"}, method="POST"), timeout=5).read()
 def call(p): return urllib.request.urlopen("http://127.0.0.1:%s%s" % (PORT, p), timeout=5).read()
+time.sleep(3)  # let keploy warm up eBPF redirect so the FIRST call is intercepted (not raced)
 scope("/agent/scope/begin", "t1"); assert call("/a") == b"AAA"; scope("/agent/scope/end", "t1")
 scope("/agent/scope/begin", "t2"); assert call("/b") == b"BBB"; scope("/agent/scope/end", "t2")
 print("RECORD_OK", flush=True)
@@ -53,7 +54,7 @@ def scope(path):
     d = json.dumps({"name": name, "pid": os.getpid()}).encode()
     urllib.request.urlopen(urllib.request.Request(AG + path, data=d, headers={"Content-Type": "application/json"}, method="POST"), timeout=5).read()
 scope("/agent/scope/begin")
-time.sleep(0.3)  # overlap the two workers' active scopes
+time.sleep(2)  # overlap the two workers' scopes AND let the replay proxy warm up
 try:
     body = urllib.request.urlopen("http://127.0.0.1:%s/b" % PORT, timeout=5).read().decode()
     print("%s=SERVED:%s" % (name, body), flush=True)
