@@ -3,11 +3,11 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 
 	"github.com/spf13/cobra"
@@ -24,7 +24,7 @@ func Example(_ context.Context, logger *zap.Logger, _ *config.Config, _ ServiceF
 		Short: "Example to record and test via keploy",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(os.Stdout, disableAnsi)
+			provider.PrintLogo(log.PrimarySink(), disableAnsi)
 			customSetup, err := cmd.Flags().GetBool("customSetup")
 			if err != nil {
 				utils.LogError(logger, nil, "failed to read the customSetup flag")

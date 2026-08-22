@@ -54,6 +54,18 @@ test-reports
 
 #Ignore the test data
 testdata
+# ...except this one checked-in Go fixture directory. `testdata` is a name the
+# Go toolchain reserves and skips when building/packaging, so it is also the
+# standard place to check in a golden fixture; the blanket rule above was
+# silently swallowing those too, which is why this repo had no testdata dir at
+# all. Re-include the directory itself (git will not descend into an excluded
+# directory, so negating only its contents would not work) plus its contents.
+# Scoped to the exact directory ON PURPOSE: a `pkg/**/testdata/` negation would
+# silently change the default for every future testdata dir under pkg/,
+# including anything a contributor's local keploy run drops there. Widen it one
+# directory at a time, when a fixture actually needs it.
+!pkg/service/report/testdata/
+!pkg/service/report/testdata/**
 
 #Ignore the c and header files
 *.c
