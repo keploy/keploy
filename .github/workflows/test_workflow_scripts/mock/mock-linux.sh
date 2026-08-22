@@ -13,6 +13,17 @@ source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.
 # root also needs an installation-id so the sudo'd agent doesn't prompt
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
+# Ensure pytest is importable by the same interpreter `python3 -m pytest` uses.
+# setup-python provides python3 but not pytest; install it once (idempotent).
+if ! python3 -c "import pytest" 2>/dev/null; then
+  # Keep everything on the SAME python3 the test command uses: ensurepip
+  # guarantees that interpreter has pip, then install pytest into it. (No
+  # cross-interpreter `pip3` fallback, which could land pytest where
+  # `python3 -m pytest` can't import it.)
+  python3 -m ensurepip --default-pip >/dev/null 2>&1 || true
+  python3 -m pip install --quiet --disable-pip-version-check pytest
+fi
+
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-keploy}"
 WORK="$(mktemp -d)"
@@ -60,7 +71,7 @@ def test_items():  assert get("/items/42")["path"]=="/items/42"
 def test_health(): assert get("/health")["path"]=="/health"
 PY
 
-start_dep() { python3 depserver.py "$PORT" & echo $!; }
+start_dep() { python3 depserver.py "$PORT" >dep.log 2>&1 & echo $!; }
 stop_dep()  { kill "$1" 2>/dev/null; sleep 1; }
 
 echo "== 1. record dependency calls =="
