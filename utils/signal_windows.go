@@ -70,8 +70,13 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 
 	logger.Info("Starting Application (Windows):", zap.String("executing_cli", cmd.String()))
 
-	// Start the command
-	err := cmd.Start()
+	// Start the command. On a native run with the unprivileged backend selected
+	// this goes through the registered starter, which creates the process
+	// suspended, injects the interception shim and then resumes it — Windows has
+	// no DYLD_INSERT_LIBRARIES, so injection has to happen at process creation.
+	// With no starter registered (an elevated WinDivert run, or a docker
+	// command) this is exactly the cmd.Start() it always was.
+	err := startApplication(cmd, kind)
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}

@@ -1379,6 +1379,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	if opts.CommandType != string(utils.DockerCompose) { // in case of docker compose, we will run the application command (our agent will run along with it)
 		opts.ClientNSPID = uint32(os.Getpid())
+		// Windows without Administrator: arm the client-side half of the
+		// unprivileged backend before the agent starts, so the shim is staged
+		// and the app-launch injector is registered by the time the application
+		// is created. A no-op on every other platform, and on an elevated
+		// Windows run, which keeps using WinDivert.
+		a.prepareNativeInterception(opts)
 		err = a.startAgent(ctx, isDockerCmd, opts)
 		if err != nil {
 			return fmt.Errorf("failed to start agent: %w", err)
