@@ -1,0 +1,33 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-1
+spec:
+    metadata:
+        description: fetch one order
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/orders/1
+        url_params:
+            expand: items
+        header:
+            Accept: application/json
+        body: ""
+        timestamp: 2026-08-22T10:00:00Z
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+        body: '{"id":1,"status":"CONFIRMED","total":41.97}'
+        status_message: OK
+        proto_major: 1
+        proto_minor: 1
+        timestamp: 2026-08-22T10:00:00.012Z
+    objects: []
+    assertions:
+        noise:
+            body.total: []
+    created: 1755861852
+    app_port: 8080
+curl: curl --request GET --url http://localhost:8080/orders/1

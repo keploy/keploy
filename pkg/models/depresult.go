@@ -281,7 +281,7 @@ func FormatDepResults(deps []DepResult) string {
 			fmt.Fprintf(&sb, "  OK      %s - consumed (presence only)\n", d.Name)
 			continue
 		}
-		fmt.Fprintf(&sb, "  MISSING %s\n", d.Name)
+		fmt.Fprintf(&sb, "  %s %s\n", DepRowLabel(d), d.Name)
 		if IsDepMissingOverflow(d) {
 			// The overflow row already reads "<n> more not consumed";
 			// appending `missing_count: expected "0", actual "<n>"` would
@@ -301,6 +301,48 @@ func FormatDepResults(deps []DepResult) string {
 	}
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// DepRowLabel is the leading word FormatDepResults prints for a FAILED row.
+//
+// It is "MISSING" for a sync-path `deps[i]` row, which is byte-identical to
+// what this renderer printed before there was a second producer — the
+// dependency block of every HTTP and gRPC report is unchanged.
+//
+// For a consumer `effects[i]` row it names what actually went wrong, because
+// "MISSING" is simply false for most of them: a payload whose `status` field
+// changed is not missing, and labelling it so sends the reader looking for a
+// message that never arrived. This is the dispatch IsEffectRow was written
+// for — on the ROW PREFIX, never on a test's Kind, so the renderer stays
+// Kind-agnostic.
+func DepRowLabel(d DepResult) string {
+	if !IsEffectRow(d) {
+		return "MISSING"
+	}
+	for _, m := range d.Meta {
+		if m.Normal {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(m.Key, "."+EffectKeyPresence):
+			return "MISSING"
+		case strings.HasSuffix(m.Key, "."+EffectKeyUnexpected):
+			return "EXTRA"
+		case strings.HasSuffix(m.Key, "."+EffectKeyIdentity):
+			return "REROUTED"
+		case strings.HasSuffix(m.Key, "."+EffectKeyOpaque):
+			return "OPAQUE"
+		case m.Key == EffectKeyPrefix+".refusal":
+			return "REFUSED"
+		case m.Key == EffectKeyPrefix+".end_reason":
+			return "WINDOW"
+		case m.Key == EffectKeyPrefix+".count":
+			return "COUNT"
+		case strings.Contains(m.Key, "."+EffectKeyBody):
+			return "CHANGED"
+		}
+	}
+	return "EFFECT"
 }
 
 // DepNoticePrefix leads the compact one-line notice. Stable: CI log scrapers

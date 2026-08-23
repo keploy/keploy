@@ -253,8 +253,22 @@ type tcsInfo struct {
 }
 
 func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
-	// Skip curl generation for either form data requests or large body (>1MB)
-	if len(tc.HTTPReq.Body) <= LargeBodyThreshold && len(tc.HTTPReq.Form) == 0 {
+	// Skip curl generation for either form data requests or large body (>1MB),
+	// and for kinds that have no HTTP request at all.
+	//
+	// A Kind: Consumer test case carries an entirely empty HTTPReq, so without
+	// this guard every consumer test would be stamped with the literal string
+	// `curl --request  --url ` — a garbage command shipped in the artifact and
+	// shown to the user.
+	//
+	// The guard EXCLUDES the new kind rather than requiring models.HTTP
+	// (which is what keploy-consumer-design-v2.md §9 asked for) so that no
+	// existing kind changes behaviour: gRPC test cases are stamped today, and
+	// although EncodeTestcase only writes doc.Curl on the HTTP arm — so the
+	// value never reaches disk for gRPC — narrowing to models.HTTP would still
+	// change the in-memory TestCase every gRPC recording produces. That is a
+	// separate cleanup with its own blast radius, not part of this contract.
+	if tc.Kind != models.CONSUMER && len(tc.HTTPReq.Body) <= LargeBodyThreshold && len(tc.HTTPReq.Form) == 0 {
 		tc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
 	}
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
@@ -467,6 +481,14 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		} else if tcs[i].Kind == models.GRPC_EXPORT {
 			reqTimeI = tcs[i].GrpcReq.Timestamp
 			respTimeI = tcs[i].GrpcResp.Timestamp
+		} else if tcs[i].Kind == models.CONSUMER {
+			// A consumer test's window lives on its spec. Without this
+			// arm every consumer test compares equal on both timestamps
+			// and the whole set falls through to extractTestNumber(name),
+			// which only orders names shaped like "test-N" — so a
+			// descriptively named consumer set would replay in an
+			// arbitrary order.
+			reqTimeI, respTimeI = tcs[i].RecordWindow()
 		}
 
 		// Get request and response timestamps for test case j
@@ -476,6 +498,8 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		} else if tcs[j].Kind == models.GRPC_EXPORT {
 			reqTimeJ = tcs[j].GrpcReq.Timestamp
 			respTimeJ = tcs[j].GrpcResp.Timestamp
+		} else if tcs[j].Kind == models.CONSUMER {
+			reqTimeJ, respTimeJ = tcs[j].RecordWindow()
 		}
 
 		// First, compare by request timestamp

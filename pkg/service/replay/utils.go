@@ -1181,6 +1181,18 @@ func recordReqResTimestamps(tc *models.TestCase) (time.Time, time.Time) {
 	if tc == nil {
 		return time.Time{}, time.Time{}
 	}
+	// A CONSUMER test case carries neither an HTTP nor a gRPC exchange, so
+	// every check below misses and it falls through to time.Unix(tc.Created,
+	// 0) — SECOND granularity, against a seed convention that spaces messages
+	// 300ms apart. Several consumer units then share one window, and
+	// --update-test-mapping regenerates a mapping that attributes one test's
+	// mocks to another. Its real window is the trigger's request/response
+	// pair, which is what RecordWindow returns.
+	if tc.Kind == models.CONSUMER {
+		if req, resp := tc.RecordWindow(); !req.IsZero() || !resp.IsZero() {
+			return req, resp
+		}
+	}
 	var req, resp time.Time
 	if !tc.HTTPReq.Timestamp.IsZero() {
 		req = tc.HTTPReq.Timestamp

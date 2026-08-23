@@ -28,6 +28,22 @@ type Instrumentation interface {
 	StreamPcapArtifacts(ctx context.Context, destDir string) error
 }
 
+// ConsumerRecordingReporter is the OPTIONAL extension of Instrumentation that
+// carries the consumer recording's reconciliation.
+//
+// IT IS A SEPARATE INTERFACE, reached by type assertion, for exactly the
+// reason replay.ConsumerInstrumentation is: Instrumentation is implemented
+// outside this repository and Go has no optional interface methods, so adding
+// a method to it would break those implementors at compile time for a
+// capability they cannot use yet.
+type ConsumerRecordingReporter interface {
+	// ConsumerRecordingReport returns the reconciliation of the recording
+	// session that has just ended. It must be called AFTER the graceful
+	// shutdown notification, which is what closes the recorder and mints
+	// its last unit.
+	ConsumerRecordingReport(ctx context.Context) (models.ConsumerRecordingReport, error)
+}
+
 type Service interface {
 	Start(ctx context.Context) error
 }

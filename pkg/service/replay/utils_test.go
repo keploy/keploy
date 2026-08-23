@@ -291,3 +291,88 @@ func TestRetainNoisyTestCaseMocks(t *testing.T) {
 		})
 	}
 }
+
+// recordReqResTimestamps supplies the record-time window a test's mocks are
+// attributed to when --update-test-mapping regenerates mappings.yaml.
+//
+// A CONSUMER test carries neither an HTTP nor a gRPC exchange, so without its
+// own arm every check misses and it falls through to time.Unix(tc.Created, 0)
+// — SECOND granularity, against a seed convention that spaces messages 300ms
+// apart. Several consumer units then share one window and one test's mocks are
+// attributed to another. That is a data-corruption path, so it is pinned by
+// values rather than only by the arm's presence.
+func TestRecordReqResTimestampsForAConsumerTestCase(t *testing.T) {
+	base := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	// Both instants round to the SAME second, which is exactly what makes the
+	// Created fallback lossy for a consumer recording.
+	req := base.Add(120 * time.Millisecond)
+	res := base.Add(420 * time.Millisecond)
+
+	tests := []struct {
+		name           string
+		tc             *models.TestCase
+		wantReq        time.Time
+		wantRes        time.Time
+		wantNotCreated bool
+	}{
+		{
+			name: "the consumer window comes off the spec, not off Created",
+			tc: &models.TestCase{
+				Kind:    models.CONSUMER,
+				Created: base.Unix(),
+				ConsumerSpec: &models.ConsumerSpec{
+					ReqTimestampMock: req,
+					ResTimestampMock: res,
+				},
+			},
+			wantReq:        req,
+			wantRes:        res,
+			wantNotCreated: true,
+		},
+		{
+			name: "a consumer test with no usable window still falls back",
+			tc: &models.TestCase{
+				Kind:         models.CONSUMER,
+				Created:      base.Unix(),
+				ConsumerSpec: &models.ConsumerSpec{},
+			},
+			wantReq: time.Unix(base.Unix(), 0),
+			wantRes: time.Unix(base.Unix(), 0).Add(time.Second),
+		},
+		{
+			name: "a consumer test with no spec at all does not panic",
+			tc: &models.TestCase{
+				Kind:    models.CONSUMER,
+				Created: base.Unix(),
+			},
+			wantReq: time.Unix(base.Unix(), 0),
+			wantRes: time.Unix(base.Unix(), 0).Add(time.Second),
+		},
+		{
+			name: "an HTTP test case is untouched by the consumer arm",
+			tc: &models.TestCase{
+				Kind:     models.HTTP,
+				Created:  base.Unix(),
+				HTTPReq:  models.HTTPReq{Timestamp: req},
+				HTTPResp: models.HTTPResp{Timestamp: res},
+			},
+			wantReq: req,
+			wantRes: res,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotReq, gotRes := recordReqResTimestamps(tt.tc)
+			if !gotReq.Equal(tt.wantReq) || !gotRes.Equal(tt.wantRes) {
+				t.Fatalf("recordReqResTimestamps() = (%s, %s), want (%s, %s)",
+					gotReq, gotRes, tt.wantReq, tt.wantRes)
+			}
+			if tt.wantNotCreated && gotReq.Equal(time.Unix(tt.tc.Created, 0)) {
+				t.Fatal("the window collapsed to Created's one-second granularity; " +
+					"several consumer units recorded 300ms apart would share one window and " +
+					"--update-test-mapping would attribute one test's mocks to another")
+			}
+		})
+	}
+}
