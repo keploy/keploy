@@ -1274,15 +1274,47 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 	return nil
 }
 
-// installWindowsCA installs the CA certificate in Windows certificate store using certutil
+// installWindowsCA installs the CA certificate into a Windows trust store.
+//
+// The per-user store is tried FIRST, and it is the one that normally succeeds.
+// `certutil -addstore ROOT` without -user targets the machine-wide store, which
+// requires Administrator: on an ordinary terminal it fails with access denied,
+// SetupCA returns that error, and the run continues with a proxy that MITMs
+// every TLS connection using a leaf nothing trusts. The application's HTTPS
+// dependencies then fail certificate verification — a worse outcome than not
+// intercepting at all, and one that used to be masked only because the previous
+// Windows backend needed a kernel driver and was therefore always elevated.
+//
+// The per-user store is also the CORRECT scope, not merely the reachable one.
+// Keploy launches the application itself, as the invoking user, so that is the
+// only trust store that has to contain the CA — and installing there does not
+// alter machine-wide trust for every other user and service on the host.
+//
+// The machine store is kept as a fallback for setups where the per-user store
+// is unavailable (a service account with no loaded profile, say), which is also
+// what preserves the previous behaviour for an elevated run.
 func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) error {
-	cmd := exec.CommandContext(ctx, "certutil", "-addstore", "-f", "ROOT", certPath)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		utils.LogError(logger, err, "Failed to install CA certificate using certutil", zap.String("output", string(output)))
-		return err
+	userCmd := exec.CommandContext(ctx, "certutil", "-user", "-addstore", "-f", "ROOT", certPath)
+	userOut, userErr := userCmd.CombinedOutput()
+	if userErr == nil {
+		logger.Debug("installed the keploy CA in the current user's Windows ROOT store",
+			zap.String("output", string(userOut)))
+		return nil
 	}
-	logger.Debug("Successfully installed CA certificate in Windows ROOT store", zap.String("output", string(output)))
+	logger.Debug("could not install the keploy CA in the per-user Windows ROOT store; trying the machine store",
+		zap.Error(userErr), zap.String("output", string(userOut)))
+
+	machineCmd := exec.CommandContext(ctx, "certutil", "-addstore", "-f", "ROOT", certPath)
+	machineOut, machineErr := machineCmd.CombinedOutput()
+	if machineErr != nil {
+		utils.LogError(logger, machineErr, "Failed to install CA certificate using certutil",
+			zap.String("user_store_output", string(userOut)),
+			zap.String("machine_store_output", string(machineOut)),
+			zap.String("next_step", "the machine-wide certificate store needs Administrator; re-run in an elevated terminal, or import "+certPath+" into your user's Trusted Root store manually. Without the CA installed, the application's HTTPS calls will fail certificate verification."))
+		return machineErr
+	}
+	logger.Debug("installed the keploy CA in the machine-wide Windows ROOT store",
+		zap.String("output", string(machineOut)))
 	return nil
 }
 

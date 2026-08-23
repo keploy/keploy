@@ -10,9 +10,17 @@ import (
 )
 
 // The default must stay exactly the set of platforms with an in-tree
-// interception backend. Widening it would let a native command through to the
-// hooks stub and fail with a confusing eBPF error instead of a clear one about
-// the platform; narrowing it would reject runs that work today.
+// interception backend, which for this build is Linux and nothing else.
+// Widening it would let a native command through to the hooks stub and fail
+// with a confusing eBPF error instead of a clear one naming the editions that
+// can run it; narrowing it would reject runs that work today.
+//
+// windows/amd64 is deliberately false. It was true while an in-tree Windows
+// backend existed; that backend now ships in the Community and Enterprise
+// editions, which widen this predicate from their own init() via
+// RegisterNativeCommandSupport. If this row ever flips back to true without a
+// backend returning to this repository, native Windows runs would get the stub
+// instead of the message pointing at those editions.
 //
 // Taking goos/goarch as parameters is what makes every platform checkable from
 // any host — asserting against runtime.GOOS on the CI runner would only ever
@@ -25,8 +33,8 @@ func TestDefaultNativeCommandSupported(t *testing.T) {
 		{"linux", "amd64", true},
 		{"linux", "arm64", true},
 		{"linux", "386", true},
-		{"windows", "amd64", true},
-		{"windows", "arm64", false}, // falls through to the others stub
+		{"windows", "amd64", false}, // backend lives in the Community/Enterprise editions
+		{"windows", "arm64", false},
 		{"darwin", "arm64", false},
 		{"darwin", "amd64", false},
 		{"freebsd", "amd64", false},

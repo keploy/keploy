@@ -20,19 +20,23 @@ import "runtime"
 var NativeCommandSupported = DefaultNativeCommandSupported
 
 // DefaultNativeCommandSupported is the set of platforms with an in-tree
-// interception backend: eBPF on Linux (pkg/agent/hooks/linux) and the WinDivert
-// redirector on Windows/amd64 (pkg/agent/hooks/windows).
+// interception backend: eBPF on Linux (pkg/agent/hooks/linux), and nothing
+// else.
 //
-// macOS and Windows/arm64 have none — both resolve to the pkg/agent/hooks/others
-// stub, whose Load returns "eBPF hooks are not supported on non-Linux
-// platforms". Rejecting a native command up front is deliberate: it produces a
-// clear message about the platform instead of that stub's confusing eBPF error
-// much later in the run.
+// macOS and Windows have no eBPF, and their userspace interception backends
+// ship in the Community and Enterprise editions rather than here. Those builds
+// widen this predicate from their own init() via RegisterNativeCommandSupport.
+// In this build both resolve to the pkg/agent/hooks/others stub, whose Load
+// returns "eBPF hooks are not supported on non-Linux platforms".
+//
+// Rejecting a native command up front is deliberate: it produces a clear
+// message naming the editions that can do it, instead of that stub's confusing
+// eBPF error much later in the run.
 //
 // goos and goarch are parameters rather than reads of runtime.GOOS/GOARCH so
 // the policy can be tested for every platform from any host.
-func DefaultNativeCommandSupported(goos, goarch string) bool {
-	return goos == "linux" || (goos == "windows" && goarch == "amd64")
+func DefaultNativeCommandSupported(goos, _ string) bool {
+	return goos == "linux"
 }
 
 // RegisterNativeCommandSupport installs the predicate used to decide whether a

@@ -63,5 +63,3 @@ testdata
 __debug_bin*
 keploy
 extraparsers.go
-# fetched at build time by tools/fetchredirector, pinned in redirector.lock
-pkg/agent/hooks/windows/libwindows_redirector.a
