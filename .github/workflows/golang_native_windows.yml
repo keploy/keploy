@@ -48,38 +48,210 @@ jobs:
               Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
             }
           }
-      # If a prior run left the workspace populated with files but no .git,
-      # actions/checkout's clean:true fails at "git config --local". Wipe in
-      # that case so checkout starts fresh; healthy workspaces are left alone.
+      # Recover the workspace so the checkout below can succeed. Kept INLINE
+      # rather than `& .github/scripts/windows/recover-stale-workspace.ps1`
+      # because this step runs BEFORE actions/checkout: the repo is not on
+      # disk yet, and in the "files but no .git" case an on-disk copy is
+      # exactly what may be missing or stale. This recovery cannot depend on
+      # the checkout it exists to repair.
+      #
+      # The block below is a verbatim copy of the region between the
+      # BEGIN/END INLINE REGION markers in
+      # .github/scripts/windows/recover-stale-workspace.ps1. That file is the
+      # single source of truth and carries the full rationale: EPERM on
+      # unlink caused by a pinned WinDivert64.sys, the interrupted-run "files
+      # but no .git" case, and why both the keploy kill and the WinDivert
+      # reset are job-scoped. Change the script first, then re-sync with
+      # `python3 .github/scripts/check-inline-regions.py --fix`; the
+      # `inline-regions` job in golangci-lint.yml fails the PR on drift.
+      #
+      # This lane runs on GitHub-hosted windows-latest - a fresh single-tenant
+      # VM per job - so unlike the self-hosted lanes it has neither sibling
+      # jobs to protect nor leftovers from a previous job to recover. It
+      # shares the body anyway because a carve-out for one lane would be a
+      # sixth variant of this code, and variants drifting apart is exactly
+      # the bug this arrangement exists to prevent: one body with no
+      # exceptions is what keeps the drift check total. It costs this lane
+      # nothing - the workspace scoping is a no-op here (every keploy this
+      # job starts lives under $GITHUB_WORKSPACE\bin), and the body's
+      # `-like 'keploy*'` match, which the older `-Name 'keploy'` form
+      # lacked, would catch this lane's keploy-record.exe / keploy-replay.exe
+      # if the lane were ever moved to a reused or self-hosted VM where
+      # leftovers can exist.
       - name: Recover stale runner state
         continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
+
+          # Ownership key for everything below: this job's workspace, with a
+          # trailing separator so `...\keploy` cannot match a sibling `...\keploy2`.
+          $ws = $env:GITHUB_WORKSPACE
+          $wsPrefix = if ([string]::IsNullOrWhiteSpace($ws)) { $null } else { $ws.TrimEnd('\', '/') + '\' }
+
+          if (-not $wsPrefix) {
+            # No workspace means no way to tell our processes from a sibling job's. On
+            # the self-hosted lanes four runner installs share one VM, so a machine-wide
+            # fallback would abort other jobs. Do nothing instead.
+            Write-Host "GITHUB_WORKSPACE is unset or empty; skipping recovery entirely (refusing to fall back to machine-wide cleanup)."
+            exit 0
+          }
+
+          Write-Host "Recovering stale runner state for workspace $ws"
+
+          # Each numbered section below carries its own try/catch. One try around all
+          # three would let a terminating error in section 1 or 2 skip section 3, which
+          # is the part that unblocks checkout.
+
+          # Identity of a process for section 2's exclusion list. A PID is NOT an
+          # identity on Windows: the kernel recycles PIDs, and section 1 waits up to
+          # five seconds for its kills to land - long enough for a freed PID to be
+          # handed to a sibling job's brand-new process. Pairing the PID with the
+          # process start time makes a recycled PID a different key. A process whose
+          # start time cannot be read gets no key and is therefore never excluded,
+          # which errs towards leaving the machine-wide driver alone.
+          function Get-KeployProcKey($proc) {
+            # Unreadable start times surface either as a thrown getter exception or, on
+            # some hosts, as a null with an error on the stream; treat both as "no key"
+            # rather than letting an empty tick count become a matchable string.
+            $ticks = $null
+            try { $ticks = $proc.StartTime.Ticks } catch { $ticks = $null }
+            if ($null -eq $ticks) { return $null }
+            return "$($proc.Id):$ticks"
+          }
+
+          # 1. Kill keploy left over from a prior run IN THIS WORKSPACE only. Such
+          #    processes pin workspace files (bin\*.exe, WinDivert64.sys) and make
+          #    actions/checkout's clean fail with EPERM on unlink. A sibling job's
+          #    keploy, running from another runner install on this same VM, is not
+          #    ours to kill.
+          $killedKeys = @()
+          $killedProcs = @()
           try {
-            Get-Process -Name 'keploy' -ErrorAction SilentlyContinue | ForEach-Object {
-              Write-Host "Stopping leftover keploy.exe pid=$($_.Id)"
-              try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+            $ownCount = 0
+            foreach ($p in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'keploy*' })) {
+              # .Path is MainModule.FileName underneath, and is unavailable for a
+              # process that has exited or that this session cannot open. Read it
+              # defensively and warn on the miss: an unreadable path silently changes
+              # what happens in BOTH sections (not killed here, counted as another
+              # job's below). If such a process belongs to THIS workspace it keeps
+              # pinning bin\WinDivert64.sys and also suppresses the driver reset, so
+              # the original EPERM-at-checkout failure can recur - that must surface as
+              # a job annotation, not scroll past in the log.
+              $path = $null
+              try { $path = $p.Path } catch { $path = $null }
+              if (-not $path) {
+                Write-Host "::warning::keploy pid=$($p.Id) name=$($p.ProcessName): executable path unreadable (exited, or this session cannot open it); not killing it, and section 2 will count it as another job's. If it is in fact this workspace's, it may still pin bin\WinDivert64.sys and fail checkout with EPERM."
+                continue
+              }
+              if (-not $path.StartsWith($wsPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+              $ownCount++
+              Write-Host "Stopping this workspace's leftover keploy pid=$($p.Id) path=$path"
+              # Take the identity BEFORE stopping it: the start time comes off a live
+              # process handle, and a process already in rundown may not answer.
+              $key = Get-KeployProcKey $p
+              try {
+                $p | Stop-Process -Force -ErrorAction SilentlyContinue
+                if ($key) { $killedKeys += $key }
+                $killedProcs += $p
+              } catch {}
             }
-            foreach ($name in @('WinDivert', 'WinDivert64')) {
-              $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
-              if ($svc -and $svc.Status -ne 'Stopped') {
-                Write-Host "Stopping kernel driver service $name (status=$($svc.Status))"
-                try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
+            if ($ownCount -eq 0) {
+              Write-Host "No leftover keploy process under $wsPrefix; nothing to kill."
+            }
+            # Stop-Process calls TerminateProcess, which returns once termination has
+            # been requested - not once the process is gone. Give each one a bounded
+            # moment to finish exiting so its handles on workspace files are released
+            # before checkout runs. Section 2 does not depend on this wait; it excludes
+            # $killedKeys outright.
+            foreach ($p in $killedProcs) { try { [void]$p.WaitForExit(5000) } catch {} }
+          } catch {
+            Write-Host "::warning::Recover stale runner state (section 1, kill own keploy): $_"
+          }
+
+          # 2. WinDivert/WinDivert64 is ONE machine-wide kernel driver service, so
+          #    reset it only when no keploy outside this workspace is running -
+          #    otherwise a sibling job mid-capture loses interception. This
+          #    re-enumerates instead of reusing section 1's snapshot so a keploy
+          #    started in the meantime is seen. Processes killed above are excluded by
+          #    (PID, start time) rather than by PID: a process still in rundown can be
+          #    listed here with an unreadable .Path, which would otherwise count it as
+          #    "other" and block the reset - but Windows recycles PIDs, so a bare PID
+          #    could just as well match a sibling job's brand-new process. Every
+          #    excluded (PID, start time) pair was classified as this workspace's while
+          #    that process was alive, so the exclusion cannot hide a sibling job's
+          #    process. A key that cannot be computed excludes nothing, and a path that
+          #    cannot be read still counts as "other", so both ambiguous cases leave the
+          #    driver alone.
+          try {
+            $otherKeploy = @()
+            foreach ($p in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'keploy*' })) {
+              if ($killedKeys -contains (Get-KeployProcKey $p)) { continue }
+              $path = $null
+              try { $path = $p.Path } catch { $path = $null }
+              if (-not $path) {
+                Write-Host "keploy pid=$($p.Id) name=$($p.ProcessName): executable path unreadable and this job did not kill it; counting it as another job's."
+                $otherKeploy += $p
+              } elseif (-not $path.StartsWith($wsPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $otherKeploy += $p
               }
             }
-            $ws = $env:GITHUB_WORKSPACE
-            if ($ws -and (Test-Path $ws)) {
-              $gitDir = Join-Path $ws '.git'
-              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
-              $hasFiles = $items.Count -gt 0
-              if ($hasFiles -and -not (Test-Path $gitDir)) {
-                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
-                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
+            if ($otherKeploy.Count -gt 0) {
+              Write-Host "Skipping WinDivert driver reset: $($otherKeploy.Count) keploy process(es) outside this workspace are running on this VM (a sibling job may be capturing)."
+            } else {
+              $answered = @()
+              foreach ($name in @('WinDivert', 'WinDivert64')) {
+                # The name is passed literally, with no wildcard, on purpose. For a
+                # literal name PowerShell resolves the service with
+                # ServiceController(name) + .Status (i.e. OpenService), which sees
+                # kernel-driver services too; a wildcard would instead filter
+                # ServiceController.GetServices(), which by contract excludes device
+                # drivers and so would never match WinDivert.
+                $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+                if (-not $svc) { continue }
+                $answered += $name
+                if ($svc.Status -ne 'Stopped') {
+                  Write-Host "No keploy outside this workspace is running; resetting stale kernel driver service $name (status=$($svc.Status))"
+                  try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
+                } else {
+                  Write-Host "Kernel driver service $name is registered and already Stopped; nothing to reset."
+                }
+              }
+              if ($answered.Count -eq 0) {
+                Write-Host "No keploy outside this workspace is running, and neither WinDivert nor WinDivert64 answered a service lookup; nothing to reset."
               }
             }
           } catch {
-            Write-Host "::warning::Recover stale runner state: $_"
+            Write-Host "::warning::Recover stale runner state (section 2, WinDivert reset): $_"
+          }
+
+          # 3. Files but no .git means a prior run was interrupted partway through
+          #    cleanup, and actions/checkout's clean:true would fail with "not a
+          #    git repository". Wipe so checkout starts fresh. Healthy workspaces
+          #    (valid .git) are left alone so the clean+fetch fast path keeps
+          #    working.
+          try {
+            if (Test-Path $ws) {
+              $gitDir = Join-Path $ws '.git'
+              $lsErr = $null
+              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue -ErrorVariable lsErr)
+              $hasFiles = $items.Count -gt 0
+              $hasGit = Test-Path $gitDir
+              if ($hasFiles -and -not $hasGit) {
+                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
+                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
+              } elseif ($lsErr) {
+                # The listing was incomplete, so hasFiles is only a lower bound and no
+                # claim about the layout is warranted. Leave the workspace alone.
+                Write-Host "::warning::Could not fully list $ws ($($lsErr.Count) suppressed error(s), hasGit=$hasGit); leaving it for checkout without judging its layout."
+              } else {
+                Write-Host "Workspace listed cleanly (hasFiles=$hasFiles, hasGit=$hasGit); no wipe needed, leaving it for checkout."
+              }
+            } else {
+              Write-Host "Workspace $ws does not exist; nothing to wipe, checkout will create it."
+            }
+          } catch {
+            Write-Host "::warning::Recover stale runner state (section 3, workspace layout): $_"
           }
           exit 0
       - name: Checkout repository
