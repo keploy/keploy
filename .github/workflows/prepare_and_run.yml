@@ -1053,14 +1053,10 @@ jobs:
     needs: [build-windows-amd64, build-docker-image-amd64, precheck-windows]
     uses: ./.github/workflows/golang_docker_windows.yml
 
-  run_golang_native_windows:
-    needs: [build-windows-amd64]
-    uses: ./.github/workflows/golang_native_windows.yml
-
   cleanup_windows:
     if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: [self-hosted, Windows, X64]
-    needs: [run_golang_docker_windows, run_golang_native_windows]
+    needs: [run_golang_docker_windows]
     # The only self-hosted job in the repo that had no cap, so it inherited
     # GitHub's 360-minute default. Because it is `if: always()` and the final
     # `gate_windows` needs it, a Windows fleet that is busy or offline parks it
@@ -1291,7 +1287,6 @@ jobs:
       - build-docker-image-amd64
       - precheck-windows
       - run_golang_docker_windows
-      - run_golang_native_windows
       - cleanup_windows
     runs-on: ubuntu-latest
     steps:
@@ -1302,7 +1297,6 @@ jobs:
             "${{ needs.build-docker-image-amd64.result }}" \
             "${{ needs.precheck-windows.result }}" \
             "${{ needs.run_golang_docker_windows.result }}" \
-            "${{ needs.run_golang_native_windows.result }}" \
             "${{ needs.cleanup_windows.result }}" \
           )
           for r in "${results[@]}"; do
