@@ -11,14 +11,18 @@ import (
 // application.
 //
 // It exists because Windows has no equivalent of DYLD_INSERT_LIBRARIES or
-// LD_PRELOAD: loading Keploy's interception shim into the application means
-// creating the process suspended, mapping the DLL into it and only then
-// resuming it. That has to happen at the exact moment the process is created,
-// which is here — but the code that knows how to do it lives in
-// pkg/agent/hooks/winshim, which imports this package. A registered function
-// inverts the dependency.
+// LD_PRELOAD: loading an interception shim into the application means creating
+// the process suspended, mapping the DLL into it and only then resuming it.
+// That has to happen at the exact moment the process is created, which is here.
 //
-// It is nil unless Windows interception is active, so a docker run and every
+// This build has no Windows interception backend — native macOS and Windows
+// interception ship in the Community and Enterprise editions — so nothing here
+// ever registers a starter. The seam exists so those builds can, exactly as
+// cli/provider.RegisterNativeCommandSupport lets them widen the platform gate.
+// Same shape, same reason: the extension point lives here, the implementation
+// does not.
+//
+// It is nil unless such a build installed one, so a docker run and every
 // non-Windows platform take exactly the path they took before.
 var nativeAppStarter atomic.Pointer[func(cmd *exec.Cmd) error]
 

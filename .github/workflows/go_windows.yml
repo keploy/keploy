@@ -32,17 +32,3 @@ jobs:
           set GOARCH=arm64
           go build -v ./...
         shell: cmd
-
-      # The unprivileged (no-Administrator) interception backend can only be
-      # exercised on a real Windows machine: it injects a DLL into a live
-      # process, hooks Winsock in user space and talks to the agent over a named
-      # pipe. These tests drive the production code end to end — they stage the
-      # real shim, inject it into a process started through `cmd /C` exactly as
-      # keploy does, and assert both that an outgoing connection reaches the
-      # proxy with its original destination recoverable from the source port and
-      # that a server bind is moved so keploy can own the advertised port.
-      - name: Test the unprivileged Windows interception backend
-        run: |
-          set GOARCH=amd64
-          go test -v -count=1 -timeout 10m ./pkg/agent/hooks/winshim/...
-        shell: cmd

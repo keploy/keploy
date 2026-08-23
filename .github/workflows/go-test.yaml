@@ -47,13 +47,5 @@ jobs:
       - name: Install dependencies
         run: go get .
 
-      # The Windows interception shim is a committed prebuilt DLL (the release
-      # binaries are cross-compiled and cannot build C), so nothing in a normal
-      # build notices when someone edits keploy_winshim.c without rebuilding it.
-      # This reads the source hash back out of the asset. It needs no compiler,
-      # which is why it can run on this Linux job.
-      - name: Windows shim asset matches its source
-        run: ./.ci/scripts/check-windows-shim-asset.sh
-
       - name: Running Unit Tests
         run: go test ./...
