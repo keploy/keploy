@@ -1,0 +1,37 @@
+version: api.keploy.io/v1beta1
+kind: gRPC
+name: test-2
+spec:
+    metadata: {}
+    grpcReq:
+        headers:
+            pseudo_headers:
+                :method: POST
+                :path: /orders.OrderService/GetOrder
+            ordinary_headers:
+                content-type: application/grpc
+        body:
+            compression_flag: 0
+            message_length: 7
+            decoded_data: '{"id":1}'
+        timestamp: 2026-08-22T10:01:00Z
+    grpcResp:
+        headers:
+            pseudo_headers:
+                :status: "200"
+            ordinary_headers:
+                content-type: application/grpc
+        body:
+            compression_flag: 0
+            message_length: 21
+            decoded_data: '{"status":"CONFIRMED"}'
+        trailers:
+            pseudo_headers: {}
+            ordinary_headers:
+                grpc-status: "0"
+        timestamp: 2026-08-22T10:01:00.009Z
+    app_port: 9090
+    created: 1755861853
+    assertions:
+        noise:
+            grpcResp.body.decoded_data.processedAt: []

@@ -123,10 +123,105 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 		return resp, err
 
+	case models.CONSUMER:
+		return h.simulateConsumer(ctx, tc, testSetID)
+
 	default:
 		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
 
+}
+
+// simulateConsumer is SimulateRequest for a Kind: Consumer test case. It is
+// ARM-AND-AWAIT, not request-and-response: there is nothing to send, because
+// the "request" is a message the recorded broker delivered to the worker.
+//
+// EVERY FAILURE PATH HERE RETURNS A REFUSAL RESULT, NOT AN ERROR. Returning an
+// error would route the test through CreateFailedTestResult, which builds a
+// result with no consumer verdict and no failure category on it — so the run
+// would go red with nothing naming why, which is only marginally better than
+// going green. A *models.ConsumerResult carrying a Refusal flows through the
+// normal judge instead and comes out as a FAILED test with a named category, a
+// rendered row and a non-zero exit. The one thing that is NEVER produced on
+// any of these paths is a pass.
+func (h *Hooks) simulateConsumer(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
+	if tc.ConsumerSpec == nil {
+		return &models.ConsumerResult{
+			TestID:        tc.Name,
+			Refusal:       models.CategoryConsumerUnsupportedSpec,
+			EndReason:     models.ConsumerEndReasonInternalError,
+			RefusalDetail: "this test case is Kind: Consumer but carries no consumer spec, so there is no trigger to deliver",
+		}, nil
+	}
+
+	ci, ok := h.instrumentation.(ConsumerInstrumentation)
+	if !ok {
+		h.logger.Error("the running agent does not implement consumer instrumentation",
+			zap.String("testcase", tc.Name),
+			zap.String("testset", testSetID),
+			zap.String("category", string(models.CategoryConsumerUnsupportedAgent)),
+			zap.String("next_step", "consumer replay needs an agent build that can arm a delivery window; upgrade the agent, or remove the consumer test cases from this set"))
+		return &models.ConsumerResult{
+			TestID:        tc.Name,
+			Refusal:       models.CategoryConsumerUnsupportedAgent,
+			EndReason:     models.ConsumerEndReasonInternalError,
+			ExpectEffects: tc.ConsumerSpec.Completion.ExpectEffects,
+			RefusalDetail: "the running agent does not implement consumer instrumentation, so no delivery window could be opened and the worker was never given the recorded message",
+		}, nil
+	}
+
+	spec := tc.ConsumerSpec
+	arm := models.ConsumerArm{
+		TestID:     tc.Name,
+		TestSetID:  testSetID,
+		Protocol:   spec.Protocol,
+		Trigger:    spec.Trigger,
+		Completion: spec.Completion,
+	}
+
+	h.logger.Debug("arming consumer trigger",
+		zap.String("testcase", tc.Name),
+		zap.String("testset", testSetID),
+		zap.String("protocol", spec.Protocol),
+		zap.String("target", spec.Trigger.Target),
+		zap.Int("expectEffects", spec.Completion.ExpectEffects))
+
+	if err := ci.ArmConsumerTrigger(ctx, arm); err != nil {
+		h.logger.Error("failed to arm the consumer trigger", zap.Error(err),
+			zap.String("testcase", tc.Name),
+			zap.String("testset", testSetID))
+		return &models.ConsumerResult{
+			TestID:        tc.Name,
+			Refusal:       models.CategoryConsumerTriggerNotDelivered,
+			EndReason:     models.ConsumerEndReasonTriggerNotDelivered,
+			ExpectEffects: spec.Completion.ExpectEffects,
+			RefusalDetail: "the recorded message could not be handed to the application: " + err.Error(),
+		}, nil
+	}
+
+	res, err := ci.AwaitConsumerEffects(ctx, tc.Name)
+	if err != nil {
+		h.logger.Error("failed to await the consumer effects", zap.Error(err),
+			zap.String("testcase", tc.Name),
+			zap.String("testset", testSetID))
+		return &models.ConsumerResult{
+			TestID:        tc.Name,
+			Refusal:       models.CategoryConsumerUnsupportedAgent,
+			EndReason:     models.ConsumerEndReasonInternalError,
+			ExpectEffects: spec.Completion.ExpectEffects,
+			RefusalDetail: "the delivery window could not be read back from the agent: " + err.Error(),
+		}, nil
+	}
+	if res == nil {
+		return &models.ConsumerResult{
+			TestID:        tc.Name,
+			Refusal:       models.CategoryConsumerUnsupportedAgent,
+			EndReason:     models.ConsumerEndReasonInternalError,
+			ExpectEffects: spec.Completion.ExpectEffects,
+			RefusalDetail: "the agent reported no delivery window for this test",
+		}, nil
+	}
+	return res, nil
 }
 
 func effectiveHTTPConfigPort(tc *models.TestCase, cfg config.Test) uint32 {
@@ -224,7 +319,17 @@ func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, test
 	return nil
 }
 
-func (h *Hooks) BeforeTestSetReplay(ctx context.Context, testSetID string) error {
+// BeforeTestSetReplay deliberately does NOT touch the consumer delivery gate.
+//
+// It used to: it type-asserted the instrumentation and reset the gate on every
+// test set of every run. The shipping instrumentation (*platform/http.
+// AgentClient) implements the interface unconditionally, so that assertion
+// always succeeded and a pure HTTP suite with no consumer test anywhere issued
+// one extra agent round trip per test set. This hook has no test cases in
+// scope and so cannot tell whether a set contains a consumer test at all; the
+// reset lives in Replayer.resetConsumerGate instead, next to the end-of-set
+// drain, where containsConsumerTest can short-circuit it.
+func (h *Hooks) BeforeTestSetReplay(_ context.Context, testSetID string) error {
 	h.logger.Debug("BeforeTestSetReplay hook executed", zap.String("testSetID", testSetID))
 	return nil
 }

@@ -41,6 +41,71 @@ type Instrumentation interface {
 	ComposeDownOnSetupFailure(ctx context.Context) error
 }
 
+// ConsumerInstrumentation is the OPTIONAL extension of Instrumentation that a
+// Kind: Consumer test needs. RunTestSet reaches it by type assertion, exactly
+// as it reaches TestCaseMutator and MockMutator.
+//
+// IT IS A SEPARATE INTERFACE ON PURPOSE, and this is not a style preference.
+// Instrumentation is a fifteen-method interface implemented in this repository
+// AND in two others that pin an older module version of it. Go has no optional
+// interface methods, so adding these three to Instrumentation would break the
+// enterprise agent and k8s-proxy at COMPILE TIME the moment they picked up the
+// tag — forcing exactly the lock-step three-repository bump this design exists
+// to avoid, for a capability neither of them can use until they choose to.
+//
+// WHERE THE IMPLEMENTATIONS ARE. `keploy test` always reaches the agent over
+// HTTP — cli/provider hands the replayer an *platform/http.AgentClient — so the
+// seam is only closed if all three links exist, and they do:
+//
+//	pkg/platform/http.AgentClient   the replayer's side: POSTs /agent/consumer/{arm,await,reset}
+//	pkg/agent/routes                those three routes, reached by capability assertion on agent.Service
+//	pkg/service/agent.Agent         forwards to the proxy that owns the gate
+//	pkg/agent/proxy.Proxy           resolves the recorded trigger and drives consumer.Gate
+//
+// What is still absent in OSS is a protocol PARSER: nothing here registers a
+// consumer.Deliverer or a consumer.Projector, so no CONSUMER test case can be
+// recorded and an armed window has nobody to deliver through. That is the
+// deliberate inertness of this slice (design §6, §7 slice 5) and it is a
+// different thing from an unimplemented seam — an enterprise parser can supply
+// the missing half without a second OSS tag.
+//
+// WHEN THE ASSERTION FAILS THE TEST IS REFUSED, NEVER DEGRADED. An agent that
+// cannot arm a delivery window cannot deliver the recorded message at all, so
+// the worker produces nothing and the test would otherwise report "the worker
+// stopped producing" — blaming the application for a missing capability in
+// keploy. SimulateRequest returns a refusal result carrying
+// models.CategoryConsumerUnsupportedAgent instead, which is a FAILED test with
+// a named reason and a non-zero exit. There is no weak-verdict path here that
+// can still print PASSED.
+type ConsumerInstrumentation interface {
+	// ArmConsumerTrigger opens the delivery window for one test and hands its
+	// recorded trigger to the application. It returns once the trigger has
+	// been handed over (or stashed for the next poll), NOT once the worker has
+	// finished: waiting is AwaitConsumerEffects' job.
+	ArmConsumerTrigger(ctx context.Context, arm models.ConsumerArm) error
+
+	// AwaitConsumerEffects blocks until the armed test's window closes under
+	// the completion rule (expected effect count observed AND the grace drain
+	// elapsed) or its backstop fires, and returns everything observed inside
+	// it. A non-nil result with a Refusal set is a NAMED failure, not an
+	// error; an error means the request itself did not complete.
+	AwaitConsumerEffects(ctx context.Context, testID string) (*models.ConsumerResult, error)
+
+	// ResetConsumerGate returns the delivery gate to its default-closed boot
+	// phase at a test-set boundary. It exists because --keep-app-alive reuses
+	// one application process across test sets: a gate left armed, or an
+	// effect adopted across the boundary, would leak one set's state into the
+	// next set's first test.
+	//
+	// It returns how many effect RECORDS the reset left unattributed. That
+	// count is an APPLICATION regression (the worker produced after the last
+	// test of the set closed its window, which is the only place an N+1
+	// emission at the very end of a run can be seen); the error is this CALL
+	// failing. They are separate returns because collapsing them made every
+	// unreachable agent read as "your worker over-produces".
+	ResetConsumerGate(ctx context.Context, testSetID string) (int, error)
+}
+
 type Service interface {
 	Start(ctx context.Context) error
 	Instrument(ctx context.Context) (*InstrumentState, error)

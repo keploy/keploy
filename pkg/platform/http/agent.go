@@ -13,6 +13,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1710,6 +1711,181 @@ func (a *AgentClient) BeginTestErrorCapture(ctx context.Context) error {
 		return fmt.Errorf("begin test error capture returned status %d: %s", res.StatusCode, string(body))
 	}
 	return nil
+}
+
+// The consumer delivery-window client.
+//
+// These three methods are what makes *AgentClient satisfy
+// replay.ConsumerInstrumentation, which is the interface RunTestSet reaches by
+// type assertion for a Kind: Consumer test. cli/provider always hands the
+// replayer an *AgentClient, so THIS is the implementation that runs for
+// `keploy test` — the in-process pkg/service/agent.Agent implementation sits
+// on the far side of these calls.
+//
+// A 501 means the agent predates the routes. It is reported as an error rather
+// than swallowed the way BeginTestErrorCapture's 404 is, and the difference is
+// deliberate: a missing error-capture window degrades to the legacy global
+// queue and loses nothing, while a missing delivery window means the recorded
+// message never reached the worker at all. Swallowing that would produce a
+// test that reports "the worker stopped producing" for a capability keploy
+// does not have.
+
+// ArmConsumerTrigger opens the delivery window for one consumer test on the
+// agent and hands its recorded trigger to the application.
+func (a *AgentClient) ArmConsumerTrigger(ctx context.Context, arm models.ConsumerArm) error {
+	body, err := json.Marshal(arm)
+	if err != nil {
+		return fmt.Errorf("failed to encode the consumer arm: %s", err.Error())
+	}
+	url := fmt.Sprintf("%s/consumer/arm", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to arm the consumer trigger: %s", err.Error())
+	}
+	defer func() {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			utils.LogError(a.logger, closeErr, "failed to close response body for consumer arm; safe to ignore once")
+		}
+	}()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("arm consumer trigger returned status %d: %s", res.StatusCode, agentErrorBody(res.Body))
+	}
+	return nil
+}
+
+// AwaitConsumerEffects blocks until the armed test's window closes on the
+// agent and returns everything observed inside it.
+//
+// There is no client-side deadline on purpose. The window's own timeout is the
+// bound (ConsumerCompletion.Timeout, carried in the arm), and a client timeout
+// shorter than it would report CONSUMER_UNSUPPORTED_AGENT for a worker that
+// was merely slow. Cancellation still works: ctx is the run's context, so
+// Ctrl-C ends the request and the gate reports CONSUMER_RUN_CANCELLED.
+func (a *AgentClient) AwaitConsumerEffects(ctx context.Context, testID string) (*models.ConsumerResult, error) {
+	url := fmt.Sprintf("%s/consumer/await?testId=%s", a.conf.Agent.AgentURI, neturl.QueryEscape(testID))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to await the consumer effects: %s", err.Error())
+	}
+	defer func() {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			utils.LogError(a.logger, closeErr, "failed to close response body for consumer await; safe to ignore once")
+		}
+	}()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("await consumer effects returned status %d: %s", res.StatusCode, agentErrorBody(res.Body))
+	}
+	var out models.ConsumerResult
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("failed to decode the consumer result: %s", err.Error())
+	}
+	return &out, nil
+}
+
+// ResetConsumerGate returns the agent's delivery gate to its default-closed
+// boot phase at a test-set boundary and reports how many effect records the
+// reset left unattributed.
+//
+// THE COUNT AND THE ERROR MEAN DIFFERENT THINGS. A non-zero count is the
+// worker over-producing after the last test of the set; an error is this call
+// failing — a 501 from an agent that predates the route, a 500, a dropped
+// connection. The caller fails the test set on the first and reports the
+// second as an infrastructure problem, which is why they cannot be the same
+// return value.
+func (a *AgentClient) ResetConsumerGate(ctx context.Context, testSetID string) (int, error) {
+	url := fmt.Sprintf("%s/consumer/reset?testSetId=%s", a.conf.Agent.AgentURI, neturl.QueryEscape(testSetID))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to reset the consumer gate: %s", err.Error())
+	}
+	defer func() {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			utils.LogError(a.logger, closeErr, "failed to close response body for consumer reset; safe to ignore once")
+		}
+	}()
+	if res.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("reset consumer gate returned status %d: %s", res.StatusCode, agentErrorBody(res.Body))
+	}
+	var out models.ConsumerResetResult
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		// The gate WAS reset — the agent answered 200. Only the trailing
+		// count is unreadable, and reporting that as a failed reset would
+		// blame the worker for a decoding problem.
+		a.logger.Debug("could not decode the consumer reset result; the gate was reset but the trailing effect count is unknown", zap.Error(err))
+		return 0, nil
+	}
+	return out.TrailingEffects, nil
+}
+
+// ConsumerRecordingReport fetches the agent's reconciliation of the recording
+// session that has just ended: how many consumer units were observed, how many
+// became test cases, and what — if anything — makes the recording
+// untrustworthy.
+//
+// IT IS CALLED AT RECORD TEARDOWN, AFTER the graceful-shutdown notification,
+// because that notification is what closes the recorder and mints its last
+// unit. Asking before it would report an unfinished session.
+//
+// AN UNREACHABLE OR OLDER AGENT IS NOT A DEGRADED RECORDING. A 404 (an agent
+// that predates the route), a transport failure or an undecodable body all
+// return an empty report and no error: the record command turns a degraded
+// report into a NON-ZERO EXIT, and inventing one from a failed request would
+// fail every recording made against an older agent. A recording that really is
+// short is still reported by the agent's own log in that deployment.
+func (a *AgentClient) ConsumerRecordingReport(ctx context.Context) (models.ConsumerRecordingReport, error) {
+	var out models.ConsumerRecordingReport
+	if a.conf.Agent.AgentURI == "" {
+		return out, nil
+	}
+	url := fmt.Sprintf("%s/consumer/recording", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return out, fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return out, fmt.Errorf("failed to fetch the consumer recording report: %s", err.Error())
+	}
+	defer func() {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			utils.LogError(a.logger, closeErr, "failed to close response body for the consumer recording report; safe to ignore once")
+		}
+	}()
+	if res.StatusCode != http.StatusOK {
+		a.logger.Debug("agent returned a non-200 for the consumer recording report",
+			zap.Int("status", res.StatusCode))
+		return models.ConsumerRecordingReport{}, nil
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		a.logger.Debug("could not decode the consumer recording report", zap.Error(err))
+		return models.ConsumerRecordingReport{}, nil
+	}
+	return out, nil
+}
+
+// agentErrorBody renders an agent error response for a message, bounded so a
+// runaway body cannot be pasted whole into a log line.
+func agentErrorBody(r io.Reader) string {
+	body, _ := io.ReadAll(io.LimitReader(r, 4096))
+	return strings.TrimSpace(string(body))
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
