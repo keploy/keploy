@@ -49,6 +49,46 @@ type Mapping struct {
 	Kind      string           `json:"kind" yaml:"kind" bson:"kind"`
 	TestSetID string           `json:"testSetId" yaml:"test_set_id" bson:"test_set_id"`
 	TestCases []MappedTestCase `json:"tests" yaml:"tests" bson:"tests"`
+
+	// Startup lists mocks that belong to the TEST SET rather than to any one test
+	// case: traffic the app produced while booting, before the first test request
+	// fired — driver handshakes, connection-pool warm-up, config/secret fetches.
+	//
+	// Until now mappings.yaml had no slot for these. Its only container was
+	// TestCases, and a mock consumed during app boot is never attributed to a test
+	// (replay drains it in the pre-loop "initial setup" pass), so it simply went
+	// unrecorded. That is fine for a local replay, where the tier is rederived from
+	// timestamps at load time, but not for the CLOUD path, which fetches mocks BY
+	// NAME from this file: a startup mock absent here is never fetched, and the app
+	// cannot boot.
+	//
+	// Deliberately a flat list, not keyed by test: these are available for the whole
+	// session and are NOT consumed by one test. Consumers must treat membership here
+	// as "always needed", exempt from any per-test selection — see the
+	// StartupMockNames note in pkg/service/replay.
+	//
+	// omitempty so an existing mappings.yaml round-trips byte-identically until a
+	// startup mock is actually recorded; every older reader ignores the key.
+	Startup []MockEntry `json:"startup,omitempty" yaml:"startup,omitempty" bson:"startup,omitempty"`
+}
+
+// StartupMockNames returns the names of the test-set-scoped startup mocks. Callers
+// building a "which mocks does this run need?" set MUST include these regardless of
+// which test cases were selected: unlike per-test entries they are not tied to a
+// test, so a subset run (--test-sets / --tests) that filtered them out would leave
+// the app unable to boot. Returns nil when the mapping has no startup section, so
+// callers need no version check.
+func (m *Mapping) StartupMockNames() []string {
+	if m == nil || len(m.Startup) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(m.Startup))
+	for _, e := range m.Startup {
+		if e.Name != "" {
+			names = append(names, e.Name)
+		}
+	}
+	return names
 }
 
 type MappedTestCase struct {
