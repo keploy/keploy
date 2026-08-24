@@ -49,21 +49,35 @@ type Config struct {
 	// recalling the port from recorded mocks during replay. Turn it off
 	// to restore the strict port-list behaviour — then MySQL on a port
 	// outside MysqlPorts will hang its handshake.
-	DisableMysqlAutoDetect bool     `json:"disableMysqlAutoDetect" yaml:"disableMysqlAutoDetect" mapstructure:"disableMysqlAutoDetect"`
-	EnableTesting          bool     `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
-	GenerateGithubActions  bool     `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
-	KeployContainer        string   `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
-	KeployNetwork          string   `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
-	CommandType            string   `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
-	Contract               Contract `json:"contract" yaml:"contract" mapstructure:"contract"`
-	Agent                  Agent    `json:"agent" yaml:"agent" mapstructure:"agent"`
-	Async                  Async    `json:"async" yaml:"async" mapstructure:"async"`
-	InCi                   bool     `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
-	InstallationID         string   `json:"-" yaml:"-" mapstructure:"-"`
-	ServerPort             uint32   `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
-	Version                string   `json:"-" yaml:"-" mapstructure:"-"`
-	APIServerURL           string   `json:"-" yaml:"-" mapstructure:"-"`
-	GitHubClientID         string   `json:"-" yaml:"-" mapstructure:"-"`
+	DisableMysqlAutoDetect bool `json:"disableMysqlAutoDetect" yaml:"disableMysqlAutoDetect" mapstructure:"disableMysqlAutoDetect"`
+	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
+	// mocks on a port the recording never saw. Detection still runs; only
+	// the inference is turned off.
+	//
+	// Leave it on (the default) unless a dependency is being misread. The
+	// inference fires when a replayed app opens a connection to an unknown
+	// port and says nothing, which is the MySQL signature — but a client that
+	// stays silent for the whole confirmation window and only then speaks
+	// looks the same, and it will be answered with a handshake it did not ask
+	// for. Pinning the real mapping with MysqlPorts is the better fix when you
+	// know it; this is the escape hatch when you do not, and unlike
+	// DisableMysqlAutoDetect it keeps record-time detection working.
+	DisableMysqlEndpointDrift bool     `json:"disableMysqlEndpointDrift" yaml:"disableMysqlEndpointDrift" mapstructure:"disableMysqlEndpointDrift"`
+	EnableTesting             bool     `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
+	GenerateGithubActions     bool     `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
+	KeployContainer           string   `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
+	KeployNetwork             string   `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
+	CommandType               string   `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+	Contract                  Contract `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Mock                      MockCmd  `json:"mock" yaml:"mock" mapstructure:"mock"`
+	Agent                     Agent    `json:"agent" yaml:"agent" mapstructure:"agent"`
+	Async                     Async    `json:"async" yaml:"async" mapstructure:"async"`
+	InCi                      bool     `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	InstallationID            string   `json:"-" yaml:"-" mapstructure:"-"`
+	ServerPort                uint32   `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
+	Version                   string   `json:"-" yaml:"-" mapstructure:"-"`
+	APIServerURL              string   `json:"-" yaml:"-" mapstructure:"-"`
+	GitHubClientID            string   `json:"-" yaml:"-" mapstructure:"-"`
 	// InMemoryCompose holds docker-compose YAML content in memory to avoid writing
 	// sensitive environment variables (secrets, tokens) to disk. When set, the
 	// compose command uses "-f -" and pipes this content via stdin.
@@ -174,6 +188,17 @@ type Record struct {
 	// suit ~99% of workloads; only touch these if you see "mock
 	// incomplete" warnings with reason "per_conn_cap" in the agent logs.
 	RecordBuffer RecordBuffer `json:"recordBuffer" yaml:"recordBuffer" mapstructure:"recordBuffer"`
+
+	// PassThroughPorts / PassThroughHosts configure telemetry-egress passthrough:
+	// destinations keploy should not record as normal dependencies. Each rule is
+	// {port|host, mode} where mode is "skip" (never record; synthesize success on
+	// replay) or "recordOne" (record exactly one exchange per host/port/path/method
+	// and serve it body-agnostically for every matching call on replay). Hosts are
+	// required to catch TLS-encrypted telemetry whose port isn't observable at
+	// capture. Built-in telemetry defaults (OTLP /v1/traces, Pyroscope /ingest,
+	// Azure App Insights host) are merged in unless overridden. See models.PassThroughRule.
+	PassThroughPorts []models.PassThroughRule `json:"passThroughPorts,omitempty" yaml:"passThroughPorts,omitempty" mapstructure:"passThroughPorts"`
+	PassThroughHosts []models.PassThroughRule `json:"passThroughHosts,omitempty" yaml:"passThroughHosts,omitempty" mapstructure:"passThroughHosts"`
 }
 
 // UpstreamTLS configures the upstream (destination-side) leg of keploy's TLS
@@ -269,6 +294,34 @@ type RecordBuffer struct {
 	// you see drops with reason "consumer_gone"; lower it to cap how long
 	// a connection with a genuinely dead parser lingers at teardown.
 	ConsumerStallGrace time.Duration `json:"consumerStallGrace" yaml:"consumerStallGrace" mapstructure:"consumerStallGrace"`
+}
+
+// MockCmd configures the `keploy mock record|replay` flow — using Keploy as a
+// framework-agnostic mocking layer for a user's own test runner (pytest, go
+// test, jest/playwright, mobile UI tests). Unlike record/test it captures ONLY
+// outgoing dependency calls (no incoming test cases) into a single named mock
+// set, and on replay serves that set back to the wrapped runner.
+type MockCmd struct {
+	// Name is the mock set to record into / replay from (the on-disk directory
+	// under keploy/, and the registry key). Defaults to "default". Re-recording
+	// the same name overwrites its mocks in place so a CI "re-record on merge to
+	// main" job produces a reviewable diff rather than an accumulating pile of
+	// test-set-N directories.
+	Name string `json:"name" yaml:"name" mapstructure:"name"`
+	// OnMiss is the replay-time miss policy: "fail" (default — deterministic,
+	// a miss is a hard error), "passthrough" (dial the real dependency, don't
+	// persist), or "record" (dial the real dependency AND append the new call
+	// to the set — VCR-style new_episodes for incremental refresh).
+	OnMiss string `json:"onMiss" yaml:"onMiss" mapstructure:"onMiss"`
+	// Strict makes replay exit non-zero if any recorded mock was missed, so a
+	// drifted dependency contract fails the build even when the runner passed.
+	Strict bool `json:"strict" yaml:"strict" mapstructure:"strict"`
+	// Local forces the file-backed store even when a cloud registry is
+	// configured (enterprise). Registry-first by default; --local opts out.
+	Local bool `json:"local" yaml:"local" mapstructure:"local"`
+	// RecordTimer optionally bounds a record session (e.g. "30s"); the wrapped
+	// runner exiting on its own ends recording first in almost all cases.
+	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 }
 
 type Contract struct {

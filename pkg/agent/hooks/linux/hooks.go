@@ -151,8 +151,22 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		}
 	}
 
-	// Now load and assign into the kernel with the corrected spec
-	if err := spec.LoadAndAssign(&objs, bpfopts); err != nil {
+	// Now load and assign into the kernel with the corrected spec.
+	//
+	// This is the one call in agent startup that can block forever without
+	// saying anything: BPF_PROG_LOAD is uninterruptible, so a wedged kernel
+	// leaves the agent with no log output at all and the container merely
+	// "not ready". watchStall makes that state describe itself.
+	// Scoped to this one call by a closure rather than a plain defer: the rest of
+	// load() attaches tracepoints and resolves cgroups, and a watchdog left
+	// running across that would blame BPF_PROG_LOAD for whatever else was slow.
+	// The defer inside the closure keeps it from leaking if LoadAndAssign panics.
+	err = func() error {
+		stopStallWatch := watchStall(h.logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", stallFirstReport, stallRepeatReport)
+		defer stopStallWatch()
+		return spec.LoadAndAssign(&objs, bpfopts)
+	}()
+	if err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			fmt.Printf("VERIFIER FAILURE:\n%s\n", strings.Join(ve.Log, "\n"))
@@ -238,8 +252,13 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	h.sockops = sockops
 
-	if opts.Mode == models.MODE_RECORD {
+	if opts.Mode == models.MODE_RECORD && !setupOpts.MockMode {
 
+		// Skipped in mock mode (--mock-mode): the wrapped process is a test
+		// runner, not a server. Relocating any port it binds (a pytest
+		// live_server, a Playwright webServer, an httptest.NewServer) would
+		// double-record the runner's own loopback traffic and can crash it on a
+		// startup race. Mock mode captures ONLY egress, so no bind/ingress hooks.
 		h.BindEvents = objs.BindEvents
 		cg4, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
@@ -608,6 +627,15 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 
 	if agent.ExtraPassThroughPortsHook != nil {
 		ports = append(ports, agent.ExtraPassThroughPortsHook()...)
+	}
+
+	// Mock mode: the wrapped test runner calls the agent's own HTTP server
+	// (the /agent/scope/* API) at localhost:<AgentPort>. That process is inside
+	// the intercepted PID tree, so without bypassing this port the runner's
+	// scope calls would be redirected into the proxy instead of reaching the
+	// agent. Kernel-level bypass the agent's own control port.
+	if opts.MockMode && opts.AgentPort != 0 {
+		ports = append(ports, uint(opts.AgentPort))
 	}
 
 	for i := 0; i < 10; i++ {

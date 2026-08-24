@@ -9,6 +9,13 @@ type AppError struct {
 	AppErrorType AppErrorType
 	Err          error
 	AppLogs      string
+	// ExitCode is the wrapped application/test-runner's process exit code
+	// when it is known (a Runtime exit carrying an *exec.ExitError). It is
+	// -1 when no exit code is available (the command never started, was
+	// killed by a signal, or exited cleanly with code 0 via ErrAppStopped).
+	// The mock record/replay flows propagate this as keploy's own exit code
+	// so a wrapped `pytest`/`go test` failure fails the keploy process too.
+	ExitCode int
 }
 
 type AppErrorType string
@@ -58,7 +65,7 @@ type MockFieldDiff struct {
 // the user how far the matcher got before giving up, which determines the
 // right remediation (re-record vs add noise vs fix candidate selection).
 const (
-	MatchPhaseNoMocks    = "no_mocks"             // mock pool for this protocol is empty
+	MatchPhaseNoMocks    = "no_mocks"             // no mocks were available to compare for this protocol: the pool is empty, or none survived filtering
 	MatchPhaseSchema     = "no_schema_candidates" // nothing matched method/path/header-keys/query-keys
 	MatchPhaseBody       = "body_mismatch"        // schema candidates existed, request body ruled them all out
 	MatchPhaseStrict     = "strict_noise_reject"  // candidates rejected by strict req-body-noise enforcement
@@ -137,3 +144,15 @@ func NewMockMismatchError(err error, report *MockMismatchReport) error {
 	}
 	return &mockMismatchError{err: err, report: report}
 }
+
+// ErrMockEncode marks a mock-persist failure caused by THIS mock's own payload
+// — an unsupported kind, a malformed spec, a value the encoder cannot represent
+// — rather than by the storage environment.
+//
+// The distinction decides whether a recording survives. The recorder treats a
+// failed mock insert as fatal and tears the whole session down, which is right
+// for disk-full or storage-gone (every subsequent mock fails too) and badly
+// wrong for one unencodable payload. A single gzip response body ended a
+// 46-hour production recording that way. Errors wrapped with this sentinel are
+// skipped and counted; everything else stays fatal.
+var ErrMockEncode = errors.New("mock encode failure")

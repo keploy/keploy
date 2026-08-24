@@ -42,7 +42,7 @@ intercept traffic on each OS:
 | Platform                  | Native binary (app runs on host)                                                                             | Keploy-in-Docker (app runs in Docker) |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------- |
 | **Linux** (x86_64, arm64) | ✅ Supported — uses eBPF (`pkg/agent/hooks/linux/`). Requires root.                                          | ✅ Supported                          |
-| **Windows** (amd64)       | ✅ Supported — uses the WinDivert redirector (`pkg/agent/hooks/windows/`, `libwindows_redirector.a`).        | ✅ Supported                          |
+| **Windows** (amd64)       | ✅ Supported — userspace interception (`pkg/agent/hooks/winshim/`). No driver and no Administrator; pure Go plus a committed shim DLL, so a windows build needs no extra fetch step.                                     | ✅ Supported                          |
 | **Windows** (arm64)       | ❌ Falls through to the `others` stub — `Load()` / `Record()` return "not supported on non-Linux platforms". | ✅ Supported                          |
 | **macOS** (amd64, arm64)  | ❌ Same `others` stub — there is **no** native interception path on macOS.                                   | ✅ Supported (only option)            |
 

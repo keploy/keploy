@@ -235,8 +235,99 @@ $env:APP_BASE_URL = "http://localhost:$appPort"
 Write-Host "Chosen app port: $appPort"
 Write-Host "Chosen container name: $containerName"
 
+# Build the sample image, retrying only a Docker Hub rate limit.
+#
+# Two independent failures used to compound here, and between them they
+# hid the real cause for nine minutes on run 32388095493 / job
+# 96488562918:
+#
+#   1. `docker compose build` ran bare. A native command's non-zero exit
+#      does NOT raise a terminating error in PowerShell 5.1 even under
+#      $ErrorActionPreference = 'Stop', so the script sailed straight past
+#      a build that had produced no image, waited out the full app
+#      readiness deadline, then sent six requests that could only fail
+#      with "Unable to connect to the remote server". The job's *reported*
+#      error was an unrelated taskkill on an already-dead PID. The 429 was
+#      still in the log, ~9 minutes further up.
+#
+#   2. Nothing retried. Docker Hub meters anonymous pulls at 100 manifest
+#      requests per rolling 3600s window keyed to the *egress IP*, and the
+#      self-hosted runners on this VM share one office NAT address — so
+#      the budget is routinely spent by traffic this repo never generated.
+#      Because the window rolls rather than resetting hourly, capacity
+#      trickles back continuously and a short backoff has a real chance of
+#      clearing it. It is a mitigation, not a cure: a retry cannot
+#      manufacture pull budget.
+#
+# Only a rate limit is retried. Retrying every failure would turn a
+# genuine 30-second compile break into a multi-minute one and push the
+# compiler error far up the log, so anything else throws on attempt 1.
+function Invoke-DockerBuildWithRetry {
+  param(
+    [string[]]$BuildArgs = @('compose', 'build'),
+    [int]$MaxAttempts = 4,
+    [int]$InitialBackoffSec = 15
+  )
+
+  $backoff = $InitialBackoffSec
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    Write-Host "docker $($BuildArgs -join ' ') (attempt $attempt/$MaxAttempts)…"
+
+    # docker writes all of its build progress to stderr, and under
+    # $ErrorActionPreference = 'Stop' the `2>&1` merge below turns the very
+    # first stderr line into a terminating NativeCommandError — which would
+    # abort here before the output could be examined for a 429 at all.
+    # Drop to 'Continue' for the duration of the call only.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    # Stream each line as it arrives AND accumulate it. Two reasons not to
+    # capture with `| Out-String` and print at the end:
+    #
+    # It would buffer the whole build, so a build that HANGS - the case the
+    # 330s agent budget exists to tolerate - would print nothing at all, and a
+    # cancelled or timed-out job would lose the build log entirely.
+    #
+    # And Out-String renders stderr ErrorRecords through the formatter, which
+    # hard-wraps at $Host.UI.RawUI.BufferSize.Width (120 on these runners, even
+    # with stdout redirected). Measured on the runner: that splits
+    # "Too Many Requests" across a line break for 17 of 81 realistic line
+    # lengths, so the match below would silently fail and report a 429 as "not
+    # a rate limit". It also injects a NativeCommandError block into every
+    # green build log that reads as though this helper crashed.
+    $sb = New-Object System.Text.StringBuilder
+    try {
+      & docker @BuildArgs 2>&1 | ForEach-Object {
+        $line = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { [string]$_ }
+        [void]$sb.AppendLine($line)
+        Write-Host $line
+      }
+      $rc = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $prevEap
+    }
+    $output = $sb.ToString()
+
+    if ($rc -eq 0) { return }
+
+    # Match the wording, never a bare "429": those digits also appear in
+    # ISO-8601 timestamps and layer byte counts in this same output, and
+    # matching them would reclassify real breakage as a rate limit.
+    if ($output -match 'toomanyrequests|too\s+many\s+requests|pull\s+rate\s+limit|rate\s+limit\s+exceeded') {
+      if ($attempt -lt $MaxAttempts) {
+        Write-Warning "Docker Hub pull rate limit hit (exit $rc). Retrying in ${backoff}s…"
+        Start-Sleep -Seconds $backoff
+        $backoff = $backoff * 2
+        continue
+      }
+      throw "docker $($BuildArgs -join ' ') failed after $MaxAttempts attempts: the Docker Hub pull rate limit (HTTP 429) did not clear. This is an infrastructure limit on the runner's egress IP, not a defect in the change under test."
+    }
+
+    throw "docker $($BuildArgs -join ' ') failed with exit code $rc. The output above is the build error; this is not a Docker Hub rate limit, so it was not retried."
+  }
+}
+
 Write-Host "Building Docker image(s) with docker compose..."
-docker compose build
+Invoke-DockerBuildWithRetry
 
 # --- Clean previous keploy outputs ---
 $candidates = @(".\keploy")
@@ -342,6 +433,51 @@ function Sync-Logs {
     } catch {}
 }
 
+# Print keploy's logs by reading the FILES, not by draining the tail job.
+#
+# Sync-Logs is the only way keploy output reaches CI, and it depends on a
+# background `Get-Content -Wait` that is known to exit on its own — the comment
+# above the readiness loop documents exactly that, and run 24630134970 is the
+# example. When it dies, Receive-Job returns nothing and every subsequent line
+# keploy writes is lost. That is precisely what happened to the runs this
+# function exists for: the agent container reported
+# "dependency failed to start: container keploy-v3-… is unhealthy" into
+# $errLogPath, the file kept it, and CI printed none of it — so the visible
+# symptom was six failed HTTP requests and no cause. The reader was told to
+# "review the full logs in the file", on a CI runner they cannot log into.
+#
+# The files outlive the tail job, so on any failure path read them directly.
+function Show-KeployLogFiles {
+    param([string]$Reason)
+    Write-Host "`n=========================================================="
+    Write-Host "KEPLOY LOGS (read from disk) — $Reason"
+    Write-Host "  stdout: $logPath"
+    Write-Host "  stderr: $errLogPath"
+    Write-Host "=========================================================="
+    foreach ($f in @($logPath, $errLogPath)) {
+        if (Test-Path $f) {
+            $content = Get-Content -Path $f -ErrorAction SilentlyContinue
+            if ($content) {
+                Write-Host "--- $f ---"
+                $content | ForEach-Object { Write-Host $_ }
+            } else {
+                # An empty stdout log is itself the finding: it means keploy
+                # blocked before its first line, which is what a wedged
+                # bpf(BPF_PROG_LOAD) looks like from outside.
+                Write-Host "--- $f --- (EMPTY: keploy produced no output at all)"
+            }
+        } else {
+            Write-Host "--- $f --- (MISSING)"
+        }
+    }
+    Write-Host "=========================================================="
+    # Container state explains the compose-level failures the log text alone
+    # does not (unhealthy dependency, app container stuck in Created).
+    Write-Host "--- docker ps -a ---"
+    try { docker ps -a --format "{{.Names}} :: {{.Status}}" 2>&1 | ForEach-Object { Write-Host $_ } } catch {}
+    Write-Host "=========================================================="
+}
+
 # Wait for app readiness.
 #
 # Previous implementation broke on the first 200 response and sent
@@ -363,7 +499,26 @@ function Sync-Logs {
 #      the remaining five — the prior `try { req1; req2; ... } catch`
 #      swallowed the first failure and sent $sent=0 requests.
 Write-Host "Waiting for app to respond on $base/hello/keploy …"
-$deadline       = (Get-Date).AddMinutes(5)
+# 7 minutes, not 5, because this probe races keploy's own agent-readiness
+# wait and used to lose. On the compose lane keploy waits
+# pkg.DefaultAgentReadyTimeout (330s, pkg/util.go) for the in-docker
+# keploy-agent to report healthy, and only reports the real failure after
+# that. At 5 minutes this loop gave up 30s BEFORE keploy could speak, so a
+# genuinely failed bring-up surfaced as six "Unable to connect to the
+# remote server" retries instead of the actual cause — observed on run
+# 32388095493 / job 96488562918.
+#
+# This costs a genuinely-failing job about 35s: the probe now waits for
+# keploy to die at ~335s rather than giving up at 300s while keploy is
+# still silent, and the traffic phase below still runs either way. What is
+# bought is the diagnostic - Show-KeployLogFiles now dumps a log that
+# contains keploy's own error instead of a mid-flight snapshot taken
+# before it had written one.
+# Raising it here rather than shrinking the agent's healthcheck budget is
+# deliberate — that budget ships to every user and exists to tolerate slow
+# docker daemons; buying prettier CI logs with product tolerance is the
+# wrong trade.
+$deadline       = (Get-Date).AddMinutes(7)
 $stabilityCount = 3
 $settleSec      = 5
 $okStreak       = 0
@@ -398,6 +553,10 @@ do {
 
 if ($okStreak -lt $stabilityCount) {
   Write-Warning "App readiness probe did not reach ${stabilityCount} consecutive 200s before deadline; continuing with traffic anyway — downstream record validation will surface the failure."
+  # The app never came up. Whatever explains that is in keploy's logs, and this
+  # is the last moment it is worth reading them before the traffic phase buries
+  # it under six identical connection failures.
+  Show-KeployLogFiles -Reason "app readiness probe timed out"
 } else {
   Write-Host "App readiness confirmed ($stabilityCount consecutive 200s). Settling ${settleSec}s before sending traffic…"
   Start-Sleep -Seconds $settleSec
@@ -442,6 +601,11 @@ if (Invoke-WithRetry -Name "DELETE products/…"  -Action { Invoke-RestMethod -M
 if (Invoke-WithRetry -Name "GET api/v2/users"   -Action { Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users" -TimeoutSec 30 })                                                                                                           { $sent++ }
 
 Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
+if ($sent -eq 0) {
+  # Zero requests means nothing can possibly have been recorded, so the run has
+  # already failed; everything after this is consequence, not cause.
+  Show-KeployLogFiles -Reason "every request failed; 0 of the intended requests were sent"
+}
 
 $pollUntil = (Get-Date).AddSeconds(60)
 do {
@@ -501,9 +665,15 @@ if ($REC_PID -and $REC_PID -ne 0) {
 
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
-if (-not (Test-Path $testSetPath)) { Write-Error "Test directory not found at $testSetPath"; exit 1 }
+if (-not (Test-Path $testSetPath)) {
+  Show-KeployLogFiles -Reason "no test directory was created at $testSetPath"
+  Write-Error "Test directory not found at $testSetPath"; exit 1
+}
 $testCount = (Get-ChildItem -Path $testSetPath -Filter "*.yaml").Count
-if ($testCount -eq 0) { Write-Error "No test files were created. Review the full logs in the file '$logPath'"; exit 1 }
+if ($testCount -eq 0) {
+  Show-KeployLogFiles -Reason "no test files were created"
+  Write-Error "No test files were created; keploy's own logs are printed above."; exit 1
+}
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
 

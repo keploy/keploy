@@ -164,6 +164,21 @@ type Proxy struct {
 	session     *agent.Session
 	mockManager *MockManager
 
+	// workerScope holds per-test-worker mock allowlists for parallel replay
+	// (Design A). Key is the worker's self-reported PID (ScopeReq.Pid); value is
+	// the set of per-test mock names that worker's current test is allowed to
+	// see. An outgoing call's origin PID (OutgoingOptions.SrcPid) is resolved up
+	// the /proc tree to the nearest registered ancestor, and its per-test view
+	// is intersected with that worker's set — so concurrent workers never stomp
+	// each other's pool. Empty/absent ⇒ the worker serves the whole pool
+	// (backward compatible with suite-level and single-worker sequential scope).
+	workerScopeMu sync.RWMutex
+	workerScope   map[uint32]map[string]struct{}
+	// mappedUniverse is the union of every test's mapped mock names; lets a
+	// scoped worker distinguish "another test's mock" from an unmapped shared
+	// recording. Guarded by workerScopeMu.
+	mappedUniverse map[string]struct{}
+
 	// asyncEngine, when non-nil (config.Async.Lanes non-empty), tracks
 	// async-lane replay state: registered parsers and the per-test
 	// position counter consumed by Engine.Decide's anchor gating. The
@@ -1488,7 +1503,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 			// Do NOT swallow the error. An auxiliary hook only gets
 			// registered when a caller has explicitly opted into the
 			// feature it implements (currently: --low-latency, which
-			// registers the proxyless / sockmap BPF startup). Silently
+			// registers the proxyless BPF startup). Silently
 			// continuing into userspace-proxy mode after the hook has
 			// declared a failure would give the user a mode they
 			// didn't ask for and no deterministic signal that the
@@ -1496,7 +1511,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 			//
 			// The hook itself is expected to embed actionable
 			// remediation in the returned error (e.g. the enterprise
-			// proxyless/sockmap hook wraps the BPF verifier error
+			// proxyless hook wraps the BPF verifier error
 			// with a "Next steps: upgrade kernel / drop --low-latency
 			// / rebuild without the BPF variant" message). Log once
 			// here with the hook's message visible in zap.Error and
@@ -1786,6 +1801,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
+
 	defer func(start time.Time) {
 		duration := time.Since(start)
 		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
@@ -1874,6 +1890,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Create a local copy of OutgoingOptions to avoid data race when multiple
 	// goroutines handle connections concurrently and modify DstCfg/Synchronous
 	outgoingOpts := rule.OutgoingOptions
+	// Stamp this connection's origin PID (eBPF redirect map) on the per-conn
+	// copy so the mock-serve and record-capture paths can attribute the call to
+	// the test worker that made it (per-PID scoping). 0 when unavailable.
+	outgoingOpts.SrcPid = destInfo.KernelPid
 
 	mgr := syncMock.Get()
 	mgr.SetOutputChannel(rule.MC)
@@ -2065,7 +2085,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		//mock the outgoing message
-		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m, outgoingOpts)
+		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
 			p.sendMockNotFoundError(err)
@@ -2834,7 +2854,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// reconnect the producer and crash on a nil schema); such a parser
 			// reports via this hook, replies normally, and keeps serving.
 			testCtx := models.WithMockMismatchReporter(parserCtx, p.sendMockNotFoundError)
-			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, m, outgoingOpts)
+			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
@@ -2854,7 +2874,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 		} else {
-			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
+			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
@@ -3151,6 +3171,26 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
+	// Forget the previous recording's MySQL ports before this test set derives
+	// its own. The agent is a single long-lived process and this registry is
+	// allocated once, so without the reset the derived port set — and the
+	// endpoint-drift inference it arms — would mean "any recording this process
+	// has ever replayed" rather than "the recording being replayed now": a test
+	// set holding MySQL mocks would arm the inference for a later one holding
+	// none, and a silent connection there would be routed to a replayer with
+	// nothing to serve.
+	//
+	// Mock() is the hook because it is what the replayer reaches once per test
+	// set (Agent.MockOutgoing → here), and it runs before that set's first
+	// UpdateMockParams → SetMocksWithWindow delivers any mocks. SetMocks is NOT
+	// a candidate despite appearances: it is only the fallback arm for a
+	// third-party proxy that does not implement WindowedProxy, and this proxy
+	// does, so a stock agent never calls it. SetMocksWithWindow is not one
+	// either — it arrives repeatedly with a per-test SUBSET.
+	//
+	// This only marks; the swap happens when the replacement mocks arrive, so
+	// the boundary leaves no window in which known ports are forgotten.
+	p.mysqlPorts.MarkSessionStale()
 	// Mock is replay; no pcap capture during replay. Tear down any
 	// capture left over from a previous record session.
 	p.stopPacketCapture()
@@ -3199,6 +3239,11 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	} else {
 		mm.ResetForReplaySession()
 	}
+
+	// Drop any per-worker scopes from a prior session so a crashed worker that
+	// never sent /agent/scope/end cannot leak an allowlist that mis-scopes a
+	// recycled PID in this session.
+	p.ClearAllWorkerScopes()
 
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")

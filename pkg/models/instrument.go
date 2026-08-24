@@ -27,6 +27,46 @@ const (
 	AND MatchType = "AND"
 )
 
+// MissPolicy decides what the proxy does in MODE_TEST when an outgoing call
+// matches no recorded mock. It is the VCR-style "record mode" for the
+// `keploy mock replay` flow.
+type MissPolicy string
+
+const (
+	// MissFail is the historical, deterministic behaviour: a miss is a hard
+	// failure (HTTP 502 / protocol error, connection torn down) and never
+	// reaches the real dependency. This is the default.
+	MissFail MissPolicy = "fail"
+	// MissPassthrough dials the real upstream on a miss, relays the exchange,
+	// and does NOT persist it. The equivalent of VCR's `once` on an existing
+	// cassette / go-vcr passthrough — new calls succeed against the real
+	// dependency but the cassette is not grown.
+	MissPassthrough MissPolicy = "passthrough"
+	// MissRecord dials the real upstream on a miss, relays the exchange, AND
+	// captures it back into the active mock set (VCR `new_episodes`). Newly
+	// observed calls are appended so the next replay serves them from the mock.
+	MissRecord MissPolicy = "record"
+)
+
+// Valid reports whether p is a recognised policy; the empty string is treated
+// as MissFail by callers.
+func (p MissPolicy) Valid() bool {
+	switch p {
+	case "", MissFail, MissPassthrough, MissRecord:
+		return true
+	}
+	return false
+}
+
+// RecordsOnMiss reports whether the policy captures newly-seen calls.
+func (p MissPolicy) RecordsOnMiss() bool { return p == MissRecord }
+
+// PassesThroughOnMiss reports whether the policy dials the real upstream on a
+// miss (both passthrough and record do).
+func (p MissPolicy) PassesThroughOnMiss() bool {
+	return p == MissPassthrough || p == MissRecord
+}
+
 type FilterPolicy string
 
 const (
@@ -58,8 +98,14 @@ type OutgoingOptions struct {
 	TLSPrivateKey string
 	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
-	SQLDelay               time.Duration // This is the same as Application delay.
-	Mocking                bool          // used to enable/disable mocking
+	SQLDelay time.Duration // This is the same as Application delay.
+	Mocking  bool          // used to enable/disable mocking
+	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
+	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
+	// default), "passthrough" (dial the real upstream, don't persist), or
+	// "record" (dial the real upstream AND capture the exchange back into the
+	// active mock set). Only consulted on the `keploy mock replay` path.
+	OnMiss                 MissPolicy
 	DstCfg                 *ConditionalDstCfg
 	Backdate               time.Time                      // used to set backdate in cacert request
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
@@ -106,12 +152,34 @@ type OutgoingOptions struct {
 	// an escape hatch rather than a requirement: a port listed here
 	// skips the detection probe entirely. See DisableMysqlAutoDetect.
 	MysqlPorts []uint32
+	// PassThroughPorts / PassThroughHosts mark telemetry / noisy egress that
+	// keploy should not record normally (see PassThroughRule). Ports gate on the
+	// destination port; Hosts gate on the destination host/authority (needed for
+	// TLS egress where the port is not observable at capture). A matched rule is
+	// either "skip" (never record; synth success on replay) or "recordOne"
+	// (keep one exchange per (host,port,path,method); serve it body-agnostic on
+	// replay). Empty ⇒ built-in telemetry defaults only (see MergePassThroughDefaults).
+	PassThroughPorts []PassThroughRule
+	PassThroughHosts []PassThroughRule
+	// PassThroughScope isolates recordOne de-duplication to one app/session. The
+	// HTTP integration (and its ptRecorder) is a single instance shared across
+	// apps in a long-lived proxyless/DaemonSet agent, so without a scope the first
+	// app's recordOne capture would suppress a second app's identical endpoint.
+	// Callers that share a recorder across tenants (the enterprise DaemonSet gate)
+	// set this to a per-app/per-session key; the classic sidecar leaves it empty
+	// (process-per-session, so the plain key already isolates).
+	PassThroughScope string
 	// DisableMysqlAutoDetect turns off automatic MySQL port detection,
 	// restoring the strict "MysqlPorts or nothing" behaviour. With
 	// detection on (the default), a MySQL server on any port is
 	// identified from its handshake at record time and recalled from
 	// the recorded mocks' destAddr at replay time.
 	DisableMysqlAutoDetect bool
+	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
+	// mocks on a port the recording never saw. Detection still runs; only the
+	// inference that covers a moved endpoint is turned off. See
+	// Config.DisableMysqlEndpointDrift.
+	DisableMysqlEndpointDrift bool
 	// SupportsDroppedRevoke is a capability flag set by the CLI on the
 	// /outgoing request: when true, the CLI understands the reserved
 	// Kind=RevokedTests control frame (it diverts it into a revoke set and
@@ -145,6 +213,14 @@ type OutgoingOptions struct {
 	// only the argv-vs-yaml precedence for the CA PATH, and the pool itself is
 	// read from disk lazily, under a sync.Once, on the first record session.
 	UpstreamTLSRootCAs *x509.CertPool `json:"-"`
+	// SrcPid is the kernel (root-namespace) PID of the process that opened THIS
+	// outgoing connection, taken from the eBPF redirect map per connection. It
+	// is a runtime, per-connection value — never session config — so it is
+	// json:"-" (OutgoingOptions is JSON-marshaled CLI→agent and this must not
+	// travel as a rule). The proxy stamps it on its per-connection copy of the
+	// options and uses it to pick the worker's scoped mock view (per-PID
+	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
+	SrcPid uint32 `json:"-"`
 }
 
 type ConditionalDstCfg struct {
@@ -165,14 +241,20 @@ type SetupOptions struct {
 	DockerDelay     uint64
 	Synchronous     bool
 	// Cmd               string
-	AgentURI                  string
-	IsDocker                  bool
-	CommandType               string
-	EnableTesting             bool
-	ProxyPort                 uint32
-	IncomingProxyPort         uint16
-	DnsPort                   uint32
-	Mode                      Mode
+	AgentURI          string
+	IsDocker          bool
+	CommandType       string
+	EnableTesting     bool
+	ProxyPort         uint32
+	IncomingProxyPort uint16
+	DnsPort           uint32
+	Mode              Mode
+	// MockMode marks a `keploy mock record|replay` session: the agent must
+	// NOT relocate the application's listening ports (no ingress/bind hooks)
+	// because the wrapped process is a test runner, not a server whose
+	// incoming traffic becomes test cases. Only outgoing calls are captured
+	// (record) or served (replay). Forwarded to the agent via --mock-mode.
+	MockMode                  bool
 	GlobalPassthrough         bool
 	CapturePackets            bool
 	OpportunisticTLSIntercept bool

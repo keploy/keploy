@@ -262,6 +262,44 @@ type Config struct {
 	// ResumePreDispatch on entry — recordViaSupervisor only sets
 	// this when the parser implements an opt-in capability method.
 	PreDispatchPause bool
+
+	// ParserCanResyncAfterGap tells the tees whether the parser on the other
+	// end can re-anchor its framer after a HOLE in capture. Set by the
+	// dispatcher from the parser's optional
+	// [integrations.GapResyncCapable] capability.
+	//
+	// The default is FALSE, and that is the load-bearing choice.
+	//
+	// When a tee desyncs — a chunk lost to [DropPerConnCap] or
+	// [DropMemoryPressure] — the connection's captured byte stream has a
+	// hole in it. The tee already says so in its own words: it logs "capture
+	// desynced; this connection can no longer be recorded" and fires
+	// [Config.OnCaptureDesync] so the owner can suppress the test cases
+	// recorded over the hole. Until now it then kept pushing anyway, and a
+	// length-prefix framer reading from the wrong offset does not merely
+	// produce nothing: postgres read four bytes of misread row data as a
+	// uint32 length and attempted a multi-gigabyte allocation.
+	//
+	// So false stops the feed for every parser that has not claimed
+	// otherwise. Yes, that changes today's behaviour for every non-mongo
+	// parser — deliberately. What it gives up is the theoretical chance that
+	// a parser recovers by luck; what those parsers actually produce after a
+	// hole is garbage frames, and the honest accounting is that this
+	// connection's recording ended when the tee said it did. Defaulting the
+	// other way would mean a parser has to know about this mechanism to be
+	// protected by it, which inverts the safety: a third-party parser that
+	// never heard of the capability is precisely the one least likely to
+	// have a resync path.
+	//
+	// True is for parsers that genuinely re-anchor and therefore NEED the
+	// post-hole bytes to do it — mongo/v2 detects the SeqNo discontinuity
+	// and content-scans for the next validated message header. Cutting its
+	// feed would strand it desynced forever, which is a regression, not a
+	// fix.
+	//
+	// Either way the FORWARD path is untouched: the relay writes every byte
+	// to the real peer before it ever offers the chunk to a tee.
+	ParserCanResyncAfterGap bool
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields

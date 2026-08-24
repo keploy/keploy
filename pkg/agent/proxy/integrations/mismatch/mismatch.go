@@ -167,7 +167,7 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 	}
 	switch {
 	case r.MatchPhase == models.MatchPhaseNoMocks:
-		return "No recorded mocks exist for this protocol in the selected test set. Re-record the test set with 'keploy record'."
+		return "No recorded mocks were available to match against for this protocol in the selected test set. Re-record the test set with 'keploy record'."
 	case onlyValueDrift:
 		paths := make([]string, 0, len(r.FieldDiffs))
 		// Body diffs are reported "body."-prefixed for readability, but HTTP

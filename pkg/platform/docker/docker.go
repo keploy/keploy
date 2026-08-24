@@ -603,6 +603,11 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Debug {
 		command = append(command, "--debug")
 	}
+	if opts.MockMode {
+		// `keploy mock record|replay` — the containerised agent must skip
+		// ingress/bind relocation (the wrapped process is a test runner).
+		command = append(command, "--mock-mode")
+	}
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}

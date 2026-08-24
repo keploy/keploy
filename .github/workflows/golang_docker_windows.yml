@@ -29,13 +29,13 @@ on:
 #   concurrency: { group: <workflow>-<pr#/ref>, cancel-in-progress: true }
 # which cancels the whole run (this job included) when a new commit
 # lands on the same PR/branch. The 4-runner pool is the natural
-# concurrency cap. This mirrors the sibling golang_native_windows.yml,
+# concurrency cap. This mirrors the other self-hosted Windows lanes,
 # which also runs with no concurrency group.
 
 jobs:
   golang_docker_windows:
     runs-on: [self-hosted, Windows, X64]
-    # Same hung-FFI-shutdown rationale as golang_native_windows -
+    # Same hung-shutdown rationale as the other Windows lanes -
     # cap per-job wall-clock at 30 min so a stuck intercepted
     # process cannot hold a self-hosted Windows runner for 6h.
     timeout-minutes: 30
@@ -155,6 +155,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           clean: true
+
+      - name: Reap leaked keploy agent containers
+        # Runs after checkout (the script lives in the repo) but before any
+        # keploy work, and fails the job if any container survives
+        # removal: a wedged Docker VM makes every keploy run on this runner
+        # report connection failures, so starting work on one only produces a
+        # misleading result. The guaranteed sweep after a run lives in
+        # cleanup-windows.ps1, which warns instead of failing.
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $reaper = Join-Path $env:GITHUB_WORKSPACE '.github\scripts\windows\reap-keploy-containers.ps1'
+          # Say so plainly if the script is not there. It lives in the repo, so
+          # this step must run after checkout; when it did not, PowerShell threw
+          # a bare CommandNotFoundException that said nothing about the cause.
+          if (-not (Test-Path $reaper)) {
+            Write-Host "::error::$reaper not found - this step must run AFTER 'Checkout repository'."
+            exit 1
+          }
+          & $reaper -FailOnStuck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Setup per-job git isolation
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 

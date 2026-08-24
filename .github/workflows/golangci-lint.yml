@@ -28,6 +28,10 @@ env:
 
 jobs:
   golangci:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     name: lint
     runs-on: ubuntu-latest
     steps:
@@ -63,6 +67,24 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
+          # PINNED, not floating: the action resolves the newest release at
+          # run time, so a single upstream publish can turn every PR in this
+          # repo red (that is exactly what v2.13.0 did — see below). A pin
+          # means an upstream release can no longer break CI without someone
+          # choosing it.
+          #
+          # This pin is coupled to the Go toolchain in go.mod and cannot lag
+          # behind it. Each release here bundles a fixed honnef.co/go/tools
+          # (staticcheck), whose IR builder must understand the stdlib of the
+          # Go version it analyzes:
+          #   v2.12.2  -> honnef v0.7.0      crashes on Go 1.27: "buildir:
+          #               package "poll" ... unexpected expr: *ast.KeyValueExpr"
+          #               (reproduced locally on go1.27.0).
+          #   v2.13.0  -> honnef v0.8.0-rc.1 nilness panics with "internal
+          #               error: unhandled builtin recover" on Go 1.26.
+          #   v2.13.1  -> honnef v0.8.0      clean on go1.27.0 (verified
+          #               locally: `golangci-lint run` reports 0 issues).
+          version: v2.13.1
           only-new-issues: true
           args: --timeout=5m
 

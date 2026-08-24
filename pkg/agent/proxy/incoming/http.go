@@ -505,17 +505,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// Get the actual destination address
 	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
-	// Determine the correct port for the test case:
-	// On Windows, getActualDestination resolves the real destination dynamically,
-	// so we extract the port from the resolved address.
-	// On non-Windows (Linux/Docker), getActualDestination returns the fallback (newAppAddr)
-	// which contains the eBPF-redirected port, NOT the original app port.
-	// In that case, we use the passed-in appPort which carries the correct OrigAppPort.
+	// newAppAddr holds the port Keploy moved the application to, not the port
+	// it advertises, so the test case records the caller-supplied appPort
+	// (the original) instead.
 	actualPort := appPort
-	if finalAppAddr != newAppAddr {
-		// Destination was dynamically resolved (Windows) — extract port from resolved address
-		actualPort = extractPortFromAddr(finalAppAddr, appPort)
-	}
 
 	// Dial Upstream
 	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
@@ -526,7 +519,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		)
 		return
 	}
-	defer upConn.Close()
+	defer func() {
+		_ = upConn.Close()
+	}()
 
 	// forceCloseMode: only sync mode needs the traditional HTTP parsing loop
 	// (strict one-at-a-time ordering with forced close). Sampling mode now

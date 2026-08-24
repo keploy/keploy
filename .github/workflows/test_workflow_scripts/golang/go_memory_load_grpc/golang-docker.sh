@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-grpc-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
@@ -465,7 +466,7 @@ run_loadtest() {
 }
 
 section "Building sample application images"
-docker compose build
+docker_build_retry docker compose build
 
 section "Cleaning previous artifacts"
 sudo rm -rf keploy/

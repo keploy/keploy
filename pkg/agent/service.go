@@ -62,6 +62,19 @@ type Proxy interface {
 	// per-app traffic without this package knowing what an "app" is.
 	SetSessionResolver(fn func(tgid uint32) *Session)
 	SetAuxiliaryHook(h AuxiliaryProxyHook)
+	// Per-PID (worker-keyed) mock scoping for parallel test runners (Design A).
+	// SetWorkerScope registers the per-test mock-name allowlist for a worker
+	// PID; ClearWorkerScope drops it (on scope end / no mapping);
+	// ClearAllWorkerScopes wipes every entry at session teardown. An outgoing
+	// call is attributed to a worker by walking its origin PID up the /proc
+	// tree to the nearest registered ancestor.
+	SetWorkerScope(pid uint32, names []string)
+	ClearWorkerScope(pid uint32)
+	ClearAllWorkerScopes()
+	// SetMappedUniverse records the union of all tests' mapped mock names so a
+	// scoped worker can keep genuinely-shared (unmapped) mocks while hiding
+	// other tests' mocks.
+	SetMappedUniverse(names []string)
 }
 
 // PcapStreamer is the optional extension implemented by proxies
@@ -153,6 +166,12 @@ type NetworkAddress struct {
 	IPv4Addr uint32
 	IPv6Addr [4]uint32
 	Port     uint32
+	// KernelPid is the source process's kernel (root-namespace) PID for this
+	// outgoing connection, captured in-kernel by the eBPF redirect program. It
+	// lets the mock-serve path attribute a call to the test worker that made it
+	// (per-PID scoping for parallel runners). 0 when unavailable (non-eBPF
+	// platforms / lookup miss) — callers must treat 0 as "unknown, no scope".
+	KernelPid uint32
 }
 
 // Sessions provides a thread-safe store for Session objects, keyed by ID.

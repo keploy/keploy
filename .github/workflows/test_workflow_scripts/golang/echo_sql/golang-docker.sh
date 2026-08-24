@@ -1,9 +1,10 @@
 #!/bin/bash
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # Build Docker Image
-docker compose build
+docker_build_retry docker compose build
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/

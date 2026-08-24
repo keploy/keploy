@@ -59,6 +59,18 @@ if ($shouldPrune) {
   try { docker system prune -af --volumes 2>&1 | Write-Host } catch { Write-Warning "docker system prune failed: $($_.Exception.Message)" }
 }
 
+# Reap keploy agent containers (keploy-v3-*) left behind by any run on this
+# runner. This is the guaranteed half: a cancelled or crashed job never gets to
+# run its own teardown, so without a sweep here those containers accumulate
+# until someone notices the VM is full of them. Warn rather than fail — a
+# teardown that fails the workflow would hide the real result of the run.
+try {
+  $reaper = Join-Path $PSScriptRoot 'reap-keploy-containers.ps1'
+  if (Test-Path $reaper) { & $reaper } else { Write-Warning "reaper script not found at $reaper" }
+} catch {
+  Write-Warning "keploy container reap failed: $($_.Exception.Message)"
+}
+
 # Output whether we stopped any containers (for workflow conditionals)
 # If running inside GitHub Actions, write to the GITHUB_OUTPUT file so the step can expose outputs
 if ($env:GITHUB_OUTPUT) {

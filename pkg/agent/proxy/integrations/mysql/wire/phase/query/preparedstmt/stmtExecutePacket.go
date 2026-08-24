@@ -16,7 +16,10 @@ import (
 
 // COM_STMT_EXECUTE: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_execute.html
 
-func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket, clientCapabilities uint32) (*mysql.StmtExecutePacket, error) {
+// longDataParams names the parameters whose value was streamed ahead with
+// COM_STMT_SEND_LONG_DATA and is therefore ABSENT from this packet, even
+// though the null bitmap reports them as non-NULL. May be nil.
+func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket, clientCapabilities uint32, longDataParams map[uint16]bool) (*mysql.StmtExecutePacket, error) {
 	if len(data) < 10 {
 		return &mysql.StmtExecutePacket{}, fmt.Errorf("packet length too short for COM_STMT_EXECUTE")
 	}
@@ -173,6 +176,17 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 				continue
 			}
 
+			// A parameter sent with COM_STMT_SEND_LONG_DATA has no value in
+			// this packet — the server already holds it — but it is not NULL
+			// either, so the bitmap check above does not catch it. Reading a
+			// value here is what made every streamed-BLOB EXECUTE fail to
+			// decode and vanish from the recording (#4262). The bytes live in
+			// the SEND_LONG_DATA mock that precedes this one.
+			if longDataParams[uint16(i)] {
+				packet.Parameters[i].Value = nil
+				continue
+			}
+
 			if pos >= len(data) {
 				logger.Error("unexpected end of data while reading parameter value", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("parameter_index", i))
 				return nil, io.ErrUnexpectedEOF
@@ -246,7 +260,8 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 				if len(data[pos:]) < 4 {
 					return nil, fmt.Errorf("malformed FieldTypeFloat value")
 				}
-				param.Value = float32(binary.LittleEndian.Uint32(data[pos : pos+4]))
+				// IEEE-754 reinterpret, exactly as FieldTypeDouble below.
+				param.Value = math.Float32frombits(binary.LittleEndian.Uint32(data[pos : pos+4]))
 				pos += 4
 
 			case mysql.FieldTypeDouble:

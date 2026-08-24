@@ -2464,112 +2464,6 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 	return &rendered, nil
 }
 
-// DetectNoiseFieldsInResp inspects a rendered HTTP response and returns a map
-// of noise fields that should be marked on the testcase so matchers ignore
-// them during comparison. It uses current templated values from utils.
-func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
-	noise := make(map[string][]string)
-	if resp == nil {
-		return noise
-	}
-
-	templatedValues, _ := snapshotTemplateState()
-
-	// headers: if a header value contains a templated value, mark header.<name>
-	for hk, hv := range resp.Header {
-		for _, v := range templatedValues {
-			if v == nil {
-				continue
-			}
-			lit := fmt.Sprintf("%v", v)
-			if lit == "" {
-				continue
-			}
-			if strings.Contains(hv, lit) {
-				key := fmt.Sprintf("header.%s", strings.ToLower(hk))
-				noise[key] = []string{}
-				break
-			}
-		}
-	}
-
-	// body: if JSON, traverse and mark specific json paths where templated values appear
-	var parsed interface{}
-	if json.Valid([]byte(resp.Body)) {
-		if err := json.Unmarshal([]byte(resp.Body), &parsed); err == nil {
-			for _, v := range templatedValues {
-				if v == nil {
-					continue
-				}
-				lit := fmt.Sprintf("%v", v)
-				if lit == "" {
-					continue
-				}
-				paths := findJSONPathsWithValue(parsed, lit, "")
-				for _, p := range paths {
-					key := fmt.Sprintf("body.%s", p)
-					noise[key] = []string{}
-				}
-				// also mark literal occurrences in raw body (fallback)
-				if strings.Contains(resp.Body, lit) && len(paths) == 0 {
-					noise["body"] = []string{}
-				}
-			}
-		}
-	} else {
-		// non-json body: if any templated literal present, mark the full body as noisy
-		for _, v := range templatedValues {
-			if v == nil {
-				continue
-			}
-			lit := fmt.Sprintf("%v", v)
-			if lit == "" {
-				continue
-			}
-			if strings.Contains(resp.Body, lit) {
-				noise["body"] = []string{}
-				break
-			}
-		}
-	}
-
-	return noise
-}
-
-// findJSONPathsWithValue recursively searches parsed JSON for values equal to target
-// and returns dot-separated paths (no leading dot). For arrays, indices are used.
-func findJSONPathsWithValue(node interface{}, target, prefix string) []string {
-	var paths []string
-	switch t := node.(type) {
-	case map[string]interface{}:
-		for k, v := range t {
-			p := k
-			if prefix != "" {
-				p = prefix + "." + k
-			}
-			paths = append(paths, findJSONPathsWithValue(v, target, p)...)
-		}
-	case []interface{}:
-		for i, v := range t {
-			idx := fmt.Sprintf("%d", i)
-			p := idx
-			if prefix != "" {
-				p = prefix + "." + idx
-			}
-			paths = append(paths, findJSONPathsWithValue(v, target, p)...)
-		}
-	case string:
-		if t == target {
-			paths = append(paths, prefix)
-		}
-	case float64, bool, nil:
-		if fmt.Sprintf("%v", t) == target {
-			paths = append(paths, prefix)
-		}
-	}
-	return paths
-}
-
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
@@ -2648,15 +2542,12 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 func NextID(IDs []string, identifier string) string {
 	latestIndx := 0
 	for _, ID := range IDs {
-		namePackets := strings.Split(ID, "-")
-		if len(namePackets) == 3 {
-			Indx, err := strconv.Atoi(namePackets[2])
-			if err != nil {
-				continue
-			}
-			if latestIndx < Indx+1 {
-				latestIndx = Indx + 1
-			}
+		Indx, ok := parseIDIndex(ID, identifier)
+		if !ok {
+			continue
+		}
+		if latestIndx < Indx+1 {
+			latestIndx = Indx + 1
 		}
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
@@ -2665,18 +2556,34 @@ func NextID(IDs []string, identifier string) string {
 func LastID(IDs []string, identifier string) string {
 	latestIndx := 0
 	for _, ID := range IDs {
-		namePackets := strings.Split(ID, "-")
-		if len(namePackets) == 3 {
-			Indx, err := strconv.Atoi(namePackets[2])
-			if err != nil {
-				continue
-			}
-			if latestIndx < Indx {
-				latestIndx = Indx
-			}
+		Indx, ok := parseIDIndex(ID, identifier)
+		if !ok {
+			continue
+		}
+		if latestIndx < Indx {
+			latestIndx = Indx
 		}
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
+}
+
+func parseIDIndex(ID, identifier string) (int, bool) {
+	if !strings.HasPrefix(ID, identifier) {
+		return 0, false
+	}
+	suffix := strings.TrimPrefix(ID, identifier)
+	// Digits only. strconv.Atoi accepts a leading sign, so without this a
+	// directory literally named "test-set--1" would parse as index -1 and a
+	// "test-set-+5" as 5. Neither is an ID keploy generates, and the old
+	// len(Split(ID, "-")) == 3 check rejected both.
+	if suffix == "" || strings.ContainsFunc(suffix, func(r rune) bool { return r < '0' || r > '9' }) {
+		return 0, false
+	}
+	Indx, err := strconv.Atoi(suffix)
+	if err != nil {
+		return 0, false
+	}
+	return Indx, true
 }
 
 var (

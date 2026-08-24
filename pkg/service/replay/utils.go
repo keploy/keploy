@@ -11,6 +11,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 	"sync"
 	"time"
 
@@ -169,6 +171,151 @@ func dockerPublishedHostPort(cmd string) (host, port string, ok bool) {
 		return h, hp, true
 	}
 	return "", "", false
+}
+
+// composePublishedHostPort finds the host port the application's service
+// publishes in a docker-compose file, so a compose replay gets the same
+// readiness gate a `docker run -p` replay already gets.
+//
+// Without it, compose apps have no gate at all: dockerPublishedHostPort only
+// recognises -p/--publish on the command line, and `docker compose up` carries
+// none, so the fixed --delay is the entire protection. That is not a
+// theoretical gap — keploy's own generated compose holds the application behind
+// the agent's healthcheck (start_period 10s, interval 5s), so on a contended
+// machine the app starts as the delay expires, the first test window opens
+// while the app is still booting, and its bootstrap queries are scored against
+// a per-test pool that has nothing in it. The app then dies on a refused
+// dependency and every test in the set fails, while the diagnostic points at
+// the mocks and tells the user to re-record.
+//
+// Conservative like its sibling: it returns ok=false rather than guess. The
+// service is identified by container_name so a multi-service stack cannot be
+// mistaken for the app, falling back to a lone port-publishing service only
+// when the stack is unambiguous. Short and long port syntax are both read;
+// ranges and container-only publishes are skipped because neither names a host
+// port to wait on.
+func composePublishedHostPort(cmd, containerName string) (host, port string, ok bool) {
+	path, ok := composeFileFromCommand(cmd)
+	if !ok {
+		return "", "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", false
+	}
+	var doc struct {
+		Services map[string]struct {
+			ContainerName string      `yaml:"container_name"`
+			Ports         []yaml.Node `yaml:"ports"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "", "", false
+	}
+
+	type candidate struct{ host, port string }
+	var byName, only []candidate
+	published := 0
+	for _, svc := range doc.Services {
+		h, p, found := firstComposeHostPort(svc.Ports)
+		if !found {
+			continue
+		}
+		published++
+		only = append(only, candidate{h, p})
+		if containerName != "" && svc.ContainerName == containerName {
+			byName = append(byName, candidate{h, p})
+		}
+	}
+	if len(byName) == 1 {
+		return byName[0].host, byName[0].port, true
+	}
+	// No container_name match: only trust the stack when exactly one service
+	// publishes anything, so a db or cache port is never mistaken for the app.
+	if published == 1 {
+		return only[0].host, only[0].port, true
+	}
+	return "", "", false
+}
+
+// composeFileFromCommand returns the compose file the command operates on,
+// honouring an explicit -f/--file and otherwise falling back to the names
+// docker compose itself looks for in the working directory.
+func composeFileFromCommand(cmd string) (string, bool) {
+	fields := strings.Fields(cmd)
+	isCompose := false
+	for i, f := range fields {
+		if f == "compose" || strings.HasPrefix(f, "docker-compose") {
+			isCompose = true
+		}
+		if (f == "-f" || f == "--file") && i+1 < len(fields) {
+			return fields[i+1], true
+		}
+	}
+	if !isCompose {
+		return "", false
+	}
+	for _, name := range []string{"compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"} {
+		if _, err := os.Stat(name); err == nil {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// firstComposeHostPort reads the first entry that names a host port, in either
+// the short form ("8080:80", "127.0.0.1:8080:80") or the long form
+// (published: 8080). Ranges and container-only publishes are skipped: neither
+// gives a single port that can be waited on.
+func firstComposeHostPort(ports []yaml.Node) (host, port string, ok bool) {
+	for i := range ports {
+		n := &ports[i]
+		switch n.Kind {
+		case yaml.ScalarNode:
+			if h, p, found := parseShortPortSpec(n.Value); found {
+				return h, p, true
+			}
+		case yaml.MappingNode:
+			var long struct {
+				Published interface{} `yaml:"published"`
+				HostIP    string      `yaml:"host_ip"`
+			}
+			if err := n.Decode(&long); err != nil || long.Published == nil {
+				continue
+			}
+			p := strings.TrimSpace(fmt.Sprintf("%v", long.Published))
+			if p == "" || strings.ContainsAny(p, "-") {
+				continue
+			}
+			h := long.HostIP
+			if h == "" {
+				h = "127.0.0.1"
+			}
+			return h, p, true
+		}
+	}
+	return "", "", false
+}
+
+// parseShortPortSpec reads docker's short port syntax, sharing
+// dockerPublishedHostPort's rules: the host port is the second-to-last
+// colon-separated segment, and anything without one (a bare container port, so
+// a random host port) or with a range is refused.
+func parseShortPortSpec(spec string) (host, port string, ok bool) {
+	spec = strings.SplitN(strings.TrimSpace(spec), "/", 2)[0]
+	segs := strings.Split(spec, ":")
+	if len(segs) < 2 {
+		return "", "", false
+	}
+	hp := segs[len(segs)-2]
+	if hp == "" || strings.ContainsAny(hp, "-") {
+		return "", "", false
+	}
+	h := "127.0.0.1"
+	if len(segs) >= 3 && segs[0] != "" {
+		h = segs[0]
+	}
+	return h, hp, true
 }
 
 // keployReadinessProbePath is the path the reset-resend readiness probe requests.
@@ -364,6 +511,26 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 					return false
 				}
 				logger.Warn("app host port did not become ready within the ceiling; firing tests anyway (replay may see status_code got=0)",
+					zap.String("host", host),
+					zap.String("port", port),
+					zap.Duration("ceiling", ceiling),
+					zap.Error(err))
+			}
+		}
+
+		// docker-compose apps: the same gate, with the host port read from the
+		// compose file instead of the command line. Identical contract to the
+		// -p gate above — best-effort, bounded, can only ever wait longer.
+		if host, port, ok := composePublishedHostPort(cfg.Command, cfg.ContainerName); ok {
+			ceiling := cfg.Test.HealthPollTimeout
+			if ceiling <= 0 {
+				ceiling = 60 * time.Second
+			}
+			if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
+				if ctx.Err() != nil {
+					return false
+				}
+				logger.Warn("compose app host port did not become ready within the ceiling; firing tests anyway (replay may see status_code got=0)",
 					zap.String("host", host),
 					zap.String("port", port),
 					zap.Duration("ceiling", ceiling),

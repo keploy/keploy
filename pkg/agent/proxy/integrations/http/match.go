@@ -22,92 +22,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// flakyHeaders lists HTTP header keys (lowercased) that are known to change
-// on every request due to cryptographic signatures, timestamps, credential
-// rotation, or per-request identifiers. These are automatically treated as
-// noise during mock matching so that replayed requests can find the correct
-// recorded mock even though these artifacts differ. Users who need strict
-// header matching can disable this with --disableAutoHeaderNoise.
-//
-// No single public library maintains such a list. Most recording/replay
-// tools (VCR, WireMock, Hoverfly) avoid the problem by not matching on
-// headers at all by default. Since Keploy does match on header keys, we
-// maintain this list covering the most common sources of non-determinism.
-//
-// Categories:
-//   - Cloud auth/signing:  AWS SigV4, GCP OAuth, Azure HMAC/Bearer
-//   - Tracing/correlation: W3C Trace Context, B3, Datadog, X-Request-Id
-//   - Webhook signatures:  Stripe, GitHub, Slack, Twilio, Shopify
-//   - SDK metadata:        per-call invocation IDs and attempt counters
-var flakyHeaders = []string{
-	// ── AWS SigV4 & SDK ──────────────────────────────────────────────
-	"authorization",         // signature changes every request (all cloud providers)
-	"x-amz-date",            // signing timestamp (yyyymmddThhmmssZ)
-	"x-amz-security-token",  // STS/IRSA session token — may appear or disappear
-	"x-amz-content-sha256",  // payload hash
-	"x-amz-credential",      // credential scope string
-	"x-amz-signature",       // explicit signature value (SigV4 query-string variant)
-	"x-amz-signedheaders",   // list of signed headers (varies with SDK)
-	"x-amz-expires",         // pre-signed URL expiry seconds
-	"x-amz-user-agent",      // SDK metadata
-	"x-amzn-trace-id",       // AWS X-Ray trace propagation
-	"amz-sdk-invocation-id", // unique per-call UUID from AWS SDK
-	"amz-sdk-request",       // attempt counter (attempt=1; max=3)
-	"date",                  // SigV4 fallback when X-Amz-Date absent. Globally ignored (Date is dynamic for all HTTP); disable per-test via DisableAutoHeaderNoise.
-
-	// ── GCP ──────────────────────────────────────────────────────────
-	"x-goog-api-client",     // SDK metadata (version, runtime info)
-	"x-goog-request-params", // routing parameters, may change with resource
-
-	// ── Azure ────────────────────────────────────────────────────────
-	"x-ms-date",                     // signing timestamp
-	"x-ms-client-request-id",        // client-generated UUID per call
-	"x-ms-content-sha256",           // body hash for HMAC auth
-	"x-ms-return-client-request-id", // echo control flag
-
-	// ── W3C Trace Context / OpenTelemetry ────────────────────────────
-	"traceparent", // unique trace-id + span-id per request
-	"tracestate",  // vendor-specific trace context
-
-	// ── Zipkin B3 propagation ────────────────────────────────────────
-	"x-b3-traceid",
-	"x-b3-spanid",
-	"x-b3-parentspanid",
-	"x-b3-sampled",
-	"b3", // single-header compact format
-
-	// ── Datadog ──────────────────────────────────────────────────────
-	"x-datadog-trace-id",
-	"x-datadog-parent-id",
-	"x-datadog-sampling-priority",
-	"x-datadog-origin",
-
-	// ── Generic request/correlation IDs ──────────────────────────────
-	"x-request-id",     // Nginx, Envoy, HAProxy, AWS ALB, Heroku
-	"x-correlation-id", // cross-service correlation
-	"request-id",       // ASP.NET Core and others
-
-	// ── Webhook signatures (request-side, inbound webhooks) ──────────
-	"stripe-signature",
-	"x-hub-signature-256", // GitHub
-	"x-hub-signature",     // GitHub (legacy SHA-1)
-	"x-twilio-signature",
-	"x-shopify-hmac-sha256",
-	"x-slack-signature",
-	"x-slack-request-timestamp",
-	"webhook-signature", // Standard Webhooks spec
-	"webhook-timestamp", // Standard Webhooks spec
-	"webhook-id",        // Standard Webhooks spec
-
-	// ── Idempotency / CSRF ───────────────────────────────────────────
-	"idempotency-key",
-	"x-idempotency-key",
-	"x-csrf-token",
-	"x-xsrf-token",
-
-	// ── GCP trace (legacy) ───────────────────────────────────────────
-	"x-cloud-trace-context",
-}
+// flakyHeaders is retained for this package's tests, which enumerate the list.
+// models.FlakyHeaders is the definition; production code here reaches it via
+// flakyHeaderNoise().
+var flakyHeaders = models.FlakyHeaders
 
 type req struct {
 	method string
@@ -1479,25 +1397,7 @@ func pickClosestCandidate(request *http.Request, schemaSurvivors, pool []*models
 	return closest
 }
 
-// telemetryEgressPaths are outgoing telemetry endpoints that carry large,
-// volatile bodies and are NOT real dependencies: OTLP/HTTP trace export
-// (/v1/traces) and the Pyroscope profiler ingest (/ingest). Recording them
-// stores big mocks that at replay schema-match the app's re-emitted telemetry
-// and fall into the fuzzy-matcher, which shingles the ~150–200 KB bodies and
-// OOMs the agent. Bypassing them keeps the pool clean and the matcher out of it.
-var telemetryEgressPaths = map[string]struct{}{
-	"/v1/traces": {}, // OpenTelemetry OTLP/HTTP trace export
-	"/ingest":    {}, // Pyroscope continuous-profiler upload
-}
-
-// isTelemetryEgress reports whether an outgoing request is a fire-and-forget
-// telemetry export (see telemetryEgressPaths). The record paths skip storing
-// these; decodeHTTP short-circuits them with a synthetic 200 so their large
-// bodies never reach the fuzzy-matcher.
-func isTelemetryEgress(method string, u *url.URL) bool {
-	if method != http.MethodPost || u == nil {
-		return false
-	}
-	_, ok := telemetryEgressPaths[u.Path]
-	return ok
-}
+// The former isTelemetryEgress / telemetryEgressPaths legacy bypass ({/v1/traces,
+// /ingest} POST) was removed: both paths are built-in telemetry defaults now, so
+// models.ResolvePassThrough handles them — and, unlike the legacy check, it
+// honours a user mode:"off" override instead of unconditionally re-skipping.

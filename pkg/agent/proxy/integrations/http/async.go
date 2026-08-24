@@ -217,13 +217,10 @@ func liveReqToMock(input *req) *models.Mock {
 	}}
 }
 
-// flakyHeaderNoise returns the package flaky-header list as a header-noise map.
-// Shared by MatchRequestShape and decode.go's auto-header-noise setup so the
-// two can't drift.
+// flakyHeaderNoise returns the flaky-header list as a header-noise map.
+// Shared by MatchRequestShape and decode.go's auto-header-noise setup so the two
+// can't drift. The response assertion shares the underlying models list but not
+// this function — it must compare names exactly, not through a noise map.
 func flakyHeaderNoise() map[string][]string {
-	nm := make(map[string][]string, len(flakyHeaders))
-	for _, fh := range flakyHeaders {
-		nm[fh] = []string{}
-	}
-	return nm
+	return models.FlakyHeaderNoise()
 }
