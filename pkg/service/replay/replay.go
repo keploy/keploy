@@ -3044,9 +3044,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
+			// startupMocks is reported at INFO, not DEBUG, on purpose: it is the
+			// only signal that the startup section was actually captured. Every
+			// other trace of it (mapdb.GetStartup, determineMockingStrategy) is
+			// DEBUG, and CI lanes do not run the replay at debug level — so
+			// without this a run that silently recorded ZERO startup mocks looks
+			// identical to one that recorded them correctly, and the whole
+			// feature is unobservable from a green pipeline.
 			r.logger.Info("Successfully saved test-mock mappings",
 				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings.TestCases)))
+				zap.Int("numTests", len(actualTestMockMappings.TestCases)),
+				zap.Int("startupMocks", len(actualTestMockMappings.Startup)))
 		}
 	}
 
