@@ -39,7 +39,7 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 //		return CmdError{Type: Init, Err: errors.New("not implemented")}
 //	}
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
 	// On Windows, commands are typically executed via 'cmd /C' or 'powershell -Command'
 	// to handle complex shell-like logic in 'userCmd'. 'cmd /C' is the most robust default.
 	cmd := exec.CommandContext(ctx, "cmd", "/C", userCmd)
@@ -70,8 +70,13 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 
 	logger.Info("Starting Application (Windows):", zap.String("executing_cli", cmd.String()))
 
-	// Start the command
-	err := cmd.Start()
+	// Start the command. On a native run this goes through the registered
+	// starter, which creates the process suspended, loads the interception shim
+	// into it and then resumes it — Windows has no DYLD_INSERT_LIBRARIES, so
+	// that has to happen at process creation. With no starter registered (a
+	// docker command, or interception disabled) this is exactly the cmd.Start()
+	// it always was.
+	err := startApplication(cmd, kind)
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}

@@ -84,6 +84,15 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
 		r.Post("/test-capture/begin", a.BeginTestErrorCapture)
+		// Per-test scope API for `keploy mock record|replay` — a user's test
+		// runner marks per-test boundaries so mocks are attributed / restricted
+		// per test. See pkg/agent/routes/scope.go.
+		r.Post("/scope/begin", a.HandleScopeBegin)
+		r.Post("/scope/end", a.HandleScopeEnd)
+		r.Get("/scope/windows", a.HandleScopeWindows)
+		r.Post("/scope/table", a.HandleScopeTable)
+		r.Get("/mock/stats", a.HandleMockStats)
+		r.Get("/mock/captured", a.HandleCapturedMocks)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		// Long-lived streaming endpoints. /pcap/traffic emits a

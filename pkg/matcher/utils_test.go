@@ -476,17 +476,22 @@ func TestCloneNoiseMap(t *testing.T) {
 	}
 }
 
-// TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported pins a known gap that
-// this change deliberately does NOT paper over.
+// TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported pins that the matcher
+// deliberately does NOT paper over an indexed path.
 //
 // The JSON walker never adds an array position to its keys — every element of
 // `items` is walked under the key "items" — so an index-free path works and an
-// indexed one matches nothing. Normalizing the indexed form by dropping numeric
-// segments looks obvious and is a trap: noise keys are matched with
-// strings.Contains, so "items.0.id" would collapse to "items.id", which is a
-// substring of "items.idempotency_key" and would silence it. That trades this
-// change's silent false negative for a wider one, so the indexed form is left
-// unmatched (loud) until the walker itself carries positions.
+// indexed one matches nothing. Normalizing the indexed form here by dropping
+// numeric segments looks obvious and is a trap, twice over. Noise keys are
+// matched with strings.Contains, so "items.0.id" would collapse to "items.id",
+// a substring of "items.idempotency_key", and would silence it. And a string
+// cannot tell an array position from a numeric object key, so "data.2026.count"
+// would collapse to "data.count" and name a different field entirely.
+//
+// Producers get this right by construction instead: BodyNoiseFromJSONDiff walks
+// the two documents in step with this walker, so it knows which numeric segments
+// are positions because it can see the arrays. An entry recorded before that
+// existed keeps failing loudly here, and WarnUnmatchableBodyNoise names it.
 func TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported(t *testing.T) {
 	exp := `{"items":[{"product":{"name":"Laptop","stock":99}}]}`
 	act := `{"items":[{"product":{"name":"Laptop","stock":100}}]}`

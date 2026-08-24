@@ -22,6 +22,7 @@ import (
 	testdb "go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/pkg/service/contract"
 	"go.keploy.io/server/v3/pkg/service/diff"
+	"go.keploy.io/server/v3/pkg/service/mock"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/pkg/service/replay"
 	"go.keploy.io/server/v3/pkg/service/report"
@@ -50,6 +51,12 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		}
 	}
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, commonServices.Storage, cfg)
+	// mockSvc reuses the SAME AgentClient instrumentation, mock/mapping DBs and
+	// (in enterprise) RecordHooks that record/replay use, so every runtime
+	// behaviour those apply to the wrapped command — LD_PRELOAD/java-agent/Go
+	// binary TLS shims, time-freeze, secret obfuscation — applies to
+	// `keploy mock` unchanged. OSS uses the file-backed store.
+	mockSvc := mock.New(logger, commonServices.Instrumentation, commonServices.YamlMockDb, commonServices.YamlMappingDb, mock.FileStore{}, nil, cfg)
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	diffSvc := diff.New(logger, commonServices.YamlReportDb, commonServices.YamlTestDB)
@@ -58,6 +65,8 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return recordSvc, nil
 	case "test":
 		return replaySvc, nil
+	case "mock-record", "mock-replay":
+		return mockSvc, nil
 	case "templatize", "config", "update", "export", "import", "sanitize", "normalize":
 		return toolsSvc, nil
 	case "contract":

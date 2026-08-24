@@ -91,6 +91,9 @@ builds:
       - -s -w -X main.version={{.Version}}
       - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
       - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
+    # Still cgo, but no longer for the interception backend — that is pure Go
+    # now. The Postgres integration pulls pg_query_go, which embeds the
+    # Postgres parser in C, so the mingw cross-toolchain stays.
     env:
       - CGO_ENABLED=1
       - CC=x86_64-w64-mingw32-gcc

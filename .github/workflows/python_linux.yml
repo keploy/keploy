@@ -122,13 +122,20 @@ jobs:
         run: |
           DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
           mkdir -p $DOCKER_CONFIG/cli-plugins
-          curl -SL https://github.com/docker/compose/releases/download/v2.33.1/docker-compose-linux-x86_64 -o $DOCKER_CONFIG/cli-plugins/docker-compose
+          # --fail matters more than the retries: without it curl writes the
+          # HTTP error body into the plugin file and exits 0, chmod +x happily
+          # marks it executable, and the failure only surfaces later as
+          # "docker: unknown command: docker compose". Observed on run
+          # 32473729951, where this fetched 92 bytes instead of the binary.
+          curl -fSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/docker/compose/releases/download/v2.33.1/docker-compose-linux-x86_64 \
+            -o $DOCKER_CONFIG/cli-plugins/docker-compose
           chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
           docker compose version
 
       - name: Install necessary dependencies
         run: |
-          sudo apt-get install -y build-essential gcc python3-dev libpq-dev pkg-config
+          sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y build-essential gcc python3-dev libpq-dev pkg-config
 
       - id: record
         uses: ./.github/actions/download-binary

@@ -1,7 +1,6 @@
 package contract
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +13,20 @@ import (
 )
 
 // InferSchema derives an OpenAPI 3.0 document from recorded HTTP test cases.
+//
+// Bodies are described by the same fold HTTPDocToOpenAPI uses (schemaForValue /
+// mergeSchemas / finalizeSchema) rather than by a second inference routine.
+// Keeping one implementation is the point: this used to decode with plain
+// encoding/json, so every JSON number arrived as a float64 and every integer
+// field was typed "number" - the same body run through the two surfaces of one
+// command produced two different contracts.
+//
+// Observations of the same operation are merged rather than one overwriting the
+// other. Request bodies used to be first-wins and responses last-wins, two
+// opposite policies in one function, which was invisible only while every
+// number was a float64: with integers typed as integers, a price of 10 in one
+// test case and 9.99 in another would otherwise produce a contract that depends
+// on the order the test cases happened to be walked in.
 func InferSchema(testCases []models.TestCase) (*openapi3.T, error) {
 	doc := &openapi3.T{
 		OpenAPI: "3.0.0",
@@ -23,6 +36,15 @@ func InferSchema(testCases []models.TestCase) (*openapi3.T, error) {
 		},
 		Paths: openapi3.NewPaths(),
 	}
+
+	// Raw, unfinalized schemas accumulated across every test case that touched
+	// the operation. They stay unfinalized until the fold is complete: filling
+	// in a default early turns "not observed yet" into a real type, and merging
+	// that with a later observation then reads as a conflict. The operation
+	// pointer identifies a path and method uniquely, which is exactly the key
+	// these are accumulated per.
+	requestSchemas := make(map[*openapi3.Operation]map[string]interface{})
+	responseSchemas := make(map[*openapi3.Operation]map[string]map[string]interface{})
 
 	for _, tc := range testCases {
 		method := strings.ToUpper(string(tc.HTTPReq.Method))
@@ -48,40 +70,55 @@ func InferSchema(testCases []models.TestCase) (*openapi3.T, error) {
 			pathItem.SetOperation(method, op)
 		}
 
-		if requestSchema, ok := inferSchemaFromBody(tc.HTTPReq.Body); ok && op.RequestBody == nil {
-			op.RequestBody = &openapi3.RequestBodyRef{
-				Value: &openapi3.RequestBody{
-					Required: false,
-					Content: openapi3.Content{
-						"application/json": &openapi3.MediaType{Schema: requestSchema},
-					},
-				},
-			}
+		if requestSchema, ok := inferSchemaFromBody(tc.HTTPReq.Body); ok {
+			requestSchemas[op] = mergeSchemas(requestSchemas[op], requestSchema)
 		}
 
 		statusCode := strconv.Itoa(tc.HTTPResp.StatusCode)
-		desc := tc.HTTPResp.StatusMessage
-		if desc == "" {
-			desc = http.StatusText(tc.HTTPResp.StatusCode)
-		}
-		if desc == "" {
-			desc = "response"
-		}
-		// Copy to avoid pointer aliasing across loop iterations
-		description := desc
-
-		response := &openapi3.Response{Description: &description}
-		if responseSchema, ok := inferSchemaFromBody(tc.HTTPResp.Body); ok {
-			response.Content = openapi3.Content{
-				"application/json": &openapi3.MediaType{Schema: responseSchema},
+		if op.Responses.Value(statusCode) == nil {
+			desc := tc.HTTPResp.StatusMessage
+			if desc == "" {
+				desc = http.StatusText(tc.HTTPResp.StatusCode)
 			}
+			if desc == "" {
+				desc = "response"
+			}
+			// Copy to avoid pointer aliasing across loop iterations
+			description := desc
+			op.Responses.Set(statusCode, &openapi3.ResponseRef{Value: &openapi3.Response{Description: &description}})
 		}
 
-		op.Responses.Set(statusCode, &openapi3.ResponseRef{Value: response})
+		if responseSchema, ok := inferSchemaFromBody(tc.HTTPResp.Body); ok {
+			if responseSchemas[op] == nil {
+				responseSchemas[op] = make(map[string]map[string]interface{})
+			}
+			responseSchemas[op][statusCode] = mergeSchemas(responseSchemas[op][statusCode], responseSchema)
+		}
 	}
 
 	if doc.Paths.Len() == 0 {
 		return nil, errors.New("no HTTP test cases found to infer schema")
+	}
+
+	// Every observation is in; resolve the placeholders and attach the result.
+	for op, schema := range requestSchemas {
+		finalizeSchema(schema)
+		op.RequestBody = &openapi3.RequestBodyRef{
+			Value: &openapi3.RequestBody{
+				Required: false,
+				Content: openapi3.Content{
+					"application/json": &openapi3.MediaType{Schema: openAPISchemaRef(schema)},
+				},
+			},
+		}
+	}
+	for op, byStatus := range responseSchemas {
+		for statusCode, schema := range byStatus {
+			finalizeSchema(schema)
+			op.Responses.Value(statusCode).Value.Content = openapi3.Content{
+				"application/json": &openapi3.MediaType{Schema: openAPISchemaRef(schema)},
+			}
+		}
 	}
 
 	return doc, nil
@@ -109,53 +146,49 @@ func extractPath(rawURL string) (string, error) {
 	return path, nil
 }
 
-func inferSchemaFromBody(body string) (*openapi3.SchemaRef, bool) {
+// inferSchemaFromBody returns a raw, unfinalized map-form schema for a recorded
+// body, or ok=false when the body is empty or not JSON this generator can
+// describe.
+func inferSchemaFromBody(body string) (map[string]interface{}, bool) {
 	trimmed := strings.TrimSpace(body)
 	if trimmed == "" {
 		return nil, false
 	}
 
-	var value any
-	if err := json.Unmarshal([]byte(trimmed), &value); err != nil {
+	// decodeJSONBody, not encoding/json: it keeps integer literals as int64, so
+	// an integer field is typed "integer" instead of "number", and an id above
+	// 2^53 stays exact. It is also stricter about trailing data, where a
+	// concatenated body would otherwise be described by its first document
+	// alone.
+	value, err := decodeJSONBody(trimmed)
+	if err != nil {
 		return nil, false
 	}
 
-	return inferSchemaRef(value), true
+	return schemaForValue(value), true
 }
 
-func inferSchemaRef(value any) *openapi3.SchemaRef {
-	switch v := value.(type) {
-	case nil:
-		s := openapi3.NewSchema()
-		s.Nullable = true
-		return openapi3.NewSchemaRef("", s)
-	case string:
-		return openapi3.NewSchemaRef("", openapi3.NewStringSchema())
-	case bool:
-		return openapi3.NewSchemaRef("", openapi3.NewBoolSchema())
-	case float64:
-		return openapi3.NewSchemaRef("", openapi3.NewFloat64Schema())
-	case []any:
-		arraySchema := openapi3.NewArraySchema()
-		if len(v) > 0 {
-			arraySchema.Items = inferSchemaRef(v[0])
-		} else {
-			// OpenAPI requires Items on array schemas; default to empty object.
-			arraySchema.Items = openapi3.NewSchemaRef("", openapi3.NewObjectSchema())
-		}
-		return openapi3.NewSchemaRef("", arraySchema)
-	case map[string]any:
-		objectSchema := openapi3.NewObjectSchema()
-		properties := make(openapi3.Schemas, len(v))
-
-		for key, val := range v {
-			properties[key] = inferSchemaRef(val)
-		}
-		objectSchema.Properties = properties
-		// Do not mark all fields Required from a single sample; inference
-		// from one observation cannot determine which fields are optional.
-		return openapi3.NewSchemaRef("", objectSchema)
-	default:
-		return openapi3.NewSchemaRef("", openapi3.NewStringSchema())
+// openAPISchemaRef converts a finalized map-form schema to the kin-openapi
+// representation this document is built from. A schema with no type is left
+// untyped, which is how a conflict between observations is expressed.
+func openAPISchemaRef(s map[string]interface{}) *openapi3.SchemaRef {
+	schema := openapi3.NewSchema()
+	if t, ok := s["type"].(string); ok && t != "" {
+		schema.Type = &openapi3.Types{t}
 	}
+	if s["nullable"] == true {
+		schema.Nullable = true
+	}
+	if props := propertiesOf(s); props != nil {
+		schema.Properties = make(openapi3.Schemas, len(props))
+		for key, prop := range props {
+			schema.Properties[key] = openAPISchemaRef(prop)
+		}
+	}
+	if items := itemsOf(s); items != nil {
+		schema.Items = openAPISchemaRef(items)
+	}
+	// Fields are deliberately not marked Required: inference cannot tell an
+	// optional field that happened to be present from a mandatory one.
+	return openapi3.NewSchemaRef("", schema)
 }

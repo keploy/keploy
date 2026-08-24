@@ -212,24 +212,50 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
 			h.Logger.Debug("url noise", zap.Any("url noise", urlNoise))
 
-			// Egress bypass for telemetry exports (POST /v1/traces, /ingest). These
-			// are live, fire-and-forget telemetry the app emits every run, not
-			// recorded dependencies — they have no real matching mock, so matching
-			// falls through to the HTTP fuzzy-matcher, which shingles the large
-			// (~150–200 KB) bodies. Under replay concurrency those transient shingle
-			// sets dominate the agent heap and OOM the sidecar (measured: ~432 MB of
-			// a ~1.1 GB peak). Short-circuit with a synthetic 200 — both OTLP/HTTP and
-			// Pyroscope treat any 2xx as success — so the client is satisfied and the
-			// body is never fuzzy-matched. Hardcoded pending a configurable rule.
-			if isTelemetryEgress(input.method, input.url) {
-				h.Logger.Debug("egress bypass: synthesizing 200 for telemetry export; skipping mock match",
+			// Telemetry / noisy-egress passthrough. Configurable via
+			// record.passThroughPorts / passThroughHosts (see models.PassThroughRule),
+			// with built-in defaults (POST /v1/traces, /ingest) as a "skip" fallback.
+			// These are live, fire-and-forget telemetry the app emits every run, not
+			// recorded dependencies — matching them falls through to the HTTP
+			// fuzzy-matcher, which shingles the large (~150–200 KB) bodies and OOMs
+			// the sidecar (measured: ~432 MB of a ~1.1 GB peak). We short-circuit
+			// BEFORE h.match:
+			//   - skip:      synthesize a bare 200 (OTLP/HTTP & Pyroscope treat any
+			//                2xx as success); no mock is consulted.
+			//   - recordOne: serve ONE recorded response for (method,path)
+			//                body-agnostically for every matching call (never
+			//                consumed), falling back to a synthetic 200 when nothing
+			//                was recorded — so replay never errors and the body is
+			//                never fuzzy-matched.
+			ptHost := request.Host
+			if ptHost == "" && input.url != nil {
+				ptHost = input.url.Host
+			}
+			var ptPort uint32
+			if dstCfg != nil {
+				ptPort = uint32(dstCfg.Port)
+			}
+			if rule, matched := passThroughEgressDecision(opts, ptHost, ptPort, input.method, input.url); matched {
+				mode := rule.Mode
+				out := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+				served := "synthetic-200"
+				// Serve a recorded mock when one exists — for recordOne always, and
+				// for skip too: an existing test-set may have legitimately recorded
+				// this endpoint (before it became a skip default), and synthesizing a
+				// 200 over it would change replay behaviour on unchanged test data.
+				// Non-consuming; falls back to the synthetic 200 when nothing matches.
+				if recorded := h.serveOnePassThroughMock(mockDb, input, ptHost, ptPort, rule.QueryKeys); recorded != nil {
+					out = recorded
+					served = "recorded"
+				}
+				h.Logger.Debug("egress passthrough: serving without mock match",
+					zap.String("mode", string(mode)), zap.String("served", served),
 					zap.String("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
-				resp := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-				if _, werr := clientConn.Write([]byte(resp)); werr != nil {
+				if _, werr := clientConn.Write(out); werr != nil {
 					if ctx.Err() != nil {
 						return
 					}
-					utils.LogError(h.Logger, werr, "egress bypass: failed to write synthetic /v1/traces response", zap.Any("metadata", utils.GetReqMeta(request)))
+					utils.LogError(h.Logger, werr, "egress passthrough: failed to write response", zap.Any("metadata", utils.GetReqMeta(request)))
 					errCh <- werr
 					return
 				}
@@ -237,7 +263,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// mirroring the matched-response path below.
 				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 				if err != nil {
-					h.Logger.Debug("egress bypass: client closed connection after /v1/traces", zap.Error(err))
+					h.Logger.Debug("egress passthrough: client closed connection", zap.Error(err))
 					errCh <- nil
 					return
 				}
@@ -316,6 +342,27 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						zap.String("closest", report.ClosestMock),
 						zap.String("diff", report.Diff),
 						zap.String("next_step", report.NextSteps))
+				}
+
+				// On-miss policy (keploy mock replay --on-miss): passthrough or
+				// record dials the real dependency and relays the exchange so an
+				// unrecorded call succeeds instead of hard-failing. record also
+				// captures it for the CLI to append to the set at end-of-run.
+				if opts.OnMiss.PassesThroughOnMiss() {
+					handled, phErr := h.serveOnMiss(ctx, clientConn, reqBuf, request, input.body, dstCfg, opts)
+					if phErr != nil {
+						h.Logger.Debug("on-miss passthrough failed; falling back to hard miss", zap.Error(phErr), zap.Any("metadata", utils.GetReqMeta(request)))
+					} else if handled {
+						// Served live — continue the keep-alive loop for the next
+						// request on this connection. Not reported as a miss.
+						reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+						if err != nil {
+							h.Logger.Debug("client closed connection after on-miss passthrough", zap.Error(err))
+							errCh <- nil
+							return
+						}
+						continue
+					}
 				}
 
 				// No mock matched — send a 502 so the application gets a

@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -91,6 +92,46 @@ func findComposeFile(cmd string) []string {
 	}
 
 	return []string{}
+}
+
+// isRewritableComposeCommand reports whether appCmd is a literal docker
+// compose invocation, i.e. one that modifyDockerComposeCommand can splice
+// `-f <generated>.yaml` into.
+//
+// It is false for a wrapper — `make up`, `./start.sh`, an npm script — that
+// runs compose internally. Splicing into those produces nonsense
+// (`make -f ./docker-compose-tmp.yaml up --abort-on-container-exit`), so
+// those commands are run untouched and pointed at keploy's compose file
+// through the COMPOSE_FILE environment variable instead.
+func isRewritableComposeCommand(appCmd string) bool {
+	lower := strings.ToLower(appCmd)
+	return strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose")
+}
+
+// composeLaunchPlan decides how keploy hands its generated compose file to
+// the application command, and is pure so both branches can be tested
+// without a docker client.
+//
+// Exactly one of the two results is non-empty. A literal compose command
+// gets the file spliced in (and with it --abort-on-container-exit, which is
+// how keploy notices the app container dying). A wrapper cannot be rewritten
+// — splicing yields `make -f ./docker-compose-tmp.yaml up
+// --abort-on-container-exit` — so it runs untouched and the file travels in
+// COMPOSE_FILE instead.
+//
+// composeFileEnv is absolute: compose resolves a relative COMPOSE_FILE
+// against its own working directory and derives the project directory from
+// it, so `make -C deploy up` would otherwise look for
+// deploy/docker-compose-tmp.yaml and find nothing.
+func composeLaunchPlan(appCmd, newComposeFile, appComposePath, appServiceName string) (newCmd, composeFileEnv string) {
+	if isRewritableComposeCommand(appCmd) {
+		return modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName), ""
+	}
+	abs, err := filepath.Abs(newComposeFile)
+	if err != nil {
+		abs = newComposeFile
+	}
+	return "", abs
 }
 
 func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName string) string {

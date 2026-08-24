@@ -457,6 +457,14 @@ func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
 // input bytes (modulo timestamps, which are allowed to differ because
 // legacy uses time.Now() and V2 uses chunk timestamps).
 func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
+	// Prefer the resolved destination port. The V2 recorder derives destPort from
+	// the DestStream FakeConn, which in proxyless (observe-only) capture has no
+	// real remote port (0) — breaking port-keyed telemetry-passthrough matching.
+	// routeEgressToParser sets DstCfg.Port authoritatively; equal to the FakeConn
+	// port on the proxy path, so this is a no-op there.
+	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
+		destPort = opts.DstCfg.Port
+	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
@@ -510,14 +518,37 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		return nil, nil
 	}
 
-	// Do not record OTLP trace exports (POST /v1/traces) — live telemetry, not a
-	// dependency. See http.go/decode.go: recording them creates the volatile
-	// config mocks that drive the replay fuzzy-match OOM.
-	if isTelemetryEgress(req.Method, req.URL) {
-		h.Logger.Debug("egress bypass: not recording telemetry export (/v1/traces, /ingest)", zap.Any("metadata", utils.GetReqMeta(req)))
-		return nil, nil
+	// Telemetry / noisy-egress passthrough (config-driven via
+	// opts.PassThroughPorts/Hosts, with built-in defaults as "skip"):
+	//   - skip:      do not record (live telemetry, not a dependency).
+	//   - recordOne: keep ONE representative exchange per (method,host,port,path),
+	//                preferring the first 2xx, tagged type:config so it becomes a
+	//                session-lifetime mock served body-agnostically on replay.
+	var ptRecordOne bool
+	var ptKey string
+	{
+		ptHost := req.Host
+		if ptHost == "" && req.URL != nil {
+			ptHost = req.URL.Host
+		}
+		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL); matched {
+			if rule.Mode == models.PassThroughSkip {
+				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
+				return nil, nil
+			}
+			// recordOne: defer the dedup decision to emit time (below) so a later
+			// drop can't burn the one representative and leave zero mocks.
+			ptRecordOne = true
+			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
+			meta["type"] = "config"
+			meta["passthrough"] = string(models.PassThroughRecordOne)
+		}
 	}
 
+	ptLifetime := models.LifetimePerTest
+	if ptRecordOne {
+		ptLifetime = models.LifetimeSession
+	}
 	mock := &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
@@ -543,9 +574,14 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			ResTimestampMock: m.ResTimestampMock,
 		},
 		TestModeInfo: models.TestModeInfo{
-			Lifetime:        models.LifetimePerTest,
+			Lifetime:        ptLifetime,
 			LifetimeDerived: true,
 		},
+	}
+	// recordOne dedup, committed only now that a mock is actually being emitted.
+	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
+		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+		return nil, nil
 	}
 	return mock, nil
 }

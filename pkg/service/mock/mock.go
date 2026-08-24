@@ -2,244 +2,119 @@ package mock
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-// MockLoader implements Service. It sets up the proxy and loads mocks for a
-// given test set (and optionally a single test case) so that outgoing calls
-// from the application under test are served from those mocks. It has no
-// knowledge of running test cases or producing test reports.
-type MockLoader struct {
+// mockService implements Service for the `keploy mock record|replay` flow.
+type mockService struct {
 	logger          *zap.Logger
 	instrumentation Instrumentation
 	mockDB          MockDB
-	mappingDB       MappingDB
+	mappingDB       MappingDB // may be nil (suite-level only)
+	store           Store
+	hooks           record.RecordHooks // reused so enterprise obfuscation/encryption applies on record
 	config          *config.Config
-	outgoingCfg     OutgoingConfig
 }
 
-// NewMockLoader constructs a MockLoader.
-func NewMockLoader(
+// New constructs the mock record/replay service. mappingDB and hooks may be nil
+// (a nil hooks becomes a no-op; a nil mappingDB disables per-test scoping).
+// store must be non-nil — pass FileStore for OSS.
+func New(
 	logger *zap.Logger,
 	instrumentation Instrumentation,
 	mockDB MockDB,
 	mappingDB MappingDB,
+	store Store,
+	hooks record.RecordHooks,
 	cfg *config.Config,
-	outgoingCfg OutgoingConfig,
 ) Service {
-	return &MockLoader{
+	if hooks == nil {
+		hooks = record.BaseRecordHooks{}
+	}
+	if store == nil {
+		store = FileStore{}
+	}
+	return &mockService{
 		logger:          logger,
 		instrumentation: instrumentation,
 		mockDB:          mockDB,
 		mappingDB:       mappingDB,
+		store:           store,
+		hooks:           hooks,
 		config:          cfg,
-		outgoingCfg:     outgoingCfg,
 	}
 }
 
-// LoadMocks fetches mocks for testSetID (filtered to testCaseName when
-// non-empty) and pushes them into the proxy.
-//
-// Context lifetime contract: the caller owns ctx. LoadMocks does NOT
-// create an internal errgroup or cancel the context on return — that
-// would shut the proxy/hooks down the moment LoadMocks returned, which
-// defeats the "mocks loaded and serving" use case. Any goroutines the
-// instrumentation layer spawns are bound to the caller's ctx, so when
-// the caller cancels, both the proxy and the hooks tear down cleanly.
-// The caller is responsible for invoking NotifyGracefulShutdown on the
-// Instrumentation when the session ends.
-func (r *MockLoader) LoadMocks(ctx context.Context, testSetID string, testCaseName string) error {
-	r.logger.Debug("MockLoader: loading mocks", zap.String("testSetID", testSetID), zap.String("testCaseName", testCaseName))
-
-	// Step 1 – load eBPF hooks and start the proxy.
-	if err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{
-		Container:   r.config.ContainerName,
-		CommandType: r.config.CommandType,
-		DockerDelay: r.config.BuildDelay,
-		BuildDelay:  r.config.BuildDelay,
-		Mode:        models.MODE_TEST,
-	}); err != nil {
-		return fmt.Errorf("MockLoader: failed to set up instrumentation: %w", err)
-	}
-
-	// Step 2 – put the proxy in mock-serving mode.
-	if err := r.instrumentation.MockOutgoing(ctx, models.OutgoingOptions{
-		Rules:         r.outgoingCfg.BypassRules,
-		MongoPassword: r.outgoingCfg.MongoPassword,
-		SQLDelay:      r.outgoingCfg.SQLDelay,
-		Mocking:       r.outgoingCfg.Mocking,
-		// Same MySQL routing knobs the record/replay paths pass. Without
-		// them a MockLoader session ignores mysqlPorts entirely and
-		// honours neither the pinned ports nor disableMysqlAutoDetect.
-		MysqlPorts:             r.outgoingCfg.MysqlPorts,
-		DisableMysqlAutoDetect: r.outgoingCfg.DisableMysqlAutoDetect,
-	}); err != nil {
-		return fmt.Errorf("MockLoader: failed to enable mock-outgoing: %w", err)
-	}
-
-	// Step 3 – resolve which mocks are needed using the mapping table.
-	mocksThatHaveMappings, mocksWeNeed, expectedMockMapping, useMappingBased := r.resolveMockSets(ctx, testSetID, testCaseName)
-
-	// Step 4 – fetch mocks from the database.
-	filteredMocks, unfilteredMocks, err := r.getMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
-	if err != nil {
-		return fmt.Errorf("MockLoader: failed to fetch mocks: %w", err)
-	}
-
-	// Step 5 – push the mocks into the proxy.
-	if err := r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
-		return fmt.Errorf("MockLoader: failed to store mocks: %w", err)
-	}
-
-	// Step 6 – send filtering parameters to the agent. Mirrors the
-	// setup-time call in Replayer.RunTestSet (see replay.go:1047): when
-	// no testCaseName is provided we send an empty mapping slice (the
-	// agent still honors useMappingBased via the mapping-registry it
-	// populated in Step 5); when a specific testCaseName is provided we
-	// send that test case's mock names so the agent can restrict
-	// serving to them (matches the per-test-case call at replay.go:1437).
-	err = r.SendMockFilterParamsToAgent(ctx, expectedMockMapping, models.BaseTime, time.Now(), nil, useMappingBased)
-	if err != nil {
-		return fmt.Errorf("MockLoader: failed to send mock filter params to agent: %w", err)
-	}
-
-	err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
-	if err != nil {
-		utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
-	}
-
-	r.logger.Info("MockLoader: mocks loaded successfully",
-		zap.String("testSetID", testSetID),
-		zap.Int("filtered", len(filteredMocks)),
-		zap.Int("unfiltered", len(unfilteredMocks)),
-		zap.Bool("useMappingBased", useMappingBased),
-		zap.Int("expectedMocks", len(expectedMockMapping)),
-	)
-	return nil
+// Overridable lets a downstream build (enterprise) swap the store and record
+// hooks on a constructed mock service — the same post-construction override
+// pattern Recorder.SetRecordHooks uses. The CLI's mock command type-asserts to
+// this so enterprise can inject a registry-backed store and secret-obfuscation
+// hooks without a mock-specific constructor.
+type Overridable interface {
+	SetStore(store Store)
+	SetRecordHooks(hooks record.RecordHooks)
 }
 
-// resolveMockSets uses the MappingDB (when available) to determine which mock
-// names are relevant, mirroring the logic in Replayer.determineMockingStrategy
-// (replay.go:~3460) and the mapping population block inside RunTestSet
-// (replay.go:~992).
-//
-// Returns:
-//   - mocksThatHaveMappings: all mock names that appear in any mapping entry
-//     for the test set (used by GetFilteredMocks / GetUnFilteredMocks to decide
-//     which bucket a mock belongs to).
-//   - mocksWeNeed: the subset of mapped mocks that this particular load
-//     actually requires (restricted to testCaseName when provided; all mapped
-//     mocks otherwise).
-//   - expectedMockMapping: ordered slice of expected mock names for the
-//     single test case (when testCaseName != ""), empty otherwise. Matches
-//     the "expectedNames" slice Replayer passes to SendMockFilterParamsToAgent
-//     at replay.go:~1433.
-//   - useMappingBased: true iff the MappingDB reports meaningful mappings
-//     exist for this test set, mirroring determineMockingStrategy's return.
-//
-// All outputs are zero-valued when no meaningful mappings exist, which causes
-// MockDB to fall back to timestamp-based filtering and the agent to ignore
-// mapping-based selection.
-func (r *MockLoader) resolveMockSets(ctx context.Context, testSetID string, testCaseName string) (mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool, expectedMockMapping []string, useMappingBased bool) {
-	mocksThatHaveMappings = make(map[string]bool)
-	mocksWeNeed = make(map[string]bool)
-	expectedMockMapping = []string{}
-
-	if r.mappingDB == nil {
-		r.logger.Debug("MockLoader: no mapping DB, using timestamp-based filtering")
-		return
+// SetStore replaces the mock-set store (e.g. enterprise's registry-backed store).
+func (m *mockService) SetStore(store Store) {
+	if store != nil {
+		m.store = store
 	}
+}
 
-	testMockMappings, hasMeaningfulMappings, err := r.mappingDB.Get(ctx, testSetID)
-	if err != nil {
-		// Downgraded from Warn to Info per repo logging guideline — this
-		// path is a recoverable fallback (timestamp-based filtering is the
-		// documented next step), not an operator-actionable warning.
-		r.logger.Info("MockLoader: failed to get mappings, falling back to timestamp-based filtering",
-			zap.String("testSetID", testSetID), zap.Error(err))
-		return
+// SetRecordHooks replaces the record hooks (e.g. enterprise secret obfuscation).
+func (m *mockService) SetRecordHooks(hooks record.RecordHooks) {
+	if hooks != nil {
+		m.hooks = hooks
 	}
+}
 
-	if !hasMeaningfulMappings {
-		r.logger.Debug("MockLoader: no meaningful mappings found, using timestamp-based filtering",
-			zap.String("testSetID", testSetID))
-		return
+// setName returns the configured mock-set name, defaulting to "default".
+func (m *mockService) setName() string {
+	name := m.config.Mock.Name
+	if name == "" {
+		return "default"
 	}
+	return name
+}
 
-	useMappingBased = true
+// notifyShutdown tells the agent the session is ending so connection errors are
+// logged at debug level. Bounded so an unresponsive agent can't hang teardown.
+func (m *mockService) notifyShutdown() {
+	notifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := m.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
+		m.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+	}
+}
 
-	// Populate the full set of mapped mock names.
-	for _, mocks := range testMockMappings {
-		for _, m := range mocks {
-			mocksThatHaveMappings[m.Name] = true
+// propagateExit mirrors the wrapped runner's exit status onto keploy's own
+// process exit code (utils.ErrCode), so a wrapped `pytest`/`go test` failure
+// fails the keploy process — the contract every CI job depends on. A clean
+// runner exit leaves ErrCode at 0. phase is "record" or "replay" for logging.
+func (m *mockService) propagateExit(appErr models.AppError, phase string) {
+	switch appErr.AppErrorType {
+	case models.ErrAppStopped:
+		// Clean exit (code 0). Success.
+		m.logger.Info("test command finished successfully", zap.String("phase", phase))
+	case models.ErrCtxCanceled, "":
+		// User interrupt or nothing to report — leave ErrCode untouched.
+	case models.ErrUnExpected, models.ErrCommandError:
+		code := appErr.ExitCode
+		if code <= 0 {
+			code = 1
 		}
+		utils.ErrCode = code
+		m.logger.Info("test command exited non-zero; mirroring its exit code",
+			zap.String("phase", phase), zap.Int("exitCode", code))
+	default:
+		utils.ErrCode = 1
+		m.logger.Info("test command did not complete cleanly", zap.String("phase", phase), zap.String("reason", string(appErr.AppErrorType)))
 	}
-
-	if testCaseName != "" {
-		// Only load the mocks that belong to this specific test case.
-		if mocks, ok := testMockMappings[testCaseName]; ok {
-			expectedMockMapping = make([]string, len(mocks))
-			for i, m := range mocks {
-				mocksWeNeed[m.Name] = true
-				expectedMockMapping[i] = m.Name
-			}
-		}
-	} else {
-		// No specific test case — load all mapped mocks.
-		mocksWeNeed = mocksThatHaveMappings
-	}
-
-	return
-}
-
-// getMocks fetches filtered and unfiltered mocks from MockDB for the given
-// testSetID, using the full time range (BaseTime → now) as the window.
-func (r *MockLoader) getMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, err error) {
-	afterTime := models.BaseTime
-	beforeTime := time.Now()
-
-	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
-	if err != nil {
-		r.logger.Error("MockLoader: failed to get filtered mocks", zap.String("testSetID", testSetID), zap.Error(err))
-		return nil, nil, err
-	}
-
-	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
-	if err != nil {
-		r.logger.Error("MockLoader: failed to get unfiltered mocks", zap.String("testSetID", testSetID), zap.Error(err))
-		return nil, nil, err
-	}
-
-	return filtered, unfiltered, nil
-}
-
-func (r *MockLoader) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
-
-	// Build filter parameters
-	params := models.MockFilterParams{
-		AfterTime:          afterTime,
-		BeforeTime:         beforeTime,
-		MockMapping:        expectedMockMapping,
-		UseMappingBased:    useMappingBased,
-		TotalConsumedMocks: totalConsumedMocks,
-	}
-
-	// Send parameters to agent for filtering and mock updates
-	err := r.instrumentation.UpdateMockParams(ctx, params)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
-		return err
-	}
-
-	r.logger.Debug("Successfully sent mock filter parameters to agent",
-		zap.Bool("useMappingBased", useMappingBased),
-		zap.Int("mockMappingCount", len(expectedMockMapping)))
-
-	return nil
 }

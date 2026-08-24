@@ -1,6 +1,7 @@
 #!/bin/bash
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # Start mongo before starting keploy.
 docker network create keploy-network
@@ -8,7 +9,7 @@ docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Set up environment
 rm -rf keploy/  # Clean up old test data
-docker build -t flask-app:1.0 .  # Build the Docker image
+docker_build_retry docker build -t flask-app:1.0 .  # Build the Docker image
 
 # Configure keploy
 sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml"

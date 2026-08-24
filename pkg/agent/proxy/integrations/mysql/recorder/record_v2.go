@@ -232,7 +232,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	res.req = append(res.req, mysql.Request{PacketBundle: *clientFirstPkt})
 
 	if decodeCtx.UseSSL {
-		// Observe-only capture (proxyless / sockmap): there is no relay
+		// Observe-only capture (proxyless): there is no relay
 		// that can perform a real TLS handshake for us, so we cannot
 		// (and must not) send a KindUpgradeTLS directive — the
 		// observe-only supervisor would reject it ("proxyless observe-only

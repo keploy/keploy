@@ -65,6 +65,10 @@ jobs:
   #     below is unchanged.
   # ---------------------------------------------------------------
   build-linux:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     strategy:
       fail-fast: true
       matrix:
@@ -174,6 +178,12 @@ jobs:
   # goreleaser-on-macOS leg, just hand-rolled.
   # ---------------------------------------------------------------
   build-darwin:
+    # Longer than the repo-wide 60 because this job blocks on Apple's
+    # notarization service, an external queue whose latency we do not control
+    # and which is documented to spike well past an hour. It previously had no
+    # bound at all; 120 still turns a wedge into two hours instead of six,
+    # without failing a legitimate release during an Apple-side slowdown.
+    timeout-minutes: 120
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -284,6 +294,10 @@ jobs:
   # path that pg_query_go #138 documents as unreliable.
   # ---------------------------------------------------------------
   build-windows:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -331,6 +345,8 @@ jobs:
       - name: Build keploy.exe
         shell: bash
         env:
+          # The interception backend is pure Go, but the Postgres integration
+          # pulls pg_query_go, which is cgo.
           CGO_ENABLED: "1"
           GOOS: windows
           GOARCH: amd64
@@ -383,6 +399,10 @@ jobs:
   # so replicating it here is trivial.
   # ---------------------------------------------------------------
   release:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     needs: [build-linux, build-darwin, build-windows]
     runs-on: ubuntu-latest
     permissions:
@@ -474,6 +494,10 @@ jobs:
   # below stitches the per-arch digests into the final multi-arch
   # manifest list and signs it.
   build-docker:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     needs: build-linux
     strategy:
       fail-fast: true
@@ -553,6 +577,10 @@ jobs:
   # go (cosign walks the manifest). Kept on ubuntu-latest because
   # only docker/imagetools + cosign run here — no per-arch workload.
   build-docker-manifest:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     needs: build-docker
     runs-on: ubuntu-latest
     permissions:
@@ -612,6 +640,10 @@ jobs:
         run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.inspect.outputs.digest }}
 
   mark-latest:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     needs: [release, build-docker-manifest]
     runs-on: ubuntu-latest
     # Only mark stable releases (no pre-release suffix like -beta1, -rc1) as latest

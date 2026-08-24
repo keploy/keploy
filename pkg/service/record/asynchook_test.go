@@ -221,7 +221,7 @@ func TestAsyncPollMockExcludedFromPerTestMapping(t *testing.T) {
 
 	r := &Recorder{logger: zap.NewNop()}
 	mapping := models.TestMockMapping{TestName: "T1", MockIDs: []string{pollMock.Name, syncMockName}}
-	got := r.resolveMappingEntries(mapping, &correlationMap, &asyncMockIDs)
+	got, _, _ := r.resolveMappingEntries(mapping, &correlationMap, &asyncMockIDs, &droppedMockSet{})
 
 	for _, e := range got {
 		if e.Name == pollMock.Name {

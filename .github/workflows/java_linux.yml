@@ -80,6 +80,10 @@ jobs:
           retention-days: 7
 
   mysql_dual_conn:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -95,6 +99,13 @@ jobs:
           - job: record_build_replay_build
             record_src: build-no-race
             replay_src: build-no-race
+            # FLOAT/DOUBLE column fidelity (keploy#4426) needs BOTH
+            # binaries to carry the fix: a record binary without it
+            # writes the IEEE-754 bit pattern into the mock, and a
+            # replay binary without it panics on a correctly recorded
+            # FLOAT. So only this cell exercises the fixture; the
+            # cross-version cells leave the flag unset and skip.
+            numeric_fidelity: "true"
     name: mysql-dual-conn (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
@@ -128,6 +139,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          MYSQL_NUMERIC_FIDELITY: ${{ matrix.config.numeric_fidelity }}
         run: |
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_dual_conn/java-linux.sh
@@ -138,6 +150,10 @@ jobs:
   # needs detection at record time AND mock-derived recall at replay time,
   # so a mixed-version pair cannot exercise it. See the script header.
   mysql_auto_port:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -204,12 +220,18 @@ jobs:
           path: |
             samples-java/mysql-dual-conn/keploy/
             samples-java/mysql-dual-conn/test_logs.txt
+            samples-java/mysql-dual-conn/test_logs_drift.txt
+            samples-java/mysql-dual-conn/application.properties
             samples-java/mysql-dual-conn/autoPort_record.txt
             samples-java/mysql-dual-conn/mvn_build.log
           if-no-files-found: warn
           retention-days: 7
 
   tidb_stmt_cache:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -284,6 +306,10 @@ jobs:
           retention-days: 7
 
   async_config_poll:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -343,6 +369,12 @@ jobs:
       - name: Set up Go (for the config-service stub)
         uses: actions/setup-go@v6
         with:
+          # Deliberately NOT go.mod's version: this Go is only used to build
+          # the config-service stub in keploy/samples-java, whose own
+          # async-config-poll/config-stub/go.mod declares `go 1.21`. It never
+          # compiles keploy itself (the binaries under test are downloaded by
+          # the download-binary steps above), so it is not part of the repo's
+          # toolchain bump and must track the sample instead.
           go-version: "1.21"
 
       - name: Run async-config-poll app

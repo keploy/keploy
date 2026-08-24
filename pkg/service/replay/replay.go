@@ -1236,17 +1236,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:                  r.config.BypassRules,
-			MongoPassword:          r.config.Test.MongoPassword,
-			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
-			Mocking:                r.config.Test.Mocking,
-			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            mockNoiseConfig,
-			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
-			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
-			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
-			MysqlPorts:             r.config.MysqlPorts,
-			DisableMysqlAutoDetect: r.config.DisableMysqlAutoDetect,
+			Rules:                     r.config.BypassRules,
+			MongoPassword:             r.config.Test.MongoPassword,
+			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
+			Mocking:                   r.config.Test.Mocking,
+			Backdate:                  testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:               mockNoiseConfig,
+			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
+			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
+			SchemaNoiseStrict:         r.config.Test.SchemaNoiseStrict,
+			MysqlPorts:                r.config.MysqlPorts,
+			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
+			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+			PassThroughPorts:          r.config.Record.PassThroughPorts,
+			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1437,17 +1440,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:                  r.config.BypassRules,
-			MongoPassword:          r.config.Test.MongoPassword,
-			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
-			Mocking:                r.config.Test.Mocking,
-			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            mockNoiseConfig,
-			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
-			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
-			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
-			MysqlPorts:             r.config.MysqlPorts,
-			DisableMysqlAutoDetect: r.config.DisableMysqlAutoDetect,
+			Rules:                     r.config.BypassRules,
+			MongoPassword:             r.config.Test.MongoPassword,
+			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
+			Mocking:                   r.config.Test.Mocking,
+			Backdate:                  testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:               mockNoiseConfig,
+			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
+			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
+			SchemaNoiseStrict:         r.config.Test.SchemaNoiseStrict,
+			MysqlPorts:                r.config.MysqlPorts,
+			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
+			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+			PassThroughPorts:          r.config.Record.PassThroughPorts,
+			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -3192,7 +3198,7 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 		return pass, result
 	}
 
-	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, r.autoHeaderNoiseOpt())
 	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 
 	return pass, result
@@ -3209,7 +3215,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	}
 
 	if emitFailureLogs {
-		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false)
+		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, r.autoHeaderNoiseOpt())
 		if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return true, result
@@ -3220,13 +3226,24 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 		}
 	}
 
-	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, r.autoHeaderNoiseOpt())
 	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 	if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 		return true, result
 	}
 
 	return pass, result
+}
+
+// autoHeaderNoiseOpt ignores response headers Keploy already treats as
+// per-request volatile for egress mock matching — X-Request-Id, Date, W3C and
+// Datadog trace ids, cloud signing headers — so a test whose status and body
+// match cannot fail on a value the application mints fresh every call.
+//
+// Honours the existing --disableAutoHeaderNoise flag, which until now only
+// covered mock matching. One switch, both places.
+func (r *Replayer) autoHeaderNoiseOpt() httpMatcher.MatchOption {
+	return httpMatcher.WithAutoHeaderNoise(!r.config.Test.DisableAutoHeaderNoise)
 }
 
 func (r *Replayer) httpNoiseConfig(testSetID string) map[string]map[string][]string {
@@ -3718,7 +3735,7 @@ func (r *Replayer) executeScript(ctx context.Context, script string) error {
 		}
 	}
 
-	cmdErr := utils.ExecuteCommand(ctx, r.logger, script, cmdCancel, 25*time.Second, nil)
+	cmdErr := utils.ExecuteCommand(ctx, r.logger, script, utils.Empty, cmdCancel, 25*time.Second, nil)
 	if cmdErr.Err != nil {
 		return fmt.Errorf("failed to execute script: %w", cmdErr.Err)
 	}

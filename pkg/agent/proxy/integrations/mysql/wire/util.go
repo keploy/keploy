@@ -26,6 +26,21 @@ type DecodeContext struct {
 	RecordedClientCaps uint32 // caps from the recorded config mock
 	PreferRecordedCaps bool   // if true, prefer RecordedClientCaps over ClientCaps
 
+	// LongDataParams records which parameters of a prepared statement had
+	// their value streamed ahead of time with COM_STMT_SEND_LONG_DATA
+	// (stmtID -> set of parameter ids).
+	//
+	// It has to be tracked out of band because the wire gives no other clue:
+	// a long-sent parameter is simply ABSENT from the COM_STMT_EXECUTE
+	// payload while still being non-NULL in the null bitmap, so a decoder
+	// that reads a value for every non-NULL parameter walks off the end of
+	// the packet and rejects the command. That is what dropped every
+	// streamed-BLOB EXECUTE from the recording (#4262).
+	//
+	// The server discards long data when the statement executes or resets,
+	// so the entry is cleared at both points.
+	LongDataParams map[uint32]map[uint16]bool
+
 	//runtime stmt-id → query mapping set when COM_STMT_PREP matches
 	StmtIDToQuery map[uint32]string
 	// Statement ID counter for generating unique statement IDs during replay
@@ -156,7 +171,12 @@ func IsGenericResponsePkt(packet *mysql.PacketBundle) bool {
 
 func IsNoResponseCommand(command string) bool {
 	switch command {
-	case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE), mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
+	// COM_QUIT is answered only by the server closing the socket. Leaving it
+	// out made the async recorder queue it as a response-bearing command,
+	// where it is never paired and, worse, keeps the queue non-empty — which
+	// suppresses the heldResp guard for any genuinely orphaned response that
+	// follows it.
+	case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE), mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA), mysql.CommandStatusToString(mysql.COM_QUIT):
 		return true
 	default:
 		return false
