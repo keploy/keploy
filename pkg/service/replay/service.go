@@ -158,6 +158,13 @@ type InstrumentState struct {
 type MappingDB interface {
 	Insert(ctx context.Context, mapping *models.Mapping) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
+	// GetStartup returns the test-set-scoped startup mocks — boot traffic
+	// (handshakes, pool warm-up, config fetches) that belongs to no single
+	// test and therefore never appears in Get's per-test map. Needed only by
+	// the mapping-based path, which loads mocks strictly by name; the
+	// timestamp path reloads the same mocks via LoadBefore. A missing file or
+	// absent section returns nil, nil.
+	GetStartup(ctx context.Context, testSetID string) ([]models.MockEntry, error)
 	// Exists reports whether the mappings.yaml file is present on disk
 	// for the given test-set. Distinct from Get's second return (which
 	// reports "file present AND contains at least one test case with

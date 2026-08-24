@@ -1122,6 +1122,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Check if mappings are present and decide filtering strategy
 	var expectedTestMockMappings map[string][]models.MockEntry
 	var useMappingBased bool
+	// startupMockNames: the test-set's boot traffic. Merged into every test's
+	// expected-name list because the mapping-based loader takes names only.
+	var startupMockNames []string
 	var isMappingEnabled bool
 	isMappingEnabled = !r.config.DisableMapping
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
@@ -1258,10 +1261,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 		mocksThatHaveMappings := make(map[string]bool)
 
 		mocksWeNeed := make(map[string]bool)
+
+		// Startup mocks are needed by EVERY test, so they go into both maps.
+		// mocksThatHaveMappings alone would be wrong: GetFilteredMocks prunes on
+		// `isMappedToSpecificTest && !isNeededForCurrentRun`, so a name present
+		// only in the first map is dropped whenever a subset of tests is run.
+		for _, n := range startupMockNames {
+			mocksThatHaveMappings[n] = true
+			mocksWeNeed[n] = true
+		}
 
 		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
 			// Populate the Registry
@@ -1280,8 +1292,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 				}
 			} else {
-				// If running all tests, we need all mapped mocks
-				mocksWeNeed = mocksThatHaveMappings
+				// Running all tests: every mapped mock is needed. Copy rather
+				// than alias — mocksWeNeed was already seeded with the startup
+				// names above, and `mocksWeNeed = mocksThatHaveMappings` would
+				// alias both variables to one map (harmless today, but it makes
+				// the two maps impossible to diverge later).
+				for n := range mocksThatHaveMappings {
+					mocksWeNeed[n] = true
+				}
 			}
 		}
 		// Get all mocks for mapping-based filtering
@@ -1362,10 +1380,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if cmdType != utils.DockerCompose {
 
-		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 		mocksThatHaveMappings := make(map[string]bool)
 
 		mocksWeNeed := make(map[string]bool)
+
+		// Startup mocks are needed by EVERY test, so they go into both maps.
+		// mocksThatHaveMappings alone would be wrong: GetFilteredMocks prunes on
+		// `isMappedToSpecificTest && !isNeededForCurrentRun`, so a name present
+		// only in the first map is dropped whenever a subset of tests is run.
+		for _, n := range startupMockNames {
+			mocksThatHaveMappings[n] = true
+			mocksWeNeed[n] = true
+		}
 
 		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
 			// Populate the Registry
@@ -1384,8 +1411,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 				}
 			} else {
-				// If running all tests, we need all mapped mocks
-				mocksWeNeed = mocksThatHaveMappings
+				// Running all tests: every mapped mock is needed. Copy rather
+				// than alias — mocksWeNeed was already seeded with the startup
+				// names above, and `mocksWeNeed = mocksThatHaveMappings` would
+				// alias both variables to one map (harmless today, but it makes
+				// the two maps impossible to diverge later).
+				for n := range mocksThatHaveMappings {
+					mocksWeNeed[n] = true
+				}
 			}
 		}
 		// Get all mocks for mapping-based filtering
@@ -1596,6 +1629,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		totalConsumedMocks[m.Name] = m
 		passingTotalConsumedMocks[m.Name] = m
 	}
+
+	// Record the boot-time traffic as the test-set's STARTUP section.
+	//
+	// These are, by definition, the mocks consumed before the first test fired
+	// — driver handshakes, auth, connection-pool warm-up. They belong to no
+	// single test case, so upsertActualTestMockMapping's per-test window filter
+	// can never attribute them (its own comment calls them "session-level
+	// traffic that should not be per-test") and until now they were simply
+	// absent from mappings.yaml.
+	//
+	// That absence is invisible on the timestamp path, which reloads them via
+	// disk.LoadBefore(firstWindowStart), but fatal on the mapping path, which
+	// loads strictly by name. Writing them here is what lets the reader hand
+	// them back for every test.
+	setStartupMocks(actualTestMockMappings, consumedMocks)
 
 	// Snapshot the post-setup consumed-mock baseline. These are the
 	// reusable/session mocks (driver handshake, auth, connection pool
@@ -1811,10 +1859,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				respTime = testCase.GrpcResp.Timestamp
 			}
 
-			expectedNames := make([]string, len(expectedTestMockMappings[testCase.Name]))
-			for i, m := range expectedTestMockMappings[testCase.Name] {
-				expectedNames[i] = m.Name
-			}
+			// Per-test names PLUS the test-set's startup names. On this path the
+			// agent calls disk.LoadByNames(MockMapping) and loads nothing else,
+			// so omitting startup names leaves the app's boot mocks (handshake,
+			// auth, pool warm-up) out of the pool for every test — the gap the
+			// startup section exists to close. The timestamp path needs no
+			// equivalent: it reloads them via disk.LoadBefore(firstWindowStart).
+			expectedNames := mergeStartupMockNames(expectedTestMockMappings[testCase.Name], startupMockNames)
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased)
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
@@ -4337,18 +4388,44 @@ func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName
 	}
 }
 
-func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID string, isMappingEnabled bool) (bool, map[string][]models.MockEntry) {
+// The third return is the test-set's startup mock names — boot traffic that
+// belongs to no test case. On the mapping-based path the agent loads strictly
+// by name (Agent.loadPerTestMocks -> disk.LoadByNames), so these must be merged
+// into every per-test name list or the app's boot mocks are absent from the
+// pool. The timestamp path does not need them: it reloads the same mocks via
+// disk.LoadBefore(firstWindowStart).
+//
+// Returned even when the mapping is not "meaningful", so a caller that falls
+// back to timestamp filtering still sees them; harmless there, since that path
+// ignores names entirely.
+func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID string, isMappingEnabled bool) (bool, map[string][]models.MockEntry, []string) {
 	// Default to timestamp-based strategy with empty mappings.
 	defaultMappings := make(map[string][]models.MockEntry)
 
 	if r.mappingDB == nil {
 		r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
-		return false, defaultMappings
+		return false, defaultMappings, nil
 	}
 
 	if !isMappingEnabled {
 		// The calling function already logs this, so we don't log it again here.
-		return false, defaultMappings
+		return false, defaultMappings, nil
+	}
+
+	// Startup mocks are read independently of the per-test mappings: they are
+	// absent from `tests:` by design, so Get() cannot surface them. A read
+	// failure here is not fatal — it costs the startup names, not the run.
+	var startupNames []string
+	if startup, serr := r.mappingDB.GetStartup(ctx, testSetID); serr != nil {
+		r.logger.Debug("Failed to read startup mocks from mappings; continuing without them",
+			zap.String("testSetID", testSetID),
+			zap.Error(serr))
+	} else {
+		for _, e := range startup {
+			if e.Name != "" {
+				startupNames = append(startupNames, e.Name)
+			}
+		}
 	}
 
 	// Try to get mappings from the database.
@@ -4357,21 +4434,28 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 		r.logger.Debug("Failed to get mappings, falling back to timestamp-based filtering",
 			zap.String("testSetID", testSetID),
 			zap.Error(err))
-		return false, defaultMappings
+		return false, defaultMappings, startupNames
 	}
 
 	if hasMeaningfulMappings {
 		// Meaningful mappings were found, so use the mapping-based strategy.
 		r.logger.Debug("Using mapping-based mock filtering strategy",
 			zap.String("testSetID", testSetID),
-			zap.Int("totalMappings", len(expectedTestMockMappings)))
-		return true, expectedTestMockMappings
+			zap.Int("totalMappings", len(expectedTestMockMappings)),
+			zap.Int("startupMocks", len(startupNames)))
+		return true, expectedTestMockMappings, startupNames
 	}
 
 	// No meaningful mappings were found, so fall back to the timestamp-based strategy.
+	//
+	// NOTE: a test set whose ONLY outgoing traffic is startup traffic still
+	// lands here — hasMeaningfulMappings counts per-test entries only. That is
+	// deliberate: mapping-based selection exists to pick mocks PER TEST, and
+	// with no per-test entry there is nothing to select. Such a set keeps the
+	// timestamp path, which loads startup mocks via LoadBefore anyway.
 	r.logger.Debug("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
 		zap.String("testSetID", testSetID))
-	return false, defaultMappings
+	return false, defaultMappings, startupNames
 }
 
 // isMockSubset checks if all expected mocks are present in the actual mocks list

@@ -1423,3 +1423,89 @@ func printFieldDiffTable(fieldDiffs []models.MockFieldDiff) {
 	}
 	table.Render()
 }
+
+// setStartupMocks records the test-set-scoped startup section on a mapping
+// being built during replay.
+//
+// consumed is the mock set captured by GetConsumedMocks immediately after the
+// application became ready and before the first test case ran, so every entry
+// is boot traffic by construction — there is no need to infer membership from
+// per-test window arithmetic.
+//
+// Deduped by name and order-stable, so re-running a test set produces a
+// byte-identical section rather than churning mappings.yaml.
+//
+// A mock may legitimately appear BOTH here and under a test's list: session-
+// and connection-tier mocks are consumed at boot and again by tests that
+// re-handshake, and upsertActualTestMockMapping deliberately keeps those in the
+// per-test list ("always keep" carve-out). Both sides only ever ADD names to
+// the pool the agent loads, so the overlap is harmless — and removing it would
+// reintroduce the empty-mapping bug that carve-out exists to prevent.
+func setStartupMocks(mapping *models.Mapping, consumed []models.MockState) {
+	if mapping == nil || len(consumed) == 0 {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(consumed))
+	entries := make([]models.MockEntry, 0, len(consumed))
+	for _, m := range consumed {
+		if m.Name == "" {
+			continue
+		}
+		if _, dup := seen[m.Name]; dup {
+			continue
+		}
+		seen[m.Name] = struct{}{}
+
+		timestamp := m.Timestamp
+		if m.ReqTimestampMock != "" {
+			if t, err := time.Parse(time.RFC3339Nano, m.ReqTimestampMock); err == nil {
+				timestamp = t.Unix()
+			}
+		}
+		entries = append(entries, models.MockEntry{
+			Name:             m.Name,
+			Kind:             string(m.Kind),
+			Timestamp:        timestamp,
+			ReqTimestampMock: m.ReqTimestampMock,
+			ResTimestampMock: m.ResTimestampMock,
+		})
+	}
+
+	mapping.Startup = entries
+}
+
+// mergeStartupMockNames returns the per-test mock names followed by any startup
+// names not already present.
+//
+// Order is per-test first, then startup, each in its original order — stable
+// across runs so the agent sees a deterministic list. Deduped because a
+// session- or connection-tier mock legitimately appears in both (consumed at
+// boot AND kept in the per-test list by upsertActualTestMockMapping's
+// always-keep carve-out); LoadByNames would otherwise be handed the same name
+// twice.
+func mergeStartupMockNames(perTest []models.MockEntry, startup []string) []string {
+	out := make([]string, 0, len(perTest)+len(startup))
+	seen := make(map[string]struct{}, len(perTest)+len(startup))
+	for _, m := range perTest {
+		if m.Name == "" {
+			continue
+		}
+		if _, dup := seen[m.Name]; dup {
+			continue
+		}
+		seen[m.Name] = struct{}{}
+		out = append(out, m.Name)
+	}
+	for _, n := range startup {
+		if n == "" {
+			continue
+		}
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
+}
