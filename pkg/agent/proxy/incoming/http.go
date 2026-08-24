@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -19,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -979,9 +979,15 @@ func isStaleConnError(err error) bool {
 	// not included — a slow upstream isn't a stale-pool case and
 	// replay would just re-pay the timeout while double-charging the
 	// upstream for the original.
-	if errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.EPIPE) ||
-		errors.Is(err, syscall.ECONNABORTED) {
+	//
+	// Classified through pkg/neterr rather than against syscall.E*
+	// directly: on Windows those constants are APPLICATION_ERROR-space
+	// values Winsock never returns, so the direct comparison is inert
+	// and every pooled-connection reset became a hard 502 instead of a
+	// transparent redial.
+	if neterr.IsConnReset(err) ||
+		neterr.IsBrokenPipe(err) ||
+		neterr.IsConnAborted(err) {
 		return true
 	}
 	if errors.Is(err, net.ErrClosed) {
