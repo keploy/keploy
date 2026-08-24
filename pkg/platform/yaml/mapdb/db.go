@@ -41,6 +41,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	}
 
 	finalMappings := make(map[string][]models.MockEntry)
+	var existingStartup []models.MockEntry
 
 	// Detect whether a mappings file already exists in either format,
 	// and remember which one so we write back in the same format.
@@ -68,6 +69,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		for _, t := range existingConfig.TestCases {
 			finalMappings[t.ID] = t.Mocks
 		}
+		existingStartup = existingConfig.Startup
 	}
 
 	for _, t := range mapping.TestCases {
@@ -75,6 +77,28 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	}
 
 	newMapping := CreateMappingStructure(testSetID, finalMappings, db.logger)
+
+	// Carry the startup section across the flatten-and-rebuild above.
+	//
+	// finalMappings is a per-test map, so everything that is NOT a test entry
+	// is invisible to it and CreateMappingStructure cannot reconstruct what it
+	// never saw. Without this the section is written once by the caller and
+	// silently dropped on the very next Insert — the same class of bug as the
+	// mock_entries/mocks mismatch on the api-server boundary.
+	//
+	// Replace-or-keep, mirroring how test entries merge: a caller that supplies
+	// startup mocks is the fresh authority for this test set (replay captures
+	// them anew on every run), while a caller that supplies none must not wipe
+	// what is already on disk.
+	//
+	// UpsertBatch needs no equivalent — it decodes into *models.Mapping and
+	// mutates TestCases in place, so the section survives untouched.
+	switch {
+	case len(mapping.Startup) > 0:
+		newMapping.Startup = mapping.Startup
+	case len(existingStartup) > 0:
+		newMapping.Startup = existingStartup
+	}
 
 	encodedData, err := EncodeMappingF(newMapping, db.logger, effFormat)
 	if err != nil {
@@ -255,6 +279,66 @@ func (db *MappingDb) Exists(ctx context.Context, testSetID string) (bool, error)
 		fileName = "mappings"
 	}
 	return yaml.FileExists(ctx, db.logger, mappingPath, fileName)
+}
+
+// GetStartup reads the test-set-scoped startup section from mappings.yaml.
+//
+// Startup mocks are the traffic the app produced while booting — driver
+// handshakes, connection-pool warm-up, config/secret fetches — recorded before
+// the first test request fired. They belong to no single test, so they have no
+// entry under `tests:` and Get() never returns them.
+//
+// This matters only on the MAPPING-BASED path. Agent.loadPerTestMocks picks its
+// loader by mode:
+//
+//	UseMappingBased && len(MockMapping) > 0 -> disk.LoadByNames(MockMapping)
+//	strict window                           -> disk.LoadWindow(...) + disk.LoadBefore(firstWindowStart)
+//	otherwise                               -> disk.LoadAll()
+//
+// The window path loads startup mocks explicitly via LoadBefore. The mapping
+// path loads ONLY the names it is handed, so a startup mock that appears in no
+// test's list is absent from the pool for every test. Callers merge these names
+// into the per-test list to close that gap.
+//
+// A missing file, or a file with no startup section, is not an error — it
+// returns nil, which is the correct answer for every mapping written before the
+// section existed.
+func (db *MappingDb) GetStartup(ctx context.Context, testSetID string) ([]models.MockEntry, error) {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+
+	fileData, detected, err := yaml.ReadFileAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	mapping, err := DecodeMappingF(fileData, db.logger, detected)
+	if err != nil {
+		return nil, err
+	}
+	if mapping == nil || len(mapping.Startup) == 0 {
+		return nil, nil
+	}
+
+	out := make([]models.MockEntry, 0, len(mapping.Startup))
+	for _, e := range mapping.Startup {
+		if e.Name == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+
+	db.logger.Debug("loaded test-set startup mocks from mappings",
+		zap.String("testSetID", testSetID),
+		zap.Int("startupMocks", len(out)))
+
+	return out, nil
 }
 
 // Get reads test-mock mappings from a YAML file
