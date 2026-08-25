@@ -281,6 +281,43 @@ func (db *MappingDb) Exists(ctx context.Context, testSetID string) (bool, error)
 	return yaml.FileExists(ctx, db.logger, mappingPath, fileName)
 }
 
+// decodeMapping reads and decodes a test-set's mappings file.
+//
+// Shared by Get and GetStartup so the filename-defaulting, format detection and
+// decode live in one place. Returns (nil, false, nil) when the file is absent —
+// callers distinguish "no file" from "decoded" via the bool rather than by
+// inspecting the error, so a missing mapping is never an error path.
+func (db *MappingDb) decodeMapping(ctx context.Context, testSetID string) (*models.Mapping, string, bool, error) {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+
+	fileData, detected, err := yaml.ReadFileAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		if os.IsNotExist(err) {
+			db.logger.Debug("Mapping file does not exist",
+				zap.String("testSetID", testSetID),
+				zap.String("path", mappingPath))
+			return nil, "", false, nil
+		}
+		utils.LogError(db.logger, err, "failed to read mapping file",
+			zap.String("testSetID", testSetID),
+			zap.String("path", mappingPath),
+			zap.String("fileName", fileName))
+		return nil, "", false, err
+	}
+
+	mapping, err := DecodeMappingF(fileData, db.logger, detected)
+	if err != nil {
+		utils.LogError(db.logger, err, "failed to decode mapping",
+			zap.String("testSetID", testSetID))
+		return nil, "", false, err
+	}
+	return mapping, filepath.Join(mappingPath, fileName+"."+detected.FileExtension()), true, nil
+}
+
 // GetStartup reads the test-set-scoped startup section from mappings.yaml.
 //
 // Startup mocks are the traffic the app produced while booting — driver
@@ -304,25 +341,11 @@ func (db *MappingDb) Exists(ctx context.Context, testSetID string) (bool, error)
 // returns nil, which is the correct answer for every mapping written before the
 // section existed.
 func (db *MappingDb) GetStartup(ctx context.Context, testSetID string) ([]models.MockEntry, error) {
-	mappingPath := filepath.Join(db.path, testSetID)
-	fileName := db.MapFileName
-	if fileName == "" {
-		fileName = "mappings"
-	}
-
-	fileData, detected, err := yaml.ReadFileAny(ctx, db.logger, mappingPath, fileName, db.Format)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	mapping, err := DecodeMappingF(fileData, db.logger, detected)
+	mapping, _, present, err := db.decodeMapping(ctx, testSetID)
 	if err != nil {
 		return nil, err
 	}
-	if mapping == nil || len(mapping.Startup) == 0 {
+	if !present || mapping == nil || len(mapping.Startup) == 0 {
 		return nil, nil
 	}
 

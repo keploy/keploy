@@ -1919,7 +1919,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// auth, pool warm-up) out of the pool for every test — the gap the
 			// startup section exists to close. The timestamp path needs no
 			// equivalent: it reloads them via disk.LoadBefore(firstWindowStart).
-			expectedNames := mergeStartupMockNames(expectedTestMockMappings[testCase.Name], startupMockNames)
+			expectedNames := models.MergeStartupMockNames(expectedTestMockMappings[testCase.Name], startupMockNames)
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased, time.Time{})
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {

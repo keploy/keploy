@@ -68,3 +68,62 @@ func contains(hay, needle string) bool {
 	}
 	return false
 }
+
+func TestMergeStartupMockNames(t *testing.T) {
+	t.Run("per-test first, then startup", func(t *testing.T) {
+		got := MergeStartupMockNames(
+			[]MockEntry{{Name: "t1"}, {Name: "t2"}},
+			[]string{"s1", "s2"},
+		)
+		want := []string{"t1", "t2", "s1", "s2"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("got %v want %v", got, want)
+			}
+		}
+	})
+
+	// Session/connection-tier mocks are consumed at boot AND kept in the
+	// per-test list by upsertActualTestMockMapping's always-keep carve-out, so
+	// the overlap is normal and must not produce a duplicate name.
+	t.Run("a mock in both sections appears once", func(t *testing.T) {
+		got := MergeStartupMockNames(
+			[]MockEntry{{Name: "shared"}, {Name: "t1"}},
+			[]string{"shared", "s1"},
+		)
+		want := []string{"shared", "t1", "s1"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("got %v want %v", got, want)
+			}
+		}
+	})
+
+	t.Run("no startup mocks leaves the per-test list intact", func(t *testing.T) {
+		got := MergeStartupMockNames([]MockEntry{{Name: "t1"}}, nil)
+		if len(got) != 1 || got[0] != "t1" {
+			t.Fatalf("got %v", got)
+		}
+	})
+
+	// A test with no mocks of its own still needs the app's boot mocks.
+	t.Run("startup only", func(t *testing.T) {
+		got := MergeStartupMockNames(nil, []string{"s1"})
+		if len(got) != 1 || got[0] != "s1" {
+			t.Fatalf("got %v", got)
+		}
+	})
+
+	t.Run("both empty yields an empty non-nil slice", func(t *testing.T) {
+		got := MergeStartupMockNames(nil, nil)
+		if got == nil || len(got) != 0 {
+			t.Fatalf("got %v", got)
+		}
+	})
+}
