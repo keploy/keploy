@@ -24,7 +24,7 @@ env:
   # when set (so operators can override without editing this file),
   # falling back to `main`. Pin to a specific SHA via the repo var if
   # a feat branch needs to carry a cross-repo change.
-  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+  INTEGRATION_REF: d7ed82e78b27ecb7012101e5b71087a97b22fdea
 
 jobs:
   golangci:
