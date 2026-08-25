@@ -282,3 +282,50 @@ func jsonContainsField(data []byte, field string) bool {
 	_, ok := raw[field]
 	return ok
 }
+
+// MergeStartupMockNames returns the per-test mock names followed by any startup
+// names not already present.
+//
+// Lives here rather than in a replay package because BOTH replay paths need it:
+// pkg/service/replay (the `keploy test` flow) and pkg/service/runner (the flow
+// enterprise's sandbox drives). Duplicating it once already meant the startup
+// section reached one path and not the other.
+//
+// Order is per-test first, then startup, each in its original order — stable
+// across runs so the agent sees a deterministic list. Deduped because a session-
+// or connection-tier mock legitimately appears in both (consumed at boot AND
+// kept in the per-test list by the recorder's always-keep carve-out).
+//
+// Fast path when there is no startup section — the overwhelmingly common case —
+// skips the dedupe map entirely, since this runs once per test case.
+func MergeStartupMockNames(perTest []MockEntry, startup []string) []string {
+	if len(startup) == 0 {
+		out := make([]string, 0, len(perTest))
+		for _, m := range perTest {
+			if m.Name != "" {
+				out = append(out, m.Name)
+			}
+		}
+		return out
+	}
+
+	out := make([]string, 0, len(perTest)+len(startup))
+	seen := make(map[string]struct{}, len(perTest)+len(startup))
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	for _, m := range perTest {
+		add(m.Name)
+	}
+	for _, n := range startup {
+		add(n)
+	}
+	return out
+}

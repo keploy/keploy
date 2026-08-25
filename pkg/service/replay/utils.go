@@ -1474,38 +1474,3 @@ func setStartupMocks(mapping *models.Mapping, consumed []models.MockState) {
 
 	mapping.Startup = entries
 }
-
-// mergeStartupMockNames returns the per-test mock names followed by any startup
-// names not already present.
-//
-// Order is per-test first, then startup, each in its original order — stable
-// across runs so the agent sees a deterministic list. Deduped because a
-// session- or connection-tier mock legitimately appears in both (consumed at
-// boot AND kept in the per-test list by upsertActualTestMockMapping's
-// always-keep carve-out); LoadByNames would otherwise be handed the same name
-// twice.
-func mergeStartupMockNames(perTest []models.MockEntry, startup []string) []string {
-	out := make([]string, 0, len(perTest)+len(startup))
-	seen := make(map[string]struct{}, len(perTest)+len(startup))
-	for _, m := range perTest {
-		if m.Name == "" {
-			continue
-		}
-		if _, dup := seen[m.Name]; dup {
-			continue
-		}
-		seen[m.Name] = struct{}{}
-		out = append(out, m.Name)
-	}
-	for _, n := range startup {
-		if n == "" {
-			continue
-		}
-		if _, dup := seen[n]; dup {
-			continue
-		}
-		seen[n] = struct{}{}
-		out = append(out, n)
-	}
-	return out
-}
