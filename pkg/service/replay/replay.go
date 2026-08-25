@@ -558,6 +558,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
+	testSets = r.applyTestSetOrder(testSets)
 	// cmdType is hoisted above the one-shot RunApplication block; the
 	// original assignment that lived here is removed to keep a single
 	// canonical declaration.
@@ -4092,7 +4093,19 @@ func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-	return testSets, nil
+	return r.applyTestSetOrder(testSets), nil
+}
+
+func (r *Replayer) applyTestSetOrder(testSets []string) []string {
+	orderer, ok := r.hookImpl.(TestSetOrderer)
+	if !ok {
+		return testSets
+	}
+	reordered := orderer.OrderTestSets(testSets)
+	if len(reordered) != len(testSets) {
+		return testSets
+	}
+	return reordered
 }
 
 func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
