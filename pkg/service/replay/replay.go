@@ -558,7 +558,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-	testSets = moveRunLastTestSetsToEnd(testSets, r.config.Test.RunLastTestSets)
+	testSets = r.applyTestSetOrder(testSets)
 	// cmdType is hoisted above the one-shot RunApplication block; the
 	// original assignment that lived here is removed to keep a single
 	// canonical declaration.
@@ -4034,27 +4034,19 @@ func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-	return moveRunLastTestSetsToEnd(testSets, r.config.Test.RunLastTestSets), nil
+	return r.applyTestSetOrder(testSets), nil
 }
 
-func moveRunLastTestSetsToEnd(testSets, runLast []string) []string {
-	if len(runLast) == 0 || len(testSets) == 0 {
+func (r *Replayer) applyTestSetOrder(testSets []string) []string {
+	orderer, ok := r.hookImpl.(TestSetOrderer)
+	if !ok {
 		return testSets
 	}
-	last := make(map[string]bool, len(runLast))
-	for _, id := range runLast {
-		last[id] = true
+	reordered := orderer.OrderTestSets(testSets)
+	if len(reordered) != len(testSets) {
+		return testSets
 	}
-	ordered := make([]string, 0, len(testSets))
-	deferred := make([]string, 0, len(runLast))
-	for _, id := range testSets {
-		if last[id] {
-			deferred = append(deferred, id)
-			continue
-		}
-		ordered = append(ordered, id)
-	}
-	return append(ordered, deferred...)
+	return reordered
 }
 
 func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
