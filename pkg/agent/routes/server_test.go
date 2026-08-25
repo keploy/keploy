@@ -118,11 +118,30 @@ func TestAgentBindAddr_NativeModeIsLoopbackOnly(t *testing.T) {
 // trade-off in docker mode: the container's internal listener must stay on
 // every interface for the docker proxy to forward the published port in.
 // Host-network exposure is closed at the publish step instead (see
-// GenerateKeployAgentService), not here.
+// GenerateKeployAgentService and agentPortPublish), not here.
+//
+// Asserted by splitting the address rather than by "is not 127.0.0.1:". A
+// negative prefix check passes for every other string, and several of those
+// are wrong in ways that matter: "localhost:%d" binds loopback and would break
+// docker mode under a test named BindsAllInterfaces, and "" binds every
+// interface on a RANDOM port — a silent misbind, which is worse than an error.
+// Splitting also avoids failing on "0.0.0.0:%d", which is byte-identical in
+// effect to ":%d".
 func TestAgentBindAddr_DockerModeBindsAllInterfaces(t *testing.T) {
 	addr := agentBindAddr(12345, true)
-	if strings.HasPrefix(addr, "127.0.0.1:") {
-		t.Fatalf("docker mode must stay reachable on the container's non-loopback interface, got addr %q", addr)
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("agentBindAddr(12345, true) = %q, which is not a valid listen address: %v", addr, err)
+	}
+	if port != "12345" {
+		t.Errorf("agentBindAddr(12345, true) = %q, want port 12345", addr)
+	}
+	// The unspecified address, however it is spelled.
+	switch host {
+	case "", "0.0.0.0", "::":
+	default:
+		t.Errorf("docker mode must bind every interface inside the container so docker can forward the published port in; got host %q from %q", host, addr)
 	}
 }
 

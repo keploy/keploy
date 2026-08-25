@@ -39,6 +39,13 @@ func TestGenerateKeployAgentService_PublishesAgentPortLoopbackOnly(t *testing.T)
 	if !sequenceContains(ports, wantAgentPublish) {
 		t.Fatalf("expected agent port published loopback-only as %q, got %s", wantAgentPublish, formatSequence(ports))
 	}
+	// Presence alone is not the invariant. A ports block carrying BOTH the
+	// loopback-scoped mapping and a bare one would satisfy the check above
+	// while leaving the control plane on every host interface, which is the
+	// exposure this test exists to prevent.
+	if unrestricted := "16789:16789"; sequenceContains(ports, unrestricted) {
+		t.Fatalf("agent port is also published unrestricted as %q, which re-exposes the unauthenticated control plane on every host interface; got %s", unrestricted, formatSequence(ports))
+	}
 
 	// The proxy port has no auth concern (it's the traffic-interception
 	// listener app containers are meant to reach) and must stay published on

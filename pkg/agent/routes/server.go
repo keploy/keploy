@@ -45,9 +45,8 @@ const bindRetryInterval = 500 * time.Millisecond
 // (see GenerateKeployAgentService, which now publishes only to the host's
 // loopback).
 func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocker bool, router http.Handler) {
-	logger.Info("Starting Agent's HTTP server on :", zap.Int("port", port))
-
 	addr := agentBindAddr(port, isDocker)
+	logger.Info("Starting Agent's HTTP server", zap.String("addr", addr))
 	srv := &http.Server{
 		Handler: router,
 	}
@@ -75,12 +74,12 @@ func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocke
 	// this agent's startup; then serve on the acquired listener.
 	listener, err := listenWithRetry(srvCtx, logger, addr, bindRetryBudget, bindRetryInterval)
 	if err != nil {
-		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.Error(err))
+		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.String("addr", addr), zap.Error(err))
 		return
 	}
 
 	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.Error(err))
+		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.String("addr", addr), zap.Error(err))
 		return
 	}
 	logger.Info("HTTP server stopped")
