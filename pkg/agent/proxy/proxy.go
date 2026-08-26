@@ -193,6 +193,9 @@ type Proxy struct {
 	// mode: GetSessionFor falls back to the single session field above.
 	// Guarded by sessionMu.
 	sessionResolver func(tgid uint32) *agent.Session
+	// peerSessionResolver routes by peer address for datapaths with no TGID
+	// view (userspace, node-scoped). See SetPeerSessionResolver.
+	peerSessionResolver func(peerIP net.IP) *agent.Session
 
 	synchronous bool
 
@@ -1042,6 +1045,44 @@ func (p *Proxy) SetSessionResolver(fn func(tgid uint32) *agent.Session) {
 	p.sessionResolver = fn
 }
 
+// SetPeerSessionResolver installs a per-PEER session resolver, used when the
+// connection's owning process cannot be identified by TGID.
+//
+// The TGID resolver above is fed by eBPF, which observes which process owns a
+// socket. A userspace datapath has no such view: connections arrive over TCP
+// from another network namespace and the only identity available is the peer
+// address. For a node-scoped agent serving many pods, that address IS the
+// identity — a pod IP is unique on the node — so it can carry the same routing
+// decision the TGID would have.
+//
+// Optional and additive: with no resolver installed nothing changes, and
+// resolution falls back to the TGID resolver and then to the single session.
+func (p *Proxy) SetPeerSessionResolver(fn func(peerIP net.IP) *agent.Session) {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	p.peerSessionResolver = fn
+}
+
+// GetSessionForPeer resolves the session owning a connection from its peer
+// address, falling back to the single active session.
+//
+// Ordering note: the peer resolver is consulted FIRST because it is only ever
+// installed by a datapath that has no usable TGID. Callers that do have a TGID
+// should keep using GetSessionFor.
+func (p *Proxy) GetSessionForPeer(peerIP net.IP) *agent.Session {
+	p.sessionMu.RLock()
+	resolver := p.peerSessionResolver
+	single := p.session
+	p.sessionMu.RUnlock()
+	// Called outside the lock: external code must not run under sessionMu.
+	if resolver != nil && peerIP != nil {
+		if s := resolver(peerIP); s != nil {
+			return s
+		}
+	}
+	return single
+}
+
 // GetSessionFor returns the session that owns the connection originating
 // from tgid. With a resolver installed it dispatches per-app; otherwise
 // (or if the resolver returns nil for an unmapped/late connection) it
@@ -1837,7 +1878,20 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
-	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
+	// Prefer peer-aware resolution when the datapath offers it. A node-scoped
+	// userspace datapath (one agent serving JVMs in many pods) sees the same
+	// ephemeral source port from several network namespaces at once, so the port
+	// alone is ambiguous there; the peer address disambiguates it. The eBPF
+	// datapath keys per namespace already and does not implement this, so it
+	// keeps the historical call below unchanged.
+	byPeer, peerAware := p.DestInfo.(agent.DestInfoByPeer)
+	var destInfo *agent.NetworkAddress
+	var err error
+	if peerAware {
+		destInfo, err = byPeer.GetByPeer(ctx, remoteAddr.IP, uint16(sourcePort))
+	} else {
+		destInfo, err = p.DestInfo.Get(ctx, uint16(sourcePort))
+	}
 	if err != nil {
 		// Gracefully handle untracked connections (eBPF lookup failed)
 		// This can happen when:
@@ -1873,15 +1927,25 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
 
-	// releases the occupied source port when done fetching the destination info
-	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
+	// releases the occupied source port when done fetching the destination info.
+	// Mirrors the peer-aware lookup above: deleting by port alone on a
+	// node-scoped datapath would evict OTHER pods that legitimately hold the
+	// same ephemeral port, silently un-tracking their in-flight connections.
+	if peerAware {
+		err = byPeer.DeleteByPeer(ctx, remoteAddr.IP, uint16(sourcePort))
+	} else {
+		err = p.DestInfo.Delete(ctx, uint16(sourcePort))
+	}
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
 		return err
 	}
 
-	//get the session rule
-	rule := p.getSession()
+	//get the session rule.
+	// Peer-aware first: a node-scoped userspace datapath has no TGID for the
+	// connection, so the peer address is the only identity available. Falls back
+	// to the single session, which is what every eBPF-backed mode uses.
+	rule := p.GetSessionForPeer(remoteAddr.IP)
 	if rule == nil {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule")
 		return err
