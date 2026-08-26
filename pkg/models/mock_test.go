@@ -272,8 +272,17 @@ func TestPostgresV3Response_CopyIn_RoundTrip(t *testing.T) {
 	if decoded.CopyOut != nil {
 		t.Fatalf("CopyOut: omitempty should have kept this nil on the CopyIn-only fixture, got %+v", decoded.CopyOut)
 	}
-	// TODO(validation): once a Validate() method or a custom
-	// UnmarshalYAML lands on PostgresV3Response, add a separate test
-	// that feeds a malformed fixture carrying BOTH Rows and CopyIn
-	// and asserts the validator rejects it.
+
+	// Valid shape passes Validate()
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("Validate(): valid CopyIn response failed validation: %v", err)
+	}
+
+	// Malformed shape carrying both Rows and CopyIn must be rejected by Validate()
+	malformed := decoded
+	malformed.Rows = []PostgresV3Cells{{{Value: int64(42)}}}
+	if err := malformed.Validate(); err == nil {
+		t.Fatalf("Validate(): want non-nil error on malformed response with both Rows and CopyIn, got nil")
+	}
 }
+
