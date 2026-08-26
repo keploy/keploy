@@ -341,15 +341,16 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		return nil
 	}
 
-	if onMockRecorded != nil {
-		onMockRecorded(newMock)
-	}
-
 	// Tag the source worker PID (per-PID record attribution, Design A). Transient
 	// hint consumed by the recorder to bucket this mock to the worker that made
 	// the call; never persisted. 0 when unavailable ⇒ recorder falls back to the
-	// scope time window.
-	newMock.SourcePID = opts.SrcPid
+	// scope time window. Stamped BEFORE the post-record hook so the hook sees the
+	// same mock the recorder will, matching the V2 path (supervisor.emitMockCore).
+	newMock.SourcePID = opts.AttributionPID()
+
+	if onMockRecorded != nil {
+		onMockRecorded(newMock)
+	}
 
 	if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
 		// Route HTTP mocks through the sync manager. The manager uses its

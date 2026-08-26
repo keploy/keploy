@@ -61,7 +61,7 @@ func TestCorrelateScopes(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := correlateScopes(tc.windows, tc.mocks)
+			got, _ := correlateScopes(tc.windows, tc.mocks)
 			require.Len(t, got, len(tc.want), "number of tests with mappings")
 			for name, wantNames := range tc.want {
 				entries, ok := got[name]
@@ -106,7 +106,7 @@ func TestCorrelateScopesParallelPID(t *testing.T) {
 		{name: "a-call", ts: ts(20), pid: 100}, // in BOTH by time; PID => "a"
 		{name: "b-call", ts: ts(25), pid: 200}, // in BOTH by time; PID => "b"
 	}
-	got := correlateScopes(windows, mocks)
+	got, _ := correlateScopes(windows, mocks)
 
 	require.ElementsMatch(t, []string{"a-call"}, names(got["a"]),
 		"worker A's call must attribute to test a, not the later-started overlapping window b")
@@ -114,7 +114,7 @@ func TestCorrelateScopesParallelPID(t *testing.T) {
 
 	// A PID-less mock (e.g. a child process's call) falls back to the timestamp
 	// scan: the innermost (latest-started) containing window wins.
-	fallback := correlateScopes(windows, []capturedMock{{name: "orphan", ts: ts(20), pid: 0}})
+	fallback, _ := correlateScopes(windows, []capturedMock{{name: "orphan", ts: ts(20), pid: 0}})
 	require.ElementsMatch(t, []string{"orphan"}, names(fallback["b"]),
 		"PID-less mock should fall back to the innermost time window")
 }

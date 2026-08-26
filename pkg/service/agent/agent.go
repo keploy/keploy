@@ -58,6 +58,10 @@ type Agent struct {
 	// test on large suites.
 	strictLogOnce sync.Once
 
+	// pidNsWarnOnce de-dupes the "reported worker PID is not in the agent's PID
+	// namespace" warning to one line per agent process. See warnIfWorkerPIDUnresolvable.
+	pidNsWarnOnce sync.Once
+
 	// setupCtx is the Setup-scoped context captured during Setup().
 	// It outlives any single /agent/incoming HTTP stream — which is the
 	// whole point: StartIncomingProxy uses this instead of the request ctx

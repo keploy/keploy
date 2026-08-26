@@ -36,11 +36,14 @@ func scopedNames(ms []*models.Mock) []string {
 func TestScopedMockDbFiltersReads(t *testing.T) {
 	// m1,m2,m3 belong to tests (in the universe); "shared" belongs to no test.
 	db := &fakeMockDb{mocks: []*models.Mock{{Name: "m1"}, {Name: "m2"}, {Name: "m3"}, {Name: "shared"}}}
-	universe := map[string]struct{}{"m1": {}, "m2": {}, "m3": {}}
+	const worker = uint32(4242)
 
 	// Worker allowed m1,m3: it sees m1,m3 (its test) + "shared" (unmapped), but
 	// NOT m2 (another test's mock). Applies to per-test AND session tiers.
-	s := &scopedMockDb{MockMemDb: db, allow: map[string]struct{}{"m1": {}, "m3": {}}, universe: universe}
+	p := &Proxy{}
+	p.SetWorkerScope(worker, []string{"m1", "m3"})
+	p.SetMappedUniverse([]string{"m1", "m2", "m3"})
+	s := &scopedMockDb{MockMemDb: db, p: p, workerPID: worker}
 	for _, get := range []func() ([]*models.Mock, error){
 		s.GetPerTestMocksInWindow, s.GetFilteredMocks, s.GetFilteredMocksInWindow,
 		s.GetSessionMocks, s.GetUnFilteredMocks, s.GetSessionScopedMocks,
@@ -52,10 +55,68 @@ func TestScopedMockDbFiltersReads(t *testing.T) {
 	}
 
 	// A nil universe (no mappings pushed) is a passthrough — never hide anything.
-	pass := &scopedMockDb{MockMemDb: db, allow: map[string]struct{}{"m1": {}}, universe: nil}
-	got, err := pass.GetSessionMocks()
+	pass := &Proxy{}
+	pass.SetWorkerScope(worker, []string{"m1"})
+	got, err := (&scopedMockDb{MockMemDb: db, p: pass, workerPID: worker}).GetSessionMocks()
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"m1", "m2", "m3", "shared"}, scopedNames(got))
+}
+
+// A scoped view is built once per TCP connection, but HTTP/1.1 keep-alive makes
+// one connection carry requests from several tests. The view must therefore read
+// the worker's CURRENT allowlist on every lookup, not the one that was installed
+// when the connection opened.
+func TestScopedMockDbReReadsAllowlistPerRead(t *testing.T) {
+	db := &fakeMockDb{mocks: []*models.Mock{{Name: "m1"}, {Name: "m2"}, {Name: "shared"}}}
+	const worker = uint32(4242)
+
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"m1", "m2"})
+	p.SetWorkerScope(worker, []string{"m1"}) // test 1 begins
+	s := &scopedMockDb{MockMemDb: db, p: p, workerPID: worker}
+
+	got, err := s.GetPerTestMocksInWindow()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"m1", "shared"}, scopedNames(got))
+
+	// Test boundary on the SAME connection: /scope/end then /scope/begin.
+	p.ClearWorkerScope(worker)
+	got, err = s.GetPerTestMocksInWindow()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"m1", "m2", "shared"}, scopedNames(got),
+		"between tests the worker sees the whole pool, as when it has no mapping")
+
+	p.SetWorkerScope(worker, []string{"m2"})
+	got, err = s.GetPerTestMocksInWindow()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"m2", "shared"}, scopedNames(got),
+		"test 2 must see ITS mock, not the one snapshotted when the connection opened")
+}
+
+// The record-side registry is independent of the replay-side allowlists, and
+// resolves a caller's PID up the process tree the same way scopedFor does.
+func TestResolveWorkerPID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("process-tree walk is linux only")
+	}
+	p := &Proxy{}
+	self := uint32(os.Getpid())
+
+	// Empty registry: fast path, no /proc walk, no resolution.
+	require.Equal(t, uint32(0), p.ResolveWorkerPID(self))
+
+	// A replay allowlist must NOT make a record-mode call resolve.
+	p.SetWorkerScope(self, []string{"m"})
+	require.Equal(t, uint32(0), p.ResolveWorkerPID(self))
+
+	// Registering the PARENT resolves a call made by this process up to it.
+	p.RegisterRecordWorker(uint32(os.Getppid()))
+	require.Equal(t, uint32(os.Getppid()), p.ResolveWorkerPID(self))
+	require.Equal(t, uint32(0), p.ResolveWorkerPID(0))
+	require.Equal(t, uint32(0), p.ResolveWorkerPID(4000000000), "dead/unknown PID resolves to nothing")
+
+	p.ClearRecordWorkers()
+	require.Equal(t, uint32(0), p.ResolveWorkerPID(self))
 }
 
 func TestScopedForResolvesWorkerAndFallsBack(t *testing.T) {

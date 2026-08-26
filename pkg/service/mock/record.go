@@ -75,6 +75,15 @@ func (m *mockService) Record(ctx context.Context) error {
 	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
 		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
 	}
+	// The per-test mapping is part of the set: UpsertBatch unions with what is
+	// on disk and ResetCounterID below reissues the same mock-N names, so a
+	// surviving mapping would attribute this run's mocks to the previous run's
+	// tests.
+	if m.mappingDB != nil {
+		if err := m.mappingDB.Delete(persistCtx, name); err != nil {
+			m.logger.Warn("failed to clear the previous per-test mock mappings; stale test entries may survive this re-record", zap.String("mock-set", name), zap.Error(err))
+		}
+	}
 	m.mockDB.ResetCounterID()
 
 	// 3. Arm the record proxy and stream captured mocks.
@@ -167,7 +176,8 @@ func (m *mockService) Record(ctx context.Context) error {
 			if werr != nil {
 				m.logger.Debug("failed to read per-test scope windows; recording suite-level", zap.Error(werr))
 			} else if len(windows) > 0 {
-				byTest := correlateScopes(windows, recorded)
+				byTest, attr := correlateScopes(windows, recorded)
+				warnOnWeakAttribution(m.logger, windows, byTest, attr)
 				if len(byTest) > 0 {
 					if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
 						m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
@@ -211,13 +221,19 @@ type capturedMock struct {
 // replay, exactly as the timestamp-based fallback would treat it.
 //
 // When a mock carries a source PID it is attributed to the SAME worker's window
-// (exact, so overlapping parallel windows don't steal each other's mocks). That
-// PID match is exact only when the worker made the call itself and the agent
-// shares its PID namespace (the normal `keploy mock <cmd>` wrap); a call made by
-// a CHILD of the worker, or a containerized/cross-namespace worker whose
-// self-reported PID differs from the kernel PID, falls back to the timestamp
-// scan — which is exact for sequential record and best-effort under overlap.
-func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[string][]models.MockEntry {
+// (exact, so overlapping parallel windows don't steal each other's mocks). The
+// proxy resolves that PID from the connection's origin up the /proc tree to the
+// registered worker (Proxy.ResolveWorkerPID), so a call made by a CHILD of the
+// worker — a browser's network process — still attributes exactly. It falls back
+// to the timestamp scan when no worker registered, when the worker's process
+// tree is not an ancestor of the caller (a runner that connects to an
+// out-of-tree browser server), or when the runner's self-reported PID is from a
+// different PID namespace than the agent's. The scan is exact for sequential
+// record and best-effort under overlap; the caller warns when it was used while
+// more than one worker was recording.
+//
+// The second return counts how each mock was resolved, for that warning.
+func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) (map[string][]models.MockEntry, attribution) {
 	// Sort windows by start so overlapping scopes resolve to the innermost
 	// (latest-started) window deterministically.
 	sort.SliceStable(windows, func(i, j int) bool { return windows[i].Start.Before(windows[j].Start) })
@@ -241,6 +257,7 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 		}
 		return best
 	}
+	var attr attribution
 	for _, mk := range mocks {
 		best := -1
 		if mk.pid != 0 {
@@ -252,11 +269,63 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 			// a child process): fall back to a pure timestamp scan — correct when
 			// windows don't overlap, i.e. sequential record.
 			best = containingWindow(mk, false)
+			if best != -1 {
+				attr.byTimestamp++
+			}
+		} else {
+			attr.byWorkerPID++
 		}
 		if best == -1 {
 			continue
 		}
 		byTest[windows[best].Name] = append(byTest[windows[best].Name], models.MockEntry{Name: mk.name})
 	}
-	return byTest
+	return byTest, attr
+}
+
+// attribution counts how correlateScopes resolved each mock it placed.
+type attribution struct {
+	byWorkerPID int
+	byTimestamp int
+}
+
+// warnOnWeakAttribution surfaces the two failure modes that are otherwise
+// completely silent, and only show up much later as a replay serving another
+// test's data: mocks bucketed by timestamp while two workers were running
+// concurrently, and tests that ended up with no mocks at all.
+func warnOnWeakAttribution(logger *zap.Logger, windows []models.ScopeWindow, byTest map[string][]models.MockEntry, attr attribution) {
+	if attr.byTimestamp > 0 && distinctWorkers(windows) > 1 {
+		logger.Warn("parallel record: some mocks could not be attributed to the worker that made the call and were bucketed by timestamp instead; with several workers recording at once that bucketing is a guess, and a test can end up mapped to another test's mocks",
+			zap.Int("mocks_attributed_by_worker", attr.byWorkerPID),
+			zap.Int("mocks_guessed_by_timestamp", attr.byTimestamp),
+			zap.String("next_step", "re-record with a single worker, or make the agent share the test runner's PID namespace (e.g. docker run --pid=host) so calls can be traced back to a worker"))
+	}
+	var empty []string
+	seen := make(map[string]struct{}, len(windows))
+	for _, w := range windows {
+		if _, dup := seen[w.Name]; dup {
+			continue
+		}
+		seen[w.Name] = struct{}{}
+		if len(byTest[w.Name]) == 0 {
+			empty = append(empty, w.Name)
+		}
+	}
+	if len(empty) > 0 {
+		logger.Warn("per-test mock mappings: some tests recorded no mocks, so at replay they will be served the whole set instead of their own recordings",
+			zap.Strings("tests", empty),
+			zap.String("next_step", "expected if those tests make no dependency calls; otherwise their calls were attributed to another test — see the parallel-record warning above"))
+	}
+}
+
+// distinctWorkers counts the reporting workers across all windows. > 1 means the
+// runner recorded in parallel, which is exactly when the timestamp fallback stops
+// being sound: a sequential run's windows cannot overlap, so bucketing by time is
+// exact, while concurrent workers' windows can, and then the bucket is a guess.
+func distinctWorkers(windows []models.ScopeWindow) int {
+	seen := make(map[uint32]struct{}, 4)
+	for _, w := range windows {
+		seen[w.PID] = struct{}{}
+	}
+	return len(seen)
 }

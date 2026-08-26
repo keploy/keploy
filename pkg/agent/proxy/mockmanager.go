@@ -1954,6 +1954,30 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 		if info, ok := key.(models.TestModeInfo); ok {
 			delete(tree.idIndex, info.ID)
 		}
+		// Record the consumption, exactly as DeleteFilteredMock does on
+		// its own tier. Without this the startup tier is the one place a
+		// mock can be consumed invisibly: reportOutcome reads
+		// len(GetConsumedMocks()) (service/mock/replay.go:250) and
+		// GetConsumedMocks drains only the flagMockAsUsed list, so a
+		// correct startup consumption would report `consumed: 0` and read
+		// as a total failure. Usage: Deleted (not Updated) is the truthful
+		// state — the mock IS gone from the tree — and it is what
+		// filterOutDeleted (service/agent/agent.go:1161) keys on when the
+		// `keploy test` path re-stages between steps.
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:             mock.Name,
+			Kind:             mock.Kind,
+			Usage:            models.Deleted,
+			IsFiltered:       mock.TestModeInfo.IsFiltered,
+			SortOrder:        mock.TestModeInfo.SortOrder,
+			Type:             mock.Spec.Metadata["type"],
+			Lifetime:         mock.TestModeInfo.Lifetime,
+			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
+			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+		}); err != nil && m.logger != nil {
+			m.logger.Error("failed to flag startup mock as used", zap.Error(err))
+		}
 		// Bump the global revision so any cached snapshot held by a
 		// matcher consumer rebuilds on next access.
 		m.bumpRevisionAll()

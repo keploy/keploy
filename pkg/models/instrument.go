@@ -221,6 +221,27 @@ type OutgoingOptions struct {
 	// options and uses it to pick the worker's scoped mock view (per-PID
 	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
 	SrcPid uint32 `json:"-"`
+	// WorkerPid is the test WORKER that owns this connection: the nearest
+	// ancestor of SrcPid (SrcPid itself included) that registered via
+	// POST /agent/scope/begin. 0 when no worker registered, or when none is an
+	// ancestor. Same per-connection, runtime-only, json:"-" contract as SrcPid.
+	//
+	// It exists because SrcPid is the process that opened the socket, which for
+	// a browser-driving runner is a chromium network-service grandchild of the
+	// worker, not the worker itself — so record-side attribution cannot compare
+	// SrcPid to the worker PID the runner reported.
+	WorkerPid uint32 `json:"-"`
+}
+
+// AttributionPID is the PID a captured mock is attributed to at record time:
+// the owning test worker when one was resolved, else the process that opened
+// the connection. Consumed by `keploy mock record`'s scope-window correlation
+// (see pkg/service/mock/record.go).
+func (o OutgoingOptions) AttributionPID() uint32 {
+	if o.WorkerPid != 0 {
+		return o.WorkerPid
+	}
+	return o.SrcPid
 }
 
 type ConditionalDstCfg struct {

@@ -218,7 +218,10 @@ func (m *Mock) DeriveLifetime() {
 	// kind-based session fallback for any non-canonical tag when
 	// the kind is in the implicit-session list. Strict mode takes
 	// the narrow path above and returns before reaching here.
-	if !laxKindFallbackDisabled() && kindsWithImplicitSessionLifetime(m.Kind) {
+	//
+	// HTTP is deliberately excluded from this promotion — see
+	// kindsWithLaxTaggedSessionPromotion.
+	if !laxKindFallbackDisabled() && kindsWithLaxTaggedSessionPromotion(m.Kind) {
 		m.TestModeInfo.Lifetime = LifetimeSession
 		return
 	}
@@ -343,6 +346,33 @@ func LegacyKindFallbackFires() uint64 {
 func kindsWithImplicitSessionLifetime(k Kind) bool {
 	switch k {
 	case HTTP, HTTP2, MySQL, Postgres, PostgresV2, GENERIC, DNS:
+		return true
+	}
+	return false
+}
+
+// kindsWithLaxTaggedSessionPromotion returns true for Kinds whose
+// EXPLICITLY-TAGGED, non-canonical mocks are still promoted to session
+// lifetime under lax mode. It gates rule 5 only; rule 4 (the tag==""
+// fallback) keeps using kindsWithImplicitSessionLifetime, so untagged
+// legacy recordings of every listed kind replay byte-for-byte.
+//
+// HTTP is excluded. Its recorder stamps LifetimePerTest at emit time
+// (integrations/http/http.go:296, recordv2.go:548) and the published
+// contract (docs/explanation/mock-lifetimes.md:109) says HTTP_CLIENT is
+// per-test — so promoting a tagged HTTP_CLIENT capture to session
+// contradicts both. The promotion made every HTTP data mock reusable,
+// which meant the matcher never consumed one and a re-issued request
+// replayed the FIRST recording forever. Same failure, same reasoning as
+// 8339fe55 removing REDIS from the sibling list ("breaks the per-test
+// consumption the matcher depends on").
+//
+// MySQL/Postgres/Generic/DNS keep the promotion: it is what the fuzzer
+// and ORM-style workloads named in the rule-5 comment above depend on,
+// and their per-test captures are tagged "mocks".
+func kindsWithLaxTaggedSessionPromotion(k Kind) bool {
+	switch k {
+	case HTTP2, MySQL, Postgres, PostgresV2, GENERIC, DNS:
 		return true
 	}
 	return false

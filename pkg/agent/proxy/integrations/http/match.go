@@ -1057,7 +1057,44 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
 	}
-	return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
+	// Startup tier. On the `keploy mock replay` path the per-test tree is
+	// always empty: every staging call arrives with start==models.BaseTime, so
+	// SetMocksWithWindow takes its initial-staging branch and routes the
+	// whole per-test slice into the startup tree instead
+	// (mockmanager.go:704 + :749). A per-test mock therefore lives in
+	// `startup`, DeleteFilteredMock above misses, and without this branch
+	// the mock is never consumed. DeleteStartupMock is name-keyed
+	// (mockmanager.go:1943-1960), not TestModeInfo-keyed, so it is safe to
+	// attempt unguarded and returns false for mocks of any other tier.
+	if mockDb.DeleteStartupMock(deleteMock) {
+		return true
+	}
+	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) {
+		return true
+	}
+	// updateMock must be TOTAL. Its caller loops on a bare `for {}`
+	// (match.go:60) and `continue`s on a false return without changing the
+	// candidate pool, so any false return here is an unbounded spin by
+	// construction.
+	//
+	// Totality is asserted HERE rather than delegated to MarkMockAsUsed,
+	// which is itself partial: it returns false for a mock with an empty
+	// Name (mockmanager.go), as does DeleteStartupMock. A nameless mock —
+	// reachable because the disk read path never assigns Name, it comes
+	// from the YAML `name:` field — would otherwise fail all four steps
+	// and reproduce the very spin this path removes.
+	mockDb.MarkMockAsUsed(deleteMock)
+
+	// Reaching here means the mock was served but consumed from no tier, so
+	// the next identical request matches it again and the tape does not
+	// advance — while the run still reports consumed>0 / missed==0. That is
+	// the silent-stale-data failure this work exists to eliminate, so it
+	// must be visible rather than merely survivable.
+	h.Logger.Warn("served a mock that could not be consumed from any tier; the tape will not advance for this request",
+		zap.String("mock", deleteMock.Name),
+		zap.String("kind", string(deleteMock.Kind)),
+		zap.Any("lifetime", deleteMock.TestModeInfo.Lifetime))
+	return true
 }
 
 // filterStrictNoiseMatches enforces strict request-body matching on the

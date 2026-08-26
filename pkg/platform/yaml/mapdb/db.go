@@ -2,6 +2,7 @@ package mapdb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 )
 
@@ -239,6 +241,36 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 		zap.String("testSetID", testSetID),
 		zap.Int("tests", len(byTest)))
 
+	return nil
+}
+
+// Delete removes this test-set's mapping file, in both text formats. Called at
+// the start of a re-record so the rewrite is a replacement, not a union:
+// UpsertBatch merges with what is on disk, while the recorder resets the mock
+// name counter every run (ResetCounterID), so without this a re-record leaves
+// the previous run's test entries behind pointing at mock-N names that now
+// belong to entirely different recordings. Missing files are tolerated; only
+// permission/ownership errors surface.
+func (db *MappingDb) Delete(_ context.Context, testSetID string) error {
+	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
+		return fmt.Errorf("rejecting mapping Delete: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..'): %w", testSetID, err)
+	}
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		validated, err := yaml.ValidatePath(filepath.Join(mappingPath, fileName+"."+format.FileExtension()))
+		if err != nil {
+			utils.LogError(db.logger, err, "failed to validate mapping path for delete", zap.String("at_path", mappingPath))
+			return err
+		}
+		if err := os.Remove(validated); err != nil && !os.IsNotExist(err) {
+			utils.LogError(db.logger, err, "failed to delete stale mapping file during re-record; check that the file is not read-only and that the current user owns the output directory", zap.String("path", validated))
+			return err
+		}
+	}
 	return nil
 }
 

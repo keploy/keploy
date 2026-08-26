@@ -48,28 +48,43 @@ import (
 // and the session read tiers: `keploy mock record` classifies its captured
 // calls into the session/config tier, so filtering only the per-test tier would
 // leave every worker seeing the whole set (the isolation would be a no-op).
+//
+// The allowlist is resolved on EVERY read, not captured when the view is built.
+// The view's lifetime is one TCP connection (scopedFor runs once per connection
+// in handleConnection) while HTTP/1.1 keep-alive makes one connection carry
+// requests from many tests, so a snapshot taken at connection time is stale for
+// every test after the first one that connection serves.
 type scopedMockDb struct {
 	integrations.MockMemDb
-	allow    map[string]struct{} // mock names this worker's current test may see
-	universe map[string]struct{} // union of ALL tests' mapped names (nil ⇒ no filtering)
+	p         *Proxy
+	workerPID uint32 // the registered worker this connection was resolved to
 }
 
 // keep returns the mocks visible to this worker: those in its allowlist plus any
 // that belong to no test (absent from the universe of mapped names).
 func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, error) {
-	if err != nil || s.allow == nil || s.universe == nil {
+	if err != nil {
 		return mocks, err
+	}
+	s.p.workerScopeMu.RLock()
+	allow := s.p.workerScope[s.workerPID]
+	universe := s.p.mappedUniverse
+	s.p.workerScopeMu.RUnlock()
+	// No allowlist right now (worker between tests, or a test with no mapping)
+	// ⇒ whole pool, matching "no mapping for this test ⇒ suite-level".
+	if allow == nil || universe == nil {
+		return mocks, nil
 	}
 	out := mocks[:0:0]
 	for _, m := range mocks {
 		if m == nil {
 			continue
 		}
-		if _, mine := s.allow[m.Name]; mine {
+		if _, mine := allow[m.Name]; mine {
 			out = append(out, m)
 			continue
 		}
-		if _, mapped := s.universe[m.Name]; !mapped {
+		if _, mapped := universe[m.Name]; !mapped {
 			out = append(out, m) // shared / unmapped mock — visible to everyone
 		}
 	}
@@ -143,6 +158,78 @@ func (p *Proxy) ClearAllWorkerScopes() {
 	p.workerScopeMu.Unlock()
 }
 
+// RegisterRecordWorker registers a test worker's self-reported PID for
+// RECORD-mode attribution. The replay-side registry (SetWorkerScope) cannot be
+// reused: it carries a per-test allowlist that is installed and cleared at every
+// test boundary, whereas record needs the worker to stay resolvable for the
+// whole session — a keep-alive connection can emit its mock after /scope/end.
+// Idempotent; cleared per record session in Record().
+func (p *Proxy) RegisterRecordWorker(pid uint32) {
+	if pid == 0 {
+		return
+	}
+	p.workerScopeMu.Lock()
+	if p.recordWorkers == nil {
+		p.recordWorkers = make(map[uint32]struct{})
+	}
+	p.recordWorkers[pid] = struct{}{}
+	p.workerScopeMu.Unlock()
+}
+
+// ClearRecordWorkers drops every registered record-mode worker. Called at the
+// start of a record session so a PID from a previous run — possibly recycled
+// onto an unrelated process by now — cannot mis-attribute this run's mocks.
+func (p *Proxy) ClearRecordWorkers() {
+	p.workerScopeMu.Lock()
+	p.recordWorkers = nil
+	p.workerScopeMu.Unlock()
+}
+
+// ResolveWorkerPID maps the kernel PID that opened an outgoing connection to the
+// registered test worker that owns it — kpid itself, or its nearest registered
+// /proc ancestor. Returns 0 when no worker has registered (fast path: no /proc
+// read at all) or when none of kpid's ancestors is one.
+//
+// This is the record-side counterpart of scopedFor's walk, and it exists for the
+// same reason: the process that opens the socket is often a CHILD of the worker
+// (a browser's network-service process, a forked helper), so the kernel PID the
+// eBPF redirect map reports never equals the PID the runner reported.
+func (p *Proxy) ResolveWorkerPID(kpid uint32) uint32 {
+	if kpid == 0 {
+		return 0
+	}
+	p.workerScopeMu.RLock()
+	registered := len(p.recordWorkers) > 0
+	p.workerScopeMu.RUnlock()
+	if !registered {
+		return 0
+	}
+	return nearestRegistered(kpid, func(pid uint32) bool {
+		p.workerScopeMu.RLock()
+		_, ok := p.recordWorkers[pid]
+		p.workerScopeMu.RUnlock()
+		return ok
+	})
+}
+
+// nearestRegistered walks pid up the /proc process tree and returns the first
+// ancestor (pid itself included) that `registered` accepts, or 0 if the walk
+// runs out of ancestors first. Bounded so a reparent race or an unexpected
+// /proc shape can never spin.
+func nearestRegistered(pid uint32, registered func(uint32) bool) uint32 {
+	for i := 0; i < 32 && pid > 1; i++ {
+		if registered(pid) {
+			return pid
+		}
+		ppid, ok := ppidFromStat(pid)
+		if !ok {
+			return 0
+		}
+		pid = ppid
+	}
+	return 0
+}
+
 // SetMappedUniverse records the union of every test's mapped mock names (from
 // mappings.yaml), so a scoped worker can tell "another test's mock" (drop) from
 // a genuinely-shared, unmapped recording (keep). Pushed once when the replay CLI
@@ -169,32 +256,24 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 		return mgr
 	}
 	p.workerScopeMu.RLock()
-	if len(p.workerScope) == 0 {
-		p.workerScopeMu.RUnlock()
+	scoped := len(p.workerScope) > 0
+	p.workerScopeMu.RUnlock()
+	if !scoped {
 		return mgr // fast path: nobody scoped — no /proc walk, exact old behavior
 	}
-	// Walk up the process tree to the nearest registered worker. Bounded so a
-	// reparent race or an unexpected /proc shape can never spin.
-	var allow map[string]struct{}
-	pid := kpid
-	for i := 0; i < 32 && pid > 1; i++ {
-		if set, ok := p.workerScope[pid]; ok {
-			allow = set
-			break
-		}
-		ppid, ok := ppidFromStat(pid)
-		if !ok {
-			break
-		}
-		pid = ppid
-	}
-	universe := p.mappedUniverse
-	p.workerScopeMu.RUnlock()
-
-	if allow == nil {
+	worker := nearestRegistered(kpid, func(pid uint32) bool {
+		p.workerScopeMu.RLock()
+		_, ok := p.workerScope[pid]
+		p.workerScopeMu.RUnlock()
+		return ok
+	})
+	if worker == 0 {
 		return mgr
 	}
-	return &scopedMockDb{MockMemDb: mgr, allow: allow, universe: universe}
+	// Only the worker identity is fixed for the connection's life — it cannot
+	// change, the process that opened the socket keeps the same ancestry. The
+	// ALLOWLIST is re-read per mock lookup; see scopedMockDb.
+	return &scopedMockDb{MockMemDb: mgr, p: p, workerPID: worker}
 }
 
 // ppidFromStat reads the parent PID of pid from /proc/<pid>/stat. The comm field

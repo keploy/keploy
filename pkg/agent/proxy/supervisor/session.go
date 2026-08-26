@@ -398,6 +398,16 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		m.ConnectionID = s.ClientConnID
 	}
 
+	// Same contract for the source PID: stamp it here so every V2 parser gets
+	// it, rather than each one remembering to. `keploy mock record` uses it to
+	// attribute the mock to the test worker that made the call. Transient hint,
+	// never persisted (models.Mock.SourcePID is yaml/json/bson "-"); 0 ⇒ the
+	// recorder falls back to the scope time window. A parser that already set
+	// it wins, as with ConnectionID.
+	if m.SourcePID == 0 {
+		m.SourcePID = s.Opts.AttributionPID()
+	}
+
 	// Enforce per-session ReqTimestampMock monotonicity (I5). In
 	// debug builds, a regression panics the test so parser bugs
 	// surface immediately; in prod the timestamp is clamped up to

@@ -77,6 +77,23 @@ type Proxy interface {
 	SetMappedUniverse(names []string)
 }
 
+// WorkerRegistrar is the optional extension implemented by proxies that can
+// attribute a captured mock to the test worker that made the call at RECORD
+// time. Callers MUST type-assert from Proxy and fall back to no registration
+// (attribution then degrades to the scope time window, which is exact for a
+// sequential recording) — this keeps third-party Proxy implementations
+// compiling without the extra method.
+//
+//	if wr, ok := p.(WorkerRegistrar); ok {
+//	    wr.RegisterRecordWorker(uint32(pid))
+//	}
+type WorkerRegistrar interface {
+	// RegisterRecordWorker records a worker's self-reported PID (ScopeReq.Pid)
+	// so an outgoing connection opened by that worker OR ANY OF ITS CHILDREN
+	// resolves to it. Idempotent; scoped to one record session.
+	RegisterRecordWorker(pid uint32)
+}
+
 // PcapStreamer is the optional extension implemented by proxies
 // that broadcast captured packets to dynamic subscribers. Callers
 // MUST type-assert from Proxy and gracefully fall back when the

@@ -2,8 +2,13 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"time"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -43,6 +48,9 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
 	if name == "" {
 		return nil
 	}
+	if pid > 0 {
+		a.pidNsWarnOnce.Do(func() { a.warnIfWorkerPIDUnresolvable(pid) })
+	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
@@ -79,8 +87,39 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
 	}
 	a.workerOpen[scopeKey{pid: uint32(pid), name: name}] = time.Now()
 	a.scopeMu.Unlock()
+	// Register the worker with the proxy so a call made by this worker OR ANY OF
+	// ITS CHILDREN (a browser's network process, a forked helper) is attributed
+	// to it at capture time. Correlation happens after the runner has exited, so
+	// this is the last moment the process tree still exists to be walked.
+	if wr, ok := a.Proxy.(coreAgent.WorkerRegistrar); ok && pid > 0 {
+		wr.RegisterRecordWorker(uint32(pid))
+	}
 	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
+}
+
+// warnIfWorkerPIDUnresolvable fires once per agent process when the PID a test
+// runner reported does not exist in the AGENT's PID namespace. Every per-PID
+// mechanism — record-time attribution (Proxy.ResolveWorkerPID) and replay-time
+// worker scoping (Proxy.scopedFor) — resolves the kernel PID of an outgoing
+// connection up /proc looking for this number. If the number is from another
+// namespace, no ancestor can ever match, both silently degrade to whole-set
+// behaviour, and the run LOOKS isolated while it is not.
+//
+// One os.Stat per session; never on a traffic path. A false negative is
+// possible (an unrelated process may hold that PID number in the agent's
+// namespace) — the end-of-record attribution warning covers that case by
+// outcome instead of by namespace.
+func (a *Agent) warnIfWorkerPIDUnresolvable(pid int) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil {
+		return
+	}
+	a.logger.Warn("per-test mock scoping is degraded: the worker PID reported by your test runner does not exist in the agent's PID namespace, so no outgoing call can be attributed to a worker",
+		zap.Int("reported_worker_pid", pid),
+		zap.String("next_step", "run the agent in the same PID namespace as the test runner (e.g. docker run --pid=host), or run the runner inside the agent's container; until then mocks are attributed by timestamp and replay serves the whole set"))
 }
 
 // EndScope closes a per-test scope. In record mode it records the [begin, now]

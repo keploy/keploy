@@ -178,6 +178,12 @@ type Proxy struct {
 	// scoped worker distinguish "another test's mock" from an unmapped shared
 	// recording. Guarded by workerScopeMu.
 	mappedUniverse map[string]struct{}
+	// recordWorkers is the RECORD-mode counterpart of workerScope: the set of
+	// worker PIDs that reported a scope, with no allowlist (record has nothing
+	// to filter). ResolveWorkerPID resolves a connection's origin PID up the
+	// /proc tree to one of these so the captured mock can be attributed to the
+	// worker that made the call. Guarded by workerScopeMu.
+	recordWorkers map[uint32]struct{}
 
 	// asyncEngine, when non-nil (config.Async.Lanes non-empty), tracks
 	// async-lane replay state: registered parsers and the per-test
@@ -1879,6 +1885,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// copy so the mock-serve and record-capture paths can attribute the call to
 	// the test worker that made it (per-PID scoping). 0 when unavailable.
 	outgoingOpts.SrcPid = destInfo.KernelPid
+	// ...and resolve it to the test worker that owns the connection, while that
+	// process tree is still alive. Record-side correlation runs after the runner
+	// has exited, when /proc is gone and PID reuse makes a late walk unsafe.
+	outgoingOpts.WorkerPid = p.ResolveWorkerPID(destInfo.KernelPid)
 
 	mgr := syncMock.Get()
 	mgr.SetOutputChannel(rule.MC)
@@ -3120,6 +3130,9 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	p.isGracefulShutdown.Store(false)
 	// Reset DNS mock deduplication tracker for fresh recording
 	p.ResetRecordedDNSMocks()
+	// Drop worker registrations from a previous record session; their PIDs may
+	// have been recycled onto unrelated processes by now.
+	p.ClearRecordWorkers()
 	// Lift the per-session opportunistic-TLS toggle onto the proxy
 	// for handleConnection to read. Independent of GlobalPassthrough.
 	p.OpportunisticTLSIntercept = opts.OpportunisticTLSIntercept
