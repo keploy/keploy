@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/agnivade/levenshtein"
@@ -504,6 +505,15 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 // comparison using the same compile + ReplaceAllString-to-placeholder approach
 // MatchURLPath uses, so a param value covered by url noise still matches while a
 // genuinely different value does not.
+//
+// A REPEATED param (same key more than once) is compared ORDER-INDEPENDENTLY:
+// the recorded ", "-joined value is split back into its members, each side is
+// url-noise-masked per member and sorted before comparison. This
+// mirrors pkg.CompareMultiValueHeaders so repeated query params and repeated
+// headers agree — a reorder of the same values (e.g. ?tag=a&tag=b vs
+// ?tag=b&tag=a, which are the same request per HTTP) still matches, while a
+// genuinely different value does not. Single-value params (the common case) take
+// the exact fast path and are unaffected.
 func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Values, urlNoise []string) bool {
 	shouldIgnore := func(key string) bool {
 		return strings.HasPrefix(strings.ToLower(key), "keploy")
@@ -561,17 +571,33 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 		}
 		actual := strings.Join(reqQuery[key], ", ")
 		if recorded == actual {
-			continue
+			continue // exact match — covers every single-value param
 		}
-		// Apply url noise to BOTH sides before comparing so a value covered by
-		// url noise still matches.
-		rv, av := recorded, actual
-		for _, re := range noiseRes {
-			rv = re.ReplaceAllString(rv, ph)
-			av = re.ReplaceAllString(av, ph)
-		}
-		if rv != av {
+		// Values differ as-joined. Compare order-independently: split the
+		// recorded value back into members, mask each side with url noise, and
+		// sort before comparing (mirrors CompareMultiValueHeaders). A reorder
+		// of the same values matches; a real difference still fails.
+		recVals := strings.Split(recorded, ", ")
+		liveVals := reqQuery[key]
+		if len(recVals) != len(liveVals) {
 			return false
+		}
+		mask := func(vals []string) []string {
+			out := make([]string, len(vals))
+			for i, v := range vals {
+				for _, re := range noiseRes {
+					v = re.ReplaceAllString(v, ph)
+				}
+				out[i] = v
+			}
+			sort.Strings(out)
+			return out
+		}
+		rv, av := mask(recVals), mask(liveVals)
+		for i := range rv {
+			if rv[i] != av[i] {
+				return false
+			}
 		}
 	}
 
