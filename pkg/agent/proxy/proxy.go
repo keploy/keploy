@@ -3338,6 +3338,18 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 	return m.GetConsumedMocks(), nil
 }
 
+// TotalConsumedMocks returns the cumulative consumption ledger WITHOUT
+// draining it, so a mid-session re-stage can filter out what has already been
+// served while leaving the end-of-run summary's drain intact. See
+// coreAgent.ConsumedMockTotalsReader.
+func (p *Proxy) TotalConsumedMocks(_ context.Context) (map[string]models.MockState, error) {
+	m := p.getMockManager()
+	if m == nil {
+		return nil, fmt.Errorf("mock manager not found to get cumulative consumed mocks")
+	}
+	return m.TotalConsumedMocks(), nil
+}
+
 // testErrorAccumulator collects errors during an active test case.
 // It is goroutine-safe via an internal mutex.
 type testErrorAccumulator struct {

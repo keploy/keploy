@@ -81,12 +81,14 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) (models.Sc
 		}
 		// No worker PID reported — restrict the single global pool (correct for
 		// a sequential single-worker suite, the pre-Design-A behavior).
-		a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)))
+		consumed := a.consumedSoFar(ctx)
+		a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)), zap.Int("already_consumed", len(consumed)))
 		if err := a.UpdateMockParams(ctx, models.MockFilterParams{
-			MockMapping:     names,
-			UseMappingBased: true,
-			AfterTime:       models.BaseTime,
-			BeforeTime:      time.Now(),
+			MockMapping:        names,
+			UseMappingBased:    true,
+			AfterTime:          models.BaseTime,
+			BeforeTime:         time.Now(),
+			TotalConsumedMocks: consumed,
 		}); err != nil {
 			return models.ScopeAck{}, err
 		}
@@ -167,10 +169,17 @@ func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 			a.ClearWorkerScope(uint32(pid))
 			return nil
 		}
-		a.logger.Debug("scope end: restoring whole pool", zap.String("test", name))
+		// The whole pool is restored MINUS what has already been served. Without
+		// the consumed set this call is the other half of the resurrection bug:
+		// a test with no mapping entry (renamed, or it recorded nothing) reads
+		// the pool exactly as EndScope left it, so every mock the suite has
+		// consumed so far becomes matchable again.
+		consumed := a.consumedSoFar(ctx)
+		a.logger.Debug("scope end: restoring whole pool", zap.String("test", name), zap.Int("already_consumed", len(consumed)))
 		return a.UpdateMockParams(ctx, models.MockFilterParams{
-			AfterTime:  models.BaseTime,
-			BeforeTime: time.Now(),
+			AfterTime:          models.BaseTime,
+			BeforeTime:         time.Now(),
+			TotalConsumedMocks: consumed,
 		})
 	}
 
@@ -184,6 +193,31 @@ func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 	a.scopeMu.Unlock()
 	a.logger.Debug("scope end (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
+}
+
+// consumedSoFar returns the cumulative set of mocks already served this
+// session, for UpdateMockParams' filterOutDeleted gate.
+//
+// Every scope re-stage rebuilds the served pool from the PRISTINE store
+// (loadPerTestMocks over storage.filtered / storage.diskMocks), so without
+// this the re-stage undoes every consumption that came before it — the same
+// mock is served twice and a later one never at all. filterOutDeleted is
+// gated on a non-nil map, so a nil return here is "unknown, filter nothing",
+// which is exactly the old behaviour.
+//
+// Deliberately NOT GetConsumedMocks: that one drains, and the CLI's
+// end-of-run `mock replay summary` counts what the drain returns.
+func (a *Agent) consumedSoFar(ctx context.Context) map[string]models.MockState {
+	r, ok := a.Proxy.(coreAgent.ConsumedMockTotalsReader)
+	if !ok {
+		return nil
+	}
+	consumed, err := r.TotalConsumedMocks(ctx)
+	if err != nil {
+		a.logger.Debug("failed to read cumulative consumed mocks; the scope re-stage will not filter them", zap.Error(err))
+		return nil
+	}
+	return consumed
 }
 
 // GetScopeWindows returns the per-test windows collected this record session,

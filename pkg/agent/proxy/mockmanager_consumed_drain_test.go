@@ -64,3 +64,56 @@ func TestGetConsumedMocks_PerCallDrains(t *testing.T) {
 		t.Fatalf("expected per-call drain to report only [mongo-find-2], got %#v", third)
 	}
 }
+
+// TestTotalConsumedMocks_DoesNotDrain pins the complement of the contract
+// above. The /agent/scope/begin re-narrow rebuilds the served pool from the
+// pristine store, so it must be able to ask "which mocks have already been
+// served?" — but it must NOT answer that question with GetConsumedMocks,
+// whose drain is what the CLI's end-of-run `mock replay summary` counts.
+//
+// So: TotalConsumedMocks accumulates across the manager's lifetime and never
+// empties, and reading it leaves the drain untouched for the summary.
+func TestTotalConsumedMocks_DoesNotDrain(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	if got := mm.TotalConsumedMocks(); len(got) != 0 {
+		t.Fatalf("expected an empty cumulative ledger initially, got %d", len(got))
+	}
+
+	if !mm.MarkMockAsUsed(models.Mock{Name: "http-1", Kind: models.HTTP}) {
+		t.Fatal("MarkMockAsUsed should record a consumption for a named mock")
+	}
+	if !mm.MarkMockAsUsed(models.Mock{Name: "http-2", Kind: models.HTTP}) {
+		t.Fatal("MarkMockAsUsed should record the second consumption")
+	}
+
+	// Reading the cumulative ledger repeatedly must not empty it...
+	for i := 0; i < 3; i++ {
+		total := mm.TotalConsumedMocks()
+		if len(total) != 2 {
+			t.Fatalf("read %d: expected 2 cumulative entries, got %d: %#v", i, len(total), total)
+		}
+		if _, ok := total["http-1"]; !ok {
+			t.Fatalf("read %d: http-1 missing from the cumulative ledger", i)
+		}
+	}
+
+	// ...and must not have stolen the drain the summary depends on.
+	if drained := mm.GetConsumedMocks(); len(drained) != 2 {
+		t.Fatalf("reading the cumulative ledger must leave the drain intact; got %d", len(drained))
+	}
+
+	// After the drain, the cumulative ledger still remembers everything — that
+	// is the whole point: a re-stage after a drain must not resurrect.
+	total := mm.TotalConsumedMocks()
+	if len(total) != 2 {
+		t.Fatalf("cumulative ledger must survive a drain; got %d: %#v", len(total), total)
+	}
+
+	// The returned map is a snapshot: mutating it must not corrupt the ledger.
+	delete(total, "http-1")
+	if len(mm.TotalConsumedMocks()) != 2 {
+		t.Fatal("TotalConsumedMocks must return a copy, not the live map")
+	}
+}

@@ -75,6 +75,14 @@ type MockManager struct {
 	consumedMu    sync.Mutex
 	consumedList  []models.MockState
 	consumedIndex map[string]int
+	// consumedTotal is the CUMULATIVE consumption ledger, keyed by mock name.
+	// consumedList above is a drain buffer — GetConsumedMocks empties it, and
+	// the end-of-run summary depends on that — so it cannot answer "has this
+	// mock been consumed at any point in this session?". Callers that re-stage
+	// the pool mid-session (the /agent/scope/begin re-narrow) need that
+	// question answered without stealing the drain from the summary. Bounded
+	// by the number of distinct mock names in the set. Guarded by consumedMu.
+	consumedTotal map[string]models.MockState
 
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
@@ -2157,8 +2165,27 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 		m.consumedIndex[mock.Name] = len(m.consumedList)
 		m.consumedList = append(m.consumedList, mock)
 	}
+	if m.consumedTotal == nil {
+		m.consumedTotal = make(map[string]models.MockState)
+	}
+	m.consumedTotal[mock.Name] = mock
 	m.consumedMu.Unlock()
 	return nil
+}
+
+// TotalConsumedMocks returns a snapshot of the cumulative consumption ledger,
+// keyed by mock name. Unlike GetConsumedMocks it does NOT drain: the drain is
+// how the end-of-run summary counts, and a mid-session reader must not steal
+// it. Safe to call on a traffic path — one map copy under consumedMu, bounded
+// by the number of distinct mock names in the set.
+func (m *MockManager) TotalConsumedMocks() map[string]models.MockState {
+	m.consumedMu.Lock()
+	defer m.consumedMu.Unlock()
+	out := make(map[string]models.MockState, len(m.consumedTotal))
+	for k, v := range m.consumedTotal {
+		out[k] = v
+	}
+	return out
 }
 
 // GetConsumedMocks returns and drains the list of mocks that were consumed

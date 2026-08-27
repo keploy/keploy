@@ -157,6 +157,22 @@ type FirstWindowStartReader interface {
 	FirstTestWindowStart() time.Time
 }
 
+// ConsumedMockTotalsReader is an optional extension implemented by proxies
+// that can report CUMULATIVE mock consumption without draining it.
+//
+// Proxy.GetConsumedMocks is destructive by contract — the CLI's end-of-run
+// summary counts what that drain returns — so it cannot answer "was this mock
+// already served?" for a caller that re-stages the pool mid-session. Anything
+// that rebuilds the served pool from the pristine store (the /agent/scope/begin
+// re-narrow) needs that answer, or it resurrects every mock consumed so far.
+//
+// Callers MUST type-assert from Proxy and fall back gracefully (a nil map =
+// "unknown, filter nothing") so third-party Proxy implementations keep
+// compiling without the extra method.
+type ConsumedMockTotalsReader interface {
+	TotalConsumedMocks(ctx context.Context) (map[string]models.MockState, error)
+}
+
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }
