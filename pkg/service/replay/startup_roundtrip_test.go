@@ -11,10 +11,13 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 )
 
-// Spans write -> disk -> read, which no other test does: the helper tests stop
-// at the struct, mapdb's tests never see a models.MockState, and
-// mocking_strategy_test stubs GetStartup entirely. A gap here is what let the
-// section be captured and then silently discarded before it reached disk.
+// Spans setStartupMocks -> Insert -> GetStartup.
+//
+// NOTE ON WHAT THIS DOES AND DOES NOT PIN: mapdb.Insert and GetStartup already
+// worked before the backfill fix, so steps 1-3 and 5 pass on the old code too.
+// The bug was never in mapdb — it was the shouldWriteMappings gate in
+// RunTestSet, which is covered by TestStartupBackfill* below. This test guards
+// the serialization contract between the two halves; that one guards the gate.
 func TestStartupSectionSurvivesWriteThenRead(t *testing.T) {
 	dir := t.TempDir()
 	db := mapdb.NewWithFormat(zap.NewNop(), dir, "mappings", yaml.FormatYAML)

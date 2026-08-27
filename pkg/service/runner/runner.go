@@ -539,7 +539,7 @@ func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[
 	// wasted file read per test set and a divergence between the two paths.
 	var startupNames []string
 	if r.config != nil && r.config.DisableMapping {
-		return testMockMappings, map[string]bool{}, map[string]bool{}, nil, nil
+		return testMockMappings, map[string]bool{}, map[string]bool{}, startupNames, nil
 	}
 	if startup, serr := r.mappingDB.GetStartup(ctx, testSetID); serr != nil {
 		r.logger.Debug("failed to read startup mocks from mappings; continuing without them",
@@ -592,13 +592,11 @@ func expectedMocksForTest(setup *testSetSetup, testCaseName string) []string {
 	// omitting startup names leaves the app's boot mocks (handshake, auth, pool
 	// warm-up) out of the pool for every test.
 	//
-	// A test with no mocks of its own still needs them, so this must NOT
-	// early-return on a missing per-test entry the way it used to.
-	entries := setup.mappings[testCaseName]
-	if len(entries) == 0 && len(setup.startupMockNames) == 0 {
-		return nil
-	}
-	return models.MergeStartupMockNames(entries, setup.startupMockNames)
+	// No local guard on an empty entry list: MergeStartupMockNames returns nil in
+	// that case by design, so a test with no per-test mapping keeps an empty
+	// MockMapping and the agent's wide-pool fallback rather than being narrowed
+	// to the boot mocks alone.
+	return models.MergeStartupMockNames(setup.mappings[testCaseName], setup.startupMockNames)
 }
 
 // expectedEntriesForTest returns this step's expected mocks as
@@ -697,9 +695,10 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 
 	filteredExpected := make([]MockRef, 0, len(expected))
 	for _, e := range expected {
-		if !isDNS(e.Name, models.Kind(e.Kind)) {
-			filteredExpected = append(filteredExpected, e)
+		if isDNS(e.Name, models.Kind(e.Kind)) || isStartup(e.Name) {
+			continue
 		}
+		filteredExpected = append(filteredExpected, e)
 	}
 
 	filteredConsumed := make([]MockRef, 0, len(consumed))
