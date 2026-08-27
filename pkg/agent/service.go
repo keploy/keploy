@@ -173,6 +173,25 @@ type ConsumedMockTotalsReader interface {
 	TotalConsumedMocks(ctx context.Context) (map[string]models.MockState, error)
 }
 
+// ConsumedMockResetter is an optional extension implemented by proxies that can
+// un-consume a NAMED SUBSET of the cumulative ledger above.
+//
+// A test-runner retry re-runs a test that already consumed its mocks, so under
+// a cumulative ledger the retry misses every call its failed attempt made. The
+// fix is to un-consume exactly that test's mock names — which /agent/scope/begin
+// already knows, from mappings.yaml — so the retry replays its own tape from the
+// start while every other test's consumption stands. Resetting the whole ledger
+// instead would reintroduce the resurrection bug the ledger was added to fix.
+//
+// Callers MUST type-assert from Proxy and fall back gracefully (no reset, and
+// say so in the acknowledgement) so third-party Proxy implementations keep
+// compiling without the extra method.
+type ConsumedMockResetter interface {
+	// ResetConsumedMocks removes the named mocks from the cumulative ledger and
+	// returns how many entries were actually removed.
+	ResetConsumedMocks(ctx context.Context, names []string) (int, error)
+}
+
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }

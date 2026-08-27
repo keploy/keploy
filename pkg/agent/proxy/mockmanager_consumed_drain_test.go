@@ -117,3 +117,59 @@ func TestTotalConsumedMocks_DoesNotDrain(t *testing.T) {
 		t.Fatal("TotalConsumedMocks must return a copy, not the live map")
 	}
 }
+
+// TestResetConsumedMocks_ScopePrecise pins the retry reset.
+//
+// A test-runner retry re-runs a test whose mocks the failed attempt already
+// consumed, so the retry must get ITS OWN mocks back — and only those. The
+// cumulative ledger is global, so a reset that took no argument (or ignored it)
+// would re-arm every other test's consumed mocks too, which is exactly the
+// resurrection bug the ledger was added to fix.
+func TestResetConsumedMocks_ScopePrecise(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	// Two tests' worth of consumption: retried-test owns http-1/http-2,
+	// other-test owns http-3/http-4.
+	for _, n := range []string{"http-1", "http-2", "http-3", "http-4"} {
+		if !mm.MarkMockAsUsed(models.Mock{Name: n, Kind: models.HTTP}) {
+			t.Fatalf("MarkMockAsUsed(%s) should record a consumption", n)
+		}
+	}
+
+	// Reset only the retried test's names.
+	if got := mm.ResetConsumedMocks([]string{"http-1", "http-2"}); got != 2 {
+		t.Fatalf("expected 2 entries removed, got %d", got)
+	}
+
+	total := mm.TotalConsumedMocks()
+	for _, n := range []string{"http-1", "http-2"} {
+		if _, ok := total[n]; ok {
+			t.Fatalf("%s must be un-consumed after the reset", n)
+		}
+	}
+	// THE REGRESSION GUARD: the other test's consumption must survive. If this
+	// fails the reset has become a global one and every earlier test's mocks are
+	// servable again.
+	for _, n := range []string{"http-3", "http-4"} {
+		if _, ok := total[n]; !ok {
+			t.Fatalf("%s belongs to another scope and must NOT be reset", n)
+		}
+	}
+
+	// An unknown name is a no-op, not an error: a scope may list a mock that was
+	// never reached because the failed attempt died before that call.
+	if got := mm.ResetConsumedMocks([]string{"http-1", "never-consumed"}); got != 0 {
+		t.Fatalf("resetting already-reset/unknown names must remove nothing, got %d", got)
+	}
+	// An empty scope resets nothing.
+	if got := mm.ResetConsumedMocks(nil); got != 0 {
+		t.Fatalf("an empty name list must remove nothing, got %d", got)
+	}
+
+	// The drain the end-of-run summary counts is untouched — it still reports
+	// every distinct mock the session served, retry or not.
+	if drained := mm.GetConsumedMocks(); len(drained) != 4 {
+		t.Fatalf("the reset must not steal the summary's drain; got %d: %#v", len(drained), drained)
+	}
+}

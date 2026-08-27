@@ -3350,6 +3350,17 @@ func (p *Proxy) TotalConsumedMocks(_ context.Context) (map[string]models.MockSta
 	return m.TotalConsumedMocks(), nil
 }
 
+// ResetConsumedMocks clears the cumulative consumption ledger for exactly the
+// named mocks, so a retried test's own recordings become servable again without
+// disturbing any other test's. See coreAgent.ConsumedMockResetter.
+func (p *Proxy) ResetConsumedMocks(_ context.Context, names []string) (int, error) {
+	m := p.getMockManager()
+	if m == nil {
+		return 0, fmt.Errorf("mock manager not found to reset consumed mocks")
+	}
+	return m.ResetConsumedMocks(names), nil
+}
+
 // testErrorAccumulator collects errors during an active test case.
 // It is goroutine-safe via an internal mutex.
 type testErrorAccumulator struct {

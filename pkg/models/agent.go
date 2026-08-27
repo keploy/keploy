@@ -33,6 +33,19 @@ type ScopeReq struct {
 	// (Design A). Optional: 0/omitted falls back to the single global scope
 	// (correct for sequential single-worker runs and suite-level).
 	Pid int `json:"pid,omitempty"`
+	// Attempt is the runner's attempt number for this test: 0 (or omitted) is
+	// the first run, 1 and up are retries. Playwright exposes it as
+	// testInfo.retry, Jest as the retry index, pytest-rerunfailures as the
+	// rerun count.
+	//
+	// It exists because a retry and a deliberately reopened scope label are the
+	// SAME two calls on the wire — begin(name) after end(name) — yet they want
+	// opposite things. A retry re-runs a test that already consumed its mocks,
+	// so it must replay that test's tape from the start. A reopened label is a
+	// second test deliberately continuing the first one's tape, so it must keep
+	// advancing. Only the runner can tell them apart, so it says which it is
+	// rather than leaving Keploy to guess.
+	Attempt int `json:"attempt,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -66,6 +79,22 @@ type ScopeAck struct {
 	// how a truncated mapping (a double scope/begin at record) shows up.
 	Mocks  int    `json:"mocks"`
 	Reason string `json:"reason"`
+	// Attempt echoes ScopeReq.Attempt. An agent that predates the field echoes
+	// nothing, so a fixture can distinguish "this build ignored my attempt
+	// number" from "this build reset nothing because there was nothing to
+	// reset".
+	Attempt int `json:"attempt,omitempty"`
+	// RetryReset is true when Attempt > 0 AND this scope's consumed state was
+	// cleared, so its mocks replay from the start. False with Attempt > 0 means
+	// nothing was reset and Reason says why: the scope has no mapping entry to
+	// reset (no_mapping_table / unmapped_scope / empty_mapping), or the call is
+	// worker-scoped (worker_scoped), where the served pool is never re-staged.
+	RetryReset bool `json:"retry_reset,omitempty"`
+	// RestoredMocks is how many of this scope's mocks the retry reset returned
+	// to the servable pool. 0 alongside RetryReset true means the scope had
+	// consumed nothing yet — e.g. the previous attempt failed before its first
+	// outgoing call.
+	RestoredMocks int `json:"restored_mocks,omitempty"`
 }
 
 // Reason values for ScopeAck. Stable tokens — test runners branch on them.
