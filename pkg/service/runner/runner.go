@@ -534,16 +534,18 @@ func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[
 
 	// Startup mocks are absent from `tests:` by design, so Get cannot surface
 	// them. Read separately; a failure costs the startup names, not the run.
+	// Skipped when mapping is disabled, matching replay's early return: the names
+	// are only consumed by the mapping-based loader, so reading them would be a
+	// wasted file read per test set and a divergence between the two paths.
 	var startupNames []string
+	if r.config != nil && r.config.DisableMapping {
+		return testMockMappings, map[string]bool{}, map[string]bool{}, nil, nil
+	}
 	if startup, serr := r.mappingDB.GetStartup(ctx, testSetID); serr != nil {
 		r.logger.Debug("failed to read startup mocks from mappings; continuing without them",
 			zap.String("testSetID", testSetID), zap.Error(serr))
 	} else {
-		for _, e := range startup {
-			if e.Name != "" {
-				startupNames = append(startupNames, e.Name)
-			}
-		}
+		startupNames = (&models.Mapping{Startup: startup}).StartupMockNames()
 	}
 	if !hasMeaningful {
 		// No mappings on disk (OSS-shape recordings, e.g. local sandbox
@@ -671,15 +673,38 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 		return false
 	}
 
+	// Startup mocks are excluded from BOTH sides, for the same reason DNS is:
+	// they belong to the test SET, not to any one step, so neither their presence
+	// nor their absence in a given step is a mismatch.
+	//
+	// Excluding rather than adding them to `expected` is deliberate. They are now
+	// merged into the names sent to the agent (expectedMocksForTest), so a step
+	// that re-handshakes legitimately consumes one — it would otherwise surface
+	// as an unexpected consumption. But listing them as EXPECTED would be worse:
+	// every step that did not happen to re-consume one would then report it
+	// missing.
+	isStartup := func(name string) bool {
+		if setup == nil {
+			return false
+		}
+		for _, n := range setup.startupMockNames {
+			if n == name {
+				return true
+			}
+		}
+		return false
+	}
+
 	filteredExpected := make([]MockRef, 0, len(expected))
 	for _, e := range expected {
 		if !isDNS(e.Name, models.Kind(e.Kind)) {
 			filteredExpected = append(filteredExpected, e)
 		}
 	}
+
 	filteredConsumed := make([]MockRef, 0, len(consumed))
 	for _, s := range consumed {
-		if isDNS(s.Name, s.Kind) {
+		if isDNS(s.Name, s.Kind) || isStartup(s.Name) {
 			continue
 		}
 		filteredConsumed = append(filteredConsumed, MockRef{

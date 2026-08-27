@@ -299,6 +299,25 @@ func jsonContainsField(data []byte, field string) bool {
 // Fast path when there is no startup section — the overwhelmingly common case —
 // skips the dedupe map entirely, since this runs once per test case.
 func MergeStartupMockNames(perTest []MockEntry, startup []string) []string {
+	// A test with NO per-test entry must return an empty list, even when a
+	// startup section exists.
+	//
+	// The agent engages mapping mode on `UseMappingBased && len(MockMapping) > 0`
+	// (service/agent/agent.go). An empty list therefore falls through to the
+	// strict-window / lax-all loaders, i.e. the whole recorded pool time-filtered
+	// — the graceful degradation such a test has always relied on. Returning
+	// startup names here instead would flip it into mapping mode with ONLY those
+	// names, shrinking its pool to the boot mocks and failing it with no_mocks.
+	//
+	// This is reachable: a set can have hasMeaningfulMappings == true because one
+	// test has mocks while another's entry is empty (the recorder dropping a
+	// batch — see mapdb/db.go). Turning that test's graceful degradation into a
+	// hard failure is a strictly worse trade than leaving it on the old path,
+	// where boot mocks are loaded by LoadBefore anyway.
+	if len(perTest) == 0 {
+		return nil
+	}
+
 	if len(startup) == 0 {
 		out := make([]string, 0, len(perTest))
 		for _, m := range perTest {

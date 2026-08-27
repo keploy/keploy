@@ -27,14 +27,21 @@ func TestExpectedMocksForTestIncludesStartup(t *testing.T) {
 		assertNames(t, got, want)
 	})
 
-	// A test with no mocks of its own still needs the app to boot.
-	t.Run("test with no per-test mocks still gets startup", func(t *testing.T) {
-		assertNames(t, expectedMocksForTest(setup, "test-2"), []string{"boot-0", "boot-1"})
+	// A test with an EMPTY per-test entry must get an empty list, not the startup
+	// names. sendPerTestParams feeds this to MockFilterParams.MockMapping, and the
+	// agent engages mapping mode on len(MockMapping) > 0 — so returning startup
+	// names here would narrow that test's pool to the boot mocks alone and fail it
+	// with no_mocks, where today it degrades gracefully to the wide pool.
+	t.Run("empty per-test entry stays empty", func(t *testing.T) {
+		if got := expectedMocksForTest(setup, "test-2"); len(got) != 0 {
+			t.Fatalf("expected empty so the agent keeps the wide pool, got %v", got)
+		}
 	})
 
-	// Unknown test names used to early-return nil; they must still boot.
-	t.Run("unknown test still gets startup", func(t *testing.T) {
-		assertNames(t, expectedMocksForTest(setup, "does-not-exist"), []string{"boot-0", "boot-1"})
+	t.Run("unknown test stays empty", func(t *testing.T) {
+		if got := expectedMocksForTest(setup, "does-not-exist"); len(got) != 0 {
+			t.Fatalf("expected empty, got %v", got)
+		}
 	})
 
 	t.Run("no startup section leaves behaviour unchanged", func(t *testing.T) {

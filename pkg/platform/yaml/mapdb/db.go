@@ -93,6 +93,14 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	//
 	// UpsertBatch needs no equivalent — it decodes into *models.Mapping and
 	// mutates TestCases in place, so the section survives untouched.
+	//
+	// KNOWN LIMITATION: this can never CLEAR a stale section. After a re-record
+	// where the app no longer makes some boot call, a run capturing zero startup
+	// mocks takes the second branch and the old names persist indefinitely.
+	// Benign — DiskMocks.LoadByNames silently skips names it cannot find — but it
+	// means the section only ever grows stale, never shrinks. Clearing it would
+	// need a way to distinguish "captured nothing" from "did not look", which
+	// this signature does not carry.
 	switch {
 	case len(mapping.Startup) > 0:
 		newMapping.Startup = mapping.Startup
@@ -367,33 +375,12 @@ func (db *MappingDb) GetStartup(ctx context.Context, testSetID string) ([]models
 // Get reads test-mock mappings from a YAML file
 // Returns: testMockMappings, mappingFilePresent, error
 func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error) {
-	// Create the file path
-	mappingPath := filepath.Join(db.path, testSetID)
-	fileName := db.MapFileName
-	if fileName == "" {
-		fileName = "mappings"
-	}
-
-	fileData, detected, err := yaml.ReadFileAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	mapping, filePath, present, err := db.decodeMapping(ctx, testSetID)
 	if err != nil {
-		if os.IsNotExist(err) {
-			db.logger.Debug("Mapping file does not exist, returning empty mappings",
-				zap.String("testSetID", testSetID),
-				zap.String("path", mappingPath))
-			return make(map[string][]models.MockEntry), false, nil
-		}
-		utils.LogError(db.logger, err, "failed to read mapping file",
-			zap.String("testSetID", testSetID),
-			zap.String("path", mappingPath),
-			zap.String("fileName", fileName))
 		return nil, false, err
 	}
-
-	mapping, err := DecodeMappingF(fileData, db.logger, detected)
-	if err != nil {
-		utils.LogError(db.logger, err, "failed to decode mapping",
-			zap.String("testSetID", testSetID))
-		return nil, false, err
+	if !present {
+		return make(map[string][]models.MockEntry), false, nil
 	}
 
 	testMockMappings := GetMappings(mapping, db.logger)
@@ -408,7 +395,7 @@ func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]mo
 
 	db.logger.Info("Successfully loaded test-mock mappings",
 		zap.String("testSetID", testSetID),
-		zap.String("filePath", filepath.Join(mappingPath, fileName+"."+detected.FileExtension())),
+		zap.String("filePath", filePath),
 		zap.Int("numTests", len(testMockMappings)),
 		zap.Bool("hasMeaningfulMappings", hasMeaningfulMappings))
 
