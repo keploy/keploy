@@ -17,7 +17,7 @@ import (
 // agent.Service interface stays unchanged (same pattern as BeginTestErrorCapture).
 
 type scopeBeginner interface {
-	BeginScope(ctx context.Context, name string, pid int) (models.ScopeAck, error)
+	BeginScope(ctx context.Context, name string, pid, attempt int) (models.ScopeAck, error)
 }
 type scopeEnder interface {
 	EndScope(ctx context.Context, name string, pid int) error
@@ -44,7 +44,7 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	ack := models.ScopeAck{Reason: models.ScopeReasonUnsupported}
 	if s, ok := a.svc.(scopeBeginner); ok {
-		got, err := s.BeginScope(r.Context(), req.Name, req.Pid)
+		got, err := s.BeginScope(r.Context(), req.Name, req.Pid, req.Attempt)
 		if err != nil {
 			a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
