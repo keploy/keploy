@@ -2460,7 +2460,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Mock Window: Calculate the effective mock filter window for streaming
 			// using the request timestamp to the response timestamp plus a timeout buffer.
 			streamReqTime, streamRespTime := effectiveStreamMockWindow(tc, r.config.Test.APITimeout)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, deferred.expectedMocks, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased)
+			// Merge startup names at the SEND site, not where expectedMocks was
+			// built: the same slice is reused below for isMockSubsetWithConfig,
+			// which compares per-test expectation against per-test consumption.
+			// Widening it there would make every startup mock look like a missing
+			// expectation. Only the agent's loader needs them.
+			streamExpected := models.MergeStartupMockNames(expectedTestMockMappings[tc.Name], startupMockNames)
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
@@ -3041,6 +3047,34 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			shouldWriteMappings = true
 		}
 	}
+
+	// Write once more when we captured a startup section the on-disk mapping
+	// does not have yet.
+	//
+	// Without this the section is unreachable in the default flow:
+	// `keploy record` writes mappings.yaml through UpsertBatch (which has no
+	// startup capture), so by the time `keploy test` runs the file EXISTS, the
+	// create-if-absent branch above is skipped, UpdateTestMapping defaults to
+	// false (config/default.go), and the Startup slice built above is computed
+	// and discarded. Only --update-test-mapping or deleting the file first would
+	// ever persist one.
+	//
+	// Gated on the section being genuinely absent on disk, so this fires at most
+	// once per test set rather than rewriting the file on every run. A read
+	// failure leaves the flag alone — costing the section, not the run.
+	if !shouldWriteMappings && r.mappingDB != nil && len(actualTestMockMappings.Startup) > 0 {
+		if onDisk, startupErr := r.mappingDB.GetStartup(ctx, testSetID); startupErr != nil {
+			r.logger.Debug("Skipping startup-section backfill — could not read the existing section",
+				zap.String("testSetID", testSetID),
+				zap.Error(startupErr))
+		} else if len(onDisk) == 0 {
+			r.logger.Debug("Writing mappings.yaml to add the startup section it lacks",
+				zap.String("testSetID", testSetID),
+				zap.Int("startupMocks", len(actualTestMockMappings.Startup)))
+			shouldWriteMappings = true
+		}
+	}
+
 	if shouldWriteMappings {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
@@ -4442,11 +4476,7 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 			zap.String("testSetID", testSetID),
 			zap.Error(serr))
 	} else {
-		for _, e := range startup {
-			if e.Name != "" {
-				startupNames = append(startupNames, e.Name)
-			}
-		}
+		startupNames = (&models.Mapping{Startup: startup}).StartupMockNames()
 	}
 
 	// Try to get mappings from the database.

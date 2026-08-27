@@ -112,17 +112,24 @@ func TestMergeStartupMockNames(t *testing.T) {
 		}
 	})
 
-	// A test with no mocks of its own still needs the app's boot mocks.
-	t.Run("startup only", func(t *testing.T) {
-		got := MergeStartupMockNames(nil, []string{"s1"})
-		if len(got) != 1 || got[0] != "s1" {
-			t.Fatalf("got %v", got)
+	// A test with NO per-test entry must stay empty even when a startup section
+	// exists. A non-empty list flips the agent into mapping mode, which would
+	// shrink that test's pool to the boot mocks alone; an empty list keeps it on
+	// the strict-window / lax-all path it has always relied on.
+	t.Run("no per-test entry stays empty, even with startup", func(t *testing.T) {
+		if got := MergeStartupMockNames(nil, []string{"s1"}); len(got) != 0 {
+			t.Fatalf("expected empty so the agent falls through to the wide pool, got %v", got)
+		}
+		if got := MergeStartupMockNames([]MockEntry{}, []string{"s1"}); len(got) != 0 {
+			t.Fatalf("expected empty for an empty (not nil) entry list, got %v", got)
 		}
 	})
 
-	t.Run("both empty yields an empty non-nil slice", func(t *testing.T) {
-		got := MergeStartupMockNames(nil, nil)
-		if got == nil || len(got) != 0 {
+	// Both empty returns nil. Only emptiness matters to the caller — the agent
+	// branches on len(MockMapping) > 0 — so nil and an empty slice are equivalent
+	// there, and nil is what the no-per-test-entry guard returns.
+	t.Run("both empty yields nothing", func(t *testing.T) {
+		if got := MergeStartupMockNames(nil, nil); len(got) != 0 {
 			t.Fatalf("got %v", got)
 		}
 	})

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -114,18 +115,9 @@ func TestStartupKeyOmittedWhenEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if containsKey(string(raw), "startup:") {
+	if strings.Contains(string(raw), "startup:") {
 		t.Fatalf("empty startup section must be omitted, got:\n%s", raw)
 	}
-}
-
-func containsKey(s, key string) bool {
-	for i := 0; i+len(key) <= len(s); i++ {
-		if s[i:i+len(key)] == key {
-			return true
-		}
-	}
-	return false
 }
 
 // Insert flattens the mapping to a per-test map and rebuilds it, so the startup
