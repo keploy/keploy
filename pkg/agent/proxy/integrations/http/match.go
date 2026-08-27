@@ -85,19 +85,27 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// that included untagged HTTP as session-by-kind). Post-
 		// Phase-3 tag-only routing, per-test HTTP mocks land in the
 		// per-test pool — they need to be reachable here.
+		//
+		// The startup and session tiers are read SEPARATELY (rather than
+		// through the GetSessionMocks union shim) so each candidate keeps the
+		// provenance updateMock needs to consume it from the right tier —
+		// see mergeTiered and the interface doc at integrations.go:246.
 		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get per-test mocks")
 			return false, nil, nil, errors.New("error while matching the request with the mocks")
 		}
-		sessionMocks, err := mockDb.GetSessionMocks()
+		startupMocks, err := mockDb.GetStartupMocks()
+		if err != nil {
+			utils.LogError(h.Logger, err, "failed to get startup mocks")
+			return false, nil, nil, errors.New("error while matching the request with the mocks")
+		}
+		sessionMocks, err := mockDb.GetSessionScopedMocks()
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get session mocks")
 			return false, nil, nil, errors.New("error while matching the request with the mocks")
 		}
-		combined := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))
-		combined = append(combined, perTestMocks...)
-		combined = append(combined, sessionMocks...)
+		combined, tierOf := mergeTiered(perTestMocks, startupMocks, sessionMocks)
 		unfilteredMocks := FilterHTTPMocks(combined)
 
 		// Log all mock names in a single line for better readability
@@ -148,7 +156,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if ok {
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
-			if !h.updateMock(ctx, bestMatch, mockDb, nil) {
+			if !h.updateMock(ctx, bestMatch, mockDb, nil, tierOf[bestMatch]) {
 				continue
 			}
 			return true, bestMatch, nil, nil
@@ -186,7 +194,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			if len(bodyMatched) == 1 {
 				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
 				detected, _ := noiseEngine.Detect(bodyMatched[0], input.body, userBodyNoise)
-				if !h.updateMock(ctx, bodyMatched[0], mockDb, detected) {
+				if !h.updateMock(ctx, bodyMatched[0], mockDb, detected, tierOf[bodyMatched[0]]) {
 					continue
 				}
 				return true, bodyMatched[0], nil, nil
@@ -202,13 +210,66 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if isMatched {
 			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
 			detected, _ := noiseEngine.Detect(bestMatch, input.body, userBodyNoise)
-			if !h.updateMock(ctx, bestMatch, mockDb, detected) {
+			if !h.updateMock(ctx, bestMatch, mockDb, detected, tierOf[bestMatch]) {
 				continue
 			}
 			return true, bestMatch, nil, nil
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed}, nil
 	}
+}
+
+// mockTier names the pool a candidate was READ from. Carrying it through the
+// match cascade is what lets updateMock issue ONE targeted consume instead of
+// probing tiers blind: the tree comparator orders on (SortOrder, ID) and never
+// consults IsFiltered, and both are per-pool 0-based indices, so the same
+// coordinates exist in every tier at once — a speculative DeleteFilteredMock
+// can evict an unrelated mock, report success, and leave the served mock
+// un-consumed.
+type mockTier uint8
+
+const (
+	tierUnknown mockTier = iota
+	tierPerTest
+	tierStartup
+	tierSession
+)
+
+// mergeTiered concatenates the three read pools in the order the matcher has
+// always seen them — per-test first, then startup, then session — while
+// recording which pool each candidate came from. The order is load-bearing:
+// a per-test mock must win a tie against a session mock that only "sort of"
+// matches.
+//
+// One pointer can legitimately be in TWO pools. SetMocksWithWindow's
+// initial-staging branch copies the whole unfiltered slice into the startup
+// tree as well, and on the `keploy mock replay` path EVERY staging call is
+// initial staging (it always passes AfterTime = models.BaseTime). Session
+// ownership wins that tie: such a mock is reusable, and consuming it from the
+// startup tier would leave the session copy behind to be served again.
+func mergeTiered(perTest, startup, session []*models.Mock) ([]*models.Mock, map[*models.Mock]mockTier) {
+	total := len(perTest) + len(startup) + len(session)
+	tierOf := make(map[*models.Mock]mockTier, total)
+	combined := make([]*models.Mock, 0, total)
+	add := func(mocks []*models.Mock, tier mockTier) {
+		for _, mk := range mocks {
+			if mk == nil {
+				continue
+			}
+			if prev, dup := tierOf[mk]; dup {
+				if prev == tierStartup && tier == tierSession {
+					tierOf[mk] = tierSession
+				}
+				continue
+			}
+			tierOf[mk] = tier
+			combined = append(combined, mk)
+		}
+	}
+	add(perTest, tierPerTest)
+	add(startup, tierStartup)
+	add(session, tierSession)
+	return combined, tierOf
 }
 
 // FilterHTTPMocks Filter mocks to only HTTP mocks
@@ -1013,7 +1074,7 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 // match.go:723-725). We build a fresh copy, mutate the copy, and pass
 // (old=matchedMock, new=&updatedMock) to the mock DB — which already
 // takes treesMu internally to swap the pointer atomically.
-func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
+func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, tier mockTier) bool {
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
@@ -1039,58 +1100,61 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 	if isSessionOrConnection {
 		return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
 	}
-	// Per-test: consume via DeleteFilteredMock, with fallback to
-	// UpdateUnFilteredMock for mocks staged into the session pool
-	// during the initial pre-first-test window.
+	// Per-test: consume from the tier this candidate was READ from, with a
+	// SINGLE operation. Probing tiers in turn is unsafe — the tree comparator
+	// orders on (SortOrder, ID) with no IsFiltered check, and both are
+	// per-pool indices, so a speculative DeleteFilteredMock can match a
+	// DIFFERENT mock's coordinates in the per-test tree, evict it, report
+	// success, and leave the mock we actually served un-consumed.
 	//
-	// DeleteFilteredMock keys the tree lookup on TestModeInfo, so the
-	// delete-key mock MUST keep the original (unmutated) TestModeInfo —
-	// we pass a copy that retains it but carries the detected noise on a
-	// fresh MockSpec.ReqBodyNoise map, so flagMockAsUsed reports the noise on
-	// the consumed per-test mock (it would otherwise be lost: the original
-	// matchedMock has no noise, and updatedMock's mutated TestModeInfo wouldn't
-	// match the tree node).
+	// The delete key MUST carry the original (unmutated) TestModeInfo,
+	// because DeleteFilteredMock keys the tree lookup on it. We pass a copy
+	// that retains it but carries the detected noise on a fresh
+	// MockSpec.ReqBodyNoise map, so flagMockAsUsed reports the noise on the
+	// consumed mock (it would otherwise be lost: the original matchedMock has
+	// no noise, and updatedMock's mutated TestModeInfo wouldn't match the
+	// tree node).
 	deleteMock := *matchedMock
 	if len(detectedNoise) > 0 {
 		deleteMock.Spec.ReqBodyNoise = mergeReqBodyNoise(deleteMock.Spec.ReqBodyNoise, detectedNoise)
 	}
-	if mockDb.DeleteFilteredMock(deleteMock) {
-		return true
+	switch tier {
+	case tierPerTest:
+		// A false return here is the LOST-CONSUME-RACE signal, and it is
+		// meaningful now that the delete is targeted: two connections scored
+		// the same mock, one delete won, and the loser must re-match against
+		// the now-shrunk pool rather than double-serve. match() re-reads all
+		// three pools at the top of every iteration, so `continue` makes
+		// progress. Same contract mongo/v2 documents at decode.go:1024.
+		return mockDb.DeleteFilteredMock(deleteMock)
+	case tierStartup:
+		// On the `keploy mock replay` path this is where per-test mocks
+		// actually live: every staging call arrives with
+		// start == models.BaseTime, so SetMocksWithWindow takes its
+		// initial-staging branch, sets filteredForTree to nil, and routes the
+		// whole per-test slice into the startup tree.
+		if deleteMock.Name == "" {
+			// DeleteStartupMock is name-keyed (the startup tree is keyed by a
+			// tier-local TestModeInfo copy, so it scans by name), and returns
+			// false for an empty name. Retrying cannot change that, so a
+			// `continue` here would spin forever. Serve it and say so.
+			h.Logger.Warn("served a startup-tier mock with no name; it cannot be consumed and the tape will not advance for this request",
+				zap.String("kind", string(deleteMock.Kind)),
+				zap.Any("lifetime", deleteMock.TestModeInfo.Lifetime))
+			return true
+		}
+		return mockDb.DeleteStartupMock(deleteMock)
+	case tierSession:
+		// A per-test-lifetime mock sitting in the session tier is a
+		// lax-promoted cross-test recording. It is deliberately reusable, so
+		// it is retained and re-sorted, not consumed.
+		return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
 	}
-	// Startup tier. On the `keploy mock replay` path the per-test tree is
-	// always empty: every staging call arrives with start==models.BaseTime, so
-	// SetMocksWithWindow takes its initial-staging branch and routes the
-	// whole per-test slice into the startup tree instead
-	// (mockmanager.go:704 + :749). A per-test mock therefore lives in
-	// `startup`, DeleteFilteredMock above misses, and without this branch
-	// the mock is never consumed. DeleteStartupMock is name-keyed
-	// (mockmanager.go:1943-1960), not TestModeInfo-keyed, so it is safe to
-	// attempt unguarded and returns false for mocks of any other tier.
-	if mockDb.DeleteStartupMock(deleteMock) {
-		return true
-	}
-	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) {
-		return true
-	}
-	// updateMock must be TOTAL. Its caller loops on a bare `for {}`
-	// (match.go:60) and `continue`s on a false return without changing the
-	// candidate pool, so any false return here is an unbounded spin by
-	// construction.
-	//
-	// Totality is asserted HERE rather than delegated to MarkMockAsUsed,
-	// which is itself partial: it returns false for a mock with an empty
-	// Name (mockmanager.go), as does DeleteStartupMock. A nameless mock —
-	// reachable because the disk read path never assigns Name, it comes
-	// from the YAML `name:` field — would otherwise fail all four steps
-	// and reproduce the very spin this path removes.
-	mockDb.MarkMockAsUsed(deleteMock)
-
-	// Reaching here means the mock was served but consumed from no tier, so
-	// the next identical request matches it again and the tape does not
-	// advance — while the run still reports consumed>0 / missed==0. That is
-	// the silent-stale-data failure this work exists to eliminate, so it
-	// must be visible rather than merely survivable.
-	h.Logger.Warn("served a mock that could not be consumed from any tier; the tape will not advance for this request",
+	// tierUnknown is unreachable by construction: every candidate reaching
+	// updateMock came out of mergeTiered, which tags all three pools. If it
+	// ever fires, the tier map and the candidate list have diverged — a
+	// programming error, not a race, so retrying would spin. Serve loudly.
+	h.Logger.Warn("served a mock with no recorded tier; it cannot be consumed and the tape will not advance for this request",
 		zap.String("mock", deleteMock.Name),
 		zap.String("kind", string(deleteMock.Kind)),
 		zap.Any("lifetime", deleteMock.TestModeInfo.Lifetime))

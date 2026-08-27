@@ -24,6 +24,7 @@ func (f *fakeMockDb) GetPerTestMocksInWindow() ([]*models.Mock, error)  { return
 func (f *fakeMockDb) GetSessionMocks() ([]*models.Mock, error)          { return f.mocks, nil }
 func (f *fakeMockDb) GetUnFilteredMocks() ([]*models.Mock, error)       { return f.mocks, nil }
 func (f *fakeMockDb) GetSessionScopedMocks() ([]*models.Mock, error)    { return f.mocks, nil }
+func (f *fakeMockDb) GetStartupMocks() ([]*models.Mock, error)          { return f.mocks, nil }
 
 func scopedNames(ms []*models.Mock) []string {
 	out := make([]string, 0, len(ms))
@@ -47,6 +48,11 @@ func TestScopedMockDbFiltersReads(t *testing.T) {
 	for _, get := range []func() ([]*models.Mock, error){
 		s.GetPerTestMocksInWindow, s.GetFilteredMocks, s.GetFilteredMocksInWindow,
 		s.GetSessionMocks, s.GetUnFilteredMocks, s.GetSessionScopedMocks,
+		// GetStartupMocks is load-bearing on the `keploy mock replay` path,
+		// where SetMocksWithWindow routes the whole per-test slice into the
+		// startup tree: a parser reading this tier directly instead of via the
+		// GetSessionMocks union shim would otherwise see every worker's mocks.
+		s.GetStartupMocks,
 	} {
 		got, err := get()
 		require.NoError(t, err)

@@ -107,6 +107,17 @@ func (s *scopedMockDb) GetSessionMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetSessionMocks())
 }
 
+// GetStartupMocks must be scoped too, and load-bearingly so on the
+// `keploy mock replay` path: every staging call there passes
+// AfterTime = models.BaseTime, so SetMocksWithWindow routes the WHOLE per-test
+// slice into the startup tree. A parser that reads this tier directly (rather
+// than through the GetSessionMocks union shim, which was the only scoped route
+// into it) would otherwise see every worker's mocks and the per-PID isolation
+// would silently become a no-op.
+func (s *scopedMockDb) GetStartupMocks() ([]*models.Mock, error) {
+	return s.keep(s.MockMemDb.GetStartupMocks())
+}
+
 func (s *scopedMockDb) GetUnFilteredMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetUnFilteredMocks())
 }
