@@ -3299,6 +3299,23 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 	return nil
 }
 
+// SetMappedMocksWithWindow is SetMocksWithWindow for a per-test pool the
+// agent selected via the recorded test→mock mapping: the window is still
+// published (tier routing, startup classification), but window containment
+// never drops a mapped mock — the mapping outranks timestamp skew. Satisfies
+// the agent's optional MappedWindowedProxy extension interface.
+func (p *Proxy) SetMappedMocksWithWindow(_ context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
+	p.deriveMysqlPorts(filtered, unFiltered)
+	if m := p.getMockManager(); m != nil {
+		m.SetMappedMocksWithWindow(filtered, unFiltered, start, end)
+		p.dnsCache.Purge()
+	}
+	if p.asyncEngine != nil {
+		p.asyncEngine.AdvanceWindow()
+	}
+	return nil
+}
+
 // FirstTestWindowStart returns the earliest test window start observed
 // by the underlying MockManager, or zero before any non-BaseTime
 // SetMocksWithWindow has landed. Satisfies the agent's optional

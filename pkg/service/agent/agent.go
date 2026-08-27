@@ -1142,7 +1142,19 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// supports the WindowedProxy extension. Otherwise fall back to the
 	// stable SetMocks contract — third-party proxies without window
 	// support keep working in legacy lax mode.
-	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
+	//
+	// Mapping-based selection prefers the MappedWindowedProxy extension:
+	// the mapping already IS this test's mock selection, so the proxy must
+	// not re-drop mapped mocks on window containment (ingress vs egress
+	// timestamp skew, or re-stamped test timestamps would otherwise empty
+	// the pool a passing recording proved complete).
+	mappingBased := params.UseMappingBased && len(params.MockMapping) > 0
+	if mwp, ok := a.Proxy.(coreAgent.MappedWindowedProxy); ok && mappingBased {
+		if err := mwp.SetMappedMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
+			utils.LogError(a.logger, err, "failed to set mapped mocks and test window on proxy; verify the proxy implements MappedWindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
+			return err
+		}
+	} else if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
 		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
 			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
 			return err

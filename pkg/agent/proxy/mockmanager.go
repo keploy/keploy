@@ -93,6 +93,18 @@ type MockManager struct {
 	windowMu    sync.RWMutex
 	windowStart time.Time
 	windowEnd   time.Time
+	// mappingAuthoritative marks the current per-test pool as selected by a
+	// recorded test→mock MAPPING rather than by timestamps. A mapping is the
+	// authoritative record of which mocks THIS test consumed, so window
+	// containment must not re-drop its mocks: test req/res stamps come from
+	// the ingress path while mock stamps come from the egress proxy path
+	// (ordering is not guaranteed at millisecond scale), and post-replay
+	// write-backs can re-stamp test timestamps entirely — either way a
+	// timestamp disagreement on a mapped mock is noise, not bleed. Set by
+	// SetMappedMocksWithWindow, cleared by SetMocksWithWindow /
+	// SetCurrentTestWindow; guarded by windowMu alongside the window it
+	// qualifies.
+	mappingAuthoritative bool
 
 	// firstWindowStart caches the earliest windowStart observed across
 	// all SetMocksWithWindow calls for this manager's lifetime. It's
@@ -494,6 +506,7 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 	m.windowMu.Lock()
 	m.windowStart = start
 	m.windowEnd = end
+	m.mappingAuthoritative = false
 	m.windowMu.Unlock()
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
 }
@@ -560,6 +573,7 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 	m.treesMu.RUnlock()
 	m.windowMu.RLock()
 	start, end := m.windowStart, m.windowEnd
+	mappingAuthoritative := m.mappingAuthoritative
 	m.windowMu.RUnlock()
 	m.swapMu.RUnlock()
 
@@ -572,6 +586,13 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 	})
 
 	if start.IsZero() || end.IsZero() {
+		return all, nil
+	}
+	// A mapping-authoritative pool was selected by the recorded test→mock
+	// mapping, not by timestamps; the set-time pre-filter already kept its
+	// out-of-window mocks, so re-enforcing containment here would drop them
+	// at match time. Serve the tree as-is.
+	if mappingAuthoritative {
 		return all, nil
 	}
 	out := make([]*models.Mock, 0, len(all))
@@ -659,6 +680,21 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 //
 // Also resets the per-test droppedOutOfWindow counter.
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	m.setMocksWithWindow(filtered, unfiltered, start, end, false)
+}
+
+// SetMappedMocksWithWindow is SetMocksWithWindow for a per-test pool selected
+// by a recorded test→mock mapping. The mapping already IS the per-test
+// selection, so window containment keeps every mapped mock instead of
+// dropping the ones whose request timestamp strays outside [start, end]
+// (ingress/egress stamp skew, or test timestamps re-stamped by post-replay
+// write-backs). Everything else — window publication, startup routing for
+// pre-first-test mocks, invalid-order sanity drop — behaves identically.
+func (m *MockManager) SetMappedMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	m.setMocksWithWindow(filtered, unfiltered, start, end, true)
+}
+
+func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time, mappingAuthoritative bool) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 
@@ -792,6 +828,13 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 			// may legitimately straggle past `end` (async downstream
 			// completion is normal).
 			if !req.Before(start) && !req.After(end) {
+				out = append(out, mock)
+				continue
+			}
+			// Mapping-authoritative pools keep out-of-window mocks in the
+			// per-test tree: the mapping recorded that THIS test consumed
+			// them, which outranks a timestamp disagreement.
+			if mappingAuthoritative {
 				out = append(out, mock)
 				continue
 			}
@@ -932,6 +975,7 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		m.windowMu.Lock()
 		m.windowStart = start
 		m.windowEnd = end
+		m.mappingAuthoritative = mappingAuthoritative
 		m.windowMu.Unlock()
 	}
 	// Counter reflects pre-filtering drops for THIS test; legacy

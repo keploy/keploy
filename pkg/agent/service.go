@@ -116,6 +116,20 @@ type WindowedProxy interface {
 	SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error
 }
 
+// MappedWindowedProxy is the optional extension for per-test pools selected
+// via a recorded test→mock MAPPING. The mapping is the authoritative record
+// of which mocks the test consumed, so the proxy publishes the window as
+// usual (tier routing, startup classification) but window containment never
+// drops a mapped mock: test req/res stamps come from the ingress path while
+// mock stamps come from the egress path (ordering is not guaranteed at
+// millisecond scale), and post-replay write-backs can re-stamp test
+// timestamps — a timestamp disagreement on a mapped mock is noise, not
+// cross-test bleed. Callers MUST type-assert from Proxy and fall back to
+// WindowedProxy (then SetMocks) when the assertion fails.
+type MappedWindowedProxy interface {
+	SetMappedMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error
+}
+
 // AsyncMockLoader is an optional Proxy capability. The agent hands the proxy
 // the COMPLETE async-mock corpus exactly once (at mock-store time) so the
 // async engine can build its per-lane ordered streams. Proxies without async
