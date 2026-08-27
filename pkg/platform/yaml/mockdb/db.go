@@ -1356,6 +1356,21 @@ func readGobMocks(path string) ([]*models.Mock, error) {
 			}
 			return out, fmt.Errorf("decode gob mock: %w", err)
 		}
+		// gob ignores struct tags. Unlike the yaml/json write paths —
+		// where TestModeInfo is simply absent from the wire document —
+		// the gob encoder serialises every exported field, so Lifetime
+		// and LifetimeDerived survive the round trip. The recorders
+		// stamp LifetimeDerived=true at emit time (integrations/http's
+		// ptLifetime, mysql/recorder/record.go) to make DeriveLifetime a
+		// no-op *within the recording process*. Persisting that flag
+		// makes it a no-op at replay too: DeriveLifetime returns at its
+		// first line, no classification rule runs at all, and the
+		// on-disk Spec.Metadata["type"] tag silently becomes advisory.
+		// Clear both so the tag stays the single source of truth on this
+		// path, which is the contract TestModeInfo.Lifetime documents.
+		// The caller re-derives via DeriveLifetime().
+		m.TestModeInfo.Lifetime = models.LifetimePerTest // the "not yet derived" zero value
+		m.TestModeInfo.LifetimeDerived = false
 		out = append(out, &m)
 	}
 }

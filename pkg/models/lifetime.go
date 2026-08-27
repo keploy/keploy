@@ -88,13 +88,18 @@ func (l Lifetime) String() string {
 //     its Metadata["type"] tag.
 //
 // Precedence (applied top-to-bottom; first match wins):
-//  1. Kind == MySQL AND first request is a connection-alive command
-//     with an input-independent response (COM_PING, COM_STATISTICS,
-//     COM_DEBUG, COM_RESET_CONNECTION) → LifetimeSession. Applied
-//     BEFORE the tag switch so an explicitly-tagged "mocks" mock from
-//     the recorder is still promoted to session when semantically
-//     reusable — this is how HikariCP startup COM_PING mocks survive
-//     strict-window pre-filtering.
+//  1. Protocol-specific overrides, applied BEFORE the tag switch so an
+//     explicitly-tagged per-test mock from a recorder is still promoted
+//     to session when its response is semantically input-independent
+//     — both cases below resolve to LifetimeSession. (a) Kind == MySQL
+//     AND first request is a connection-alive command (COM_PING,
+//     COM_STATISTICS, COM_DEBUG, COM_RESET_CONNECTION): this is how
+//     HikariCP startup COM_PING mocks tagged "mocks" survive
+//     strict-window pre-filtering. (b) Kind == HTTP AND the recorded
+//     request is a browser CORS preflight (method OPTIONS + an
+//     Access-Control-Request-Method header), so the HTTP recorder's
+//     per-test "HTTP_CLIENT" tag cannot make a preflight consumable or
+//     test-scoped; see httpIsCORSPreflight (regression B28).
 //  2. Spec.Metadata["type"] == "config"       → LifetimeSession
 //  3. Spec.Metadata["type"] == "connection"   → LifetimeConnection
 //     (requires non-empty connID; falls back to Session if missing).
@@ -146,6 +151,45 @@ func (m *Mock) DeriveLifetime() {
 	// COM_CHANGE_USER / COM_SET_OPTION all depend on input and must
 	// stay per-test.
 	if m.Kind == MySQL && mysqlIsSessionReusableCommand(m) {
+		m.TestModeInfo.Lifetime = LifetimeSession
+		return
+	}
+
+	// Rule 1(b): same tier as the MySQL override above, for HTTP. A CORS
+	// preflight is input-independent in exactly the sense COM_PING is:
+	// the browser sends `OPTIONS <path>` with
+	// Access-Control-Request-Method/-Headers and no body, and the server
+	// answers with the allow-policy for that endpoint. The reply is a
+	// property of the endpoint, not of the test that happened to trigger
+	// it, so it is legitimately reusable across tests and across
+	// connections.
+	//
+	// Why the override is needed (regression B28): the HTTP recorder tags
+	// every capture Spec.Metadata["type"] = "HTTP_CLIENT", and HTTP is
+	// deliberately excluded from rule 5's lax promotion (see
+	// kindsWithLaxTaggedSessionPromotion) so HTTP data mocks stay per-test
+	// and are consumed on match. Preflights inherited that classification:
+	// consumed on first match AND visible only inside the owning test's
+	// mock pool. In the ci-cd recording that surfaced this, only 3 of 6
+	// tests own any of the 8 recorded OPTIONS mocks, so the other 3 replay
+	// as "no matching mock found for OPTIONS /query" and every preflighted
+	// request in them fails the browser's CORS check with
+	// net::ERR_FAILED.
+	//
+	// What session lifetime does and does not fix. It exempts the mock
+	// from consumption on match, from window filtering, and from the
+	// mapping-based narrowing that `scope/begin` applies when the runner
+	// reports no worker PID — that last one is why this override repairs
+	// B28, because FilterConfigMocksMapping returns the whole session
+	// pool while FilterTcsMocksMapping returns only in-mapping mocks
+	// (see pkg/util.go). It does NOT exempt the mock from per-PID worker
+	// scoping: scopedMockDb.keep is Lifetime-blind and wraps the session
+	// readers too, so under parallel workers (workers > 1, pid > 0) a
+	// preflight the current worker does not own is still dropped and B28
+	// reproduces. Making keep() Lifetime-aware is the fix for that, and
+	// is deliberately out of scope here — this branch targets the
+	// single-worker path.
+	if m.Kind == HTTP && httpIsCORSPreflight(m) {
 		m.TestModeInfo.Lifetime = LifetimeSession
 		return
 	}
@@ -420,6 +464,69 @@ func IsMySQLSessionReusableCommandType(cmdType string) bool {
 	switch cmdType {
 	case "COM_PING", "COM_STATISTICS", "COM_DEBUG", "COM_RESET_CONNECTION":
 		return true
+	}
+	return false
+}
+
+// httpIsCORSPreflight reports whether an HTTP mock captured a browser
+// CORS preflight, whose response is input-independent and therefore safe
+// to route into the session pool regardless of the recorder's per-test
+// "HTTP_CLIENT" tag. Mirrors mysqlIsSessionReusableCommand: the Kind
+// check stays at the DeriveLifetime call site, the shape check lives
+// here.
+//
+// Only Kind == HTTP is wired up. HTTP2 is deliberately excluded because
+// keploy's h2 parser serves gRPC traffic, where browser preflights do not
+// appear — so there is no recording to validate an h2 rule against.
+//
+// Wiring it up would be mechanical, not structural: HTTP2Req carries the
+// same (Method, map[string]string) shape, and IsCORSPreflightRequest is
+// already case-insensitive, so h2's lowercase header keys (RFC 7540
+// section 8.1.2) need no second code path — it is one extra call site.
+//
+// One caveat if it is ever added: HTTP2 remains listed in
+// kindsWithLaxTaggedSessionPromotion, so a tagged h2 capture is already
+// promoted to LifetimeSession under lax mode. But that promotion is gated
+// on lax; under KEPLOY_STRICT_MOCK_WINDOW=1 an h2 preflight WOULD exhibit
+// B28. So "h2 never had this problem" is only true in the default mode.
+func httpIsCORSPreflight(m *Mock) bool {
+	if m == nil || m.Spec.HTTPReq == nil {
+		return false
+	}
+	return IsCORSPreflightRequest(m.Spec.HTTPReq.Method, m.Spec.HTTPReq.Header)
+}
+
+// IsCORSPreflightRequest reports whether a recorded HTTP request is a
+// browser CORS preflight: method OPTIONS *and* an
+// Access-Control-Request-Method header. It is the single source of truth
+// shared by DeriveLifetime's rule 1(b) and any recorder/matcher that later
+// needs the same classification, mirroring
+// IsMySQLSessionReusableCommandType.
+//
+// The header is required on purpose. Per the Fetch standard a browser
+// always sends Access-Control-Request-Method on a preflight, so requiring
+// it costs nothing on real recordings (every OPTIONS mock in the four
+// ci-cd recordings used to diagnose B28 carries it) while excluding a
+// bare OPTIONS that is a genuine data endpoint — WebDAV capability
+// discovery, or an API that serves OPTIONS as a real response whose body
+// varies per caller. Those must stay per-test and be consumed on match;
+// promoting one to session would replay the first recording forever. The
+// tradeoff is deliberately directional: a false negative merely leaves
+// today's behaviour in place, a false positive breaks per-test
+// consumption.
+//
+// The header lookup is case-insensitive. Proxy-recorded mocks go through
+// pkg.ToYamlHTTPHeader(http.Header) so their keys are canonical, but
+// mocks arriving as raw JSON/YAML (cloud sync, hand-written fixtures)
+// carry whatever casing the producer emitted.
+func IsCORSPreflightRequest(method Method, header map[string]string) bool {
+	if !strings.EqualFold(string(method), "OPTIONS") {
+		return false
+	}
+	for k := range header {
+		if strings.EqualFold(k, "Access-Control-Request-Method") {
+			return true
+		}
 	}
 	return false
 }
