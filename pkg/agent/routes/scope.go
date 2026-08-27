@@ -17,7 +17,7 @@ import (
 // agent.Service interface stays unchanged (same pattern as BeginTestErrorCapture).
 
 type scopeBeginner interface {
-	BeginScope(ctx context.Context, name string, pid int) error
+	BeginScope(ctx context.Context, name string, pid int) (models.ScopeAck, error)
 }
 type scopeEnder interface {
 	EndScope(ctx context.Context, name string, pid int) error
@@ -42,15 +42,21 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	ack := models.ScopeAck{Reason: models.ScopeReasonUnsupported}
 	if s, ok := a.svc.(scopeBeginner); ok {
-		if err := s.BeginScope(r.Context(), req.Name, req.Pid); err != nil {
+		got, err := s.BeginScope(r.Context(), req.Name, req.Pid)
+		if err != nil {
 			a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		ack = got
 	}
+	// "status" is kept so a runner written against the original contract is
+	// unaffected; scoped/mocks/reason say whether the call did anything.
+	ack.Status = "ok"
 	render.Status(r, http.StatusOK)
-	render.JSON(w, r, map[string]string{"status": "ok"})
+	render.JSON(w, r, ack)
 }
 
 // HandleScopeEnd marks the end of a named per-test scope.

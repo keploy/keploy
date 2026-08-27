@@ -44,9 +44,9 @@ type scopeKey struct {
 // that worker so PARALLEL workers each get their own served view without
 // stomping each other (Design A); pid == 0 falls back to the single global
 // scope (sequential single-worker runs, and the suite-level default).
-func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
+func (a *Agent) BeginScope(ctx context.Context, name string, pid int) (models.ScopeAck, error) {
 	if name == "" {
-		return nil
+		return models.ScopeAck{Reason: models.ScopeReasonEmptyName}, nil
 	}
 	if pid > 0 {
 		a.pidNsWarnOnce.Do(func() { a.warnIfWorkerPIDUnresolvable(pid) })
@@ -54,27 +54,43 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
+		tableSize := len(a.scopeTable)
 		a.scopeMu.Unlock()
-		if !ok || len(names) == 0 {
-			// No per-test mapping for this test — leave the whole pool armed.
-			return nil
+		// No per-test mapping for this test — leave the whole pool armed. All
+		// three shapes below served the whole set silently before; they are
+		// distinguished here because a runner needs to know WHICH it hit: an
+		// absent mappings.yaml is a setup error, an absent NAME is a renamed
+		// or never-recorded test.
+		switch {
+		case tableSize == 0:
+			a.logger.Debug("scope begin: NOT scoped, no per-test mapping table installed", zap.String("test", name))
+			return models.ScopeAck{Reason: models.ScopeReasonNoMappingTable}, nil
+		case !ok:
+			a.logger.Debug("scope begin: NOT scoped, this name is absent from the mapping table", zap.String("test", name), zap.Int("mapped_tests", tableSize))
+			return models.ScopeAck{Reason: models.ScopeReasonUnmappedScope}, nil
+		case len(names) == 0:
+			a.logger.Debug("scope begin: NOT scoped, this name is mapped to zero mocks", zap.String("test", name))
+			return models.ScopeAck{Reason: models.ScopeReasonEmptyMapping}, nil
 		}
 		if pid > 0 {
 			// Parallel-safe: narrow ONLY this worker's served view, keyed by its
 			// PID, so concurrent workers never overwrite one shared filter.
 			a.logger.Debug("scope begin: worker-scoped pool", zap.String("test", name), zap.Int("worker", pid), zap.Int("mocks", len(names)))
 			a.SetWorkerScope(uint32(pid), names)
-			return nil
+			return models.ScopeAck{Scoped: true, Mocks: len(names), Reason: models.ScopeReasonWorkerScoped}, nil
 		}
 		// No worker PID reported — restrict the single global pool (correct for
 		// a sequential single-worker suite, the pre-Design-A behavior).
 		a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)))
-		return a.UpdateMockParams(ctx, models.MockFilterParams{
+		if err := a.UpdateMockParams(ctx, models.MockFilterParams{
 			MockMapping:     names,
 			UseMappingBased: true,
 			AfterTime:       models.BaseTime,
 			BeforeTime:      time.Now(),
-		})
+		}); err != nil {
+			return models.ScopeAck{}, err
+		}
+		return models.ScopeAck{Scoped: true, Mocks: len(names), Reason: models.ScopeReasonPoolRestricted}, nil
 	}
 
 	// Record mode: mark the window start (agent clock), keyed by worker PID so
@@ -85,7 +101,13 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
 	if a.workerOpen == nil {
 		a.workerOpen = make(map[scopeKey]time.Time)
 	}
-	a.workerOpen[scopeKey{pid: uint32(pid), name: name}] = time.Now()
+	k := scopeKey{pid: uint32(pid), name: name}
+	// A second begin for a scope that was never ended silently discards the
+	// earlier window start, so every mock captured before this call is
+	// attributed to no test and vanishes from mappings.yaml. The overwrite is
+	// kept (changing it is a separate fix) but it is no longer silent.
+	_, alreadyOpen := a.workerOpen[k]
+	a.workerOpen[k] = time.Now()
 	a.scopeMu.Unlock()
 	// Register the worker with the proxy so a call made by this worker OR ANY OF
 	// ITS CHILDREN (a browser's network process, a forked helper) is attributed
@@ -94,8 +116,11 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
 	if wr, ok := a.Proxy.(coreAgent.WorkerRegistrar); ok && pid > 0 {
 		wr.RegisterRecordWorker(uint32(pid))
 	}
-	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
-	return nil
+	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid), zap.Bool("already_open", alreadyOpen))
+	if alreadyOpen {
+		return models.ScopeAck{Reason: models.ScopeReasonRecordAlreadyOpen}, nil
+	}
+	return models.ScopeAck{Reason: models.ScopeReasonRecordWindowOpened}, nil
 }
 
 // warnIfWorkerPIDUnresolvable fires once per agent process when the PID a test
