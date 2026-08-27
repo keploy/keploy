@@ -1993,6 +1993,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
+		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Match outgoing request bodies by VALUE, not just by key presence: a mock is rejected when any request-body field outside test.globalNoise.requestbody drifted. Off by default; turning it on will surface request drift that was previously served the stale recorded response")
 		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
 	}
 	return nil
@@ -2099,6 +2100,17 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			return errors.New("failed to get the strict flag")
 		}
 		c.cfg.Mock.Strict = strict
+
+		// Changed()-guarded so an unset flag doesn't clobber
+		// test.schemaNoiseStrict from keploy.yml with the flag's default.
+		if cmd.Flags().Changed("schema-noise-strict") {
+			schemaNoiseStrict, err := cmd.Flags().GetBool("schema-noise-strict")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the schema-noise-strict flag")
+				return errors.New("failed to get the schema-noise-strict flag")
+			}
+			c.cfg.Test.SchemaNoiseStrict = schemaNoiseStrict
+		}
 
 		if cmd.Flags().Changed("delay") {
 			d, err := cmd.Flags().GetUint64("delay")
