@@ -1474,3 +1474,34 @@ func setStartupMocks(mapping *models.Mapping, consumed []models.MockState) {
 
 	mapping.Startup = entries
 }
+
+// dropStartupMockInfos removes test-set-scoped startup mocks from a
+// MockMismatch side.
+//
+// Applied to expected AND actual, mirroring pkg/service/runner's
+// checkMockMismatches and the DNS carve-out beside it. Startup mocks belong to
+// the test set, not to any one test, so neither their presence nor their
+// absence in a given test is a mismatch worth reporting — and because a
+// session- or connection-tier mock legitimately appears in both the startup
+// section and a per-test list, filtering only one side would turn every such
+// name into a phantom on the other.
+//
+// Report-only: MockMismatches does not feed the pass/fail or obsolescence
+// decision, which is why this cannot mask a real failure.
+func dropStartupMockInfos(infos []models.MockMismatchMock, startupNames []string) []models.MockMismatchMock {
+	if len(infos) == 0 || len(startupNames) == 0 {
+		return infos
+	}
+	startup := make(map[string]struct{}, len(startupNames))
+	for _, n := range startupNames {
+		startup[n] = struct{}{}
+	}
+	out := make([]models.MockMismatchMock, 0, len(infos))
+	for _, i := range infos {
+		if _, isStartup := startup[i.Name]; isStartup {
+			continue
+		}
+		out = append(out, i)
+	}
+	return out
+}

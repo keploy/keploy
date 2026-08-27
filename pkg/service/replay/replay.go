@@ -2319,8 +2319,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// See buildExpectedMockInfos / buildActualMockInfos at the
 					// bottom of this file for DNS-filter + perTestConsumed-known
 					// semantics. Both extracted as helpers for unit testability.
-					expectedMockInfos := buildExpectedMockInfos(expectedMocks, mockKindByName)
-					actualMockInfos := buildActualMockInfos(perTestConsumed, perTestConsumedKnown)
+					// Startup names are dropped from BOTH sides, matching the
+					// runner path (checkMockMismatches) and the existing DNS
+					// carve-out. They belong to the test SET, so neither their
+					// presence nor their absence in one test is a mismatch: a step
+					// that re-handshakes would otherwise report an unexpected
+					// consumption, and one that did not would report a phantom
+					// missing expectation for any name that appears in both
+					// sections. Report-only — MockMismatches does not drive the
+					// pass/fail or obsolescence verdict.
+					expectedMockInfos := dropStartupMockInfos(buildExpectedMockInfos(expectedMocks, mockKindByName), startupMockNames)
+					actualMockInfos := dropStartupMockInfos(buildActualMockInfos(perTestConsumed, perTestConsumedKnown), startupMockNames)
 
 					// TestResult.MockMismatches: populated for tests going
 					// through this (non-streaming) replay path — regardless of
@@ -2462,9 +2471,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			streamReqTime, streamRespTime := effectiveStreamMockWindow(tc, r.config.Test.APITimeout)
 			// Merge startup names at the SEND site, not where expectedMocks was
 			// built: the same slice is reused below for isMockSubsetWithConfig,
-			// which compares per-test expectation against per-test consumption.
-			// Widening it there would make every startup mock look like a missing
-			// expectation. Only the agent's loader needs them.
+			// and only the agent's loader needs the wider list.
+			//
+			// The hazard of widening it at the build site is a FALSE PASS, not a
+			// false mismatch. isMockSubsetWithConfig iterates CONSUMED and flags
+			// anything absent from the expected set, so a larger expected set can
+			// only ever report fewer mismatches. A per-test-lifetime mock that
+			// happened to be consumed at boot lands in `startup:`, and adding it
+			// to expected would have that unexpected consumption tolerated — a
+			// test that should go OBSOLETE would pass instead.
 			streamExpected := models.MergeStartupMockNames(expectedTestMockMappings[tc.Name], startupMockNames)
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased)
 			if err != nil {
@@ -3048,31 +3063,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// Write once more when we captured a startup section the on-disk mapping
-	// does not have yet.
-	//
-	// Without this the section is unreachable in the default flow:
-	// `keploy record` writes mappings.yaml through UpsertBatch (which has no
-	// startup capture), so by the time `keploy test` runs the file EXISTS, the
-	// create-if-absent branch above is skipped, UpdateTestMapping defaults to
-	// false (config/default.go), and the Startup slice built above is computed
-	// and discarded. Only --update-test-mapping or deleting the file first would
-	// ever persist one.
-	//
-	// Gated on the section being genuinely absent on disk, so this fires at most
-	// once per test set rather than rewriting the file on every run. A read
-	// failure leaves the flag alone — costing the section, not the run.
-	if !shouldWriteMappings && r.mappingDB != nil && len(actualTestMockMappings.Startup) > 0 {
-		if onDisk, startupErr := r.mappingDB.GetStartup(ctx, testSetID); startupErr != nil {
-			r.logger.Debug("Skipping startup-section backfill — could not read the existing section",
-				zap.String("testSetID", testSetID),
-				zap.Error(startupErr))
-		} else if len(onDisk) == 0 {
-			r.logger.Debug("Writing mappings.yaml to add the startup section it lacks",
-				zap.String("testSetID", testSetID),
-				zap.Int("startupMocks", len(actualTestMockMappings.Startup)))
-			shouldWriteMappings = true
-		}
+	// See backfillStartupSection: writes a STARTUP-ONLY document so the
+	// operator's per-test mappings are never rewritten by a subset run.
+	if !shouldWriteMappings {
+		r.backfillStartupSection(ctx, testSetID, actualTestMockMappings)
 	}
 
 	if shouldWriteMappings {
@@ -4614,4 +4608,67 @@ func buildActualMockInfos(consumed []models.MockState, known bool) []models.Mock
 		out = append(out, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
 	}
 	return out
+}
+
+// backfillStartupSection adds the startup section to mappings.yaml when the
+// replay captured one and the file on disk has none.
+//
+// Needed because the section is otherwise unreachable in the default flow:
+// `keploy record` writes mappings.yaml through UpsertBatch (no startup
+// capture), so by the time `keploy test` runs the file EXISTS, the
+// create-if-absent branch above is skipped, UpdateTestMapping defaults to
+// false, and the Startup slice built earlier is computed and discarded.
+//
+// ⚠ Written as a STARTUP-ONLY document, deliberately NOT by flipping
+// shouldWriteMappings. That flag routes through StoreMappings ->
+// mapdb.Insert, and Insert REPLACES per-test entries
+// (`finalMappings[t.ID] = t.Mocks`) for every test in the document. On a
+// subset run — `keploy test --tests test-A` — actualTestMockMappings holds
+// only test-A, populated from THIS run's consumption, so the operator's
+// curated list for test-A would be overwritten with whatever this run
+// happened to consume. A short-circuited or partly-failed run writes a
+// strict subset as authoritative, and the next mapping-based run fails that
+// test with no_mocks. That is exactly the contract the create-if-not-present
+// gate exists to protect ("once a file exists, leave it alone; to force a
+// refresh, pass --update-test-mapping").
+//
+// With TestCases empty, Insert's seed-from-existing loop carries every
+// on-disk entry through untouched and only the section is added.
+//
+// Fires at most once per test set (gated on the section being genuinely
+// absent), so it cannot churn the file. A read failure costs the section,
+// not the run.
+//
+// Extracted from RunTestSet so the gate is unit-testable: it is the exact
+// decision that made the whole feature unreachable in the default flow, and the
+// first fix for it clobbered per-test mappings.
+func (r *Replayer) backfillStartupSection(ctx context.Context, testSetID string, actual *models.Mapping) {
+	if r.mappingDB == nil || actual == nil || len(actual.Startup) == 0 {
+		return
+	}
+
+	onDisk, err := r.mappingDB.GetStartup(ctx, testSetID)
+	if err != nil {
+		r.logger.Debug("Skipping startup-section backfill — could not read the existing section",
+			zap.String("testSetID", testSetID),
+			zap.Error(err))
+		return
+	}
+	if len(onDisk) > 0 {
+		return
+	}
+
+	startupOnly := &models.Mapping{
+		Version:   actual.Version,
+		Kind:      actual.Kind,
+		TestSetID: testSetID,
+		Startup:   actual.Startup,
+	}
+	if err := r.mappingDB.Insert(ctx, startupOnly); err != nil {
+		r.logger.Error("Error adding the startup section to mappings.yaml", zap.Error(err))
+		return
+	}
+	r.logger.Info("Added the startup section to mappings.yaml",
+		zap.String("testSetID", testSetID),
+		zap.Int("startupMocks", len(actual.Startup)))
 }
