@@ -14,7 +14,65 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Download image artifact
+    # Retried for the reason documented at length in
+    # .github/actions/download-binary/action.yml: actions/download-artifact
+    # classes a transient "(403) Forbidden: Error from intermediary" as
+    # non-retryable and fails the whole job on it (seen on run 32861996594).
+    # 6 call sites across 6 workflows here.
+    #
+    # The backoff steps are OS-split because golang_docker_windows.yml calls
+    # this action on [self-hosted, Windows, X64], where bash is not guaranteed
+    # to be on PATH - the same reason every other non-action step in this file
+    # already has a runner.os guard and a powershell twin. An unguarded
+    # `shell: bash` step there fails with "Executable 'bash' not found", which
+    # would replace a retryable download error with a confusing one.
+    - id: download-attempt-1
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ runner.temp }}/keploy-image
+
+    - name: Back off before retrying the artifact download (Unix)
+      if: steps.download-attempt-1.outcome == 'failure' && runner.os != 'Windows'
+      shell: bash
+      run: |
+        echo "::warning::artifact download attempt 1 failed; retrying in 10s"
+        sleep 10
+
+    - name: Back off before retrying the artifact download (Windows)
+      if: steps.download-attempt-1.outcome == 'failure' && runner.os == 'Windows'
+      shell: powershell
+      run: |
+        Write-Host "::warning::artifact download attempt 1 failed; retrying in 10s"
+        Start-Sleep -Seconds 10
+
+    - id: download-attempt-2
+      if: steps.download-attempt-1.outcome == 'failure'
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ runner.temp }}/keploy-image
+
+    - name: Back off before the final artifact download attempt (Unix)
+      if: steps.download-attempt-1.outcome == 'failure' && steps.download-attempt-2.outcome == 'failure' && runner.os != 'Windows'
+      shell: bash
+      run: |
+        echo "::warning::artifact download attempt 2 failed; final retry in 30s"
+        sleep 30
+
+    - name: Back off before the final artifact download attempt (Windows)
+      if: steps.download-attempt-1.outcome == 'failure' && steps.download-attempt-2.outcome == 'failure' && runner.os == 'Windows'
+      shell: powershell
+      run: |
+        Write-Host "::warning::artifact download attempt 2 failed; final retry in 30s"
+        Start-Sleep -Seconds 30
+
+    # No continue-on-error: if the third attempt fails the job must fail, and
+    # the log will carry all three failures rather than a single bare one.
+    - name: Download artifact (final attempt)
+      if: steps.download-attempt-1.outcome == 'failure' && steps.download-attempt-2.outcome == 'failure'
       uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.artifact_name }}
