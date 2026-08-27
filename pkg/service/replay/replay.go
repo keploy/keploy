@@ -1690,11 +1690,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Separate replay into regular and streaming buckets. Regular tests can use the
 	// iterative replay path from main, while streaming tests are replayed sequentially
 	// afterwards so long-lived connections do not block the normal flow.
-	type streamingTest struct {
-		testCase      *models.TestCase
-		expectedMocks []string
-	}
-
 	var activeTestCases []*models.TestCase
 	var streamingTests []streamingTest
 	for _, testCase := range testCases {
@@ -1721,15 +1716,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
-			tcCopy := *testCase
-			expectedMockNames := make([]string, len(expectedTestMockMappings[testCase.Name]))
-			for i, m := range expectedTestMockMappings[testCase.Name] {
-				expectedMockNames[i] = m.Name
-			}
-			streamingTests = append(streamingTests, streamingTest{
-				testCase:      &tcCopy,
-				expectedMocks: expectedMockNames,
-			})
+			streamingTests = append(streamingTests, newStreamingTest(testCase, expectedTestMockMappings))
 			r.logger.Debug("deferring streaming test case",
 				zap.String("testcase", testCase.Name),
 				zap.String("testset", testSetID))
@@ -4671,4 +4658,34 @@ func (r *Replayer) backfillStartupSection(ctx context.Context, testSetID string,
 	r.logger.Info("Added the startup section to mappings.yaml",
 		zap.String("testSetID", testSetID),
 		zap.Int("startupMocks", len(actual.Startup)))
+}
+
+// streamingTest is a test case deferred to the sequential streaming phase.
+//
+// Package-scoped rather than local to RunTestSet so newStreamingTest is
+// testable: the field below carries an invariant that is easy to break by
+// "simplifying".
+type streamingTest struct {
+	testCase *models.TestCase
+	// expectedMocks is PER-TEST ONLY, deliberately.
+	//
+	// It feeds isMockSubsetWithConfig, which compares this against what the test
+	// consumed. The agent's list is built separately at the send site and DOES
+	// include the test-set's startup names — merging them here instead would be a
+	// false pass: a per-test-lifetime mock consumed at boot lands in `startup:`,
+	// and having it in the expected set would tolerate that unexpected
+	// consumption, letting a test that should go OBSOLETE pass.
+	expectedMocks []string
+}
+
+// newStreamingTest builds the deferred entry for a streaming test case. It
+// copies the test case because the caller's loop variable is reused.
+func newStreamingTest(testCase *models.TestCase, mappings map[string][]models.MockEntry) streamingTest {
+	tcCopy := *testCase
+	entries := mappings[testCase.Name]
+	names := make([]string, len(entries))
+	for i, m := range entries {
+		names[i] = m.Name
+	}
+	return streamingTest{testCase: &tcCopy, expectedMocks: names}
 }
