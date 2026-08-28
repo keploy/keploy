@@ -147,20 +147,25 @@ func (r *MockReader) readNextYAMLDocument() ([]byte, error) {
 			return nil, fmt.Errorf("failed to read line %d: %w", r.lineNum, err)
 		}
 
-		trimmedLine := strings.TrimSpace(line)
+		// A YAML document separator is only a separator at column 0. Trim the
+		// trailing line ending only: trimming leading whitespace would
+		// misclassify an indented '---' inside a block scalar (e.g. a prompt
+		// body) as a document boundary, and keploy would fail to read back
+		// mocks it wrote itself.
+		line = strings.TrimRight(line, "\r\n")
 
-		if trimmedLine == "---" {
+		if line == "---" {
 			if buffer.Len() == 0 {
 				continue
 			}
 			return buffer.Bytes(), nil
 		}
 
-		if isFirstDoc && buffer.Len() == 0 && strings.HasPrefix(trimmedLine, "#") {
+		if isFirstDoc && buffer.Len() == 0 && strings.HasPrefix(line, "#") {
 			continue
 		}
 
-		buffer.WriteString(line)
+		buffer.WriteString(line + "\n")
 	}
 }
 
