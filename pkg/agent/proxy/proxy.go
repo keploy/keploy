@@ -20,7 +20,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
@@ -36,6 +35,7 @@ import (
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -3661,13 +3661,21 @@ func isShutdownError(err error) bool {
 	if strings.Contains(errStr, "use of closed network connection") {
 		return true
 	}
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
+	if neterr.IsConnReset(err) || neterr.IsConnAborted(err) {
 		return true
 	}
 	if strings.Contains(errStr, "connection reset by peer") {
 		return true
 	}
-	// Windows-specific error patterns for connection close during shutdown
+	// Kept for errors that arrive as plain strings with no errno left in the
+	// chain. Note the two halves are not equally reliable: "wsarecv" and
+	// "wsasend" are Go's own syscall op names (net/fd_windows.go), so they
+	// are locale-independent and already match every socket read/write error
+	// on Windows — broadly enough that the errno check above is redundant at
+	// this particular site. "forcibly closed by the remote host" is the
+	// opposite: Windows renders it in the system display language, so it is
+	// an English-only match and must never be the only thing carrying a
+	// classification.
 	if strings.Contains(errStr, "wsarecv") || strings.Contains(errStr, "wsasend") ||
 		strings.Contains(errStr, "forcibly closed by the remote host") {
 		return true
