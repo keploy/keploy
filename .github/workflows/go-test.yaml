@@ -29,6 +29,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # docker-build-retry.sh decides whether a failed image build is weather or
+      # a real break. Neither direction of getting that wrong shows up in a
+      # green pipeline - too narrow and a transient registry failure fails the
+      # lane, too broad and a compile error is retried four times and then
+      # blamed on infrastructure - so the classification table is asserted.
+      # Needs no Go, no apt and no network, so it runs first and fails fast.
+      - name: docker-build-retry classifier self-test
+        run: ./.github/workflows/test_workflow_scripts/docker-build-retry-selftest.sh
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
