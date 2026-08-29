@@ -313,7 +313,16 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 			select {
 			case <-ctx.Done():
-				// If the context is done, exit the loop
+				// The capture context was cancelled between decoding this mock
+				// and handing it over, so it is dropped. Say so: this used to
+				// be silent, and a silently dropped mock is indistinguishable
+				// from a dependency call that never happened - which is how a
+				// two-call recording could persist one mock with nothing in the
+				// log to explain it. Record drains the stream before cancelling
+				// (see pkg/service/mock/record.go), so reaching here means the
+				// drain's budget was exhausted or the user interrupted.
+				a.logger.Warn("dropping a decoded mock: the capture stream was closed before it could be handed over",
+					zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)))
 				return nil
 			case mockChan <- &mock:
 				// Send the decoded mock to the channel
