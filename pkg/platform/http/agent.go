@@ -254,6 +254,16 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 	return tcChan, nil
 }
 
+// mockHandoffBuffer sizes the decoder -> consumer hand-off. Deep enough that a
+// slow InsertMock cannot park the decoder behind a mock it has already read off
+// the wire.
+const mockHandoffBuffer = 1024
+
+// mockHandoffGrace bounds how long the decoder waits for the consumer to take a
+// mock before giving up on it. Only reachable if the consumer has stopped
+// draining entirely; a busy one drains in milliseconds.
+const mockHandoffGrace = 30 * time.Second
+
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 
 	a.logger.Debug("Connecting to outgoing mocks stream...")
@@ -281,7 +291,12 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
-	mockChan := make(chan *models.Mock)
+	// Buffered. An unbuffered channel parks the decoder for as long as the
+	// consumer spends inside InsertMock - and the first insert does mkdir +
+	// create + YAML encode + flush, which is exactly when the last mock of a
+	// recording arrives. A decoded mock waiting there was the widest of the
+	// three places a trailing mock could be lost.
+	mockChan := make(chan *models.Mock, mockHandoffBuffer)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -311,21 +326,30 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				break
 			}
 
+			// Offer the mock rather than racing the context for it.
+			//
+			// This used to be `select { case <-ctx.Done(): return nil; case
+			// mockChan <- &mock }`, which threw away a mock already decoded
+			// into our own address space the moment the capture context was
+			// cancelled - silently, with agent-side accounting still reporting
+			// success. Cancellation is the wrong thing to consult here: the
+			// consumer persists on an uncancellable context, so it can always
+			// accept, and the only reason it might not have yet is that it is
+			// busy writing the previous mock.
+			//
+			// So always try to deliver, bounded so a genuinely dead consumer
+			// cannot hang the stream. Anything still dropped is data loss and
+			// is logged as an error, because the alternative - a mock set
+			// indistinguishable from one where the call never happened - is
+			// what made this class of bug take an investigation to find.
 			select {
-			case <-ctx.Done():
-				// The capture context was cancelled between decoding this mock
-				// and handing it over, so it is dropped. Say so: this used to
-				// be silent, and a silently dropped mock is indistinguishable
-				// from a dependency call that never happened - which is how a
-				// two-call recording could persist one mock with nothing in the
-				// log to explain it. Record drains the stream before cancelling
-				// (see pkg/service/mock/record.go), so reaching here means the
-				// drain's budget was exhausted or the user interrupted.
-				a.logger.Warn("dropping a decoded mock: the capture stream was closed before it could be handed over",
-					zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)))
-				return nil
 			case mockChan <- &mock:
 				// Send the decoded mock to the channel
+			case <-time.After(mockHandoffGrace):
+				utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
+					zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
+					zap.Duration("waited", mockHandoffGrace))
+				return nil
 			}
 		}
 		return nil
