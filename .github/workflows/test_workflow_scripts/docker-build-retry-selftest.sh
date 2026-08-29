@@ -155,6 +155,30 @@ expect ABORT "prose between 'status from' and 'request to'" \
 expect ABORT "the word timeout inside a RUN command" \
 'ERROR: failed to build: failed to solve: process "/bin/sh -c go test -timeout 30s ./..." did not complete successfully: exit code: 1'
 
+# --- the classic (non-BuildKit) builder ------------------------------------
+# Its terminal line is "returned a non-zero code:", not "failed to solve:".
+# Without that marker the extractor falls through to the tail, where a
+# recovered transient outvotes the real error - D1 all over again on a path
+# that still runs on older engines and some self-hosted runners.
+expect ABORT "classic builder: recovered i/o timeout + compile break" \
+'Step 4/9 : RUN go mod download
+go: golang.org/x/net@v0.1.0: Get "https://proxy.golang.org/...": dial tcp: i/o timeout
+go: retrying...
+Step 5/9 : RUN go build -o app ./cmd
+./main.go:12:2: undefined: fooBar
+The command '"'"'/bin/sh -c go build -o app ./cmd'"'"' returned a non-zero code: 1'
+# A genuinely transient classic-builder failure has no terminal marker at all,
+# so it still reaches the tail fallback and is still retried.
+expect RETRY "classic builder: fatal pull timeout, no terminal marker" \
+'Step 1/9 : FROM golang:1.20-bookworm
+Get "https://registry-1.docker.io/v2/": net/http: TLS handshake timeout'
+
+# --- docker pull states a 5xx with no URL before it -------------------------
+expect RETRY "docker pull 5xx from the daemon" \
+'Error response from daemon: received unexpected HTTP status: 502 Bad Gateway'
+expect ABORT "docker pull, nonexistent tag" \
+'Error response from daemon: manifest for docker.io/library/golang:nope not found: manifest unknown'
+
 if [ "$fails" -ne 0 ]; then
   echo "::error::docker-build-retry classifier self-test: $fails case(s) failed"
   exit 1

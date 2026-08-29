@@ -66,6 +66,7 @@
 # unauthorized and 404 for a nonexistent tag must fail on the first attempt.
 DOCKER_BUILD_RETRY_RE='toomanyrequests|too many requests|pull rate limit|rate limit exceeded'\
 '|unexpected status (from [A-Z]+ request to|code) https?://[^ ]+: 5[0-9][0-9]'\
+'|received unexpected HTTP status: 5[0-9][0-9]'\
 '|TLS handshake timeout|i/o timeout|context deadline exceeded'\
 '|connection reset by peer|unexpected EOF|server misbehaving'\
 '|Client\.Timeout exceeded while awaiting headers'
@@ -80,7 +81,14 @@ DOCKER_BUILD_RETRY_RE='toomanyrequests|too many requests|pull rate limit|rate li
 # for those tools is the error.
 docker_build_retry_terminal_error() {
     local _f="$1" _terminal
-    _terminal="$(grep -E 'failed to solve:|ERROR: failed to build:|^ERROR: ' "$_f" 2>/dev/null)"
+    # `failed to solve:` / `ERROR: failed to build:` are BuildKit. `returned a
+    # non-zero code:` is the classic builder, which still runs on older engines
+    # and some self-hosted runners. Without that third marker the classic path
+    # always fell through to the tail below, and `go mod download`, apt, npm and
+    # pip all narrate-and-recover exactly the transports listed in the pattern -
+    # so a recovered i/o timeout could outvote a compile error sitting one line
+    # further down.
+    _terminal="$(grep -E 'failed to solve:|ERROR: failed to build:|returned a non-zero code:|^ERROR: ' "$_f" 2>/dev/null)"
     if [ -n "$_terminal" ]; then
         printf '%s\n' "$_terminal"
     else
@@ -95,7 +103,7 @@ docker_build_retry_terminal_error() {
 # cannot drift out of use without the test noticing.
 docker_build_retry_is_transient() {
     : "${DOCKER_BUILD_RETRY_RE:?classifier pattern is unset}"
-    docker_build_retry_terminal_error "$1" | grep -qiE "$DOCKER_BUILD_RETRY_RE"
+    grep -qiE "$DOCKER_BUILD_RETRY_RE" <<< "$(docker_build_retry_terminal_error "$1")"
 }
 
 
