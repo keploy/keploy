@@ -405,7 +405,16 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE), clientConn, mysql.COM_STMT_EXECUTE, decodeCtx)
 		logger.Debug("COM_STMT_EXECUTE decoded", zap.Any("parsed packet", parsedPacket))
 
-	// case payloadType == mysql.COM_STMT_FETCH:
+	case payloadType == mysql.COM_STMT_FETCH:
+		logger.Debug("COM_STMT_FETCH packet", zap.Any("Type", payloadType))
+		pkt, err := preparedstmt.DecodeStmtFetch(ctx, logger, payload)
+		if err != nil {
+			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_FETCH packet: %w", err)
+		}
+
+		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_FETCH), clientConn, mysql.COM_STMT_FETCH, decodeCtx)
+		logger.Debug("COM_STMT_FETCH decoded", zap.Any("parsed packet", parsedPacket))
+
 	case payloadType == mysql.COM_STMT_CLOSE:
 		logger.Debug("COM_STMT_CLOSE packet", zap.Any("Type", payloadType))
 		pkt, err := preparedstmt.DecoderStmtClose(ctx, payload)

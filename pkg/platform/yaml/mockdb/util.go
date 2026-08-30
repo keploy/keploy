@@ -1052,7 +1052,14 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 			}
 			req.Message = msg
 
-		// case mysql.CommandStatusToString(mysql.COM_FETCH): // not supported yet
+		case mysql.CommandStatusToString(mysql.COM_STMT_FETCH):
+			msg := &mysql.StmtFetchPacket{}
+			err := v.Message.Decode(msg)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal yaml document into mysql StmtFetchPacket")
+				return nil, err
+			}
+			req.Message = msg
 
 		case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE):
 			msg := &mysql.StmtClosePacket{}
@@ -1188,6 +1195,15 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 			err := v.Message.Decode(msg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal yml document into mysql BinaryProtocolResultSet")
+				return nil, err
+			}
+			resp.Message = msg
+
+		case mysql.COM_STMT_FETCH_RESPONSE:
+			msg := &mysql.StmtFetchResponse{}
+			err := v.Message.Decode(msg)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal yml document into mysql StmtFetchResponse")
 				return nil, err
 			}
 			resp.Message = msg
@@ -1696,6 +1712,8 @@ func retypeMySQLRequest(header *mysql.PacketInfo, raw interface{}) (interface{},
 		target = &mysql.StmtPreparePacket{}
 	case mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE):
 		target = &mysql.StmtExecutePacket{}
+	case mysql.CommandStatusToString(mysql.COM_STMT_FETCH):
+		target = &mysql.StmtFetchPacket{}
 	case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE):
 		target = &mysql.StmtClosePacket{}
 	case mysql.CommandStatusToString(mysql.COM_STMT_RESET):
@@ -1741,6 +1759,8 @@ func retypeMySQLResponse(header *mysql.PacketInfo, raw interface{}) (interface{}
 		target = &mysql.TextResultSet{}
 	case string(mysql.Binary):
 		target = &mysql.BinaryProtocolResultSet{}
+	case mysql.COM_STMT_FETCH_RESPONSE:
+		target = &mysql.StmtFetchResponse{}
 	default:
 		return raw, nil
 	}

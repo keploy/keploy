@@ -45,6 +45,14 @@ type BinaryProtocolResultSet struct {
 	FinalResponse   *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
 }
 
+// StmtFetchResponse contains the binary rows returned by COM_STMT_FETCH.
+// Column metadata is omitted because COM_STMT_EXECUTE sends it when opening
+// the cursor; every row retains the field types needed for replay encoding.
+type StmtFetchResponse struct {
+	Rows          []*BinaryRow     `yaml:"rows" json:"rows"`
+	FinalResponse *GenericResponse `yaml:"FinalResponse" json:"FinalResponse"`
+}
+
 type GenericResponse struct {
 	Data []byte `yaml:"data" json:"data"`
 	Type string `yaml:"type" json:"type"`
@@ -142,8 +150,7 @@ type Parameter struct {
 	Value    any    `yaml:"value" json:"value"`
 }
 
-// COM_STMT_FETCH packet is not currently supported because its response involves multi-resultset
-
+// StmtFetchPacket requests the next row batch from a prepared-statement cursor.
 type StmtFetchPacket struct {
 	Status      byte   `yaml:"status" json:"status"`
 	StatementID uint32 `yaml:"statement_id" json:"statement_id"`

@@ -20,9 +20,10 @@ const (
 
 // Some constants for MySQL
 const (
-	HandshakeResponse41 = "HandshakeResponse41"
-	SSLRequest          = "SSLRequest"
-	COM_STMT_PREPARE_OK = "COM_STMT_PREPARE_OK"
+	HandshakeResponse41     = "HandshakeResponse41"
+	SSLRequest              = "SSLRequest"
+	COM_STMT_PREPARE_OK     = "COM_STMT_PREPARE_OK"
+	COM_STMT_FETCH_RESPONSE = "COM_STMT_FETCH_RESPONSE"
 )
 
 type CachingSha2Password byte
@@ -171,10 +172,10 @@ const (
 
 // Command Packet Status
 const (
-	COM_QUERY        byte = 0x03
-	COM_STMT_PREPARE byte = 0x16
-	COM_STMT_EXECUTE byte = 0x17
-	// COM_STMT_FETCH          byte = 0x19
+	COM_QUERY               byte = 0x03
+	COM_STMT_PREPARE        byte = 0x16
+	COM_STMT_EXECUTE        byte = 0x17
+	COM_STMT_FETCH          byte = 0x1c
 	COM_STMT_CLOSE          byte = 0x19
 	COM_STMT_RESET          byte = 0x1a
 	COM_STMT_SEND_LONG_DATA byte = 0x18
@@ -219,10 +220,10 @@ var commandStatusToString = map[byte]string{
 	COM_RESET_CONNECTION: "COM_RESET_CONNECTION",
 	// COM_SET_OPTION:       "COM_SET_OPTION",
 	// command
-	COM_QUERY:        "COM_QUERY",
-	COM_STMT_PREPARE: "COM_STMT_PREPARE",
-	COM_STMT_EXECUTE: "COM_STMT_EXECUTE",
-	// COM_STMT_FETCH:          "COM_STMT_FETCH",
+	COM_QUERY:               "COM_QUERY",
+	COM_STMT_PREPARE:        "COM_STMT_PREPARE",
+	COM_STMT_EXECUTE:        "COM_STMT_EXECUTE",
+	COM_STMT_FETCH:          "COM_STMT_FETCH",
 	COM_STMT_CLOSE:          "COM_STMT_CLOSE",
 	COM_STMT_RESET:          "COM_STMT_RESET",
 	COM_STMT_SEND_LONG_DATA: "COM_STMT_SEND_LONG_DATA",

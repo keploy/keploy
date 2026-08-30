@@ -9,8 +9,10 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -35,11 +37,16 @@ func wrapPacket(payload []byte, seq byte) []byte {
 // mysql_native_password auth. Using Native avoids the additional auth-
 // more-data round trip needed by caching_sha2 in the happy test.
 func cannedHandshakeV10(t *testing.T) []byte {
+	return cannedHandshakeV10WithCaps(t, 0)
+}
+
+func cannedHandshakeV10WithCaps(t *testing.T, additionalCaps uint32) []byte {
 	t.Helper()
 	caps := uint32(mysql.CLIENT_PROTOCOL_41 |
 		mysql.CLIENT_PLUGIN_AUTH |
 		mysql.CLIENT_SSL |
 		mysql.CLIENT_SECURE_CONNECTION)
+	caps |= additionalCaps
 	hs := &mysql.HandshakeV10Packet{
 		ProtocolVersion: 0x0a,
 		ServerVersion:   "8.0.test-keploy",
@@ -63,11 +70,16 @@ func cannedHandshakeV10(t *testing.T) []byte {
 // cannedHandshakeResponse41 returns a full HandshakeResponse41 packet
 // (Native auth). sslBit toggles whether CLIENT_SSL is advertised.
 func cannedHandshakeResponse41(t *testing.T, seq byte, sslBit bool) []byte {
+	return cannedHandshakeResponse41WithCaps(t, seq, sslBit, 0)
+}
+
+func cannedHandshakeResponse41WithCaps(t *testing.T, seq byte, sslBit bool, additionalCaps uint32) []byte {
 	t.Helper()
 	caps := uint32(mysql.CLIENT_PROTOCOL_41 | mysql.CLIENT_PLUGIN_AUTH | mysql.CLIENT_SECURE_CONNECTION)
 	if sslBit {
 		caps |= mysql.CLIENT_SSL
 	}
+	caps |= additionalCaps
 	hr := &mysql.HandshakeResponse41Packet{
 		CapabilityFlags: caps,
 		MaxPacketSize:   1 << 24,
@@ -114,6 +126,97 @@ func cannedCOMQuery(_ *testing.T, seq byte, query string) []byte {
 	body[0] = mysql.COM_QUERY
 	copy(body[1:], query)
 	return wrapPacket(body, seq)
+}
+
+func cannedStmtPrepare(seq byte, query string) []byte {
+	payload := append([]byte{mysql.COM_STMT_PREPARE}, []byte(query)...)
+	return wrapPacket(payload, seq)
+}
+
+func cannedStmtPrepareOK(seq byte, statementID uint32, numColumns uint16) []byte {
+	payload := make([]byte, 12)
+	payload[0] = mysql.OK
+	binary.LittleEndian.PutUint32(payload[1:5], statementID)
+	binary.LittleEndian.PutUint16(payload[5:7], numColumns)
+	return wrapPacket(payload, seq)
+}
+
+func cannedLongColumn(t *testing.T, seq byte, name string) []byte {
+	t.Helper()
+	column := &mysql.ColumnDefinition41{
+		Header:       mysql.Header{SequenceID: seq},
+		Catalog:      "def",
+		Schema:       "test",
+		Table:        "cursor_rows",
+		OrgTable:     "cursor_rows",
+		Name:         name,
+		OrgName:      name,
+		FixedLength:  0x0c,
+		CharacterSet: 0x21,
+		ColumnLength: 11,
+		Type:         byte(mysql.FieldTypeLong),
+		Filler:       []byte{0x00, 0x00},
+	}
+	buf, err := rowscols.EncodeColumn(context.Background(), zap.NewNop(), column)
+	if err != nil {
+		t.Fatalf("encode column: %v", err)
+	}
+	return buf
+}
+
+func cannedEOF(seq byte, statusFlags uint16) []byte {
+	payload := []byte{mysql.EOF, 0x00, 0x00, 0x00, 0x00}
+	binary.LittleEndian.PutUint16(payload[3:5], statusFlags)
+	return wrapPacket(payload, seq)
+}
+
+func cannedOKReplacingEOF(seq byte, statusFlags uint16) []byte {
+	payload := []byte{mysql.EOF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	binary.LittleEndian.PutUint16(payload[3:5], statusFlags)
+	return wrapPacket(payload, seq)
+}
+
+func cannedStmtExecute(seq byte, statementID uint32, flags byte) []byte {
+	payload := make([]byte, 10)
+	payload[0] = mysql.COM_STMT_EXECUTE
+	binary.LittleEndian.PutUint32(payload[1:5], statementID)
+	payload[5] = flags
+	binary.LittleEndian.PutUint32(payload[6:10], 1)
+	return wrapPacket(payload, seq)
+}
+
+func cannedStmtFetch(seq byte, statementID, numRows uint32) []byte {
+	payload := make([]byte, 9)
+	payload[0] = mysql.COM_STMT_FETCH
+	binary.LittleEndian.PutUint32(payload[1:5], statementID)
+	binary.LittleEndian.PutUint32(payload[5:9], numRows)
+	return wrapPacket(payload, seq)
+}
+
+func cannedStmtClose(seq byte, statementID uint32) []byte {
+	payload := make([]byte, 5)
+	payload[0] = mysql.COM_STMT_CLOSE
+	binary.LittleEndian.PutUint32(payload[1:5], statementID)
+	return wrapPacket(payload, seq)
+}
+
+func cannedBinaryLongRow(t *testing.T, seq byte, value int32) []byte {
+	t.Helper()
+	row := &mysql.BinaryRow{
+		Header:        mysql.Header{SequenceID: seq},
+		RowNullBuffer: []byte{0x00},
+		Values: []mysql.ColumnEntry{{
+			Type:  mysql.FieldTypeLong,
+			Name:  "id",
+			Value: value,
+		}},
+	}
+	column := &mysql.ColumnDefinition41{Name: "id", Type: byte(mysql.FieldTypeLong)}
+	buf, err := rowscols.EncodeBinaryRow(context.Background(), zap.NewNop(), row, []*mysql.ColumnDefinition41{column})
+	if err != nil {
+		t.Fatalf("encode binary row: %v", err)
+	}
+	return buf
 }
 
 // v2Harness stitches together a fake supervisor.Session driven by
@@ -289,6 +392,138 @@ collect:
 	}
 	if !qm.Spec.ResTimestampMock.Equal(queryRespTs) {
 		t.Errorf("query mock ResTimestampMock = %v, want %v", qm.Spec.ResTimestampMock, queryRespTs)
+	}
+}
+
+func TestRecordV2_StmtFetchRecordsEveryCursorChunk(t *testing.T) {
+	t.Parallel()
+	h := newV2Harness(t)
+
+	const (
+		statementID       = uint32(4)
+		serverAutocommit  = uint16(0x0002)
+		serverCursorOpen  = uint16(0x0040)
+		serverLastRowSent = uint16(0x0080)
+	)
+	base := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	handshakeBuf := cannedHandshakeV10WithCaps(t, wire.CLIENT_DEPRECATE_EOF)
+	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), handshakeBuf[4:])
+	if err != nil {
+		t.Fatalf("decode handshake v10: %v", err)
+	}
+
+	// Handshake.
+	h.pushDest(handshakeBuf, base)
+	h.pushClient(cannedHandshakeResponse41WithCaps(t, 1, false, wire.CLIENT_DEPRECATE_EOF), base.Add(time.Millisecond))
+	h.pushDest(cannedOK(t, 2, greeting.CapabilityFlags), base.Add(2*time.Millisecond))
+
+	// PREPARE supplies the result-column metadata later needed to decode the
+	// row-only FETCH responses.
+	h.pushClient(cannedStmtPrepare(0, "SELECT id FROM cursor_rows ORDER BY id"), base.Add(10*time.Millisecond))
+	h.pushDest(cannedStmtPrepareOK(1, statementID, 1), base.Add(11*time.Millisecond))
+	h.pushDest(cannedLongColumn(t, 2, "id"), base.Add(12*time.Millisecond))
+
+	// EXECUTE opens a read-only cursor. It returns metadata and a cursor-open
+	// terminator, but no rows; rows arrive only after COM_STMT_FETCH.
+	h.pushClient(cannedStmtExecute(0, statementID, mysql.CURSOR_TYPE_READ_ONLY), base.Add(20*time.Millisecond))
+	h.pushDest(wrapPacket([]byte{0x01}, 1), base.Add(21*time.Millisecond))
+	h.pushDest(cannedLongColumn(t, 2, "id"), base.Add(22*time.Millisecond))
+	h.pushDest(cannedOKReplacingEOF(3, serverAutocommit|serverCursorOpen), base.Add(23*time.Millisecond))
+
+	// Two fetches prove repeated identical commands remain separate FIFO mocks.
+	h.pushClient(cannedStmtFetch(0, statementID, 2), base.Add(30*time.Millisecond))
+	h.pushDest(cannedBinaryLongRow(t, 1, 11), base.Add(31*time.Millisecond))
+	h.pushDest(cannedBinaryLongRow(t, 2, 12), base.Add(32*time.Millisecond))
+	h.pushDest(cannedOKReplacingEOF(3, serverAutocommit|serverCursorOpen), base.Add(33*time.Millisecond))
+
+	h.pushClient(cannedStmtFetch(0, statementID, 2), base.Add(40*time.Millisecond))
+	h.pushDest(cannedBinaryLongRow(t, 1, 13), base.Add(41*time.Millisecond))
+	h.pushDest(cannedOKReplacingEOF(2, serverAutocommit|serverLastRowSent), base.Add(42*time.Millisecond))
+
+	// CLOSE is a no-response command and must still be recorded separately.
+	h.pushClient(cannedStmtClose(0, statementID), base.Add(50*time.Millisecond))
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		done <- RecordV2(ctx, h.logger, h.sess)
+	}()
+
+	got := make([]*models.Mock, 0, 6)
+	for len(got) < 6 {
+		select {
+		case mock := <-h.mocks:
+			got = append(got, mock)
+			if len(got) == 6 {
+				h.closeStreams()
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for cursor mocks (got %d)", len(got))
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("RecordV2 returned error: %v", err)
+	}
+
+	wantOps := []string{
+		mysql.AuthStatusToString(mysql.HandshakeV10),
+		mysql.CommandStatusToString(mysql.COM_STMT_PREPARE),
+		mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE),
+		mysql.CommandStatusToString(mysql.COM_STMT_FETCH),
+		mysql.CommandStatusToString(mysql.COM_STMT_FETCH),
+		mysql.CommandStatusToString(mysql.COM_STMT_CLOSE),
+	}
+	for i, want := range wantOps {
+		if gotOp := got[i].Spec.Metadata["requestOperation"]; gotOp != want {
+			t.Errorf("mock %d requestOperation = %q, want %q", i, gotOp, want)
+		}
+	}
+
+	assertFetch := func(mock *models.Mock, wantValues []int32, wantStatus uint16) {
+		t.Helper()
+		if len(mock.Spec.MySQLRequests) != 1 {
+			t.Fatalf("fetch requests = %d, want 1", len(mock.Spec.MySQLRequests))
+		}
+		request, ok := mock.Spec.MySQLRequests[0].Message.(*mysql.StmtFetchPacket)
+		if !ok {
+			t.Fatalf("fetch request message = %T", mock.Spec.MySQLRequests[0].Message)
+		}
+		if request.StatementID != statementID || request.NumRows != 2 {
+			t.Errorf("fetch request = %+v, want stmt=%d rows=2", request, statementID)
+		}
+
+		if len(mock.Spec.MySQLResponses) != 1 {
+			t.Fatalf("fetch responses = %d, want 1", len(mock.Spec.MySQLResponses))
+		}
+		response, ok := mock.Spec.MySQLResponses[0].Message.(*mysql.StmtFetchResponse)
+		if !ok {
+			t.Fatalf("fetch response message = %T", mock.Spec.MySQLResponses[0].Message)
+		}
+		if len(response.Rows) != len(wantValues) {
+			t.Fatalf("fetch rows = %d, want %d", len(response.Rows), len(wantValues))
+		}
+		for i, want := range wantValues {
+			if gotValue, ok := response.Rows[i].Values[0].Value.(int32); !ok || gotValue != want {
+				t.Errorf("fetch row %d value = %v (%T), want int32(%d)", i, response.Rows[i].Values[0].Value, response.Rows[i].Values[0].Value, want)
+			}
+		}
+		if response.FinalResponse == nil || len(response.FinalResponse.Data) < 9 {
+			t.Fatalf("fetch final response = %+v", response.FinalResponse)
+		}
+		if response.FinalResponse.Type != mysql.StatusToString(mysql.OK) {
+			t.Errorf("fetch final response type = %q, want OK", response.FinalResponse.Type)
+		}
+		if gotStatus := binary.LittleEndian.Uint16(response.FinalResponse.Data[7:9]); gotStatus != wantStatus {
+			t.Errorf("fetch final status = %#x, want %#x", gotStatus, wantStatus)
+		}
+	}
+
+	assertFetch(got[3], []int32{11, 12}, serverAutocommit|serverCursorOpen)
+	assertFetch(got[4], []int32{13}, serverAutocommit|serverLastRowSent)
+	if len(got[5].Spec.MySQLResponses) != 0 {
+		t.Errorf("COM_STMT_CLOSE responses = %d, want 0", len(got[5].Spec.MySQLResponses))
 	}
 }
 
