@@ -2326,3 +2326,90 @@ func TestAgentReadyTimeout(t *testing.T) {
 		t.Fatalf("DefaultAgentReadyTimeout %v is shorter than the agent healthcheck budget (~310s)", DefaultAgentReadyTimeout)
 	}
 }
+
+// TestFilterMappingLabelsMatchDestinationPool guards the invariant that
+// TestModeInfo.IsFiltered describes WHICH POOL a mock is being handed to, not
+// whether its name appeared in mappings.yaml.
+//
+// FilterTcsMocksMapping's result becomes the agent's per-test pool, so every mock
+// it returns must be IsFiltered=true. FilterConfigMocksMapping's result becomes
+// the agent's SESSION pool — all of it, both the mapped and unmapped group — so
+// every mock it returns must be IsFiltered=false.
+//
+// Before the fix both labels came from mapping membership, so a session mock that
+// an earlier replay had consumed (and which therefore appears in mappings.yaml)
+// was labelled IsFiltered=true while living in the session tree. Matchers that
+// pick a consume target from IsFiltered then deleted from the per-test tree; since
+// both trees are keyed on (SortOrder, ID) stamped from independent 0-based slice
+// indices, that evicted an unrelated per-test mock instead of missing cleanly.
+func TestFilterMappingLabelsMatchDestinationPool(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	// Both timestamps must be non-zero: filterByTimeStampTierAware routes a mock
+	// with a missing timestamp into the per-test pool via an early branch, which
+	// would make the tier comparison below measure the wrong thing.
+	newMock := func(name string, isFiltered bool) *models.Mock {
+		now := time.Now()
+		return &models.Mock{
+			Version: "api.keploy.io/v1beta2",
+			Name:    name,
+			Kind:    models.HTTP,
+			Spec: models.MockSpec{
+				ReqTimestampMock: now,
+				ResTimestampMock: now,
+			},
+			TestModeInfo: models.TestModeInfo{
+				// Seed the OPPOSITE of the expected outcome so a missing write
+				// cannot pass by accident.
+				IsFiltered: isFiltered,
+			},
+		}
+	}
+
+	t.Run("per-test pool is labelled true", func(t *testing.T) {
+		in := []*models.Mock{newMock("mapped", false), newMock("unmapped", false)}
+		got := FilterTcsMocksMapping(ctx, logger, in, []string{"mapped"})
+		if len(got) != 1 {
+			t.Fatalf("got %d mocks, want 1 (only the mapped one)", len(got))
+		}
+		if !got[0].TestModeInfo.IsFiltered {
+			t.Errorf("per-test pool mock %q has IsFiltered=false, want true", got[0].Name)
+		}
+	})
+
+	t.Run("session pool is labelled false regardless of mapping membership", func(t *testing.T) {
+		in := []*models.Mock{newMock("mapped", true), newMock("unmapped", true)}
+		got := FilterConfigMocksMapping(ctx, logger, in, []string{"mapped"})
+		if len(got) != 2 {
+			t.Fatalf("got %d mocks, want 2 (session pool keeps both groups)", len(got))
+		}
+		for _, mk := range got {
+			if mk.TestModeInfo.IsFiltered {
+				t.Errorf("session pool mock %q has IsFiltered=true, want false "+
+					"(mapping membership must not redefine the tier)", mk.Name)
+			}
+		}
+	})
+
+	t.Run("matches the timestamp-based path for the same input", func(t *testing.T) {
+		// FilterConfigMocksTierAware is the non-mapping equivalent; both must
+		// agree, otherwise replay behaviour depends on whether a mappings.yaml
+		// happens to exist on disk.
+		session := newMock("session-mock", true)
+		session.Spec.Metadata = map[string]string{"type": "config"}
+		session.DeriveLifetime()
+
+		mapped := FilterConfigMocksMapping(ctx, logger, []*models.Mock{session}, []string{"session-mock"})
+		tiered := FilterConfigMocksTierAware(ctx, logger, []*models.Mock{session},
+			time.Now().Add(-time.Minute), time.Now().Add(time.Minute), false, time.Time{})
+
+		if len(mapped) != 1 || len(tiered) != 1 {
+			t.Fatalf("setup: mapped=%d tiered=%d, want 1 and 1", len(mapped), len(tiered))
+		}
+		if mapped[0].TestModeInfo.IsFiltered != tiered[0].TestModeInfo.IsFiltered {
+			t.Errorf("mapping mode IsFiltered=%v but timestamp mode IsFiltered=%v; the two must agree",
+				mapped[0].TestModeInfo.IsFiltered, tiered[0].TestModeInfo.IsFiltered)
+		}
+	})
+}
