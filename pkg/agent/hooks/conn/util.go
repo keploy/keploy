@@ -58,9 +58,14 @@ type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.Te
 var CaptureHook CaptureFunc = Capture
 
 // GRPCCaptureHook is called in CaptureGRPC before a test case is built.
-// Returns true if the request is a duplicate and should be dropped.
-// Enterprise sets this when --static-dedup is enabled; nil means no dedup.
-var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp) bool
+// isDuplicate reports whether the pair repeats an already-captured schema and
+// should be dropped; schemaKey is the canonical static-dedup fingerprint of
+// the pair, stamped onto the kept test case (TestCase.SchemaKey) so the
+// control plane can additionally mark duplicates across pods of a recording.
+// An empty schemaKey means "no fingerprint" and disables cross-pod judgement
+// for this test case. Enterprise sets this when --static-dedup is enabled;
+// nil means no dedup.
+var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp) (isDuplicate bool, schemaKey string)
 
 // MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
 const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
@@ -451,8 +456,9 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel.
 // Mirrors NewCapture (HTTP) exactly:
-//   - GRPCCaptureHook is evaluated as a boolean so ResolveRange always runs,
-//     even for duplicates (with keep=false to flush their mocks cleanly).
+//   - GRPCCaptureHook is invoked unconditionally before ResolveRange, so
+//     ResolveRange always runs — even for duplicates (with keep=false to flush
+//     their mocks cleanly).
 //   - Counter is always incremented so concurrent duplicate streams each get a
 //     unique window name; keep=false discards their mocks without saving the TC.
 //   - Duplicate streams return after ResolveRange, before the test case is sent.
@@ -472,7 +478,11 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	}
 
 	testName := http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"]
-	isDuplicate := GRPCCaptureHook != nil && GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
+	var isDuplicate bool
+	var schemaKey string
+	if GRPCCaptureHook != nil {
+		isDuplicate, schemaKey = GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
+	}
 
 	// Bin buffered outgoing mocks into this stream's window before any early
 	// return. For non-duplicates keep=true attributes the mocks; for duplicates
@@ -516,6 +526,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		Kind:      models.GRPC_EXPORT,
 		Created:   time.Now().Unix(),
 		SourcePod: SourcePodFromContext(ctx),
+		SchemaKey: schemaKey,
 		GrpcReq:   *http2Stream.GRPCReq,
 		GrpcResp:  *http2Stream.GRPCResp,
 		Noise:     map[string][]string{},
