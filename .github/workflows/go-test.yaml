@@ -29,10 +29,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # docker-build-retry.sh decides whether a failed image build is weather or
+      # a real break. Neither direction of getting that wrong shows up in a
+      # green pipeline - too narrow and a transient registry failure fails the
+      # lane, too broad and a compile error is retried four times and then
+      # blamed on infrastructure - so the classification table is asserted.
+      # Needs no Go, no apt and no network, so it runs first and fails fast.
+      - name: docker-build-retry classifier self-test
+        run: ./.github/workflows/test_workflow_scripts/docker-build-retry-selftest.sh
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: false     
+          # Cache the module and build caches. This was `cache: false` from the
+          # workflow's first commit (#3100) with no stated reason, which meant
+          # every run re-fetched the whole module graph from proxy.golang.org.
+          # That is not just slow, it is the failure surface: run 32861996344
+          # died with
+          #   github.com/keploy/shlex@v1.0.0: read
+          #   "https://proxy.golang.org/.../v1.0.0.zip": stream error;
+          #   INTERNAL_ERROR; received from peer
+          # A warm cache removes that fetch from the common path. It is not a
+          # complete answer - setup-go keys the cache on go.mod with no
+          # restore-keys, so the PR most likely to hit the proxy (one that bumps
+          # a dependency) always misses - which is what the retry below is for.
+          cache: true
       
       - name: Installing build Essentials and gcc
         run: |
@@ -44,8 +65,33 @@ jobs:
             libxrandr-dev libxinerama-dev \
             libxxf86vm-dev libx11-dev libx11-xcb-dev  
 
+      # Retried for the same reason the apt step above carries
+      # Acquire::Retries=3: a module fetch is a network call to a third party
+      # and fails transiently. Caching (above) removes the network from the
+      # common path; this covers the cold-cache one. Without it a single
+      # proxy.golang.org hiccup fails the whole unit-test lane.
       - name: Install dependencies
-        run: go get .
+        run: |
+          attempts=3
+          for attempt in $(seq 1 "$attempts"); do
+            if go get .; then
+              exit 0
+            fi
+            if [ "$attempt" -lt "$attempts" ]; then
+              echo "::warning::go get attempt $attempt failed; retrying in $((attempt * 10))s"
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::go get failed after $attempts attempts"
+          exit 1
 
+      # -count=1 is load-bearing now that the cache is on. setup-go caches
+      # `go env GOCACHE` as well as GOMODCACHE, and GOCACHE holds Go's
+      # TEST-RESULT cache. The key is over go.mod with no restore-keys, so any
+      # PR that does not touch go.mod restores main's GOCACHE and `go test`
+      # reports "ok (cached)" for every package whose inputs are unchanged -
+      # i.e. it stops running them, and this gate quietly becomes a no-op that
+      # also hides flakes. -count=1 disables that result cache while keeping
+      # the compile cache, which is where the speed actually comes from.
       - name: Running Unit Tests
-        run: go test ./...
+        run: go test -count=1 ./...

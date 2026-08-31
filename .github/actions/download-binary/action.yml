@@ -19,7 +19,72 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: actions/download-artifact@v4
+    # actions/download-artifact fails the whole job on the first error, and one
+    # of its errors is not the caller's fault. Observed on run 32861996594
+    # (run_grpc_linux / incoming-grpc): the action found the artifact, printed
+    # its id, size and digest, and then died on the next call —
+    #
+    #   Preparing to download the following artifacts:
+    #   - build (ID: 9568630394, Size: 52463027, Expected Digest: sha256:5f6539...)
+    #   ##[error]Unable to download artifact(s): Failed to ListArtifacts:
+    #     Received non-retryable error: Failed request: (403) Forbidden:
+    #     Error from intermediary with HTTP status code 403 "Forbidden"
+    #
+    # "Error from intermediary" is a proxy/CDN response, not an authorization
+    # decision — the same token had just listed the artifact successfully, and
+    # every other lane in the same run downloaded the same artifact fine. The
+    # action classes it "non-retryable" and gives up.
+    #
+    # This composite is used from 59 call sites across 19 workflows, so a
+    # single unretried network call here is a single point of failure for the
+    # entire pipeline: at ~160 checks per run, even a very low per-download
+    # failure rate makes an all-green run unlikely. Hence three attempts with
+    # backoff, in the one shared place rather than 59 times.
+    #
+    # Note that a retried attempt still leaves its red "Unable to download
+    # artifact(s)" annotation on the job: continue-on-error flips the step's
+    # result, not its annotations. A green job with that error in the log is
+    # this retry working, not a fault.
+    #
+    # `shell: bash` is safe here without a runner.os guard: the only Windows
+    # caller is golang_wsl.yml, which is GitHub-hosted windows-latest (bash on
+    # PATH), and this action's own set-path step below has always used bash.
+    # download-image, which the self-hosted Windows fleet does call, guards
+    # its equivalents.
+    - id: download-attempt-1
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: ${{ inputs.src }}
+        path: ${{ inputs.src }}
+
+    - name: Back off before retrying the artifact download
+      if: steps.download-attempt-1.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::artifact download attempt 1 failed; retrying in 10s"
+        sleep 10
+
+    - id: download-attempt-2
+      if: steps.download-attempt-1.outcome == 'failure'
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: ${{ inputs.src }}
+        path: ${{ inputs.src }}
+
+    - name: Back off before the final artifact download attempt
+      if: steps.download-attempt-1.outcome == 'failure' && steps.download-attempt-2.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::artifact download attempt 2 failed; final retry in 30s"
+        sleep 30
+
+    # No continue-on-error: if the third attempt fails the job must fail, and
+    # the log will carry all three failures rather than a single bare one.
+    - name: Download artifact (final attempt)
+      if: steps.download-attempt-1.outcome == 'failure' && steps.download-attempt-2.outcome == 'failure'
+      uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.src }}
         path: ${{ inputs.src }}
