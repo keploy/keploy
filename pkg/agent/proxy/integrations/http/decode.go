@@ -168,7 +168,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// are separate axes. Reusing the response "body" bucket here would
 			// let a field noised only because it is dynamic in the response
 			// silently soften request matching too (e.g. excusing a wrong
-			// user-id under --schema-noise-strict). Keeping them separate makes
+			// user-id under --mock-noise-strict). Keeping them separate makes
 			// strict matching a real guarantee — a path can only weaken request
 			// matching if the user puts it under requestBody on purpose.
 			//

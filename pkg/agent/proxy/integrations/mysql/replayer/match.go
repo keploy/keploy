@@ -441,7 +441,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// commands, CLOSE/RESET) — the engine no-ops for those.
 	liveBody, liveBodyOK := mysqlRequestBodyJSON(&req.PacketBundle)
 
-	// Strict-enforcement gate (see strictGate in schema_noise.go): consulted
+	// Strict-enforcement gate (see strictGate in mock_noise.go): consulted
 	// before a mock may become a match candidate, and accumulates the
 	// rejection diagnostics (count / closest mock / field-level diffs) the
 	// mismatch report renders on a miss.
@@ -989,7 +989,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			// the record window captured none.
 			//
 			// Historically the streamed payload was never content-compared at
-			// all. Under schemaNoiseStrict each candidate is now gated through
+			// all. Under mockNoiseStrict each candidate is now gated through
 			// the engine: a chunk whose data drifted outside learned/user
 			// noise (body.data) cannot be consumed, and when every recorded
 			// candidate is rejected that way the command is a real mismatch

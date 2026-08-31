@@ -180,7 +180,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				if actualQuery != "" || closestQuery != "" {
 					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200))
 				}
-				// Under schemaNoiseStrict a rejection is a drift verdict, not a
+				// Under mockNoiseStrict a rejection is a drift verdict, not a
 				// missing recording — say WHICH fields drifted (FieldDiffs) and
 				// how to mark them, instead of the generic re-record hint.
 				nextSteps := "Re-record mocks if the SQL query has changed."
@@ -219,7 +219,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					)
 				}
 				// next_step reuses the strict-aware guidance computed for the
-				// mismatch report above — under schemaNoiseStrict the accurate
+				// mismatch report above — under mockNoiseStrict the accurate
 				// advice is "mark/learn the drifted fields", not "re-record".
 				logger.Error("Connection closing due to no matching mock found.",
 					zap.Int("commands_processed", commandCount),

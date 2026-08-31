@@ -683,7 +683,7 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	// Merge EVERY section present in the test-set noise — not just body/header.
 	// The previous code hard-coded those two buckets, so test-set-scoped
 	// `requestbody` noise (and any future bucket) was silently dropped while the
-	// global bucket worked, which under --schema-noise-strict could turn a
+	// global bucket worked, which under --mock-noise-strict could turn a
 	// noised request-body field back into a match-affecting one and falsely
 	// reject the mock.
 	for section, fields := range tsNoise {

@@ -52,12 +52,12 @@ type matchDiag struct {
 // test.globalNoise body bucket (root-relative dotted paths, lowercased) so
 // manual noise config participates in mock matching with the same vocabulary
 // as response assertions.
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, mockNoiseDetection bool, mockNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
 
 	// Shared mock-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
 	// only the HTTP-specific bits (body extraction, JSON/form diff).
-	noiseEngine := mocknoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
+	noiseEngine := mocknoise.New(httpNoiseAdapter{}, mockNoiseDetection, mockNoiseStrict)
 
 	for {
 		if ctx.Err() != nil {
@@ -172,7 +172,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			// even to candidates with no learned noise — strict mode value-checks
 			// the whole body, not just the lenient key/schema match above.
 			beforeStrict := len(bodyMatched)
-			if schemaNoiseStrict {
+			if mockNoiseStrict {
 				bodyMatched = h.filterStrictNoiseMatches(noiseEngine, bodyMatched, input.body, userBodyNoise)
 			}
 

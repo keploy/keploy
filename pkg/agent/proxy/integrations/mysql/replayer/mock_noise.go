@@ -89,10 +89,10 @@ func (mysqlNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool 
 	return func(v string) bool { return nc.IsNoisy(v) }
 }
 
-// strictGate applies schemaNoiseStrict enforcement while matchCommand scans
+// strictGate applies mockNoiseStrict enforcement while matchCommand scans
 // candidate mocks, and accumulates the diagnostics the mismatch report needs.
 // Consult allows() before a mock may become a match candidate: under
-// schemaNoiseStrict every candidate's recorded request body is value-compared
+// mockNoiseStrict every candidate's recorded request body is value-compared
 // against the live one and rejected when a field OUTSIDE the known-noise set
 // (user's requestBody noise ∪ the mock's learned req_body_noise) drifted.
 // Without strict (or with no diffable live body) it always allows, preserving

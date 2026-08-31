@@ -29,7 +29,7 @@ APP_BIN=mux-elasticsearch
 APP_DIR="$PWD"
 SND_PATH="$APP_DIR/keploy-snd"          # dedicated path; leaves committed keploy/ untouched
 export ELASTICSEARCH_URL="http://127.0.0.1:9200"
-# Enable the app's schema-noise demo mode (server-stamped created_at + no
+# Enable the app's mock-noise demo mode (server-stamped created_at + no
 # keep-alive on the ES client). Off by default so the app's committed
 # recordings stay valid; this pipeline opts in.
 export STAMP_CREATED_AT=1
@@ -109,7 +109,7 @@ checkout_passed() {  # post-documents testcase passed?
   grep -oE '"testcase id": "[^"]*document[^"]*".*"passed": "[^"]+"' "$1" \
     | strip_ansi | grep -q '"passed": "true"'
 }
-# Request-body schema noise is written under the unified `noise:` block as a
+# Request-body mock noise is written under the unified `noise:` block as a
 # `req:` list of field paths (this replaced the legacy top-level `req_body_noise:`
 # map). A learned path therefore appears as a `- body.<path>` list item, which is
 # unique to noise.req: the HTTP spec's own `req:` is a mapping (no body-path list
@@ -173,7 +173,7 @@ fi
 # ---------------------------------------------------------------------------
 echo
 if [ "$FAILURES" -eq 0 ]; then
-  echo "ALL CHECKS PASSED — schema-noise detection verified on mux-elasticsearch."
+  echo "ALL CHECKS PASSED — mock-noise detection verified on mux-elasticsearch."
   exit 0
 fi
 echo "$FAILURES CHECK(S) FAILED."

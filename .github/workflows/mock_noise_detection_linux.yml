@@ -1,6 +1,6 @@
-name: Schema Noise Detection On Linux
+name: Mock Noise Detection On Linux
 
-# Exercises schema-based request-body noise detection end-to-end using the real
+# Exercises mock-noise request-body detection end-to-end using the real
 # keploy/samples-go "mux-elasticsearch" app (patched to stamp a server-side
 # created_at, so the outgoing Elasticsearch request body drifts every run):
 #
@@ -11,6 +11,9 @@ name: Schema Noise Detection On Linux
 on:
   push:
     branches:
+      # Not renamed with the rest of the feature: this is a branch NAME, and
+      # the branch no longer exists on origin, so renaming it would neither
+      # fix nor break anything. Left as the historical record.
       - 'feat/schema-noise-detection-mocks'
     paths:
       - 'pkg/agent/proxy/integrations/http/**'
@@ -21,8 +24,8 @@ on:
       - 'pkg/service/replay/**'
       - 'cli/provider/cmd.go'
       - 'config/config.go'
-      - '.github/workflows/schema_noise_detection_linux.yml'
-      - '.github/workflows/test_workflow_scripts/golang/mux_elasticsearch_schema_noise/**'
+      - '.github/workflows/mock_noise_detection_linux.yml'
+      - '.github/workflows/test_workflow_scripts/golang/mux_elasticsearch_mock_noise/**'
   pull_request:
     paths:
       - 'pkg/agent/proxy/integrations/http/**'
@@ -33,8 +36,8 @@ on:
       - 'pkg/service/replay/**'
       - 'cli/provider/cmd.go'
       - 'config/config.go'
-      - '.github/workflows/schema_noise_detection_linux.yml'
-      - '.github/workflows/test_workflow_scripts/golang/mux_elasticsearch_schema_noise/**'
+      - '.github/workflows/mock_noise_detection_linux.yml'
+      - '.github/workflows/test_workflow_scripts/golang/mux_elasticsearch_mock_noise/**'
   workflow_call:
     inputs:
       runner:
@@ -44,7 +47,7 @@ on:
         default: 'ubuntu-latest'
 
 jobs:
-  schema_noise_detection_linux:
+  mock_noise_detection_linux:
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 20
 
@@ -80,9 +83,11 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
-          # The mux-elasticsearch schema-noise demo mode (env STAMP_CREATED_AT)
+          # The mux-elasticsearch mock-noise demo mode (env STAMP_CREATED_AT)
           # lives on this branch until keploy/samples-go#234 merges. Switch back
           # to `main` once that PR is merged.
+          # NOT renamed: this is a live branch in keploy/samples-go, an
+          # external repo. Changing this string breaks the checkout.
           ref: feat/mux-elasticsearch-schema-noise
 
       - name: Run mock-noise-detection test (mux-elasticsearch)
@@ -90,4 +95,4 @@ jobs:
           KEPLOY_BIN: /usr/local/bin/keploy
         run: |
           cd samples-go/mux-elasticsearch
-          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mux_elasticsearch_schema_noise/golang-linux.sh
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mux_elasticsearch_mock_noise/golang-linux.sh

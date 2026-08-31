@@ -1669,7 +1669,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// each retry cycle, so after the loop it no longer holds the full set of
 	// consumed mocks. Two post-loop readers need that full union: the
 	// run-level Mocks-Consumed telemetry (r.consumedMockNames) and the
-	// schema-noise-detection persistence (PersistMockNoise, which reads the
+	// mock-noise-detection persistence (PersistMockNoise, which reads the
 	// learned ReqBodyNoise off each MockState value — including mocks a later
 	// test failed on). Fold consumed mocks in here as cycles complete; last
 	// write wins, matching the pre-rewind behavior where a re-consumed mock's
@@ -2987,7 +2987,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
 	} else if r.config.Test.MockNoiseDetection && r.instrument {
-		// --schema-noise-detection without --remove-unused-mocks: the learned
+		// --mock-noise-detection without --remove-unused-mocks: the learned
 		// req_body_noise used to ride only inside UpdateMocks (the pruning
 		// path), so detection alone learned noise and threw it away at exit.
 		// Persist it through the prune-free path instead. We persist noise
