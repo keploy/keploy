@@ -67,7 +67,7 @@ func TestMatchRequestShapePathDriftFlags(t *testing.T) {
 // other MatchRequestShape tests never touch because httpMock() leaves
 // HTTPReq.URLParams nil. At record time pkg.URLParams(req) populates
 // URLParams for real, so SchemaMatch's query-param check
-// (QueryParamsMatch(mock.Spec.HTTPReq.URLParams, input.url.Query(), urlNoise))
+// (QueryParamsMatch(mock.Spec.HTTPReq.URLParams, reqQuery, urlNoise, autoDynamic))
 // compares against a real recorded URLParams map in production. Here the
 // recorded mock's URLParams includes the volatile "cursor" key alongside a
 // stable "page" key; the live request differs only in cursor's value. If the

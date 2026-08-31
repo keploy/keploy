@@ -36,7 +36,7 @@ func TestQueryParamsMatch_NoiseNotCompiledOnExactMatch(t *testing.T) {
 	require.True(t, h.QueryParamsMatch(
 		map[string]string{"id": "A", "page": "2"},
 		url.Values{"id": {"A"}, "page": {"2"}},
-		[]string{pat}))
+		[]string{pat}, false))
 	_, cached := urlNoiseCache.Load(pat)
 	require.False(t, cached, "url noise must not be compiled when no value differs")
 }

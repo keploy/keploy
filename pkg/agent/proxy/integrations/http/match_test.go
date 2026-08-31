@@ -1098,7 +1098,7 @@ func TestQueryParamsMatch_ValueSensitive(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := h.QueryParamsMatch(tc.mockParams, tc.reqQuery, tc.urlNoise)
+			got := h.QueryParamsMatch(tc.mockParams, tc.reqQuery, tc.urlNoise, false)
 			if got != tc.want {
 				t.Fatalf("QueryParamsMatch(%v, %v, %v) = %v, want %v",
 					tc.mockParams, tc.reqQuery, tc.urlNoise, got, tc.want)

@@ -531,6 +531,24 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	return true
 }
 
+// looksDynamicQueryValue reports whether a query-param VALUE looks like a
+// machine-generated token that legitimately varies between record and replay.
+// It reuses looksDynamicSegment (uuid / long hex / >=16-char alphanumeric mix)
+// but is deliberately STRICTER about bare integers: in a path, position gives a
+// number its meaning (/users/55 is unmistakably an id), whereas a bare small
+// integer in a query is overwhelmingly a page / limit / offset / count, and
+// collapsing ?page=2 onto ?page=3 would re-open the very "wrong recorded
+// response" bug this gate exists to close. So only a LONG digit run (epoch
+// seconds/millis, snowflake ids and the like) counts as dynamic.
+const minDynamicQueryDigits = 10
+
+func looksDynamicQueryValue(s string) bool {
+	if reSegAllDigits.MatchString(s) {
+		return len(s) >= minDynamicQueryDigits
+	}
+	return looksDynamicSegment(s)
+}
+
 // maskAndSort applies url noise to every member and sorts the result, so two
 // value sets can be compared order-independently.
 func maskAndSort(vals []string, noiseRes []*regexp.Regexp) []string {
@@ -553,13 +571,18 @@ func maskAndSort(vals []string, noiseRes []*regexp.Regexp) []string {
 //
 // Values are compared in the recorded form: pkg.URLParams stores a recorded param
 // as ", "-joined (map[string]string), so the live side is joined the same way
-// (strings.Join(reqQuery[key], ", ")). urlNoise is applied to BOTH sides before
-// comparison using the same compile + ReplaceAllString-to-placeholder approach
-// MatchURLPath uses, so a param value covered by url noise still matches while a
-// genuinely different value does not. The patterns are compiled lazily and
-// memoized (see compileURLNoise): the exact fast path settles every param of a
-// request that did not drift, so a configured noise list costs nothing until a
-// value actually differs.
+// (strings.Join(reqQuery[key], ", ")). Note this join is lossy — ?q=a,%20b (one
+// value) and ?q=a&q=b (two values) both record as "a, b" and therefore compare
+// equal. That ambiguity predates this gate (it is inherent to pkg.URLParams) and
+// only bounds how strict the value check can be; it never makes a genuinely
+// different value match.
+//
+// urlNoise is applied to BOTH sides before comparison using the same
+// compile-and-replace-with-placeholder approach MatchURLPath uses, so a param
+// value covered by url noise still matches while a genuinely different value does
+// not. The patterns are compiled lazily and memoized (see compileURLNoise): the
+// exact fast path settles every param of a request that did not drift, so a
+// configured noise list costs nothing until a value actually differs.
 //
 // A REPEATED param (same key more than once) is compared ORDER-INDEPENDENTLY:
 // the recorded ", "-joined value is split back into its members, each side is
@@ -569,7 +592,18 @@ func maskAndSort(vals []string, noiseRes []*regexp.Regexp) []string {
 // ?tag=b&tag=a, which are the same request per HTTP) still matches, while a
 // genuinely different value does not. Single-value params (the common case) take
 // the exact fast path and are unaffected.
-func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Values, urlNoise []string) bool {
+//
+// autoDynamic mirrors MatchURLPath's auto-detected dynamic path segments and is
+// the zero-config DEFAULT for values, set only on SchemaMatch's SECOND pass —
+// after an exact + url-noise pass over every mock found nothing, i.e. when the
+// alternative is a "no matching mock" 502. Without it a rotating value that
+// needs no config in the path (/items/<uuid>) would hard-fail in the query
+// (?id=<uuid>), which is the same non-deterministic-id 502 that pass 2 exists to
+// prevent. A differing member is tolerated only when it looks machine-generated
+// on BOTH sides (see looksDynamicQueryValue), so deterministic and
+// genuinely-distinct queries are never relaxed. Disable via
+// OutgoingOptions.DisableAutoURLDynamic.
+func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Values, urlNoise []string, autoDynamic bool) bool {
 	shouldIgnore := func(key string) bool {
 		return strings.HasPrefix(strings.ToLower(key), "keploy")
 	}
@@ -636,16 +670,28 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 		}
 		rv, av := maskAndSort(recVals, noiseRes), maskAndSort(liveVals, noiseRes)
 		for i := range rv {
-			if rv[i] != av[i] {
-				return false
+			if rv[i] == av[i] {
+				continue
 			}
+			// Fallback only (pass 2): tolerate a member that looks
+			// machine-generated on BOTH sides. Sorting can misalign two
+			// multi-value sets that each carry a dynamic member, so this is a
+			// best-effort relaxation for repeated params; the single-value case
+			// (len 1, the one that matters) is exact.
+			if autoDynamic && looksDynamicQueryValue(rv[i]) && looksDynamicQueryValue(av[i]) {
+				h.Logger.Debug("http query: value treated as auto-detected dynamic",
+					zap.String("param", key),
+					zap.String("mock value", rv[i]),
+					zap.String("request value", av[i]))
+				continue
+			}
+			return false
 		}
 	}
 
 	return true
 }
 
-// SchemaMatch match the schema of the request with the mocks
 func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string, urlNoise []string, autoDynamic bool) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
 
@@ -706,7 +752,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		}
 
 		// Query parameter match (key set AND value; url noise aware)
-		if !h.QueryParamsMatch(mock.Spec.HTTPReq.URLParams, reqQuery, urlNoise) {
+		if !h.QueryParamsMatch(mock.Spec.HTTPReq.URLParams, reqQuery, urlNoise, autoDynamic) {
 			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}

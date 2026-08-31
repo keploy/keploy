@@ -31,7 +31,7 @@ func TestQueryParamsMatch_MultiValueOrderIndependent(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, h.QueryParamsMatch(tc.mock, tc.live, tc.noise))
+			require.Equal(t, tc.want, h.QueryParamsMatch(tc.mock, tc.live, tc.noise, false))
 		})
 	}
 }

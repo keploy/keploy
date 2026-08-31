@@ -18,7 +18,7 @@ func BenchmarkQueryParamsMatch_NoNoise(b *testing.B) {
 	q := url.Values{"id": {"A"}, "page": {"2"}}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		h.QueryParamsMatch(m, q, nil)
+		h.QueryParamsMatch(m, q, nil, false)
 	}
 }
 
@@ -28,7 +28,7 @@ func BenchmarkQueryParamsMatch_NoiseUnused(b *testing.B) {
 	q := url.Values{"id": {"A"}, "page": {"2"}}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		h.QueryParamsMatch(m, q, benchNoise)
+		h.QueryParamsMatch(m, q, benchNoise, false)
 	}
 }
 
@@ -39,7 +39,7 @@ func BenchmarkQueryParamsMatch_NoiseUsed(b *testing.B) {
 	q := url.Values{"id": {"B"}, "page": {"2"}}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		h.QueryParamsMatch(m, q, benchNoise)
+		h.QueryParamsMatch(m, q, benchNoise, false)
 	}
 }
 
