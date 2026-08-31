@@ -121,7 +121,7 @@ Usage:{{if .Runnable}}
   {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
 
 Aliases:
-  {{.NameAndAliases}}{{end}}{{if .HasExample}}
+  {{.NameAndAliases}}{{end}}{{if .HasAvailableSubCommands}}
 
 Available Commands:{{range .Commands}}{{if .IsAvailableCommand}}
   {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableFlags}}
@@ -2008,9 +2008,17 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return err
 	}
 	c.cfg.CommandType = commandType
-	if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) &&
-		!(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
-		return fmt.Errorf("a native command is not supported on OS %s/%s for `keploy mock`; on macOS run your tests through a docker command (e.g. -c \"docker compose run tests\")", runtime.GOOS, runtime.GOARCH)
+	// Ask the same extension point `record`/`test` use (see the identical check
+	// above in validateFlags). This literal was copied here from the record path
+	// as it stood BEFORE that check became nativeCommandSupportedHere(), so it
+	// never learned about the native backends a wrapping build registers —
+	// macOS (DYLD shim) and Windows. The result was that `keploy record` ran
+	// natively on darwin while `keploy mock` refused, on the same binary.
+	if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !nativeCommandSupportedHere() {
+		// Retrying cannot help — the command shape has to change — so give the
+		// caller a code that says so rather than a generic 1.
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return fmt.Errorf("a native command is not supported on OS %s/%s for `keploy mock`; run your tests through a docker command instead (e.g. -c \"docker compose run tests\")", runtime.GOOS, runtime.GOARCH)
 	}
 
 	// Resolve the keploy folder path.

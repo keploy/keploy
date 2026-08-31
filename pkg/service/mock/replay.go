@@ -252,6 +252,26 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) {
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.String("mock-set", name))
 }
 
+// ReplayOutcome is what a replay produced, for a wrapping build that meters or
+// reports usage. Counts only; no payloads, no destinations.
+type ReplayOutcome struct {
+	SetName  string
+	Loaded   int
+	Consumed int
+	Missed   int
+}
+
+// replayOutcomeReporter is installed by a wrapping build (enterprise) from
+// init(). Mirrors the RegisterNativeCommandSupport extension point in
+// cli/provider/hooks.go: OSS stays free of any billing/api-server dependency,
+// and a build that has one opts in.
+var replayOutcomeReporter func(context.Context, ReplayOutcome)
+
+// RegisterReplayOutcomeReporter installs the reporter. A nil fn disables it.
+func RegisterReplayOutcomeReporter(fn func(context.Context, ReplayOutcome)) {
+	replayOutcomeReporter = fn
+}
+
 // reportOutcome logs which mocks were consumed and which outgoing calls matched
 // nothing, and returns the number of distinct missed calls.
 func (m *mockService) reportOutcome(ctx context.Context, loaded int) int {
@@ -267,12 +287,25 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int) int {
 		zap.Int("loaded", loaded),
 		zap.Int("consumed", len(consumed)),
 		zap.Int("missed", len(misses)))
+
 	for _, miss := range misses {
 		m.logger.Warn("no recorded mock matched an outgoing call",
 			zap.String("protocol", miss.Protocol),
 			zap.String("call", miss.ActualSummary),
 			zap.String("destination", miss.Destination),
 			zap.String("next_step", "record this call with --on-miss record, or re-record the set"))
+	}
+
+	// Metering LAST: it may do network I/O, and the miss warnings above are what
+	// the user actually needs to see first. Never for --local — that is the free
+	// offline loop and is deliberately unmetered and untracked.
+	if replayOutcomeReporter != nil && !m.config.Mock.Local {
+		replayOutcomeReporter(ctx, ReplayOutcome{
+			SetName:  m.config.Mock.Name,
+			Loaded:   loaded,
+			Consumed: len(consumed),
+			Missed:   len(misses),
+		})
 	}
 	return len(misses)
 }
