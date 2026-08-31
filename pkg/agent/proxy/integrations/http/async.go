@@ -80,12 +80,12 @@ func queryOf(r *models.HTTPReq) url.Values {
 // MatchRequestShape reuses SchemaMatch against the single recorded mock.
 // Volatile query params (lane.VolatileParams) are stripped from BOTH the
 // live and the recorded request before comparison: SchemaMatch's query-param
-// check (MapsHaveSameKeys) compares the KEY SET of the live request's parsed
-// URL query against the recorded mock's URLParams, so stripping only one
-// side would leave the key counts unequal (e.g. "cursor" present on the live
-// side but absent on the stripped recorded side) and spuriously fail the
-// shape match — stripping both sides keeps the key-set comparison honest
-// while still ignoring the volatile key's value.
+// check (QueryParamsMatch) compares the KEY SET and VALUES of the live
+// request's parsed URL query against the recorded mock's URLParams, so
+// stripping only one side would leave the key counts unequal (e.g. "cursor"
+// present on the live side but absent on the stripped recorded side) and
+// spuriously fail the shape match — stripping both sides keeps the comparison
+// honest while still ignoring the volatile key's value.
 func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncLane) (bool, string) {
 	if live == nil || live.Spec.HTTPReq == nil || recorded == nil || recorded.Spec.HTTPReq == nil {
 		return false, "missing request payload"

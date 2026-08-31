@@ -162,7 +162,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// running across that would blame BPF_PROG_LOAD for whatever else was slow.
 	// The defer inside the closure keeps it from leaking if LoadAndAssign panics.
 	err = func() error {
-		stopStallWatch := watchStall(h.logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", stallFirstReport, stallRepeatReport)
+		stopStallWatch := watchStall(h.logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", stallFirstReport, stallRepeatReport, stallErrorAfter)
 		defer stopStallWatch()
 		return spec.LoadAndAssign(&objs, bpfopts)
 	}()

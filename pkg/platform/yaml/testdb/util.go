@@ -57,16 +57,35 @@ func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 			return a
 		}(),
 	}
-	if tc.Description != "" {
-		httpSchema.Metadata = map[string]string{"description": tc.Description}
-	}
+	httpSchema.Metadata = specMetadata(tc.Description, tc.DuplicateOf)
 	return httpSchema
+}
+
+// specMetadata builds the spec-level Metadata map carrying the fields that
+// persist through the spec rather than the doc: the user-facing description
+// and the cross-pod duplicate mark. Returns nil when there is nothing to
+// carry, so specs without metadata keep encoding byte-identically to before.
+// The gRPC encoders pass description="" — gRPC specs have never persisted a
+// description and that stays unchanged.
+func specMetadata(description, duplicateOf string) map[string]string {
+	if description == "" && duplicateOf == "" {
+		return nil
+	}
+	md := make(map[string]string, 2)
+	if description != "" {
+		md["description"] = description
+	}
+	if duplicateOf != "" {
+		md["duplicate_of"] = duplicateOf
+	}
+	return md
 }
 
 // buildGrpcSpec is the JSON-path counterpart of the gRPC branch in EncodeTestcase.
 func buildGrpcSpec(tc models.TestCase) models.GrpcSpec {
 	noise := tc.Noise
 	return models.GrpcSpec{
+		Metadata: specMetadata("", tc.DuplicateOf),
 		GrpcReq:  tc.GrpcReq,
 		GrpcResp: tc.GrpcResp,
 		Created:  tc.Created,
@@ -135,92 +154,21 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		LastUpdated: tc.LastUpdated,
 	}
 
-	var noise map[string][]string
 	switch tc.Kind {
 	case models.HTTP:
 		logger.Debug("Encoding HTTP test case")
 		doc.Curl = tc.Curl
 
-		// find noisy fields only for HTTP responses
-		m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
-		if err != nil {
-			msg := "error in flattening http response"
-			utils.LogError(logger, err, msg)
-		}
-		noise = tc.Noise
-
-		noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
-			// check if k is date
-			for _, v := range vals {
-				if pkg.IsTime(v) {
-					return true
-				}
-			}
-			// maybe we need to concatenate the values
-			return pkg.IsTime(strings.Join(vals, ", "))
-		})
-
-		for _, v := range noiseFieldsFound {
-			noise[v] = []string{}
-		}
-
-		httpSchema := models.HTTPSchema{
-			Request:  tc.HTTPReq,
-			Response: tc.HTTPResp,
-			Created:  tc.Created,
-			AppPort:  tc.AppPort,
-			// need to check here for type here as well as push in other custom assertions
-			Assertions: func() map[models.AssertionType]interface{} {
-				a := map[models.AssertionType]interface{}{}
-				for k, v := range tc.Assertions {
-					a[k] = v
-				}
-
-				if len(noise) > 0 {
-					a[models.NoiseAssertion] = noise
-				}
-
-				// Optionally add other custom assertions if needed here
-				// Example:
-				// a[models.StatusCode] = tc.HTTPResp.StatusCode
-
-				return a
-			}(),
-		}
-		if tc.Description != "" {
-			httpSchema.Metadata = map[string]string{
-				"description": tc.Description,
-			}
-		}
-		err = doc.Spec.Encode(httpSchema)
+		httpSchema := buildHTTPSchema(tc, logger)
+		err := doc.Spec.Encode(httpSchema)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 			return nil, err
 		}
 	case models.GRPC_EXPORT:
 		logger.Debug("Encoding gRPC test case")
-		// For gRPC, use the noise directly from the test case
-		noise = tc.Noise
 
-		// Create a YAML node for the gRPC schema
-		grpcSpec := models.GrpcSpec{
-			GrpcReq:  tc.GrpcReq,
-			GrpcResp: tc.GrpcResp,
-			Created:  tc.Created,
-			AppPort:  tc.AppPort,
-			// need to check here for type here as well as push in other custom assertions
-			Assertions: func() map[models.AssertionType]interface{} {
-				a := map[models.AssertionType]interface{}{}
-				if len(noise) > 0 {
-					a[models.NoiseAssertion] = noise
-				}
-				// Optionally add other custom assertions if needed here
-				// Example:
-				// a[models.StatusCode] = tc.HTTPResp.StatusCode
-
-				return a
-			}(),
-		}
+		grpcSpec := buildGrpcSpec(tc)
 
 		logger.Debug("gRPC schema created",
 			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
@@ -420,6 +368,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		tc.HTTPReq = httpSpec.Request
 		tc.HTTPResp = httpSpec.Response
 		tc.Description = httpSpec.Metadata["description"]
+		tc.DuplicateOf = httpSpec.Metadata["duplicate_of"]
 		tc.AppPort = httpSpec.AppPort
 
 		// single map-based loop for all assertions
@@ -457,6 +406,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		tc.Created = grpcSpec.Created
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
+		tc.DuplicateOf = grpcSpec.Metadata["duplicate_of"]
 		tc.AppPort = grpcSpec.AppPort
 
 		for key, raw := range grpcSpec.Assertions {
@@ -519,6 +469,7 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 		tc.HTTPReq = httpSpec.Request
 		tc.HTTPResp = httpSpec.Response
 		tc.Description = httpSpec.Metadata["description"]
+		tc.DuplicateOf = httpSpec.Metadata["duplicate_of"]
 		tc.AppPort = httpSpec.AppPort
 		expandAssertionsJSON(tc, httpSpec.Assertions)
 
@@ -531,6 +482,7 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 		tc.Created = grpcSpec.Created
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
+		tc.DuplicateOf = grpcSpec.Metadata["duplicate_of"]
 		tc.AppPort = grpcSpec.AppPort
 		expandAssertionsJSON(tc, grpcSpec.Assertions)
 

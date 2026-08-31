@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v3/pkg"
@@ -268,18 +270,8 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDyna
 	// "<uuid>.txt" match; the trade-off is that bare value patterns need
 	// anchoring (see TestMatchURLPath_NumericIDScoping).
 	if len(urlNoise) > 0 {
-		const ph = "{{keploy.urlnoise}}"
-		np, rp := mockPath, reqPath
-		for _, pat := range urlNoise {
-			re, cerr := regexp.Compile(pat)
-			if cerr != nil {
-				h.Logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(cerr))
-				continue
-			}
-			np = re.ReplaceAllString(np, ph)
-			rp = re.ReplaceAllString(rp, ph)
-		}
-		if np == rp {
+		noiseRes := compileURLNoise(h.Logger, urlNoise)
+		if maskURLNoise(mockPath, noiseRes) == maskURLNoise(reqPath, noiseRes) {
 			return true
 		}
 	}
@@ -321,6 +313,56 @@ func pathMatchesModuloDynamicSegments(mockPath, reqPath string) bool {
 		return false // a non-id segment differs -> genuinely different path
 	}
 	return differed
+}
+
+// urlNoisePlaceholder is what a url-noise match is replaced with on BOTH the
+// recorded and the live side before they are compared, so a covered substring
+// stops distinguishing the two.
+const urlNoisePlaceholder = "{{keploy.urlnoise}}"
+
+// urlNoiseCache memoizes compiled url-noise patterns. MatchURLPath and
+// QueryParamsMatch both run once per CANDIDATE MOCK per proxied request, so
+// compiling the configured patterns inline cost O(mocks x patterns)
+// regexp.Compile calls on every request — measured at ~12us and ~18KB of
+// garbage per QueryParamsMatch call with five patterns configured, against
+// ~240ns with none. The patterns come from config (test.globalNoise.url) and
+// are fixed for the process lifetime, so compile each one once and share it.
+// An invalid pattern is cached as a nil entry: it is logged once and never
+// re-attempted.
+var urlNoiseCache sync.Map // pattern string -> *regexp.Regexp (nil = invalid)
+
+// compileURLNoise returns the compiled form of the configured url-noise
+// patterns, skipping (and logging once) any that do not compile.
+func compileURLNoise(logger *zap.Logger, urlNoise []string) []*regexp.Regexp {
+	if len(urlNoise) == 0 {
+		return nil
+	}
+	res := make([]*regexp.Regexp, 0, len(urlNoise))
+	for _, pat := range urlNoise {
+		if cached, ok := urlNoiseCache.Load(pat); ok {
+			if re, _ := cached.(*regexp.Regexp); re != nil {
+				res = append(res, re)
+			}
+			continue
+		}
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(err))
+			urlNoiseCache.Store(pat, (*regexp.Regexp)(nil))
+			continue
+		}
+		urlNoiseCache.Store(pat, re)
+		res = append(res, re)
+	}
+	return res
+}
+
+// maskURLNoise replaces every url-noise match in s with the placeholder.
+func maskURLNoise(s string, noiseRes []*regexp.Regexp) string {
+	for _, re := range noiseRes {
+		s = re.ReplaceAllString(s, urlNoisePlaceholder)
+	}
+	return s
 }
 
 var (
@@ -396,50 +438,160 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	return true
 }
 
-func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
-	// Helper function to check if a header should be ignored
-	shouldIgnoreHeader := func(key string) bool {
-		lkey := strings.ToLower(key)
-		return strings.HasPrefix(lkey, "keploy")
+// looksDynamicQueryValue reports whether a query-param VALUE looks like a
+// machine-generated token that legitimately varies between record and replay.
+// It reuses looksDynamicSegment (uuid / long hex / >=16-char alphanumeric mix)
+// but is deliberately STRICTER about bare integers: in a path, position gives a
+// number its meaning (/users/55 is unmistakably an id), whereas a bare small
+// integer in a query is overwhelmingly a page / limit / offset / count, and
+// collapsing ?page=2 onto ?page=3 would re-open the very "wrong recorded
+// response" bug this gate exists to close. So only a LONG digit run (epoch
+// seconds/millis, snowflake ids and the like) counts as dynamic.
+const minDynamicQueryDigits = 10
+
+func looksDynamicQueryValue(s string) bool {
+	if reSegAllDigits.MatchString(s) {
+		return len(s) >= minDynamicQueryDigits
+	}
+	return looksDynamicSegment(s)
+}
+
+// maskAndSort applies url noise to every member and sorts the result, so two
+// value sets can be compared order-independently.
+func maskAndSort(vals []string, noiseRes []*regexp.Regexp) []string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = maskURLNoise(v, noiseRes)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// QueryParamsMatch reports whether the recorded query params (mockParams) and the
+// live request's query (reqQuery) match on BOTH key set AND value.
+//
+// MapsHaveSameKeys — the previous gate here — compared only key presence/counts,
+// never VALUES: a mock recorded for /search?id=A would satisfy a live request for
+// /search?id=B, so a distinct query could be served the wrong recorded response.
+// QueryParamsMatch keeps the exact same bidirectional key-set contract (ignoring
+// keploy-prefixed keys) and additionally compares each shared key's value.
+//
+// Values are compared in the recorded form: pkg.URLParams stores a recorded param
+// as ", "-joined (map[string]string), so the live side is joined the same way
+// (strings.Join(reqQuery[key], ", ")). Note this join is lossy — ?q=a,%20b (one
+// value) and ?q=a&q=b (two values) both record as "a, b" and therefore compare
+// equal. That ambiguity predates this gate (it is inherent to pkg.URLParams) and
+// only bounds how strict the value check can be; it never makes a genuinely
+// different value match.
+//
+// urlNoise is applied to BOTH sides before comparison using the same
+// compile-and-replace-with-placeholder approach MatchURLPath uses, so a param
+// value covered by url noise still matches while a genuinely different value does
+// not. The patterns are compiled lazily and memoized (see compileURLNoise): the
+// exact fast path settles every param of a request that did not drift, so a
+// configured noise list costs nothing until a value actually differs.
+//
+// A REPEATED param (same key more than once) is compared ORDER-INDEPENDENTLY:
+// the recorded ", "-joined value is split back into its members, each side is
+// url-noise-masked per member and sorted before comparison. This
+// mirrors pkg.CompareMultiValueHeaders so repeated query params and repeated
+// headers agree — a reorder of the same values (e.g. ?tag=a&tag=b vs
+// ?tag=b&tag=a, which are the same request per HTTP) still matches, while a
+// genuinely different value does not. Single-value params (the common case) take
+// the exact fast path and are unaffected.
+//
+// autoDynamic mirrors MatchURLPath's auto-detected dynamic path segments and is
+// the zero-config DEFAULT for values, set only on SchemaMatch's SECOND pass —
+// after an exact + url-noise pass over every mock found nothing, i.e. when the
+// alternative is a "no matching mock" 502. Without it a rotating value that
+// needs no config in the path (/items/<uuid>) would hard-fail in the query
+// (?id=<uuid>), which is the same non-deterministic-id 502 that pass 2 exists to
+// prevent. A differing member is tolerated only when it looks machine-generated
+// on BOTH sides (see looksDynamicQueryValue), so deterministic and
+// genuinely-distinct queries are never relaxed. Disable via
+// OutgoingOptions.DisableAutoURLDynamic.
+func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Values, urlNoise []string, autoDynamic bool) bool {
+	shouldIgnore := func(key string) bool {
+		return strings.HasPrefix(strings.ToLower(key), "keploy")
 	}
 
-	// Count non-ignored keys in map1
-	map1Count := 0
-	for key := range map1 {
-		if !shouldIgnoreHeader(key) {
-			map1Count++
+	// Enforce the same bidirectional key-set contract as MapsHaveSameKeys.
+	mockCount := 0
+	for key := range mockParams {
+		if !shouldIgnore(key) {
+			mockCount++
 		}
 	}
-
-	// Count non-ignored keys in map2
-	map2Count := 0
-	for key := range map2 {
-		if !shouldIgnoreHeader(key) {
-			map2Count++
+	reqCount := 0
+	for key := range reqQuery {
+		if !shouldIgnore(key) {
+			reqCount++
 		}
 	}
-
-	// Check if counts match
-	if map1Count != map2Count {
+	if mockCount != reqCount {
 		return false
 	}
-
-	// Check if all non-ignored keys in map1 exist in map2
-	for key := range map1 {
-		if shouldIgnoreHeader(key) {
+	for key := range mockParams {
+		if shouldIgnore(key) {
 			continue
 		}
-		if _, exists := map2[key]; !exists {
+		if _, exists := reqQuery[key]; !exists {
+			return false
+		}
+	}
+	for key := range reqQuery {
+		if shouldIgnore(key) {
+			continue
+		}
+		if _, exists := mockParams[key]; !exists {
 			return false
 		}
 	}
 
-	// Check if all non-ignored keys in map2 exist in map1
-	for key := range map2 {
-		if shouldIgnoreHeader(key) {
+	// Value compare for each shared, non-keploy key.
+	var (
+		noiseRes      []*regexp.Regexp
+		noiseCompiled bool
+	)
+	for key, recorded := range mockParams {
+		if shouldIgnore(key) {
 			continue
 		}
-		if _, exists := map1[key]; !exists {
+		actual := strings.Join(reqQuery[key], ", ")
+		if recorded == actual {
+			continue // exact match — covers every single-value param
+		}
+		// Something drifted on this key: compile the noise patterns now (once
+		// per call, memoized process-wide) rather than on every candidate mock.
+		if !noiseCompiled {
+			noiseRes, noiseCompiled = compileURLNoise(h.Logger, urlNoise), true
+		}
+		// Values differ as-joined. Compare order-independently: split the
+		// recorded value back into members, mask each side with url noise, and
+		// sort before comparing (mirrors CompareMultiValueHeaders). A reorder
+		// of the same values matches; a real difference still fails.
+		recVals := strings.Split(recorded, ", ")
+		liveVals := reqQuery[key]
+		if len(recVals) != len(liveVals) {
+			return false
+		}
+		rv, av := maskAndSort(recVals, noiseRes), maskAndSort(liveVals, noiseRes)
+		for i := range rv {
+			if rv[i] == av[i] {
+				continue
+			}
+			// Fallback only (pass 2): tolerate a member that looks
+			// machine-generated on BOTH sides. Sorting can misalign two
+			// multi-value sets that each carry a dynamic member, so this is a
+			// best-effort relaxation for repeated params; the single-value case
+			// (len 1, the one that matters) is exact.
+			if autoDynamic && looksDynamicQueryValue(rv[i]) && looksDynamicQueryValue(av[i]) {
+				h.Logger.Debug("http query: value treated as auto-detected dynamic",
+					zap.String("param", key),
+					zap.String("mock value", rv[i]),
+					zap.String("request value", av[i]))
+				continue
+			}
 			return false
 		}
 	}
@@ -447,9 +599,13 @@ func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string
 	return true
 }
 
-// SchemaMatch match the schema of the request with the mocks
 func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string, urlNoise []string, autoDynamic bool) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
+
+	// Parse the live query once, not once per candidate mock: url.Query()
+	// re-parses and re-allocates the whole query string on every call and this
+	// loop runs over the full mock set on every proxied request.
+	reqQuery := input.url.Query()
 
 	for _, mock := range unfilteredMocks {
 		if ctx.Err() != nil {
@@ -502,8 +658,8 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			continue
 		}
 
-		// Query parameter match
-		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.URLParams, input.url.Query()) {
+		// Query parameter match (key set AND value; url noise aware)
+		if !h.QueryParamsMatch(mock.Spec.HTTPReq.URLParams, reqQuery, urlNoise, autoDynamic) {
 			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
