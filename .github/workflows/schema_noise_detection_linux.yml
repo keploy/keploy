@@ -4,9 +4,9 @@ name: Schema Noise Detection On Linux
 # keploy/samples-go "mux-elasticsearch" app (patched to stamp a server-side
 # created_at, so the outgoing Elasticsearch request body drifts every run):
 #
-#   --schema-noise-detection -> detect the drifting field (body.created_at) and
+#   --mock-noise-detection -> detect the drifting field (body.created_at) and
 #                               persist it under noise.req on the ES mock.
-#   test.schemaNoiseStrict    -> a drift on a NON-noise field is rejected.
+#   test.mockNoiseStrict    -> a drift on a NON-noise field is rejected.
 
 on:
   push:
@@ -85,7 +85,7 @@ jobs:
           # to `main` once that PR is merged.
           ref: feat/mux-elasticsearch-schema-noise
 
-      - name: Run schema-noise-detection test (mux-elasticsearch)
+      - name: Run mock-noise-detection test (mux-elasticsearch)
         env:
           KEPLOY_BIN: /usr/local/bin/keploy
         run: |

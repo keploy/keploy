@@ -71,8 +71,8 @@ type DocNoise struct {
 
 // NewDocNoise builds the unified noise block for encoding from the in-memory
 // model fields: the obfuscator value-regex list (models.Mock.Noise) and the
-// kind-agnostic schema-noise map (models.MockSpec.ReqBodyNoise). Only the field
-// PATHS of the schema-noise map are persisted — the per-path regex values are
+// kind-agnostic mock-noise map (models.MockSpec.ReqBodyNoise). Only the field
+// PATHS of the mock-noise map are persisted — the per-path regex values are
 // intentionally dropped (unused on the strict path). Returns nil when there is
 // nothing to write so `omitempty` drops the `noise:` key entirely. Req paths are
 // sorted for deterministic output.
@@ -99,7 +99,7 @@ func (n *DocNoise) ValueNoise() []string {
 	return n.Value
 }
 
-// pathsToNoiseMap turns a list of field paths into the canonical schema-noise map
+// pathsToNoiseMap turns a list of field paths into the canonical mock-noise map
 // shape (path -> empty regex list), the only form the strict/detection path honours.
 func pathsToNoiseMap(paths []string) map[string][]string {
 	if len(paths) == 0 {
@@ -112,7 +112,7 @@ func pathsToNoiseMap(paths []string) map[string][]string {
 	return out
 }
 
-// ResolveReqBodyNoise returns the request-body schema noise for a decoded doc,
+// ResolveReqBodyNoise returns the request-body mock noise for a decoded doc,
 // taken from the unified noise.req list. Returns nil when it is absent.
 func ResolveReqBodyNoise(noise *DocNoise) map[string][]string {
 	if noise != nil && len(noise.Req) > 0 {

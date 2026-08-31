@@ -1247,8 +1247,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Backdate:                  testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:               mockNoiseConfig,
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
-			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
-			SchemaNoiseStrict:         r.config.Test.SchemaNoiseStrict,
+			SchemaNoiseDetection:      r.config.Test.MockNoiseDetection,
+			SchemaNoiseStrict:         r.config.Test.MockNoiseStrict,
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
@@ -1481,8 +1481,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Backdate:                  testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:               mockNoiseConfig,
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
-			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
-			SchemaNoiseStrict:         r.config.Test.SchemaNoiseStrict,
+			SchemaNoiseDetection:      r.config.Test.MockNoiseDetection,
+			SchemaNoiseStrict:         r.config.Test.MockNoiseStrict,
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
@@ -2101,7 +2101,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.Strings("mockNames", mockNames),
 				zap.Any("mocks", consumedMocks))
 
-			// strictMockReject: under SchemaNoiseStrict, an expected mock that
+			// strictMockReject: under MockNoiseStrict, an expected mock that
 			// went unconsumed means strict req-body matching REJECTED it — a
 			// non-noise request field drifted. The app's response can still
 			// match (e.g. a deterministic dependency), so the response check
@@ -2109,8 +2109,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			strictMockReject := false
 			if mockSetMismatch {
 				switch {
-				case testPass && r.config.Test.SchemaNoiseStrict:
-					r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
+				case testPass && r.config.Test.MockNoiseStrict:
+					r.logger.Error("strict mock-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
 						zap.Strings("expectedMocks", filteredExpectedNames),
@@ -2978,7 +2978,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
-	} else if r.config.Test.SchemaNoiseDetection && r.instrument {
+	} else if r.config.Test.MockNoiseDetection && r.instrument {
 		// --schema-noise-detection without --remove-unused-mocks: the learned
 		// req_body_noise used to ride only inside UpdateMocks (the pruning
 		// path), so detection alone learned noise and threw it away at exit.

@@ -52,7 +52,7 @@ type matchDiag struct {
 // as response assertions.
 func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
 
-	// Shared schema-noise engine for this match. HTTP is a full client of the
+	// Shared mock-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
 	// only the HTTP-specific bits (body extraction, JSON/form diff).
 	noiseEngine := schemanoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
@@ -1138,7 +1138,7 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 	// the same URL-encoded form the obfuscator's formKeyNoiseRegex anchored on
 	// (^<raw_key>=[^&]+$) — exactly as formBodiesMatchModuloNoise does. Passing
 	// only the decoded value here would never match a key-anchored regex, so
-	// obfuscated form fields would be wrongly re-flagged as schema noise.
+	// obfuscated form fields would be wrongly re-flagged as mock noise.
 	rawValuesByKey := func(body string) map[string][]string {
 		out := map[string][]string{}
 		for _, seg := range strings.Split(body, "&") {
@@ -1206,7 +1206,7 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 // request-body noise. Existing entries win on key collision (noise is
 // monotonic — once a field is flagged it stays flagged), and every slice is
 // copied so the result shares no backing storage with its inputs. It delegates
-// to the shared schema-noise engine so HTTP, Pulsar and the on-disk persistence
+// to the shared mock-noise engine so HTTP, Pulsar and the on-disk persistence
 // all merge learned noise through one implementation.
 func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
 	return schemanoise.MergeLearned(existing, detected)

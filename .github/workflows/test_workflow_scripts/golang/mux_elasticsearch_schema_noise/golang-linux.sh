@@ -8,9 +8,9 @@
 # field that drifts between a keploy recording and each replay. Three scenarios:
 #
 #   Phase A — control (flag off): replay writes NO noise.req.
-#   Phase B — detect+persist (--schema-noise-detection): the body.created_at
+#   Phase B — detect+persist (--mock-noise-detection): the body.created_at
 #             drift is detected and persisted under noise.req on the ES mock.
-#   Phase C — strict (test.schemaNoiseStrict): a drift on a NON-noise field
+#   Phase C — strict (test.mockNoiseStrict): a drift on a NON-noise field
 #             (content, induced by tampering the recorded mock) is rejected.
 #
 # Runs inside samples-go/mux-elasticsearch. Expects: $KEPLOY_BIN (named
@@ -120,7 +120,7 @@ mock_has_any_noise()        { grep -qE '^[[:space:]]*-[[:space:]]+body\.' "$(moc
 # ---------------------------------------------------------------------------
 # Phase A — control
 # ---------------------------------------------------------------------------
-step "Phase A — control (no --schema-noise-detection)"
+step "Phase A — control (no --mock-noise-detection)"
 record_fresh
 mock_has_any_noise && fail "fresh recording already has noise.req" \
                    || pass "fresh recording has no noise.req"
@@ -133,9 +133,9 @@ mock_has_any_noise && fail "flag off must NOT write noise.req" \
 # ---------------------------------------------------------------------------
 # Phase B — detect + persist
 # ---------------------------------------------------------------------------
-step "Phase B — detect + persist (--schema-noise-detection)"
+step "Phase B — detect + persist (--mock-noise-detection)"
 record_fresh
-replay "$APP_DIR/test_detect.log" --schema-noise-detection --remove-unused-mocks
+replay "$APP_DIR/test_detect.log" --mock-noise-detection --remove-unused-mocks
 checkout_passed "$APP_DIR/test_detect.log" && pass "replay passed with detection on" \
                                            || fail "replay should pass with detection on"
 if mock_has_created_at_noise; then
@@ -153,16 +153,16 @@ fi
 # in the recorded ES request body: on replay the app re-sends "world", which
 # now differs from the mock -> strict matching must reject it.
 # ---------------------------------------------------------------------------
-step "Phase C — strict matching (test.schemaNoiseStrict: true)"
+step "Phase C — strict matching (test.mockNoiseStrict: true)"
 sed -i 's/"content":"world"/"content":"TAMPERED"/' "$(mock_file)"
 STRICT_CFG="$APP_DIR/.strict-config"; mkdir -p "$STRICT_CFG"
 cat >"$STRICT_CFG/keploy.yml" <<'EOF'
 path: ""
 appName: mux-elasticsearch
 test:
-    schemaNoiseStrict: true
+    mockNoiseStrict: true
 EOF
-replay "$APP_DIR/test_strict.log" --schema-noise-detection --config-path "$STRICT_CFG" --debug
+replay "$APP_DIR/test_strict.log" --mock-noise-detection --config-path "$STRICT_CFG" --debug
 if grep 'strict req-body match rejected mock' "$APP_DIR/test_strict.log" | grep -q 'body.content'; then
   pass "strict matching rejected the mock on non-noise drift (body.content)"
 else

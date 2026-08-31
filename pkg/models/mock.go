@@ -257,7 +257,7 @@ type MockSpec struct {
 
 	// ReqBodyNoise is the single, kind-agnostic home for field-path request-body
 	// noise detected during schema-based auto-replay matching
-	// (config.Test.SchemaNoiseDetection). EVERY parser stores it here — HTTP and
+	// (config.Test.MockNoiseDetection). EVERY parser stores it here — HTTP and
 	// non-HTTP (Pulsar/Kafka/Redis/…) alike — so the learn/enforce flow is
 	// uniform across protocols (see pkg/agent/proxy/integrations/schemanoise).
 	// fieldpath ("body.user.id") -> regex list, where an empty list means
@@ -844,7 +844,7 @@ type MockState struct {
 	// catalog probes as session-tier (#empty-mapping bug).
 	Lifetime Lifetime `json:"lifetime,omitempty"`
 	// ReqBodyNoise carries field-path request-body noise detected during
-	// schema-based auto-replay matching (config.Test.SchemaNoiseDetection)
+	// schema-based auto-replay matching (config.Test.MockNoiseDetection)
 	// back from the agent to the replay service so UpdateMocks /
 	// PersistMockNoise can persist it onto the mock. HTTP mocks store it on
 	// HTTPReq.ReqBodyNoise; non-HTTP integrations (Pulsar/Kafka/Redis/Generic)
@@ -907,7 +907,7 @@ func (m *Mock) DeepCopy() *Mock {
 		}
 	}
 
-	// Deep copy the kind-agnostic request-body schema-noise map (used by EVERY
+	// Deep copy the kind-agnostic request-body mock-noise map (used by EVERY
 	// parser — HTTP and non-HTTP alike). Started from m.Spec by value above, so
 	// the clone would otherwise share this map and its value slices — and
 	// DeepCopy runs before async gob writes and when building runtime mock

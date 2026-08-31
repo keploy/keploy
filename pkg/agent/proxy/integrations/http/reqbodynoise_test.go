@@ -30,7 +30,7 @@ func sortedKeys(m map[string][]string) []string {
 	return out
 }
 
-// TestDetectReqBodyNoise drives HTTP's schema-noise detection through the shared
+// TestDetectReqBodyNoise drives HTTP's mock-noise detection through the shared
 // engine (httpNoiseAdapter + schemanoise.Engine) — the same path match() uses —
 // proving HTTP is a full client of the generic engine, not just a borrower of
 // the JSON kernel.

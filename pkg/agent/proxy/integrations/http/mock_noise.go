@@ -8,7 +8,7 @@ import (
 )
 
 // httpNoiseAdapter is the HTTP implementation of schemanoise.Adapter, making
-// HTTP a first-class client of the shared schema-noise engine (the same engine
+// HTTP a first-class client of the shared mock-noise engine (the same engine
 // Pulsar and any future parser use). Like every parser, HTTP stores its learned
 // noise on the kind-agnostic MockSpec.ReqBodyNoise. It supplies a Diff that
 // handles BOTH JSON and form-urlencoded bodies — the form path is HTTP's own
@@ -48,7 +48,7 @@ func (httpNoiseAdapter) SetLearnedNoise(m *models.Mock, merged map[string][]stri
 
 // RecordedValueIsNoise excludes recorded values the enterprise obfuscator already
 // redacted (recorded value matches a Mock.Noise regex) so secret fields are not
-// re-flagged as schema noise.
+// re-flagged as mock noise.
 func (httpNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool {
 	if m == nil {
 		return nil

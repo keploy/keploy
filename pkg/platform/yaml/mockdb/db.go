@@ -473,7 +473,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		}
 		if st, ok := mockNames[mock.Name]; ok {
 			// Persist any request-body noise detected during schema-based
-			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
+			// auto-replay matching (config.Test.MockNoiseDetection) onto the
 			// disk-read mock before it is re-written. Stored uniformly on the
 			// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
 			if len(st.ReqBodyNoise) > 0 {
@@ -593,7 +593,7 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		}
 		if st, ok := mockNames[mock.Name]; ok {
 			// Persist any request-body noise detected during schema-based
-			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
+			// auto-replay matching (config.Test.MockNoiseDetection) onto the
 			// disk-read mock before it is re-written. Stored uniformly on the
 			// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
 			if len(st.ReqBodyNoise) > 0 {

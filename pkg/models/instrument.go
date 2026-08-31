@@ -92,6 +92,12 @@ type IngressEvent struct {
 	_           uint16 // Padding
 }
 
+// NAMING: SchemaNoiseDetection / SchemaNoiseStrict keep the pre-rename spelling
+// while the rest of the feature moved to "mock noise". These are fields on a
+// struct that crosses a MODULE boundary — github.com/keploy/integrations reads
+// opts.SchemaNoise* directly — so renaming them breaks that module at compile
+// time rather than being an internal tidy-up. They rename in a coordinated
+// change with integrations, not here.
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string

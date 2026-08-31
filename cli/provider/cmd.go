@@ -444,8 +444,15 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
-		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared schema-noise adapter")
-		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared schema-noise adapter. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
+		cmd.Flags().Bool("mock-noise-detection", c.cfg.Test.MockNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared mock-noise adapter")
+		// Deprecated alias, kept so existing scripts and CI keep working.
+		// MarkDeprecated hides it from --help and prints a notice when used;
+		// readMockNoiseFlag below still honours it.
+		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.MockNoiseDetection, "DEPRECATED: use --mock-noise-detection")
+		_ = cmd.Flags().MarkDeprecated("schema-noise-detection", "use --mock-noise-detection instead")
+		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
+		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.MockNoiseStrict, "DEPRECATED: use --mock-noise-strict")
+		_ = cmd.Flags().MarkDeprecated("schema-noise-strict", "use --mock-noise-strict instead")
 		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping (default behaviour demotes such cases to OBSOLETE). The per-test mappingDiff block is still written for diagnostics.")
 		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
 		// Start the user app ONCE for the whole replay run instead of
@@ -464,66 +471,70 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 
 func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	var flagNameMapping = map[string]string{
-		"testsets":                  "test-sets",
-		"fullBody":                  "full",
-		"reportPath":                "report-path",
-		"tc":                        "test-case",
-		"delay":                     "delay",
-		"apiTimeout":                "api-timeout",
-		"mongoPassword":             "mongo-password",
-		"tlsPrivateKeyPath":         "tls-private-key-path",
-		"coverageReportPath":        "coverage-report-path",
-		"language":                  "language",
-		"ignoreOrdering":            "ignore-ordering",
-		"coverage":                  "coverage",
-		"removeUnusedMocks":         "remove-unused-mocks",
-		"goCoverage":                "go-coverage",
-		"fallBackOnMiss":            "fallBack-on-miss",
-		"basePath":                  "base-path",
-		"updateTemplate":            "update-template",
-		"mocking":                   "mocking",
-		"configPath":                "config-path",
-		"path":                      "path",
-		"port":                      "port",
-		"grpcPort":                  "grpc-port",
-		"ssePort":                   "sse-port",
-		"proxyPort":                 "proxy-port",
-		"incomingProxyPort":         "incoming-proxy-port",
-		"dnsPort":                   "dns-port",
-		"command":                   "command",
-		"cmdType":                   "cmd-type",
-		"buildDelay":                "build-delay",
-		"containerName":             "container-name",
-		"networkName":               "network-name",
-		"passThroughPorts":          "pass-through-ports",
-		"memoryLimit":               "memory-limit",
-		"maxMemoryPerConnection":    "max-memory-per-conn",
-		"queueSize":                 "queue-size",
-		"consumerStallGrace":        "consumer-stall-grace",
-		"appId":                     "app-id",
-		"appName":                   "app-name",
-		"generateGithubActions":     "generate-github-actions",
-		"disableTele":               "disable-tele",
-		"disableANSI":               "disable-ansi",
-		"jsonOutput":                "json",
-		"selectedTests":             "selected-tests",
-		"testReport":                "test-report",
-		"enableTesting":             "enable-testing",
-		"inDocker":                  "in-docker",
-		"keployContainer":           "keploy-container",
-		"keployNetwork":             "keploy-network",
-		"recordTimer":               "record-timer",
-		"healthUrl":                 "health-url",
-		"healthPollTimeout":         "health-poll-timeout",
-		"urlMethods":                "url-methods",
-		"inCi":                      "in-ci",
-		"protoFile":                 "proto-file",
-		"protoDir":                  "proto-dir",
-		"protoInclude":              "proto-include",
-		"allowHighRisk":             "allow-high-risk",
-		"disableMapping":            "disable-mapping",
-		"compareAll":                "compare-all",
-		"schemaMatch":               "schema-match",
+		"testsets":               "test-sets",
+		"fullBody":               "full",
+		"reportPath":             "report-path",
+		"tc":                     "test-case",
+		"delay":                  "delay",
+		"apiTimeout":             "api-timeout",
+		"mongoPassword":          "mongo-password",
+		"tlsPrivateKeyPath":      "tls-private-key-path",
+		"coverageReportPath":     "coverage-report-path",
+		"language":               "language",
+		"ignoreOrdering":         "ignore-ordering",
+		"coverage":               "coverage",
+		"removeUnusedMocks":      "remove-unused-mocks",
+		"goCoverage":             "go-coverage",
+		"fallBackOnMiss":         "fallBack-on-miss",
+		"basePath":               "base-path",
+		"updateTemplate":         "update-template",
+		"mocking":                "mocking",
+		"configPath":             "config-path",
+		"path":                   "path",
+		"port":                   "port",
+		"grpcPort":               "grpc-port",
+		"ssePort":                "sse-port",
+		"proxyPort":              "proxy-port",
+		"incomingProxyPort":      "incoming-proxy-port",
+		"dnsPort":                "dns-port",
+		"command":                "command",
+		"cmdType":                "cmd-type",
+		"buildDelay":             "build-delay",
+		"containerName":          "container-name",
+		"networkName":            "network-name",
+		"passThroughPorts":       "pass-through-ports",
+		"memoryLimit":            "memory-limit",
+		"maxMemoryPerConnection": "max-memory-per-conn",
+		"queueSize":              "queue-size",
+		"consumerStallGrace":     "consumer-stall-grace",
+		"appId":                  "app-id",
+		"appName":                "app-name",
+		"generateGithubActions":  "generate-github-actions",
+		"disableTele":            "disable-tele",
+		"disableANSI":            "disable-ansi",
+		"jsonOutput":             "json",
+		"selectedTests":          "selected-tests",
+		"testReport":             "test-report",
+		"enableTesting":          "enable-testing",
+		"inDocker":               "in-docker",
+		"keployContainer":        "keploy-container",
+		"keployNetwork":          "keploy-network",
+		"recordTimer":            "record-timer",
+		"healthUrl":              "health-url",
+		"healthPollTimeout":      "health-poll-timeout",
+		"urlMethods":             "url-methods",
+		"inCi":                   "in-ci",
+		"protoFile":              "proto-file",
+		"protoDir":               "proto-dir",
+		"protoInclude":           "proto-include",
+		"allowHighRisk":          "allow-high-risk",
+		"disableMapping":         "disable-mapping",
+		"compareAll":             "compare-all",
+		"schemaMatch":            "schema-match",
+		"mockNoiseDetection":     "mock-noise-detection",
+		"mockNoiseStrict":        "mock-noise-strict",
+		// Deprecated spellings, kept so a lookup by the old config key still
+		// resolves to its (also deprecated) flag.
 		"schemaNoiseDetection":      "schema-noise-detection",
 		"schemaNoiseStrict":         "schema-noise-strict",
 		"updateTestMapping":         "update-test-mapping",
@@ -699,6 +710,18 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		errMsg := "failed to unmarshal the config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
+	}
+
+	// 7b) Fold the deprecated schemaNoise* keys into the canonical mockNoise*
+	// fields, so nothing downstream has to know the old spelling existed.
+	// viper.IsSet is what disambiguates "absent" from "explicitly false" — both
+	// keys are booleans, so the struct alone cannot tell them apart.
+	if deprecated := c.cfg.ResolveMockNoiseAliases(viper.IsSet); len(deprecated) > 0 {
+		for _, key := range deprecated {
+			c.logger.Warn("this config key is deprecated and will be removed in a future release; rename it",
+				zap.String("deprecated", key),
+				zap.String("use", strings.Replace(key, "schemaNoise", "mockNoise", 1)))
+		}
 	}
 
 	// 8) Persist the path used
@@ -1405,24 +1428,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
-			c.cfg.Test.SchemaNoiseDetection, err = cmd.Flags().GetBool("schema-noise-detection")
-			if err != nil {
-				errMsg := "failed to read the --schema-noise-detection flag; check the flag name with --help and confirm this command supports it"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			if err := readMockNoiseFlag(cmd, "mock-noise-detection", "schema-noise-detection",
+				"test.mockNoiseDetection", "test.schemaNoiseDetection", &c.cfg.Test.MockNoiseDetection); err != nil {
+				utils.LogError(c.logger, err, err.Error())
+				return err
 			}
 
-			// Only let the flag override when it was explicitly passed or
-			// the config file doesn't set the key — otherwise the flag's
-			// default would silently clobber a yaml-only configuration
-			// (same guard pattern as disable-mapping above).
-			if cmd.Flags().Changed("schema-noise-strict") || !viper.IsSet("test.schemaNoiseStrict") {
-				c.cfg.Test.SchemaNoiseStrict, err = cmd.Flags().GetBool("schema-noise-strict")
-				if err != nil {
-					errMsg := "failed to read the --schema-noise-strict flag; check the flag name with --help and confirm this command supports it"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
+			if err := readMockNoiseFlag(cmd, "mock-noise-strict", "schema-noise-strict",
+				"test.mockNoiseStrict", "test.schemaNoiseStrict", &c.cfg.Test.MockNoiseStrict); err != nil {
+				utils.LogError(c.logger, err, err.Error())
+				return err
 			}
 
 			// enforce that the test-sets are provided when --must-pass is set to true
@@ -2110,5 +2125,43 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		}
 	}
 
+	return nil
+}
+
+// readMockNoiseFlag resolves one mock-noise setting from its canonical flag,
+// its deprecated alias, or the config file — in that order of precedence.
+//
+// Both spellings are registered (the old one deprecated), so a user may pass
+// either. An explicitly-passed flag always wins; between the two, the canonical
+// name wins so passing both is unambiguous.
+//
+// The `!viper.IsSet` guard is why this cannot simply read the flag: the flag's
+// DEFAULT would otherwise clobber a yaml-only configuration, since a bool flag
+// that was never passed still reports a value. Both config keys are checked so
+// a keploy.yml using either spelling is respected. Same pattern as
+// disable-mapping.
+func readMockNoiseFlag(cmd *cobra.Command, canonical, deprecated, canonicalKey, deprecatedKey string, dst *bool) error {
+	switch {
+	case cmd.Flags().Changed(canonical):
+		// explicit canonical flag
+	case cmd.Flags().Changed(deprecated):
+		val, err := cmd.Flags().GetBool(deprecated)
+		if err != nil {
+			return fmt.Errorf("failed to read the --%s flag; check the flag name with --help and confirm this command supports it", deprecated)
+		}
+		*dst = val
+		return nil
+	case viper.IsSet(canonicalKey) || viper.IsSet(deprecatedKey):
+		// the config file set it; ResolveMockNoiseAliases already folded the
+		// deprecated key into dst, so leave it alone rather than letting the
+		// flag default overwrite it.
+		return nil
+	}
+
+	val, err := cmd.Flags().GetBool(canonical)
+	if err != nil {
+		return fmt.Errorf("failed to read the --%s flag; check the flag name with --help and confirm this command supports it", canonical)
+	}
+	*dst = val
 	return nil
 }

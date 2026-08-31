@@ -1,8 +1,16 @@
-// Package schemanoise hosts the kind-agnostic schema-noise learn/enforce engine
+// Package schemanoise hosts the kind-agnostic mock-noise learn/enforce engine
+//
+// NAMING: the feature is "mock noise" everywhere else — flags, config keys,
+// identifiers, logs. This package keeps its original path because it crosses a
+// MODULE boundary: github.com/keploy/integrations imports
+// go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise, so renaming
+// the directory is a breaking change for that module rather than an internal
+// tidy-up. Renaming it needs a coordinated change there plus a version bump,
+// which is out of scope for a rename that is otherwise backward compatible.
 // shared by every protocol integration.
 //
-// Schema-noise ("req_body_noise") is the field-path noise keploy auto-learns
-// during schema-based auto-replay (config.Test.SchemaNoiseDetection): when a
+// Mock-noise ("req_body_noise") is the field-path noise keploy auto-learns
+// during schema-based auto-replay (config.Test.MockNoiseDetection): when a
 // recorded request body and the live one differ on a field, the drifting field
 // path is recorded as noise on the mock so a later strict replay tolerates it
 // instead of failing. Historically this whole flow lived inside the HTTP
@@ -33,7 +41,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// Adapter is the per-protocol contract for plugging into the shared schema-noise
+// Adapter is the per-protocol contract for plugging into the shared mock-noise
 // engine. Implementations are tiny: they expose where the recorded request body
 // lives and where this protocol keeps its learned noise. The engine owns flag
 // handling, the known-noise merge, JSON field diffing, strict rejection and the
@@ -58,7 +66,7 @@ type Adapter interface {
 	// RecordedValueIsNoise returns a predicate consulted with the recorded
 	// (expected) scalar value of each changed field; returning true drops that
 	// field so values already covered by the mock's value-regex noise (e.g.
-	// enterprise-obfuscated secrets) are not re-flagged as schema noise.
+	// enterprise-obfuscated secrets) are not re-flagged as mock noise.
 	// Implementations with no such concept return nil.
 	RecordedValueIsNoise(m *models.Mock) func(string) bool
 
@@ -94,16 +102,16 @@ func (JSONDiffer) Diff(_ *models.Mock, recorded, live []byte, known map[string][
 	return DetectJSONDrift(recorded, live, known, valIsNoise)
 }
 
-// Engine runs the schema-noise learn/enforce flow for one protocol through its
+// Engine runs the mock-noise learn/enforce flow for one protocol through its
 // Adapter. Construct one per replay with the resolved flags via New.
 type Engine struct {
 	adapter   Adapter
-	detection bool // config.Test.SchemaNoiseDetection
-	strict    bool // config.Test.SchemaNoiseStrict
+	detection bool // config.Test.MockNoiseDetection
+	strict    bool // config.Test.MockNoiseStrict
 }
 
-// New builds an Engine for an adapter with the resolved schema-noise flags
-// (config.Test.SchemaNoiseDetection / SchemaNoiseStrict).
+// New builds an Engine for an adapter with the resolved mock-noise flags
+// (config.Test.MockNoiseDetection / MockNoiseStrict).
 func New(a Adapter, detection, strict bool) *Engine {
 	return &Engine{adapter: a, detection: detection, strict: strict}
 }
@@ -128,7 +136,7 @@ func (e *Engine) KnownNoise(m *models.Mock, userNoise map[string][]string) map[s
 	return MergeKnown(userNoise, StripBodyPrefix(e.adapter.StoredNoise(m)))
 }
 
-// Detect returns the new "body."-prefixed schema-noise to record on the mock for
+// Detect returns the new "body."-prefixed mock-noise to record on the mock for
 // a live request body, plus whether the bodies were comparable (both JSON).
 //
 // It is a no-op (nil, false) when detection is disabled or the mock has no
@@ -231,7 +239,7 @@ func (e *Engine) StrictReject(m *models.Mock, liveBody []byte, userNoise map[str
 // comparable reports whether both bodies were valid JSON. When false there is no
 // field structure to diff and the caller must treat any byte difference as a
 // real, non-learnable mismatch. This is the single JSON-diff kernel behind both
-// the HTTP and Pulsar schema-noise paths.
+// the HTTP and Pulsar mock-noise paths.
 func DetectJSONDrift(recordedBody, liveBody []byte, known map[string][]string, isRecordedNoise func(string) bool) (drift map[string][]string, comparable bool) {
 	if !json.Valid(recordedBody) || !json.Valid(liveBody) {
 		return nil, false

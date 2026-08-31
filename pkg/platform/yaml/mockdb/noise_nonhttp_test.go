@@ -14,7 +14,7 @@ import (
 
 // genericNoiseMock builds a non-HTTP (Generic-kind) mock whose request lives in
 // the wire-encoded GenericRequests payload — exactly the shape (Redis/Kafka/
-// Pulsar/Generic) that has no per-protocol struct to hang schema-noise on and
+// Pulsar/Generic) that has no per-protocol struct to hang mock-noise on and
 // therefore relies on the kind-agnostic MockSpec.ReqBodyNoise field.
 func genericNoiseMock(name string) *models.Mock {
 	return &models.Mock{
@@ -88,7 +88,7 @@ func TestNonHTTPNoise_JSONRoundTrip(t *testing.T) {
 	}
 }
 
-// TestNonHTTPNoise_HTTPUsesSameEnvelope confirms HTTP now stores schema-noise on
+// TestNonHTTPNoise_HTTPUsesSameEnvelope confirms HTTP now stores mock-noise on
 // the SAME kind-agnostic MockSpec.ReqBodyNoise as every other parser, and that it
 // rides through the shared top-level envelope on encode and round-trips back on
 // decode — i.e. the storage is uniform across protocols.
