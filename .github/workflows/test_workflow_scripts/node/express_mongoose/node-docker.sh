@@ -1,6 +1,7 @@
 #!/bin/bash
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # Start the docker container.
 docker network create keploy-network
@@ -10,7 +11,7 @@ docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 sudo rm -rf keploy/
 
 # Build the image of the application.
-docker build -t node-app:1.0 .
+docker_build_retry docker build -t node-app:1.0 .
 
 container_kill() {
     # pid=$(pgrep -f "keploy record")

@@ -13,9 +13,9 @@
 # unauthenticated pull-rate-limits. Callers can still override with
 # `--build-arg GOLANG_IMAGE=…` (the docker-compose.yml forwards the
 # $GOLANG_IMAGE / $DEBIAN_IMAGE environment variables through, so CI runners
-# with a locally cached `golang:1.26-bookworm` can use the cache directly).
+# with a locally cached `golang:1.27-bookworm` can use the cache directly).
 
-ARG GOLANG_IMAGE=public.ecr.aws/docker/library/golang:1.26-bookworm
+ARG GOLANG_IMAGE=public.ecr.aws/docker/library/golang:1.27-bookworm
 ARG DEBIAN_IMAGE=public.ecr.aws/docker/library/debian:trixie-slim
 
 # BuildKit populates TARGETOS / TARGETARCH automatically based on the

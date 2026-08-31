@@ -344,6 +344,27 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						zap.String("next_step", report.NextSteps))
 				}
 
+				// On-miss policy (keploy mock replay --on-miss): passthrough or
+				// record dials the real dependency and relays the exchange so an
+				// unrecorded call succeeds instead of hard-failing. record also
+				// captures it for the CLI to append to the set at end-of-run.
+				if opts.OnMiss.PassesThroughOnMiss() {
+					handled, phErr := h.serveOnMiss(ctx, clientConn, reqBuf, request, input.body, dstCfg, opts)
+					if phErr != nil {
+						h.Logger.Debug("on-miss passthrough failed; falling back to hard miss", zap.Error(phErr), zap.Any("metadata", utils.GetReqMeta(request)))
+					} else if handled {
+						// Served live — continue the keep-alive loop for the next
+						// request on this connection. Not reported as a miss.
+						reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+						if err != nil {
+							h.Logger.Debug("client closed connection after on-miss passthrough", zap.Error(err))
+							errCh <- nil
+							return
+						}
+						continue
+					}
+				}
+
 				// No mock matched — send a 502 so the application gets a
 				// proper HTTP error instead of a silent connection close.
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"

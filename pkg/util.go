@@ -30,13 +30,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg/models"
 
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -627,7 +627,7 @@ const (
 // errors.Is unwraps the *url.Error -> *net.OpError -> *os.SyscallError ->
 // syscall.Errno chain, so no manual unwrapping is needed.
 func isPreResponseConnRefused(err error) bool {
-	return errors.Is(err, syscall.ECONNREFUSED)
+	return neterr.IsConnRefused(err)
 }
 
 // IsTransportConnReset reports whether err is a transport-level connection
@@ -657,7 +657,7 @@ func IsTransportConnReset(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+	if neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) {
 		return true
 	}
 	// net/http surfaces a peer-side drop during the response read as a bare

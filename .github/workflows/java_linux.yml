@@ -369,6 +369,12 @@ jobs:
       - name: Set up Go (for the config-service stub)
         uses: actions/setup-go@v6
         with:
+          # Deliberately NOT go.mod's version: this Go is only used to build
+          # the config-service stub in keploy/samples-java, whose own
+          # async-config-poll/config-stub/go.mod declares `go 1.21`. It never
+          # compiles keploy itself (the binaries under test are downloaded by
+          # the download-binary steps above), so it is not part of the repo's
+          # toolchain bump and must track the sample instead.
           go-version: "1.21"
 
       - name: Run async-config-poll app

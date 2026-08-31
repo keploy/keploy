@@ -29,13 +29,13 @@ on:
 #   concurrency: { group: <workflow>-<pr#/ref>, cancel-in-progress: true }
 # which cancels the whole run (this job included) when a new commit
 # lands on the same PR/branch. The 4-runner pool is the natural
-# concurrency cap. This mirrors the sibling golang_native_windows.yml,
+# concurrency cap. This mirrors the other self-hosted Windows lanes,
 # which also runs with no concurrency group.
 
 jobs:
   golang_docker_windows:
     runs-on: [self-hosted, Windows, X64]
-    # Same hung-FFI-shutdown rationale as golang_native_windows -
+    # Same hung-shutdown rationale as the other Windows lanes -
     # cap per-job wall-clock at 30 min so a stuck intercepted
     # process cannot hold a self-hosted Windows runner for 6h.
     timeout-minutes: 30

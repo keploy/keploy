@@ -22,6 +22,49 @@ type TestMockMapping struct {
 	MockIDs  []string `json:"mock_ids"`
 }
 
+// ScopeReq is the body of POST /agent/scope/begin and /agent/scope/end — a
+// test-runner plugin / glue-code marks a named per-test scope so the mock flow
+// can attribute captured mocks to a test (record) or restrict the served pool
+// to that test (replay).
+type ScopeReq struct {
+	Name string `json:"name"`
+	// Pid is the calling test WORKER's PID (e.g. Node process.pid, os.Getpid()).
+	// It keys the per-worker scope so parallel workers don't stomp each other
+	// (Design A). Optional: 0/omitted falls back to the single global scope
+	// (correct for sequential single-worker runs and suite-level).
+	Pid int `json:"pid,omitempty"`
+}
+
+// ScopeWindow is one recorded per-test scope: the agent-clock interval during
+// which the named test made its outgoing calls. Record correlates captured
+// mocks into these windows to build mappings.yaml — by source PID when the
+// worker reported one (exact, parallel-safe), else by request timestamp.
+type ScopeWindow struct {
+	Name  string    `json:"name"`
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+	// PID is the reporting worker's PID (ScopeReq.Pid), 0 if none. When set,
+	// record attributes a captured mock to this window if the mock's own source
+	// PID resolves (up the /proc tree) to this worker — exact even when windows
+	// from parallel workers overlap in time.
+	PID uint32 `json:"pid,omitempty"`
+}
+
+// ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
+// the agent the per-test name→mock-names table (from mappings.yaml) so the
+// runner's /agent/scope/begin calls can restrict the served pool per test.
+type ScopeTableReq struct {
+	Mappings map[string][]string `json:"mappings"`
+}
+
+// MockStats is the body of GET /agent/mock/stats — a non-draining snapshot of
+// the mock session for the runner or the CLI end-of-run summary.
+type MockStats struct {
+	Loaded   int `json:"loaded"`
+	Consumed int `json:"consumed"`
+	Missed   int `json:"missed"`
+}
+
 type SetMocksReq struct {
 	Filtered   []*Mock `json:"filtered"`
 	UnFiltered []*Mock `json:"unFiltered"`

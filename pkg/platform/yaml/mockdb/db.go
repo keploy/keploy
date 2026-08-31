@@ -1737,3 +1737,13 @@ func (ys *MockYaml) GetCurrMockID() int64 {
 func (ys *MockYaml) ResetCounterID() {
 	atomic.StoreInt64(&ys.idCounter, -1)
 }
+
+// SetCounterID seeds the mock-name counter so the NEXT InsertMock names its
+// mock "mock-<id+1>". Used when APPENDING to an existing set (the `keploy mock
+// replay --on-miss record` incremental-refresh path) so newly-captured mocks
+// don't reuse names already present on disk. Recording a fresh set uses
+// ResetCounterID (seed -1 → first mock is mock-0); appending seeds from the
+// set's highest existing index instead.
+func (ys *MockYaml) SetCounterID(id int64) {
+	atomic.StoreInt64(&ys.idCounter, id)
+}

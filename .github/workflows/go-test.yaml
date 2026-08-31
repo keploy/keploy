@@ -46,6 +46,6 @@ jobs:
 
       - name: Install dependencies
         run: go get .
-          
+
       - name: Running Unit Tests
         run: go test ./...

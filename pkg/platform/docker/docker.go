@@ -567,7 +567,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Generate ports
 	var ports []string
 	if opts.AgentPort != 0 {
-		ports = append(ports, fmt.Sprintf("%d:%d", opts.AgentPort, opts.AgentPort))
+		// The agent control-plane HTTP server is unauthenticated (it streams
+		// live TLS session keys on /agent/pcap/keylog and accepts
+		// unauthenticated /agent/stop and /agent/storemocks). Only the local
+		// keploy CLI needs to reach it, so publish it to the host's own
+		// loopback rather than every host-network interface.
+		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.AgentPort, opts.AgentPort))
 	}
 	if opts.ProxyPort != 0 {
 		ports = append(ports, fmt.Sprintf("%d:%d", opts.ProxyPort, opts.ProxyPort))
@@ -602,6 +607,11 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 	if idc.conf.Debug {
 		command = append(command, "--debug")
+	}
+	if opts.MockMode {
+		// `keploy mock record|replay` — the containerised agent must skip
+		// ingress/bind relocation (the wrapped process is a test runner).
+		command = append(command, "--mock-mode")
 	}
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,14 +21,16 @@ import (
 	"golang.org/x/term"
 )
 
-// NewAgentCommand returns a command that runs elevated on Unix.
+// NewAgentCommand returns a command that runs the native agent, elevated on the
+// platforms that need it.
+// - If the platform does not need root at all (macOS), we run the binary directly.
 // - If already root, we run the binary directly.
 // - Otherwise we prefix with "sudo".
 // - If useCachedCreds is true, uses "sudo -n" (non-interactive) which relies on cached credentials.
 // - We put the process in its own group so we can signal the whole group.
 func NewAgentCommand(bin string, args []string, useCachedCreds bool) *exec.Cmd {
 	var cmd *exec.Cmd
-	if os.Geteuid() == 0 {
+	if !AgentNeedsElevation(runtime.GOOS) || os.Geteuid() == 0 {
 		cmd = exec.Command(bin, args...)
 	} else {
 		if useCachedCreds {
@@ -47,11 +50,12 @@ func NewAgentCommand(bin string, args []string, useCachedCreds bool) *exec.Cmd {
 	return cmd
 }
 
-// NewAgentCommandForPTY returns a command configured for PTY execution.
+// NewAgentCommandForPTY returns a command configured for PTY execution,
+// elevated on the platforms that need it (see NewAgentCommand).
 // Uses Setsid instead of Setpgid to allow PTY to become the controlling terminal.
 func NewAgentCommandForPTY(bin string, args []string) *exec.Cmd {
 	var cmd *exec.Cmd
-	if os.Geteuid() == 0 {
+	if !AgentNeedsElevation(runtime.GOOS) || os.Geteuid() == 0 {
 		cmd = exec.Command(bin, args...)
 	} else {
 		// sudo <bin> <args...>

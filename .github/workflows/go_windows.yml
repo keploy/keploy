@@ -21,15 +21,6 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # `go build ./...` discards its objects, but it still LINKS the main
-      # package, so the cgo LDFLAGS in pkg/agent/hooks/windows apply and the
-      # .a — which is no longer committed — has to be on disk first. Verified:
-      # without this the amd64 step fails with
-      # "cannot find -l:libwindows_redirector.a".
-      - name: Fetch Windows redirector
-        run: go run ./tools/fetchredirector
-        shell: bash
-
       - name: Build amd64
         run: |
           set GOARCH=amd64
@@ -40,4 +31,41 @@ jobs:
         run: |
           set GOARCH=arm64
           go build -v ./...
+        shell: cmd
+
+      # This repository has never run a Go test on Windows - this job only
+      # ever compiled. That is how a whole class of bug survived unnoticed:
+      # Go's syscall.ECONNRESET / ECONNREFUSED / ECONNABORTED / EPIPE are
+      # APPLICATION_ERROR-space values on Windows that Winsock never returns
+      # and syscall.Errno.Is does not map, so every predicate written against
+      # them was silently inert on this platform. pkg/neterr classifies those
+      # correctly, and its tests drive real sockets rather than synthetic
+      # errno values - which means they only prove anything when they run
+      # here, on Windows.
+      #
+      # Package selection, in order of what it buys:
+      #   ./pkg               IsTransportConnReset and the connection-refused
+      #                       retry live here, and they are called from
+      #                       pkg/service/replay with no build tag - this is
+      #                       the code that genuinely runs natively on Windows.
+      #                       It also already holds a real-socket
+      #                       connection-refused test.
+      #   ./pkg/neterr        the classification itself.
+      #   .../proxy/incoming  isStaleConnError, which decides whether an
+      #                       idempotent request is redialed and replayed or
+      #                       turned into a 502 for the user's application.
+      #   .../integrations/http  the recorded-upstream-error markers.
+      #
+      # Every one of these was cross-compiled and executed on a real Windows
+      # host before being listed. pkg/agent/proxy is deliberately NOT here:
+      # two of its tests read a source file by relative path, so I could not
+      # separate "fails on Windows" from "fails in my harness" and will not
+      # add a package on a guess. Widen this list as packages are shown to
+      # pass here, not speculatively.
+      #
+      # One `go test` invocation with several patterns, not several joined by
+      # &&: under `shell: cmd` a multi-line block is a batch file that does not
+      # stop on failure and reports only the last exit code.
+      - name: Test amd64
+        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/...
         shell: cmd

@@ -254,6 +254,16 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 	return tcChan, nil
 }
 
+// mockHandoffBuffer sizes the decoder -> consumer hand-off. Deep enough that a
+// slow InsertMock cannot park the decoder behind a mock it has already read off
+// the wire.
+const mockHandoffBuffer = 1024
+
+// mockHandoffGrace bounds how long the decoder waits for the consumer to take a
+// mock before giving up on it. Only reachable if the consumer has stopped
+// draining entirely; a busy one drains in milliseconds.
+const mockHandoffGrace = 30 * time.Second
+
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 
 	a.logger.Debug("Connecting to outgoing mocks stream...")
@@ -281,7 +291,12 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
-	mockChan := make(chan *models.Mock)
+	// Buffered. An unbuffered channel parks the decoder for as long as the
+	// consumer spends inside InsertMock - and the first insert does mkdir +
+	// create + YAML encode + flush, which is exactly when the last mock of a
+	// recording arrives. A decoded mock waiting there was the widest of the
+	// three places a trailing mock could be lost.
+	mockChan := make(chan *models.Mock, mockHandoffBuffer)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -311,12 +326,30 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				break
 			}
 
+			// Offer the mock rather than racing the context for it.
+			//
+			// This used to be `select { case <-ctx.Done(): return nil; case
+			// mockChan <- &mock }`, which threw away a mock already decoded
+			// into our own address space the moment the capture context was
+			// cancelled - silently, with agent-side accounting still reporting
+			// success. Cancellation is the wrong thing to consult here: the
+			// consumer persists on an uncancellable context, so it can always
+			// accept, and the only reason it might not have yet is that it is
+			// busy writing the previous mock.
+			//
+			// So always try to deliver, bounded so a genuinely dead consumer
+			// cannot hang the stream. Anything still dropped is data loss and
+			// is logged as an error, because the alternative - a mock set
+			// indistinguishable from one where the call never happened - is
+			// what made this class of bug take an investigation to find.
 			select {
-			case <-ctx.Done():
-				// If the context is done, exit the loop
-				return nil
 			case mockChan <- &mock:
 				// Send the decoded mock to the channel
+			case <-time.After(mockHandoffGrace):
+				utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
+					zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
+					zap.Duration("waited", mockHandoffGrace))
+				return nil
 			}
 		}
 		return nil
@@ -1029,6 +1062,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.ChannelBindingShim {
 		args = append(args, "--channel-binding-shim")
 	}
+	if opts.MockMode {
+		args = append(args, "--mock-mode")
+	}
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
 	// pattern (and for the same reason) as --disable-mapping above: the
 	// orchestrator has already applied flag > yaml > default, and the native
@@ -1076,13 +1112,22 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
 
-	// Check if sudo credentials are already cached (e.g., from permission fix)
-	// If cached, we can use sudo -n (non-interactive) and skip PTY
-	sudoCached := utils.AreSudoCredentialsCached()
+	// The PTY and the cached-credentials probe both exist for one reason: sudo
+	// may prompt for a password. On a platform where the agent is never
+	// elevated (darwin) there is no prompt, and taking the PTY path anyway is
+	// pure cost — startNativeAgentWithPTY puts the user's real terminal into
+	// raw mode for the whole run, swallows their keystrokes into a pty nothing
+	// reads, and closes the master on stop, which delivers SIGHUP to an agent
+	// that would otherwise have shut down gracefully.
+	elevates := agentUtils.AgentNeedsElevation(runtime.GOOS)
 
-	// Check if we need PTY for interactive input (e.g., sudo password)
-	// Skip PTY if credentials are already cached - use non-interactive sudo instead
-	if agentUtils.NeedsPTY() && !sudoCached {
+	sudoCached := false
+	if elevates {
+		// Cached credentials mean we can use sudo -n and skip the prompt.
+		sudoCached = utils.AreSudoCredentialsCached()
+	}
+
+	if elevates && agentUtils.NeedsPTY() && !sudoCached {
 		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp)
 	}
 
@@ -1412,6 +1457,25 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to set TLS environment")
 		return err
+	}
+
+	// Mock mode: export the agent's scope-API address into the wrapped
+	// command's environment so a test-runner plugin / glue-code can mark
+	// per-test boundaries (POST {KEPLOY_MOCK_AGENT}/agent/scope/begin|end).
+	// The child inherits this process's environment. Native + docker-run put
+	// the child in the agent's netns, so localhost:<agentPort> reaches it;
+	// docker-compose shares the host loopback. Harmless when unused.
+	if opts.MockMode {
+		if err := os.Setenv("KEPLOY_MOCK_AGENT", fmt.Sprintf("http://localhost:%d", agentPort)); err != nil {
+			a.logger.Debug("failed to export KEPLOY_MOCK_AGENT", zap.Error(err))
+		}
+		session := "record"
+		if opts.Mode == models.MODE_TEST {
+			session = "replay"
+		}
+		if err := os.Setenv("KEPLOY_MOCK_SESSION", session); err != nil {
+			a.logger.Debug("failed to export KEPLOY_MOCK_SESSION", zap.Error(err))
+		}
 	}
 
 	err = usrApp.Setup(ctx)
@@ -1806,4 +1870,98 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 		return copyErr
 	}
 	return nil
+}
+
+// GetScopeWindows fetches the per-test scope windows the wrapped runner reported
+// during a `keploy mock record` session (via /agent/scope/*), so the CLI can
+// correlate captured mocks into mappings.yaml. A missing endpoint (older agent)
+// returns an empty slice, degrading to suite-level recording.
+func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	url := fmt.Sprintf("%s/scope/windows", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create scope-windows request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get scope windows: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return nil, fmt.Errorf("scope windows returned status %d: %s", res.StatusCode, string(body))
+	}
+	var windows []models.ScopeWindow
+	if err := json.NewDecoder(res.Body).Decode(&windows); err != nil {
+		return nil, fmt.Errorf("failed to decode scope windows: %w", err)
+	}
+	return windows, nil
+}
+
+// PushScopeTable hands the agent the replay-time per-test name→mock-names table
+// (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
+// served pool per test. A missing endpoint (older agent) is a no-op.
+func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string) error {
+	url := fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI)
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table})
+	if err != nil {
+		return fmt.Errorf("failed to marshal scope table: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create scope-table request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push scope table: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("scope table returned status %d: %s", res.StatusCode, string(b))
+	}
+	return nil
+}
+
+// DrainCapturedMocks fetches (and clears) the mocks the proxy captured on miss
+// during a `--on-miss record` replay session. The CLI appends them to the set.
+func (a *AgentClient) DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error) {
+	url := fmt.Sprintf("%s/mock/captured", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create captured-mocks request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get captured mocks: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return nil, fmt.Errorf("captured mocks returned status %d: %s", res.StatusCode, string(b))
+	}
+	var mocks []*models.Mock
+	if err := gob.NewDecoder(res.Body).Decode(&mocks); err != nil {
+		return nil, fmt.Errorf("failed to decode captured mocks: %w", err)
+	}
+	return mocks, nil
 }
