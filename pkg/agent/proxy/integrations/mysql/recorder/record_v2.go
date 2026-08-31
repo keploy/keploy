@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -389,30 +391,61 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	if hsStore == nil {
 		return res, fmt.Errorf("post-TLS V2: PostTLSModeKey is set but TLSHandshakeStore is missing from the context — the SSL/GoTLS reader callback must set models.TLSHandshakeStoreKey (same store the pre-TLS raw stream pushes the greeting into) before dispatching the decrypted tls-* stream")
 	}
-	entry, ok := hsStore.PopWait(models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort), 5*time.Second)
-	// Port-only fallback only when the first key was conn-specific — otherwise it
-	// is the same port-only key and we'd waste another 2s on a guaranteed miss
-	// (matches the legacy handlePostTLSRecord guard).
-	if !ok && sess.Opts.ConnKey != "" {
-		entry, ok = hsStore.PopWait(models.HandshakeStoreKey("", dstPort), 2*time.Second)
-	}
+	// The raw leg's push rides the SAME capture as this decrypted stream, so
+	// under CPU pressure it can land arbitrarily late — a short fixed timeout
+	// here converted that lateness into total capture loss (the CI "served but
+	// NOT recorded" shortfall). resolvePreTLSGreeting waits (bounded by ctx and
+	// by the store TTL) for this connection's own greeting, but falls back FAST
+	// to the port's last-greeting cache when the raw leg was genuinely dropped —
+	// so a dropped leg does not stall the whole overall window and push the
+	// COM_QUERY decode past the CI (2a) gate. Waiting is free: the client's
+	// post-TLS bytes are buffered on ClientStream and read only after this
+	// returns.
+	entry, source := resolvePreTLSGreeting(ctx, hsStore, sess.Opts.ConnKey, dstPort)
+	staleEntry := source == greetingCached
 	var greetingBuf []byte
-	if ok && len(entry.RespPackets) > 0 {
+	if source != greetingNone && len(entry.RespPackets) > 0 {
 		greetingBuf = entry.RespPackets[0]
+		if staleEntry {
+			// The raw leg was genuinely lost (its capture event dropped by a
+			// full ringbuf, or delayed past the store TTL). Greetings for the
+			// same destination are reusable for stitching: capabilities,
+			// protocol version and auth plugin are per-server, and the
+			// per-connection salt is never verified on the record or replay
+			// path (the replayer skips AuthResponse comparison — see
+			// replayer/match.go). Reuse the most recent greeting (+SSLRequest)
+			// another connection pushed for this port instead of losing the
+			// whole command phase.
+			logger.Debug("post-TLS V2: raw-leg greeting lost; falling back to the last cached greeting for this port",
+				zap.Uint16("dstPort", dstPort))
+		}
 	} else {
 		// The pre-TLS handshake was never captured (connection opened before
-		// interception started). Fetch the greeting directly, matching legacy.
+		// interception started) and no greeting is cached for the port. Fetch
+		// the greeting directly, matching legacy. fetchServerGreeting refuses
+		// fabricated destinations (see models.ConditionalDstCfg.AddrFabricated),
+		// so this cannot dial an address the capture layer merely invented.
 		var gErr error
 		greetingBuf, gErr = fetchServerGreeting(ctx, sess.Opts)
 		if gErr != nil {
 			return res, fmt.Errorf("post-TLS V2: no greeting in store (key port %d) and direct fetch failed: %w", dstPort, gErr)
 		}
+		// A directly-fetched greeting carries no stashed SSLRequest or
+		// timestamp; make downstream treat it as such.
+		entry = models.TLSHandshakeEntry{}
+		staleEntry = false
+		source = greetingNone
 	}
 
 	// Config-mock request timestamp = when the greeting arrived (stashed on the
 	// raw stream). Zero when we fell back to a direct fetch; sampled from the
 	// first client read below in that case.
 	res.reqTimestamp = entry.ReqTimestamp
+	if staleEntry {
+		// The cached entry belongs to an EARLIER connection; its timestamp
+		// would backdate this mock. Sample from the first client read below.
+		res.reqTimestamp = time.Time{}
+	}
 
 	// 2. Decode the greeting and seed the decode context (mirrors legacy).
 	greetingPkt, err := wire.DecodePayload(ctx, logger, greetingBuf, clientKey, decodeCtx)
@@ -440,7 +473,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	//    before the HandshakeResponse41 below, while LastOp is still
 	//    HandshakeV10 — same ordering constraint as legacy handlePostTLSRecord.
 	var sslReqPkt *mysql.PacketBundle
-	if ok && len(entry.ReqPackets) > 0 {
+	if source != greetingNone && len(entry.ReqPackets) > 0 {
 		if pkt, sErr := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientKey, decodeCtx); sErr == nil {
 			sslReqPkt = pkt
 			res.req = append(res.req, mysql.Request{PacketBundle: *pkt})
@@ -761,6 +794,185 @@ func handlePlainPasswordV2(ctx context.Context, logger *zap.Logger, sess *superv
 	res.resp = append(res.resp, mysql.Response{PacketBundle: *finalPkt})
 	res.responseOperation = finalPkt.Header.Type
 	return res, nil
+}
+
+// mysqlPostTLSStashWaitDefault is the OVERALL upper bound on how long
+// resolvePreTLSGreeting waits for a pre-TLS greeting when it has NO cached
+// greeting to fall back on (the first connection to a destination port, or one
+// where every sibling connection's raw leg was also dropped). 30s deliberately
+// matches the store's own unconsumed-entry TTL: an entry older than that is
+// pruned anyway, so waiting longer can only be serviced by entries pushed
+// DURING the wait — which the loop already catches. It still bounds teardown
+// when the raw leg was genuinely dropped. Override with
+// KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS (0 = single immediate check, no blocking).
+const mysqlPostTLSStashWaitDefault = 30 * time.Second
+
+// mysqlPostTLSStashPrimaryDefault is the SHORT primary bound: how long
+// resolvePreTLSGreeting waits for THIS connection's own raw leg before, if a
+// reusable greeting is already cached for the port, falling back to it rather
+// than blocking out the full overall window.
+//
+// CI (2a) observed the raw leg landing >5s late under CPU pressure, so 8s
+// comfortably absorbs that observed lateness — a merely-late own leg is still
+// preferred and stitched with its real per-connection salt+timestamp — while
+// leaving ~22s of the 30s "served but NOT recorded" decode gate as headroom for
+// the COM_QUERY to decode AFTER the greeting is resolved. The load-bearing
+// property: a genuinely-DROPPED raw leg whose port already has a cached greeting
+// reaches that cache at ~8s, NOT ~30s, so the command phase records well inside
+// the gate under the exact CPU pressure this fix targets. It is capped at the
+// overall bound, so a small KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS (tests, or 0)
+// collapses both bounds to a single short phase. Override the primary bound
+// itself with KEPLOY_MYSQL_POSTTLS_STASH_PRIMARY_MS.
+const mysqlPostTLSStashPrimaryDefault = 8 * time.Second
+
+// mysqlPostTLSStashPollSlice is the per-blocking-PopWait slice inside
+// resolvePreTLSGreeting's loop. The loop re-checks ctx (and the primary/overall
+// deadlines) between slices, so this is the worst-case reaction time to context
+// cancellation. A push wakes the blocked PopWait immediately, so it does NOT
+// delay the success path.
+const mysqlPostTLSStashPollSlice = 500 * time.Millisecond
+
+func mysqlPostTLSStashWait() time.Duration {
+	if v := os.Getenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return mysqlPostTLSStashWaitDefault
+}
+
+// mysqlPostTLSStashPrimary returns the primary (fast-fallback) bound, never
+// longer than the overall bound.
+func mysqlPostTLSStashPrimary(overall time.Duration) time.Duration {
+	primary := mysqlPostTLSStashPrimaryDefault
+	if v := os.Getenv("KEPLOY_MYSQL_POSTTLS_STASH_PRIMARY_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
+			primary = time.Duration(ms) * time.Millisecond
+		}
+	}
+	if primary > overall {
+		return overall
+	}
+	return primary
+}
+
+// preTLSGreetingSource records where resolvePreTLSGreeting obtained the greeting.
+type preTLSGreetingSource int
+
+const (
+	// greetingNone: nothing available within the bounds — the caller must fetch
+	// the greeting directly or abort cleanly.
+	greetingNone preTLSGreetingSource = iota
+	// greetingOwn: this connection's own raw-leg stash (or, in the empty-connKey
+	// proxyless case, the port FIFO entry that bridges the two legs). Carries the
+	// real per-connection salt + request timestamp.
+	greetingOwn
+	// greetingCached: another connection's most-recent greeting for the port,
+	// from the non-consuming last-greeting cache. Reusable for stitching
+	// (capabilities/plugin are per-server; the salt is never verified — see
+	// replayer/match.go), but its per-connection metadata (the timestamp) must
+	// NOT leak into this mock.
+	greetingCached
+)
+
+// resolvePreTLSGreeting obtains the pre-TLS greeting (+SSLRequest) for a
+// decrypted tls-* stream. It prefers THIS connection's own raw-leg stash, but a
+// genuinely-dropped raw leg must NOT block the full overall window before using
+// a reusable cached greeting — that stall could push the COM_QUERY decode past
+// the CI (2a) 30s "served but NOT recorded" gate. So the wait is two-phase:
+//
+//   - up to `primary` (short): wait for this connection's own entry, waking the
+//     instant a Push arrives (the store broadcasts its cond). A merely-late own
+//     leg is absorbed here and stitched with its real salt+timestamp.
+//   - once `primary` elapses AND a greeting is cached for the port: use the
+//     cache immediately (the dropped-leg fast path).
+//   - only when NO greeting is cached yet (the first connection to the port, or
+//     every sibling leg also dropped) keep waiting for the own entry up to
+//     `overall`, since nothing better can serve this connection.
+//
+// ctx cancellation (stream/session teardown) cuts any wait short within one
+// poll slice. On a final miss it returns greetingNone so the caller can
+// fetchServerGreeting / abort cleanly.
+//
+// It checks the conn-specific key and the port-only key on every pass: in
+// proxyless the raw and decrypted legs are different TCP connections, so only
+// the port-only key (e.g. "port:3306") reliably bridges them — the raw leg
+// pushes under both (storePreTLSHandshakeV2).
+func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, connKey string, dstPort uint16) (models.TLSHandshakeEntry, preTLSGreetingSource) {
+	connSpecificKey := models.HandshakeStoreKey(connKey, dstPort)
+	portKey := models.HandshakeStoreKey("", dstPort)
+
+	overall := mysqlPostTLSStashWait()
+	primary := mysqlPostTLSStashPrimary(overall)
+	start := time.Now()
+	overallDeadline := start.Add(overall)
+	primaryDeadline := start.Add(primary)
+
+	// popOwn returns this connection's own stashed entry (either key), if
+	// present, without blocking.
+	popOwn := func() (models.TLSHandshakeEntry, bool) {
+		if entry, ok := hsStore.PopWait(connSpecificKey, 0); ok {
+			return entry, true
+		}
+		if portKey != connSpecificKey {
+			if entry, ok := hsStore.PopWait(portKey, 0); ok {
+				return entry, true
+			}
+		}
+		return models.TLSHandshakeEntry{}, false
+	}
+	// cachedGreeting returns the port's last-greeting cache entry, if usable.
+	cachedGreeting := func() (models.TLSHandshakeEntry, bool) {
+		if c, ok := hsStore.Last(portKey); ok && len(c.RespPackets) > 0 {
+			return c, true
+		}
+		return models.TLSHandshakeEntry{}, false
+	}
+
+	for {
+		// 1. This connection's own entry is always preferred.
+		if entry, ok := popOwn(); ok {
+			return entry, greetingOwn
+		}
+		now := time.Now()
+		// 2. Past the primary bound, a cached greeting is good enough — take it
+		//    rather than blocking out the full overall window (the dropped-leg
+		//    fast path that keeps the decode inside the CI gate).
+		if !now.Before(primaryDeadline) {
+			if entry, ok := cachedGreeting(); ok {
+				return entry, greetingCached
+			}
+		}
+		// 3. Overall bound / teardown.
+		if !now.Before(overallDeadline) || ctx.Err() != nil {
+			break
+		}
+		// 4. Block on the port-only key (the one the raw leg reliably lands
+		//    under), waking the moment a Push broadcasts the cond. Bound the
+		//    slice by the next deadline so the cache is re-checked promptly at
+		//    the primary boundary.
+		nextEval := overallDeadline
+		if now.Before(primaryDeadline) && primaryDeadline.Before(nextEval) {
+			nextEval = primaryDeadline
+		}
+		slice := mysqlPostTLSStashPollSlice
+		if d := time.Until(nextEval); d < slice {
+			slice = d
+		}
+		if slice <= 0 {
+			continue
+		}
+		if entry, ok := hsStore.PopWait(portKey, slice); ok {
+			return entry, greetingOwn
+		}
+	}
+
+	// Final miss on the own entry: the cache is the last resort before a direct
+	// fetch (it may have been populated by a sibling during the overall wait).
+	if entry, ok := cachedGreeting(); ok {
+		return entry, greetingCached
+	}
+	return models.TLSHandshakeEntry{}, greetingNone
 }
 
 // storePreTLSHandshakeV2 pushes the pre-TLS MySQL server greeting and the
