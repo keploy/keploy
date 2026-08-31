@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v3/pkg"
@@ -362,18 +363,8 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDyna
 	// "<uuid>.txt" match; the trade-off is that bare value patterns need
 	// anchoring (see TestMatchURLPath_NumericIDScoping).
 	if len(urlNoise) > 0 {
-		const ph = "{{keploy.urlnoise}}"
-		np, rp := mockPath, reqPath
-		for _, pat := range urlNoise {
-			re, cerr := regexp.Compile(pat)
-			if cerr != nil {
-				h.Logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(cerr))
-				continue
-			}
-			np = re.ReplaceAllString(np, ph)
-			rp = re.ReplaceAllString(rp, ph)
-		}
-		if np == rp {
+		noiseRes := compileURLNoise(h.Logger, urlNoise)
+		if maskURLNoise(mockPath, noiseRes) == maskURLNoise(reqPath, noiseRes) {
 			return true
 		}
 	}
@@ -415,6 +406,56 @@ func pathMatchesModuloDynamicSegments(mockPath, reqPath string) bool {
 		return false // a non-id segment differs -> genuinely different path
 	}
 	return differed
+}
+
+// urlNoisePlaceholder is what a url-noise match is replaced with on BOTH the
+// recorded and the live side before they are compared, so a covered substring
+// stops distinguishing the two.
+const urlNoisePlaceholder = "{{keploy.urlnoise}}"
+
+// urlNoiseCache memoizes compiled url-noise patterns. MatchURLPath and
+// QueryParamsMatch both run once per CANDIDATE MOCK per proxied request, so
+// compiling the configured patterns inline cost O(mocks x patterns)
+// regexp.Compile calls on every request — measured at ~12us and ~18KB of
+// garbage per QueryParamsMatch call with five patterns configured, against
+// ~240ns with none. The patterns come from config (test.globalNoise.url) and
+// are fixed for the process lifetime, so compile each one once and share it.
+// An invalid pattern is cached as a nil entry: it is logged once and never
+// re-attempted.
+var urlNoiseCache sync.Map // pattern string -> *regexp.Regexp (nil = invalid)
+
+// compileURLNoise returns the compiled form of the configured url-noise
+// patterns, skipping (and logging once) any that do not compile.
+func compileURLNoise(logger *zap.Logger, urlNoise []string) []*regexp.Regexp {
+	if len(urlNoise) == 0 {
+		return nil
+	}
+	res := make([]*regexp.Regexp, 0, len(urlNoise))
+	for _, pat := range urlNoise {
+		if cached, ok := urlNoiseCache.Load(pat); ok {
+			if re, _ := cached.(*regexp.Regexp); re != nil {
+				res = append(res, re)
+			}
+			continue
+		}
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(err))
+			urlNoiseCache.Store(pat, (*regexp.Regexp)(nil))
+			continue
+		}
+		urlNoiseCache.Store(pat, re)
+		res = append(res, re)
+	}
+	return res
+}
+
+// maskURLNoise replaces every url-noise match in s with the placeholder.
+func maskURLNoise(s string, noiseRes []*regexp.Regexp) string {
+	for _, re := range noiseRes {
+		s = re.ReplaceAllString(s, urlNoisePlaceholder)
+	}
+	return s
 }
 
 var (
@@ -490,6 +531,17 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	return true
 }
 
+// maskAndSort applies url noise to every member and sorts the result, so two
+// value sets can be compared order-independently.
+func maskAndSort(vals []string, noiseRes []*regexp.Regexp) []string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = maskURLNoise(v, noiseRes)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // QueryParamsMatch reports whether the recorded query params (mockParams) and the
 // live request's query (reqQuery) match on BOTH key set AND value.
 //
@@ -504,7 +556,10 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 // (strings.Join(reqQuery[key], ", ")). urlNoise is applied to BOTH sides before
 // comparison using the same compile + ReplaceAllString-to-placeholder approach
 // MatchURLPath uses, so a param value covered by url noise still matches while a
-// genuinely different value does not.
+// genuinely different value does not. The patterns are compiled lazily and
+// memoized (see compileURLNoise): the exact fast path settles every param of a
+// request that did not drift, so a configured noise list costs nothing until a
+// value actually differs.
 //
 // A REPEATED param (same key more than once) is compared ORDER-INDEPENDENTLY:
 // the recorded ", "-joined value is split back into its members, each side is
@@ -552,19 +607,11 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 		}
 	}
 
-	// Pre-compile url-noise patterns once (mirrors MatchURLPath).
-	const ph = "{{keploy.urlnoise}}"
-	var noiseRes []*regexp.Regexp
-	for _, pat := range urlNoise {
-		re, cerr := regexp.Compile(pat)
-		if cerr != nil {
-			h.Logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(cerr))
-			continue
-		}
-		noiseRes = append(noiseRes, re)
-	}
-
 	// Value compare for each shared, non-keploy key.
+	var (
+		noiseRes      []*regexp.Regexp
+		noiseCompiled bool
+	)
 	for key, recorded := range mockParams {
 		if shouldIgnore(key) {
 			continue
@@ -572,6 +619,11 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 		actual := strings.Join(reqQuery[key], ", ")
 		if recorded == actual {
 			continue // exact match — covers every single-value param
+		}
+		// Something drifted on this key: compile the noise patterns now (once
+		// per call, memoized process-wide) rather than on every candidate mock.
+		if !noiseCompiled {
+			noiseRes, noiseCompiled = compileURLNoise(h.Logger, urlNoise), true
 		}
 		// Values differ as-joined. Compare order-independently: split the
 		// recorded value back into members, mask each side with url noise, and
@@ -582,18 +634,7 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 		if len(recVals) != len(liveVals) {
 			return false
 		}
-		mask := func(vals []string) []string {
-			out := make([]string, len(vals))
-			for i, v := range vals {
-				for _, re := range noiseRes {
-					v = re.ReplaceAllString(v, ph)
-				}
-				out[i] = v
-			}
-			sort.Strings(out)
-			return out
-		}
-		rv, av := mask(recVals), mask(liveVals)
+		rv, av := maskAndSort(recVals, noiseRes), maskAndSort(liveVals, noiseRes)
 		for i := range rv {
 			if rv[i] != av[i] {
 				return false
@@ -607,6 +648,11 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 // SchemaMatch match the schema of the request with the mocks
 func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string, urlNoise []string, autoDynamic bool) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
+
+	// Parse the live query once, not once per candidate mock: url.Query()
+	// re-parses and re-allocates the whole query string on every call and this
+	// loop runs over the full mock set on every proxied request.
+	reqQuery := input.url.Query()
 
 	for _, mock := range unfilteredMocks {
 		if ctx.Err() != nil {
@@ -660,7 +706,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		}
 
 		// Query parameter match (key set AND value; url noise aware)
-		if !h.QueryParamsMatch(mock.Spec.HTTPReq.URLParams, input.url.Query(), urlNoise) {
+		if !h.QueryParamsMatch(mock.Spec.HTTPReq.URLParams, reqQuery, urlNoise) {
 			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
