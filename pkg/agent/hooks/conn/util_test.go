@@ -231,3 +231,61 @@ func TestIsFiltered_FilterPolicy(t *testing.T) {
 		})
 	}
 }
+
+// TestCaptureGRPC_SchemaKeyStamping pins the GRPCCaptureHook contract: the
+// hook's schemaKey return is stamped onto the kept test case (so the control
+// plane can mark cross-pod duplicates), a duplicate verdict still drops the
+// capture, and with no hook installed the schema key stays empty.
+func TestCaptureGRPC_SchemaKeyStamping(t *testing.T) {
+	origHook := GRPCCaptureHook
+	defer func() { GRPCCaptureHook = origHook }()
+
+	newStream := func() *pkg.HTTP2Stream {
+		return &pkg.HTTP2Stream{
+			GRPCReq:  &models.GrpcReq{},
+			GRPCResp: &models.GrpcResp{},
+		}
+	}
+	const key = "GRPC|/svc.Users/Get|0|11|22"
+
+	t.Run("hook stamps schema key on kept test case", func(t *testing.T) {
+		GRPCCaptureHook = func(_ *models.GrpcReq, _ *models.GrpcResp) (bool, string) {
+			return false, key
+		}
+		tChan := make(chan *models.TestCase, 1)
+		CaptureGRPC(context.Background(), zap.NewNop(), tChan, newStream(), 9090, false, false)
+		select {
+		case tc := <-tChan:
+			if tc.SchemaKey != key {
+				t.Fatalf("SchemaKey = %q, want %q", tc.SchemaKey, key)
+			}
+		default:
+			t.Fatal("expected a captured test case")
+		}
+	})
+
+	t.Run("duplicate verdict drops the capture", func(t *testing.T) {
+		GRPCCaptureHook = func(_ *models.GrpcReq, _ *models.GrpcResp) (bool, string) {
+			return true, key
+		}
+		tChan := make(chan *models.TestCase, 1)
+		CaptureGRPC(context.Background(), zap.NewNop(), tChan, newStream(), 9090, false, false)
+		if len(tChan) != 0 {
+			t.Fatal("duplicate must not emit a test case")
+		}
+	})
+
+	t.Run("nil hook leaves schema key empty", func(t *testing.T) {
+		GRPCCaptureHook = nil
+		tChan := make(chan *models.TestCase, 1)
+		CaptureGRPC(context.Background(), zap.NewNop(), tChan, newStream(), 9090, false, false)
+		select {
+		case tc := <-tChan:
+			if tc.SchemaKey != "" {
+				t.Fatalf("SchemaKey = %q, want empty with no hook", tc.SchemaKey)
+			}
+		default:
+			t.Fatal("expected a captured test case")
+		}
+	})
+}

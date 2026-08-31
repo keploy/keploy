@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -15,11 +16,19 @@ import (
 )
 
 // mockDrainGrace bounds how long Record waits for the agent to hand over the
-// last few mocks after the wrapped runner has exited. The outgoing stream
-// closes when we cancel its context; this only guards against a mock whose
-// agent-side parse completes in the window between the runner exiting and the
-// stream tearing down.
+// last few mocks after the wrapped runner has exited.
 const mockDrainGrace = 5 * time.Second
+
+// mockDrainQuiet is how long the outgoing stream must stay silent before the
+// drain concludes the agent has handed over everything.
+//
+// The window it covers is small but real: the agent finishes parsing the last
+// dependency response, emits the mock, and it travels agent -> gob stream ->
+// CLI, while the CLI independently observes the wrapped runner exit. Measured
+// on a failing reproduction that gap ran to a median of 6.5ms and a maximum of
+// 22.8ms. 500ms is an order of magnitude of headroom on that, is paid once per
+// recording, and is bounded by mockDrainGrace above.
+const mockDrainQuiet = 500 * time.Millisecond
 
 // Record runs the wrapped test command and captures every outgoing dependency
 // call into the configured named mock set. It writes ONLY mocks (no incoming
@@ -102,11 +111,16 @@ func (m *mockService) Record(ctx context.Context) error {
 	// scope-window correlation after the run can build mappings.yaml.
 	var recorded []capturedMock
 	mockCount := 0
+	// Bumped for every mock that arrives, whether or not it ends up persisted,
+	// and read by the drain below while the consumer is still running - hence
+	// atomic. mockCount stays a plain int: it is only read after consumerDone.
+	var mocksSeen atomic.Int64
 	consumerDone := make(chan struct{})
 	go func() {
 		defer utils.Recover(m.logger)
 		defer close(consumerDone)
 		for mk := range outgoing {
+			mocksSeen.Add(1)
 			mctx := &rec.MockContext{Mock: mk, TestSetID: name}
 			if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
 				m.logger.Debug("BeforeMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
@@ -147,12 +161,27 @@ func (m *mockService) Record(ctx context.Context) error {
 	//    failing — is the NORMAL end of a mock recording, not an app crash.
 	appErr := m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
 
-	// 6. Stop capturing and drain the last mocks.
+	// 6. Drain the trailing mocks, THEN stop capturing.
+	//
+	// The order is the entire point. stopCapture() cancels the context the
+	// outgoing stream is built on (http.NewRequestWithContext in
+	// pkg/platform/http/agent.go), so cancelling first aborts the request, the
+	// decoder errors, the mock channel closes, and consumerDone fires in tens
+	// of microseconds. A grace period applied after that waits on an
+	// already-closed channel and does nothing at all - which is how a mock the
+	// agent had already written to the wire was still lost, silently, with the
+	// agent-side accounting reporting success.
+	//
+	// So wait for the stream to fall quiet before tearing it down. Quiescence
+	// rather than a fixed sleep: a sleep long enough to be safe would be paid
+	// in full by every recording, and one short enough not to hurt would still
+	// be a race. This returns as soon as the agent stops sending.
+	m.drainTrailingMocks(ctx, consumerDone, &mocksSeen)
 	stopCapture()
 	select {
 	case <-consumerDone:
 	case <-time.After(mockDrainGrace):
-		m.logger.Debug("timed out draining trailing mocks after runner exit")
+		m.logger.Debug("timed out waiting for the mock consumer to finish after teardown")
 	}
 
 	if ctx.Err() != nil { // user Ctrl+C
@@ -259,4 +288,38 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 		byTest[windows[best].Name] = append(byTest[windows[best].Name], models.MockEntry{Name: mk.name})
 	}
 	return byTest
+}
+
+// drainTrailingMocks blocks until the agent has evidently finished handing over
+// mocks: no new arrival for mockDrainQuiet, or the stream ended by itself, or
+// mockDrainGrace elapsed, or the user interrupted. It must be called BEFORE the
+// capture context is cancelled - see the call site.
+func (m *mockService) drainTrailingMocks(ctx context.Context, consumerDone <-chan struct{}, mocksSeen *atomic.Int64) {
+	deadline := time.After(mockDrainGrace)
+	quiet := time.NewTimer(mockDrainQuiet)
+	defer quiet.Stop()
+
+	last := mocksSeen.Load()
+	for {
+		select {
+		case <-consumerDone:
+			// The agent closed the stream on its own; nothing left to wait for.
+			return
+		case <-ctx.Done():
+			// Ctrl+C. Stop waiting and let the caller report what it has.
+			return
+		case <-deadline:
+			m.logger.Debug("timed out draining trailing mocks after runner exit",
+				zap.Int64("mocks_seen", mocksSeen.Load()))
+			return
+		case <-quiet.C:
+			if now := mocksSeen.Load(); now != last {
+				// Still arriving - reset and keep waiting.
+				last = now
+				quiet.Reset(mockDrainQuiet)
+				continue
+			}
+			return
+		}
+	}
 }
