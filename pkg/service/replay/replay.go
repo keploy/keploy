@@ -1240,13 +1240,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:                     r.config.BypassRules,
-			MongoPassword:             r.config.Test.MongoPassword,
-			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
-			Mocking:                   r.config.Test.Mocking,
-			Backdate:                  testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:               mockNoiseConfig,
-			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
+			Rules:                  r.config.BypassRules,
+			MongoPassword:          r.config.Test.MongoPassword,
+			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
+			Mocking:                r.config.Test.Mocking,
+			Backdate:               testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:            mockNoiseConfig,
+			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			MockNoiseDetection:     r.config.Test.MockNoiseDetection,
+			MockNoiseStrict:        r.config.Test.MockNoiseStrict,
+			// Deprecated mirror: see OutgoingOptions' NAMING note. A composite
+			// literal cannot call SetMockNoise, so both pairs are set by hand.
 			SchemaNoiseDetection:      r.config.Test.MockNoiseDetection,
 			SchemaNoiseStrict:         r.config.Test.MockNoiseStrict,
 			MysqlPorts:                r.config.MysqlPorts,
@@ -1474,13 +1478,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:                     r.config.BypassRules,
-			MongoPassword:             r.config.Test.MongoPassword,
-			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
-			Mocking:                   r.config.Test.Mocking,
-			Backdate:                  testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:               mockNoiseConfig,
-			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
+			Rules:                  r.config.BypassRules,
+			MongoPassword:          r.config.Test.MongoPassword,
+			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
+			Mocking:                r.config.Test.Mocking,
+			Backdate:               testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:            mockNoiseConfig,
+			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			MockNoiseDetection:     r.config.Test.MockNoiseDetection,
+			MockNoiseStrict:        r.config.Test.MockNoiseStrict,
+			// Deprecated mirror: see OutgoingOptions' NAMING note. A composite
+			// literal cannot call SetMockNoise, so both pairs are set by hand.
 			SchemaNoiseDetection:      r.config.Test.MockNoiseDetection,
 			SchemaNoiseStrict:         r.config.Test.MockNoiseStrict,
 			MysqlPorts:                r.config.MysqlPorts,

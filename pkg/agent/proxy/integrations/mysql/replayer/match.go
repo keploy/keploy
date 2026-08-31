@@ -11,9 +11,9 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	mysqlutils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -275,7 +275,7 @@ func isSessionReusableCommandMock(mock *models.Mock) bool {
 // test.globalNoise.requestBody bucket (root-relative lowercased paths) so
 // configured noise participates in strict gating with the same vocabulary as
 // learned req_body_noise. miss is non-nil only when ok is false without error.
-func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *mocknoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	// Precompute string constants once (avoid frequent map lookups)
 	var (
 		sCOM_QUIT       = mysql.CommandStatusToString(mysql.COM_QUIT)
@@ -1946,7 +1946,7 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 	if len(detectedNoise) > 0 {
-		updatedMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(updatedMock.Spec.ReqBodyNoise, detectedNoise)
+		updatedMock.Spec.ReqBodyNoise = mocknoise.MergeLearned(updatedMock.Spec.ReqBodyNoise, detectedNoise)
 	}
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
@@ -1981,7 +1981,7 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	// the noise gets reported on the consumed per-test mock (mirrors HTTP).
 	deleteMock := *matchedMock
 	if len(detectedNoise) > 0 {
-		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
+		deleteMock.Spec.ReqBodyNoise = mocknoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
 	}
 	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true

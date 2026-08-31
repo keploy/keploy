@@ -259,7 +259,7 @@ type MockSpec struct {
 	// noise detected during schema-based auto-replay matching
 	// (config.Test.MockNoiseDetection). EVERY parser stores it here — HTTP and
 	// non-HTTP (Pulsar/Kafka/Redis/…) alike — so the learn/enforce flow is
-	// uniform across protocols (see pkg/agent/proxy/integrations/schemanoise).
+	// uniform across protocols (see pkg/agent/proxy/integrations/mocknoise).
 	// fieldpath ("body.user.id") -> regex list, where an empty list means
 	// "ignore this whole field". Distinct from Mock.Noise ([]string value-regexes
 	// written by the enterprise obfuscator): this records which request-body

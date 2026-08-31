@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
@@ -30,7 +30,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 	// Shared mock-noise engine for this connection's command phase. MySQL is
 	// a client of the same engine HTTP uses — mysqlNoiseAdapter owns only the
 	// MySQL-specific bit (canonicalizing command packets into diffable JSON).
-	noiseEngine := schemanoise.New(mysqlNoiseAdapter{}, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict)
+	noiseEngine := mocknoise.New(mysqlNoiseAdapter{}, opts.MockNoiseDetection, opts.MockNoiseStrict)
 
 	// User request-body noise from test.globalNoise.requestBody — the same
 	// DEDICATED request-matching bucket HTTP consumes (see http/decode.go for

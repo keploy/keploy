@@ -316,7 +316,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
+			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.MockNoiseDetection, opts.MockNoiseStrict) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err

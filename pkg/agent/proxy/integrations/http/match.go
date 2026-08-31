@@ -17,7 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -57,7 +57,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 	// Shared mock-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
 	// only the HTTP-specific bits (body extraction, JSON/form diff).
-	noiseEngine := schemanoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
+	noiseEngine := mocknoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
 
 	for {
 		if ctx.Err() != nil {
@@ -1225,10 +1225,10 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 // learned noise no longer passes by default: only fields explicitly marked as
 // noise may differ.
 //
-// It delegates to schemanoise.Engine.StrictReject. The JSON/form comparison and
+// It delegates to mocknoise.Engine.StrictReject. The JSON/form comparison and
 // known-noise merge are owned by the shared engine + httpNoiseAdapter; the
 // returned drift names the offending field path(s) for the rejection log.
-func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*models.Mock, reqBody []byte, userBodyNoise map[string][]string) []*models.Mock {
+func (h *HTTP) filterStrictNoiseMatches(eng *mocknoise.Engine, candidates []*models.Mock, reqBody []byte, userBodyNoise map[string][]string) []*models.Mock {
 	var kept []*models.Mock
 	for _, m := range candidates {
 		allowed, drift := eng.StrictReject(m, reqBody, userBodyNoise)
@@ -1365,7 +1365,7 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 // to the shared mock-noise engine so HTTP, Pulsar and the on-disk persistence
 // all merge learned noise through one implementation.
 func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
-	return schemanoise.MergeLearned(existing, detected)
+	return mocknoise.MergeLearned(existing, detected)
 }
 
 // buildHTTPMismatchReport finds the closest HTTP mock to the given request

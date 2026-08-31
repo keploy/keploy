@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
@@ -17,7 +17,7 @@ import (
 	"vitess.io/vitess/go/vt/sqlparser"
 )
 
-// mysqlNoiseAdapter is the MySQL implementation of schemanoise.Adapter, making
+// mysqlNoiseAdapter is the MySQL implementation of mocknoise.Adapter, making
 // the MySQL parser a client of the same shared mock-noise engine HTTP uses.
 // MySQL has no single "request body": the drift-carrying content depends on the
 // command packet, so both sides of every comparison are first serialized into a
@@ -42,7 +42,7 @@ import (
 // is merged onto a fresh copy in updateMock so the shared pooled mock is never
 // mutated. SetLearnedNoise is implemented for interface completeness.
 type mysqlNoiseAdapter struct {
-	schemanoise.JSONDiffer
+	mocknoise.JSONDiffer
 }
 
 // RecordedBody returns the canonical JSON body of the mock's recorded request.
@@ -99,7 +99,7 @@ func (mysqlNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool 
 // the lenient score/FIFO behaviour so the auto-replay detection path can
 // still learn.
 type strictGate struct {
-	engine        *schemanoise.Engine
+	engine        *mocknoise.Engine
 	logger        *zap.Logger
 	requestType   string
 	liveBody      []byte
@@ -120,7 +120,7 @@ type strictGate struct {
 	fieldDiffs  []models.MockFieldDiff
 }
 
-func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
+func newStrictGate(engine *mocknoise.Engine, logger *zap.Logger, requestType string, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
 	return &strictGate{
 		engine:        engine,
 		logger:        logger,

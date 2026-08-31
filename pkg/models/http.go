@@ -31,7 +31,7 @@ type HTTPReq struct {
 	// NOTE: mock-noise (req_body_noise) is NOT stored here. It lives on the
 	// kind-agnostic MockSpec.ReqBodyNoise for every parser, HTTP included, so the
 	// learn/enforce flow is uniform across protocols (see pkg/agent/proxy/
-	// integrations/schemanoise).
+	// integrations/mocknoise).
 }
 
 type HTTPSchema struct {
