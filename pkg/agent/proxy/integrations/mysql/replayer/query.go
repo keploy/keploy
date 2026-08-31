@@ -185,7 +185,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				// how to mark them, instead of the generic re-record hint.
 				nextSteps := "Re-record mocks if the SQL query has changed."
 				if miss.strictRejected > 0 {
-					nextSteps = fmt.Sprintf("mock-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
+					nextSteps = fmt.Sprintf("mock-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --mock-noise-detection to learn them, or re-record.", miss.strictRejected)
 				}
 				report := &models.MockMismatchReport{
 					Protocol:      "MySQL",
