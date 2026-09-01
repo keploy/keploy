@@ -108,8 +108,8 @@ type MockManager struct {
 	//
 	// Zero until the first SetMocksWithWindow call with a non-zero
 	// start arrives; after that it's sticky (only goes earlier, never
-	// later — see updateFirstWindowStart). HasFirstTestFired reads
-	// this field under swapMu.RLock.
+	// later within a set; cleared at each set boundary by
+	// ResetForReplaySession). Read under swapMu.RLock.
 	firstWindowStart time.Time
 
 	// swapMu guards the {filtered, unfiltered, window} swap performed by
@@ -316,15 +316,18 @@ func (m *MockManager) IsClosed() bool {
 //   - droppedOutOfWindow: per-test diagnostic counter that should
 //     reset at the test-set boundary so "dropped for this test-set"
 //     stays meaningful in metrics.
+//   - windowStart/windowEnd: the tier-routing window.
+//     Both describe the set currently being replayed, so both have to be
+//     back at "nothing has fired" before the next set is staged. Leaving
+//     them set is what made every test-set after the first route its
+//     bootstrap traffic to the per-test engine while staging had put those
+//     mocks in the startup tree.
+//   - firstWindowStart: the startup-init vs. stale-bleed cutoff, which is
+//     also per-set — each set must classify against its OWN first test.
+//     See the reset itself for why preserving it (as this used to) silently
+//     emptied the startup tier for every set but the earliest-recorded one.
 //
 // What it preserves:
-//   - firstWindowStart: deliberately sticky across the whole replay
-//     run so the startup-init vs. stale-bleed classification in
-//     SetMocksWithWindow keeps the same "before any test fired"
-//     cutoff for every test-set. Resetting it would let later
-//     test-sets' pre-firstTest mocks accidentally be classified as
-//     startup-init when they're really stale bleed from the previous
-//     test-set's tail.
 //   - filtered / unfiltered / startup trees: SetMocksWithWindow swaps
 //     these atomically on the next call from the orchestrator, so
 //     clearing them here would just briefly serve an empty pool to
@@ -354,6 +357,64 @@ func (m *MockManager) ResetForReplaySession() {
 		return true
 	})
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
+
+	// Everything that describes "where are we in the current test set" goes
+	// back to "nothing has fired yet". Both of these are per-set questions,
+	// and between them they are the whole (Active, FirstTestFired) pair the
+	// tier dispatcher routes on:
+	//
+	//   windowStart/windowEnd — the active-window half of tier routing.
+	//   Left set, the next set's isInitialStaging call stages every mock
+	//   into the startup tree while the dispatcher, still seeing the
+	//   previous set's window, routes that set's bootstrap traffic to the
+	//   per-test engine and misses all of it.
+	//
+	//   firstWindowStart — the startup-init vs. stale-bleed cutoff. It used
+	//   to be preserved here, justified as keeping "the same before-any-test
+	//   cutoff for every test-set" so a later set's leading mocks could not
+	//   be misread as startup-init. That rationale does not hold: the mock
+	//   pool is REPLACED per set (Agent.StoreMocks allocates fresh slices and
+	//   finalizeClientMocks does clientMocks.Store(0, storage)), so a set's
+	//   SetMocksWithWindow only ever sees its own mocks and there is no
+	//   previous-set tail to bleed. Within a set the value never moves (the
+	//   test cases arrive sorted by request timestamp — platform/yaml/testdb
+	//   db.go), so per-set and global classify the same mocks WITHIN a set;
+	//   they differ only across sets, which is the bug.
+	//
+	//   What preserving it actually did: the cutoff is a running MINIMUM
+	//   (start.Before(m.firstWindowStart)), so it stuck at whichever set
+	//   recorded earliest. Every other set's own bootstrap mocks sit AFTER
+	//   that cutoff, get classified as stale bleed, and are dropped from
+	//   every tier the moment that set's first test fires. Resetting makes
+	//   each set classify against its own first test, which is what "before
+	//   any test fired" was always supposed to mean.
+	//
+	//   Scope note: this repairs the CLASSIFICATION. It does not by itself
+	//   guarantee the startup band is POPULATED, because the agent reads
+	//   FirstTestWindowStart() before calling SetMocksWithWindow, so on a
+	//   set's first test the read is still zero and the disk LoadBefore that
+	//   fetches the band is skipped. Deriving the cutoff from the window
+	//   being applied is a separate agent-side fix, and it has to stay gated
+	//   on the proxy actually adopting that start — an unguarded derivation
+	//   collapses "req < firstWindowStart" into "req < afterTime" and
+	//   preserves every stale previous-test mock.
+	//
+	// Lock order is swapMu then windowMu, matching WindowSnapshot, so a
+	// WindowSnapshot reader sees either the whole previous set or the whole
+	// cleared state. That guarantee does NOT extend to the legacy
+	// sequential pair (IsTestWindowActive then HasFirstTestFired): those
+	// take different locks, so a caller straddling this reset can still
+	// observe the forbidden Active=true && FirstTestFired=false. Reordering
+	// the writes cannot fix that — the straddle spans both calls — which is
+	// why the pair-coherent readers (the v3 dispatcher's routeTransactional,
+	// TierIndex.orderForCurrentState) are required to use WindowSnapshot.
+	m.swapMu.Lock()
+	m.firstWindowStart = time.Time{}
+	m.windowMu.Lock()
+	m.windowStart = time.Time{}
+	m.windowEnd = time.Time{}
+	m.windowMu.Unlock()
+	m.swapMu.Unlock()
 }
 
 // runIdleSweeper is the background loop that calls SweepIdleConnections
@@ -1166,8 +1227,9 @@ func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
 // HasFirstTestFired reports whether at least one real test window has
 // been set on this manager — i.e. some SetMocksWithWindow call arrived
 // with a non-zero start that was NOT the models.BaseTime sentinel used
-// for pre-test staging. Sticky: once true, stays true for the manager's
-// lifetime.
+// for pre-test staging. Sticky within a test set; ResetForReplaySession
+// clears it at each set boundary, so the next set reads false until its
+// own first test fires.
 //
 // Parsers use this to distinguish "app bootstrap" from "between tests"
 // when IsTestWindowActive() returns false. Before the first test fires
@@ -1175,10 +1237,11 @@ func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
 // the runner is in the idle gap between tests (or post-last-test
 // teardown).
 //
-// Concurrency: firstWindowStart is updated only under swapMu.Lock()
-// inside SetMocksWithWindow. A reader here uses swapMu.RLock to avoid
-// a torn read on the time.Time. An inherently-racy pre-check is
-// tolerable — a caller that needs strict window/pool atomicity
+// Concurrency: firstWindowStart is written only under swapMu.Lock() — in
+// SetMocksWithWindow when a real window arrives, and in
+// ResetForReplaySession at the set boundary. A reader here takes
+// swapMu.RLock so it cannot observe a torn time.Time or a half-applied
+// reset. An inherently-racy pre-check is tolerable — a caller that needs strict window/pool atomicity
 // consults GetPerTestMocksInWindow, which snapshots both under swapMu.
 //
 // Non-atomic-pair warning: a caller that reads IsTestWindowActive and
