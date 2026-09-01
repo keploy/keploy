@@ -31,12 +31,54 @@
 # digits also occur in ISO-8601 timestamps and layer byte counts in this
 # very output, and matching them would silently reclassify real breakage
 # as a rate limit.
-DOCKER_BUILD_RETRY_RE='toomanyrequests|too many requests|pull rate limit|rate limit exceeded'
+#
+# THE MODULE PROXY IS THE OTHER TRANSIENT DEPENDENCY FETCH
+#
+# A build inside these images downloads Go modules, and proxy.golang.org
+# fails the same way a registry does. Observed on the echo-sql lane, after
+# the build had sat for two minutes:
+#
+#   github.com/valyala/fasttemplate@v1.2.1:
+#     read "https://proxy.golang.org/@v/v1.2.1.zip":
+#     stream error: stream ID 43; INTERNAL_ERROR; received from peer
+#
+# Only the HTTP/2 TRANSPORT wording is matched, and the reason is narrow: a
+# fetch that dies in transport says so, whereas a compiler failure never does.
+# Note the failure above is still emitted from a compiler line (it surfaces
+# while type-checking an import 120s in), so "the compile had not started" is
+# NOT the discriminator — the transport phrasing is.
+#
+# Two patterns were tried and removed after they collided:
+#
+#   unexpected eof   — cmd/compile prints "syntax error: unexpected EOF,
+#                      expected }" for ANY unterminated brace, and bash prints
+#                      it for an unbalanced quote in a RUN line. Matching it
+#                      retried a syntax error four times and pushed the
+#                      compiler line four builds up the log — exactly what the
+#                      paragraph above exists to prevent.
+#   proxy.golang.org — a hostname, not an error. Under the default
+#                      GOPROXY=...,direct a permanent dependency error (bad
+#                      checksum, unknown revision, missing module) falls through
+#                      to git and never prints it, so it buys nothing; but one
+#                      `go mod download -x` or an echoed ENV line would put it
+#                      in the log and make that lane retry everything.
+#
+# Like the rate-limit handling above, this is a MITIGATION, not a cure. The cure
+# is that the sample Dockerfiles run `go build` with no
+# --mount=type=cache,target=/go/pkg/mod, so every lane re-fetches the whole
+# module graph over the network on every build; a cache mount or vendoring in
+# the samples repos would remove the exposure instead of retrying it.
+#
+# Scope caveat: the grep is over the whole build log, and the compose call sites
+# build several services at once, so one service's transient blip retries the
+# others too — including a sibling's genuine compile break.
+DOCKER_BUILD_RETRY_RE='toomanyrequests|too many requests|pull rate limit|rate limit exceeded|stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer'
 
 # docker_build_retry <command> [args...]
 #
 # Runs the build, echoing its output, and retries with exponential backoff
-# only while the failure looks like a Docker Hub rate limit.
+# only while the failure looks transient — a Docker Hub rate limit, or a
+# module/registry fetch that failed in transport rather than in the compiler.
 docker_build_retry() {
     local _max="${DOCKER_BUILD_RETRY_ATTEMPTS:-4}"
     local _backoff="${DOCKER_BUILD_RETRY_BACKOFF:-15}"
@@ -67,18 +109,18 @@ docker_build_retry() {
         fi
 
         if ! grep -qiE "$DOCKER_BUILD_RETRY_RE" "$_log"; then
-            echo "::error::'$*' failed with exit code ${_rc}. Not a Docker Hub rate limit, so not retrying."
+            echo "::error::'$*' failed with exit code ${_rc}. The failure above is not a transient fetch (rate limit or transport), so retrying would only bury it. Not retrying."
             rm -f "$_log"
             exit 1
         fi
 
         if [ "$_attempt" -ge "$_max" ]; then
-            echo "::error::'$*' failed after ${_max} attempts: Docker Hub pull rate limit (HTTP 429) did not clear. This is an infrastructure limit on the runner's egress IP, not a defect in this change."
+            echo "::error::'$*' failed after ${_max} attempts: the last failure is above. A fetch that never clears is usually an egress-IP rate limit or an upstream outage rather than a defect in this change — but read the message rather than assuming."
             rm -f "$_log"
             exit 1
         fi
 
-        echo "Docker Hub rate limit hit (exit ${_rc}); retrying in ${_backoff}s…"
+        echo "Transient fetch failure (exit ${_rc}); retrying in ${_backoff}s…"
         sleep "$_backoff"
         _attempt=$((_attempt + 1))
         _backoff=$((_backoff * 2))
@@ -105,7 +147,7 @@ docker_build_retry() {
 # runner, an amd64-only image). Retrying those wastes minutes and then blames
 # a network fault that never happened, sending the next reader after the wrong
 # cause. They abort on the first attempt, showing docker's own message.
-DOCKER_PULL_RETRY_RE="${DOCKER_BUILD_RETRY_RE}|client\.timeout|context deadline exceeded|i/o timeout|connection reset|connection refused|temporary failure|no such host|tls handshake timeout|unexpected eof|request canceled"
+DOCKER_PULL_RETRY_RE="${DOCKER_BUILD_RETRY_RE}|client\.timeout|context deadline exceeded|connection refused|temporary failure|no such host|unexpected eof|request canceled"
 
 # _docker_fetch_retry <what> <command> [args...]
 #
