@@ -973,6 +973,10 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 		// Helper check to ensure the binary running inside docker has the required capabilities
 		if err := utils.CheckRequiredPermissions(); err != nil {
 			a.logger.Error("Failed to start Keploy Agent", zap.Error(err))
+			// Distinct exit code: a caller must be able to tell "Keploy needs
+			// kernel privileges" from "your tests failed", both of which used to
+			// be a bare 1. See utils/exitcodes.go.
+			utils.SetExitCodeOnce(utils.ExitPrivilegeRequired)
 			return err
 		}
 		// Start the agent in Docker container using errgroup

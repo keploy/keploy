@@ -1210,6 +1210,17 @@ func fetchServerGreeting(ctx context.Context, opts models.OutgoingOptions) ([]by
 	if addr == "" {
 		return nil, fmt.Errorf("no destination address available to fetch server greeting")
 	}
+	// Never dial an address the capture layer fabricated. When the proxyless
+	// SSL-uprobe path cannot resolve a decrypted stream's real destination it
+	// substitutes a loopback stand-in (and content matching later forces the
+	// well-known port), yielding e.g. "127.0.0.1:3306" — an address this
+	// connection never talked to. Dialing it either fails instantly
+	// (ECONNREFUSED, aborting the capture) or, worse, fetches a greeting from
+	// an unrelated local server. Fail here so callers fall through to their
+	// stash/cache fallbacks or abort cleanly.
+	if opts.DstCfg != nil && opts.DstCfg.AddrFabricated {
+		return nil, fmt.Errorf("destination address %s is a capture-layer stand-in (real destination unresolved), refusing to dial it to fetch the server greeting", addr)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

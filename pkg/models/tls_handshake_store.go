@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,6 +32,21 @@ type TLSHandshakeStore struct {
 	mu   sync.Mutex
 	cond *sync.Cond
 	m    map[string][]timedTLSHandshakeEntry
+	// last remembers, per PORT-scoped key, the most recent entry ever pushed —
+	// independently of the consumable queue in m. Only port keys are cached
+	// here (Push skips conn-scoped keys) because it is never TTL/size-pruned and
+	// the only reader queries it by port. Unlike m it is never
+	// consumed by Pop and never TTL-pruned: it is the last-resort
+	// fallback for a consumer whose OWN raw-leg entry was genuinely
+	// lost (e.g. the plaintext MySQL greeting+SSLRequest capture event
+	// dropped by a full ringbuf under load). A MySQL server's greeting
+	// is reusable across connections for stitching purposes: the
+	// capability flags, protocol version and auth plugin are per-server
+	// (stable), and the only per-connection field — the auth-plugin-data
+	// salt — is not verified anywhere on the record or replay path (the
+	// replayer explicitly skips AuthResponse comparison because it is
+	// salt-dependent; see mysql/replayer/match.go matchHanshakeResponse41).
+	last map[string]TLSHandshakeEntry
 }
 
 type timedTLSHandshakeEntry struct {
@@ -40,7 +56,10 @@ type timedTLSHandshakeEntry struct {
 
 // NewTLSHandshakeStore creates a new store.
 func NewTLSHandshakeStore() *TLSHandshakeStore {
-	s := &TLSHandshakeStore{m: make(map[string][]timedTLSHandshakeEntry)}
+	s := &TLSHandshakeStore{
+		m:    make(map[string][]timedTLSHandshakeEntry),
+		last: make(map[string]TLSHandshakeEntry),
+	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
@@ -56,7 +75,8 @@ func HandshakeStoreKey(connKey string, dstPort uint16) string {
 	return fmt.Sprintf("port:%d", dstPort)
 }
 
-// Push adds a handshake entry for the given key.
+// Push adds a handshake entry for the given key. It also refreshes the
+// key's last-greeting cache (see Last).
 func (s *TLSHandshakeStore) Push(key string, entry TLSHandshakeEntry) {
 	s.mu.Lock()
 	s.pruneExpiredLocked(time.Now())
@@ -68,8 +88,38 @@ func (s *TLSHandshakeStore) Push(key string, entry TLSHandshakeEntry) {
 		entry:    entry,
 		pushedAt: time.Now(),
 	})
+	// Only PORT-scoped keys ("port:<n>", from HandshakeStoreKey with an empty
+	// connKey) feed the last-greeting cache. The post-TLS stitch's fallback
+	// reads Last() by the port-only key exclusively (see recorder/record_v2.go
+	// resolvePreTLSGreeting), so a conn-scoped ("conn:<connKey>") entry here
+	// would never be read — and, because `last` is deliberately never
+	// TTL/size-pruned (unlike m), a per-connection key would accumulate without
+	// bound over a long record session. Restrict the cache to the reusable,
+	// low-cardinality port keys.
+	if strings.HasPrefix(key, "port:") {
+		if s.last == nil {
+			s.last = make(map[string]TLSHandshakeEntry)
+		}
+		s.last[key] = entry
+	}
 	s.cond.Broadcast()
 	s.mu.Unlock()
+}
+
+// Last returns the most recent entry ever pushed for key, without
+// consuming anything. Unlike PopWait it survives consumption by other
+// connections and the TTL prune, so it stays available as a stitching
+// fallback when a connection's own raw-leg entry was lost (dropped
+// capture event / >TTL delay). Callers must treat the result as
+// belonging to ANOTHER connection to the same destination: reuse the
+// server-stable parts (greeting capabilities / plugin, client
+// SSLRequest shape) but not per-connection metadata such as the
+// request timestamp.
+func (s *TLSHandshakeStore) Last(key string) (TLSHandshakeEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.last[key]
+	return entry, ok
 }
 
 // PopWait pops the oldest handshake entry for the given key, waiting up

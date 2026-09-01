@@ -73,9 +73,18 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install yq
+      - name: Ensure yq
         run: |
-          # -f so an HTTP error is not silently written into the yq binary
+          # yq ships preinstalled on the ubuntu-24.04 runner image, so the
+          # unconditional download here was a redundant network hop that took the
+          # whole job down whenever github.com hiccuped — it failed with six
+          # consecutive 504s despite --retry 5. Use what is already there, and
+          # only reach out if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
           curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
           chmod +x yq
@@ -251,9 +260,18 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install yq
+      - name: Ensure yq
         run: |
-          # -f so an HTTP error is not silently written into the yq binary
+          # yq ships preinstalled on the ubuntu-24.04 runner image, so the
+          # unconditional download here was a redundant network hop that took the
+          # whole job down whenever github.com hiccuped — it failed with six
+          # consecutive 504s despite --retry 5. Use what is already there, and
+          # only reach out if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
           curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
           chmod +x yq
