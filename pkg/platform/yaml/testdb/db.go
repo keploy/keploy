@@ -165,12 +165,6 @@ func (ts *TestYaml) nextTestIndex(tcsPath string) (int, error) {
 	return seed, nil
 }
 
-// nextSlugIndex returns the next index for a descriptive slug within
-// tcsPath. First call per (tcsPath, slug) seeds from the on-disk scan
-// (yaml.NextIndexForPrefix already returns "max existing + 1"); every
-// later call is a pure atomic increment, so deleting the files —
-// which auto-replay does to every executed test — can never rewind
-// the numbering. Mirrors nextTestIndex's contract for sequential names.
 // slugIndexKey is the single definition of the slugIndex map key. Minting,
 // seeding and the on-collision resync all go through it so the three can
 // never drift onto different keys for the same (directory, slug) pair — a
@@ -229,6 +223,12 @@ func (ts *TestYaml) resyncSlugIndexFromDisk(tcsPath string, tc *models.TestCase)
 	ts.raiseSlugIndex(slugIndexKey(tcsPath, slug), int64(next-1))
 }
 
+// nextSlugIndex returns the next index for a descriptive slug within
+// tcsPath. First call per (tcsPath, slug) seeds from the on-disk scan
+// (yaml.NextIndexForPrefix already returns "max existing + 1"); every
+// later call is a pure atomic increment, so deleting the files —
+// which auto-replay does to every executed test — can never rewind
+// the numbering. Mirrors nextTestIndex's contract for sequential names.
 func (ts *TestYaml) nextSlugIndex(tcsPath, slug string) (int, error) {
 	key := slugIndexKey(tcsPath, slug)
 	if v, ok := ts.slugIndex.Load(key); ok {
