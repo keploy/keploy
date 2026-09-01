@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	yamlLib "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
 )
 
@@ -503,5 +504,129 @@ func TestIsIDSegment(t *testing.T) {
 		if isIDSegment(s) {
 			t.Errorf("expected %q NOT to be an id segment", s)
 		}
+	}
+}
+
+// The production defect this pins: descriptive names were minted from a disk
+// scan alone, and auto-replay deletes every executed test's file — so a later
+// capture of the same endpoint re-minted an earlier name, aliasing two
+// different requests under one identity (corrupted name-keyed mappings and
+// verdicts; same-named files collapsing on download). Numbering must be
+// monotonic per (test set, slug) regardless of what happens to the files.
+func TestDescriptiveNamesNeverReuseAfterFileDeletion(t *testing.T) {
+	dir := t.TempDir()
+	ts := NewWithFormatAndNaming(zap.NewNop(), dir, yamlLib.FormatYAML, NamingDescriptive)
+	tc := &models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: "http://app:8080/k8s-proxy/mappings"}}
+
+	n1, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, n1+".yaml"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	n2, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Auto-replay deletes executed test files.
+	if err := os.Remove(filepath.Join(dir, n1+".yaml")); err != nil {
+		t.Fatal(err)
+	}
+
+	n3, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n1 == n3 || n2 == n3 {
+		t.Fatalf("name re-minted after deletion: %s, %s, %s", n1, n2, n3)
+	}
+	if n1 != "get-k8s-proxy-mappings-1" || n2 != "get-k8s-proxy-mappings-2" || n3 != "get-k8s-proxy-mappings-3" {
+		t.Fatalf("unexpected sequence: %s, %s, %s", n1, n2, n3)
+	}
+}
+
+// First mint on a directory that already holds files continues from the disk
+// maximum — the counter seeds from the scan, it does not fight it.
+func TestDescriptiveNamesSeedFromExistingFiles(t *testing.T) {
+	dir := t.TempDir()
+	ts := NewWithFormatAndNaming(zap.NewNop(), dir, yamlLib.FormatYAML, NamingDescriptive)
+	for _, n := range []string{"post-pay-1.yaml", "post-pay-7.yaml"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tc := &models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "POST", URL: "http://app:8080/pay"}}
+	n, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != "post-pay-8" {
+		t.Fatalf("got %s, want post-pay-8 (continue from disk max)", n)
+	}
+}
+
+// A recorder adopting an in-flight test set has an EMPTY directory; seeding
+// from the server-side maxima must prevent the takeover from re-minting the
+// previous owner's names.
+func TestSeedSlugIndexesProtectsTakeover(t *testing.T) {
+	root := t.TempDir()
+	ts := NewWithFormatAndNaming(zap.NewNop(), root, yamlLib.FormatYAML, NamingDescriptive)
+	if err := ts.SeedSlugIndexes("set-1", map[string]int{"post-pay": 41, "get-users": 7}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "set-1", "tests")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tc := &models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "POST", URL: "http://app:8080/pay"}}
+	n, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != "post-pay-42" {
+		t.Fatalf("got %s, want post-pay-42 (seeded from server max 41 despite empty dir)", n)
+	}
+	// Seeding lower than the live counter is a no-op.
+	if err := ts.SeedSlugIndexes("set-1", map[string]int{"post-pay": 3}); err != nil {
+		t.Fatal(err)
+	}
+	n2, _ := ts.generateName(dir, tc)
+	if n2 != "post-pay-43" {
+		t.Fatalf("got %s, want post-pay-43 (lower seed must not rewind)", n2)
+	}
+}
+
+// Concurrent mints for the same slug must produce unique names.
+func TestDescriptiveNamesConcurrentMintsUnique(t *testing.T) {
+	dir := t.TempDir()
+	ts := NewWithFormatAndNaming(zap.NewNop(), dir, yamlLib.FormatYAML, NamingDescriptive)
+	tc := &models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: "http://app:8080/users"}}
+
+	const n = 32
+	names := make(chan string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name, err := ts.generateName(dir, tc)
+			if err == nil {
+				names <- name
+			}
+		}()
+	}
+	wg.Wait()
+	close(names)
+	seen := map[string]bool{}
+	for name := range names {
+		if seen[name] {
+			t.Fatalf("duplicate name minted concurrently: %s", name)
+		}
+		seen[name] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("minted %d unique names, want %d", len(seen), n)
 	}
 }

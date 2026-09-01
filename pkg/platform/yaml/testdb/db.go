@@ -53,6 +53,17 @@ type TestYaml struct {
 	// Only used by the sequential naming path; descriptive mode keys
 	// per-slug indices off NextIndexForPrefix instead.
 	lastIndex sync.Map // map[string]*atomic.Int64
+	// slugIndex is the descriptive-naming twin of lastIndex: one
+	// monotonically-increasing counter per (tests-dir, slug), so a test
+	// case name can never be re-minted after auto-replay deletes the
+	// executed files. Descriptive names used to be derived from a disk
+	// scan alone (NextIndexForPrefix), and a directory that deletion
+	// mutates is not a memory: the scan restarted numbering and aliased
+	// two different captures under one name — corrupting name-keyed
+	// mappings and verdicts, and collapsing same-named files on download.
+	// Keyed by tcsPath+"\x00"+slug; values are *atomic.Int64 holding the
+	// last index handed out.
+	slugIndex sync.Map
 }
 
 func New(logger *zap.Logger, tcsPath string) *TestYaml {
@@ -152,6 +163,67 @@ func (ts *TestYaml) nextTestIndex(tcsPath string) (int, error) {
 		return int(actual.(*atomic.Int64).Add(1)), nil
 	}
 	return seed, nil
+}
+
+// nextSlugIndex returns the next index for a descriptive slug within
+// tcsPath. First call per (tcsPath, slug) seeds from the on-disk scan
+// (yaml.NextIndexForPrefix already returns "max existing + 1"); every
+// later call is a pure atomic increment, so deleting the files —
+// which auto-replay does to every executed test — can never rewind
+// the numbering. Mirrors nextTestIndex's contract for sequential names.
+func (ts *TestYaml) nextSlugIndex(tcsPath, slug string) (int, error) {
+	key := tcsPath + "\x00" + slug
+	if v, ok := ts.slugIndex.Load(key); ok {
+		return int(v.(*atomic.Int64).Add(1)), nil
+	}
+	seed, err := yaml.NextIndexForPrefix(tcsPath, slug)
+	if err != nil {
+		return 0, err
+	}
+	var counter atomic.Int64
+	counter.Store(int64(seed))
+	actual, loaded := ts.slugIndex.LoadOrStore(key, &counter)
+	if loaded {
+		return int(actual.(*atomic.Int64).Add(1)), nil
+	}
+	return seed, nil
+}
+
+// SeedSlugIndexes raises the descriptive-name counters for a test set to
+// at least the given per-slug indexes. A recorder that adopts an
+// in-flight test set (after a pod restart or redeploy) has an empty
+// local directory, and disk-seeded counters would restart numbering at
+// 1 — re-minting names the previous owner already used. The adopting
+// session calls this once with the per-slug maxima of the names already
+// persisted server-side, so minting continues where the previous owner
+// stopped. Raising only: a seed below the current counter is a no-op.
+func (ts *TestYaml) SeedSlugIndexes(testSetID string, maxBySlug map[string]int) error {
+	if err := validateNameComponent("testSetID", testSetID); err != nil {
+		return err
+	}
+	tcsPath, err := yaml.ValidatePath(filepath.Join(ts.TcsPath, testSetID, "tests"))
+	if err != nil {
+		return fmt.Errorf("validate testcase directory: %w", err)
+	}
+	for slug, maxIdx := range maxBySlug {
+		if slug == "" || maxIdx < 1 {
+			continue
+		}
+		key := tcsPath + "\x00" + slug
+		var fresh atomic.Int64
+		fresh.Store(int64(maxIdx))
+		actual, loaded := ts.slugIndex.LoadOrStore(key, &fresh)
+		if loaded {
+			c := actual.(*atomic.Int64)
+			for {
+				cur := c.Load()
+				if cur >= int64(maxIdx) || c.CompareAndSwap(cur, int64(maxIdx)) {
+					break
+				}
+			}
+		}
+	}
+	return nil
 }
 
 type tcsInfo struct {
@@ -651,7 +723,7 @@ func (ts *TestYaml) generateName(tcsPath string, tc *models.TestCase) (string, e
 	}
 
 	slug := BuildTestCaseSlug(tc)
-	idx, err := yaml.NextIndexForPrefix(tcsPath, slug)
+	idx, err := ts.nextSlugIndex(tcsPath, slug)
 	if err != nil {
 		return "", err
 	}
