@@ -26,6 +26,11 @@ func TestTLSHandshakeStore_LastSurvivesConsumption(t *testing.T) {
 		ReqTimestamp: time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC),
 	}
 	s.Push(key, entry1)
+	// The cache is recorded explicitly now: a queue key is a port or a
+	// connection, neither of which names a server, so Push no longer populates
+	// it as a side effect.
+	dstKey := HandshakeLastKey("scope-a", &ConditionalDstCfg{Addr: "10.0.0.5:3306"})
+	s.RememberLast(dstKey, entry1)
 
 	// Consume the queue the way another connection's PopWait would.
 	if _, ok := s.PopWait(key, 0); !ok {
@@ -36,7 +41,7 @@ func TestTLSHandshakeStore_LastSurvivesConsumption(t *testing.T) {
 	}
 
 	// The last-greeting cache must still serve entry1.
-	got, ok := s.Last(key)
+	got, ok := s.Last(dstKey)
 	if !ok {
 		t.Fatal("Last must survive queue consumption — it is the lost-raw-leg fallback")
 	}
@@ -44,12 +49,12 @@ func TestTLSHandshakeStore_LastSurvivesConsumption(t *testing.T) {
 		t.Fatalf("Last returned wrong entry: %+v", got)
 	}
 
-	// A newer push overwrites the cache.
+	// A newer record overwrites the cache.
 	entry2 := TLSHandshakeEntry{RespPackets: [][]byte{[]byte("greeting-2")}}
-	s.Push(key, entry2)
-	got, ok = s.Last(key)
+	s.RememberLast(dstKey, entry2)
+	got, ok = s.Last(dstKey)
 	if !ok || !bytes.Equal(got.RespPackets[0], []byte("greeting-2")) {
-		t.Fatalf("Last must return the most recent push, got %+v ok=%v", got, ok)
+		t.Fatalf("Last must return the most recent record, got %+v ok=%v", got, ok)
 	}
 
 	// Keys are independent.
@@ -63,7 +68,7 @@ func TestTLSHandshakeStore_LastSurvivesConsumption(t *testing.T) {
 // PORT-scoped keys. A conn-scoped key must NOT populate `last` (it would
 // accumulate one unremovable entry per connection over a long session) — while
 // still flowing normally through the consumable queue m.
-func TestTLSHandshakeStore_LastOnlyCachesPortKeys(t *testing.T) {
+func TestTLSHandshakeStore_CacheIsExplicitAndScopeIsolated(t *testing.T) {
 	s := NewTLSHandshakeStore()
 	connKey := HandshakeStoreKey("srcport:55123", 3306) // -> "conn:srcport:55123"
 	if !strings.HasPrefix(connKey, "conn:") {
@@ -82,11 +87,24 @@ func TestTLSHandshakeStore_LastOnlyCachesPortKeys(t *testing.T) {
 		t.Fatal("conn-scoped key must NOT populate the last-greeting cache — it would leak unbounded")
 	}
 
-	// A port-scoped push is cached as before.
+	// Push never populates the cache now, whatever the key shape.
 	portKey := HandshakeStoreKey("", 3306)
 	s.Push(portKey, entry)
-	if _, ok := s.Last(portKey); !ok {
-		t.Fatal("port-scoped key must populate the last-greeting cache")
+	if _, ok := s.Last(portKey); ok {
+		t.Fatal("Push must not populate the last-greeting cache: a port names no server, and this " +
+			"map is never pruned")
+	}
+
+	// Only an explicit, scope+destination keyed record does.
+	dstKey := HandshakeLastKey("ns/app-a/ts0", &ConditionalDstCfg{Addr: "10.0.0.5:3306"})
+	s.RememberLast(dstKey, entry)
+	if _, ok := s.Last(dstKey); !ok {
+		t.Fatal("RememberLast must populate the cache under the destination key")
+	}
+	// A second app on the same node, same address, must not see it.
+	otherKey := HandshakeLastKey("ns/app-b/ts0", &ConditionalDstCfg{Addr: "10.0.0.5:3306"})
+	if _, ok := s.Last(otherKey); ok {
+		t.Fatal("a different app/session scope must not read another's cached greeting")
 	}
 }
 

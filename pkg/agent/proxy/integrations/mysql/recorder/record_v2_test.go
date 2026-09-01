@@ -153,18 +153,20 @@ func TestRecordV2_PostTLS_LostStash_GreetingCacheFallback(t *testing.T) {
 	// into this connection's mock.
 	store := models.NewTLSHandshakeStore()
 	staleTs := base.Add(-time.Hour)
-	store.Push(models.HandshakeStoreKey("", 3306), models.TLSHandshakeEntry{
-		RespPackets:  [][]byte{handshakeBuf},
-		ReqPackets:   [][]byte{sslReq},
-		ReqTimestamp: staleTs,
-	})
-	if _, ok := store.PopWait(models.HandshakeStoreKey("", 3306), 0); !ok {
-		t.Fatal("setup: expected to consume the earlier connection's entry")
-	}
 
 	// The degraded proxyless dest is fabricated — the fallback must succeed
 	// WITHOUT dialing it (a dial would fail: nothing listens on this port).
 	h.sess.Opts.DstCfg = &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 3306, AddrFabricated: true}
+
+	// The earlier connection was this SAME app reaching the SAME destination, so
+	// it shares the scope+address key and its greeting is reusable here. Only the
+	// queue entry was consumed; the cache retains it.
+	store.RememberLast(models.HandshakeLastKey(h.sess.Opts.PassThroughScope, h.sess.Opts.DstCfg),
+		models.TLSHandshakeEntry{
+			RespPackets:  [][]byte{handshakeBuf},
+			ReqPackets:   [][]byte{sslReq},
+			ReqTimestamp: staleTs,
+		})
 
 	clientTs := base.Add(5 * time.Millisecond)
 	h.pushClient(cannedHandshakeResponse41(t, 2, false), clientTs)
@@ -271,7 +273,7 @@ func TestResolvePreTLSGreeting_CtxCancelUnblocks(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, source := resolvePreTLSGreeting(ctx, store, "", 3306)
+	_, source := resolvePreTLSGreeting(ctx, store, "", 3306, "", testDst("10.0.0.5:3306"))
 	elapsed := time.Since(start)
 	if source != greetingNone {
 		t.Fatalf("resolvePreTLSGreeting must return greetingNone on an empty store, got %v", source)
@@ -298,17 +300,14 @@ func TestResolvePreTLSGreeting_DroppedLegHitsCacheAtPrimaryBound(t *testing.T) {
 	store := models.NewTLSHandshakeStore()
 	// A sibling connection populated the port's last-greeting cache; THIS
 	// connection's own raw leg was dropped (never pushed).
-	store.Push(models.HandshakeStoreKey("", 3306), models.TLSHandshakeEntry{
+	store.RememberLast("dst:|10.0.0.5:3306", models.TLSHandshakeEntry{
 		RespPackets:  [][]byte{[]byte("greeting")},
 		ReqPackets:   [][]byte{[]byte("sslreq")},
 		ReqTimestamp: time.Now(),
 	})
-	if _, ok := store.PopWait(models.HandshakeStoreKey("", 3306), 0); !ok {
-		t.Fatal("setup: expected to consume the sibling's queued entry, leaving only the cache")
-	}
 
 	start := time.Now()
-	entry, source := resolvePreTLSGreeting(context.Background(), store, "", 3306)
+	entry, source := resolvePreTLSGreeting(context.Background(), store, "", 3306, "", testDst("10.0.0.5:3306"))
 	elapsed := time.Since(start)
 	if source != greetingCached {
 		t.Fatalf("source = %v, want greetingCached (the dropped-leg cache fallback)", source)
@@ -332,12 +331,9 @@ func TestResolvePreTLSGreeting_OwnLatePreferredOverCache(t *testing.T) {
 
 	store := models.NewTLSHandshakeStore()
 	// Cache is populated (a sibling), but the own leg is merely late.
-	store.Push(models.HandshakeStoreKey("", 3306), models.TLSHandshakeEntry{
+	store.RememberLast("dst:|10.0.0.5:3306", models.TLSHandshakeEntry{
 		RespPackets: [][]byte{[]byte("sibling-greeting")},
 	})
-	if _, ok := store.PopWait(models.HandshakeStoreKey("", 3306), 0); !ok {
-		t.Fatal("setup: expected to consume the sibling's queued entry")
-	}
 	ownTs := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	go func() {
 		time.Sleep(150 * time.Millisecond)
@@ -347,11 +343,89 @@ func TestResolvePreTLSGreeting_OwnLatePreferredOverCache(t *testing.T) {
 		})
 	}()
 
-	entry, source := resolvePreTLSGreeting(context.Background(), store, "", 3306)
+	entry, source := resolvePreTLSGreeting(context.Background(), store, "", 3306, "", testDst("10.0.0.5:3306"))
 	if source != greetingOwn {
 		t.Fatalf("source = %v, want greetingOwn (a late own leg within the primary bound beats the cache)", source)
 	}
 	if !entry.ReqTimestamp.Equal(ownTs) {
 		t.Errorf("ReqTimestamp = %v, want the own leg's %v", entry.ReqTimestamp, ownTs)
+	}
+}
+
+// testDst builds a resolved (non-fabricated) destination.
+func testDst(addr string) *models.ConditionalDstCfg {
+	return &models.ConditionalDstCfg{Addr: addr, Port: 3306}
+}
+
+// The cross-connection greeting fallback exists because a MySQL server's
+// capability flags, protocol version and auth plugin are per-SERVER. That is
+// precisely why it must never be served across servers. Under a DaemonSet one
+// agent serves every pod on the node, so two apps talking to different MySQL
+// servers both see destination port 3306; keyed by port alone, the second would
+// stitch the first's greeting into its own config mock.
+func TestResolvePreTLSGreeting_DoesNotServeOneServersGreetingToAnother(t *testing.T) {
+	store := models.NewTLSHandshakeStore()
+	store.RememberLast("dst:|10.0.0.5:3306", models.TLSHandshakeEntry{
+		RespPackets: [][]byte{{0x0a, 'A'}},
+	})
+
+	// A different server, same port. Past the primary bound the fallback would
+	// fire if the cache were port-keyed.
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "0")
+	_, source := resolvePreTLSGreeting(context.Background(), store, "", 3306, "", testDst("10.0.0.9:3306"))
+	if source == greetingCached {
+		t.Fatal("served server A's greeting to a connection destined for server B; the cache must be " +
+			"scoped to a server, not to a port")
+	}
+}
+
+// The DaemonSet hazard: one store shared across every app on a node. Two apps
+// whose destinations are BOTH unresolvable present the same placeholder address,
+// so only the app/session scope keeps them apart. Without it, app B stitches app
+// A's server greeting into its own config mock.
+func TestResolvePreTLSGreeting_DoesNotServeOneAppsGreetingToAnother(t *testing.T) {
+	store := models.NewTLSHandshakeStore()
+	fabricated := func() *models.ConditionalDstCfg {
+		return &models.ConditionalDstCfg{Addr: "127.0.0.1:3306", Port: 3306, AddrFabricated: true}
+	}
+	store.RememberLast(models.HandshakeLastKey("ns/app-a/test-set-0", fabricated()),
+		models.TLSHandshakeEntry{RespPackets: [][]byte{{0x0a, 'A'}}})
+
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "0")
+
+	// App B, same placeholder address, different scope: must NOT borrow.
+	if _, source := resolvePreTLSGreeting(context.Background(), store, "", 3306,
+		"ns/app-b/test-set-0", fabricated()); source == greetingCached {
+		t.Fatal("served app A's greeting to app B; a store shared across a node must isolate by scope")
+	}
+
+	// App A itself must still get the fallback — this is the case the feature
+	// exists for, and a fabricated address must not disable it.
+	if _, source := resolvePreTLSGreeting(context.Background(), store, "", 3306,
+		"ns/app-a/test-set-0", fabricated()); source != greetingCached {
+		t.Fatalf("app A lost its own cached fallback (source=%v); the fabricated proxyless "+
+			"destination is exactly the case this fallback was built for", source)
+	}
+}
+
+// HandshakeLastKey is the whole guard, so pin its contract directly.
+func TestHandshakeLastKey_OnlyNamesResolvedDestinations(t *testing.T) {
+	if got := models.HandshakeLastKey("", nil); got != "" {
+		t.Fatalf("nil DstCfg = %q, want empty", got)
+	}
+	if got := models.HandshakeLastKey("", &models.ConditionalDstCfg{Port: 3306}); got != "" {
+		t.Fatalf("no address = %q, want empty", got)
+	}
+	// A fabricated address is still keyable: the scope is what isolates apps,
+	// and refusing here would disable the fallback in the proxyless case it
+	// exists to serve.
+	if got := models.HandshakeLastKey("s", &models.ConditionalDstCfg{Addr: "127.0.0.1:3306", AddrFabricated: true}); got != "dst:s|127.0.0.1:3306" {
+		t.Fatalf("fabricated address = %q, want dst:s|127.0.0.1:3306", got)
+	}
+	// Different scopes must never collide on one address.
+	a := models.HandshakeLastKey("app-a", &models.ConditionalDstCfg{Addr: "127.0.0.1:3306"})
+	b := models.HandshakeLastKey("app-b", &models.ConditionalDstCfg{Addr: "127.0.0.1:3306"})
+	if a == b {
+		t.Fatalf("two apps collided on one key (%q)", a)
 	}
 }
