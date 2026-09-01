@@ -568,37 +568,6 @@ func TestDescriptiveNamesSeedFromExistingFiles(t *testing.T) {
 	}
 }
 
-// A recorder adopting an in-flight test set has an EMPTY directory; seeding
-// from the server-side maxima must prevent the takeover from re-minting the
-// previous owner's names.
-func TestSeedSlugIndexesProtectsTakeover(t *testing.T) {
-	root := t.TempDir()
-	ts := NewWithFormatAndNaming(zap.NewNop(), root, yamlLib.FormatYAML, NamingDescriptive)
-	if err := ts.SeedSlugIndexes("set-1", map[string]int{"post-pay": 41, "get-users": 7}); err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(root, "set-1", "tests")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	tc := &models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "POST", URL: "http://app:8080/pay"}}
-	n, err := ts.generateName(dir, tc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != "post-pay-42" {
-		t.Fatalf("got %s, want post-pay-42 (seeded from server max 41 despite empty dir)", n)
-	}
-	// Seeding lower than the live counter is a no-op.
-	if err := ts.SeedSlugIndexes("set-1", map[string]int{"post-pay": 3}); err != nil {
-		t.Fatal(err)
-	}
-	n2, _ := ts.generateName(dir, tc)
-	if n2 != "post-pay-43" {
-		t.Fatalf("got %s, want post-pay-43 (lower seed must not rewind)", n2)
-	}
-}
-
 // Concurrent mints for the same slug must produce unique names.
 func TestDescriptiveNamesConcurrentMintsUnique(t *testing.T) {
 	dir := t.TempDir()
@@ -679,39 +648,6 @@ func TestClaimName_ForeignWriteGapBeyondRetryBound(t *testing.T) {
 		if next != "post-pay-"+itoa(gap+3) {
 			t.Fatalf("gap=%d: follow-up = %q, want post-pay-%d", gap, next, gap+3)
 		}
-	}
-}
-
-// A seed that lands BELOW the directory's real contents must not strand the
-// counter: the first collision resyncs it past what is on disk.
-func TestSeedSlugIndexes_LowSeedRecoversViaResync(t *testing.T) {
-	parent := t.TempDir()
-	setID := "test-set-0"
-	dir := filepath.Join(parent, setID, "tests")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	ts := NewWithNaming(zap.NewNop(), parent, NamingDescriptive)
-	tc := httpTC("POST", "http://api.test/pay")
-
-	// Directory already holds 1..400 (e.g. a downloaded set).
-	for i := 1; i <= 400; i++ {
-		p := filepath.Join(dir, "post-pay-"+itoa(i)+"."+ts.Format.FileExtension())
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Seed far too low (server knew only about 5).
-	if err := ts.SeedSlugIndexes(setID, map[string]int{"post-pay": 5}); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := ts.claimName(dir, tc)
-	if err != nil {
-		t.Fatalf("claim with a low seed over a full directory failed: %v", err)
-	}
-	if got != "post-pay-401" {
-		t.Fatalf("got %q, want post-pay-401", got)
 	}
 }
 

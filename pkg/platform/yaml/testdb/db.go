@@ -247,31 +247,6 @@ func (ts *TestYaml) nextSlugIndex(tcsPath, slug string) (int, error) {
 	return seed, nil
 }
 
-// SeedSlugIndexes raises the descriptive-name counters for a test set to
-// at least the given per-slug indexes. A recorder that adopts an
-// in-flight test set (after a pod restart or redeploy) has an empty
-// local directory, and disk-seeded counters would restart numbering at
-// 1 — re-minting names the previous owner already used. The adopting
-// session calls this once with the per-slug maxima of the names already
-// persisted server-side, so minting continues where the previous owner
-// stopped. Raising only: a seed below the current counter is a no-op.
-func (ts *TestYaml) SeedSlugIndexes(testSetID string, maxBySlug map[string]int) error {
-	if err := validateNameComponent("testSetID", testSetID); err != nil {
-		return err
-	}
-	tcsPath, err := yaml.ValidatePath(filepath.Join(ts.TcsPath, testSetID, "tests"))
-	if err != nil {
-		return fmt.Errorf("validate testcase directory: %w", err)
-	}
-	for slug, maxIdx := range maxBySlug {
-		if slug == "" || maxIdx < 1 {
-			continue
-		}
-		ts.raiseSlugIndex(slugIndexKey(tcsPath, slug), int64(maxIdx))
-	}
-	return nil
-}
-
 type tcsInfo struct {
 	name string
 	path string
