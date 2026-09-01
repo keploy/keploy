@@ -171,8 +171,66 @@ func (ts *TestYaml) nextTestIndex(tcsPath string) (int, error) {
 // later call is a pure atomic increment, so deleting the files —
 // which auto-replay does to every executed test — can never rewind
 // the numbering. Mirrors nextTestIndex's contract for sequential names.
+// slugIndexKey is the single definition of the slugIndex map key. Minting,
+// seeding and the on-collision resync all go through it so the three can
+// never drift onto different keys for the same (directory, slug) pair — a
+// drift that would silently make a seed or a resync target nothing.
+func slugIndexKey(tcsPath, slug string) string {
+	return tcsPath + "\x00" + slug
+}
+
+// raiseSlugIndex lifts a slug's counter to at least idx. Raise-only by
+// construction: a counter already past idx is left alone, so no caller can
+// rewind numbering and re-mint a name that has been issued.
+func (ts *TestYaml) raiseSlugIndex(key string, idx int64) {
+	var fresh atomic.Int64
+	fresh.Store(idx)
+	actual, loaded := ts.slugIndex.LoadOrStore(key, &fresh)
+	if !loaded {
+		return
+	}
+	c := actual.(*atomic.Int64)
+	for {
+		cur := c.Load()
+		if cur >= idx || c.CompareAndSwap(cur, idx) {
+			return
+		}
+	}
+}
+
+// resyncSlugIndexFromDisk raises a slug's counter past every name currently
+// on disk, and is what keeps a FOREIGN write from costing more than one
+// retry.
+//
+// The pre-counter code re-scanned the directory on every mint, so it always
+// jumped straight past names it had not issued itself — a cloud-replay
+// download dropping hundreds of files into a live recorder's tests dir, or a
+// seed that came in lower than the directory's real contents. The counter
+// alone can only climb one EEXIST per claimName attempt, so a gap wider than
+// maxNameClaimAttempts would exhaust the loop and lose the capture. Resyncing
+// here restores the jump: the next mint lands past the whole gap.
+//
+// Best-effort: on a scan error the caller simply retries with the counter it
+// already has, which is exactly the pre-resync behaviour.
+func (ts *TestYaml) resyncSlugIndexFromDisk(tcsPath string, tc *models.TestCase) {
+	if tc == nil || ts.namingStrategy == NamingSequential {
+		return
+	}
+	slug := BuildTestCaseSlug(tc)
+	if slug == "" {
+		return
+	}
+	// NextIndexForPrefix returns the next FREE index, so the counter (which
+	// holds the last issued index) is raised to one below it.
+	next, err := yaml.NextIndexForPrefix(tcsPath, slug)
+	if err != nil || next < 1 {
+		return
+	}
+	ts.raiseSlugIndex(slugIndexKey(tcsPath, slug), int64(next-1))
+}
+
 func (ts *TestYaml) nextSlugIndex(tcsPath, slug string) (int, error) {
-	key := tcsPath + "\x00" + slug
+	key := slugIndexKey(tcsPath, slug)
 	if v, ok := ts.slugIndex.Load(key); ok {
 		return int(v.(*atomic.Int64).Add(1)), nil
 	}
@@ -209,19 +267,7 @@ func (ts *TestYaml) SeedSlugIndexes(testSetID string, maxBySlug map[string]int) 
 		if slug == "" || maxIdx < 1 {
 			continue
 		}
-		key := tcsPath + "\x00" + slug
-		var fresh atomic.Int64
-		fresh.Store(int64(maxIdx))
-		actual, loaded := ts.slugIndex.LoadOrStore(key, &fresh)
-		if loaded {
-			c := actual.(*atomic.Int64)
-			for {
-				cur := c.Load()
-				if cur >= int64(maxIdx) || c.CompareAndSwap(cur, int64(maxIdx)) {
-					break
-				}
-			}
-		}
+		ts.raiseSlugIndex(slugIndexKey(tcsPath, slug), int64(maxIdx))
 	}
 	return nil
 }
@@ -793,6 +839,11 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 		if !errors.Is(err, fs.ErrExist) {
 			return "", fmt.Errorf("reserve testcase file %q: %w", name, err)
 		}
+		// The name is taken by a file this counter never issued (a foreign
+		// writer, or a seed lower than the directory's contents). Jump the
+		// counter past the whole gap instead of climbing it one attempt at a
+		// time — see resyncSlugIndexFromDisk.
+		ts.resyncSlugIndexFromDisk(tcsPath, tc)
 	}
 	return "", fmt.Errorf("failed to allocate a unique testcase name after %d attempts (last candidate %q)", maxNameClaimAttempts, lastName)
 }

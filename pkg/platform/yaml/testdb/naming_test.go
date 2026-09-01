@@ -3,6 +3,7 @@ package testdb
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -630,3 +631,88 @@ func TestDescriptiveNamesConcurrentMintsUnique(t *testing.T) {
 		t.Fatalf("minted %d unique names, want %d", len(seen), n)
 	}
 }
+
+// A FOREIGN writer (a cloud-replay download, a low seed) can drop names into
+// the tests dir that this recorder's counter never issued. The counter climbs
+// one EEXIST per claimName attempt, so without a disk resync a gap wider than
+// maxNameClaimAttempts exhausts the retry loop and the capture is lost with an
+// error — a regression against the pre-counter code, which re-scanned on every
+// mint and so always jumped straight past the gap.
+func TestClaimName_ForeignWriteGapBeyondRetryBound(t *testing.T) {
+	for _, gap := range []int{10, 255, 300, 1000} {
+		dir := t.TempDir()
+		ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
+		tc := httpTC("POST", "http://api.test/pay")
+
+		// Take one name so the counter exists and is low (mints post-pay-1).
+		first, err := ts.claimName(dir, tc)
+		if err != nil {
+			t.Fatalf("gap=%d: first claim: %v", gap, err)
+		}
+		if first != "post-pay-1" {
+			t.Fatalf("gap=%d: first = %q, want post-pay-1", gap, first)
+		}
+
+		// Foreign writer fills post-pay-2 .. post-pay-(gap+1) behind the
+		// counter's back.
+		for i := 2; i <= gap+1; i++ {
+			p := filepath.Join(dir, "post-pay-"+itoa(i)+"."+ts.Format.FileExtension())
+			if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+				t.Fatalf("gap=%d: seed file: %v", gap, err)
+			}
+		}
+
+		got, err := ts.claimName(dir, tc)
+		if err != nil {
+			t.Fatalf("gap=%d: claim after foreign writes failed (the regression): %v", gap, err)
+		}
+		want := "post-pay-" + itoa(gap+2)
+		if got != want {
+			t.Fatalf("gap=%d: got %q, want %q (must jump past the whole gap)", gap, got, want)
+		}
+
+		// And the counter must keep climbing from there, not rescan-and-stall.
+		next, err := ts.claimName(dir, tc)
+		if err != nil {
+			t.Fatalf("gap=%d: follow-up claim: %v", gap, err)
+		}
+		if next != "post-pay-"+itoa(gap+3) {
+			t.Fatalf("gap=%d: follow-up = %q, want post-pay-%d", gap, next, gap+3)
+		}
+	}
+}
+
+// A seed that lands BELOW the directory's real contents must not strand the
+// counter: the first collision resyncs it past what is on disk.
+func TestSeedSlugIndexes_LowSeedRecoversViaResync(t *testing.T) {
+	parent := t.TempDir()
+	setID := "test-set-0"
+	dir := filepath.Join(parent, setID, "tests")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ts := NewWithNaming(zap.NewNop(), parent, NamingDescriptive)
+	tc := httpTC("POST", "http://api.test/pay")
+
+	// Directory already holds 1..400 (e.g. a downloaded set).
+	for i := 1; i <= 400; i++ {
+		p := filepath.Join(dir, "post-pay-"+itoa(i)+"."+ts.Format.FileExtension())
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Seed far too low (server knew only about 5).
+	if err := ts.SeedSlugIndexes(setID, map[string]int{"post-pay": 5}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ts.claimName(dir, tc)
+	if err != nil {
+		t.Fatalf("claim with a low seed over a full directory failed: %v", err)
+	}
+	if got != "post-pay-401" {
+		t.Fatalf("got %q, want post-pay-401", got)
+	}
+}
+
+func itoa(i int) string { return strconv.Itoa(i) }
