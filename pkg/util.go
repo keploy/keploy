@@ -2841,15 +2841,17 @@ func FilterPerTestAndLaxPromoted(ctx context.Context, logger *zap.Logger, m []*m
 // test window start observed by the agent's MockManager, or zero before
 // any real test has fired) so the strict gate can preserve per-test
 // startup-init mocks (req < firstWindowStart) in the returned perTestIn
-// slice instead of dropping them. MockManager.SetMocksWithWindow's
+// slice instead of dropping them. The preservation runs in BOTH strict and
+// lax mode: agentStrict is false on a WindowedProxy, so a strict-only
+// preservation never runs on a windowed replay. MockManager.SetMocksWithWindow's
 // startup-tier partition then routes those preserved mocks into the
 // dedicated startup tree, and the v3 tier-aware dispatcher reaches them
 // via GetStartupMocks.
 //
 // Passing firstWindowStart == time.Time{} reproduces the legacy blanket-
-// drop contract (strict mode drops every per-test mock outside the
-// current window, regardless of whether the mock predates the first
-// test). Legacy callers that don't know firstWindowStart can keep
+// drop contract (every per-test mock outside the current window is dropped
+// in strict mode / promoted in lax, regardless of whether the mock predates
+// the first test), because there is no cutoff to preserve against. Legacy callers that don't know firstWindowStart can keep
 // calling FilterPerTestAndLaxPromoted unchanged.
 func FilterPerTestAndLaxPromotedTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
 	perTestInWindow, promotedToSession := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
@@ -3186,25 +3188,38 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// the unfiltered pool by the lifetime-first short-circuit
 		// above, so the strict/lax divergence here applies exclusively
 		// to the perTest class that actually needs window containment.
+		// Startup-init (req < firstWindowStart) is preserved in the filtered
+		// slice so MockManager.SetMocksWithWindow's startup-tier partition
+		// routes it into the startup tree, where the tier-aware dispatcher
+		// reaches it via GetStartupMocks.
+		//
+		// This runs in BOTH modes, deliberately. It used to sit inside the
+		// strict branch below, and `agentStrict` is permanently false on a
+		// WindowedProxy (agent.go: `params.StrictMockWindow && !isWindowedProxy`),
+		// so on every windowed replay the lax branch diverted these mocks into
+		// the session/unfiltered pool instead — a pool the mongo tier-aware
+		// path never consults for bootstrap traffic (it reads GetFilteredMocks
+		// and GetStartupMocks only). The startup tier was therefore EMPTY for
+		// the whole run, and a bootstrap query issued while a window was open
+		// missed with candidates:0 even though its mock was on disk.
+		//
+		// It is not a widening of what may be served: these mocks predate the
+		// first test window, so they can only be bootstrap traffic, and routing
+		// them to the tier built for exactly that is what both modes intend.
+		// A zero firstWindowStart still means "no cutoff yet" and falls through
+		// to the legacy behaviour below, unchanged.
+		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			preservedStartup++
+			continue
+		}
+
 		if strict {
-			// Per-test, out-of-window. Tier-aware split: startup-init
-			// (req < firstWindowStart) is preserved in the filtered slice
-			// so MockManager.SetMocksWithWindow's startup-tier partition
-			// routes it into the startup tree. Genuine stale cross-test
-			// bleed (firstWindowStart <= req < afterTime, or req >
-			// beforeTime) is dropped — the strictMockWindow guarantee.
-			//
-			// When firstWindowStart is zero we have no cutoff yet (either
-			// the agent hasn't observed a real test window on this
-			// MockManager, or the caller didn't thread the value through).
-			// In that case fall back to the legacy blanket-drop contract
-			// so the behaviour is strictly no worse than before.
-			if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
-				p.TestModeInfo.IsFiltered = true
-				filteredMocks = append(filteredMocks, p)
-				preservedStartup++
-				continue
-			}
+			// Per-test, out-of-window. Genuine stale cross-test bleed
+			// (firstWindowStart <= req < afterTime, or req > beforeTime) is
+			// dropped — the strictMockWindow guarantee. The startup-init band
+			// was already preserved above, in both modes.
 			// Per-mock diagnostic: emit the hash + window + actual ts
 			// at Debug for the strict-drop path so a CI log can
 			// pinpoint which postgres / http / mongo mock the per-test
@@ -3371,15 +3386,23 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			continue
 		}
 
-		// Out-of-window per-test: strict drops (with startup-init
-		// preservation), lax promotes to unfiltered.
+		// Startup-init band, preserved in BOTH modes. Identical reasoning to
+		// filterByTimeStampTierAware: agentStrict is false on a WindowedProxy, so
+		// a strict-only preservation never runs on a windowed replay and the
+		// startup tier stays empty for the whole run. This twin is only
+		// test-called today, but fixing one of two identical functions would
+		// guarantee the bug returns the moment the three-tier path is wired for
+		// postgres v3 / mysql.
+		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+			p.TestModeInfo.IsFiltered = true
+			startup = append(startup, p)
+			preservedStartup++
+			continue
+		}
+
+		// Out-of-window per-test: strict drops, lax promotes to unfiltered.
+		// The startup-init band was already claimed above, in both modes.
 		if strict {
-			if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
-				p.TestModeInfo.IsFiltered = true
-				startup = append(startup, p)
-				preservedStartup++
-				continue
-			}
 			// Per-mock diagnostic: emit hash + window deltas at Debug
 			// for the three-tier strict-drop path so a CI log can
 			// identify which postgres / mongo / etc. mock the per-test
