@@ -1051,3 +1051,172 @@ func TestResetForReplaySession_SecondTestSetKeepsItsOwnBootstrapMocks(t *testing
 		t.Fatalf("set 2's in-window test mock is missing from the per-test tier: %v", perTest)
 	}
 }
+
+// CHARACTERIZATION of an OPEN defect. Delete this test when it fails.
+//
+// models.TestModeInfo carries no tier discriminator and customComparator orders
+// on (SortOrder, ID) alone — both stamped from zero per tier, on fresh DeepCopys
+// the agent supplies each call. So the first entry of the startup tree and the
+// first entry of the per-test tree share the key (SortOrder:1, ID:0), and every
+// door that looks a mock up BY that key can address the wrong tier's entry:
+// DeleteFilteredMock, DeleteUnFilteredMock, and TreeDb.update (whose idIndex
+// fallback matches on ID alone, so it collides even without an exact key hit).
+//
+// DeleteStartupMock sidesteps it by resolving on Name, which is why the startup
+// tier is effectively name-addressed while the others are key-addressed.
+//
+// A name check on the filtered door is NOT the fix: it makes DeleteFilteredMock
+// correctly return false, but HTTP and MySQL then fall through to
+// UpdateUnFilteredMock (http/match.go, mysql/replayer/match.go — neither has a
+// DeleteStartupMock step), which has no identity check at all, and the eviction
+// moves to a SESSION mock reused by every test in the set. Strictly worse.
+//
+// The fix has to make the tiers unaddressable from each other — a tier field in
+// TestModeInfo included in the comparator, or disjoint key ranges applied to the
+// key each door actually looks up — or route consumption through a single
+// tier-aware entry point. Note SetMocksWithWindowThreeTier already attempts the
+// disjoint-range idea (startupKey.ID = 1_000_000 + idx) but applies it to the
+// tier-local copy rather than the key the delete path uses, so it prevents
+// nothing.
+func TestDeleteFilteredMock_CrossTierKeyCollision_OPEN(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+
+	start := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	boot := newMockForTest("boot", start.Add(-time.Minute), models.LifetimePerTest)
+	live := newMockForTest("live", start.Add(time.Second), models.LifetimePerTest)
+
+	// The agent hands the manager FRESH copies every call with SortOrder unset,
+	// so each tier restamps from 1. Reusing pointers carries the first stamping
+	// forward and hides the collision entirely.
+	fresh := func() []*models.Mock {
+		a, b := *boot, *live
+		a.TestModeInfo = models.TestModeInfo{Lifetime: models.LifetimePerTest}
+		b.TestModeInfo = models.TestModeInfo{Lifetime: models.LifetimePerTest}
+		return []*models.Mock{&a, &b}
+	}
+	mm.SetMocksWithWindow(fresh(), nil, models.BaseTime, time.Now())
+	mm.SetMocksWithWindow(fresh(), nil, start, start.Add(10*time.Second))
+
+	startup, err := mm.GetStartupMocks()
+	if err != nil || !containsMockNamed(startup, "boot") {
+		t.Fatalf("precondition: boot must be in the startup tier, got %v (err %v)", startup, err)
+	}
+	var bootCopy models.Mock
+	for _, m := range startup {
+		if m != nil && m.Name == "boot" {
+			bootCopy = *m
+		}
+	}
+
+	// Consuming the STARTUP mock through the filtered door — what mongo v2's
+	// consumeMatchedMock does before it falls back to DeleteStartupMock.
+	mm.DeleteFilteredMock(bootCopy)
+
+	perTest, err := mm.GetPerTestMocksInWindow()
+	if err != nil {
+		t.Fatalf("GetPerTestMocksInWindow: %v", err)
+	}
+	if containsMockNamed(perTest, "live") {
+		t.Fatal("the cross-tier key collision is FIXED: deleting the startup mock no longer " +
+			"evicts the per-test entry at the same key. Delete this characterization test — " +
+			"and check TreeDb.update and DeleteUnFilteredMock were fixed with it, since they " +
+			"share the same root cause.")
+	}
+	t.Logf("OPEN defect: deleting startup mock %q evicted the running test's own mock; "+
+		"per-test tier now holds %d entries", bootCopy.Name, len(perTest))
+}
+
+// CHARACTERIZATION. Delete this test when it fails.
+//
+// Between ResetForReplaySession and the next set's staging call the trees still
+// hold the PREVIOUS set's mocks, while the window bits already read
+// (false, false). A query arriving in that gap is answered from the previous
+// set's startup tier.
+//
+// Only reachable when the application SURVIVES the boundary (--keep-app-alive /
+// compose reuse); in the default per-set-restart mode the app starts after
+// staging, so no traffic crosses the gap.
+//
+// This is half-torn-down state rather than deliberately preserved state: the
+// reset clears the window bits and the connection trees but leaves these
+// populated. Closing it properly means not splitting the reset from the staging
+// — moving the window-bit reset into the next set's first SetMocksWithWindow,
+// or gating lookups behind a "staging pending" flag — rather than clearing the
+// trees here, which would serve an empty pool to a parser racing the reset.
+func TestResetForReplaySession_BoundaryGapServesThePreviousSetsTrees_OPEN(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+
+	s1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	boot := newMockForTest("s1boot", s1.Add(-time.Minute), models.LifetimePerTest)
+	test := newMockForTest("s1test", s1.Add(time.Second), models.LifetimePerTest)
+	mm.SetMocksWithWindow([]*models.Mock{boot, test}, nil, models.BaseTime, time.Now())
+	mm.SetMocksWithWindow([]*models.Mock{boot, test}, nil, s1, s1.Add(10*time.Second))
+
+	mm.ResetForReplaySession()
+
+	if snap := mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
+		t.Fatalf("after the reset the window bits must read (false,false), got %+v", snap)
+	}
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if !containsMockNamed(startup, "s1boot") {
+		t.Fatal("the boundary gap is CLOSED: the previous set's startup tree no longer " +
+			"survives the reset. Delete this characterization test.")
+	}
+	t.Logf("OPEN: in the gap the window bits say 'nothing has fired' while the startup tier " +
+		"still holds the previous set's mocks")
+}
+
+// CHARACTERIZATION. Delete this test when it fails.
+//
+// The startup-init cutoff is a running MINIMUM over the windows that actually
+// FIRE in a set (mockmanager.go's firstWindowStart update). When the first fired
+// test is not the earliest RECORDED one — a --test-sets selection, an ignored
+// test, or the streaming deferral — the cutoff lands late, and mocks belonging
+// to a test that is not being run fall before it and are classified as
+// startup-init rather than dropped as previous-test bleed. Because it is a
+// running minimum, a later window with an earlier start also moves the cutoff
+// back MID-SET and reclassifies mocks retroactively.
+//
+// Here t1 never runs; only t2 fires, so t1's mock reads as bootstrap.
+//
+// The fix is to seed the cutoff from the set's earliest RECORDED test rather
+// than its first EXECUTED window. The manager cannot do that alone: the mocks it
+// is staged with include the bootstrap ones, so their minimum timestamp cannot
+// separate "recorded before the tests began" from "recorded during the earliest
+// test". It needs the set's first recorded test start plumbed from the replayer,
+// which already sorts test cases by request timestamp.
+func TestSetMocksWithWindow_CutoffFollowsTheFiredWindowsNotTheRecordedOnes_OPEN(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+
+	t1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+
+	boot := newMockForTest("boot", t1.Add(-time.Minute), models.LifetimePerTest)
+	t1Mock := newMockForTest("t1mock", t1.Add(time.Second), models.LifetimePerTest)
+	t2Mock := newMockForTest("t2mock", t2.Add(time.Second), models.LifetimePerTest)
+	all := []*models.Mock{boot, t1Mock, t2Mock}
+
+	mm.SetMocksWithWindow(all, nil, models.BaseTime, time.Now())
+	// t1 is skipped; t2 is the first window that fires.
+	mm.SetMocksWithWindow(all, nil, t2, t2.Add(10*time.Second))
+
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if !containsMockNamed(startup, "boot") {
+		t.Fatalf("the genuine bootstrap mock must be in the startup tier, got %v", startup)
+	}
+	if !containsMockNamed(startup, "t1mock") {
+		t.Fatal("the cutoff no longer follows the first FIRED window — a skipped test's mocks " +
+			"are no longer misclassified as startup-init. Delete this characterization test.")
+	}
+	t.Logf("OPEN: %q belongs to a test that never ran, but the cutoff (first FIRED window = %v) "+
+		"puts it before the line, so it is served as bootstrap", "t1mock", t2)
+}
