@@ -9,7 +9,7 @@ import (
 )
 
 // TestDeepCopyPreservesSpecReqBodyNoise verifies Mock.DeepCopy deep-copies the
-// kind-agnostic MockSpec.ReqBodyNoise map — the single schema-noise store used
+// kind-agnostic MockSpec.ReqBodyNoise map — the single mock-noise store used
 // by every parser (HTTP, Pulsar, Kafka, Redis, Generic). Mock.DeepCopy starts
 // from m.Spec by value, so without an explicit deep copy the clone would share
 // this map and its per-path slices — and DeepCopy runs before async gob writes

@@ -17,7 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -52,12 +52,12 @@ type matchDiag struct {
 // test.globalNoise body bucket (root-relative dotted paths, lowercased) so
 // manual noise config participates in mock matching with the same vocabulary
 // as response assertions.
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, mockNoiseDetection bool, mockNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
 
-	// Shared schema-noise engine for this match. HTTP is a full client of the
+	// Shared mock-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
 	// only the HTTP-specific bits (body extraction, JSON/form diff).
-	noiseEngine := schemanoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
+	noiseEngine := mocknoise.New(httpNoiseAdapter{}, mockNoiseDetection, mockNoiseStrict)
 
 	for {
 		if ctx.Err() != nil {
@@ -172,7 +172,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			// even to candidates with no learned noise — strict mode value-checks
 			// the whole body, not just the lenient key/schema match above.
 			beforeStrict := len(bodyMatched)
-			if schemaNoiseStrict {
+			if mockNoiseStrict {
 				bodyMatched = h.filterStrictNoiseMatches(noiseEngine, bodyMatched, input.body, userBodyNoise)
 			}
 
@@ -1225,10 +1225,10 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 // learned noise no longer passes by default: only fields explicitly marked as
 // noise may differ.
 //
-// It delegates to schemanoise.Engine.StrictReject. The JSON/form comparison and
+// It delegates to mocknoise.Engine.StrictReject. The JSON/form comparison and
 // known-noise merge are owned by the shared engine + httpNoiseAdapter; the
 // returned drift names the offending field path(s) for the rejection log.
-func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*models.Mock, reqBody []byte, userBodyNoise map[string][]string) []*models.Mock {
+func (h *HTTP) filterStrictNoiseMatches(eng *mocknoise.Engine, candidates []*models.Mock, reqBody []byte, userBodyNoise map[string][]string) []*models.Mock {
 	var kept []*models.Mock
 	for _, m := range candidates {
 		allowed, drift := eng.StrictReject(m, reqBody, userBodyNoise)
@@ -1294,7 +1294,7 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 	// the same URL-encoded form the obfuscator's formKeyNoiseRegex anchored on
 	// (^<raw_key>=[^&]+$) — exactly as formBodiesMatchModuloNoise does. Passing
 	// only the decoded value here would never match a key-anchored regex, so
-	// obfuscated form fields would be wrongly re-flagged as schema noise.
+	// obfuscated form fields would be wrongly re-flagged as mock noise.
 	rawValuesByKey := func(body string) map[string][]string {
 		out := map[string][]string{}
 		for _, seg := range strings.Split(body, "&") {
@@ -1362,10 +1362,10 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 // request-body noise. Existing entries win on key collision (noise is
 // monotonic — once a field is flagged it stays flagged), and every slice is
 // copied so the result shares no backing storage with its inputs. It delegates
-// to the shared schema-noise engine so HTTP, Pulsar and the on-disk persistence
+// to the shared mock-noise engine so HTTP, Pulsar and the on-disk persistence
 // all merge learned noise through one implementation.
 func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
-	return schemanoise.MergeLearned(existing, detected)
+	return mocknoise.MergeLearned(existing, detected)
 }
 
 // buildHTTPMismatchReport finds the closest HTTP mock to the given request

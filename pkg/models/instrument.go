@@ -92,6 +92,15 @@ type IngressEvent struct {
 	_           uint16 // Padding
 }
 
+// NAMING: the mock-noise flags are carried TWICE — MockNoiseDetection /
+// MockNoiseStrict are canonical, SchemaNoiseDetection / SchemaNoiseStrict are
+// the deprecated pre-rename spelling. Go has no field aliases, so unlike the
+// schemanoise->mocknoise package rename (which uses type aliases) the only way
+// to stay source-compatible across the MODULE boundary — github.com/keploy/
+// integrations and github.com/keploy/enterprise both read opts.SchemaNoise*
+// directly — is to keep both pairs populated. Producers MUST set both; use
+// SetMockNoise rather than assigning the fields by hand. Readers should prefer
+// the Mock* pair. The Schema* pair is deleted once both modules have migrated.
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
@@ -111,10 +120,14 @@ type OutgoingOptions struct {
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
-	SchemaNoiseDetection   bool                           // when true, detect request-body field drift vs the recorded mock and record it as field-path noise (req_body_noise) on the matched mock
-	SchemaNoiseStrict      bool                           // when true (replay/enforcement path), a mock (any parser) that carries learned req_body_noise must match strictly: every request-body field must match except the learned-noise paths, so a non-noise drift rejects the mock
-	SkipTLSMITM            bool
-	ConnKey                string // connection-level key for TLSHandshakeStore correlation
+	MockNoiseDetection     bool                           // when true, detect request-body field drift vs the recorded mock and record it as field-path noise (req_body_noise) on the matched mock
+	MockNoiseStrict        bool                           // when true (replay/enforcement path), a mock (any parser) that carries learned req_body_noise must match strictly: every request-body field must match except the learned-noise paths, so a non-noise drift rejects the mock
+	// Deprecated: use MockNoiseDetection. Kept in sync by SetMockNoise.
+	SchemaNoiseDetection bool
+	// Deprecated: use MockNoiseStrict. Kept in sync by SetMockNoise.
+	SchemaNoiseStrict bool
+	SkipTLSMITM       bool
+	ConnKey           string // connection-level key for TLSHandshakeStore correlation
 	// PreferH2, on the REPLAY path, tells the TLS MITM to advertise h2 in ALPN
 	// (instead of the default http/1.1 downgrade) so a dual-protocol client
 	// stays on HTTP/2 and its request matches a recorded kind:Http2 mock.
@@ -221,6 +234,28 @@ type OutgoingOptions struct {
 	// options and uses it to pick the worker's scoped mock view (per-PID
 	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
 	SrcPid uint32 `json:"-"`
+}
+
+// SetMockNoise sets the mock-noise flags on both the canonical MockNoise* pair
+// and the deprecated SchemaNoise* pair, so a consumer still reading the old
+// field names sees the same value. Producers should call this instead of
+// assigning either pair directly; composite literals that cannot call a method
+// must set all four keys.
+func (o *OutgoingOptions) SetMockNoise(detection, strict bool) {
+	o.MockNoiseDetection, o.SchemaNoiseDetection = detection, detection
+	o.MockNoiseStrict, o.SchemaNoiseStrict = strict, strict
+}
+
+// NormalizeMockNoise folds whichever mock-noise pair a producer populated into
+// both pairs, so that an OutgoingOptions built by out-of-tree code that only
+// knows the deprecated SchemaNoise* names still drives the canonical
+// MockNoise* readers, and vice versa. It ORs the pairs, which makes it
+// idempotent and order-independent; it is called on the receiving side after
+// the options are decoded, and is a no-op once both pairs agree.
+func (o *OutgoingOptions) NormalizeMockNoise() {
+	detection := o.MockNoiseDetection || o.SchemaNoiseDetection
+	strict := o.MockNoiseStrict || o.SchemaNoiseStrict
+	o.SetMockNoise(detection, strict)
 }
 
 type ConditionalDstCfg struct {

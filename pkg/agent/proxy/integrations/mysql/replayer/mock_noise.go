@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
@@ -17,8 +17,8 @@ import (
 	"vitess.io/vitess/go/vt/sqlparser"
 )
 
-// mysqlNoiseAdapter is the MySQL implementation of schemanoise.Adapter, making
-// the MySQL parser a client of the same shared schema-noise engine HTTP uses.
+// mysqlNoiseAdapter is the MySQL implementation of mocknoise.Adapter, making
+// the MySQL parser a client of the same shared mock-noise engine HTTP uses.
 // MySQL has no single "request body": the drift-carrying content depends on the
 // command packet, so both sides of every comparison are first serialized into a
 // canonical JSON document by mysqlRequestBodyJSON and diffed with the shared
@@ -42,7 +42,7 @@ import (
 // is merged onto a fresh copy in updateMock so the shared pooled mock is never
 // mutated. SetLearnedNoise is implemented for interface completeness.
 type mysqlNoiseAdapter struct {
-	schemanoise.JSONDiffer
+	mocknoise.JSONDiffer
 }
 
 // RecordedBody returns the canonical JSON body of the mock's recorded request.
@@ -76,7 +76,7 @@ func (mysqlNoiseAdapter) SetLearnedNoise(m *models.Mock, merged map[string][]str
 
 // RecordedValueIsNoise excludes recorded values already covered by the mock's
 // value-regex noise (Mock.Noise, e.g. enterprise-obfuscated secrets) so they
-// are not re-flagged as schema noise — the same values paramValueEqual already
+// are not re-flagged as mock noise — the same values paramValueEqual already
 // waves through via NoiseChecker.IsNoisyValue.
 func (mysqlNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool {
 	if m == nil {
@@ -89,17 +89,17 @@ func (mysqlNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool 
 	return func(v string) bool { return nc.IsNoisy(v) }
 }
 
-// strictGate applies schemaNoiseStrict enforcement while matchCommand scans
+// strictGate applies mockNoiseStrict enforcement while matchCommand scans
 // candidate mocks, and accumulates the diagnostics the mismatch report needs.
 // Consult allows() before a mock may become a match candidate: under
-// schemaNoiseStrict every candidate's recorded request body is value-compared
+// mockNoiseStrict every candidate's recorded request body is value-compared
 // against the live one and rejected when a field OUTSIDE the known-noise set
 // (user's requestBody noise ∪ the mock's learned req_body_noise) drifted.
 // Without strict (or with no diffable live body) it always allows, preserving
 // the lenient score/FIFO behaviour so the auto-replay detection path can
 // still learn.
 type strictGate struct {
-	engine        *schemanoise.Engine
+	engine        *mocknoise.Engine
 	logger        *zap.Logger
 	requestType   string
 	liveBody      []byte
@@ -120,7 +120,7 @@ type strictGate struct {
 	fieldDiffs  []models.MockFieldDiff
 }
 
-func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
+func newStrictGate(engine *mocknoise.Engine, logger *zap.Logger, requestType string, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
 	return &strictGate{
 		engine:        engine,
 		logger:        logger,
@@ -155,7 +155,7 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 	for p := range drift {
 		paths = append(paths, p)
 	}
-	g.logger.Debug("schema-noise strict: rejected candidate mock (non-noise request field drifted)",
+	g.logger.Debug("mock-noise strict: rejected candidate mock (non-noise request field drifted)",
 		zap.String("mock", mock.Name),
 		zap.String("request_type", g.requestType),
 		zap.Strings("drifted_fields", paths))
@@ -294,7 +294,7 @@ func queryBodyValue(sql string) any {
 }
 
 // mysqlRequestBodyJSON serializes the drift-carrying content of a command
-// packet into a canonical JSON document for the schema-noise engine. ok=false
+// packet into a canonical JSON document for the mock-noise engine. ok=false
 // means the packet has no drift-capable body (utility commands, statement-id
 // only packets, handshake elements) and the engine must no-op.
 //

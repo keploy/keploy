@@ -58,11 +58,14 @@ type Runner struct {
 // already consumed — replay.go maintains the equivalent local map
 // inside RunTestSet.
 type testSetSetup struct {
-	id              string
-	mappings        map[string][]models.MockEntry
-	mockKindByName  map[string]models.Kind
-	useMappingBased bool
-	cleanup         func()
+	id       string
+	mappings map[string][]models.MockEntry
+	// startupMockNames is the test-set's boot traffic, merged into every test's
+	// expected-name list by expectedMocksForTest. Constant for the whole set.
+	startupMockNames []string
+	mockKindByName   map[string]models.Kind
+	useMappingBased  bool
+	cleanup          func()
 
 	consumedMu    sync.Mutex
 	totalConsumed map[string]models.MockState
@@ -380,8 +383,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.MongoPassword = r.config.Test.MongoPassword
 		outOpts.SQLDelay = time.Duration(r.config.Test.Delay) * time.Second
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
-		outOpts.SchemaNoiseDetection = r.config.Test.SchemaNoiseDetection
-		outOpts.SchemaNoiseStrict = r.config.Test.SchemaNoiseStrict
+		outOpts.SetMockNoise(r.config.Test.MockNoiseDetection, r.config.Test.MockNoiseStrict)
 		outOpts.MysqlPorts = r.config.MysqlPorts
 		outOpts.DisableMysqlAutoDetect = r.config.DisableMysqlAutoDetect
 		outOpts.DisableMysqlEndpointDrift = r.config.DisableMysqlEndpointDrift
@@ -423,7 +425,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		return nil, fmt.Errorf("mock-outgoing failed: %w", err)
 	}
 
-	mappings, mocksThatHaveMappings, mocksWeNeed, err := r.loadMappingsForSet(gCtx, testSetID)
+	mappings, mocksThatHaveMappings, mocksWeNeed, startupMockNames, err := r.loadMappingsForSet(gCtx, testSetID)
 	if err != nil {
 		return nil, err
 	}
@@ -495,12 +497,13 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 
 	success = true
 	return &testSetSetup{
-		id:              testSetID,
-		mappings:        mappings,
-		mockKindByName:  mockKindByName,
-		useMappingBased: useMappingBased,
-		totalConsumed:   map[string]models.MockState{},
-		cleanup:         cleanup,
+		id:               testSetID,
+		mappings:         mappings,
+		startupMockNames: startupMockNames,
+		mockKindByName:   mockKindByName,
+		useMappingBased:  useMappingBased,
+		totalConsumed:    map[string]models.MockState{},
+		cleanup:          cleanup,
 	}, nil
 }
 
@@ -519,13 +522,29 @@ func (r *Runner) strictMockWindow() bool {
 // The UNION is what we pass to GetFilteredMocks / GetUnFilteredMocks
 // so the StoreMocks call covers every step — per-step filtering then
 // happens via UpdateMockParams.
-func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[string][]models.MockEntry, map[string]bool, map[string]bool, error) {
+func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[string][]models.MockEntry, map[string]bool, map[string]bool, []string, error) {
 	if r.mappingDB == nil {
-		return nil, nil, nil, fmt.Errorf("mappingDB not configured; initialize the mapping database dependency to resolve which mocks are needed for test execution")
+		return nil, nil, nil, nil, fmt.Errorf("mappingDB not configured; initialize the mapping database dependency to resolve which mocks are needed for test execution")
 	}
 	testMockMappings, hasMeaningful, err := r.mappingDB.Get(ctx, testSetID)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get mock mappings for test set %q: %w", testSetID, err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to get mock mappings for test set %q: %w", testSetID, err)
+	}
+
+	// Startup mocks are absent from `tests:` by design, so Get cannot surface
+	// them. Read separately; a failure costs the startup names, not the run.
+	// Skipped when mapping is disabled, matching replay's early return: the names
+	// are only consumed by the mapping-based loader, so reading them would be a
+	// wasted file read per test set and a divergence between the two paths.
+	var startupNames []string
+	if r.config != nil && r.config.DisableMapping {
+		return testMockMappings, map[string]bool{}, map[string]bool{}, startupNames, nil
+	}
+	if startup, serr := r.mappingDB.GetStartup(ctx, testSetID); serr != nil {
+		r.logger.Debug("failed to read startup mocks from mappings; continuing without them",
+			zap.String("testSetID", testSetID), zap.Error(serr))
+	} else {
+		startupNames = (&models.Mapping{Startup: startup}).StartupMockNames()
 	}
 	if !hasMeaningful {
 		// No mappings on disk (OSS-shape recordings, e.g. local sandbox
@@ -537,17 +556,24 @@ func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[
 		// takes when DisableMapping is set. Returning an error here
 		// would break every repo-mode sandbox replay that lacks the
 		// enterprise-only mappings.yaml.
-		return map[string][]models.MockEntry{}, map[string]bool{}, map[string]bool{}, nil
+		return map[string][]models.MockEntry{}, map[string]bool{}, map[string]bool{}, startupNames, nil
 	}
 	mocksThatHaveMappings := make(map[string]bool)
 	mocksWeNeed := make(map[string]bool)
+	// Startup names go into BOTH maps. GetFilteredMocks prunes on
+	// `isMappedToSpecificTest && !isNeededForCurrentRun`, so a name in only the
+	// first map is dropped whenever a subset of tests runs.
+	for _, n := range startupNames {
+		mocksThatHaveMappings[n] = true
+		mocksWeNeed[n] = true
+	}
 	for _, mocks := range testMockMappings {
 		for _, m := range mocks {
 			mocksThatHaveMappings[m.Name] = true
 			mocksWeNeed[m.Name] = true
 		}
 	}
-	return testMockMappings, mocksThatHaveMappings, mocksWeNeed, nil
+	return testMockMappings, mocksThatHaveMappings, mocksWeNeed, startupNames, nil
 }
 
 // expectedMocksForTest returns this step's expected mock-name list from
@@ -559,15 +585,17 @@ func expectedMocksForTest(setup *testSetSetup, testCaseName string) []string {
 	if setup == nil {
 		return nil
 	}
-	entries, ok := setup.mappings[testCaseName]
-	if !ok {
-		return nil
-	}
-	expected := make([]string, 0, len(entries))
-	for _, m := range entries {
-		expected = append(expected, m.Name)
-	}
-	return expected
+	// Per-test names PLUS the test-set's startup names. sendPerTestParams hands
+	// this to the agent as MockFilterParams.MockMapping, which on the
+	// mapping-based path is loaded via disk.LoadByNames and nothing else — so
+	// omitting startup names leaves the app's boot mocks (handshake, auth, pool
+	// warm-up) out of the pool for every test.
+	//
+	// No local guard on an empty entry list: MergeStartupMockNames returns nil in
+	// that case by design, so a test with no per-test mapping keeps an empty
+	// MockMapping and the agent's wide-pool fallback rather than being narrowed
+	// to the boot mocks alone.
+	return models.MergeStartupMockNames(setup.mappings[testCaseName], setup.startupMockNames)
 }
 
 // expectedEntriesForTest returns this step's expected mocks as
@@ -642,15 +670,39 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 		return false
 	}
 
+	// Startup mocks are excluded from BOTH sides, for the same reason DNS is:
+	// they belong to the test SET, not to any one step, so neither their presence
+	// nor their absence in a given step is a mismatch.
+	//
+	// Excluding rather than adding them to `expected` is deliberate. They are now
+	// merged into the names sent to the agent (expectedMocksForTest), so a step
+	// that re-handshakes legitimately consumes one — it would otherwise surface
+	// as an unexpected consumption. But listing them as EXPECTED would be worse:
+	// every step that did not happen to re-consume one would then report it
+	// missing.
+	isStartup := func(name string) bool {
+		if setup == nil {
+			return false
+		}
+		for _, n := range setup.startupMockNames {
+			if n == name {
+				return true
+			}
+		}
+		return false
+	}
+
 	filteredExpected := make([]MockRef, 0, len(expected))
 	for _, e := range expected {
-		if !isDNS(e.Name, models.Kind(e.Kind)) {
-			filteredExpected = append(filteredExpected, e)
+		if isDNS(e.Name, models.Kind(e.Kind)) || isStartup(e.Name) {
+			continue
 		}
+		filteredExpected = append(filteredExpected, e)
 	}
+
 	filteredConsumed := make([]MockRef, 0, len(consumed))
 	for _, s := range consumed {
-		if isDNS(s.Name, s.Kind) {
+		if isDNS(s.Name, s.Kind) || isStartup(s.Name) {
 			continue
 		}
 		filteredConsumed = append(filteredConsumed, MockRef{

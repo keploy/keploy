@@ -3116,6 +3116,10 @@ func (p *Proxy) loadUpstreamTLSTrustAnchors() {
 }
 
 func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	// Fold the deprecated SchemaNoise* pair into the canonical MockNoise* one
+	// (and back), so options produced by a caller that predates the rename
+	// still drive the parsers, which read the canonical names.
+	opts.NormalizeMockNoise()
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
 	// Reset DNS mock deduplication tracker for fresh recording
@@ -3154,6 +3158,10 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 }
 
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+	// Fold the deprecated SchemaNoise* pair into the canonical MockNoise* one
+	// (and back), so options produced by a caller that predates the rename
+	// still drive the parsers, which read the canonical names.
+	opts.NormalizeMockNoise()
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
 	// Forget the previous recording's MySQL ports before this test set derives

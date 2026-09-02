@@ -8,9 +8,9 @@
 # field that drifts between a keploy recording and each replay. Three scenarios:
 #
 #   Phase A — control (flag off): replay writes NO noise.req.
-#   Phase B — detect+persist (--schema-noise-detection): the body.created_at
+#   Phase B — detect+persist (--mock-noise-detection): the body.created_at
 #             drift is detected and persisted under noise.req on the ES mock.
-#   Phase C — strict (test.schemaNoiseStrict): a drift on a NON-noise field
+#   Phase C — strict (test.mockNoiseStrict): a drift on a NON-noise field
 #             (content, induced by tampering the recorded mock) is rejected.
 #
 # Runs inside samples-go/mux-elasticsearch. Expects: $KEPLOY_BIN (named
@@ -29,7 +29,7 @@ APP_BIN=mux-elasticsearch
 APP_DIR="$PWD"
 SND_PATH="$APP_DIR/keploy-snd"          # dedicated path; leaves committed keploy/ untouched
 export ELASTICSEARCH_URL="http://127.0.0.1:9200"
-# Enable the app's schema-noise demo mode (server-stamped created_at + no
+# Enable the app's mock-noise demo mode (server-stamped created_at + no
 # keep-alive on the ES client). Off by default so the app's committed
 # recordings stay valid; this pipeline opts in.
 export STAMP_CREATED_AT=1
@@ -109,7 +109,7 @@ checkout_passed() {  # post-documents testcase passed?
   grep -oE '"testcase id": "[^"]*document[^"]*".*"passed": "[^"]+"' "$1" \
     | strip_ansi | grep -q '"passed": "true"'
 }
-# Request-body schema noise is written under the unified `noise:` block as a
+# Request-body mock noise is written under the unified `noise:` block as a
 # `req:` list of field paths (this replaced the legacy top-level `req_body_noise:`
 # map). A learned path therefore appears as a `- body.<path>` list item, which is
 # unique to noise.req: the HTTP spec's own `req:` is a mapping (no body-path list
@@ -120,7 +120,7 @@ mock_has_any_noise()        { grep -qE '^[[:space:]]*-[[:space:]]+body\.' "$(moc
 # ---------------------------------------------------------------------------
 # Phase A — control
 # ---------------------------------------------------------------------------
-step "Phase A — control (no --schema-noise-detection)"
+step "Phase A — control (no --mock-noise-detection)"
 record_fresh
 mock_has_any_noise && fail "fresh recording already has noise.req" \
                    || pass "fresh recording has no noise.req"
@@ -133,9 +133,9 @@ mock_has_any_noise && fail "flag off must NOT write noise.req" \
 # ---------------------------------------------------------------------------
 # Phase B — detect + persist
 # ---------------------------------------------------------------------------
-step "Phase B — detect + persist (--schema-noise-detection)"
+step "Phase B — detect + persist (--mock-noise-detection)"
 record_fresh
-replay "$APP_DIR/test_detect.log" --schema-noise-detection --remove-unused-mocks
+replay "$APP_DIR/test_detect.log" --mock-noise-detection --remove-unused-mocks
 checkout_passed "$APP_DIR/test_detect.log" && pass "replay passed with detection on" \
                                            || fail "replay should pass with detection on"
 if mock_has_created_at_noise; then
@@ -153,16 +153,16 @@ fi
 # in the recorded ES request body: on replay the app re-sends "world", which
 # now differs from the mock -> strict matching must reject it.
 # ---------------------------------------------------------------------------
-step "Phase C — strict matching (test.schemaNoiseStrict: true)"
+step "Phase C — strict matching (test.mockNoiseStrict: true)"
 sed -i 's/"content":"world"/"content":"TAMPERED"/' "$(mock_file)"
 STRICT_CFG="$APP_DIR/.strict-config"; mkdir -p "$STRICT_CFG"
 cat >"$STRICT_CFG/keploy.yml" <<'EOF'
 path: ""
 appName: mux-elasticsearch
 test:
-    schemaNoiseStrict: true
+    mockNoiseStrict: true
 EOF
-replay "$APP_DIR/test_strict.log" --schema-noise-detection --config-path "$STRICT_CFG" --debug
+replay "$APP_DIR/test_strict.log" --mock-noise-detection --config-path "$STRICT_CFG" --debug
 if grep 'strict req-body match rejected mock' "$APP_DIR/test_strict.log" | grep -q 'body.content'; then
   pass "strict matching rejected the mock on non-noise drift (body.content)"
 else
@@ -173,7 +173,7 @@ fi
 # ---------------------------------------------------------------------------
 echo
 if [ "$FAILURES" -eq 0 ]; then
-  echo "ALL CHECKS PASSED — schema-noise detection verified on mux-elasticsearch."
+  echo "ALL CHECKS PASSED — mock-noise detection verified on mux-elasticsearch."
   exit 0
 fi
 echo "$FAILURES CHECK(S) FAILED."

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -17,7 +17,7 @@ func httpMockWithReq(name, method, rawURL, body string, header map[string]string
 		Name: name,
 		Kind: models.Kind(models.HTTP),
 		Spec: models.MockSpec{
-			// Schema-noise lives on the kind-agnostic MockSpec.ReqBodyNoise for
+			// Mock-noise lives on the kind-agnostic MockSpec.ReqBodyNoise for
 			// every parser, HTTP included.
 			ReqBodyNoise: reqBodyNoise,
 			HTTPReq: &models.HTTPReq{
@@ -142,7 +142,7 @@ func TestDetectReqBodyNoise_UserNoiseExcluded(t *testing.T) {
 	mock := httpMockWithReq("mock-1", "POST", "http://x/y",
 		`{"ts":"111","real":"a"}`, map[string]string{"Content-Type": "application/json"}, nil)
 
-	got, _ := schemanoise.New(httpNoiseAdapter{}, true, false).Detect(mock, []byte(`{"ts":"222","real":"b"}`), map[string][]string{"ts": {}})
+	got, _ := mocknoise.New(httpNoiseAdapter{}, true, false).Detect(mock, []byte(`{"ts":"222","real":"b"}`), map[string][]string{"ts": {}})
 	if _, ok := got["body.ts"]; ok {
 		t.Errorf("user-noised field must not be re-learned as noise: %+v", got)
 	}
@@ -159,7 +159,7 @@ func TestFilterStrictNoiseMatches_UserNoiseAllowsDrift(t *testing.T) {
 		`{"request_id":"r-1","ts":"111"}`, map[string]string{"Content-Type": "application/json"},
 		map[string][]string{"body.request_id": {}})
 
-	eng := schemanoise.New(httpNoiseAdapter{}, false, true)
+	eng := mocknoise.New(httpNoiseAdapter{}, false, true)
 	// ts drifted; without user noise the candidate must be rejected.
 	live := []byte(`{"request_id":"r-9","ts":"222"}`)
 	if kept := h.filterStrictNoiseMatches(eng, []*models.Mock{mock}, live, nil); len(kept) != 0 {

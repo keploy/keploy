@@ -122,7 +122,7 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 // (expected) scalar value of each changed path — returning true drops that
 // path. This lets the proxy exclude fields the enterprise obfuscator already
 // redacted (recorded value matches a Mock.Noise regex) so secret fields are
-// not re-flagged as schema noise.
+// not re-flagged as mock noise.
 func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, excludeRecordedValue func(string) bool) []string {
 	if !json.Valid([]byte(expJSON)) || !json.Valid([]byte(actJSON)) {
 		return nil

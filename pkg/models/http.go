@@ -28,10 +28,10 @@ type HTTPReq struct {
 	Binary     string            `json:"binary" yaml:"binary,omitempty"`
 	Form       []FormData        `json:"form" yaml:"form,omitempty"`
 	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
-	// NOTE: schema-noise (req_body_noise) is NOT stored here. It lives on the
+	// NOTE: mock-noise (req_body_noise) is NOT stored here. It lives on the
 	// kind-agnostic MockSpec.ReqBodyNoise for every parser, HTTP included, so the
 	// learn/enforce flow is uniform across protocols (see pkg/agent/proxy/
-	// integrations/schemanoise).
+	// integrations/mocknoise).
 }
 
 type HTTPSchema struct {

@@ -11,9 +11,9 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	mysqlutils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -270,12 +270,12 @@ func isSessionReusableCommandMock(mock *models.Mock) bool {
 }
 
 // matchCommand matches one live command-phase request against the mock pool.
-// noiseEngine carries the resolved schema-noise flags (nil-safe: a nil engine
+// noiseEngine carries the resolved mock-noise flags (nil-safe: a nil engine
 // disables both detection and strict). userBodyNoise is the user's
 // test.globalNoise.requestBody bucket (root-relative lowercased paths) so
 // configured noise participates in strict gating with the same vocabulary as
 // learned req_body_noise. miss is non-nil only when ok is false without error.
-func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *mocknoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	// Precompute string constants once (avoid frequent map lookups)
 	var (
 		sCOM_QUIT       = mysql.CommandStatusToString(mysql.COM_QUIT)
@@ -436,12 +436,12 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		logger.Debug("recorded prepEntries", zap.String("entries", strings.Join(allEntries, " | ")))
 	}
 
-	// Canonical JSON body of the live request for the schema-noise engine.
+	// Canonical JSON body of the live request for the mock-noise engine.
 	// liveBodyOK is false for packets with no drift-capable body (utility
 	// commands, CLOSE/RESET) — the engine no-ops for those.
 	liveBody, liveBodyOK := mysqlRequestBodyJSON(&req.PacketBundle)
 
-	// Strict-enforcement gate (see strictGate in schema_noise.go): consulted
+	// Strict-enforcement gate (see strictGate in mock_noise.go): consulted
 	// before a mock may become a match candidate, and accumulates the
 	// rejection diagnostics (count / closest mock / field-level diffs) the
 	// mismatch report renders on a miss.
@@ -989,7 +989,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			// the record window captured none.
 			//
 			// Historically the streamed payload was never content-compared at
-			// all. Under schemaNoiseStrict each candidate is now gated through
+			// all. Under mockNoiseStrict each candidate is now gated through
 			// the engine: a chunk whose data drifted outside learned/user
 			// noise (body.data) cannot be consumed, and when every recorded
 			// candidate is rejected that way the command is a real mismatch
@@ -1031,7 +1031,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			if chosen == nil && sldClosest != nil {
 				// Recorded SLD mocks exist but strict rejected every one:
 				// unmarked payload drift is a real mismatch, not a pass.
-				logger.Debug("schema-noise strict: all recorded COM_STMT_SEND_LONG_DATA candidates rejected",
+				logger.Debug("mock-noise strict: all recorded COM_STMT_SEND_LONG_DATA candidates rejected",
 					zap.String("closest_mock", sldClosest.Name))
 				return nil, false, &mockMiss{
 					closestMock:    sldClosest.Name,
@@ -1223,7 +1223,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		}, nil
 	}
 
-	// Schema-noise detection: diff the winning mock's recorded request body
+	// Mock-noise detection: diff the winning mock's recorded request body
 	// against the live one and learn any NEW drifted field paths (beyond
 	// user-configured noise and anything already learned) as req_body_noise.
 	// A mock served via the lenient score/FIFO fallbacks is exactly a mock
@@ -1239,7 +1239,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			for p := range detectedNoise {
 				paths = append(paths, p)
 			}
-			logger.Debug("schema-noise detection: learned request-body drift on matched mock",
+			logger.Debug("mock-noise detection: learned request-body drift on matched mock",
 				zap.String("mock", matchedMock.Name),
 				zap.String("request_type", req.Header.Type),
 				zap.Strings("fields", paths))
@@ -1936,7 +1936,7 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // copy rather than the pool pointer, so concurrent goroutines that
 // match the same session-lifetime mock don't race on TestModeInfo.
 // updateMock processes the matched mock based on its Lifetime. detectedNoise
-// carries any request-body drift the schema-noise engine detected this match;
+// carries any request-body drift the mock-noise engine detected this match;
 // it is merged onto FRESH copies only (never the shared pooled mock's map —
 // see the HTTP updateMock's concurrency note, the same pooled-pointer race
 // applies here) and reaches persistence through the same
@@ -1946,7 +1946,7 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 	if len(detectedNoise) > 0 {
-		updatedMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(updatedMock.Spec.ReqBodyNoise, detectedNoise)
+		updatedMock.Spec.ReqBodyNoise = mocknoise.MergeLearned(updatedMock.Spec.ReqBodyNoise, detectedNoise)
 	}
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
@@ -1981,7 +1981,7 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	// the noise gets reported on the consumed per-test mock (mirrors HTTP).
 	deleteMock := *matchedMock
 	if len(detectedNoise) > 0 {
-		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
+		deleteMock.Spec.ReqBodyNoise = mocknoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
 	}
 	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true

@@ -4,7 +4,7 @@ import (
 	"sort"
 	"testing"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -30,8 +30,8 @@ func sortedKeys(m map[string][]string) []string {
 	return out
 }
 
-// TestDetectReqBodyNoise drives HTTP's schema-noise detection through the shared
-// engine (httpNoiseAdapter + schemanoise.Engine) — the same path match() uses —
+// TestDetectReqBodyNoise drives HTTP's mock-noise detection through the shared
+// engine (httpNoiseAdapter + mocknoise.Engine) — the same path match() uses —
 // proving HTTP is a full client of the generic engine, not just a borrower of
 // the JSON kernel.
 func TestDetectReqBodyNoise(t *testing.T) {
@@ -41,7 +41,7 @@ func TestDetectReqBodyNoise(t *testing.T) {
 	// detect mirrors what match() does: build an engine with the detection flag
 	// and ask it for the drift on a candidate.
 	detect := func(enabled bool, mock *models.Mock, body []byte, userNoise map[string][]string) map[string][]string {
-		drift, _ := schemanoise.New(httpNoiseAdapter{}, enabled, false).Detect(mock, body, userNoise)
+		drift, _ := mocknoise.New(httpNoiseAdapter{}, enabled, false).Detect(mock, body, userNoise)
 		return drift
 	}
 

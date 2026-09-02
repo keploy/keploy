@@ -64,7 +64,7 @@ func TestDocNoise_UnmarshalJSON(t *testing.T) {
 }
 
 // TestNewDocNoise_DropsRegexValuesAndSorts verifies the encode helper persists
-// only the field PATHS of the schema-noise map (regex values dropped), sorts them
+// only the field PATHS of the mock-noise map (regex values dropped), sorts them
 // deterministically, and returns nil when there is nothing to write.
 func TestNewDocNoise_DropsRegexValuesAndSorts(t *testing.T) {
 	got := NewDocNoise([]string{"^tok-.*$"}, map[string][]string{
@@ -86,7 +86,7 @@ func TestNewDocNoise_DropsRegexValuesAndSorts(t *testing.T) {
 	}
 }
 
-// TestResolveReqBodyNoise checks decode resolution: request-body schema noise is
+// TestResolveReqBodyNoise checks decode resolution: request-body mock noise is
 // taken from the unified noise.req list, mapping each path to an empty regex list
 // (path-only representation). An absent noise block resolves to nil.
 func TestResolveReqBodyNoise(t *testing.T) {

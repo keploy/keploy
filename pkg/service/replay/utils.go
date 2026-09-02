@@ -683,7 +683,7 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	// Merge EVERY section present in the test-set noise — not just body/header.
 	// The previous code hard-coded those two buckets, so test-set-scoped
 	// `requestbody` noise (and any future bucket) was silently dropped while the
-	// global bucket worked, which under --schema-noise-strict could turn a
+	// global bucket worked, which under --mock-noise-strict could turn a
 	// noised request-body field back into a match-affecting one and falsely
 	// reject the mock.
 	for section, fields := range tsNoise {
@@ -1422,4 +1422,86 @@ func printFieldDiffTable(fieldDiffs []models.MockFieldDiff) {
 		table.Append([]string{d.Path, exp, rec})
 	}
 	table.Render()
+}
+
+// setStartupMocks records the test-set-scoped startup section on a mapping
+// being built during replay.
+//
+// consumed is the mock set captured by GetConsumedMocks immediately after the
+// application became ready and before the first test case ran, so every entry
+// is boot traffic by construction — there is no need to infer membership from
+// per-test window arithmetic.
+//
+// Deduped by name and order-stable, so re-running a test set produces a
+// byte-identical section rather than churning mappings.yaml.
+//
+// A mock may legitimately appear BOTH here and under a test's list: session-
+// and connection-tier mocks are consumed at boot and again by tests that
+// re-handshake, and upsertActualTestMockMapping deliberately keeps those in the
+// per-test list ("always keep" carve-out). Both sides only ever ADD names to
+// the pool the agent loads, so the overlap is harmless — and removing it would
+// reintroduce the empty-mapping bug that carve-out exists to prevent.
+func setStartupMocks(mapping *models.Mapping, consumed []models.MockState) {
+	if mapping == nil || len(consumed) == 0 {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(consumed))
+	entries := make([]models.MockEntry, 0, len(consumed))
+	for _, m := range consumed {
+		if m.Name == "" {
+			continue
+		}
+		if _, dup := seen[m.Name]; dup {
+			continue
+		}
+		seen[m.Name] = struct{}{}
+
+		timestamp := m.Timestamp
+		if m.ReqTimestampMock != "" {
+			if t, err := time.Parse(time.RFC3339Nano, m.ReqTimestampMock); err == nil {
+				timestamp = t.Unix()
+			}
+		}
+		entries = append(entries, models.MockEntry{
+			Name:             m.Name,
+			Kind:             string(m.Kind),
+			Timestamp:        timestamp,
+			ReqTimestampMock: m.ReqTimestampMock,
+			ResTimestampMock: m.ResTimestampMock,
+		})
+	}
+
+	mapping.Startup = entries
+}
+
+// dropStartupMockInfos removes test-set-scoped startup mocks from a
+// MockMismatch side.
+//
+// Applied to expected AND actual, mirroring pkg/service/runner's
+// checkMockMismatches and the DNS carve-out beside it. Startup mocks belong to
+// the test set, not to any one test, so neither their presence nor their
+// absence in a given test is a mismatch worth reporting — and because a
+// session- or connection-tier mock legitimately appears in both the startup
+// section and a per-test list, filtering only one side would turn every such
+// name into a phantom on the other.
+//
+// Report-only: MockMismatches does not feed the pass/fail or obsolescence
+// decision, which is why this cannot mask a real failure.
+func dropStartupMockInfos(infos []models.MockMismatchMock, startupNames []string) []models.MockMismatchMock {
+	if len(infos) == 0 || len(startupNames) == 0 {
+		return infos
+	}
+	startup := make(map[string]struct{}, len(startupNames))
+	for _, n := range startupNames {
+		startup[n] = struct{}{}
+	}
+	out := make([]models.MockMismatchMock, 0, len(infos))
+	for _, i := range infos {
+		if _, isStartup := startup[i.Name]; isStartup {
+			continue
+		}
+		out = append(out, i)
+	}
+	return out
 }

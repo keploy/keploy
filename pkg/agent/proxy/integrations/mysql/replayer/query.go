@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
@@ -27,10 +27,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 		zap.Int("config_mocks", cfg),
 		zap.Int("data_mocks_available", data))
 
-	// Shared schema-noise engine for this connection's command phase. MySQL is
+	// Shared mock-noise engine for this connection's command phase. MySQL is
 	// a client of the same engine HTTP uses — mysqlNoiseAdapter owns only the
 	// MySQL-specific bit (canonicalizing command packets into diffable JSON).
-	noiseEngine := schemanoise.New(mysqlNoiseAdapter{}, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict)
+	noiseEngine := mocknoise.New(mysqlNoiseAdapter{}, opts.MockNoiseDetection, opts.MockNoiseStrict)
 
 	// User request-body noise from test.globalNoise.requestBody — the same
 	// DEDICATED request-matching bucket HTTP consumes (see http/decode.go for
@@ -180,12 +180,12 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				if actualQuery != "" || closestQuery != "" {
 					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200))
 				}
-				// Under schemaNoiseStrict a rejection is a drift verdict, not a
+				// Under mockNoiseStrict a rejection is a drift verdict, not a
 				// missing recording — say WHICH fields drifted (FieldDiffs) and
 				// how to mark them, instead of the generic re-record hint.
 				nextSteps := "Re-record mocks if the SQL query has changed."
 				if miss.strictRejected > 0 {
-					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
+					nextSteps = fmt.Sprintf("mock-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --mock-noise-detection to learn them, or re-record.", miss.strictRejected)
 				}
 				report := &models.MockMismatchReport{
 					Protocol:      "MySQL",
@@ -219,7 +219,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					)
 				}
 				// next_step reuses the strict-aware guidance computed for the
-				// mismatch report above — under schemaNoiseStrict the accurate
+				// mismatch report above — under mockNoiseStrict the accurate
 				// advice is "mark/learn the drifted fields", not "re-record".
 				logger.Error("Connection closing due to no matching mock found.",
 					zap.Int("commands_processed", commandCount),

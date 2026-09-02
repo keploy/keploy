@@ -2,13 +2,13 @@ package http
 
 import (
 	"go.keploy.io/server/v3/pkg"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// httpNoiseAdapter is the HTTP implementation of schemanoise.Adapter, making
-// HTTP a first-class client of the shared schema-noise engine (the same engine
+// httpNoiseAdapter is the HTTP implementation of mocknoise.Adapter, making
+// HTTP a first-class client of the shared mock-noise engine (the same engine
 // Pulsar and any future parser use). Like every parser, HTTP stores its learned
 // noise on the kind-agnostic MockSpec.ReqBodyNoise. It supplies a Diff that
 // handles BOTH JSON and form-urlencoded bodies — the form path is HTTP's own
@@ -48,7 +48,7 @@ func (httpNoiseAdapter) SetLearnedNoise(m *models.Mock, merged map[string][]stri
 
 // RecordedValueIsNoise excludes recorded values the enterprise obfuscator already
 // redacted (recorded value matches a Mock.Noise regex) so secret fields are not
-// re-flagged as schema noise.
+// re-flagged as mock noise.
 func (httpNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool {
 	if m == nil {
 		return nil
@@ -72,11 +72,11 @@ func (httpNoiseAdapter) Diff(m *models.Mock, recorded, live []byte, known map[st
 	}
 	switch {
 	case pkg.IsJSON(recorded) && pkg.IsJSON(live):
-		return schemanoise.DetectJSONDrift(recorded, live, known, valIsNoise)
+		return mocknoise.DetectJSONDrift(recorded, live, known, valIsNoise)
 	case isFormURLEncoded(m.Spec.HTTPReq.Header):
 		// Form bodies are comparable; formReqBodyNoise emits "body."-prefixed
 		// drift and expects a "body."-prefixed known set.
-		return formReqBodyNoise(string(recorded), string(live), schemanoise.AddBodyPrefix(known), valIsNoise), true
+		return formReqBodyNoise(string(recorded), string(live), mocknoise.AddBodyPrefix(known), valIsNoise), true
 	default:
 		return nil, false
 	}

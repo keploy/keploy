@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -33,7 +33,7 @@ func TestMatchCommand_MissNamesTheNearestRecordingInsteadOfClaimingNoneExists(t 
 	db := &fakeMockDb{session: []*models.Mock{
 		readbackMock("m-invoices", recorded, "row-1", zeroTime()),
 	}}
-	eng := schemanoise.New(mysqlNoiseAdapter{}, false, false)
+	eng := mocknoise.New(mysqlNoiseAdapter{}, false, false)
 
 	_, ok, miss, err := matchCommand(context.Background(), logger, comQueryReq(live), db, newDecodeCtx(), eng, nil)
 	if err != nil {
@@ -81,7 +81,7 @@ func TestMatchCommand_DBMCommentEndToEnd(t *testing.T) {
 		readbackMock("m-decoy", dbmWriter+decoy, "decoy-row", zeroTime()),
 		readbackMock("m-target", dbmWriter+body, "target-row", zeroTime()),
 	}}
-	eng := schemanoise.New(mysqlNoiseAdapter{}, false, false)
+	eng := mocknoise.New(mysqlNoiseAdapter{}, false, false)
 
 	resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(dbmReader+body), db, newDecodeCtx(), eng, nil)
 	if err != nil {
@@ -121,7 +121,7 @@ func TestMatchCommand_NoMocksPhaseStillReachable(t *testing.T) {
 	}}
 
 	db := &fakeMockDb{session: []*models.Mock{handshake}}
-	eng := schemanoise.New(mysqlNoiseAdapter{}, false, false)
+	eng := mocknoise.New(mysqlNoiseAdapter{}, false, false)
 
 	_, ok, miss, err := matchCommand(context.Background(), zap.NewNop(),
 		comQueryReq("SELECT 1"), db, newDecodeCtx(), eng, nil)
@@ -160,7 +160,7 @@ func TestMatchCommand_LiteralDriftPicksTheRightShape(t *testing.T) {
 		readbackMock("m-decoy", fmt.Sprintf(decoy, "1dc32a3c-a50c-5e92-9797-a6b6c4c7156e"), "decoy-row", zeroTime()),
 		readbackMock("m-target", fmt.Sprintf(shape, "1dc32a3c-a50c-5e92-9797-a6b6c4c7156e"), "target-row", zeroTime()),
 	}}
-	eng := schemanoise.New(mysqlNoiseAdapter{}, false, false)
+	eng := mocknoise.New(mysqlNoiseAdapter{}, false, false)
 
 	live := comQueryReq(fmt.Sprintf(shape, "2a22d715-4799-5150-80d6-a0dd935fbda2"))
 	resp, ok, _, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), eng, nil)
