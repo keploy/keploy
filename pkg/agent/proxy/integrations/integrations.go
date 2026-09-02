@@ -344,7 +344,11 @@ type WindowAware interface {
 	// HasFirstTestFired reports whether at least one real test window
 	// has been set on the underlying MockManager via SetMocksWithWindow
 	// (non-zero start that is not the BaseTime staging sentinel).
-	// Sticky — once true, stays true.
+	// Sticky within a test-set; ResetForReplaySession clears it at each
+	// set boundary, so a set being staged reads false again. This is the
+	// same underlying value FirstTestWindowStart below exposes as a
+	// timestamp — "has this set's first test fired" and "when did it fire"
+	// are one field, so they share that per-set lifetime.
 	//
 	// Parsers use this alongside IsTestWindowActive to distinguish
 	// "app bootstrap" (before first test) from "between tests" (after
@@ -365,9 +369,11 @@ type WindowAware interface {
 	HasFirstTestFired() bool
 
 	// FirstTestWindowStart returns the earliest test window start observed
-	// by the MockManager, or zero if no real test has fired yet (i.e. every
-	// SetMocksWithWindow call so far was either absent or fired with the
-	// models.BaseTime staging sentinel). Used by filter / strict-gate
+	// by the MockManager FOR THE TEST SET BEING REPLAYED, or zero if no real
+	// test has fired in it yet (i.e. every SetMocksWithWindow call so far was
+	// either absent or fired with the models.BaseTime staging sentinel).
+	// ResetForReplaySession clears it at each set boundary, so each set
+	// classifies against its own first test. Used by filter / strict-gate
 	// callers to distinguish startup-init mocks (req_ts < firstWindowStart)
 	// from stale previous-test mocks (firstWindowStart <= req_ts <
 	// currentStart): the former are legitimate app-bootstrap traffic that

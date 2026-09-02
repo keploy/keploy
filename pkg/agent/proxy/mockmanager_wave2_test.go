@@ -7,7 +7,8 @@
 //   - GetPerTestMocksInWindow()→ per-test mocks inside [start, end]
 //
 // Plus the legacy GetSessionMocks() union shim (startup + session) and
-// the HasFirstTestFired() sticky signal.
+// the HasFirstTestFired() signal, which is sticky WITHIN a test-set and
+// clears at each set boundary (ResetForReplaySession).
 package proxy
 
 import (
@@ -938,5 +939,115 @@ func TestSetMocksWithWindow_StartupRebuild_DoesNotClobberUnfilteredID(t *testing
 	}
 	if !containsMockNamed(session, "sess") {
 		t.Fatalf("GetSessionScopedMocks: want 'sess' in session tier, got %v", mockNames(session))
+	}
+}
+
+// proxy.go reuses ONE MockManager for the whole replay — deliberately, to keep
+// revision tracking continuous for parsers that captured it at MockOutgoing
+// time — and marks each test-set boundary with ResetForReplaySession.
+//
+// Tier routing is a per-test-set question, so it has to be back at "nothing
+// has fired" when the next set is staged. It was not: the routing bit was read
+// off the process-global firstWindowStart, so from the first test of the FIRST
+// set onward it stayed true forever, and SetMocksWithWindow's isInitialStaging
+// branch kept the previous set's window besides. A parser staging set 2 saw
+// Active=true, routed that set's bootstrap traffic to the per-test engine, and
+// missed all of it — staging had just copied those mocks into the startup tree
+// precisely because it expected routing to land on the startup engine.
+func TestResetForReplaySession_PutsTierRoutingBackToPreTestState(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+
+	// Test set 1: one real test fires.
+	start := time.Now().Add(-time.Minute)
+	mm.SetMocksWithWindow(nil, nil, start, start.Add(time.Second))
+	if snap := mm.WindowSnapshot(); !snap.Active || !snap.FirstTestFired {
+		t.Fatalf("precondition: a real test must publish an active window, got %+v", snap)
+	}
+
+	// Set 1 ends, set 2 begins and is staged with the "no test yet" sentinel.
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+
+	snap := mm.WindowSnapshot()
+	if snap.Active {
+		t.Errorf("window still Active while staging test set 2 — bootstrap traffic routes to the per-test engine, whose tree staging just left empty")
+	}
+	if snap.FirstTestFired {
+		t.Errorf("FirstTestFired still set while staging test set 2 — routing skips the startup engine that holds the staged mocks")
+	}
+
+	// And it must come back for set 2's own first test, or every query in
+	// that set would route to startup.
+	s2 := time.Now()
+	mm.SetMocksWithWindow(nil, nil, s2, s2.Add(time.Second))
+	if snap := mm.WindowSnapshot(); !snap.Active || !snap.FirstTestFired {
+		t.Errorf("test set 2's first real test did not re-arm routing: %+v", snap)
+	}
+}
+
+// The other half of the same boundary, and the reason routing alone is not
+// enough: the startup-init vs. stale-bleed cutoff is per-set too.
+//
+// It is a running MINIMUM over every real window the manager has seen, so
+// preserving it across sets pinned it to whichever set recorded earliest.
+// Every other set's own bootstrap mocks fall AFTER that cutoff, so they are
+// classified as stale previous-test bleed and dropped from every tier the
+// instant that set's first test fires — the startup tier is empty for the
+// rest of the run even though staging had just populated it.
+//
+// Real mocks, not nil slices: the flags being right is worth nothing if the
+// mock is not actually in the tier the flags route to.
+func TestResetForReplaySession_SecondTestSetKeepsItsOwnBootstrapMocks(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	// Test set 1, recorded earlier than set 2 (the normal ordering).
+	s1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	mm.SetMocksWithWindow(
+		[]*models.Mock{newMockForTest("s1test", s1.Add(time.Second), models.LifetimePerTest)},
+		nil, s1, s1.Add(10*time.Second))
+
+	// Boundary, then set 2 stages with the "no test yet" sentinel.
+	mm.ResetForReplaySession()
+
+	s2 := s1.Add(time.Hour)
+	boot := newMockForTest("s2boot", s2.Add(-5*time.Second), models.LifetimePerTest)
+	test := newMockForTest("s2test", s2.Add(time.Second), models.LifetimePerTest)
+	mm.SetMocksWithWindow([]*models.Mock{boot, test}, nil, models.BaseTime, time.Now())
+
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks during staging: %v", err)
+	}
+	if !containsMockNamed(startup, "s2boot") {
+		t.Fatalf("staging did not put set 2's bootstrap mock in the startup tier: %v", startup)
+	}
+
+	// Set 2's first real test fires. Its bootstrap mock must STAY in the
+	// startup tier — it was recorded before this set's first test, which is
+	// the definition of startup-init.
+	mm.SetMocksWithWindow([]*models.Mock{boot, test}, nil, s2, s2.Add(10*time.Second))
+
+	startup, err = mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks after set 2's first test: %v", err)
+	}
+	if !containsMockNamed(startup, "s2boot") {
+		perTest, _ := mm.GetPerTestMocksInWindow()
+		session, _ := mm.GetSessionScopedMocks()
+		t.Fatalf("set 2's own bootstrap mock was dropped from every tier once its first test fired "+
+			"(cutoff stuck at set 1's start): startup=%v perTest=%v session=%v",
+			startup, perTest, session)
+	}
+
+	// And the mock that IS in this set's window still routes per-test, so the
+	// cutoff reset did not simply reclassify everything as startup.
+	perTest, err := mm.GetPerTestMocksInWindow()
+	if err != nil {
+		t.Fatalf("GetPerTestMocksInWindow: %v", err)
+	}
+	if !containsMockNamed(perTest, "s2test") {
+		t.Fatalf("set 2's in-window test mock is missing from the per-test tier: %v", perTest)
 	}
 }
