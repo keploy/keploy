@@ -12,6 +12,7 @@
 package proxy
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1638,5 +1639,127 @@ func TestSeedStartupCutoff_AbortedSetDoesNotLeakItsCutoffToTheNext(t *testing.T)
 	if got := mm.FirstTestWindowStart(); !got.IsZero() {
 		t.Fatalf("cutoff = %v, want zero: an unseeded set inherited a parked cutoff "+
 			"from an aborted earlier set", got)
+	}
+}
+
+// MarkMockAsUsed must move a startup-tier mock's HitCount.
+//
+// rebuildHitIndex was handed only the per-test and session slices, and
+// bumpHitCount's slow path walked filteredByKind, unfilteredByKind and the
+// connection trees — never the startup tree. A startup-only mock therefore
+// missed the index forever: every call took the process-wide exclusive hitMu,
+// walked all of those trees, found nothing, and seeded nothing, so the next
+// call repeated the whole walk — and the mock's HitCount never moved.
+func TestMarkMockAsUsed_CountsStartupTierMocks(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(func() { mm.Close() })
+
+	first := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	boot := newMockForTest("boot-mock", first.Add(-time.Minute), models.LifetimePerTest)
+
+	// Stage, then open a window so the boot mock is classified startup-init.
+	mm.SetMocksWithWindow([]*models.Mock{boot}, nil, models.BaseTime, time.Now())
+	mm.SetMocksWithWindow([]*models.Mock{boot}, nil, first, first.Add(time.Second))
+
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if !containsMockNamed(startup, "boot-mock") {
+		t.Fatal("precondition: the mock must be in the startup tier")
+	}
+
+	if !mm.MarkMockAsUsed(*boot) {
+		t.Fatal("MarkMockAsUsed reported failure")
+	}
+
+	live, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	for _, mk := range live {
+		if mk != nil && mk.Name == "boot-mock" {
+			if got := atomic.LoadUint64(&mk.TestModeInfo.HitCount); got == 0 {
+				t.Fatal("the startup-tier mock's HitCount is still 0: it is absent from " +
+					"hitIdx and from the slow path's search, so every MarkMockAsUsed " +
+					"takes the exclusive lock, walks every other tree and seeds nothing")
+			}
+			return
+		}
+	}
+	t.Fatal("the startup mock disappeared from the tier")
+}
+
+// SetMocksWithWindowThreeTier inserts its explicit startup slice AFTER the
+// SetMocksWithWindow it delegates to has already rebuilt hitIdx, so those mocks
+// could never reach the index — and the slow path does not search the startup
+// tree. Their HitCount could never move at all.
+func TestSetMocksWithWindowThreeTier_IndexesItsExplicitStartupSlice(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(func() { mm.Close() })
+
+	at := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	boot := newMockForTest("threetier-boot", at.Add(-time.Minute), models.LifetimePerTest)
+
+	mm.SetMocksWithWindowThreeTier(nil, nil, []*models.Mock{boot}, at, at.Add(time.Second))
+
+	mm.hitMu.RLock()
+	_, indexed := mm.hitIdx["threetier-boot"]
+	mm.hitMu.RUnlock()
+	if !indexed {
+		t.Fatal("the explicit startup mock never reached hitIdx: it is inserted after " +
+			"SetMocksWithWindow's rebuild, and the slow path does not search the startup tree")
+	}
+
+	if !mm.MarkMockAsUsed(*boot) {
+		t.Fatal("MarkMockAsUsed reported failure")
+	}
+	if got := atomic.LoadUint64(&boot.TestModeInfo.HitCount); got == 0 {
+		t.Fatal("HitCount did not move for a mock in the explicit startup slice")
+	}
+
+	// The seeding is additive, never displacing: an explicit startup mock must
+	// not steal the index entry of a session mock with the same name, or the
+	// rebuild's precedence is inverted by the back door.
+	mm2 := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(func() { mm2.Close() })
+	sessionCopy := newMockForTest("dup-name", at.Add(time.Second), models.LifetimeSession)
+	startupCopy := newMockForTest("dup-name", at.Add(-time.Minute), models.LifetimePerTest)
+
+	mm2.SetMocksWithWindowThreeTier(nil, []*models.Mock{sessionCopy},
+		[]*models.Mock{startupCopy}, at, at.Add(time.Minute))
+
+	mm2.hitMu.RLock()
+	claimed := mm2.hitIdx["dup-name"]
+	mm2.hitMu.RUnlock()
+	if claimed != sessionCopy {
+		t.Fatal("the explicit startup mock displaced the session mock's index entry; " +
+			"addToHitIndexIfAbsent must not overwrite what the rebuild established")
+	}
+}
+
+// A duplicate name must not let a startup mock outrank a session or per-test
+// one. rebuildHitIndex resolves duplicates to the LAST slice that carries the
+// name, so the tier order it is called with is load-bearing: passing startup
+// last would silently invert the precedence this call has always had.
+func TestRebuildHitIndex_StartupDoesNotOutrankTheOtherTiers(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(func() { mm.Close() })
+
+	at := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	// Same name, distinct pointers: one lands in the startup tier (recorded
+	// before the window), one in the session tier.
+	bootCopy := newMockForTest("shared-name", at.Add(-time.Minute), models.LifetimePerTest)
+	sessionCopy := newMockForTest("shared-name", at.Add(time.Second), models.LifetimeSession)
+
+	mm.SetMocksWithWindow([]*models.Mock{bootCopy}, []*models.Mock{sessionCopy}, at, at.Add(time.Minute))
+
+	mm.hitMu.RLock()
+	got := mm.hitIdx["shared-name"]
+	mm.hitMu.RUnlock()
+	if got != sessionCopy {
+		t.Fatal("a startup-tier mock claimed the index entry over the session-tier mock " +
+			"of the same name; rebuildHitIndex must be called with startup FIRST so it " +
+			"loses the duplicate-name tie")
 	}
 }

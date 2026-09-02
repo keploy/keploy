@@ -49,3 +49,11 @@ jobs:
 
       - name: Running Unit Tests
         run: go test ./...
+
+      # The mock-manager's concurrency guards — the tier-key/HitCount race and
+      # the hitMu/treesMu lock order — are only meaningful under -race: without
+      # it their tests pass on a build that races, so they read as coverage
+      # while proving nothing. Scoped to this package rather than the whole
+      # tree to keep the lane fast.
+      - name: Running Race Detector (agent proxy)
+        run: go test -race -count=1 ./pkg/agent/proxy/

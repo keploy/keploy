@@ -22,6 +22,11 @@ import (
 //	                          bump revisions; revMu is a leaf lock —
 //	                          never re-acquire swapMu/treesMu from under it)
 //	swapMu  →  consumedMu    (independent; never hold consumedMu then swapMu)
+//	hitMu   →  treesMu  →  connMu  →  TreeDb.mu
+//	                         (bumpHitCount's slow path; rebuildHitIndex and
+//	                          addToHitIndexIfAbsent take hitMu as a LEAF —
+//	                          never acquire treesMu from under either, and
+//	                          never take hitMu while holding treesMu)
 //
 // Any new code path that acquires more than one of these MUST take them
 // in the declared order. Readers of {mock pool, test window} as an
@@ -365,8 +370,10 @@ func (m *MockManager) IsClosed() bool {
 //   - sweeperStop / closed: the idle sweeper goroutine keeps running
 //     across the reset; closing it would stop the per-connection
 //     idle reaping for the rest of the replay.
-//   - hitIdx: rebuilt by SetFilteredMocks/SetUnFilteredMocks on the
-//     next mock load, so an explicit clear here is redundant.
+//   - hitIdx: rebuilt by the next SetMocksWithWindow (NOT by a bare
+//     SetFilteredMocks/SetUnFilteredMocks), so an explicit clear here
+//     is redundant only because Proxy.Mock always follows this reset
+//     with a staging SetMocksWithWindow.
 //
 // Safe to call concurrently with active matchers — connMu guards
 // the maps and noConnMocks is a sync.Map. Matchers holding stale
@@ -956,9 +963,7 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		// ID on the copy. mk.TestModeInfo.ID is left untouched so a
 		// later SetUnFilteredMocks re-stamp does not corrupt the
 		// startup tree's idIndex.
-		startupKey := mk.TestModeInfo
-		startupKey.ID = idx
-		newStartup.insert(startupKey, mk)
+		newStartup.insert(tierKey(mk, idx), mk)
 	}
 	// Harvest the kinds present BEFORE any tier is swapped.
 	//
@@ -1063,7 +1068,20 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// Rebuild the HitCount name→*Mock index so MarkMockAsUsed takes
 	// the O(1) fast path. Called after the tree swap so the index
 	// always points at the freshest mock pointers.
-	m.rebuildHitIndex(filteredForTree, unfilteredForTree)
+	// The startup tier is included: without it a startup-only mock never enters
+	// hitIdx, so MarkMockAsUsed on one takes the exclusive-lock slow path,
+	// walks the filtered tree, the unfiltered tree and every connection tree,
+	// finds nothing and seeds nothing — repeating that walk on every call for a
+	// mock whose HitCount never moves. Session and connection mocks copied into
+	// startup during BaseTime staging are already covered via unfilteredForTree;
+	// the ones that miss are those the startup tier alone holds.
+	//
+	// startupInit goes FIRST because the index resolves duplicate names to the
+	// LAST writer. Passing it last would silently make a startup mock outrank a
+	// session or per-test mock of the same name, inverting the precedence this
+	// call has always had (session over per-test). Names are not enforced
+	// unique by the manager — see sameMock — so the order has to be deliberate.
+	m.rebuildHitIndex(startupInit, filteredForTree, unfilteredForTree)
 
 	// Seed per-connID trees for connection-scoped mocks so
 	// GetConnectionMocks takes the O(1) path from the first lookup.
@@ -1164,26 +1182,59 @@ func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup 
 	// contribute connection-scoped mocks that the heuristic can't
 	// derive on its own.
 	m.SetMocksWithWindow(filtered, unfiltered, start, end)
-	m.swapMu.Lock()
-	defer m.swapMu.Unlock()
-	m.treesMu.Lock()
-	defer m.treesMu.Unlock()
-	if m.startup == nil {
-		m.startup = NewTreeDb(customComparator)
-	}
-	for idx, mk := range startup {
-		if mk == nil {
+	// Scoped so swapMu and treesMu are RELEASED before hitIdx is seeded below.
+	// bumpHitCount's slow path takes hitMu and then treesMu; seeding from in
+	// here would take them in the opposite order and the two paths would
+	// deadlock on each other.
+	func() {
+		m.swapMu.Lock()
+		defer m.swapMu.Unlock()
+		m.treesMu.Lock()
+		defer m.treesMu.Unlock()
+		if m.startup == nil {
+			m.startup = NewTreeDb(customComparator)
+		}
+		for idx, mk := range startup {
+			if mk == nil {
+				continue
+			}
+			if mk.TestModeInfo.SortOrder == 0 {
+				mk.TestModeInfo.SortOrder = int64(idx) + 1
+			}
+			// Tier-local key with an ID offset by a large constant so it cannot
+			// collide with the legacy SetMocksWithWindow's startup IDs (0..N).
+			m.startup.insert(tierKey(mk, 1_000_000+idx), mk)
+		}
+	}()
+	// The inserts above happen AFTER the SetMocksWithWindow already rebuilt
+	// hitIdx, so without this they could never reach the index and
+	// MarkMockAsUsed on one would take the exclusive-lock slow path — which
+	// does not search the startup tree — find nothing, and seed nothing.
+	// Additive, so a name already claimed by the per-test or session tier keeps
+	// its entry rather than being outranked by an explicit startup mock.
+	m.addToHitIndexIfAbsent(startup)
+}
+
+// addToHitIndexIfAbsent seeds hitIdx for mocks inserted into a tier outside
+// SetMocksWithWindow's rebuild. It never displaces an existing entry: the
+// rebuild's precedence (session over per-test over startup) is authoritative.
+//
+// Takes hitMu as a LEAF — callers must not hold treesMu, because
+// bumpHitCount's slow path acquires hitMu then treesMu and the reverse order
+// deadlocks.
+func (m *MockManager) addToHitIndexIfAbsent(mocks []*models.Mock) {
+	m.hitMu.Lock()
+	defer m.hitMu.Unlock()
+	// No nil check: NewMockManager allocates hitIdx and rebuildHitIndex only
+	// ever assigns a non-nil map, so a nil here would be a construction bug
+	// that a silent re-allocation would hide.
+	for _, mk := range mocks {
+		if mk == nil || mk.Name == "" {
 			continue
 		}
-		if mk.TestModeInfo.SortOrder == 0 {
-			mk.TestModeInfo.SortOrder = int64(idx) + 1
+		if _, ok := m.hitIdx[mk.Name]; !ok {
+			m.hitIdx[mk.Name] = mk
 		}
-		// Tier-local key: copy TestModeInfo and stamp an ID offset.
-		// Offset by a large constant so it cannot collide with the
-		// legacy SetMocksWithWindow's startup IDs (idx 0..N).
-		startupKey := mk.TestModeInfo
-		startupKey.ID = 1_000_000 + idx
-		m.startup.insert(startupKey, mk)
 	}
 }
 
@@ -2381,11 +2432,36 @@ func (m *MockManager) bumpHitCount(name string, kind models.Kind) {
 }
 
 // rebuildHitIndex walks the given mock slices and replaces m.hitIdx
-// with a fresh name → *Mock map. Called from SetFilteredMocks +
-// SetUnFilteredMocks after their tree swap so the fast-path bump
-// sees the new pool. Collisions (duplicate names across pools)
-// resolve to the last inserted pointer — acceptable for a telemetry
-// counter; the reuse metric aggregates by name anyway.
+// Its sole caller is SetMocksWithWindow, after all three tier swaps, so the
+// fast-path bump sees the new pool. A tier populated outside that call — the
+// explicit startup slice in SetMocksWithWindowThreeTier — must seed itself via
+// addToHitIndexIfAbsent, or its mocks never reach the index at all.
+//
+// NOTE: a bare SetFilteredMocks / SetUnFilteredMocks swaps its tree WITHOUT
+// rebuilding here, leaving hitIdx pointing at the previous pool.
+// tierKey builds a mock's tier-local tree key with an explicit ID.
+//
+// It copies field by field rather than taking a struct copy of TestModeInfo,
+// because HitCount lives in that struct and is written with atomic.AddUint64 by
+// bumpHitCount. A wholesale copy reads it non-atomically and races every
+// concurrent bump — benign in effect (customComparator orders on SortOrder and
+// ID alone, so HitCount cannot affect placement) but undefined behaviour under
+// the Go memory model, and it trips -race. The key genuinely does not need the
+// counter, so the cleanest fix is not to read it.
+func tierKey(mk *models.Mock, id int) models.TestModeInfo {
+	return models.TestModeInfo{
+		ID:              id,
+		IsFiltered:      mk.TestModeInfo.IsFiltered,
+		SortOrder:       mk.TestModeInfo.SortOrder,
+		Lifetime:        mk.TestModeInfo.Lifetime,
+		LifetimeDerived: mk.TestModeInfo.LifetimeDerived,
+		IsStartup:       mk.TestModeInfo.IsStartup,
+	}
+}
+
+// rebuildHitIndex REPLACES hitIdx with a fresh name → *Mock map built from the
+// given slices, in order: a duplicate name resolves to the LAST slice that
+// carries it, so callers pass tiers lowest-precedence first.
 func (m *MockManager) rebuildHitIndex(slices ...[]*models.Mock) {
 	total := 0
 	for _, s := range slices {
