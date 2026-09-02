@@ -3316,6 +3316,19 @@ func (p *Proxy) FirstTestWindowStart() time.Time {
 	return time.Time{}
 }
 
+// SeedStartupCutoff seeds the underlying MockManager's startup-init cutoff from
+// the earliest RECORDED test of the set being staged. Satisfies the agent's
+// optional StartupCutoffSeeder extension interface.
+//
+// Without it the cutoff follows whichever test fires FIRST, so a --test-sets
+// selection, an ignored test or the streaming deferral leaves it late and mocks
+// from a test that never runs are served as bootstrap traffic.
+func (p *Proxy) SeedStartupCutoff(start time.Time) {
+	if m := p.getMockManager(); m != nil {
+		m.SeedStartupCutoff(start)
+	}
+}
+
 // GetConsumedMocks returns the consumed filtered mocks.
 func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
 	m := p.getMockManager()

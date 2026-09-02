@@ -3101,19 +3101,6 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			continue
 		}
 
-		// Defensive sanity check: if the response-timestamp is BEFORE the
-		// request-timestamp the recording is inconsistent (clock skew,
-		// serialisation bug, or file corruption). Skip it — keeping such
-		// a mock in either pool risks confusing downstream scoring.
-		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
-			logger.Debug("mock has response timestamp before request timestamp; dropping",
-				zap.String("mock", p.Name),
-				zap.Time("req", p.Spec.ReqTimestampMock),
-				zap.Time("res", p.Spec.ResTimestampMock))
-			droppedInvalidOrder++
-			continue
-		}
-
 		// Lifetime-first routing (mockdb/filter-layer authoritative
 		// attribution design): Session- and Connection-lifetime mocks
 		// belong in the session/unfiltered pool REGARDLESS of whether
@@ -3138,6 +3125,26 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			p.TestModeInfo.Lifetime == models.LifetimeConnection {
 			p.TestModeInfo.IsFiltered = false
 			unfilteredMocks = append(unfilteredMocks, p)
+			continue
+		}
+		// NOTE: this runs BELOW the session/connection short-circuit above,
+		// deliberately. It is a window-ordering sanity check, and only per-test
+		// mocks are window-routed — a session or config mock is never compared
+		// against a test window, so a skewed pair cannot mis-route it. Running
+		// it above the short-circuit dropped clock-skewed session mocks (an
+		// auth or handshake recording) out of EVERY pool, which is a hard miss
+		// on traffic that had a perfectly good mock. mockmanager's own
+		// equivalent check is per-test-scoped for the same reason.
+		// Defensive sanity check: if the response-timestamp is BEFORE the
+		// request-timestamp the recording is inconsistent (clock skew,
+		// serialisation bug, or file corruption). Skip it — keeping such
+		// a mock in either pool risks confusing downstream scoring.
+		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
+			logger.Debug("mock has response timestamp before request timestamp; dropping",
+				zap.String("mock", p.Name),
+				zap.Time("req", p.Spec.ReqTimestampMock),
+				zap.Time("res", p.Spec.ResTimestampMock))
+			droppedInvalidOrder++
 			continue
 		}
 		// Defensive fallback: DeriveLifetime may not have run on mocks

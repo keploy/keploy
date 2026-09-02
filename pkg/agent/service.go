@@ -110,6 +110,19 @@ type PcapStreamer interface {
 //	} else {
 //	    _ = p.SetMocks(ctx, f, u)
 //	}
+//
+// StartupCutoffSeeder is the optional extension implemented by proxies whose
+// mock manager can be told the earliest RECORDED test start of the set being
+// staged, before any test of that set has run.
+//
+// Optional in the same style as WindowedProxy: the agent type-asserts for it and
+// simply does not seed when the assertion fails, so no existing proxy breaks and
+// third-party proxies keep compiling. Not seeding leaves the cutoff derived from
+// the fired windows, which is the pre-existing behaviour.
+type StartupCutoffSeeder interface {
+	SeedStartupCutoff(start time.Time)
+}
+
 type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.
