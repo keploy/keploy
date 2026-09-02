@@ -1312,6 +1312,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if err := mutator.AfterGetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 				return models.TestSetStatusFailed, err
 			}
+			// Honour any reusable retagging the mutator applied (e.g. the mongo/v2
+			// stable-metadata promotion): move retagged mocks from the per-test pool
+			// into the reusable pool so SetMocksWithWindow does not window-filter them.
+			filteredMocks, unfilteredMocks = rebalanceReusableMocks(filteredMocks, unfilteredMocks)
 		}
 
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
@@ -1409,6 +1413,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if err := mutator.AfterGetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 				return models.TestSetStatusFailed, err
 			}
+			// Honour any reusable retagging the mutator applied (see the
+			// non-DockerCompose branch above for the rationale).
+			filteredMocks, unfilteredMocks = rebalanceReusableMocks(filteredMocks, unfilteredMocks)
 		}
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
@@ -4409,6 +4416,44 @@ func isReusableTierMock(m *models.Mock) bool {
 		}
 	}
 	return false
+}
+
+// rebalanceReusableMocks moves any mock that a MockMutator.AfterGetMocks
+// re-tagged as reusable (isReusableTierMock — Lifetime Session/Connection or
+// metadata type config/connection) out of the per-test `filtered` pool and into
+// the reusable `unfiltered` pool, and returns the adjusted slices.
+//
+// It exists because AfterGetMocks receives the two pools BY VALUE: a mutator can
+// retag a mock's Lifetime/metadata in place, but it cannot move a mock between
+// the slices (a shrink of `filtered` or a grow of `unfiltered` does not
+// propagate to the caller). Since the agent's SetMocksWithWindow window-filters
+// every mock in `filtered` regardless of its per-mock tag, a mock retagged
+// reusable but left in `filtered` would still be dropped when it fires outside
+// its record-time window — defeating the retag. Running this immediately after
+// AfterGetMocks honours the retag by physically re-partitioning.
+//
+// Memory: `filtered` is compacted in place (its backing array is reused via the
+// [:0] read/write cursor); `unfiltered` grows only by the promoted count. No
+// second copy of the corpus is allocated. Relative order within each pool is
+// preserved. Safe on nil/empty inputs.
+func rebalanceReusableMocks(filtered, unfiltered []*models.Mock) ([]*models.Mock, []*models.Mock) {
+	if len(filtered) == 0 {
+		return filtered, unfiltered
+	}
+	keep := filtered[:0]
+	for _, m := range filtered {
+		if m == nil {
+			// A nil entry can never match; drop it from the per-test pool rather
+			// than carrying it forward (SetMocksWithWindow skips nils anyway).
+			continue
+		}
+		if isReusableTierMock(m) {
+			unfiltered = append(unfiltered, m)
+			continue
+		}
+		keep = append(keep, m)
+	}
+	return keep, unfiltered
 }
 
 // isReusableTierState is the MockState (consumed-mock) equivalent of
