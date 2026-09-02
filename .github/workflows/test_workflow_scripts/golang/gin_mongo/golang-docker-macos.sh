@@ -78,6 +78,7 @@ docker network create "$NETWORK_NAME"
 
 # Start MongoDB with a unique container name but a network alias of "mongoDb"
 # so the gin-mongo app (which hardcodes "mongoDb:27017") resolves correctly.
+docker_pull_retry mongo
 docker run --name "$MONGO_CONTAINER" --rm \
   --net "$NETWORK_NAME" --network-alias mongoDb \
   -p "${DB_PORT}:27017" -d mongo
