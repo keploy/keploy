@@ -106,10 +106,14 @@ type MockManager struct {
 	// Previous-test mocks continue to be dropped to prevent cross-test
 	// bleed.
 	//
-	// Zero until the first SetMocksWithWindow call with a non-zero
-	// start arrives; after that it's sticky (only goes earlier, never
-	// later within a set; cleared at each set boundary by
-	// ResetForReplaySession). Read under swapMu.RLock.
+	// Zero until either the replayer seeds this set's cutoff (see
+	// cutoffSeeded, installed by the boundary staging call) or the first
+	// SetMocksWithWindow call with a non-zero start arrives — whichever comes
+	// first, which in production is the seed. After that it is sticky within
+	// the set (only goes earlier, never later), and the set boundary REPLACES
+	// it with the next set's seeded value rather than clearing it: the clear
+	// used to happen in ResetForReplaySession, then moved to staging, and
+	// staging is also where the seed lands. Read under swapMu.RLock.
 	firstWindowStart time.Time
 
 	// testFiredThisSet is the TIER-ROUTING half of what firstWindowStart used
@@ -128,6 +132,20 @@ type MockManager struct {
 	// call mid-set being able to deactivate a live test's window. Written
 	// under swapMu.
 	boundaryPending bool
+
+	// cutoffSeeded parks the startup-init cutoff the replayer supplies for the
+	// NEXT set, until that set's staging call installs it.
+	//
+	// The seed cannot be written straight into firstWindowStart: staging clears
+	// firstWindowStart at the boundary, and the replayer seeds BEFORE staging in
+	// the same UpdateMockParams call (SeedStartupCutoff then
+	// SetMocksWithWindow), so a directly-written seed was wiped microseconds
+	// later — for every set. Parking it separately lets staging INSTALL the
+	// value instead of clearing to zero, which is also what stops set N+1 from
+	// inheriting set N's cutoff: sets are recorded in chronological order, so
+	// the next set's cutoff is always LATER and a running-minimum guard against
+	// the live value would refuse it. Written under swapMu.
+	cutoffSeeded time.Time
 
 	// swapMu guards the {filtered, unfiltered, window} swap performed by
 	// SetMocksWithWindow. Writers Lock(); readers via GetFilteredMocksInWindow
@@ -372,6 +390,14 @@ func (m *MockManager) ResetForReplaySession() {
 
 	m.swapMu.Lock()
 	m.boundaryPending = true
+	// A parked cutoff belongs to the set that seeded it and must never outlive
+	// it. UpdateMockParams can abort between SeedStartupCutoff and
+	// SetMocksWithWindow (the "no mocks stored for client ID" bail and the
+	// loadPerTestMocks error path), leaving a park with no staging call to
+	// consume it — and since sets are recorded chronologically the stale value
+	// is always the EARLIER one, so it would win any running-minimum guard and
+	// the next set would run on the aborted set's cutoff.
+	m.cutoffSeeded = time.Time{}
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -754,7 +780,10 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		if m.boundaryPending {
 			m.boundaryPending = false
 			m.testFiredThisSet = false
-			m.firstWindowStart = time.Time{}
+			// Install this set's seeded cutoff. Zero when nothing was seeded,
+			// which is exactly the historical clear.
+			m.firstWindowStart = m.cutoffSeeded
+			m.cutoffSeeded = time.Time{}
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -931,6 +960,38 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		startupKey.ID = idx
 		newStartup.insert(startupKey, mk)
 	}
+	// Harvest the kinds present BEFORE any tier is swapped.
+	//
+	// A kind that LEAVES the pool has to bump its own per-kind revision, or a
+	// consumer caching an index under RevisionByKind never learns its mocks are
+	// gone and keeps serving the previous set's index. Reading the by-kind maps
+	// after the swaps — as this used to — reads the NEW maps, so it is exactly
+	// redundant with walking the new input slices and departing kinds are
+	// published nowhere.
+	//
+	// The old startup tree is walked too: during BaseTime staging
+	// filteredForTree is nil, so a kind whose mocks all live in the startup tier
+	// never appears in filteredByKind either, and reading only the two by-kind
+	// maps misses it in both directions.
+	outgoingKinds := map[models.Kind]struct{}{}
+	m.treesMu.RLock()
+	for k := range m.filteredByKind {
+		outgoingKinds[k] = struct{}{}
+	}
+	for k := range m.unfilteredByKind {
+		outgoingKinds[k] = struct{}{}
+	}
+	oldStartup := m.startup
+	m.treesMu.RUnlock()
+	if oldStartup != nil {
+		oldStartup.rangeValues(func(v interface{}) bool {
+			if mk, ok := v.(*models.Mock); ok && mk != nil {
+				outgoingKinds[mk.Kind] = struct{}{}
+			}
+			return true
+		})
+	}
+
 	m.treesMu.Lock()
 	m.startup = newStartup
 	m.treesMu.Unlock()
@@ -990,14 +1051,11 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 			touchedAll[mk.Kind] = struct{}{}
 		}
 	}
-	m.treesMu.RLock()
-	for k := range m.filteredByKind {
+	// Kinds that were present before this call but are absent from every input
+	// slice above. Collected pre-swap; see outgoingKinds.
+	for k := range outgoingKinds {
 		touchedAll[k] = struct{}{}
 	}
-	for k := range m.unfilteredByKind {
-		touchedAll[k] = struct{}{}
-	}
-	m.treesMu.RUnlock()
 	for k := range touchedAll {
 		m.bumpRevisionKind(k)
 	}
@@ -1300,9 +1358,14 @@ func (m *MockManager) HasFirstTestFired() bool {
 	return m.testFiredThisSet
 }
 
-// FirstTestWindowStart returns the earliest test window start this
-// MockManager has observed, or the zero time if no non-BaseTime
-// SetMocksWithWindow call has landed yet.
+// FirstTestWindowStart returns this set's startup-init cutoff: the earliest
+// test window start observed, or — from the boundary staging call onward — the
+// value the replayer seeded via SeedStartupCutoff.
+//
+// It is NOT "zero until a non-BaseTime SetMocksWithWindow lands". In production
+// the seed arrives first, so this returns a non-zero cutoff throughout the
+// staging window. A non-zero value here does not mean a test has fired; use
+// HasFirstTestFired for that.
 //
 // Exposed so the agent's tier-aware strictMockWindow filter can
 // distinguish:
@@ -2176,6 +2239,21 @@ func (m *MockManager) SeedStartupCutoff(start time.Time) {
 	}
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
+	if m.boundaryPending {
+		// This set has not been staged yet, so firstWindowStart still describes
+		// the PREVIOUS set and comparing against it is meaningless. Park the
+		// value; staging installs it.
+		//
+		// Unconditionally, NOT as a running minimum: the reset clears the park,
+		// so anything already here belongs to this same set, and a minimum
+		// would be backwards anyway — later sets always seed later, so an
+		// earlier value would win every comparison.
+		m.cutoffSeeded = start
+		return
+	}
+	// Already staged: apply directly, keeping the running-minimum semantics.
+	// Parking it here instead would strand the value until the NEXT boundary,
+	// where it would install a cutoff belonging to the wrong set.
 	if m.firstWindowStart.IsZero() || start.Before(m.firstWindowStart) {
 		m.firstWindowStart = start
 	}
