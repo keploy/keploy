@@ -1225,9 +1225,9 @@ func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup 
 func (m *MockManager) addToHitIndexIfAbsent(mocks []*models.Mock) {
 	m.hitMu.Lock()
 	defer m.hitMu.Unlock()
-	if m.hitIdx == nil {
-		m.hitIdx = make(map[string]*models.Mock, len(mocks))
-	}
+	// No nil check: NewMockManager allocates hitIdx and rebuildHitIndex only
+	// ever assigns a non-nil map, so a nil here would be a construction bug
+	// that a silent re-allocation would hide.
 	for _, mk := range mocks {
 		if mk == nil || mk.Name == "" {
 			continue

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -29,10 +30,15 @@ func TestTierKeyDoesNotRaceWithHitCountBumps(t *testing.T) {
 	}
 	mm.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
 	mm.SetMocksWithWindow(pool, nil, at, at.Add(time.Second))
-	// Real callers pass a mock they matched out of a pool snapshot, not a live
-	// dereference of the tree pointer — MarkMockAsUsed takes models.Mock BY
-	// VALUE, so `*livePointer` would copy HitCount non-atomically in the
-	// CALLER. Snapshot once, like a matcher does.
+	// Snapshot once so this test isolates the MANAGER's half of the race.
+	//
+	// It is not what every caller does: the consume doors take models.Mock BY
+	// VALUE and real callers dereference a live tree pointer into them —
+	// http/match.go:1209 `deleteMock := *matchedMock`, mysql/replayer/conn.go:764
+	// `DeleteUnFilteredMock(*initialHandshakeMock)`. That copy reads HitCount
+	// non-atomically in the CALLER and still races after this fix. tierKey
+	// closes the manager's half only; closing the caller's half means changing
+	// the by-value API, which is a separate change.
 	snaps := make([]models.Mock, 0, len(pool))
 	for _, mk := range pool {
 		snaps = append(snaps, *mk)
@@ -138,5 +144,63 @@ func TestThreeTierSeedingDoesNotInvertTheHitMuLockOrder(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("deadlock: ThreeTier seeded hitIdx while holding treesMu, inverting the " +
 			"hitMu -> treesMu order that bumpHitCount's slow path takes")
+	}
+}
+
+// tierKey hand-copies TestModeInfo field by field (to avoid reading HitCount),
+// so the field list is a maintenance hazard: drop one and the key silently
+// loses it. SortOrder is the dangerous one — customComparator orders on it, and
+// DeleteStartupMock's contract depends on the startup tier staying in recorded
+// order — but nothing else in the package asserts startup ordering, so the
+// omission compiles and the whole suite stays green.
+func TestTierKeyPreservesEveryFieldButHitCount(t *testing.T) {
+	src := &models.Mock{
+		Name: "m",
+		Kind: models.HTTP,
+		TestModeInfo: models.TestModeInfo{
+			ID:              7,
+			IsFiltered:      true,
+			SortOrder:       42,
+			Lifetime:        models.LifetimeSession,
+			LifetimeDerived: true,
+			HitCount:        99,
+			IsStartup:       true,
+		},
+	}
+
+	got := tierKey(src, 123)
+
+	if got.ID != 123 {
+		t.Fatalf("ID = %d, want the explicit 123", got.ID)
+	}
+	if got.SortOrder != 42 {
+		t.Fatal("SortOrder was dropped: customComparator orders on it, so the startup " +
+			"tier would lose its recorded order and DeleteStartupMock's chronological " +
+			"contract with it")
+	}
+	if !got.IsFiltered {
+		t.Fatal("IsFiltered was dropped")
+	}
+	if got.Lifetime != models.LifetimeSession {
+		t.Fatal("Lifetime was dropped: tier routing reads it directly")
+	}
+	if !got.LifetimeDerived {
+		t.Fatal("LifetimeDerived was dropped: DeriveLifetime would re-run and could " +
+			"reclassify the mock")
+	}
+	if !got.IsStartup {
+		t.Fatal("IsStartup was dropped")
+	}
+	if got.HitCount != 0 {
+		t.Fatalf("HitCount = %d, want 0: reading it is exactly the race tierKey exists "+
+			"to avoid", got.HitCount)
+	}
+
+	// Guard the hand-maintained list itself: if a field is ADDED to
+	// TestModeInfo, tierKey must be updated to carry it (or deliberately not).
+	if n := reflect.TypeOf(models.TestModeInfo{}).NumField(); n != 7 {
+		t.Fatalf("TestModeInfo now has %d fields, not 7: tierKey copies them by hand, "+
+			"so decide explicitly whether the new field belongs in a tree key and "+
+			"update this count", n)
 	}
 }
