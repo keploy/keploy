@@ -1,0 +1,146 @@
+name: MySQL TLS Greeting-Stitch Regression (Linux)
+# Regression guard for the proxyless MySQL-over-TLS "served but NOT recorded"
+# capture shortfall.
+#
+# The bug: recording MySQL over TLS splits into two legs — a raw plaintext leg
+# carrying the server greeting + SSLRequest, and a decrypted TLS-uprobe leg
+# carrying the command phase. The greeting is stashed in TLSHandshakeStore under
+# conn:<connKey> and port:<dstPort>, and PopWait CONSUMES it. A pooled MySQL
+# connection reused across cycles yields a decrypted leg with no handshake of its
+# own, so both keys miss. resolvePreTLSGreeting has a documented last-resort
+# fallback (cachedGreeting, backed by RememberLast/Last) for exactly that case —
+# but the only caller of RememberLast was the LEGACY handleInitialHandshake,
+# which the V2 path never runs. The fallback was dead code, so such a connection
+# fell through to fetchServerGreeting, dialled a destination the capture layer
+# had only synthesized, got ECONNREFUSED, and the record was SILENTLY DISCARDED.
+# Downstream that surfaces as a dirty replay verdict with no visible error.
+#
+# These tests are also run by the normal `go test ./...` lane. This lane exists
+# because that is not enough: the defect was a DEAD FALLBACK, and the way such a
+# bug returns is for the guarding test to quietly stop exercising it. So the
+# second job mutates the fix back out and asserts the tests actually FAIL —
+# a vacuous regression test is treated as a red build, not a green one.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
+
+jobs:
+  mysql_tls_greeting_stitch_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: greeting-stitch regression
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # -race because the store is touched from both legs concurrently, and
+      # -count=3 because the end-to-end case drives the recorder through a
+      # bounded wait — a fix that only sometimes populates the cache would
+      # otherwise pass intermittently and be read as green.
+      - name: Greeting-stitch regression tests
+        run: |
+          go test ./pkg/models/ ./pkg/agent/proxy/integrations/mysql/recorder/ \
+            -run 'TestStorePreTLSHandshakeV2|TestHandshakeLastPortKey|TestRecordV2_PostTLS_PooledConn|TestRecordV2_PostTLS_LostStash|TestTLSHandshakeStore|TestResolvePreTLSGreeting|TestRememberLast|TestAmbiguityLatch|TestTombstone|TestLastGreeting|TestGreetingServerIdentity|TestRecordV2_RawLeg|TestRawLegIdentity|TestHandshakeLastKey' \
+            -race -count=3 -v
+
+      - name: Full MySQL + models suites
+        run: go test ./pkg/models/ ./pkg/agent/proxy/integrations/mysql/... -race -count=1
+
+  # Asserts the guard above is load-bearing. Removing the writer's cache seeding
+  # must break it; if it does not, the regression test has gone vacuous and is no
+  # longer protecting anything.
+  mysql_tls_greeting_stitch_mutation_guard:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: greeting-stitch mutation guard
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Remove the fix, expect the regression tests to FAIL
+        run: |
+          set -uo pipefail
+          f=pkg/agent/proxy/integrations/mysql/recorder/record_v2.go
+          before=$(grep -cE 'hsStore\.RememberLast(ForPort)?\(' "$f")
+          forport=$(grep -c 'hsStore.RememberLastForPort(' "$f")
+          if [ "$before" -lt 2 ] || [ "$forport" -lt 1 ]; then
+            echo "::error::expected >=2 RememberLast calls in $f, found $before —" \
+                 "the fix or this guard has drifted; update both together"
+            exit 1
+          fi
+          # Neutralise only the writer half of the fix.
+          sed -i -E 's/^([[:space:]]*)hsStore\.RememberLast(ForPort)?\(/\1_ = \&hsStore; \/\/ MUTATED: /' "$f"
+          go build ./pkg/agent/proxy/integrations/mysql/... 2>/dev/null || {
+            # A non-compiling mutant proves nothing; fall back to deleting the lines.
+            git checkout -- "$f"
+            sed -i -E '/hsStore\.RememberLast(ForPort)?\(/d' "$f"
+            go build ./pkg/agent/proxy/integrations/mysql/... || {
+              echo "::error::neither mutant compiles; the guard cannot score a kill"
+              git checkout -- "$f"; exit 1
+            }
+          }
+          if go test ./pkg/agent/proxy/integrations/mysql/recorder/ \
+               -run 'TestStorePreTLSHandshakeV2_SeedsLastGreetingCache|TestRecordV2_PostTLS_PooledConn_BridgesRealWriterToFabricatedReader' \
+               -count=1 >/tmp/mutant.log 2>&1; then
+            echo "::error::VACUOUS TEST: the greeting-stitch regression tests still PASS with the" \
+                 "last-greeting cache seeding removed. They are not guarding the fix."
+            tail -40 /tmp/mutant.log
+            git checkout -- "$f"
+            exit 1
+          fi
+          echo "OK: removing the cache seeding fails the regression tests, as it must."
+          git checkout -- "$f"
+
+          # Second mutant: the seeding calls survive, but the SERVER IDENTITY
+          # feeding them is blanked. RememberLastForPort drops an empty identity,
+          # so the port key is never written and the fix is inert on the exact
+          # path it targets — with both call sites still present, so the grep
+          # above cannot see it. Only an end-to-end raw-leg test catches this.
+          if ! grep -q 'serverID = greetingServerIdentity(greeting)' "$f"; then
+            echo "::error::the greetingServerIdentity wiring moved; update this guard with it"
+            exit 1
+          fi
+          sed -i 's/serverID = greetingServerIdentity(greeting)/serverID = ""/' "$f"
+          # A test failure only counts as a kill if the mutant actually COMPILES.
+          # Without this gate a behaviour-preserving refactor that leaves
+          # `greeting` unused after the sed turns "build failed" into a false
+          # kill — the exact vacuity this job exists to catch, occurring inside
+          # the job. Mutant 1 has the same gate.
+          go build ./pkg/agent/proxy/integrations/mysql/... || {
+            echo "::error::the blank-identity mutant does not compile, so a test failure would" \
+                 "score a FALSE kill; rework the guard alongside the code it mutates"
+            git checkout -- "$f"; exit 1
+          }
+          if go test ./pkg/agent/proxy/integrations/mysql/recorder/ \
+               -run 'TestRecordV2_RawLegSeedsPortKeyFromGreeting' \
+               -count=1 >/tmp/mutant2.log 2>&1; then
+            echo "::error::VACUOUS TEST: blanking the server identity still passes. The port key" \
+                 "would never be seeded and the fallback would be inert."
+            tail -30 /tmp/mutant2.log
+            git checkout -- "$f"
+            exit 1
+          fi
+          echo "OK: blanking the server identity fails the raw-leg test, as it must."
+          git checkout -- "$f"

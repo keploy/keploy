@@ -187,8 +187,10 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			}
 			// Record this greeting as the destination's last-resort fallback for
 			// a sibling connection whose own raw leg was dropped. Keyed by the
-			// resolved destination so it can only be reused for the SAME server,
-			// and skipped entirely when the address was synthesized.
+			// resolved destination so it can only be reused for the SAME server.
+			// Note it is NOT skipped for a synthesized address: HandshakeLastKey
+			// combines the address with the app/session scope, so a placeholder
+			// bucket is still per-scope (see its doc).
 			hsStore.RememberLast(models.HandshakeLastKey(opts.PassThroughScope, opts.DstCfg), hsEntry)
 			// Signal that the pre-TLS config mock should NOT be recorded here;
 			// the post-TLS path will produce a single combined config mock.
