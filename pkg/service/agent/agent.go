@@ -669,12 +669,11 @@ func (a *Agent) wantsAsyncMocks() bool {
 }
 
 // loadAsyncIntoProxy hands the async corpus to the proxy if it supports it.
-// Engine.Load is run-once, so callers pass the COMPLETE async corpus in a
-// single call per store path — never per window.
+// Engine.Load REPLACES the corpus, so callers pass the COMPLETE async corpus
+// for the test-set in a single call per store path — never per window.
 func (a *Agent) loadAsyncIntoProxy(asyncMocks []*models.Mock) {
-	if len(asyncMocks) == 0 {
-		return
-	}
+	// No early return on an empty corpus: Load REPLACES, so a test-set holding
+	// no async mocks has to clear the previous set's rather than inherit them.
 	if loader, ok := a.Proxy.(coreAgent.AsyncMockLoader); ok {
 		loader.LoadAsyncMocks(asyncMocks)
 	}

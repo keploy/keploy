@@ -45,7 +45,7 @@ func asyncMock(lane string, seq int, body string) *models.Mock {
 }
 
 // TestLoadAsyncMocksForwardsToEngine proves Proxy.LoadAsyncMocks hands the
-// complete corpus to the async engine's run-once Load (the engine's Load
+// complete corpus to the async engine's Load (the engine's Load
 // filter ignores the interleaved non-async mock), and that under the
 // value-epoch model two epochs recorded at the same AnchorPos resolve to the
 // newest one: both "a" (seq 1) and "b" (seq 2) are effective at completed=0,

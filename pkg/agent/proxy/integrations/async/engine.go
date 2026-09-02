@@ -57,7 +57,6 @@ type Engine struct {
 
 	mu         sync.Mutex
 	cond       *sync.Cond             // signaled whenever completed/windowSeen changes; wakes held POLL Decide calls
-	loaded     bool                   // true once Load has partitioned+sorted streams; makes Load idempotent
 	streams    map[string]*laneStream // by lane name
 	completed  int                    // number of testcases completed
 	windowSeen bool                   // AdvanceWindow: first window doesn't count as a completed test
@@ -141,14 +140,34 @@ func (e *Engine) laneByName(name string) (models.AsyncLane, bool) {
 }
 
 // Load partitions async-tagged mocks into per-lane epoch timelines, sorted by
-// (effectiveFromPos, seq). It is run-once: the first call partitions and
-// sorts; subsequent calls are no-ops.
+// (effectiveFromPos, seq). Each call REPLACES the previous corpus and rewinds
+// the epoch cursor.
+//
+// It used to be run-once, which was wrong: one Engine serves a whole replay run
+// (proxy.go builds it in InitIntegrations), while StoreMocks — the only thing
+// that feeds it — runs once per TEST-SET. So sets 2..N had their corpus dropped
+// and set 1's replayed in their place, and `completed`, which counts windows for
+// the whole run while AnchorPos restarts at 0 in every set, made currentEpoch
+// open mid-timeline so a set's boot value was never served.
+//
+// Replacing inside Load rather than on a separate reset seam is deliberate: the
+// two replay branches call StoreMocks and MockOutgoing in OPPOSITE orders —
+// compose is MockOutgoing then StoreMocks (replay.go:1239/1321), native is
+// StoreMocks then MockOutgoing (replay.go:1420/1450) — so any seam in
+// Proxy.Mock is correct for one path and wipes the just-loaded corpus on the
+// other. Doing it here is ordering-independent.
+//
+// The report tallies (pass/flag/flags) are deliberately left alone; they are
+// not per-set state.
 func (e *Engine) Load(mocks []*models.Mock) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.loaded {
-		return
-	}
+	e.streams = make(map[string]*laneStream)
+	e.completed = 0
+	e.windowSeen = false
+	// A poll Decide parked on cond is waiting for a counter that just moved
+	// backwards; wake it rather than let it block until its context expires.
+	e.cond.Broadcast()
 	for _, m := range mocks {
 		if m == nil || !m.IsAsync() {
 			continue
@@ -177,7 +196,6 @@ func (e *Engine) Load(mocks []*models.Mock) {
 			return s.epochs[i].seq < s.epochs[j].seq
 		})
 	}
-	e.loaded = true
 }
 
 // OnTestComplete increments the completed-testcase counter directly. Used by
@@ -265,6 +283,15 @@ func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models
 	}
 	if lane.IsPoll() {
 		e.holdThrottle(ctx, lane.ThrottleDuration()) // pace + wake-early; holds e.mu
+	}
+	// Re-read the stream: holdThrottle released e.mu, and a Load for the next
+	// test-set may have replaced e.streams while this poll was parked. The
+	// captured pointer would serve the PREVIOUS set's timeline against the
+	// rewound counter — i.e. its boot value — instead of keep-aliving.
+	s = e.streams[lane.Name]
+	if s == nil || len(s.epochs) == 0 {
+		e.mu.Unlock()
+		return e.keepAlive(p, lane)
 	}
 	cur := s.currentEpoch(e.completed)
 	e.mu.Unlock()
