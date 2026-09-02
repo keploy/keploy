@@ -1346,13 +1346,15 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	// Check and allocate available ports for proxy and DNS
-	proxyPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort) // check if the proxy port provided by user is unused
+	// Exclude the ports already handed out in this setup: none of them is bound
+	// yet, so a later draw could otherwise legitimately return one of them.
+	proxyPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, agentPort) // check if the proxy port provided by user is unused
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to ensure available ports for proxy")
 		return err
 	}
 
-	dnsPort, err := utils.EnsureAvailablePorts(a.conf.DNSPort) // check if the dns port provided by user is unused
+	dnsPort, err := utils.EnsureAvailablePorts(a.conf.DNSPort, agentPort, proxyPort) // check if the dns port provided by user is unused
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to ensure available ports for DNS")
 		return err
