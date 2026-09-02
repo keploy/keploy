@@ -870,6 +870,27 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 			zap.String("portKey", portKey))
 		entry, ok = hsStore.PopWait(portKey, 2*time.Second)
 	}
+	// Both consumable keys missed. Before dialling the server, consult the
+	// last-greeting cache — the same fallback the V2 path uses, and the reason
+	// handleInitialHandshake seeds it above. Without this read that seeding is a
+	// write with no reader, and a POOLED connection (reused long after its
+	// handshake, so its own entry was already consumed) loses its whole command
+	// phase here exactly as it did on V2.
+	//
+	// Address-keyed only. The V2 path additionally bridges legs that disagree
+	// about the address via a port key, but that key names no server and is only
+	// safe with the identity latch that RememberLastForPort applies; this path
+	// writes no port key, so there is nothing here that could answer unsafely.
+	if !ok || len(entry.RespPackets) == 0 {
+		if lastKey := models.HandshakeLastKey(opts.PassThroughScope, opts.DstCfg); lastKey != "" {
+			if c, found := hsStore.Last(lastKey); found && len(c.RespPackets) > 0 {
+				logger.Debug("Post-TLS MySQL: own handshake entry gone; reusing the last greeting recorded for this destination",
+					zap.String("lastKey", lastKey))
+				entry, ok = c, true
+			}
+		}
+	}
+
 	var serverGreetingBuf []byte
 	if ok && len(entry.RespPackets) > 0 {
 		serverGreetingBuf = entry.RespPackets[0]

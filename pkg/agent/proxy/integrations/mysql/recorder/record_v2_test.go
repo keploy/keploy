@@ -5,6 +5,7 @@ import (
 	"context"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -932,5 +933,43 @@ func TestResolvePreTLSGreeting_GateHandlesNilAndEmptyAddr(t *testing.T) {
 	noAddr := &models.ConditionalDstCfg{Port: 3306}
 	if _, source := resolvePreTLSGreeting(context.Background(), seed(), "", 3306, scope, noAddr); source != greetingCached {
 		t.Errorf("empty Addr: source = %v, want the port key to answer", source)
+	}
+}
+
+// TestLegacyPostTLSReadsLastGreetingCache pins that the LEGACY path
+// (KEPLOY_NEW_RELAY=off) also consults the last-greeting cache.
+//
+// That path is the documented escape hatch our own error messages tell users to
+// pull when a V2 parser misbehaves — proxy_v2.go, util.go and directive_proc.go
+// all name it — so it cannot simply be deleted. But handleInitialHandshake
+// SEEDS the cache there while the post-TLS reader only ever did PopWait, so the
+// seeding was a write with no reader and a pooled connection lost its command
+// phase exactly as it did on V2. A write with no reader is the defect class
+// this whole change exists to fix; leaving a second instance of it in place
+// would be careless.
+func TestLegacyPostTLSReadsLastGreetingCache(t *testing.T) {
+	src, err := os.ReadFile("conn.go")
+	if err != nil {
+		t.Fatalf("read conn.go: %v", err)
+	}
+	s := string(src)
+
+	// The seeding must still be there...
+	if !strings.Contains(s, "hsStore.RememberLast(models.HandshakeLastKey(opts.PassThroughScope, opts.DstCfg)") {
+		t.Error("conn.go no longer seeds the last-greeting cache")
+	}
+	// ...and the post-TLS reader must actually consult it.
+	i := strings.Index(s, "PopWait(portKey")
+	if i < 0 {
+		t.Fatal("the legacy post-TLS port-key PopWait moved; update this guard with it")
+	}
+	rest := s[i:]
+	if j := strings.Index(rest, "serverGreetingBuf = entry.RespPackets[0]"); j > 0 {
+		rest = rest[:j]
+	}
+	if !strings.Contains(rest, "hsStore.Last(lastKey)") {
+		t.Error("the legacy post-TLS reader does not consult the last-greeting cache between its " +
+			"PopWait misses and the direct dial; the seeding above is a write with no reader and " +
+			"a pooled connection still loses its command phase on this path")
 	}
 }
