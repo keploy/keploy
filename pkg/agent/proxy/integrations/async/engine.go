@@ -61,10 +61,53 @@ type Engine struct {
 	completed  int                    // number of testcases completed
 	windowSeen bool                   // AdvanceWindow: first window doesn't count as a completed test
 
+	// pass/flag are CUMULATIVE for this Engine's lifetime and are deliberately
+	// never reset. CI parses the emitted verdict line with `tail -n1`
+	// (.github/workflows/test_workflow_scripts/java/async_config_poll/java-linux.sh),
+	// so the LAST line has to describe the whole run. Per-set deltas would
+	// quietly narrow that gate from "no drift anywhere in the run" to "no drift
+	// in the last chunk" — and worse, a poll woken by the test-set context
+	// being cancelled (holdThrottle registers a context.AfterFunc that
+	// broadcasts on cancel) lands AFTER the per-set flush, so the final line
+	// would report served:0 on a run that served dozens.
+	//
+	// Scope, stated precisely: a straggler landing between the per-set flush
+	// and the run-level one IS counted, because the run-level flush follows it.
+	// One landing after the run-level flush is not — replay.go cancels the run
+	// context immediately after that notify and no seam flushes afterwards
+	// (Proxy.StopProxyServer would, but it is dead code with no call
+	// expression anywhere). That tail was equally lost under the sync.Once
+	// guard, so it is unchanged here rather than fixed.
 	pass, flag int
-	flags      []string
+	// flags holds drift details NOT YET EMITTED. LogReport drains it, so each
+	// detail is logged exactly once even though LogReport now fires per
+	// test-set. Draining is also what stops the output going quadratic: with
+	// logOnce removed but the slice retained, every flush would re-log the
+	// whole backlog.
+	flags []string
+	// lastPass/lastFlag are the tallies as of the last emitted line. LogReport
+	// emits only when the cumulative counts have MOVED since then, which is
+	// what keeps record mode silent (it never increments) and what suppresses a
+	// duplicate identical line when the run-level flush follows a per-set flush
+	// with no traffic in between.
+	lastPass, lastFlag int
 
-	logOnce         sync.Once // LogReport fires at most once (multiple shutdown seams call it)
+	// emitMu serialises drain-and-log as one unit. drainReport returns under
+	// e.mu but the logger.Info call happens after it is released, so two
+	// concurrent LogReport callers could otherwise write their lines in the
+	// opposite order to their snapshots — and CI reads the LAST line, so it
+	// would see the SMALLER total. The replayer happens to serialise the two
+	// callers today; nothing in the code says so, and the whole CI contract
+	// rests on the last line being the largest.
+	//
+	// Deliberately NOT pinned by a test: making the two callers interleave
+	// deterministically means blocking one inside the other's critical section,
+	// which deadlocks against e.mu, and a purely racing test scores no
+	// detections under CI's `go test ./...`. This is defence in depth for a
+	// path that is not reachable today, kept because the invariant it protects
+	// is load-bearing and undocumented elsewhere — not because it is covered.
+	emitMu sync.Mutex
+
 	nonWindowedOnce sync.Once // WarnNonWindowed fires at most once (SetMocks runs per test-set)
 }
 
@@ -378,9 +421,66 @@ func (e *Engine) decideServe(p AsyncParser, lane models.AsyncLane, recorded, liv
 func (e *Engine) Report() ReportSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	out := ReportSnapshot{Pass: e.pass, Flag: e.flag, NotExercised: 0, Held: 0}
+	out := e.reportLocked()
 	out.Flags = append(out.Flags, e.flags...)
 	return out
+}
+
+// reportLocked builds the tally snapshot. Caller holds e.mu.
+//
+// Shared with drainReport so the two cannot drift: ReportSnapshot.Flags is
+// populated only by Report, because drainReport hands the drift details back
+// out-of-band after draining them. Anything that printed the verdict via
+// Report would therefore re-log the whole backlog on every call — the
+// quadratic-output bug the drain exists to prevent.
+func (e *Engine) reportLocked() ReportSnapshot {
+	return ReportSnapshot{Pass: e.pass, Flag: e.flag, NotExercised: 0, Held: 0}
+}
+
+// drainTestHook, when non-nil, runs between drainReport's snapshot and its
+// cursor advance. It exists ONLY so a test can deterministically land an
+// increment in that window: the window is otherwise unreachable by racing
+// goroutines (Decide holds e.mu throughout unless the lane is a POLL lane, and
+// even then the gap is a few instructions), so a purely concurrent test scores
+// zero detections under CI's `go test ./...` — no -race, no -count>1. nil in
+// production; the branch is one predictable-not-taken compare.
+var drainTestHook func()
+
+// drainReport returns the CUMULATIVE tallies together with the drift details
+// not yet emitted, advances the emission cursor, and reports whether anything
+// actually moved — all in ONE critical section.
+//
+// One section matters: MatchRequestShape runs unlocked and its increment takes
+// e.mu afterwards, so a snapshot-then-separate-drain would let an increment
+// land in the gap and be discarded without ever being logged.
+//
+// It deliberately does NOT delegate to Report(). sync.Mutex is not reentrant
+// and Report() takes e.mu, so calling it from under the lock would self-
+// deadlock the caller — which on the SetGracefulShutdown seam is the agent's
+// HTTP handler goroutine. Handing e.flags over by assignment rather than
+// copying is safe precisely because the engine drops its own reference in the
+// same section.
+func (e *Engine) drainReport() (ReportSnapshot, []string, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pass == e.lastPass && e.flag == e.lastFlag {
+		return ReportSnapshot{}, nil, false
+	}
+	snap := e.reportLocked()
+	if drainTestHook != nil {
+		drainTestHook()
+	}
+	drained := e.flags
+	e.flags = nil
+	// Advance the cursor to what was SNAPSHOT, not to the current values.
+	// Advancing to the current values would mark as "reported" anything that
+	// landed after the snapshot was taken — counted by the cursor, printed by
+	// no line, and never picked up again because the cursor had moved past it.
+	// e.mu makes that window empty in production (decideServe needs the lock to
+	// increment), so this costs nothing and removes the dependence on that
+	// being true.
+	e.lastPass, e.lastFlag = snap.Pass, snap.Flag
+	return snap, drained, true
 }
 
 // LogReport emits the async verdict tally so it is visible in keploy's output
@@ -393,21 +493,29 @@ func (e *Engine) Report() ReportSnapshot {
 // (holdThrottle), served lanes serve immediately. Each shape flag is logged at
 // Info with a remediation hint.
 func (e *Engine) LogReport(logger *zap.Logger) {
-	e.logOnce.Do(func() {
-		s := e.Report()
-		if s.Pass == 0 && s.Flag == 0 && s.NotExercised == 0 {
-			return // no async activity (e.g. record mode) — stay quiet
-		}
-		logger.Info("async egress verdict",
-			zap.Int("served", s.Pass),
-			zap.Int("shape_flags", s.Flag),
-			zap.Int("not_exercised", s.NotExercised),
-			zap.Int("held", s.Held))
-		for _, f := range s.Flags {
-			logger.Info("async egress shape drift (served recorded response anyway); "+
-				"re-record if the request legitimately changed, or widen the lane's "+
-				"volatileParams / match to treat the varying part as noise",
-				zap.String("detail", f))
-		}
-	})
+	e.emitMu.Lock()
+	defer e.emitMu.Unlock()
+	s, drift, moved := e.drainReport()
+	if !moved {
+		return // nothing new since the last line (record mode, or a repeat flush)
+	}
+	// Field names and ORDER are load-bearing: java-linux.sh greps the encoded
+	// line for `"served": N, "shape_flags": N, "not_exercised": N`. Renaming or
+	// reordering these silently breaks that gate.
+	logger.Info("async egress verdict",
+		zap.Int("served", s.Pass),
+		zap.Int("shape_flags", s.Flag),
+		zap.Int("not_exercised", s.NotExercised),
+		zap.Int("held", s.Held),
+		// Appended AFTER held so the three fields CI greps stay contiguous.
+		// The boundary flush runs inside RunTestSet, which the replayer has
+		// already announced as the NEXT test-set, so without this a reader
+		// attributes the previous set's verdict to the one just announced.
+		zap.String("scope", "cumulative-for-run"))
+	for _, f := range drift {
+		logger.Info("async egress shape drift (served recorded response anyway); "+
+			"re-record if the request legitimately changed, or widen the lane's "+
+			"volatileParams / match to treat the varying part as noise",
+			zap.String("detail", f))
+	}
 }

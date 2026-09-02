@@ -1101,8 +1101,13 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 // When this flag is set, connection errors will be logged as debug instead of error
 func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	p.isGracefulShutdown.Store(true)
-	// Surface the async-egress verdict at replay wind-down (logs once; the
-	// StopProxyServer path also calls this, whichever fires first wins).
+	// Surface the async-egress verdict at replay wind-down. This fires per
+	// test-set on the native path and once per run on every path (replay.go's
+	// run-level defer is ungated), so it is what covers the FINAL test-set.
+	// LogReport is idempotent when nothing has moved since the last line.
+	//
+	// StopProxyServer also calls LogReport but is unreachable — it has no call
+	// expression anywhere in the tree, only comments referring to it.
 	if p.asyncEngine != nil {
 		p.asyncEngine.LogReport(p.logger)
 	}
@@ -3257,9 +3262,32 @@ var _ agent.AsyncMockLoader = (*Proxy)(nil)
 // (which REPLACES the previous test-set's corpus). No-op when async is not
 // configured.
 func (p *Proxy) LoadAsyncMocks(mocks []*models.Mock) {
-	if p.asyncEngine != nil {
-		p.asyncEngine.Load(mocks)
+	if p.asyncEngine == nil {
+		return
 	}
+	// Flush the previous test-set's verdict at the boundary.
+	//
+	// Order relative to Load is NOT load-bearing — Load touches streams,
+	// completed and windowSeen, never the tally — so this reads before it only
+	// because that is the order the boundary happens in, not because anything
+	// depends on it.
+	//
+	// This is the only seam that runs once per test-set on EVERY replay path.
+	// The SetGracefulShutdown seam does not: replay.go gates its per-test-set
+	// notify on `r.instrument && !serveTest`, and serveTest is true for
+	// docker-compose replay with mocking on — which is the DEFAULT — so on that
+	// path only the run-level notify fires and sets 2..N would stay invisible.
+	//
+	// Emitting here is ordering-independent for the same reason Load itself
+	// replaces here rather than on a reset seam: the two replay branches call
+	// StoreMocks and MockOutgoing in opposite orders, and Load is the one call
+	// that carries the corpus.
+	//
+	// The last set is still covered: replay.go's run-level defer calls
+	// NotifyGracefulShutdown ungated, which reaches SetGracefulShutdown and
+	// flushes whatever the final set accumulated.
+	p.asyncEngine.LogReport(p.logger)
+	p.asyncEngine.Load(mocks)
 }
 
 func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
