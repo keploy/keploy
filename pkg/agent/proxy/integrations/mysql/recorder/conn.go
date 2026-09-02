@@ -185,6 +185,11 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 				logger.Debug("Also pushed to port-only fallback key",
 					zap.String("portKey", portKey))
 			}
+			// Record this greeting as the destination's last-resort fallback for
+			// a sibling connection whose own raw leg was dropped. Keyed by the
+			// resolved destination so it can only be reused for the SAME server,
+			// and skipped entirely when the address was synthesized.
+			hsStore.RememberLast(models.HandshakeLastKey(opts.PassThroughScope, opts.DstCfg), hsEntry)
 			// Signal that the pre-TLS config mock should NOT be recorded here;
 			// the post-TLS path will produce a single combined config mock.
 			res.skipConfigMock = true

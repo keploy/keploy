@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # safer bash, but we’ll locally disable -e around commands we want to inspectset -Eeuo pipefail
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 git fetch origin
 git checkout origin/add-ssl-mysql
 
@@ -162,12 +163,14 @@ section "Start MySQL"
 if ! docker ps --format '{{.Names}}' | grep -q '^mysql-container$'; then
   if [[ "${ENABLE_SSL:-false}" == "true" ]]; then
     echo "Starting MySQL with SSL/TLS via Docker Compose"
+    docker_compose_pull_retry
     docker compose up -d
     wait_for_mysql
   else
     echo "Starting MySQL with standard Docker run (no SSL)"
     sed -i 's/MYSQL_SSL_MODE=production/MYSQL_SSL_MODE=false/' .env
     cat .env
+    docker_pull_retry mysql:latest
     docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss \
       -p 3306:3306 --rm -d mysql:latest
     wait_for_mysql
@@ -193,9 +196,11 @@ if json_pass_supported; then
   section "Reset MySQL before json record pass"
   docker rm -f mysql-container || true
   if [[ "${ENABLE_SSL:-false}" == "true" ]]; then
+    docker_compose_pull_retry
     docker compose up -d
     wait_for_mysql
   else
+    docker_pull_retry mysql:latest
     docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss \
       -p 3306:3306 --rm -d mysql:latest
     wait_for_mysql

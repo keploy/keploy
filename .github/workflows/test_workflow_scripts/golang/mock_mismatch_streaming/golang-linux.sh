@@ -1,5 +1,7 @@
 #!/bin/bash
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+
 # E2E for STREAMING mock-mismatch reporting. Uses the sse-redis sample, whose
 # streaming endpoints (SSE / NDJSON / multipart / plain-text) are served from
 # Redis. We record it, then MUTATE the recorded LRANGE read mock — the outgoing
@@ -38,6 +40,7 @@ rm -rf keploy/
 rm -f record_logs.txt test_logs.txt
 
 # Redis backing store for the sample's streaming endpoints.
+docker_compose_pull_retry
 docker compose up -d
 echo "waiting for redis..."
 for i in $(seq 1 30); do

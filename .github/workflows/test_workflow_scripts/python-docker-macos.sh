@@ -70,6 +70,7 @@ docker network create "$NETWORK_NAME"
 
 # --- Start fresh Mongo (force remove any stale one first) ---
 docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+docker_pull_retry mongo
 docker run --name "$DB_CONTAINER" --rm \
   --net "$NETWORK_NAME" --network-alias mongo \
   -p "${DB_PORT}:27017" -d mongo

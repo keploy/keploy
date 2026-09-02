@@ -401,7 +401,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	// COM_QUERY decode past the CI (2a) gate. Waiting is free: the client's
 	// post-TLS bytes are buffered on ClientStream and read only after this
 	// returns.
-	entry, source := resolvePreTLSGreeting(ctx, hsStore, sess.Opts.ConnKey, dstPort)
+	entry, source := resolvePreTLSGreeting(ctx, hsStore, sess.Opts.ConnKey, dstPort, sess.Opts.PassThroughScope, sess.Opts.DstCfg)
 	staleEntry := source == greetingCached
 	var greetingBuf []byte
 	if source != greetingNone && len(entry.RespPackets) > 0 {
@@ -898,9 +898,15 @@ const (
 // proxyless the raw and decrypted legs are different TCP connections, so only
 // the port-only key (e.g. "port:3306") reliably bridges them — the raw leg
 // pushes under both (storePreTLSHandshakeV2).
-func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, connKey string, dstPort uint16) (models.TLSHandshakeEntry, preTLSGreetingSource) {
+func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, connKey string, dstPort uint16, scope string, dst *models.ConditionalDstCfg) (models.TLSHandshakeEntry, preTLSGreetingSource) {
 	connSpecificKey := models.HandshakeStoreKey(connKey, dstPort)
 	portKey := models.HandshakeStoreKey("", dstPort)
+	// The cross-connection fallback is keyed by DESTINATION, not by port: the
+	// fields it lets us reuse (capability flags, protocol version, auth plugin)
+	// are per-server, so an entry is only reusable for the same server. The key
+	// combines the app/session scope with the address so that a shared
+	// DaemonSet store cannot serve one app's greeting to another.
+	lastKey := models.HandshakeLastKey(scope, dst)
 
 	overall := mysqlPostTLSStashWait()
 	primary := mysqlPostTLSStashPrimary(overall)
@@ -923,7 +929,10 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 	}
 	// cachedGreeting returns the port's last-greeting cache entry, if usable.
 	cachedGreeting := func() (models.TLSHandshakeEntry, bool) {
-		if c, ok := hsStore.Last(portKey); ok && len(c.RespPackets) > 0 {
+		if lastKey == "" {
+			return models.TLSHandshakeEntry{}, false
+		}
+		if c, ok := hsStore.Last(lastKey); ok && len(c.RespPackets) > 0 {
 			return c, true
 		}
 		return models.TLSHandshakeEntry{}, false

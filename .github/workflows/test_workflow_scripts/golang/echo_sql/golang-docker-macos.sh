@@ -175,6 +175,7 @@ dump_diag() {
 # either path.
 wait_for_postgres_ready() {
     echo "Pre-starting postgres and waiting for it to accept TCP connections..."
+    docker_compose_pull_retry postgres
     docker compose up -d postgres
     local ready=false
     for _ in $(seq 1 90); do
