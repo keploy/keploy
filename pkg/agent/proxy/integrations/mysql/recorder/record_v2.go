@@ -208,9 +208,11 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		return res, fmt.Errorf("decode server greeting: %w", err)
 	}
 	res.requestOperation = handshakePkt.Header.Type
+	var serverID string
 	if greeting, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet); ok {
 		decodeCtx.ServerCaps = greeting.CapabilityFlags
 		decodeCtx.ServerGreetings.Store(clientKey, greeting)
+		serverID = greetingServerIdentity(greeting)
 	}
 	pluginName, err := wire.GetPluginName(handshakePkt.Message)
 	if err != nil {
@@ -258,7 +260,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		// is false) control falls through to the directive-based upgrade
 		// below instead.
 		if sess.Opts.SkipTLSMITM {
-			if err := storePreTLSHandshakeV2(ctx, logger, sess, handshake, clientFirst, res.reqTimestamp); err != nil {
+			if err := storePreTLSHandshakeV2(ctx, logger, sess, handshake, clientFirst, res.reqTimestamp, serverID); err != nil {
 				return res, err
 			}
 			res.skipConfigMock = true
@@ -901,12 +903,38 @@ const (
 func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, connKey string, dstPort uint16, scope string, dst *models.ConditionalDstCfg) (models.TLSHandshakeEntry, preTLSGreetingSource) {
 	connSpecificKey := models.HandshakeStoreKey(connKey, dstPort)
 	portKey := models.HandshakeStoreKey("", dstPort)
-	// The cross-connection fallback is keyed by DESTINATION, not by port: the
+	// The cross-connection fallback has TWO keys. One names the destination: the
 	// fields it lets us reuse (capability flags, protocol version, auth plugin)
 	// are per-server, so an entry is only reusable for the same server. The key
 	// combines the app/session scope with the address so that a shared
 	// DaemonSet store cannot serve one app's greeting to another.
 	lastKey := models.HandshakeLastKey(scope, dst)
+	// The decrypted leg's address is frequently a capture-layer stand-in, which
+	// can never match what the raw leg wrote. The port is agreed between the two
+	// legs, so it is the key that actually bridges them here.
+	lastPortKey := models.HandshakeLastPortKey(scope, dstPort)
+	// The port key exists ONLY for a leg that cannot identify its own server. If
+	// this leg's destination was genuinely resolved, a key that names no server
+	// must never be allowed to answer for it: the latch cannot save us here,
+	// because it only trips once the OTHER server's raw leg writes the key, and
+	// by construction that has not happened — that is precisely why the fallback
+	// was reached. Without this gate a fully-resolved connection is stitched with
+	// another server's capability flags and auth plugin, turning a missing mock
+	// into a WRONG one, which is strictly worse.
+	// NOTE ON REACHABILITY: AddrFabricated has NO producer in this repository —
+	// every assignment is in a _test.go. It is set by the out-of-tree proxyless
+	// capture layer (enterprise pkg/agent/proxy, routeEgressToParser, which
+	// propagates its destInfoResult.Fabricated into DstCfg.AddrFabricated) when
+	// it could not resolve a decrypted TLS leg's destination and had to
+	// substitute a stand-in. So in a plain OSS/sidecar deployment this gate is
+	// always false and the port key never answers; the path below is exercised
+	// only under that capture layer, and OSS tests must set the flag by hand.
+	// This is stated because "a mechanism with no in-tree caller" is exactly the
+	// defect being fixed here — RememberLast had one, in a legacy path the
+	// proxyless flow never runs — and it should not be rediscovered by accident.
+	if dst != nil && dst.Addr != "" && !dst.AddrFabricated {
+		lastPortKey = ""
+	}
 
 	overall := mysqlPostTLSStashWait()
 	primary := mysqlPostTLSStashPrimary(overall)
@@ -929,11 +957,31 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 	}
 	// cachedGreeting returns the port's last-greeting cache entry, if usable.
 	cachedGreeting := func() (models.TLSHandshakeEntry, bool) {
-		if lastKey == "" {
+		// A latched port key is POSITIVE proof that this scope+port serves more
+		// than one server. Falling through to the address key would then quietly
+		// answer from the shared placeholder bucket — which carries no identity
+		// at all — after the guarded key just told us reuse is unsafe. Decline
+		// outright instead; a missing mock beats one stitched from a server we
+		// have already proven is not necessarily this connection's.
+		if lastPortKey != "" && hsStore.IsAmbiguous(lastPortKey) {
 			return models.TLSHandshakeEntry{}, false
 		}
-		if c, ok := hsStore.Last(lastKey); ok && len(c.RespPackets) > 0 {
-			return c, true
+		// Port key FIRST. It is the only one of the two with a runtime guard:
+		// RememberLastForPort tags every entry with the destination that produced
+		// it and latches the key unusable once a second server appears. The
+		// address key has no such guard, and on this path the reader's address is
+		// usually a capture-layer stand-in, so "dst:<scope>|127.0.0.1:3306" is a
+		// shared bucket that any unresolved connection in the scope can land in —
+		// consulting it first would let it shadow the guarded answer.
+		if lastPortKey != "" {
+			if c, ok := hsStore.Last(lastPortKey); ok && len(c.RespPackets) > 0 {
+				return c, true
+			}
+		}
+		if lastKey != "" {
+			if c, ok := hsStore.Last(lastKey); ok && len(c.RespPackets) > 0 {
+				return c, true
+			}
 		}
 		return models.TLSHandshakeEntry{}, false
 	}
@@ -984,6 +1032,27 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 	return models.TLSHandshakeEntry{}, greetingNone
 }
 
+// greetingServerIdentity fingerprints the SERVER-STABLE parts of a HandshakeV10
+// greeting: protocol version, server version, capability flags, default charset
+// and auth plugin. These are exactly the fields a borrowed greeting contributes
+// to a config mock (ServerCaps drives DeprecateEOF and result-set parsing;
+// PluginName drives auth-flow selection), so two greetings with the same
+// fingerprint are interchangeable for stitching no matter which address or
+// connection they arrived on.
+//
+// The per-connection fields — connection id, auth-plugin-data salt, status flags
+// — are deliberately excluded: they differ on every connection to the SAME
+// server, and none of them is verified on the record or replay path (the
+// replayer skips AuthResponse comparison precisely because it is salt-derived).
+// Including them would make every connection look like a different server.
+func greetingServerIdentity(g *mysql.HandshakeV10Packet) string {
+	if g == nil {
+		return ""
+	}
+	return fmt.Sprintf("v%d|%s|caps=%d|cs=%d|%s",
+		g.ProtocolVersion, g.ServerVersion, g.CapabilityFlags, g.CharacterSet, g.AuthPluginName)
+}
+
 // storePreTLSHandshakeV2 pushes the pre-TLS MySQL server greeting and the
 // client SSLRequest into the shared TLSHandshakeStore so the decrypted
 // (uprobe) tls-* stream's handlePostTLSRecord can recover them. It mirrors
@@ -992,7 +1061,7 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 // observe-only stream and the decrypted uprobe stream are different TCP
 // connections with different connIDs — only the port-only key (port:3306)
 // reliably bridges the two.
-func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, greeting, sslRequest []byte, reqTimestamp time.Time) error {
+func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, greeting, sslRequest []byte, reqTimestamp time.Time, serverID string) error {
 	hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
 	if !ok || hsStore == nil {
 		return fmt.Errorf("SkipTLSMITM requires TLSHandshakeStore in context for MySQL handshake reconstruction")
@@ -1014,10 +1083,38 @@ func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *super
 	if portKey != storeKey {
 		hsStore.Push(portKey, hsEntry)
 	}
+	// Seed the last-greeting cache too. Push/PopWait entries are CONSUMED, so a
+	// connection whose own raw leg never produced one — a pooled connection
+	// reused long after its handshake, or a leg the ringbuf dropped under load —
+	// finds both keys above empty and has nothing left to stitch with. That is
+	// what resolvePreTLSGreeting's cachedGreeting fallback exists for, but until
+	// now nothing on this path ever wrote it: the only RememberLast caller was
+	// the legacy handleInitialHandshake, which the proxyless V2 flow never runs.
+	// The fallback was therefore dead code on every proxyless MySQL-over-TLS
+	// recording, and the command phase of such a connection was dropped outright
+	// (the "served but NOT recorded" capture shortfall).
+	//
+	// Both keys are written because the two legs disagree about the address: the
+	// decrypted leg's destination is often unresolvable, so it presents a
+	// synthesized stand-in and could never match an address-keyed entry. See
+	// models.HandshakeLastPortKey.
+	scope := sess.Opts.PassThroughScope
+	hsStore.RememberLast(models.HandshakeLastKey(scope, sess.Opts.DstCfg), hsEntry)
+	// The port-scoped copy is tagged with the SERVER's identity, taken from the
+	// greeting itself rather than from the address it arrived from. Address is
+	// the wrong identity here: in Kubernetes the same logical MySQL gets a new
+	// pod IP on every rollout, and a Service with several endpoints hands out a
+	// different IP per connection, so an address-tagged latch would fire on two
+	// connections to the SAME server and permanently disable the fallback in the
+	// environment it exists for. The greeting fingerprint is stable across those
+	// and captures exactly the fields a borrower reuses, so it latches only when
+	// reuse would genuinely be unsafe.
+	hsStore.RememberLastForPort(models.HandshakeLastPortKey(scope, dstPort), serverID, hsEntry)
 	logger.Debug("V2: pushed pre-TLS MySQL greeting + SSLRequest to TLSHandshakeStore for post-TLS stitch",
 		zap.String("key", storeKey),
 		zap.String("portKey", portKey),
 		zap.String("connKey", sess.Opts.ConnKey),
+		zap.String("scope", scope),
 		zap.Uint16("dstPort", dstPort))
 	return nil
 }
