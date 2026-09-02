@@ -3162,6 +3162,11 @@ func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
 		if ts := tc.HTTPReq.Timestamp; !ts.IsZero() {
 			return ts
 		}
+		// A gRPC-only test set has no HTTPReq, so reading that field alone
+		// returned zero and the cutoff was never seeded for it at all.
+		if ts := tc.GrpcReq.Timestamp; !ts.IsZero() {
+			return ts
+		}
 	}
 	return time.Time{}
 }

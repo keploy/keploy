@@ -129,6 +129,13 @@ type MockManager struct {
 	// under swapMu.
 	boundaryPending bool
 
+	// cutoffSeeded records that SeedStartupCutoff supplied the startup-init
+	// cutoff for the set now being staged. Production order is
+	// ResetForReplaySession (raises boundaryPending) -> SeedStartupCutoff ->
+	// SetMocksWithWindow(BaseTime); without this the staging branch clears the
+	// cutoff it was just given, in the same call, and the seed does nothing.
+	cutoffSeeded bool
+
 	// swapMu guards the {filtered, unfiltered, window} swap performed by
 	// SetMocksWithWindow. Writers Lock(); readers via GetFilteredMocksInWindow
 	// RLock() the snapshot read so they cannot observe a torn (newMocks,
@@ -372,6 +379,7 @@ func (m *MockManager) ResetForReplaySession() {
 
 	m.swapMu.Lock()
 	m.boundaryPending = true
+	m.cutoffSeeded = false
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -754,7 +762,12 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		if m.boundaryPending {
 			m.boundaryPending = false
 			m.testFiredThisSet = false
-			m.firstWindowStart = time.Time{}
+			// Leave a cutoff that was seeded for THIS set. The caller seeds
+			// between the reset and this call, so clearing unconditionally
+			// erased it in the same breath it was given.
+			if !m.cutoffSeeded {
+				m.firstWindowStart = time.Time{}
+			}
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -968,10 +981,28 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// window: any revision a consumer can observe now corresponds to a state
 	// where all three tiers agree. Suppression is per-call, not a flag on the
 	// manager, so it cannot swallow a concurrent consumer's own bump.
+	// Collect the kinds LEAVING the pool BEFORE the swaps replace the maps.
+	// Reading them afterwards re-reads the new maps, so a kind that was present
+	// and is now absent never bumps — and a consumer caching under that frozen
+	// per-kind revision keeps serving mocks that are gone. Test set A uses
+	// redis, set B does not: set B was served set A's cached redis index.
+	departing := map[models.Kind]struct{}{}
+	m.treesMu.RLock()
+	for k := range m.filteredByKind {
+		departing[k] = struct{}{}
+	}
+	for k := range m.unfilteredByKind {
+		departing[k] = struct{}{}
+	}
+	m.treesMu.RUnlock()
+
 	m.setFilteredMocks(filteredForTree, false)
 	m.setUnFilteredMocks(unfilteredForTree, false)
 
 	touchedAll := map[models.Kind]struct{}{}
+	for k := range departing {
+		touchedAll[k] = struct{}{}
+	}
 	for _, mk := range filteredForTree {
 		if mk != nil {
 			touchedAll[mk.Kind] = struct{}{}
@@ -990,14 +1021,7 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 			touchedAll[mk.Kind] = struct{}{}
 		}
 	}
-	m.treesMu.RLock()
-	for k := range m.filteredByKind {
-		touchedAll[k] = struct{}{}
-	}
-	for k := range m.unfilteredByKind {
-		touchedAll[k] = struct{}{}
-	}
-	m.treesMu.RUnlock()
+
 	for k := range touchedAll {
 		m.bumpRevisionKind(k)
 	}
@@ -1900,7 +1924,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 		_, oldUnf := m.ensureKindTrees(oldK)
 		_, newUnf := m.ensureKindTrees(newK)
 		m.treesMu.Lock()
-		updatedOldKind = oldUnf.delete(old.TestModeInfo)
+		updatedOldKind = oldUnf.deleteMock(old.TestModeInfo, *old)
 		updatedNewKind = newUnf.update(old.TestModeInfo, new.TestModeInfo, new, *old)
 		if !updatedNewKind {
 			newUnf.insert(new.TestModeInfo, new)
@@ -1950,7 +1974,28 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	if updatedGlobal {
 		m.bumpRevisionAll()
 	}
-	return updatedGlobal
+	if updatedGlobal {
+		return true
+	}
+
+	// Ladder step: the unfiltered doors missed, so try the startup tier.
+	//
+	// Every consume door has to be able to resolve a mock the caller legitimately
+	// matched, because a false is not a terminal answer to any caller — it means
+	// "someone else won the race, retry against the shrunk pool", and the pool
+	// does not shrink. http2's matcher takes its candidates from GetSessionMocks
+	// (startup UNION session) and this is its ONLY consume door, so a
+	// bootstrap-recorded per-test mock — which lands in the startup tier — made
+	// it spin until the request context died. Generic and mongo v1 have the same
+	// shape.
+	//
+	// Consuming from startup is the right analogue here: the identity-checked
+	// rewrite above could not find it in the unfiltered trees because it does not
+	// live there.
+	if m.DeleteStartupMock(*old) {
+		return true
+	}
+	return false
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
@@ -2016,6 +2061,20 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	// one the caller matched instead of whatever shared its key.
 	if m.DeleteStartupMock(mock) {
 		return true
+	}
+
+	// Final ladder step: a per-test mock that the lax filter promoted into the
+	// SESSION tier. agentStrict is permanently false on the stock proxy, so
+	// pkg/util.go appends out-of-window per-test mocks to the unfiltered slice
+	// with their Lifetime left at per-test. grpcV2 dispatches on Lifetime and
+	// sends those here; kafka reaches here for the same shape. Neither has a
+	// second door, so refusing made them spin.
+	//
+	// Gated on per-test lifetime: a genuine session or connection mock is
+	// REUSABLE and must never be consumed out of the unfiltered tier by this
+	// door, or one match destroys a recording every later test depends on.
+	if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
+		return m.DeleteUnFilteredMock(mock)
 	}
 	return false
 }
@@ -2109,7 +2168,17 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 	it := tree.rbt.Iterator()
 	for it.Next() {
 		mk, ok := it.Value().(*models.Mock)
-		if !ok || mk == nil || mk.Name != mock.Name {
+		if !ok || mk == nil {
+			continue
+		}
+		// Name alone is not enough, and this door is now reached far more often
+		// because the consume ladder falls through to it. Names are not unique:
+		// pulsar emits "pulsar-<commandType>" and says so in its own comment,
+		// kafka emits "kafka-<api>-<corrID>" with correlation ids restarting per
+		// connection. Two callers reach here with mocks they never matched
+		// (pulsar's consumeServerPush, zookeeper's notification flush), so a
+		// name-only match can consume an unrelated recording.
+		if !sameMock(mk, mock) {
 			continue
 		}
 		key := it.Key()
@@ -2179,6 +2248,7 @@ func (m *MockManager) SeedStartupCutoff(start time.Time) {
 	if m.firstWindowStart.IsZero() || start.Before(m.firstWindowStart) {
 		m.firstWindowStart = start
 	}
+	m.cutoffSeeded = true
 }
 
 // MarkMockAsUsed marks the given mock as used (consumed) without modifying

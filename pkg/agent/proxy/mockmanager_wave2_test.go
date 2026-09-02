@@ -1473,3 +1473,89 @@ func TestDeleteFilteredMock_StartupFallbackLeavesTheSessionTierIntact(t *testing
 			"later test that needs that handshake now misses")
 	}
 }
+
+// The cutoff must survive being seeded in the gap between the boundary and
+// staging — which is the order production actually uses.
+//
+// MockOutgoing calls ResetForReplaySession (raising boundaryPending), then
+// UpdateMockParams seeds the cutoff and only THEN calls SetMocksWithWindow with
+// the BaseTime sentinel. The boundary branch cleared the cutoff unconditionally,
+// so the seed was erased in the same call that set it and the whole
+// earliest-recorded-test fix was inert. The original test for this passed only
+// because it staged first and seeded second.
+func TestSeedStartupCutoff_SurvivesTheBoundaryClearInProductionOrder(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+
+	t1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	// Production order.
+	mm.ResetForReplaySession()
+	mm.SeedStartupCutoff(t1)
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+
+	if got := mm.FirstTestWindowStart(); !got.Equal(t1) {
+		t.Fatalf("the seeded cutoff was wiped by the boundary clear: got %v, want %v", got, t1)
+	}
+	// Routing must still read "nothing has fired" — seeding is not a test firing.
+	if snap := mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
+		t.Fatalf("seeding must not look like a fired test, got %+v", snap)
+	}
+}
+
+// Every consume door has to resolve a mock the caller legitimately matched.
+// A false is not terminal to any caller — it means "someone else won the race,
+// retry against the shrunk pool" — and the pool does not shrink, so a door that
+// refuses makes the caller spin until its context dies.
+func TestConsumeLadder_EveryDoorResolvesAMockFromAnotherTier(t *testing.T) {
+	newMgr := func() *MockManager {
+		m := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+		t.Cleanup(func() { m.Close() })
+		return m
+	}
+	start := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("UpdateUnFilteredMock resolves a startup-tier mock", func(t *testing.T) {
+		mm := newMgr()
+		boot := newMockForTest("boot", start.Add(-time.Minute), models.LifetimePerTest)
+		mm.SetMocksWithWindow([]*models.Mock{boot}, nil, models.BaseTime, time.Now())
+
+		startup, _ := mm.GetStartupMocks()
+		var c models.Mock
+		for _, m := range startup {
+			if m != nil && m.Name == "boot" {
+				c = *m
+			}
+		}
+		if c.Name == "" {
+			t.Skip("boot is not in the startup tier")
+		}
+		updated := c
+		if !mm.UpdateUnFilteredMock(&c, &updated) {
+			t.Fatal("http2's only consume door refused a startup-tier mock it matched out of " +
+				"GetSessionMocks; its retry loop re-matches the same mock until the context dies")
+		}
+	})
+
+	t.Run("DeleteFilteredMock resolves a per-test mock promoted into the session tier", func(t *testing.T) {
+		mm := newMgr()
+		// what the lax filter produces: per-test lifetime, unfiltered slice
+		promoted := newMockForTest("promoted", start.Add(-time.Hour), models.LifetimePerTest)
+		mm.SetMocksWithWindow(nil, []*models.Mock{promoted}, start, start.Add(10*time.Second))
+
+		sess, _ := mm.GetSessionScopedMocks()
+		var c models.Mock
+		for _, m := range sess {
+			if m != nil && m.Name == "promoted" {
+				c = *m
+			}
+		}
+		if c.Name == "" {
+			t.Skip("the promoted mock is not in the session tier")
+		}
+		if !mm.DeleteFilteredMock(c) {
+			t.Fatal("grpcV2 and kafka dispatch a per-test-lifetime mock here; refusing it makes " +
+				"them re-pick the same mock forever")
+		}
+	})
+}
