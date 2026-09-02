@@ -1473,3 +1473,170 @@ func TestDeleteFilteredMock_StartupFallbackLeavesTheSessionTierIntact(t *testing
 			"later test that needs that handshake now misses")
 	}
 }
+
+// The replayer seeds the set's startup-init cutoff and then stages its mocks in
+// ONE UpdateMockParams call — SeedStartupCutoff (agent.go) followed by
+// SetMocksWithWindow. Staging is also where the set boundary clears the window
+// bits, so a seed written straight into firstWindowStart was wiped microseconds
+// after it was written, for EVERY set: the feature was inert in production
+// while its unit tests passed, because they used a fresh manager where the
+// clear had nothing to remove.
+func TestSeedStartupCutoff_SurvivesTheStagingThatFollowsIt(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(func() { mm.Close() })
+
+	first := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	// Exactly the production order for one test set.
+	mm.ResetForReplaySession()
+	mm.SeedStartupCutoff(first)
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+
+	if got := mm.FirstTestWindowStart(); !got.Equal(first) {
+		t.Fatalf("cutoff after staging = %v, want %v: the boundary clear wiped the "+
+			"seed the replayer had just supplied, so every mock recorded before the "+
+			"set's first test is dropped instead of routed to the startup tier", got, first)
+	}
+
+	// Installing a cutoff must not look like a fired test. If it did, tier-aware
+	// parsers would route the set's bootstrap traffic to the per-test engine
+	// over a tree that staging just emptied.
+	if mm.HasFirstTestFired() {
+		t.Fatal("the installed cutoff marked a test as fired")
+	}
+	if snap := mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
+		t.Fatalf("window snapshot after staging = %+v, want inactive with no test fired", snap)
+	}
+}
+
+// Test sets are recorded in chronological order, so set N+1's cutoff is always
+// LATER than set N's. A running-minimum guard against the live value therefore
+// REFUSES it, and set N+1 runs the whole set on set N's cutoff — every mock
+// recorded between the two sets reads as previous-test bleed and is dropped
+// rather than served as that set's bootstrap traffic.
+func TestSeedStartupCutoff_SecondSetDoesNotInheritTheFirstsCutoff(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(func() { mm.Close() })
+
+	setA := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	setB := setA.Add(time.Hour)
+
+	mm.ResetForReplaySession()
+	mm.SeedStartupCutoff(setA)
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.SetMocksWithWindow(nil, nil, setA, setA.Add(time.Second)) // a test fires in set A
+
+	mm.ResetForReplaySession()
+	mm.SeedStartupCutoff(setB)
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+
+	if got := mm.FirstTestWindowStart(); !got.Equal(setB) {
+		t.Fatalf("set B cutoff = %v, want %v: set B is running on set A's cutoff", got, setB)
+	}
+
+	// The user-visible consequence: set B's own bootstrap mock, recorded after
+	// set A ended, must reach the startup tier.
+	boot := newMockForTest("setB-bootstrap", setB.Add(-5*time.Minute), models.LifetimePerTest)
+	mm.SetMocksWithWindow([]*models.Mock{boot}, nil, setB, setB.Add(time.Second))
+
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if !containsMockNamed(startup, "setB-bootstrap") {
+		t.Fatalf("set B's bootstrap mock was dropped instead of routed to startup "+
+			"(startup=%d dropped=%d cutoff=%v)", len(startup), mm.DroppedOutOfWindow(),
+			mm.FirstTestWindowStart())
+	}
+}
+
+// A kind that LEAVES the pool must bump its own per-kind revision, or a
+// consumer caching an index under RevisionByKind never learns its mocks are
+// gone and keeps serving the previous set's index.
+//
+// The walk used to read filteredByKind/unfilteredByKind AFTER the tier swap, so
+// it read the NEW maps — exactly redundant with walking the new input slices,
+// and departing kinds were published nowhere. A kind living only in the startup
+// tier was missed in both directions, because during BaseTime staging
+// filteredForTree is nil and such a kind never enters filteredByKind at all.
+func TestSetMocksWithWindow_BumpsRevisionForDepartingKinds(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		startup bool // seed via the startup tier (BaseTime staging) instead of a live window
+	}{
+		{name: "per-test tier"},
+		{name: "startup tier", startup: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+			t.Cleanup(func() { mm.Close() })
+
+			at := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+			redis := newMockForTest("redis-1", at, models.LifetimePerTest)
+			redis.Kind = models.REDIS
+
+			if tc.startup {
+				mm.SetMocksWithWindow([]*models.Mock{redis}, nil, models.BaseTime, time.Now())
+			} else {
+				mm.SetMocksWithWindow([]*models.Mock{redis}, nil, at, at.Add(time.Second))
+			}
+			before := mm.RevisionByKind(models.REDIS)
+			if before == 0 {
+				t.Fatal("precondition: staging redis mocks must move the redis revision")
+			}
+
+			// Next set holds no redis mocks at all.
+			mm.SetMocksWithWindow(nil, nil, at.Add(time.Hour), at.Add(time.Hour+time.Second))
+
+			if got := mm.RevisionByKind(models.REDIS); got == before {
+				t.Fatalf("redis per-kind revision stayed %d after its mocks left the pool; "+
+					"a revision-gated consumer keeps serving the previous set's redis index", got)
+			}
+		})
+	}
+}
+
+// A parked cutoff must not outlive the set that seeded it.
+//
+// UpdateMockParams can abort between SeedStartupCutoff and SetMocksWithWindow
+// — the "no mocks stored for client ID" bail and the loadPerTestMocks error
+// path both return in that gap — leaving a park with no staging call to consume
+// it. Sets are recorded chronologically, so the orphan is always the EARLIER
+// value: it would win any running-minimum guard and the next set would replay
+// on the aborted set's cutoff, dropping its bootstrap traffic as bleed.
+func TestSeedStartupCutoff_AbortedSetDoesNotLeakItsCutoffToTheNext(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(func() { mm.Close() })
+
+	setA := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	setB := setA.Add(time.Hour)
+
+	// Set A seeds and then aborts before staging.
+	mm.ResetForReplaySession()
+	mm.SeedStartupCutoff(setA)
+
+	// Set B runs normally.
+	mm.ResetForReplaySession()
+	mm.SeedStartupCutoff(setB)
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+
+	if got := mm.FirstTestWindowStart(); !got.Equal(setB) {
+		t.Fatalf("set B cutoff = %v, want %v: the aborted set's parked cutoff survived "+
+			"its own set and was installed here", got, setB)
+	}
+
+	// The set after an abort need not seed at all — the replayer supplies a
+	// cutoff only when it knows the set's first recorded test. Then nothing
+	// overwrites the orphan, so the reset is the only thing that can clear it.
+	mm.ResetForReplaySession()
+	mm.SeedStartupCutoff(setB.Add(time.Hour))
+	mm.ResetForReplaySession() // that set aborts before staging
+
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now()) // no seed for this one
+
+	if got := mm.FirstTestWindowStart(); !got.IsZero() {
+		t.Fatalf("cutoff = %v, want zero: an unseeded set inherited a parked cutoff "+
+			"from an aborted earlier set", got)
+	}
+}
