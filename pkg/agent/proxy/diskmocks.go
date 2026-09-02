@@ -226,6 +226,23 @@ func (d *DiskMocks) LoadWindow(start, end time.Time) ([]*models.Mock, error) {
 	}
 	lo := start.UnixNano()
 	hi := end.UnixNano()
+	// An inverted window selects nothing: the scan below runs from the first
+	// entry >= lo while entries are <= hi, so hi < lo yields an empty band and
+	// the test replays with no per-test mocks at all — a whole test's worth of
+	// hard misses, reported as if the recording were empty.
+	//
+	// It reaches here from a recorded pair whose response timestamp precedes
+	// its request (clock skew on the recording host, most often a container
+	// clock stepping). Normalising to the degenerate [lo, lo] keeps the mock
+	// whose request time anchors the window instead of dropping everything,
+	// and says so once rather than failing silently.
+	if hi < lo {
+		d.logger.Info("test window is inverted (end before start); clamping to the start instant "+
+			"so the window selects the anchoring mock rather than nothing — the recording's "+
+			"response timestamp precedes its request, usually a clock step on the recording host",
+			zap.Time("start", start), zap.Time("end", end))
+		hi = lo
+	}
 	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].reqTsNano >= lo })
 	sel := make([]diskEntry, 0)
 	for ; i < len(d.entries) && d.entries[i].reqTsNano <= hi; i++ {

@@ -969,7 +969,15 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	case params.UseMappingBased && len(params.MockMapping) > 0:
 		mode = "mapping"
 		loaded, err = disk.LoadByNames(params.MockMapping)
-	case pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
+	// Gate on the CALLER's flag, not the agent's own config. The two are
+	// independent: params.StrictMockWindow is what the replayer resolved for
+	// this run and is what :1047 below already uses, while a.config is the
+	// agent process's default. When they disagree, this switch would pick the
+	// windowed disk load while the filter that consumes its output ran lax (or
+	// the reverse) — the residency decision and the filtering decision have to
+	// come from one source. IsStrictMockWindow folds in the env override, so
+	// KEPLOY_STRICT_MOCK_WINDOW still opts out either way.
+	case pkg.IsStrictMockWindow(params.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
 		mode = "strict-window"
 		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
 		if err == nil && !firstWindowStart.IsZero() {
@@ -1017,6 +1025,19 @@ func dedupByName(a, b []*models.Mock) []*models.Mock {
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+
+	// Seed the startup-init cutoff from the set's earliest RECORDED test before
+	// anything else touches the window. Without it the cutoff follows whichever
+	// test fires FIRST, so a --test-sets selection, an ignored test or the
+	// streaming deferral leaves it late and mocks belonging to a test that is
+	// never run are classified as startup-init and served as bootstrap traffic.
+	// Optional capability: a proxy that does not implement it keeps the
+	// fired-window behaviour.
+	if !params.FirstRecordedTestStart.IsZero() {
+		if seeder, ok := a.Proxy.(coreAgent.StartupCutoffSeeder); ok {
+			seeder.SeedStartupCutoff(params.FirstRecordedTestStart)
+		}
+	}
 
 	a.logger.Debug("UpdateMockParams called",
 		zap.Time("afterTime", params.AfterTime),

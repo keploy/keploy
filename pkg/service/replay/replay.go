@@ -1329,7 +1329,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -1471,7 +1471,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -1823,7 +1823,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			for i, m := range expectedTestMockMappings[testCase.Name] {
 				expectedNames[i] = m.Name
 			}
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased)
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased, time.Time{})
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 					testSetStatus = resolvedStatus
@@ -2416,7 +2416,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Mock Window: Calculate the effective mock filter window for streaming
 			// using the request timestamp to the response timestamp plus a timeout buffer.
 			streamReqTime, streamRespTime := effectiveStreamMockWindow(tc, r.config.Test.APITimeout)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, deferred.expectedMocks, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased)
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, deferred.expectedMocks, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased, time.Time{})
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
@@ -3146,7 +3146,27 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 }
 
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of sending filtered mocks
-func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
+// firstRecordedTestStart is the request time of the EARLIEST RECORDED test in
+// the set, and is only meaningful on the initial staging call. It lets the agent
+// seed the startup-init cutoff from the set's recorded shape instead of from
+// whichever test fires first; pass the zero time on per-test calls.
+// firstRecordedTestStart returns the request time of the earliest RECORDED test
+// in the set. testDB returns cases sorted by request timestamp, so it is the
+// first one's; a case with no request time contributes nothing rather than
+// pinning the cutoff to the zero time.
+func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
+	for _, tc := range testCases {
+		if tc == nil {
+			continue
+		}
+		if ts := tc.HTTPReq.Timestamp; !ts.IsZero() {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, firstRecordedTestStart time.Time) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -3162,12 +3182,13 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		strictMockWindow = r.config.Test.StrictMockWindow
 	}
 	params := models.MockFilterParams{
-		AfterTime:          afterTime,
-		BeforeTime:         beforeTime,
-		MockMapping:        expectedMockMapping,
-		UseMappingBased:    useMappingBased,
-		TotalConsumedMocks: totalConsumedMocks,
-		StrictMockWindow:   strictMockWindow,
+		AfterTime:              afterTime,
+		BeforeTime:             beforeTime,
+		FirstRecordedTestStart: firstRecordedTestStart,
+		MockMapping:            expectedMockMapping,
+		UseMappingBased:        useMappingBased,
+		TotalConsumedMocks:     totalConsumedMocks,
+		StrictMockWindow:       strictMockWindow,
 	}
 
 	// Send parameters to agent for filtering and mock updates

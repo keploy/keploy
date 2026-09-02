@@ -86,11 +86,21 @@ type MockStreamHeader struct {
 }
 
 type MockFilterParams struct {
-	AfterTime          time.Time            `json:"afterTime,omitempty"`
-	BeforeTime         time.Time            `json:"beforeTime,omitempty"`
-	MockMapping        []string             `json:"mockMapping,omitempty"`
-	UseMappingBased    bool                 `json:"useMappingBased"`
-	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	AfterTime time.Time `json:"afterTime,omitempty"`
+	// FirstRecordedTestStart is the request time of the EARLIEST RECORDED test
+	// in the set being staged, which the replayer knows because it loads test
+	// cases sorted by request timestamp. The agent seeds the manager's
+	// startup-init cutoff from it so that cutoff follows the set's recorded
+	// shape rather than whichever test happens to fire first — a --test-sets
+	// selection, an ignored test or the streaming deferral otherwise leave it
+	// late, and mocks from a test that never runs get served as bootstrap.
+	// Zero means "not supplied"; the cutoff then falls back to the fired
+	// windows, which is the pre-existing behaviour.
+	FirstRecordedTestStart time.Time            `json:"firstRecordedTestStart,omitempty"`
+	BeforeTime             time.Time            `json:"beforeTime,omitempty"`
+	MockMapping            []string             `json:"mockMapping,omitempty"`
+	UseMappingBased        bool                 `json:"useMappingBased"`
+	TotalConsumedMocks     map[string]MockState `json:"totalConsumedMocks,omitempty"`
 	// StrictMockWindow controls whether out-of-window non-config mocks are
 	// dropped rather than being promoted into the cross-test config pool.
 	// Default TRUE (see config.Test default) — out-of-window per-test

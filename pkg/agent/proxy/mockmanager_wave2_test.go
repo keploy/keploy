@@ -1051,3 +1051,425 @@ func TestResetForReplaySession_SecondTestSetKeepsItsOwnBootstrapMocks(t *testing
 		t.Fatalf("set 2's in-window test mock is missing from the per-test tier: %v", perTest)
 	}
 }
+
+// The startup-init cutoff must follow the set's earliest RECORDED test, not
+// whichever test happens to fire first.
+//
+// firstWindowStart is a running minimum over the windows that actually fire, so
+// when the first fired test is not the earliest recorded — a --test-sets
+// selection, an ignored test, the streaming deferral — the cutoff lands late.
+// Mocks belonging to a test that is NOT being run then fall before it, are
+// classified as startup-init instead of dropped as previous-test bleed, and are
+// served as bootstrap traffic.
+//
+// SeedStartupCutoff closes that: the replayer already loads test cases sorted by
+// request timestamp, so it supplies testCases[0]'s time before any test runs.
+func TestSeedStartupCutoff_SkippedFirstTestDoesNotLeakAsBootstrap(t *testing.T) {
+	t1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+
+	build := func() (*MockManager, []*models.Mock) {
+		mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+		t.Cleanup(func() { mm.Close() })
+		return mm, []*models.Mock{
+			newMockForTest("boot", t1.Add(-time.Minute), models.LifetimePerTest),
+			newMockForTest("t1mock", t1.Add(time.Second), models.LifetimePerTest),
+			newMockForTest("t2mock", t2.Add(time.Second), models.LifetimePerTest),
+		}
+	}
+
+	// Without the seed the cutoff follows the fired window (t2), so t1's mock —
+	// belonging to a test that never runs — reads as bootstrap.
+	unseeded, all := build()
+	unseeded.SetMocksWithWindow(all, nil, models.BaseTime, time.Now())
+	unseeded.SetMocksWithWindow(all, nil, t2, t2.Add(10*time.Second))
+	before, err := unseeded.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if !containsMockNamed(before, "t1mock") {
+		t.Skip("baseline no longer reproduces; the cutoff is derived differently now")
+	}
+
+	// With the seed it is classified against t1, so only genuine bootstrap
+	// traffic survives in the startup tier.
+	seeded, all := build()
+	seeded.SetMocksWithWindow(all, nil, models.BaseTime, time.Now())
+	seeded.SeedStartupCutoff(t1) // what the replayer supplies: testCases[0]
+	seeded.SetMocksWithWindow(all, nil, t2, t2.Add(10*time.Second))
+
+	after, err := seeded.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if !containsMockNamed(after, "boot") {
+		t.Fatalf("the genuine bootstrap mock must stay in the startup tier, got %v", after)
+	}
+	if containsMockNamed(after, "t1mock") {
+		t.Fatal("a mock from a test that never ran is still classified as startup-init and " +
+			"will be served as bootstrap traffic")
+	}
+}
+
+// Seeding the cutoff must NOT make routing think a test has fired. If it did,
+// staging would look like a live test and the set's bootstrap traffic would be
+// routed to the per-test engine over a tree staging had just emptied — the
+// exact outage the per-test-set reset exists to prevent.
+func TestSeedStartupCutoff_DoesNotMarkATestAsFired(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+
+	start := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.SeedStartupCutoff(start)
+
+	if snap := mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
+		t.Fatalf("seeding the cutoff must leave routing at 'nothing has fired', got %+v", snap)
+	}
+	if mm.FirstTestWindowStart().IsZero() {
+		t.Fatal("the cutoff was not seeded")
+	}
+
+	// A real window still flips routing.
+	mm.SetMocksWithWindow(nil, nil, start, start.Add(10*time.Second))
+	if snap := mm.WindowSnapshot(); !snap.Active || !snap.FirstTestFired {
+		t.Fatalf("a real window must flip routing, got %+v", snap)
+	}
+}
+
+// A consume must always terminate. Every parser except mongo v2 treats a false
+// from DeleteFilteredMock as "another goroutine won the race, retry against the
+// shrunk pool" and loops — http/match.go's `for {}` re-fetches the pool and
+// continues, and generic, grpcV2, http2, mongo v1, sqs and kafka share the
+// shape. But those parsers match against GetSessionMocks, which is startup UNION
+// session, so they can pick a STARTUP-tier mock — and DeleteStartupMock has no
+// caller in OSS at all. If the per-test door simply refuses such a mock, the
+// pool never shrinks, the retry re-picks it, and the loop spins until the
+// request context dies.
+//
+// Before the tier keys were disambiguated this never surfaced, because the
+// blind delete always "succeeded" by evicting whatever shared the key. Fixing
+// that eviction without giving the mock a door would have converted a
+// wrong-mock bug into a livelock.
+func TestDeleteFilteredMock_ConsumesAStartupTierMockSoRetryLoopsTerminate(t *testing.T) {
+	mm, bootCopy := tierFixture(t)
+
+	if !mm.DeleteFilteredMock(bootCopy) {
+		t.Fatal("a startup-tier mock matched out of the startup-union pool was refused by every " +
+			"door; the caller's retry loop re-picks it forever and spins until its context dies")
+	}
+
+	// And it must be genuinely consumed, not merely reported as such.
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if containsMockNamed(startup, "boot") {
+		t.Fatal("reported consumed but still present in the startup tier; the next match re-picks it")
+	}
+
+	// The per-test mock sharing its key is still untouched — the original defect.
+	perTest, err := mm.GetPerTestMocksInWindow()
+	if err != nil {
+		t.Fatalf("GetPerTestMocksInWindow: %v", err)
+	}
+	if !containsMockNamed(perTest, "live") {
+		t.Fatal("consuming the startup mock evicted the running test's own per-test mock")
+	}
+}
+
+// tierFixture stages a set the way the agent does — fresh copies with
+// SortOrder unset on every call, so each tier restamps its keys from 1 and the
+// first entry of every tree lands on (SortOrder:1, ID:0). Reusing pointers
+// across calls carries the first stamping forward and hides the collision
+// entirely, so a test that does that proves nothing.
+func tierFixture(t *testing.T) (*MockManager, models.Mock) {
+	t.Helper()
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(func() { mm.Close() })
+
+	start := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	boot := newMockForTest("boot", start.Add(-time.Minute), models.LifetimePerTest)
+	live := newMockForTest("live", start.Add(time.Second), models.LifetimePerTest)
+	sess := newMockForTest("sess", start.Add(2*time.Second), models.LifetimeSession)
+
+	fresh := func() ([]*models.Mock, []*models.Mock) {
+		a, b, c := *boot, *live, *sess
+		a.TestModeInfo = models.TestModeInfo{Lifetime: models.LifetimePerTest}
+		b.TestModeInfo = models.TestModeInfo{Lifetime: models.LifetimePerTest}
+		c.TestModeInfo = models.TestModeInfo{Lifetime: models.LifetimeSession}
+		return []*models.Mock{&a, &b}, []*models.Mock{&c}
+	}
+	f, u := fresh()
+	mm.SetMocksWithWindow(f, u, models.BaseTime, time.Now())
+	f, u = fresh()
+	mm.SetMocksWithWindow(f, u, start, start.Add(10*time.Second))
+
+	startup, err := mm.GetStartupMocks()
+	if err != nil || !containsMockNamed(startup, "boot") {
+		t.Fatalf("precondition: boot must be in the startup tier, got %v (err %v)", startup, err)
+	}
+	var bootCopy models.Mock
+	for _, m := range startup {
+		if m != nil && m.Name == "boot" {
+			bootCopy = *m
+		}
+	}
+	return mm, bootCopy
+}
+
+// Consuming a startup-tier mock through the FILTERED door must not evict the
+// per-test entry that shares its key. mongo v2 reaches this: it tries
+// DeleteFilteredMock before falling back to DeleteStartupMock.
+func TestDeleteFilteredMock_LeavesAnotherTiersMockAtTheSameKeyAlone(t *testing.T) {
+	mm, bootCopy := tierFixture(t)
+
+	// It reports success — it consumes the mock from the tier it actually lives
+	// in, which is what keeps the caller's retry loop terminating (see
+	// TestDeleteFilteredMock_ConsumesAStartupTierMockSoRetryLoopsTerminate).
+	// What must NOT happen is the per-test entry sharing its key being evicted.
+	mm.DeleteFilteredMock(bootCopy)
+	perTest, err := mm.GetPerTestMocksInWindow()
+	if err != nil {
+		t.Fatalf("GetPerTestMocksInWindow: %v", err)
+	}
+	if !containsMockNamed(perTest, "live") {
+		t.Fatal("deleting the startup mock evicted the running test's own per-test mock")
+	}
+}
+
+// The same for the UNFILTERED door, and this is the one that matters most:
+// HTTP and MySQL match against the startup-union pool and, when
+// DeleteFilteredMock declines, fall through to UpdateUnFilteredMock. Its ID
+// index is keyed on ID alone — and ID is stamped from zero per tier — so an
+// unguarded fallback rewrites whatever sits at that ID in the session tree.
+// The victim there is reused by every test in the set, which is strictly worse
+// than the per-test eviction it replaces.
+func TestUpdateUnFilteredMock_DoesNotRewriteAnotherTiersMockViaTheIDIndex(t *testing.T) {
+	mm, bootCopy := tierFixture(t)
+
+	before, err := mm.GetSessionScopedMocks()
+	if err != nil || !containsMockNamed(before, "sess") {
+		t.Fatalf("precondition: the session mock must be present, got %v (err %v)", before, err)
+	}
+
+	updated := bootCopy
+	updated.TestModeInfo.SortOrder = 9999
+	mm.UpdateUnFilteredMock(&bootCopy, &updated)
+
+	after, err := mm.GetSessionScopedMocks()
+	if err != nil {
+		t.Fatalf("GetSessionScopedMocks: %v", err)
+	}
+	if !containsMockNamed(after, "sess") {
+		t.Fatal("updating with a startup-tier mock destroyed the session mock at the same ID; " +
+			"it is reused by every test in the set")
+	}
+	if containsMockNamed(after, "boot") {
+		t.Fatal("a startup-tier mock was inserted into the session tier, where it will be " +
+			"served for the rest of the run")
+	}
+}
+
+// The guard must not cost a legitimate consume. There was no positive-case test
+// for DeleteFilteredMock anywhere in this package before.
+func TestDeleteFilteredMock_StillConsumesItsOwnTiersMock(t *testing.T) {
+	mm, _ := tierFixture(t)
+
+	perTest, err := mm.GetPerTestMocksInWindow()
+	if err != nil || !containsMockNamed(perTest, "live") {
+		t.Fatalf("precondition: live must be in the per-test tier, got %v (err %v)", perTest, err)
+	}
+	var liveCopy models.Mock
+	for _, m := range perTest {
+		if m != nil && m.Name == "live" {
+			liveCopy = *m
+		}
+	}
+
+	if !mm.DeleteFilteredMock(liveCopy) {
+		t.Fatal("a per-test mock consumed through its own door was refused; the identity guard " +
+			"must not turn a legitimate consume into a no-op, or the mock is served twice")
+	}
+	after, err := mm.GetPerTestMocksInWindow()
+	if err != nil {
+		t.Fatalf("GetPerTestMocksInWindow: %v", err)
+	}
+	if containsMockNamed(after, "live") {
+		t.Fatal("DeleteFilteredMock reported success but the mock is still in the tier")
+	}
+}
+
+// The window bits and the mock trees they describe must change TOGETHER.
+//
+// ResetForReplaySession runs at the test-set boundary, but the next set's mocks
+// do not arrive until its staging call. If the reset cleared the bits, then for
+// the whole gap between the two the manager said "nothing has fired" while the
+// trees still held the PREVIOUS set's mocks — so a query arriving in that gap
+// was routed to the startup engine and answered out of the previous set's
+// startup tier. Reachable whenever the app survives the boundary
+// (--keep-app-alive, compose reuse).
+//
+// Clearing the trees at the reset instead would serve an empty pool to a parser
+// racing it, and a hard miss against a live app is what crash-loops it. So the
+// bits are deferred to staging, which is where the trees are replaced anyway.
+func TestResetForReplaySession_WindowBitsAndTreesChangeTogether(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+
+	s1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	boot := newMockForTest("s1boot", s1.Add(-time.Minute), models.LifetimePerTest)
+	test := newMockForTest("s1test", s1.Add(time.Second), models.LifetimePerTest)
+	mm.SetMocksWithWindow([]*models.Mock{boot, test}, nil, models.BaseTime, time.Now())
+	mm.SetMocksWithWindow([]*models.Mock{boot, test}, nil, s1, s1.Add(10*time.Second))
+
+	mm.ResetForReplaySession()
+
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if containsMockNamed(startup, "s1boot") && !mm.WindowSnapshot().FirstTestFired {
+		t.Fatal("half torn down: the startup tier still holds the previous set's mocks while " +
+			"the window bits already say nothing has fired, so a query in the gap is routed to " +
+			"the startup engine and answered from the previous set")
+	}
+
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if snap := mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
+		t.Fatalf("staging must put routing back to 'nothing has fired', got %+v", snap)
+	}
+}
+
+// A startup consume must be recorded, and must NOT be recorded as Deleted.
+//
+// Unrecorded, it is invisible to the run's consumed set, so the resend guard
+// re-sends a request that already burned a mock — and because startupInit is
+// derived from the same filtered slice, the burned mock is re-staged by the
+// next SetMocksWithWindow and served again.
+//
+// Recorded as Deleted it is worse: filterOutDeleted prunes on Deleted and is
+// applied to the slice the startup tier is rebuilt from, so the boot mock would
+// disappear permanently and a driver reconnect that legitimately replays the
+// bootstrap chain would miss.
+func TestDeleteStartupMock_RecordsTheConsumeWithoutPruningTheBootMock(t *testing.T) {
+	mm, bootCopy := tierFixture(t)
+
+	if !mm.DeleteStartupMock(bootCopy) {
+		t.Fatal("precondition: the startup mock must be consumable")
+	}
+
+	consumed := mm.GetConsumedMocks()
+	var got *models.MockState
+	for i := range consumed {
+		if consumed[i].Name == "boot" {
+			got = &consumed[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("the startup consume was not recorded; the resend guard cannot see it and the " +
+			"mock is re-staged by the next SetMocksWithWindow")
+	}
+	if got.Usage == models.Deleted {
+		t.Fatal("recorded as Deleted: filterOutDeleted prunes on that, and it is applied to the " +
+			"slice the startup tier is rebuilt from, so the boot mock is lost for the whole run")
+	}
+}
+
+// A revision must never be observable for a torn state.
+//
+// SetMocksWithWindow swaps startup, filtered and unfiltered in three
+// independent treesMu sections, and the by-kind readers each take treesMu on
+// their own. When each swap bumped the revision, the value published midway was
+// legitimately "current" for a half-applied state — so a parser following the
+// usual sample-revision / read-tiers / cache-under-that-revision idiom could
+// capture test N+1's per-test mocks beside test N's session mocks and never
+// invalidate, because the revision it recorded really was the newest.
+func TestSetMocksWithWindow_PublishesOneRevisionAfterAllTiersLand(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+
+	start := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	perTest := newMockForTest("pt", start.Add(time.Second), models.LifetimePerTest)
+	sess := newMockForTest("ss", start.Add(2*time.Second), models.LifetimeSession)
+
+	before := mm.Revision()
+	mm.SetMocksWithWindow([]*models.Mock{perTest}, []*models.Mock{sess}, start, start.Add(10*time.Second))
+	after := mm.Revision()
+
+	if after == before {
+		t.Fatal("the swap published no revision at all; cached indexes never invalidate")
+	}
+	// Exactly one publication for the whole swap. More than one means there is
+	// an intermediate value a consumer can sample and cache a torn read under.
+	if got := after - before; got != 1 {
+		t.Fatalf("the swap published %d revisions; a consumer can sample an intermediate one "+
+			"and cache an index built from a half-applied state", got)
+	}
+}
+
+// A kind that LEAVES the pool has to bump too. `touched` is built from the
+// incoming slice, so without also walking the map being replaced, a kind that
+// was present and is now absent keeps its old revision — and a consumer caching
+// by that revision never learns its mocks are gone and keeps serving them.
+func TestSetMocks_BumpsAKindThatLeavesThePool(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+
+	now := time.Now()
+	http := newMockForTest("h1", now, models.LifetimePerTest)
+	http.Kind = models.HTTP
+	mm.SetFilteredMocks([]*models.Mock{http})
+	revWithHTTP := mm.RevisionByKind(models.HTTP)
+
+	// Replace the pool with a different kind entirely: HTTP has left.
+	pg := newMockForTest("p1", now, models.LifetimePerTest)
+	pg.Kind = models.PostgresV3
+	mm.SetFilteredMocks([]*models.Mock{pg})
+
+	if mm.RevisionByKind(models.HTTP) == revWithHTTP {
+		t.Fatal("HTTP left the pool but its revision is frozen; a consumer caching under it " +
+			"keeps serving mocks that are no longer there")
+	}
+}
+
+// The startup fallback in DeleteFilteredMock must not destroy a REUSABLE mock.
+//
+// During BaseTime staging the startup tree also holds the session mocks, so the
+// fallback can reach one. Consuming its startup-tier view is fine — that view
+// exists to make bootstrap traffic matchable — but the session tier is the
+// durable home and must still serve it, or a handshake/auth recording every
+// later test depends on disappears on its first use.
+func TestDeleteFilteredMock_StartupFallbackLeavesTheSessionTierIntact(t *testing.T) {
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+
+	sess := newMockForTest("sess", time.Now(), models.LifetimeSession)
+	mm.SetMocksWithWindow(nil, []*models.Mock{sess}, models.BaseTime, time.Now())
+
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	var copyOf models.Mock
+	for _, m := range startup {
+		if m != nil && m.Name == "sess" {
+			copyOf = *m
+		}
+	}
+	if copyOf.Name == "" {
+		t.Skip("session mocks are no longer staged into the startup tree; the fallback " +
+			"cannot reach one and this test has nothing to protect")
+	}
+
+	mm.DeleteFilteredMock(copyOf)
+
+	session, err := mm.GetSessionScopedMocks()
+	if err != nil {
+		t.Fatalf("GetSessionScopedMocks: %v", err)
+	}
+	if !containsMockNamed(session, "sess") {
+		t.Fatal("the startup fallback consumed a session mock out of its durable tier; every " +
+			"later test that needs that handshake now misses")
+	}
+}

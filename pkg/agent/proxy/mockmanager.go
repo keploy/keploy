@@ -112,6 +112,23 @@ type MockManager struct {
 	// ResetForReplaySession). Read under swapMu.RLock.
 	firstWindowStart time.Time
 
+	// testFiredThisSet is the TIER-ROUTING half of what firstWindowStart used
+	// to answer alone. They are separate now because they are seeded at
+	// different moments: SeedStartupCutoff sets the cutoff from the set's
+	// earliest RECORDED test before any test has run, while routing must keep
+	// reading "nothing has fired" until a real window actually arrives.
+	// Deriving routing from a non-zero cutoff would make the seed itself look
+	// like a fired test and send the set's bootstrap traffic to the per-test
+	// engine over a tree staging just emptied. Written under swapMu.
+	testFiredThisSet bool
+
+	// boundaryPending marks that ResetForReplaySession has run and the next
+	// set's mocks have not arrived yet. It is what lets the window bits be
+	// cleared by staging instead of by the reset, without a stray BaseTime
+	// call mid-set being able to deactivate a live test's window. Written
+	// under swapMu.
+	boundaryPending bool
+
 	// swapMu guards the {filtered, unfiltered, window} swap performed by
 	// SetMocksWithWindow. Writers Lock(); readers via GetFilteredMocksInWindow
 	// RLock() the snapshot read so they cannot observe a torn (newMocks,
@@ -316,16 +333,11 @@ func (m *MockManager) IsClosed() bool {
 //   - droppedOutOfWindow: per-test diagnostic counter that should
 //     reset at the test-set boundary so "dropped for this test-set"
 //     stays meaningful in metrics.
-//   - windowStart/windowEnd: the tier-routing window.
-//     Both describe the set currently being replayed, so both have to be
-//     back at "nothing has fired" before the next set is staged. Leaving
-//     them set is what made every test-set after the first route its
-//     bootstrap traffic to the per-test engine while staging had put those
-//     mocks in the startup tree.
-//   - firstWindowStart: the startup-init vs. stale-bleed cutoff, which is
-//     also per-set — each set must classify against its OWN first test.
-//     See the reset itself for why preserving it (as this used to) silently
-//     emptied the startup tier for every set but the earliest-recorded one.
+//     (The tier-routing window and the startup-init cutoff used to be cleared
+//     here too. They are now cleared by the next set's initial staging call, so
+//     that the window bits and the mock trees they describe change together
+//     rather than leaving a gap where the bits describe a set whose mocks have
+//     not been swapped in yet. See the note in the body.)
 //
 // What it preserves:
 //   - filtered / unfiltered / startup trees: SetMocksWithWindow swaps
@@ -358,63 +370,29 @@ func (m *MockManager) ResetForReplaySession() {
 	})
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
 
-	// Everything that describes "where are we in the current test set" goes
-	// back to "nothing has fired yet". Both of these are per-set questions,
-	// and between them they are the whole (Active, FirstTestFired) pair the
-	// tier dispatcher routes on:
-	//
-	//   windowStart/windowEnd — the active-window half of tier routing.
-	//   Left set, the next set's isInitialStaging call stages every mock
-	//   into the startup tree while the dispatcher, still seeing the
-	//   previous set's window, routes that set's bootstrap traffic to the
-	//   per-test engine and misses all of it.
-	//
-	//   firstWindowStart — the startup-init vs. stale-bleed cutoff. It used
-	//   to be preserved here, justified as keeping "the same before-any-test
-	//   cutoff for every test-set" so a later set's leading mocks could not
-	//   be misread as startup-init. That rationale does not hold: the mock
-	//   pool is REPLACED per set (Agent.StoreMocks allocates fresh slices and
-	//   finalizeClientMocks does clientMocks.Store(0, storage)), so a set's
-	//   SetMocksWithWindow only ever sees its own mocks and there is no
-	//   previous-set tail to bleed. Within a set the value never moves (the
-	//   test cases arrive sorted by request timestamp — platform/yaml/testdb
-	//   db.go), so per-set and global classify the same mocks WITHIN a set;
-	//   they differ only across sets, which is the bug.
-	//
-	//   What preserving it actually did: the cutoff is a running MINIMUM
-	//   (start.Before(m.firstWindowStart)), so it stuck at whichever set
-	//   recorded earliest. Every other set's own bootstrap mocks sit AFTER
-	//   that cutoff, get classified as stale bleed, and are dropped from
-	//   every tier the moment that set's first test fires. Resetting makes
-	//   each set classify against its own first test, which is what "before
-	//   any test fired" was always supposed to mean.
-	//
-	//   Scope note: this repairs the CLASSIFICATION. It does not by itself
-	//   guarantee the startup band is POPULATED, because the agent reads
-	//   FirstTestWindowStart() before calling SetMocksWithWindow, so on a
-	//   set's first test the read is still zero and the disk LoadBefore that
-	//   fetches the band is skipped. Deriving the cutoff from the window
-	//   being applied is a separate agent-side fix, and it has to stay gated
-	//   on the proxy actually adopting that start — an unguarded derivation
-	//   collapses "req < firstWindowStart" into "req < afterTime" and
-	//   preserves every stale previous-test mock.
-	//
-	// Lock order is swapMu then windowMu, matching WindowSnapshot, so a
-	// WindowSnapshot reader sees either the whole previous set or the whole
-	// cleared state. That guarantee does NOT extend to the legacy
-	// sequential pair (IsTestWindowActive then HasFirstTestFired): those
-	// take different locks, so a caller straddling this reset can still
-	// observe the forbidden Active=true && FirstTestFired=false. Reordering
-	// the writes cannot fix that — the straddle spans both calls — which is
-	// why the pair-coherent readers (the v3 dispatcher's routeTransactional,
-	// TierIndex.orderForCurrentState) are required to use WindowSnapshot.
 	m.swapMu.Lock()
-	m.firstWindowStart = time.Time{}
-	m.windowMu.Lock()
-	m.windowStart = time.Time{}
-	m.windowEnd = time.Time{}
-	m.windowMu.Unlock()
+	m.boundaryPending = true
 	m.swapMu.Unlock()
+
+	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
+	// cleared here. They are cleared by the next set's initial staging call
+	// instead — see SetMocksWithWindow's isInitialStaging branch.
+	//
+	// Clearing them here left the manager half torn down for the whole gap
+	// between this reset and that staging call: the bits already said "nothing
+	// has fired" while the trees still held the PREVIOUS set's mocks, so a
+	// query arriving in the gap was routed to the startup engine and answered
+	// out of the previous set's startup tier. That gap is real whenever the
+	// application survives the test-set boundary (--keep-app-alive, compose
+	// reuse). Clearing the trees here instead is not the answer either: that
+	// serves an empty pool to a parser racing the reset, and a hard miss
+	// against a live app is what crash-loops it.
+	//
+	// Deferring makes the two flip TOGETHER. Through the gap the manager is
+	// consistently the previous set — previous bits, previous trees — and
+	// staging then replaces both. The single caller (Proxy.Mock) always
+	// follows this reset with a BaseTime staging call, so the deferral cannot
+	// strand the bits.
 }
 
 // runIdleSweeper is the background loop that calls SweepIdleConnections
@@ -738,6 +716,7 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		if m.firstWindowStart.IsZero() || start.Before(m.firstWindowStart) {
 			m.firstWindowStart = start
 		}
+		m.testFiredThisSet = true
 	}
 	firstStart := m.firstWindowStart
 	// Wave 2: startup-init mocks (req < firstStart) are routed into a
@@ -764,6 +743,23 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// test bleed and get dropped.
 	isInitialStaging := start.Equal(models.BaseTime)
 	if isInitialStaging {
+		// Staging is the set boundary as far as routing is concerned: this is
+		// where the previous set's window bits and startup-init cutoff go, so
+		// they are replaced in the same call that replaces the trees rather
+		// than in ResetForReplaySession (see the note there). Until this
+		// point the manager still describes the previous set, consistently.
+		// Only when a set boundary is actually pending. A BaseTime call that
+		// is NOT preceded by a reset is a mid-set stage, and deactivating a
+		// live test's window there would mis-route it to the startup engine.
+		if m.boundaryPending {
+			m.boundaryPending = false
+			m.testFiredThisSet = false
+			m.firstWindowStart = time.Time{}
+			m.windowMu.Lock()
+			m.windowStart = time.Time{}
+			m.windowEnd = time.Time{}
+			m.windowMu.Unlock()
+		}
 		// Wave-3 H3 fix: include BOTH filtered (per-test) and unfiltered
 		// (session + connection) mocks in the startup pool during initial
 		// staging. Rationale: during Runner/Replayer's pre-test staging
@@ -956,8 +952,56 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// bootstrap traffic and polluted the strict session tier seen by
 	// tier-aware parsers.
 
-	m.SetFilteredMocks(filteredForTree)
-	m.SetUnFilteredMocks(unfilteredForTree)
+	// Publish ONE revision after all three tiers have landed.
+	//
+	// The three swaps happen in independent treesMu sections — startup above,
+	// then filtered, then unfiltered — while the by-kind readers each take
+	// treesMu on their own. Bumping after each swap meant the revision
+	// published midway was legitimately "current" for a torn state: a consumer
+	// that samples the revision, reads the three tiers, and caches its index
+	// under that revision could capture test N+1's per-test mocks alongside
+	// test N's session mocks and never invalidate it, because the revision it
+	// recorded really was the newest at the moment it looked. Every kind-aware
+	// parser follows that sample-read-install idiom.
+	//
+	// Suppressing the inner bumps and publishing once at the end closes the
+	// window: any revision a consumer can observe now corresponds to a state
+	// where all three tiers agree. Suppression is per-call, not a flag on the
+	// manager, so it cannot swallow a concurrent consumer's own bump.
+	m.setFilteredMocks(filteredForTree, false)
+	m.setUnFilteredMocks(unfilteredForTree, false)
+
+	touchedAll := map[models.Kind]struct{}{}
+	for _, mk := range filteredForTree {
+		if mk != nil {
+			touchedAll[mk.Kind] = struct{}{}
+		}
+	}
+	for _, mk := range unfilteredForTree {
+		if mk != nil {
+			touchedAll[mk.Kind] = struct{}{}
+		}
+	}
+	// The startup tree is swapped in this function without any bump of its own,
+	// so its kinds have to be published here or a startup-only kind never
+	// invalidates a cached index.
+	for _, mk := range startupInit {
+		if mk != nil {
+			touchedAll[mk.Kind] = struct{}{}
+		}
+	}
+	m.treesMu.RLock()
+	for k := range m.filteredByKind {
+		touchedAll[k] = struct{}{}
+	}
+	for k := range m.unfilteredByKind {
+		touchedAll[k] = struct{}{}
+	}
+	m.treesMu.RUnlock()
+	for k := range touchedAll {
+		m.bumpRevisionKind(k)
+	}
+	m.bumpRevisionAll()
 	// Rebuild the HitCount name→*Mock index so MarkMockAsUsed takes
 	// the O(1) fast path. Called after the tree swap so the index
 	// always points at the freshest mock pointers.
@@ -1253,7 +1297,7 @@ func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
 func (m *MockManager) HasFirstTestFired() bool {
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
-	return !m.firstWindowStart.IsZero()
+	return m.testFiredThisSet
 }
 
 // FirstTestWindowStart returns the earliest test window start this
@@ -1310,7 +1354,7 @@ func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
 	defer m.windowMu.RUnlock()
 	return models.WindowSnapshot{
 		Active:         !m.windowStart.IsZero() && !m.windowEnd.IsZero(),
-		FirstTestFired: !m.firstWindowStart.IsZero(),
+		FirstTestFired: m.testFiredThisSet,
 	}
 }
 
@@ -1666,6 +1710,12 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 // ---------- setters (populate both legacy + per-kind) ----------
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
+	m.setFilteredMocks(mocks, true)
+}
+
+// setFilteredMocks is the body; bump=false lets SetMocksWithWindow swap all
+// three tiers before publishing a single revision (see the note there).
+func (m *MockManager) setFilteredMocks(mocks []*models.Mock, bump bool) {
 	newFiltered := NewTreeDb(customComparator)
 	newFilteredByKind := make(map[models.Kind]*TreeDb)
 	newStateless := make(map[models.Kind]map[string][]*models.Mock)
@@ -1714,12 +1764,21 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 	m.treesMu.Lock()
+	// A kind that LEAVES the pool must be bumped too: `touched` is built from
+	// the incoming slice only, so a kind present before and absent now keeps
+	// its old revision — and a consumer caching by that revision never learns
+	// its mocks are gone and keeps serving them.
+	for k := range m.filteredByKind {
+		touched[k] = struct{}{}
+	}
 	m.filtered, m.filteredByKind, m.statelessFiltered = newFiltered, newFilteredByKind, newStateless
 	m.treesMu.Unlock()
-	for k := range touched {
-		m.bumpRevisionKind(k)
+	if bump {
+		for k := range touched {
+			m.bumpRevisionKind(k)
+		}
+		m.bumpRevisionAll()
 	}
-	m.bumpRevisionAll()
 	// DEBUG_TRACE: prove what landed in m.filtered after the swap +
 	// bump. Lists every PostgresV3 mock so we can correlate by mock name
 	// against the failing hashes the parser later misses. Gated behind
@@ -1739,6 +1798,11 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
+	m.setUnFilteredMocks(mocks, true)
+}
+
+// setUnFilteredMocks is the body; see setFilteredMocks for why bump exists.
+func (m *MockManager) setUnFilteredMocks(mocks []*models.Mock, bump bool) {
 	newUnFiltered := NewTreeDb(customComparator)
 	newUnFilteredByKind := make(map[models.Kind]*TreeDb)
 	newStateless := make(map[models.Kind]map[string][]*models.Mock)
@@ -1774,12 +1838,19 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 	m.treesMu.Lock()
+	// Same as the filtered path: bump kinds leaving the pool, not just those
+	// arriving, or a consumer caches a stale index for a kind that emptied.
+	for k := range m.unfilteredByKind {
+		touched[k] = struct{}{}
+	}
 	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = newUnFiltered, newUnFilteredByKind, newStateless
 	m.treesMu.Unlock()
-	for k := range touched {
-		m.bumpRevisionKind(k)
+	if bump {
+		for k := range touched {
+			m.bumpRevisionKind(k)
+		}
+		m.bumpRevisionAll()
 	}
-	m.bumpRevisionAll()
 }
 
 // ---------- point updates / deletes (keep per-kind in sync) ----------
@@ -1790,7 +1861,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
 	// Update legacy/global tree first
-	updatedGlobal := globalTree.update(old.TestModeInfo, new.TestModeInfo, new)
+	updatedGlobal := globalTree.update(old.TestModeInfo, new.TestModeInfo, new, *old)
 
 	oldK, newK := old.Kind, new.Kind
 	var updatedOldKind, updatedNewKind bool
@@ -1799,7 +1870,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 		// Same kind: update the per-kind tree under lock
 		_, unf := m.ensureKindTrees(newK)
 		m.treesMu.Lock()
-		updatedNewKind = unf.update(old.TestModeInfo, new.TestModeInfo, new)
+		updatedNewKind = unf.update(old.TestModeInfo, new.TestModeInfo, new, *old)
 
 		// Self-heal if global updated but per-kind missed.
 		//
@@ -1830,7 +1901,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 		_, newUnf := m.ensureKindTrees(newK)
 		m.treesMu.Lock()
 		updatedOldKind = oldUnf.delete(old.TestModeInfo)
-		updatedNewKind = newUnf.update(old.TestModeInfo, new.TestModeInfo, new)
+		updatedNewKind = newUnf.update(old.TestModeInfo, new.TestModeInfo, new, *old)
 		if !updatedNewKind {
 			newUnf.insert(new.TestModeInfo, new)
 			updatedNewKind = true
@@ -1886,13 +1957,15 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	m.treesMu.RLock()
 	globalTree := m.filtered
 	m.treesMu.RUnlock()
-	deletedGlobal := globalTree.delete(mock.TestModeInfo)
+	// Identity-checked: the key is tier-local, so a mock taken from another
+	// tier addresses a DIFFERENT mock here. See TreeDb.sameMock.
+	deletedGlobal := globalTree.deleteMock(mock.TestModeInfo, mock)
 
 	// per-kind
 	k := mock.Kind
 	flt, _ := m.ensureKindTrees(k)
 	m.treesMu.Lock()
-	deletedKind := flt.delete(mock.TestModeInfo)
+	deletedKind := flt.deleteMock(mock.TestModeInfo, mock)
 	m.treesMu.Unlock()
 
 	if deletedGlobal {
@@ -1919,20 +1992,47 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	if deletedGlobal {
 		m.bumpRevisionAll()
 	}
-	return deletedGlobal
+	if deletedGlobal {
+		return true
+	}
+
+	// Not in the per-test tier. Fall back to the startup tier before reporting
+	// failure, because the caller almost certainly matched this mock out of
+	// GetSessionMocks — which is startup UNION session — and a startup-tier
+	// mock has no other consume door: mongo v2 is the ONLY parser in the tree
+	// that calls DeleteStartupMock itself.
+	//
+	// This matters far more than it looks. Every other consume site treats a
+	// false here as "another goroutine won the race, retry against the shrunk
+	// pool" and loops: http/match.go's `for {}` re-fetches the pool and
+	// continues, and generic, grpcV2, http2, mongo v1, sqs and kafka all have
+	// the same shape. The pool does not shrink, so the retry re-picks the same
+	// mock and spins until the request context dies. Before the tier keys were
+	// disambiguated the blind delete always "succeeded" — evicting the WRONG
+	// mock — which is what accidentally kept those loops terminating.
+	//
+	// Returning true here keeps the caller contract ("consumed, stop looping")
+	// exactly as it was, while the mock that actually gets consumed is now the
+	// one the caller matched instead of whatever shared its key.
+	if m.DeleteStartupMock(mock) {
+		return true
+	}
+	return false
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
-	deletedGlobal := globalTree.delete(mock.TestModeInfo)
+	// Identity-checked for the same reason as DeleteFilteredMock: the key is
+	// tier-local, so a mock from another tier addresses a different entry here.
+	deletedGlobal := globalTree.deleteMock(mock.TestModeInfo, mock)
 
 	// per-kind
 	k := mock.Kind
 	_, unf := m.ensureKindTrees(k)
 	m.treesMu.Lock()
-	deletedKind := unf.delete(mock.TestModeInfo)
+	deletedKind := unf.deleteMock(mock.TestModeInfo, mock)
 	m.treesMu.Unlock()
 
 	if deletedGlobal {
@@ -2017,12 +2117,68 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 		if info, ok := key.(models.TestModeInfo); ok {
 			delete(tree.idIndex, info.ID)
 		}
+		// Record the consume. Every sibling door flags, and without it a
+		// startup consume is invisible to the run's consumed set — so
+		// upsertActualTestMockMapping, FailureInfo.MatchedCalls and the
+		// resend guard all miss it, and resetResendUnsafe will re-send a
+		// request that already burned a mock.
+		//
+		// Usage is Updated, NOT Deleted, and that distinction is load-bearing:
+		// filterOutDeleted prunes only on Deleted, and it is applied to the
+		// filtered slice the startup tier is REBUILT from. Flagging Deleted
+		// here would drop the boot mock permanently and break a driver
+		// reconnect that legitimately replays the bootstrap chain.
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:             mk.Name,
+			Kind:             mk.Kind,
+			Usage:            models.Updated,
+			IsFiltered:       mk.TestModeInfo.IsFiltered,
+			SortOrder:        mk.TestModeInfo.SortOrder,
+			Type:             mk.Spec.Metadata["type"],
+			Lifetime:         mk.TestModeInfo.Lifetime,
+			ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
+			ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
+			ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
+		}); err != nil {
+			m.logger.Error("failed to flag startup mock as used", zap.Error(err))
+		}
 		// Bump the global revision so any cached snapshot held by a
 		// matcher consumer rebuilds on next access.
 		m.bumpRevisionAll()
 		return true
 	}
 	return false
+}
+
+// SeedStartupCutoff sets the startup-init cutoff from the set's earliest
+// RECORDED test, before any test of that set has run.
+//
+// The cutoff decides whether a mock was recorded before this set's tests began.
+// Derived from the first EXECUTED window it gets that wrong whenever the first
+// executed test is not the earliest recorded one — a --test-sets selection, an
+// ignored test, or the streaming deferral all do that. The cutoff then lands
+// late, and mocks belonging to a test that is NOT being run fall before it, get
+// classified as startup-init, and are served as bootstrap traffic.
+//
+// The manager cannot derive this itself: the mocks it is staged with include
+// the bootstrap ones, so their minimum timestamp cannot separate "recorded
+// before the tests began" from "recorded during the earliest test". The caller
+// supplies it — the replayer already loads test cases sorted by request
+// timestamp, so it is testCases[0]'s request time.
+//
+// Seeds only when nothing has been recorded for this set yet, and never marks a
+// test as fired: routing must still read "nothing has fired" until a real
+// window arrives. A later real window that turns out to be earlier still lowers
+// the cutoff through the running minimum in SetMocksWithWindow.
+func (m *MockManager) SeedStartupCutoff(start time.Time) {
+	if start.IsZero() || start.Equal(models.BaseTime) {
+		return
+	}
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	if m.firstWindowStart.IsZero() || start.Before(m.firstWindowStart) {
+		m.firstWindowStart = start
+	}
 }
 
 // MarkMockAsUsed marks the given mock as used (consumed) without modifying
