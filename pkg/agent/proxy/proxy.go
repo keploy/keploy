@@ -3254,7 +3254,8 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 var _ agent.AsyncMockLoader = (*Proxy)(nil)
 
 // LoadAsyncMocks forwards the complete async-mock corpus to the async engine
-// (run-once inside Engine.Load). No-op when async is not configured.
+// (which REPLACES the previous test-set's corpus). No-op when async is not
+// configured.
 func (p *Proxy) LoadAsyncMocks(mocks []*models.Mock) {
 	if p.asyncEngine != nil {
 		p.asyncEngine.Load(mocks)
