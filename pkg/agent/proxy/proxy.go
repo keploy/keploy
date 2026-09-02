@@ -991,6 +991,19 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 // It wraps src/dst in SafeConn. The caller (handleConnection) is responsible
 // for creating the TLSUpgrader using pointers to its own srcConn/dstConn
 // variables, so the upgrader updates the correct references on TLS upgrade.
+// shouldRecordViaSupervisor is the single decision for "does this parser record
+// through the supervisor + relay, or through the legacy path".
+//
+// Extracted so the rule is testable. It was previously written inline at three
+// dispatch sites, and two of them simply omitted it — the generic catch-all and
+// the MySQL probe branch both recorded legacy on the default configuration with
+// no flag set. Source-grep fences over those call sites proved nothing: an
+// inverted condition keeps every asserted substring and stays green.
+func shouldRecordViaSupervisor(parser integrations.Integrations) bool {
+	v2, ok := parser.(integrations.IntegrationsV2)
+	return ok && v2.IsV2() && !newRelayDisabled()
+}
+
 func (p *Proxy) buildRecordSession(
 	srcConn, dstConn net.Conn,
 	mocks chan<- *models.Mock,
@@ -2794,7 +2807,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// isolates parser panics/hangs and falls through to passthrough
 			// on failure. The legacy path below is preserved for parsers
 			// that have not yet migrated.
-			if v2, ok := matchedParser.(integrations.IntegrationsV2); ok && v2.IsV2() && !newRelayDisabled() {
+			if shouldRecordViaSupervisor(matchedParser) {
 				if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, matchedParser, parserType, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts); err != nil {
 					if isNetworkClosedErr(err) {
 						logger.Debug("V2 record path: connection closed", zap.Error(err))
@@ -2857,11 +2870,33 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			genericSession := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
-			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, genericSession)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
-				utils.LogError(logger, err, "failed to record the outgoing message")
-				return err
+			genericParser := p.Integrations[integrations.GENERIC]
+			// Route through the supervisor exactly like the matched-parser path
+			// above. This branch previously called RecordOutgoing directly with
+			// NO IsV2 gate, so every connection that matched no parser recorded
+			// through generic's LEGACY path — on the default configuration, with
+			// no flag set. Generic has declared IsV2() == true all along; nothing
+			// consulted it here, so the migration silently skipped the widest
+			// code path in the proxy.
+			if shouldRecordViaSupervisor(genericParser) {
+				if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, genericParser, integrations.GENERIC, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts); err != nil {
+					if isNetworkClosedErr(err) {
+						logger.Debug("V2 generic record path: connection closed", zap.Error(err))
+					} else {
+						utils.LogError(logger, err, "V2 generic record path failed",
+							zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force the legacy record path while investigating, or KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough); the supervisor has already fallen through to passthrough for this connection so user traffic continues"),
+						)
+					}
+					return err
+				}
+				logger.Debug("V2 generic record path returned")
+			} else {
+				genericSession := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
+				err := genericParser.RecordOutgoing(parserCtx, genericSession)
+				if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
+					utils.LogError(logger, err, "failed to record the outgoing message")
+					return err
+				}
 			}
 		} else {
 			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
