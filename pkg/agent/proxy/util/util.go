@@ -65,6 +65,41 @@ type Conn struct {
 	mu     sync.Mutex
 }
 
+// CloseWriteIfPossible forwards a FIN on c when the conn supports
+// half-close, and does nothing when it does not. Doing nothing is the
+// right fallback: losing a half-close costs a protocol signal, whereas
+// closing the connection to compensate would cost the connection.
+//
+// It lives here because this package defines the wrappers that sit
+// between the proxy and every real socket, and is the only one able to
+// see through them.
+func CloseWriteIfPossible(c net.Conn) error {
+	if c == nil {
+		return nil
+	}
+	type closeWriter interface{ CloseWrite() error }
+	if cw, ok := c.(closeWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+// CloseWrite forwards a half-close to the conn underneath.
+//
+// Conn embeds net.Conn as an INTERFACE, so Go promotes only net.Conn's
+// method set and CloseWrite is not in it. This type is what
+// handleConnection hands to the V2 relay as the client-side conn, so
+// without this method the relay's half-close support is silently dead
+// in the client direction — the relay's own tests, which drive raw TCP
+// sockets, cannot see that.
+//
+// Same delegation as SafeConn.CloseWrite, for the same reason. Half-close
+// is protocol content, not termination: an EOF-delimited peer only
+// learns the request ended when the FIN arrives.
+func (c *Conn) CloseWrite() error {
+	return CloseWriteIfPossible(c.Conn)
+}
+
 func (c *Conn) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

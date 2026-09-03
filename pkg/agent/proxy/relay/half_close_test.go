@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"io"
 	"net"
 	"testing"
@@ -380,6 +381,74 @@ func TestHalfCloseGrace_NegativeSurvivesDefaulting(t *testing.T) {
 			got := Config{HalfCloseGrace: tc.in}.withDefaults().HalfCloseGrace
 			if got != tc.want {
 				t.Fatalf("HalfCloseGrace %v resolved to %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHalfClose_SurvivesTheProductionConnWrappers is the test that
+// should have existed from the start.
+//
+// Three times now, a half-close fix has been written against raw
+// *net.TCPConn and shipped inert, because every wrapper between the
+// proxy and the real socket embeds net.Conn as an INTERFACE — which
+// promotes net.Conn's method set and nothing else. CloseWrite is not in
+// that set, so the capability assertion just fails and the FIN is
+// silently dropped.
+//
+// The wrappers that actually reach THIS relay:
+//   - util.Conn — what handleConnection hands in as the client side, so
+//     it is on every V2 connection
+//   - readTimeReportingConn / readTrackingConn — installed by the TLS
+//     upgrade, so they are on every MITM'd connection
+//
+// A test that drives raw sockets proves nothing about either. (util.SafeConn
+// has the same defect but never reaches the relay — it wraps the LEGACY
+// record session, and is covered where that path is fixed.)
+func TestHalfClose_SurvivesTheProductionConnWrappers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wrap func(net.Conn) net.Conn
+	}{
+		{"util.Conn (client side of every V2 relay)", func(c net.Conn) net.Conn {
+			return &proxyutil.Conn{Conn: c, Reader: c, Logger: zap.NewNop()}
+		}},
+		{"readTimeReportingConn (installed by the TLS upgrade)", func(c net.Conn) net.Conn {
+			tracked := newReadTrackingConn(c)
+			return newReadTimeReportingConn(tracked, tracked)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			defer func() { _ = ln.Close() }()
+			accepted := make(chan net.Conn, 1)
+			go func() {
+				if c, err := ln.Accept(); err == nil {
+					accepted <- c
+				}
+			}()
+			raw, err := net.Dial("tcp", ln.Addr().String())
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer func() { _ = raw.Close() }()
+			peer := <-accepted
+			defer func() { _ = peer.Close() }()
+
+			wrapped := tc.wrap(raw)
+			if !halfCloseWrite(&wrapped) {
+				t.Fatalf("halfCloseWrite failed through %T: the FIN is silently dropped and "+
+					"half-close is dead on this path, while raw-socket tests stay green", wrapped)
+			}
+
+			_ = peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+			buf := make([]byte, 1)
+			if _, err := peer.Read(buf); err != io.EOF {
+				t.Fatalf("peer read = %v, want io.EOF — the FIN did not reach it through %T",
+					err, wrapped)
 			}
 		})
 	}
