@@ -963,18 +963,30 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 		// at all — after the guarded key just told us reuse is unsafe. Decline
 		// outright instead; a missing mock beats one stitched from a server we
 		// have already proven is not necessarily this connection's.
-		if lastPortKey != "" && hsStore.IsAmbiguous(lastPortKey) {
-			return models.TLSHandshakeEntry{}, false
-		}
-		// Port key FIRST. It is the only one of the two with a runtime guard:
-		// RememberLastForPort tags every entry with the destination that produced
-		// it and latches the key unusable once a second server appears. The
-		// address key has no such guard, and on this path the reader's address is
-		// usually a capture-layer stand-in, so "dst:<scope>|127.0.0.1:3306" is a
-		// shared bucket that any unresolved connection in the scope can land in —
-		// consulting it first would let it shadow the guarded answer.
+		// Port key FIRST, and the latch check and the read must be ONE
+		// acquisition of the store lock. It is the only one of the two with a
+		// runtime guard: RememberLastForPort tags every entry with the
+		// destination that produced it and latches the key unusable once a
+		// second server appears. The address key has no such guard, and on this
+		// path the reader's address is usually a capture-layer stand-in, so
+		// "dst:<scope>|127.0.0.1:3306" is a shared bucket that any unresolved
+		// connection in the scope can land in — consulting it first would let it
+		// shadow the guarded answer.
+		//
+		// Composing IsAmbiguous with Last is NOT equivalent: another connection's
+		// raw leg can latch the key between the two calls, Last then reports a
+		// plain miss, and control falls through to that unguarded address bucket
+		// after the guard just proved reuse unsafe. LastForPort answers both
+		// under one lock.
 		if lastPortKey != "" {
-			if c, ok := hsStore.Last(lastPortKey); ok && len(c.RespPackets) > 0 {
+			c, ok, ambiguous := hsStore.LastForPort(lastPortKey)
+			if ambiguous {
+				// POSITIVE proof this scope+port serves more than one server.
+				// A missing mock beats one stitched from a server we have already
+				// proven is not necessarily this connection's.
+				return models.TLSHandshakeEntry{}, false
+			}
+			if ok && len(c.RespPackets) > 0 {
 				return c, true
 			}
 		}
