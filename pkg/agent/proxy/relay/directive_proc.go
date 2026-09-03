@@ -892,6 +892,28 @@ func (r *Relay) handleReleaseClient(ctx context.Context, stopping <-chan struct{
 		r.cfg.OnMarkMockIncomplete("write_error")
 	}
 
+	// Deliver anything the D2C forwarder stashed at the pause boundary
+	// before endPause drops it.
+	//
+	// endPause discards both stashes unconditionally, which is right
+	// after a TLS upgrade — the socket underneath has been replaced and
+	// cleartext bytes read before it have nowhere sensible to go. It is
+	// wrong here: a plain release changes nothing about the connection,
+	// so server bytes read at the boundary are still ordinary response
+	// data the client is waiting for, and dropping them is silent
+	// user-traffic loss on a directive whose whole contract is "our
+	// brake comes off, nothing else changes".
+	if held := r.takeStashed(fakeconn.FromDest); held.len() > 0 {
+		if srcPtr := r.src.Load(); srcPtr != nil {
+			if _, werr := (*srcPtr).Write(held.bytes); werr != nil && log != nil {
+				log.Debug("relay: delivering the D2C pause stash on release failed",
+					zap.Error(werr),
+					zap.Int("bytes", held.len()),
+				)
+			}
+		}
+	}
+
 	r.endPause()
 
 	if err != nil {

@@ -674,7 +674,16 @@ func (r *Relay) forward(
 				// (the client's first chunk) and nothing it didn't
 				// (the server's preamble reply belongs to the
 				// directive handler, not the parser).
-				if r.preDispatchActive.Load() && dir == fakeconn.FromClient {
+				// A hold gets the same treatment as pre-dispatch, and
+				// for the same reason. Under a hold every client byte is
+				// the parser's to see — that is the hold's contract, and
+				// what the upgrade's watermark later retracts is only
+				// the part the handshake consumed. Without this, bytes
+				// the forwarder happened to read inside the pause window
+				// are flushed upstream by the release but never teed, so
+				// the parser's stream has a hole covering bytes the real
+				// server received.
+				if (r.preDispatchActive.Load() || r.holdClient.Load()) && dir == fakeconn.FromClient {
 					chunk := fakeconn.Chunk{
 						Dir:    dir,
 						Bytes:  stash,

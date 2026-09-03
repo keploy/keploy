@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"io"
 	"net"
 	"sync"
@@ -956,4 +957,47 @@ func TestClientWriteHold_WholeHoldFlushedIsNotDiscarded(t *testing.T) {
 	}
 	// ...and normal stream continuity resumes after them.
 	assertParserResumesAfterUpgrade(t, h)
+}
+
+// TestClientWriteHold_ReleaseDeliversTheDestStash covers what endPause
+// would otherwise throw away.
+//
+// endPause discards both stashes unconditionally. After a TLS upgrade
+// that is right — the socket underneath has been replaced, and cleartext
+// bytes read before it have nowhere sensible to go. On a PLAIN release
+// it is wrong: nothing about the connection changes, so server bytes
+// read at the pause boundary are ordinary response data the client is
+// still waiting for. Dropping them is silent user-traffic loss on a
+// directive whose entire contract is "our brake comes off, nothing else
+// changes".
+//
+// The stash is populated directly rather than raced for. The real window
+// is nanoseconds wide — a reviewer failed to stage it in 60 attempts —
+// so a timing-based test would pass whether or not the delivery exists.
+// What matters is the handler's behaviour when the stash is non-empty.
+func TestClientWriteHold_ReleaseDeliversTheDestStash(t *testing.T) {
+	h := newTCPHarness(t, Config{HoldClientWrites: true})
+	h.drainUpstream(t)
+	h.greetAndAwait(t)
+
+	// A server response caught at the pause boundary.
+	stranded := []byte("server-bytes-read-at-the-boundary\n")
+	h.r.stashInflightFromPause(fakeconn.FromDest, stranded, time.Now())
+
+	h.r.Directives() <- directive.ReleaseClient("plaintext auth")
+	if ack := awaitTCPAck(t, h); !ack.OK {
+		t.Fatalf("release-client failed: %+v", ack)
+	}
+
+	_ = h.clientApp.SetReadDeadline(time.Now().Add(3 * time.Second))
+	got := make([]byte, len(stranded))
+	if _, err := io.ReadFull(h.clientApp, got); err != nil {
+		t.Fatalf("the client never received the bytes stashed at the pause boundary: %v.\n"+
+			"A plain release changes nothing about the connection, so those are ordinary "+
+			"response bytes the client is waiting for — endPause dropping them is silent "+
+			"user-traffic loss.", err)
+	}
+	if !bytes.Equal(got, stranded) {
+		t.Fatalf("client received % x, want % x", got, stranded)
+	}
 }

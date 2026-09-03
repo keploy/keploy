@@ -443,7 +443,7 @@ func (c Config) withDefaults() Config {
 	// opt out of half-close, so it must survive default resolution.
 	if out.HalfCloseGrace == 0 {
 		out.HalfCloseGrace = DefaultHalfCloseGrace
-
+	}
 	// == 0, not <= 0: a negative ClientHoldCap is the documented way to
 	// disable the bound, so it must survive default resolution.
 	if out.ClientHoldCap == 0 {
