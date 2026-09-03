@@ -58,6 +58,19 @@ const (
 	// DefaultForwardBuf is the size of the per-iteration Read/Write
 	// scratch buffer used by the forwarder goroutines.
 	DefaultForwardBuf = 32 * 1024 // 32 KiB
+
+	// DefaultHalfCloseGrace bounds how long the surviving direction may
+	// sit IDLE after its peer half-closed. See [Config.HalfCloseGrace].
+	//
+	// Because the bound is on idle time and not on total time, it only
+	// has to cover the gap before a peer STARTS answering, never the
+	// length of the answer: a response that streams for ten minutes
+	// re-arms the window on every chunk. 10s is generous for
+	// "connection accepted, request complete, first byte not yet sent"
+	// while keeping the worst case — a peer that goes silent and never
+	// closes — short enough that a busy proxy is not holding file
+	// descriptors and tee buffers for half a minute per connection.
+	DefaultHalfCloseGrace = 10 * time.Second
 )
 
 // TLSUpgradeFn performs a TLS handshake on a real net.Conn and returns
@@ -263,6 +276,39 @@ type Config struct {
 	// this when the parser implements an opt-in capability method.
 	PreDispatchPause bool
 
+	// HalfCloseGrace bounds how long the relay keeps copying the
+	// surviving direction after one side has half-closed (sent FIN
+	// while still able to receive). Zero resolves to
+	// [DefaultHalfCloseGrace]; negative disables half-close entirely and
+	// restores the original behaviour of tearing both directions down
+	// on the first EOF.
+	//
+	// A clean EOF from one side means "I have finished writing", not
+	// "this connection is over". A client that does shutdown(SHUT_WR)
+	// and then reads the reply — Node's socket.end(data), Python's
+	// sock.shutdown(SHUT_WR), any request/EOF/response protocol — loses
+	// that reply if the relay closes the other direction, and the
+	// application sees its connection end before the answer arrives.
+	//
+	// The bound exists because the opposite risk is real too: a peer
+	// that answers with neither data nor a FIN would leave the
+	// surviving forwarder parked in Read forever. That is the ~60s hang
+	// the unconditional teardown originally prevented, and this keeps
+	// that protection while giving a well-behaved peer room to answer.
+	//
+	// It measures IDLE time, not total time. A total bound would cut a
+	// slow response off mid-body — and silently, since the caller closes
+	// the client socket once Run returns, so an EOF-delimited protocol
+	// reads a truncated body as a complete one. Every forwarded chunk
+	// re-arms the window.
+	//
+	// NOTE: unlike its siblings in config.RecordBuffer (PerConnCap,
+	// TeeChanBuf, ConsumerStallGrace) this is not yet reachable from
+	// keploy.yml, a flag or an env var — it is a compile-time knob and
+	// a programmatic one. Worth plumbing if an operator ever needs to
+	// turn it down in the field.
+	HalfCloseGrace time.Duration
+
 	// ParserCanResyncAfterGap tells the tees whether the parser on the other
 	// end can re-anchor its framer after a HOLE in capture. Set by the
 	// dispatcher from the parser's optional
@@ -317,6 +363,11 @@ func (c Config) withDefaults() Config {
 	}
 	if out.ForwardBuf <= 0 {
 		out.ForwardBuf = DefaultForwardBuf
+	}
+	// == 0, not <= 0: a negative HalfCloseGrace is the documented way to
+	// opt out of half-close, so it must survive default resolution.
+	if out.HalfCloseGrace == 0 {
+		out.HalfCloseGrace = DefaultHalfCloseGrace
 	}
 	if out.ConsumerStallGrace <= 0 {
 		out.ConsumerStallGrace = DefaultConsumerStallGrace
