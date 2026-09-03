@@ -3659,17 +3659,25 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
 			if parserErr.MismatchReport != nil {
 				errs = append(errs, models.UnmatchedCall{
-					Protocol:       parserErr.MismatchReport.Protocol,
-					ActualSummary:  parserErr.MismatchReport.ActualSummary,
-					Destination:    parserErr.MismatchReport.Destination,
-					ClosestMock:    parserErr.MismatchReport.ClosestMock,
-					Diff:           parserErr.MismatchReport.Diff,
-					NextSteps:      parserErr.MismatchReport.NextSteps,
-					MatchPhase:     parserErr.MismatchReport.MatchPhase,
-					CandidateCount: parserErr.MismatchReport.CandidateCount,
-					FieldDiffs:     parserErr.MismatchReport.FieldDiffs,
-					ClosestMockReq: parserErr.MismatchReport.ClosestMockReq,
-					ReceivedReq:    parserErr.MismatchReport.ReceivedReq,
+					Protocol:      parserErr.MismatchReport.Protocol,
+					ActualSummary: parserErr.MismatchReport.ActualSummary,
+					Destination:   parserErr.MismatchReport.Destination,
+					ClosestMock:   parserErr.MismatchReport.ClosestMock,
+					Diff:          parserErr.MismatchReport.Diff,
+					NextSteps:     parserErr.MismatchReport.NextSteps,
+					MatchPhase:    parserErr.MismatchReport.MatchPhase,
+					// Separate axis from MatchPhase: the phase still reports
+					// where the cascade stopped, the scope says whether any
+					// mock this miss was compared against targeted that
+					// upstream. Deliberately a statement about the COMPARED
+					// SET, not about the whole recording — mocks served
+					// earlier in the run are no longer in that set, so a
+					// wider claim would be false.
+					DestinationScope: parserErr.MismatchReport.DestinationScope,
+					CandidateCount:   parserErr.MismatchReport.CandidateCount,
+					FieldDiffs:       parserErr.MismatchReport.FieldDiffs,
+					ClosestMockReq:   parserErr.MismatchReport.ClosestMockReq,
+					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach
@@ -3722,14 +3730,35 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	// got, instead of each parser logging it differently (or not at all). The
 	// per-parser decode loggers stay at Debug to avoid double-logging.
 	if r := proxyErr.MismatchReport; r != nil {
-		p.logger.Warn("mock mismatch: no matching mock for outgoing call",
+		fields := []zap.Field{
 			zap.String("protocol", r.Protocol),
 			zap.String("destination", r.Destination),
 			zap.String("actual", r.ActualSummary),
 			zap.String("match_phase", r.MatchPhase),
 			zap.Int("candidates", r.CandidateCount),
 			zap.String("closest", r.ClosestMock),
-			zap.String("next_step", r.NextSteps))
+			zap.String("next_step", r.NextSteps),
+		}
+		// destination_scope is greppable in a node-wide agent log:
+		// "not_in_compared_set" is the one value that says "nothing this miss
+		// was compared against even targets that upstream" — in Kubernetes
+		// most often a sibling container's egress (replay intercepts the whole
+		// pod while record armed only the container the user named), and in
+		// any mode endpoint drift or a per-test mock window that excluded the
+		// mock. models.OutOfScopeDestinationCauses carries the user-facing
+		// wording; the log field is the machine-greppable half.
+		//
+		// A string, and emitted ONLY when the question was actually answered.
+		// The mechanism is protocol-agnostic, but HTTP is the only protocol
+		// that supplies destination evidence today (nothing else records an
+		// upstream authority in its mocks), so an unconditional boolean
+		// printed a negative on every mongo/mysql/generic miss — an unchecked
+		// negative that reads as "we checked, and it was fine". Absent means
+		// "not established", which is the truth.
+		if r.DestinationScope != models.DestinationScopeUnknown {
+			fields = append(fields, zap.String("destination_scope", r.DestinationScope))
+		}
+		p.logger.Warn("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {
 		p.logger.Warn("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
 	}
