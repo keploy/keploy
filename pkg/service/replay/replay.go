@@ -4325,6 +4325,17 @@ func (r *Replayer) resetResendUnsafe(ctx context.Context) (bool, []models.MockSt
 // published host-port TCP gate (no-op for native apps / unmapped publishes). On
 // timeout it returns and lets the bounded re-send attempts run.
 func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models.TestCase, testSetID string) {
+	// The same opt-out as the pre-test gate, and this path needs it more,
+	// not less. Its trigger is a transport-level reset — which, behind a
+	// kubectl port-forward, is exactly what a dying forward produces.
+	// Re-opening a connect-then-close probe against the same address in
+	// response is the one thing most likely to finish it off. The
+	// bounded re-sends themselves are unaffected; only the readiness
+	// re-gate is skipped. See config.Test.DisableAppReadyProbe.
+	if r.config.Test.DisableAppReadyProbe {
+		return
+	}
+
 	wctx, cancel := context.WithTimeout(ctx, resetResendReadyTimeout)
 	defer cancel()
 
