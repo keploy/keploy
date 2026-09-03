@@ -3,12 +3,13 @@ package recorder
 import (
 	"bytes"
 	"context"
-	"go.keploy.io/server/v3/pkg/models/mysql"
 	"net"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models/mysql"
 
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/models"
