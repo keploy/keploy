@@ -192,6 +192,13 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	r.src.Store(&src)
 	r.dst.Store(&dst)
 
+	// Armed here rather than in run(): the caller registers its abort
+	// hook between New and Run, and an abort in that window must find a
+	// hold it can actually release. See the note in run().
+	if cfg.HoldClientWrites {
+		r.holdClient.Store(true)
+	}
+
 	r.teeC2D = newTee(
 		fakeconn.FromClient,
 		cfg.PerConnCap,
@@ -404,12 +411,19 @@ func (r *Relay) run(ctx context.Context) error {
 	// flowing (a server-speaks-first protocol greets before the client
 	// says anything). Only the C2D Write is deferred. See
 	// [Config.HoldClientWrites].
+	// The hold itself is armed in New(), NOT here. Arming inside this
+	// goroutine loses a race with the caller: proxy_v2.go does
+	// relay.New, then `go r.Run(...)`, then registers SessionOnAbort. An
+	// abort firing before this goroutine got scheduled found holdClient
+	// still false, so PauseTees released nothing — and then Run armed a
+	// hold with no releaser left. On the FallthroughToPassthrough path
+	// the relay deliberately keeps running, so the client direction
+	// stayed blackholed until peer close: exactly the silent
+	// user-traffic outage PauseTees exists to prevent.
+	//
 	// withDefaults has already refused any HoldClientWrites +
 	// PreDispatchPause combination, so the block above cannot have
 	// installed a pause barrier that this hold would strand.
-	if r.cfg.HoldClientWrites {
-		r.holdClient.Store(true)
-	}
 
 	// When one forwarder exits, signal the other to exit too via the
 	// existing stopping/nudgeDeadline machinery. Without this signalling,
@@ -708,68 +722,89 @@ func (r *Relay) forward(
 		// the block above has already routed the bytes there; holding
 		// them a second time here would double-stash them.
 		if n > 0 && dir == fakeconn.FromClient && r.holdClient.Load() {
-			payload := make([]byte, n)
-			copy(payload, buf[:n])
+			// holdMu, and re-check under it. Without the lock a
+			// releaser can clear the flag and start writing the stash
+			// to the upstream socket while this goroutine is deciding
+			// to stash-or-write, and the two writes reach the server
+			// out of order — observed 25/25 with a slow flush, which is
+			// exactly the case an abort correlates with (a full
+			// upstream socket buffer). Held chunks only occur during
+			// the pre-handshake window, so this is not a hot path.
+			r.holdMu.Lock()
+			if !r.holdClient.Load() {
+				// A release won the race; fall through and forward
+				// normally, after the flush it just completed.
+				r.holdMu.Unlock()
+			} else {
+				payload := make([]byte, n)
+				copy(payload, buf[:n])
 
-			// Stash BEFORE teeing, and the order is load-bearing.
-			//
-			// The parser's decision is what ends the hold, so everything
-			// downstream synchronises on having SEEN a chunk — a test
-			// waits for it on the FakeConn, and in production the parser
-			// issues its directive the moment it has decoded enough.
-			// Teeing first makes "the parser saw it" true while "it is in
-			// the stash" is not yet, so a release can run against an
-			// empty stash and strand the very bytes it was meant to
-			// deliver. Stashing first makes the visible event the LATER
-			// of the two, so anyone who observed the chunk is guaranteed
-			// the stash already holds it.
-			//
-			// The reverse hazard does not exist: if a release claims the
-			// stash between these two statements, the bytes go upstream
-			// and are teed immediately after, so the parser still sees
-			// every byte the connection carried.
-			r.stashInflightFromPause(dir, payload, readAt)
-			chunk := fakeconn.Chunk{
-				Dir:    dir,
-				Bytes:  payload,
-				ReadAt: readAt,
-				SeqNo:  seq.Add(1),
-			}
-			teed := t.push(chunk)
-			if teed && r.cfg.OnClientChunkTeed != nil {
-				r.cfg.OnClientChunkTeed()
-			}
-			// The connection IS carrying traffic even though nothing
-			// reaches the peer yet. Without this the only bump on this
-			// path is the one OnClientChunkTeed makes, so a held
-			// connection whose tee is dropping chunks (per-conn cap,
-			// memory pressure) stops bumping altogether and reads as
-			// idle to the hang watchdog while it is anything but.
-			if r.cfg.BumpActivity != nil {
-				r.cfg.BumpActivity()
-			}
-			if log != nil {
-				log.Debug("relay: holding client bytes from the destination",
-					zap.Int("held_bytes", n),
-					zap.Bool("teed", teed),
-				)
-			}
-			// A hold that outgrows its cap is a parser that is not
-			// coming back. Release rather than keep buffering: the
-			// client is blocked on a reply it cannot get while we sit
-			// on its request. See [Config.ClientHoldCap].
-			if r.noteHeldClientBytes(int64(n)) {
-				if werr := r.releaseClientHold(); werr != nil {
-					if log != nil {
-						log.Debug("relay: client hold cap release failed",
-							zap.Error(werr),
-						)
-					}
-					return werr
+				// Stash BEFORE teeing, and the order is load-bearing.
+				//
+				// The parser's decision is what ends the hold, so everything
+				// downstream synchronises on having SEEN a chunk — a test
+				// waits for it on the FakeConn, and in production the parser
+				// issues its directive the moment it has decoded enough.
+				// Teeing first makes "the parser saw it" true while "it is in
+				// the stash" is not yet, so a release can run against an
+				// empty stash and strand the very bytes it was meant to
+				// deliver. Stashing first makes the visible event the LATER
+				// of the two, so anyone who observed the chunk is guaranteed
+				// the stash already holds it.
+				//
+				// The reverse hazard does not exist: if a release claims the
+				// stash between these two statements, the bytes go upstream
+				// and are teed immediately after, so the parser still sees
+				// every byte the connection carried.
+				r.stashInflightFromPause(dir, payload, readAt)
+				chunk := fakeconn.Chunk{
+					Dir:    dir,
+					Bytes:  payload,
+					ReadAt: readAt,
+					SeqNo:  seq.Add(1),
 				}
+				teed := t.push(chunk)
+				if teed && r.cfg.OnClientChunkTeed != nil {
+					r.cfg.OnClientChunkTeed()
+				}
+				// The connection IS carrying traffic even though nothing
+				// reaches the peer yet. Without this the only bump on this
+				// path is the one OnClientChunkTeed makes, so a held
+				// connection whose tee is dropping chunks (per-conn cap,
+				// memory pressure) stops bumping altogether and reads as
+				// idle to the hang watchdog while it is anything but.
+				if r.cfg.BumpActivity != nil {
+					r.cfg.BumpActivity()
+				}
+				if log != nil {
+					log.Debug("relay: holding client bytes from the destination",
+						zap.Int("held_bytes", n),
+						zap.Bool("teed", teed),
+					)
+				}
+				capBreached := r.noteHeldClientBytes(int64(n))
+				// Drop the lock BEFORE releasing: releaseClientHold
+				// takes holdMu itself, so calling it here would
+				// self-deadlock.
+				r.holdMu.Unlock()
+
+				// A hold that outgrows its cap is a parser that is not
+				// coming back. Release rather than keep buffering: the
+				// client is blocked on a reply it cannot get while we
+				// sit on its request. See [Config.ClientHoldCap].
+				if capBreached {
+					if werr := r.releaseClientHold(); werr != nil {
+						if log != nil {
+							log.Debug("relay: client hold cap release failed",
+								zap.Error(werr),
+							)
+						}
+						return werr
+					}
+				}
+				// Suppress the forward below; the bytes are accounted for.
+				n = 0
 			}
-			// Suppress the forward below; the bytes are accounted for.
-			n = 0
 		}
 
 		if n > 0 {
