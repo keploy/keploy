@@ -2,6 +2,9 @@ package replay
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,9 +15,10 @@ import (
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/olekukonko/tablewriter"
 	"github.com/olekukonko/tablewriter/tw"
@@ -345,9 +349,24 @@ const resetProbeInterval = 200 * time.Millisecond
 //
 // It resolves from the pre-template-render URL, so a {{ }} placeholder in the
 // host/port (as opposed to the path/query/body, where they actually live) would
-// make the probe target diverge from the dial. That is best-effort only: a wrong
-// target just times out within resetResendReadyTimeout and the bounded re-send
-// still runs, so it never affects correctness.
+// make the probe target diverge from the dial. That is best-effort only and never
+// affects correctness, but MIND THE BUDGET, because it differs by caller:
+//
+//   - waitForResetResendReady bounds a wrong target by resetResendReadyTimeout
+//     (5s) and the re-send still runs.
+//   - gateOnAppAddress's HTTP stage, via resolveTestSetProbeTarget, is bounded by
+//     test.healthPollTimeout instead — 3 minutes by default and operator-
+//     configurable. So a target that is resolvable but DEAD (an un-rendered
+//     template in the host, or a --host override pointing nowhere) makes the
+//     pre-test gate retry until that budget expires before warning and firing
+//     anyway, on every test-set.
+//
+// That residual is deliberate rather than overlooked. Shortening it would take
+// the budget away from the case the gate exists for — a cold application start
+// measured at ~55s to first serve — and a target this resolver gets wrong is
+// almost always one the real dispatch will get wrong too, so the run was going
+// to fail regardless. It is bounded, warn-and-proceed, and never turns a passing
+// run into a failing one.
 func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID string, logger *zap.Logger) (scheme, host, port string, ok bool) {
 	if tc == nil || tc.Kind != models.HTTP {
 		return "", "", "", false
@@ -386,6 +405,32 @@ func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID stri
 	return scheme, host, port, true
 }
 
+// isTLSVerificationError reports whether err is the TLS handshake failing on
+// certificate VERIFICATION, as opposed to the connection never getting that far.
+//
+// The distinction is the whole point: an untrusted or mismatched certificate
+// means the peer is up, listening, and speaking TLS. A refusal, reset or timeout
+// means it is not. A readiness probe cares only about the latter.
+func isTLSVerificationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var cve *tls.CertificateVerificationError
+	if errors.As(err, &cve) {
+		return true
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthority) {
+		return true
+	}
+	var hostname x509.HostnameError
+	if errors.As(err, &hostname) {
+		return true
+	}
+	var invalid x509.CertificateInvalidError
+	return errors.As(err, &invalid)
+}
+
 // waitForHTTPServing polls until an HTTP round-trip to host:port completes with
 // ANY status — proving the proxy→app path actually serves — or ctx expires. A
 // transport reset / refusal / timeout counts as not-ready and keeps waiting.
@@ -400,7 +445,27 @@ func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID stri
 // invoking a handler; and in the reset (failure) state the userland-proxy resets
 // the probe before the app ever sees it, so it never reaches application code.
 func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
-	target := fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(host, port), keployReadinessProbePath)
+	return waitForHTTPServingPath(ctx, scheme, host, port, keployReadinessProbePath)
+}
+
+// waitForHTTPServingPath is waitForHTTPServing with an explicit request path, so
+// an operator-supplied health path (test.healthPath) can be probed instead of the
+// keploy-reserved one. An empty path falls back to the reserved probe path.
+//
+// The contract is identical either way: ANY completed HTTP response — including
+// 404 or 503 — proves the proxy→app path serves, which is the only thing a
+// readiness gate needs to know. We deliberately do NOT require 2xx here: a health
+// endpoint that reports "unhealthy" has still proved the app is listening and
+// answering, and holding replay back for application-level health would turn a
+// readiness gate into a liveness policy.
+func waitForHTTPServingPath(ctx context.Context, scheme, host, port, path string) error {
+	if path == "" {
+		path = keployReadinessProbePath
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	target := fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(host, port), path)
 	client := &http.Client{
 		Timeout: resetProbeRequestTimeout,
 		// Don't follow redirects — any 3xx already proves the app serves.
@@ -422,6 +487,20 @@ func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
 		}
 		resp, err := client.Do(req)
 		if err != nil {
+			// A certificate we do not trust still answers the only question this
+			// gate asks. Verification failing means the server completed a TLS
+			// handshake and presented a certificate — it is listening and
+			// serving; we simply do not vouch for who it is. A self-signed cert
+			// is the norm for a local or CI HTTPS fixture, so treating that as
+			// "not ready" would burn the whole ceiling on every run.
+			//
+			// Deliberately NOT solved with InsecureSkipVerify: that disables the
+			// check everywhere in this client and is a real finding for scanners
+			// to flag. Reading the specific error keeps verification on and only
+			// reinterprets its meaning for a readiness decision.
+			if isTLSVerificationError(err) {
+				return true
+			}
 			return false // transport reset / refused / timeout → not ready yet
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -446,7 +525,147 @@ func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
 	}
 }
 
-func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config) bool {
+// gateOnAppAddress blocks until host:port looks ready, then returns. It is the
+// single implementation behind every pre-test readiness gate.
+//
+// Two stages, because one is not enough:
+//
+//  1. TCP accept. Proves something is bound. Works for any protocol, so it is
+//     all we can do for a non-HTTP app.
+//  2. A real HTTP round-trip, but ONLY when the app is known to serve HTTP.
+//
+// Stage 2 exists because stage 1 is not sufficient for the case this gate was
+// built for. Docker's userland proxy binds and ACCEPTS on the published host
+// port as soon as the container is created — before anything inside the
+// container is listening — and then RESETS the connection when it cannot reach
+// the app. A TCP-accept gate therefore passes instantly and hands replay a port
+// that will reset its first request, which is exactly the status_code=0 flake on
+// the first test of a set. Only a completed HTTP exchange proves the whole
+// proxy→app path carries a request.
+//
+// "Known to serve HTTP" is not a guess: it is derived from the recorded test set
+// (see testSetServesHTTP). If we recorded HTTP requests against this app, the app
+// serves HTTP. For a non-HTTP app (MySQL, Redis, a gRPC-only service) stage 2 is
+// skipped entirely rather than burning the ceiling on a probe that can never
+// parse a response.
+//
+// Best-effort throughout, preserving the pre-existing contract: it can only ever
+// wait LONGER than --delay, never shorter; a timeout WARNS and proceeds rather
+// than failing the run; and it never weakens an assertion. Returns false only on
+// context cancellation (user abort).
+func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Config, host, port, label string, probe httpProbeTarget) bool {
+	ceiling := cfg.Test.HealthPollTimeout
+	if ceiling <= 0 {
+		ceiling = config.DefaultHealthPollTimeout
+	}
+	deadline := time.Now().Add(ceiling)
+
+	if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		logger.Warn("app address did not accept a connection within the ceiling; firing tests anyway (replay may see status_code got=0)",
+			zap.String("gate", label),
+			zap.String("host", host),
+			zap.String("port", port),
+			zap.Duration("ceiling", ceiling),
+			zap.Error(err))
+		return true
+	}
+
+	if !probe.ok {
+		return true
+	}
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return true
+	}
+	hctx, cancel := context.WithTimeout(ctx, remaining)
+	defer cancel()
+
+	// Scheme comes from the resolved target; healthScheme is an explicit override
+	// for the rare case an operator needs to force it.
+	scheme := probe.scheme
+	if forced := strings.TrimSpace(cfg.Test.HealthScheme); forced != "" && !strings.EqualFold(forced, scheme) {
+		if strings.EqualFold(forced, "http") || strings.EqualFold(forced, "https") {
+			scheme = strings.ToLower(forced)
+		}
+	}
+	if err := waitForHTTPServingPath(hctx, scheme, probe.host, probe.port, cfg.Test.HealthPath); err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		logger.Warn("app accepted TCP but never completed an HTTP round-trip within the ceiling; firing tests anyway (replay may see status_code got=0)",
+			zap.String("gate", label),
+			zap.String("probeHost", probe.host),
+			zap.String("probePort", probe.port),
+			zap.String("probePath", healthProbePathForLog(cfg.Test.HealthPath)),
+			zap.Duration("ceiling", ceiling),
+			zap.Error(err))
+		return true
+	}
+	logger.Debug("app readiness confirmed by a completed HTTP round-trip",
+		zap.String("gate", label),
+		zap.String("probeHost", probe.host),
+		zap.String("probePort", probe.port),
+		zap.String("probePath", healthProbePathForLog(cfg.Test.HealthPath)))
+	return true
+}
+
+// healthProbePathForLog reports the path gateOnAppAddress actually requests.
+func healthProbePathForLog(configured string) string {
+	if configured == "" {
+		return keployReadinessProbePath
+	}
+	if !strings.HasPrefix(configured, "/") {
+		return "/" + configured
+	}
+	return configured
+}
+
+// httpProbeTarget is the address a recorded HTTP test case actually dials, used
+// as the target of the readiness gate's HTTP stage.
+type httpProbeTarget struct {
+	scheme, host, port string
+	ok                 bool
+}
+
+// resolveTestSetProbeTarget returns the address the readiness gate should complete
+// an HTTP round-trip against, derived from the recorded test set.
+//
+// This is EVIDENCE, not a guess, and the distinction is the whole point. An
+// earlier revision decided only WHETHER to escalate from the test set and then
+// escalated against whatever address the docker/compose heuristic produced —
+// dockerPublishedHostPort returns the FIRST -p flag it finds, with no check that
+// it is the HTTP port. For `-p 5432:5432 -p 8080:8080` that is the database, and
+// an HTTP probe against it can never succeed: stage 1 passes instantly because
+// the port is bound, then stage 2 burns the entire ceiling on EVERY run before
+// warning and proceeding. Same for an operator who points appReadyProbeAddr at a
+// non-HTTP service, which its own documentation invites.
+//
+// resolveProbeTarget mirrors the simulation's own ResolveTestTarget (ConfigHost /
+// --host override, replaceWith, port precedence) so the probe hits exactly what
+// the test will dial, and is address-family-correct — an IPv6 "localhost" dial is
+// gated on the IPv6 path, not a mismatched 127.0.0.1. It is the same resolver the
+// reset re-send gate already uses.
+//
+// Returns ok=false when no test case resolves (empty set, non-HTTP set, or an
+// unresolvable target); the caller then keeps the TCP-accept stage only, which is
+// exactly the pre-existing behaviour.
+func resolveTestSetProbeTarget(testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger) httpProbeTarget {
+	for _, tc := range testCases {
+		if tc == nil || tc.Kind != models.HTTP {
+			continue
+		}
+		if scheme, host, port, ok := resolveProbeTarget(testCfg, tc, testSetID, logger); ok {
+			return httpProbeTarget{scheme: scheme, host: host, port: port, ok: true}
+		}
+	}
+	return httpProbeTarget{}
+}
+
+func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget) bool {
 	delay := time.Duration(cfg.Test.Delay) * time.Second
 
 	healthURL := cfg.Test.HealthURL
@@ -501,20 +720,11 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		// --delay behavior. This can only ever wait LONGER than --delay, never
 		// shorter, and never weakens an assertion — a fast-ready port returns
 		// instantly.
+		gated := false
 		if host, port, ok := dockerPublishedHostPort(cfg.Command); ok {
-			ceiling := cfg.Test.HealthPollTimeout
-			if ceiling <= 0 {
-				ceiling = 60 * time.Second
-			}
-			if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
-				if ctx.Err() != nil {
-					return false
-				}
-				logger.Warn("app host port did not become ready within the ceiling; firing tests anyway (replay may see status_code got=0)",
-					zap.String("host", host),
-					zap.String("port", port),
-					zap.Duration("ceiling", ceiling),
-					zap.Error(err))
+			gated = true
+			if !gateOnAppAddress(ctx, logger, cfg, host, port, "docker-published-port", probe) {
+				return false
 			}
 		}
 
@@ -522,19 +732,9 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		// compose file instead of the command line. Identical contract to the
 		// -p gate above — best-effort, bounded, can only ever wait longer.
 		if host, port, ok := composePublishedHostPort(cfg.Command, cfg.ContainerName); ok {
-			ceiling := cfg.Test.HealthPollTimeout
-			if ceiling <= 0 {
-				ceiling = 60 * time.Second
-			}
-			if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
-				if ctx.Err() != nil {
-					return false
-				}
-				logger.Warn("compose app host port did not become ready within the ceiling; firing tests anyway (replay may see status_code got=0)",
-					zap.String("host", host),
-					zap.String("port", port),
-					zap.Duration("ceiling", ceiling),
-					zap.Error(err))
+			gated = true
+			if !gateOnAppAddress(ctx, logger, cfg, host, port, "compose-published-port", probe) {
+				return false
 			}
 		}
 
@@ -559,19 +759,31 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 				if host == "" {
 					host = "127.0.0.1" // ":<port>" shorthand → localhost, parity with the docker gate
 				}
-				ceiling := cfg.Test.HealthPollTimeout
-				if ceiling <= 0 {
-					ceiling = 60 * time.Second
+				gated = true
+				if !gateOnAppAddress(ctx, logger, cfg, host, port, "app-ready-probe-addr", probe) {
+					return false
 				}
-				if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
-					if ctx.Err() != nil {
-						return false
-					}
-					logger.Warn("app ready-probe address did not accept a connection within the ceiling; firing tests anyway (replay may see connection refused)",
-						zap.String("addr", addr),
-						zap.Duration("ceiling", ceiling),
-						zap.Error(err))
-				}
+			}
+		}
+
+		// Nothing above could name the app's address — a NATIVE app, the common
+		// case: no docker -p publish, no compose file, no operator-supplied
+		// appReadyProbeAddr. Until now that meant no readiness gate at all beyond
+		// the fixed --delay, so a native app slower than that delay had its first
+		// test fired into a socket nothing was listening on yet, producing exactly
+		// the status_code=0 this whole gate exists to prevent. Observed on the
+		// python-cred-expiry lane (`python3 recorded_app.py`, --delay 5): 2 of 4
+		// tests failed with expected=200 got=0.
+		//
+		// The recorded test set already told us where it dials, so use it. There
+		// is nothing to guess: probe.host/probe.port IS the app's address for the
+		// purposes of these tests, and the same best-effort contract holds —
+		// bounded by the ceiling, warn-and-proceed on timeout, only ever waits
+		// longer than --delay. Guarded on `gated` purely to avoid probing twice
+		// when a published address already covered it.
+		if !gated && probe.ok {
+			if !gateOnAppAddress(ctx, logger, cfg, probe.host, probe.port, "resolved-test-target", probe) {
+				return false
 			}
 		}
 		return true
@@ -579,7 +791,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 
 	pollCeiling := cfg.Test.HealthPollTimeout
 	if pollCeiling <= 0 {
-		pollCeiling = 60 * time.Second
+		pollCeiling = config.DefaultHealthPollTimeout
 	}
 
 	logger.Info("polling application health endpoint before firing tests",

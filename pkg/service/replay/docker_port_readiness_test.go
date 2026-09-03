@@ -55,7 +55,7 @@ func TestWaitForAppReady_DockerPortGate_ReadyPort(t *testing.T) {
 	cfg.Test.Delay = 0 // no floor; isolate the port gate
 
 	start := time.Now()
-	if !waitForAppReady(context.Background(), zap.NewNop(), cfg) {
+	if !waitForAppReady(context.Background(), zap.NewNop(), cfg, httpProbeTarget{}) {
 		t.Fatal("waitForAppReady returned false for a listening port")
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -80,7 +80,7 @@ func TestWaitForAppReady_DockerPortGate_DeadPortProceeds(t *testing.T) {
 	cfg.Test.HealthPollTimeout = 1 * time.Second // tiny ceiling for the test
 
 	start := time.Now()
-	if !waitForAppReady(context.Background(), zap.NewNop(), cfg) {
+	if !waitForAppReady(context.Background(), zap.NewNop(), cfg, httpProbeTarget{}) {
 		t.Fatal("waitForAppReady should proceed (return true) after the ceiling on a dead port")
 	}
 	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
@@ -103,7 +103,7 @@ func TestWaitForAppReady_DockerPortGate_CtxCancel(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	if waitForAppReady(ctx, zap.NewNop(), cfg) {
+	if waitForAppReady(ctx, zap.NewNop(), cfg, httpProbeTarget{}) {
 		t.Fatal("waitForAppReady should return false when ctx is cancelled mid-wait")
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
