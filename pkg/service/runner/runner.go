@@ -15,6 +15,8 @@ import (
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/v3/utils"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -239,6 +241,12 @@ func (r *Runner) executeAndCompare(ctx context.Context, tc *models.TestCase, ser
 
 	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{})
 	if err != nil {
+		// SimulateHTTP reports a transport reset at Debug because the REPLAY
+		// caller re-sends it. This path has no such retry, so the failure is
+		// terminal here and has to be reported by us or it is only visible in
+		// the returned TestResult.
+		utils.LogError(r.logger, err, "failed to send test request to app",
+			zap.String("testCase", tc.Name))
 		return false, models.RespCompare{}, err
 	}
 

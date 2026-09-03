@@ -96,7 +96,8 @@ func TestWaitForAppReady_503ThenOK(t *testing.T) {
 }
 
 // TestWaitForAppReady_NeverOK verifies the fallback path: when the health
-// endpoint never returns 2xx we log at INFO and sleep for --delay.
+// endpoint never returns 2xx we warn and sleep for --delay. The level itself is
+// pinned by TestWaitForAppReady_HealthTimeoutWarnsWithConsequence.
 func TestWaitForAppReady_NeverOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -130,7 +131,7 @@ func TestWaitForAppReady_NeverOK(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("expected INFO 'health probe timed out' log, entries=%v", logs.All())
+		t.Fatalf("expected a 'health probe timed out' log, entries=%v", logs.All())
 	}
 }
 

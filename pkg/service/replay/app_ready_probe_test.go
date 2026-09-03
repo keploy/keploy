@@ -3,10 +3,13 @@ package replay
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/config"
 )
@@ -126,5 +129,57 @@ func TestWaitForAppReady_ProbeAddrGate_EmptyHostShorthand(t *testing.T) {
 	// without the 1s ticker floor.
 	if elapsed := time.Since(start); elapsed > 900*time.Millisecond {
 		t.Fatalf("ready port should return promptly (leading dial), took %v", elapsed)
+	}
+}
+
+// TestWaitForAppReady_HealthTimeoutWarnsWithConsequence pins the visibility of
+// the health-gate fallback.
+//
+// When the health probe never sees a 2xx, waitForAppReady deliberately proceeds
+// on a fixed delay rather than blocking or failing — that behaviour is not in
+// question here. What matters is that the operator can tell: firing a whole
+// suite at an app that never reported healthy typically produces every test
+// failing with no response at all, which is indistinguishable from a real
+// regression unless this line stands out. Reported at Info it drowned in a long
+// run; the sibling TCP port gate in the same function already reports the
+// identical situation at Warn.
+func TestWaitForAppReady_HealthTimeoutWarnsWithConsequence(t *testing.T) {
+	// An address nothing listens on, so the health probe can never see a 2xx.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	cfg := &config.Config{}
+	cfg.Test.Delay = 0
+	cfg.Test.HealthURL = "http://" + addr + "/healthz"
+	cfg.Test.HealthPollTimeout = 300 * time.Millisecond
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	if !waitForAppReady(context.Background(), zap.New(core), cfg) {
+		t.Fatal("the gate must still proceed after the ceiling; this test is about the log, not the fallback")
+	}
+
+	warns := logs.FilterLevelExact(zapcore.WarnLevel).All()
+	if len(warns) == 0 {
+		t.Fatalf("health-probe timeout must be reported at Warn — at Info it is invisible in a real run "+
+			"and the resulting all-tests-fail looks like a regression; got %v", logs.All())
+	}
+	var found bool
+	for _, w := range warns {
+		if strings.Contains(w.Message, "health probe timed out") {
+			found = true
+			if !strings.Contains(w.Message, "status_code got=0") {
+				t.Errorf("the warning must name the consequence so the failure mode is recognisable, got %q", w.Message)
+			}
+			if !strings.Contains(w.Message, "--health-poll-timeout") {
+				t.Errorf("the warning must name the knob to turn, got %q", w.Message)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no health-probe-timeout warning found; got %v", warns)
 	}
 }

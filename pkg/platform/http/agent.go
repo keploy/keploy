@@ -517,8 +517,11 @@ func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, 
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
+		// Returned, not logged: the caller ignores a hook failure and carries on,
+		// so it owns the level. Logging here as well produced a second entry —
+		// at Error — for a failure that does not break the run. The body travels
+		// in the error so nothing is lost by staying quiet.
+		return fmt.Errorf("agent hook failed (status %d, body: %q)", resp.StatusCode, string(respBody))
 	}
 	return nil
 }
@@ -553,8 +556,8 @@ func (a *AgentClient) AfterSimulate(ctx context.Context, tcName string, testSetI
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
+		// See BeforeSimulate: returned, not logged — the caller owns the level.
+		return fmt.Errorf("agent hook failed (status %d, body: %q)", resp.StatusCode, string(respBody))
 	}
 	return nil
 }
@@ -588,8 +591,8 @@ func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
+		// See BeforeSimulate: returned, not logged — the caller owns the level.
+		return fmt.Errorf("agent hook failed (status %d, body: %q)", resp.StatusCode, string(respBody))
 	}
 	return nil
 
@@ -625,8 +628,8 @@ func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
+		// See BeforeSimulate: returned, not logged — the caller owns the level.
+		return fmt.Errorf("agent hook failed (status %d, body: %q)", resp.StatusCode, string(respBody))
 	}
 	return nil
 
@@ -663,8 +666,8 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
+		// See BeforeSimulate: returned, not logged — the caller owns the level.
+		return fmt.Errorf("agent hook failed (status %d, body: %q)", resp.StatusCode, string(respBody))
 	}
 	return nil
 
