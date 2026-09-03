@@ -260,7 +260,8 @@ type UpstreamTLS struct {
 // giving up on the chunks still queued for it.
 //
 // Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN, KEPLOY_RECORD_QUEUE_SIZE and
-// KEPLOY_RECORD_CONSUMER_STALL_GRACE override the yaml/flag values when set.
+// KEPLOY_RECORD_CONSUMER_STALL_GRACE and KEPLOY_RECORD_HALF_CLOSE_GRACE
+// override the yaml/flag values when set.
 type RecordBuffer struct {
 	// MaxMemoryPerConnection caps the bytes the recorder may hold
 	// in the per-connection queue while the parser catches up.

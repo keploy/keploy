@@ -117,7 +117,8 @@ record:
   # recordBuffer tunes the per-connection recording queue. Touch only
   # if you see "mock incomplete" warnings (reason: per_conn_cap) in
   # the agent logs. Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN,
-  # KEPLOY_RECORD_QUEUE_SIZE and KEPLOY_RECORD_CONSUMER_STALL_GRACE
+  # KEPLOY_RECORD_QUEUE_SIZE, KEPLOY_RECORD_CONSUMER_STALL_GRACE and
+  # KEPLOY_RECORD_HALF_CLOSE_GRACE
   # override these values.
   recordBuffer:
     # Bytes. 67108864 = 64 MiB. Zero falls through to the built-in

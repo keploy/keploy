@@ -1344,6 +1344,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if err := c.resolveRecordBufferDuration(cmd, "consumer-stall-grace", "KEPLOY_RECORD_CONSUMER_STALL_GRACE", &c.cfg.Record.RecordBuffer.ConsumerStallGrace); err != nil {
 				return err
 			}
+			if err := c.resolveRecordBufferDuration(cmd, "half-close-grace", "KEPLOY_RECORD_HALF_CLOSE_GRACE", &c.cfg.Record.RecordBuffer.HalfCloseGrace); err != nil {
+				return err
+			}
 
 			// Cross-check: a single connection's recording buffer must
 			// not exceed the docker container's memory limit. Otherwise
@@ -1802,6 +1805,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return err
 		}
 		if err := c.resolveRecordBufferDuration(cmd, "consumer-stall-grace", "KEPLOY_RECORD_CONSUMER_STALL_GRACE", &c.cfg.Record.RecordBuffer.ConsumerStallGrace); err != nil {
+			return err
+		}
+		if err := c.resolveRecordBufferDuration(cmd, "half-close-grace", "KEPLOY_RECORD_HALF_CLOSE_GRACE", &c.cfg.Record.RecordBuffer.HalfCloseGrace); err != nil {
 			return err
 		}
 
