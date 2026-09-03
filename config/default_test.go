@@ -38,7 +38,7 @@ func TestDefaultConfigParses(t *testing.T) {
 		got  time.Duration
 		want time.Duration
 	}{
-		{"test.healthPollTimeout", cfg.Test.HealthPollTimeout, 60 * time.Second},
+		{"test.healthPollTimeout", cfg.Test.HealthPollTimeout, DefaultHealthPollTimeout},
 		{"record.recordTimer", cfg.Record.RecordTimer, 0},
 		// Asserted against the relay's own constant rather than a literal: the
 		// yaml default and relay.DefaultConsumerStallGrace are two sources of

@@ -409,7 +409,9 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32("sse-port", c.cfg.Test.SSEPort, "Custom SSE port to replace the actual port in the SSE testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 		cmd.Flags().String("health-url", c.cfg.Test.HealthURL, "HTTP(S) URL polled before the first test is fired; first 2xx response proceeds immediately. Empty (default) preserves the fixed --delay behavior.")
-		cmd.Flags().Duration("health-poll-timeout", c.cfg.Test.HealthPollTimeout, "Ceiling for --health-url polling (e.g. 60s, 2m). If no 2xx is seen within this window, replay logs an info message and falls back to --delay.")
+		cmd.Flags().String("health-path", c.cfg.Test.HealthPath, "Request path polled on the address the recorded tests actually dial, before the first test is fired — e.g. /health. Needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready. Ignored when --health-url is set (that takes precedence). Empty (default) uses a keploy-reserved probe path.")
+		cmd.Flags().String("health-scheme", c.cfg.Test.HealthScheme, "Override the scheme for --health-path probing (http or https). Empty (default) uses the scheme the recorded tests dial. Ignored when --health-url is set.")
+		cmd.Flags().Duration("health-poll-timeout", c.cfg.Test.HealthPollTimeout, "Ceiling for every pre-test readiness gate — --health-url, --health-path and the automatic docker/compose port gates (e.g. 60s, 3m). Only ever paid by an app that is not yet serving; a ready app satisfies the gate on the first probe. On timeout replay warns and fires anyway.")
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
@@ -514,6 +516,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployNetwork":             "keploy-network",
 		"recordTimer":               "record-timer",
 		"healthUrl":                 "health-url",
+		"healthPath":                "health-path",
+		"healthScheme":              "health-scheme",
 		"healthPollTimeout":         "health-poll-timeout",
 		"urlMethods":                "url-methods",
 		"inCi":                      "in-ci",
