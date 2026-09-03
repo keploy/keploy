@@ -44,6 +44,7 @@ test:
   healthPath: ""
   healthScheme: ""
   healthPollTimeout: 3m
+  disableAppReadyProbe: false
   host: "localhost"
   port: 0
   grpcPort: 0

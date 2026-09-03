@@ -553,24 +553,45 @@ func waitForHTTPServingPath(ctx context.Context, scheme, host, port, path string
 // wait LONGER than --delay, never shorter; a timeout WARNS and proceeds rather
 // than failing the run; and it never weakens an assertion. Returns false only on
 // context cancellation (user abort).
-func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Config, host, port, label string, probe httpProbeTarget) bool {
+// gateMode tweaks how gateOnAppAddress probes. The zero value runs both
+// stages; httpOnly skips the stage-1 TCP dial, for the one caller whose
+// stage-1 and stage-2 addresses are identical and whose bare
+// connect-then-close is therefore both redundant and harmful.
+type gateMode int
+
+const (
+	bothStages gateMode = iota
+	httpOnly
+)
+
+func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Config, host, port, label string, probe httpProbeTarget, modes ...gateMode) bool {
+	mode := bothStages
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
 	ceiling := cfg.Test.HealthPollTimeout
 	if ceiling <= 0 {
 		ceiling = config.DefaultHealthPollTimeout
 	}
 	deadline := time.Now().Add(ceiling)
 
-	if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
-		if ctx.Err() != nil {
-			return false
+	// Stage 1: the address accepts a TCP connection. Skipped in
+	// httpOnly mode, where stage 2 probes the very same address and the
+	// bare connect-then-close would be redundant — see the rationale at
+	// the resolved-test-target call site.
+	if mode != httpOnly {
+		if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
+			if ctx.Err() != nil {
+				return false
+			}
+			logger.Warn("app address did not accept a connection within the ceiling; firing tests anyway (replay may see status_code got=0)",
+				zap.String("gate", label),
+				zap.String("host", host),
+				zap.String("port", port),
+				zap.Duration("ceiling", ceiling),
+				zap.Error(err))
+			return true
 		}
-		logger.Warn("app address did not accept a connection within the ceiling; firing tests anyway (replay may see status_code got=0)",
-			zap.String("gate", label),
-			zap.String("host", host),
-			zap.String("port", port),
-			zap.Duration("ceiling", ceiling),
-			zap.Error(err))
-		return true
 	}
 
 	if !probe.ok {
@@ -720,6 +741,38 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		// --delay behavior. This can only ever wait LONGER than --delay, never
 		// shorter, and never weakens an assertion — a fast-ready port returns
 		// instantly.
+
+		// An embedder can state that probing is unsafe here. Honoured
+		// for every address-based gate below, not just the fallback,
+		// and for the reset-resend readiness re-gate in replay.go:
+		// the hazard is the connect-then-close itself, and all of these
+		// perform one. --health-url is untouched — that is an explicit
+		// operator request rather than an inferred probe.
+		//
+		// This is a stated intent, not an inferred one, because the
+		// inference is unreliable: a caller in this position still sets
+		// test.host (it rewrites recorded request URLs), so "no gate
+		// input was supplied" is simply false for it, and the
+		// resolved-test-target fallback would reach for that address
+		// and probe it anyway. See config.Test.DisableAppReadyProbe.
+		if cfg.Test.DisableAppReadyProbe {
+			// Info, not Debug: a safety gate being switched off should
+			// be visible at default verbosity, the way the health poll
+			// announces itself below.
+			logger.Info("app-readiness probing disabled by configuration; using the delay floor only",
+				zap.Duration("delay", delay),
+			)
+			// The delay select above can take its timer branch even when
+			// ctx is already cancelled. Every other exit from here goes
+			// through gateOnAppAddress, which checks; this one must too,
+			// or a cancelled run reports ready and fires tests instead
+			// of reporting the abort.
+			if ctx.Err() != nil {
+				return false
+			}
+			return true
+		}
+
 		gated := false
 		if host, port, ok := dockerPublishedHostPort(cfg.Command); ok {
 			gated = true
@@ -782,7 +835,23 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		// longer than --delay. Guarded on `gated` purely to avoid probing twice
 		// when a published address already covered it.
 		if !gated && probe.ok {
-			if !gateOnAppAddress(ctx, logger, cfg, probe.host, probe.port, "resolved-test-target", probe) {
+			// httpOnly: skip gateOnAppAddress's stage-1 bare TCP dial.
+			//
+			// Here, and only here, stage 1 and stage 2 probe the SAME
+			// address, so the dial proves nothing the HTTP round-trip
+			// does not — waitForHTTPServingPath already treats refusal
+			// and reset as not-ready and retries to the ceiling. What
+			// the dial does add is a naked connect-then-close, the
+			// shape a kubectl port-forward's SPDY relay is most hostile
+			// to. Dropping it removes that shape from the exact path
+			// that broke keploy/k8s-proxy, for every embedder that
+			// never learns about test.disableAppReadyProbe, at no cost
+			// in coverage.
+			//
+			// The docker and compose gates above deliberately pass a
+			// DIFFERENT stage-1 address than the probe target, so their
+			// dial is not redundant and stays.
+			if !gateOnAppAddress(ctx, logger, cfg, probe.host, probe.port, "resolved-test-target", probe, httpOnly) {
 				return false
 			}
 		}

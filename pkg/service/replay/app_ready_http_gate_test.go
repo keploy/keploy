@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,36 @@ func acceptOnlyListener(t *testing.T) (host, port string) {
 	}()
 	h, p, _ := net.SplitHostPort(ln.Addr().String())
 	return h, p
+}
+
+// countingListener is acceptOnlyListener that also reports how many
+// connections were made to it.
+//
+// The disable-probe contract is "no connect-then-close happens", and
+// elapsed time cannot express that: against a listener that accepts
+// instantly, a probe that IS made still returns in microseconds, so a
+// wall-clock assertion passes whether or not the flag was honoured. The
+// hazard being guarded against is the connection itself.
+func countingListener(t *testing.T) (host, port string, conns *atomic.Int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var n atomic.Int64
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n.Add(1)
+			_ = c.Close()
+		}
+	}()
+	h, p, _ := net.SplitHostPort(ln.Addr().String())
+	return h, p, &n
 }
 
 func gateCfg(ceiling time.Duration) *config.Config {
@@ -302,5 +333,135 @@ func TestWaitForAppReady_NativeAppWithoutEvidenceIsNotGated(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("waited %v with no resolvable target; a non-HTTP native app must keep the "+
 			"pure --delay behaviour", elapsed)
+	}
+}
+
+// TestWaitForAppReady_DisableProbeIsHonoured covers the embedder that
+// drives replay as a library where a connect-then-close probe is
+// DESTRUCTIVE.
+//
+// keploy/k8s-proxy is the motivating case: on its cluster-mode path the
+// app is reached through a kubectl port-forward, and probing it can make
+// kubelet's SPDY relay tear the session down ("lost connection to pod"),
+// killing the app and agent forwards together. It therefore supplies no
+// test.appReadyProbeAddr — but it DOES set test.host, because that is
+// what rewrites recorded request URLs.
+//
+// That is why the opt-out is a stated flag rather than an inference from
+// "no gate input was supplied": for this caller that inference is simply
+// false, and the resolved-test-target fallback would reach for test.host
+// and probe it anyway.
+func TestWaitForAppReady_DisableProbeIsHonoured(t *testing.T) {
+	host, port := acceptOnlyListener(t) // accepts, never serves HTTP
+	cfg := gateCfg(10 * time.Second)
+	cfg.Command = "replay"
+	cfg.CommandType = "docker-compose"
+	cfg.Test.Host = host // set for request rewriting, NOT for probing
+	cfg.Test.AppReadyProbeAddr = ""
+	cfg.Test.DisableAppReadyProbe = true
+	cfg.Test.Delay = 0
+
+	start := time.Now()
+	ok := waitForAppReady(context.Background(), zap.NewNop(), cfg,
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true})
+	elapsed := time.Since(start)
+
+	if !ok {
+		t.Fatal("the gate must stay best-effort and proceed, never fail the run")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("waited %v with probing disabled: the caller said a connect-then-close probe "+
+			"is destructive in its environment, and this one tears down the very connection "+
+			"it is testing", elapsed)
+	}
+}
+
+// The opt-out must cover EVERY address gate, not just the fallback: the
+// hazard is the connect-then-close itself, and each of them performs
+// one. Asserted by counting connections, because against a listener that
+// accepts instantly a wall-clock assertion passes whether or not the
+// probe was made.
+func TestWaitForAppReady_DisableProbeMakesNoConnection(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(cfg *config.Config, host, port string)
+	}{
+		{
+			name: "explicit appReadyProbeAddr",
+			apply: func(cfg *config.Config, host, port string) {
+				cfg.Test.AppReadyProbeAddr = net.JoinHostPort(host, port)
+			},
+		},
+		{
+			name: "docker published port",
+			apply: func(cfg *config.Config, host, port string) {
+				cfg.Command = "docker run -p " + host + ":" + port + ":" + port + " myapp"
+				cfg.CommandType = "docker-run"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, port, conns := countingListener(t)
+			cfg := gateCfg(10 * time.Second)
+			cfg.Command = "replay"
+			cfg.CommandType = "docker-compose"
+			cfg.Test.DisableAppReadyProbe = true
+			cfg.Test.Delay = 0
+			tc.apply(cfg, host, port)
+
+			if !waitForAppReady(context.Background(), zap.NewNop(), cfg,
+				httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+				t.Fatal("must proceed")
+			}
+			if got := conns.Load(); got != 0 {
+				t.Fatalf("%d connection(s) made to the app address with probing disabled. The "+
+					"caller said a connect-then-close is destructive in its environment; a "+
+					"gate that still dials tears down the very connection it is testing.", got)
+			}
+		})
+	}
+}
+
+// ...and with the flag OFF the same gates still probe, so the opt-out is
+// the only thing suppressing them.
+func TestWaitForAppReady_ProbeConnectsWhenNotDisabled(t *testing.T) {
+	host, port, conns := countingListener(t)
+	cfg := gateCfg(700 * time.Millisecond)
+	cfg.Command = "replay"
+	cfg.CommandType = "docker-compose"
+	cfg.Test.AppReadyProbeAddr = net.JoinHostPort(host, port)
+	cfg.Test.Delay = 0
+
+	if !waitForAppReady(context.Background(), zap.NewNop(), cfg,
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+		t.Fatal("must proceed")
+	}
+	if got := conns.Load(); got == 0 {
+		t.Fatal("no connection was made with probing ENABLED: the disable tests above would " +
+			"then pass for the wrong reason")
+	}
+}
+
+// And with the flag off, nothing changes — every gate that shipped in
+// v3.6.41 still fires. This is the half the previous attempt got wrong:
+// a guard keyed on command type silently dropped the gate for
+// docker-start, docker run without a parseable -p, and compose without
+// a published host port, all of which are gated on released v3.6.41.
+func TestWaitForAppReady_DockerStartKeepsItsGate(t *testing.T) {
+	host, port := acceptOnlyListener(t) // accepts TCP, never serves HTTP
+	cfg := gateCfg(700 * time.Millisecond)
+	cfg.Command = "docker start myapp" // no -p to parse
+	cfg.CommandType = "docker-start"
+	cfg.Test.Delay = 0
+
+	start := time.Now()
+	if !waitForAppReady(context.Background(), zap.NewNop(), cfg,
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+		t.Fatal("must proceed")
+	}
+	if elapsed := time.Since(start); elapsed < 500*time.Millisecond {
+		t.Fatalf("returned after %v — a docker-start app was declared ready with no HTTP "+
+			"round-trip. Its ports were published at create time, so there is no -p to parse "+
+			"and the resolved-test-target fallback is the only gate it has.", elapsed)
 	}
 }

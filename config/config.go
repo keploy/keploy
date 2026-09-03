@@ -367,15 +367,34 @@ type Normalize struct {
 const DefaultHealthPollTimeout = 3 * time.Minute
 
 type Test struct {
-	SelectedTests               map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	GlobalNoise                 Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
-	ReplaceWith                 ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
-	Delay                       uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
-	HealthURL                   string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
-	HealthPollTimeout           time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
-	HealthPath                  string              `json:"healthPath" yaml:"healthPath" mapstructure:"healthPath"`                      // optional request path probed on the app's OWN auto-detected address (docker/compose published port, or appReadyProbeAddr) before the first test. Unlike healthUrl it needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready — a health endpoint returning 503 has still proved the app is answering. Empty uses a keploy-reserved probe path.
-	HealthScheme                string              `json:"healthScheme" yaml:"healthScheme" mapstructure:"healthScheme"`                // optional override for the readiness probe scheme ("http" or "https"). Empty (the default) uses the scheme the recorded tests actually dial; only consulted when the app is probed over HTTP, and ignored entirely when healthUrl is set.
-	AppReadyProbeAddr           string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
+	SelectedTests     map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	GlobalNoise       Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
+	ReplaceWith       ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
+	Delay             uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
+	HealthURL         string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
+	HealthPollTimeout time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
+	HealthPath        string              `json:"healthPath" yaml:"healthPath" mapstructure:"healthPath"`                      // optional request path probed on the app's OWN auto-detected address (docker/compose published port, or appReadyProbeAddr) before the first test. Unlike healthUrl it needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready — a health endpoint returning 503 has still proved the app is answering. Empty uses a keploy-reserved probe path.
+	HealthScheme      string              `json:"healthScheme" yaml:"healthScheme" mapstructure:"healthScheme"`                // optional override for the readiness probe scheme ("http" or "https"). Empty (the default) uses the scheme the recorded tests actually dial; only consulted when the app is probed over HTTP, and ignored entirely when healthUrl is set.
+	AppReadyProbeAddr string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
+
+	// DisableAppReadyProbe turns off the app-readiness probing that
+	// runs before the first test fires — the docker/compose
+	// published-port gates, AppReadyProbeAddr, and the resolved
+	// test-target fallback. --health-url is unaffected: that is an
+	// explicit operator request, not an inferred probe.
+	//
+	// It exists for embedders that drive replay as a library in an
+	// environment where a connect-then-close probe is DESTRUCTIVE.
+	// keploy/k8s-proxy is the motivating case: on its cluster-mode path
+	// the app is reached through a kubectl port-forward, and probing it
+	// can make kubelet's SPDY relay tear the session down ("lost
+	// connection to pod"), killing the app and agent forwards together.
+	//
+	// Leaving a gate input unset is NOT a reliable way to express this:
+	// such a caller still sets Test.Host (it rewrites recorded request
+	// URLs), and the resolved-test-target fallback will reach for that
+	// address and probe it. Intent has to be stated, not inferred.
+	DisableAppReadyProbe        bool                `json:"disableAppReadyProbe" yaml:"disableAppReadyProbe" mapstructure:"disableAppReadyProbe"`
 	Host                        string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                        uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort                    uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
