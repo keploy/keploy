@@ -121,6 +121,18 @@ type lastGreeting struct {
 	seen      time.Time
 }
 
+// hasPayload reports whether this record can actually be served. A record with a
+// serverID but no response packets is an IDENTITY record: the payload aged out or
+// was evicted, but the key must keep remembering which server owned it so a later
+// write from a DIFFERENT server still latches. Without that the identity dies
+// with the payload and the next write recreates the key clean and serving.
+func (g lastGreeting) hasPayload() bool { return len(g.entry.RespPackets) > 0 }
+
+// isIdentityOnly reports whether this record is an identity placeholder.
+func (g lastGreeting) isIdentityOnly() bool {
+	return !g.ambiguous && !g.hasPayload() && g.serverID != ""
+}
+
 const (
 	// lastPortKeyPrefix marks keys built by HandshakeLastPortKey, which must
 	// only ever be written through RememberLastForPort.
@@ -130,6 +142,13 @@ const (
 	// connection's own entry being consumed, but it is not unbounded: a server
 	// restarted hours ago may advertise different capabilities.
 	lastGreetingTTL = 30 * time.Minute
+	// identityTTL is how long a key remembers WHICH server owned it after its
+	// payload is gone. It must outlast any rollout drain by a wide margin --
+	// surviving the payload is the whole point -- but not forever, or a key
+	// latched by an in-place version bump stays dead for the agent's lifetime.
+	// 4x the payload TTL: a key that has seen no traffic from ANY server for two
+	// hours has no live producer left to protect.
+	identityTTL = 4 * lastGreetingTTL
 	// maxLastGreetings caps the cache. Cardinality is distinct (scope,
 	// destination) pairs, and a long-lived DaemonSet agent accumulates one per
 	// app x session x destination, so without a cap this map only ever grows.
@@ -255,6 +274,10 @@ func (s *TLSHandshakeStore) RememberLast(key string, entry TLSHandshakeEntry) {
 // POSITIVE evidence that this scope+port serves more than one server, and should
 // then decline any other identity-less fallback for the same connection rather
 // than quietly reaching for one.
+// Do NOT compose this with Last to decide whether a cached greeting is usable:
+// a latch landing between the two calls makes Last report a plain miss, and the
+// caller then falls through to an unguarded fallback right after the guard
+// proved reuse unsafe. Use LastForPort, which answers both under one lock.
 func (s *TLSHandshakeStore) IsAmbiguous(key string) bool {
 	if key == "" {
 		return false
@@ -310,23 +333,42 @@ func (s *TLSHandshakeStore) rememberLast(key string, serverID string, entry TLSH
 	s.last[key] = lastGreeting{entry: entry, serverID: serverID, seen: now}
 	// Prune AFTER inserting, so a write cannot leave the map over its budget;
 	// pruning first leaves it one over every time. Live entries and tombstones
-	// are budgeted separately, so the map holds about 2*maxLastGreetings — a
+	// are budgeted separately, so the map holds about 3*maxLastGreetings — a
 	// latching write returns before pruning, so the tombstone class can sit one
 	// over its budget until the next write.
 	s.pruneLastLocked(now)
 }
 
 // pruneLastLocked drops expired entries and, if still over the cap, the oldest
-// ones. Live entries and tombstones have SEPARATE budgets: tombstones must not
-// be able to crowd out live entries (that would disable the fallback store-wide,
-// recreating the capture loss this cache prevents), and live entries must not be
-// able to evict tombstones early (that would let a proven-unsafe key serve
-// again).
+// ones.
+//
+// THREE classes have SEPARATE budgets, so the map's designed steady state is up
+// to 3*maxLastGreetings (measured: 1536):
+//
+//   - live      — a servable greeting.
+//   - identity  — remembers WHICH server owned a key after the payload expired
+//     or was evicted, so the ambiguity latch stays armed. Never servable.
+//   - tombstone — a latched key, permanently refusing.
+//
+// The budgets are separate because the classes must not crowd each other out.
+// Tombstones evicting live entries would disable the fallback store-wide,
+// recreating the capture loss this cache prevents; live entries evicting
+// tombstones early would let a proven-unsafe key serve again; and either
+// evicting identity records would disarm the latch, which is the guard itself.
 func (s *TLSHandshakeStore) pruneLastLocked(now time.Time) {
 	// Fast path. This runs under s.mu, which also serialises Push/PopWait for
 	// every MySQL connection, and the sweeps below are full map scans. While the
 	// map is comfortably under budget there is nothing for them to find, so only
 	// pay for them once it is worth checking.
+	// The threshold is the SMALLEST single class budget, deliberately, even
+	// though the three classes below are budgeted separately and the map's
+	// designed steady state is therefore up to 3*maxLastGreetings. Raising it to
+	// the sum looks like an obvious win -- the scans are skipped more often --
+	// but it lets ONE class run far past its own budget while the total stays
+	// under the combined threshold, which is unbounded growth of that class.
+	// Measured: with the sum as the threshold, 1024 address-keyed live entries
+	// all survived against a 512 live budget. Under the smallest budget no class
+	// can be over while the total is under, so the early return is always safe.
 	if len(s.last) <= maxLastGreetings && now.Sub(s.lastPruned) < lastGreetingTTL {
 		return
 	}
@@ -338,7 +380,47 @@ func (s *TLSHandshakeStore) pruneLastLocked(now time.Time) {
 		if v.ambiguous {
 			continue
 		}
+		// Identity records are exempt for the same reason, one step earlier: they
+		// ARE the memory that makes the latch fire. Expiring one returns the key
+		// to "never seen", and the next write from a different server recreates
+		// it clean and serving.
+		if v.isIdentityOnly() {
+			// Exempt from the PAYLOAD TTL, but not immortal: unbounded, a key
+			// latched by an in-place server upgrade never serves again for the
+			// agent's lifetime, because the only other escape is the identity
+			// class's own eviction budget, which a low-cardinality node never
+			// reaches.
+			if now.Sub(v.seen) > identityTTL {
+				delete(s.last, k)
+			}
+			continue
+		}
 		if now.Sub(v.seen) > lastGreetingTTL {
+			// Demote rather than delete when the key knows which server owned
+			// it. Deleting outright is what let server A's entry age out and
+			// server B's next write recreate the key with no latch, serving B's
+			// capability flags and auth plugin to a reader that expected A.
+			//
+			// KNOWN TRADE, deliberate: the identity now outlives the TTL, so an
+			// IN-PLACE server upgrade latches this key permanently. greetingServerIdentity
+			// fingerprints ServerVersion and CapabilityFlags, so a minor-version
+			// bump on the same logical server reads as a second server. Before
+			// this change the key recovered after lastGreetingTTL -- but only if
+			// no old-version write landed inside that window, which a real
+			// rolling upgrade usually violates, so main latched permanently too
+			// in the common case. identityTTL now bounds it either way; the
+			// remaining exposure is a >2h gap between the two versions
+			// (scale-to-zero, then redeploy). The outcome is a MISSING mock
+			// (the fallback goes dead for that scope+port) rather than a WRONG
+			// one, which is the direction we want to fail in -- but it does mean
+			// the capture shortfall can return for a destination after a rolling
+			// upgrade, so it is a latency-to-recovery regression, not a no-op.
+			// The TTL rationale above is about payload staleness and still holds
+			// for the payload; it does not apply to the identity.
+			if v.serverID != "" {
+				s.last[k] = lastGreeting{serverID: v.serverID, seen: v.seen}
+				continue
+			}
 			delete(s.last, k)
 		}
 	}
@@ -348,13 +430,17 @@ func (s *TLSHandshakeStore) pruneLastLocked(now time.Time) {
 	// genuinely useful live greetings age past them and get evicted first. The
 	// cache then fills with keys that can only ever refuse, and the fallback goes
 	// dead for destinations that were never ambiguous at all.
-	evictOldest := func(ambiguous bool, budget int) {
+	//
+	// Identity records get a third budget for the same reason: they must outlive
+	// their payloads (that is their whole purpose) but must not be able to crowd
+	// out live entries.
+	evictOldest := func(class func(lastGreeting) bool, budget int, demote bool) {
 		for {
 			n := 0
 			var oldestKey string
 			var oldest time.Time
 			for k, v := range s.last {
-				if v.ambiguous != ambiguous {
+				if !class(v) {
 					continue
 				}
 				n++
@@ -365,11 +451,28 @@ func (s *TLSHandshakeStore) pruneLastLocked(now time.Time) {
 			if n <= budget || oldestKey == "" {
 				return
 			}
+			// Evicting a live entry must not forget which server owned the key:
+			// 512 unrelated address keys could otherwise evict a port key's live
+			// entry and disarm its latch without any clock involved.
+			if v := s.last[oldestKey]; demote && v.serverID != "" {
+				s.last[oldestKey] = lastGreeting{serverID: v.serverID, seen: v.seen}
+				continue
+			}
 			delete(s.last, oldestKey)
 		}
 	}
-	evictOldest(false, maxLastGreetings)
-	evictOldest(true, maxLastGreetings)
+	// NOT "!ambiguous && hasPayload()": that leaves an entry which is neither
+	// ambiguous, nor carrying a payload, nor carrying an identity in NO class at
+	// all, so no eviction pass ever counts or removes it and the map grows
+	// without bound. Measured: 2048 payload-less entries survived a 512 budget,
+	// with every write past the budget doing a full scan that removes nothing.
+	// Defining live as "not a tombstone and not an identity record" keeps the
+	// three classes exhaustive, which is what the fast path's argument requires.
+	isLive := func(g lastGreeting) bool { return !g.ambiguous && !g.isIdentityOnly() }
+	isTomb := func(g lastGreeting) bool { return g.ambiguous }
+	evictOldest(isLive, maxLastGreetings, true)
+	evictOldest(lastGreeting.isIdentityOnly, maxLastGreetings, false)
+	evictOldest(isTomb, maxLastGreetings, false)
 }
 
 // Push adds a handshake entry for the given key.
@@ -406,14 +509,47 @@ func (s *TLSHandshakeStore) Push(key string, entry TLSHandshakeEntry) {
 func (s *TLSHandshakeStore) Last(key string) (TLSHandshakeEntry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.lastLocked(key, time.Now())
+}
+
+// lastLocked is the shared body of Last and LastForPort. Callers hold s.mu.
+func (s *TLSHandshakeStore) lastLocked(key string, now time.Time) (TLSHandshakeEntry, bool) {
 	v, ok := s.last[key]
 	if !ok || v.ambiguous {
 		return TLSHandshakeEntry{}, false
 	}
-	if time.Since(v.seen) > lastGreetingTTL {
+	// An identity record remembers WHICH server owned this key after its payload
+	// expired or was evicted. It exists to keep the ambiguity latch armed; it is
+	// never servable.
+	if !v.hasPayload() {
+		return TLSHandshakeEntry{}, false
+	}
+	if now.Sub(v.seen) > lastGreetingTTL {
 		return TLSHandshakeEntry{}, false
 	}
 	return v.entry, true
+}
+
+// LastForPort answers "is this key latched, and if not what does it hold?" in a
+// SINGLE acquisition of s.mu.
+//
+// Callers must not compose IsAmbiguous with Last to get this. Between the two
+// calls another connection's raw leg can latch the key; Last then reports a miss
+// (it re-checks ambiguous), the caller reads that as "nothing cached", and falls
+// through to the unguarded shared address bucket — which is the exact outcome
+// the ambiguity check exists to prevent. That interleaving is a logic race, so
+// -race cannot see it; it was reproduced on iteration 127 of 20000.
+func (s *TLSHandshakeStore) LastForPort(key string) (entry TLSHandshakeEntry, ok bool, ambiguous bool) {
+	if key == "" {
+		return TLSHandshakeEntry{}, false, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.last[key].ambiguous {
+		return TLSHandshakeEntry{}, false, true
+	}
+	e, found := s.lastLocked(key, time.Now())
+	return e, found, false
 }
 
 // PopWait pops the oldest handshake entry for the given key, waiting up

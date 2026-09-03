@@ -56,7 +56,7 @@ jobs:
       - name: Greeting-stitch regression tests
         run: |
           go test ./pkg/models/ ./pkg/agent/proxy/integrations/mysql/recorder/ \
-            -run 'TestStorePreTLSHandshakeV2|TestHandshakeLastPortKey|TestRecordV2_PostTLS_PooledConn|TestRecordV2_PostTLS_LostStash|TestTLSHandshakeStore|TestResolvePreTLSGreeting|TestRememberLast|TestAmbiguityLatch|TestTombstone|TestLastGreeting|TestGreetingServerIdentity|TestRecordV2_RawLeg|TestRawLegIdentity|TestHandshakeLastKey' \
+            -run 'TestStorePreTLSHandshakeV2|TestHandshakeLastPortKey|TestRecordV2_PostTLS_PooledConn|TestRecordV2_PostTLS_LostStash|TestTLSHandshakeStore|TestResolvePreTLSGreeting|TestRememberLast|TestAmbiguityLatch|TestTombstone|TestLastGreeting|TestGreetingServerIdentity|TestRecordV2_RawLeg|TestRawLegIdentity|TestHandshakeLastKey|TestLatchSurvives|TestIdentityRecords|TestPayloadlessEntriesAreBounded|TestLastForPortIsAtomic|TestLegacyPostTLSUsesTheLastGreetingCache' \
             -race -count=3 -v
 
       - name: Full MySQL + models suites
@@ -144,3 +144,157 @@ jobs:
           fi
           echo "OK: blanking the server identity fails the raw-leg test, as it must."
           git checkout -- "$f"
+
+          # Mutant 3: the LEGACY post-TLS reader (conn.go). The previous guard for
+          # this path asserted on SOURCE TEXT -- it grepped conn.go for
+          # "hsStore.Last(lastKey)" -- so flipping the surrounding condition to
+          # `if false` left the string in place, killed the whole fallback, and the
+          # suite stayed green. That is the same write-with-no-reader defect this
+          # workflow exists to catch, one file over. conn.go was never mutated by
+          # this job at all, which is exactly how it slipped through.
+          c=pkg/agent/proxy/integrations/mysql/recorder/conn.go
+          if ! grep -q 'if !ok || len(entry.RespPackets) == 0 {' "$c"; then
+            echo "::error::the legacy post-TLS cache-read guard moved in $c; update this mutant with it"
+            exit 1
+          fi
+          perl -0pi -e 's/\tif !ok \|\| len\(entry\.RespPackets\) == 0 \{\n\t\tif lastKey :=/\tif false {\n\t\tif lastKey :=/' "$c"
+          if ! grep -q 'if false {' "$c"; then
+            echo "::error::mutant 3 did not apply; rework it alongside the code it mutates"
+            git checkout -- "$c"; exit 1
+          fi
+          go build ./pkg/agent/proxy/integrations/mysql/... || {
+            echo "::error::the disabled-legacy-read mutant does not compile, so a test failure would" \
+                 "score a FALSE kill; rework the guard"
+            git checkout -- "$c"; exit 1
+          }
+          if go test ./pkg/agent/proxy/integrations/mysql/recorder/ \
+               -run 'TestLegacyPostTLSUsesTheLastGreetingCacheInsteadOfDialling' \
+               -count=1 >/tmp/mutant3.log 2>&1; then
+            echo "::error::VACUOUS TEST: disabling the legacy post-TLS cache read still passes." \
+                 "The seeding in handleInitialHandshake is a write with no reader and a pooled" \
+                 "connection loses its command phase on that path."
+            tail -30 /tmp/mutant3.log
+            git checkout -- "$c"; exit 1
+          fi
+          echo "OK: disabling the legacy cache read fails its behavioural test, as it must."
+          git checkout -- "$c"
+
+          # Mutant 4: the ambiguity latch's DURABILITY. The latch is the only thing
+          # stopping a port key from serving one server's greeting to a connection
+          # that talked to another, but only the tombstone was TTL-exempt: the live
+          # entry carrying serverID was swept like any other, so server A could age
+          # out and server B's next write would recreate the key CLEAN and SERVING.
+          m=pkg/models/tls_handshake_store.go
+          if ! grep -q 'lastGreeting{serverID: v.serverID, seen: v.seen}' "$m"; then
+            echo "::error::the identity-preserving demotion moved in $m; update this mutant with it"
+            exit 1
+          fi
+          perl -0pi -e 's/\t\t\tif v\.serverID != "" \{\n\t\t\t\ts\.last\[k\] = lastGreeting\{serverID: v\.serverID, seen: v\.seen\}\n\t\t\t\tcontinue\n\t\t\t\}\n//' "$m"
+          go build ./pkg/models/ || {
+            echo "::error::the lost-identity mutant does not compile; rework the guard"
+            git checkout -- "$m"; exit 1
+          }
+          if go test ./pkg/models/ -run 'TestLatchSurvivesTheLiveEntryExpiring' -count=1 >/tmp/mutant4.log 2>&1; then
+            echo "::error::VACUOUS TEST: dropping the server identity when a live entry expires still" \
+                 "passes. The latch would silently disarm and a later write from a DIFFERENT server" \
+                 "would recreate the key clean and serving."
+            tail -30 /tmp/mutant4.log
+            git checkout -- "$m"; exit 1
+          fi
+          echo "OK: forgetting the identity on expiry fails the latch-durability test, as it must."
+          git checkout -- "$m"
+
+          # Mutant 5: the latch check and the read must be ONE lock acquisition.
+          # Composing IsAmbiguous with Last lets another connection's raw leg latch
+          # the key between the two calls; Last then reports a plain miss, the
+          # caller reads that as "nothing cached", and answers from the UNGUARDED
+          # shared address bucket -- after the guard just proved reuse unsafe. It is
+          # a logic race, so -race cannot see it and only a contended test catches it.
+          if ! grep -q 'e, found := s.lastLocked(key, time.Now())' "$m"; then
+            echo "::error::LastForPort's single-acquisition body moved in $m; update this mutant with it"
+            exit 1
+          fi
+          perl -0pi -e 's/\ts\.mu\.Lock\(\)\n\tdefer s\.mu\.Unlock\(\)\n\tif s\.last\[key\]\.ambiguous \{\n\t\treturn TLSHandshakeEntry\{\}, false, true\n\t\}\n\te, found := s\.lastLocked\(key, time\.Now\(\)\)/\tif s.IsAmbiguous(key) {\n\t\treturn TLSHandshakeEntry{}, false, true\n\t}\n\te, found := s.Last(key)/' "$m"
+          go build ./pkg/models/ || {
+            echo "::error::the composed-accessor mutant does not compile; rework the guard"
+            git checkout -- "$m"; exit 1
+          }
+          if go test ./pkg/models/ -run 'TestLastForPortIsAtomicAgainstLatching' -count=1 >/tmp/mutant5.log 2>&1; then
+            echo "::error::VACUOUS TEST: composing IsAmbiguous with Last still passes. A latch landing" \
+                 "between the two calls would fall through to the unguarded address bucket."
+            tail -30 /tmp/mutant5.log
+            git checkout -- "$m"; exit 1
+          fi
+          echo "OK: the composed accessor fails the atomicity test, as it must."
+          git checkout -- "$m"
+
+          # Mutant 6: an identity record must never be SERVED. It exists only to
+          # keep the ambiguity latch armed after a payload expires or is evicted;
+          # handing one to a caller returns ok=true with an empty greeting.
+          # Deleting this guard previously left the whole pkg/models suite green.
+          if ! grep -q 'if !v.hasPayload() {' "$m"; then
+            echo "::error::the identity-record payload guard moved in $m; update this mutant with it"
+            exit 1
+          fi
+          perl -0pi -e 's/\tif !v\.hasPayload\(\) \{\n\t\treturn TLSHandshakeEntry\{\}, false\n\t\}\n//' "$m"
+          go build ./pkg/models/ || { echo "::error::mutant 6 does not compile"; git checkout -- "$m"; exit 1; }
+          if go test ./pkg/models/ -run 'TestIdentityRecordsAreNeverServed' -count=1 >/tmp/mutant6.log 2>&1; then
+            echo "::error::VACUOUS TEST: serving identity records still passes. Last would return ok=true" \
+                 "with an empty greeting."
+            tail -30 /tmp/mutant6.log; git checkout -- "$m"; exit 1
+          fi
+          echo "OK: serving an identity record fails its test, as it must."
+          git checkout -- "$m"
+
+          # Mutant 7: the three eviction classes must be EXHAUSTIVE. Defining live
+          # as "!ambiguous && hasPayload()" drops payload-less, identity-less
+          # entries into no class at all, so nothing ever evicts them and the map
+          # grows without bound -- measured at 2048 against a 512 budget, with
+          # every write past the budget scanning the whole map for nothing.
+          if ! grep -q 'isLive := func(g lastGreeting) bool { return !g.ambiguous && !g.isIdentityOnly() }' "$m"; then
+            echo "::error::the isLive class predicate moved in $m; update this mutant with it"
+            exit 1
+          fi
+          sed -i 's/isLive := func(g lastGreeting) bool { return !g.ambiguous \&\& !g.isIdentityOnly() }/isLive := func(g lastGreeting) bool { return !g.ambiguous \&\& g.hasPayload() }/' "$m"
+          go build ./pkg/models/ || { echo "::error::mutant 7 does not compile"; git checkout -- "$m"; exit 1; }
+          if go test ./pkg/models/ -run 'TestPayloadlessEntriesAreBounded' -count=1 >/tmp/mutant7.log 2>&1; then
+            echo "::error::VACUOUS TEST: a non-exhaustive class split still passes. Entries in no class" \
+                 "are never evicted and the cache grows without bound."
+            tail -30 /tmp/mutant7.log; git checkout -- "$m"; exit 1
+          fi
+          echo "OK: a non-exhaustive class split fails the boundedness test, as it must."
+          git checkout -- "$m"
+
+          # Mutant 8: the EVICTION half of the latch durability fix. The commit
+          # treats expiry and eviction as one change, but only the expiry half had
+          # a mutant -- so the eviction test could go vacuous without CI noticing,
+          # which is the precise failure mode this job exists to prevent.
+          if ! grep -q 'demote && v.serverID != ""' "$m"; then
+            echo "::error::the eviction-demotion guard moved in $m; update this mutant with it"
+            exit 1
+          fi
+          perl -0pi -e 's/\t\t\tif v := s\.last\[oldestKey\]; demote && v\.serverID != "" \{\n\t\t\t\ts\.last\[oldestKey\] = lastGreeting\{serverID: v\.serverID, seen: v\.seen\}\n\t\t\t\tcontinue\n\t\t\t\}\n//' "$m"
+          go build ./pkg/models/ || { echo "::error::mutant 8 does not compile"; git checkout -- "$m"; exit 1; }
+          if go test ./pkg/models/ -run 'TestLatchSurvivesTheLiveEntryBeingEvicted' -count=1 >/tmp/mutant8.log 2>&1; then
+            echo "::error::VACUOUS TEST: forgetting the identity on EVICTION still passes. Unrelated" \
+                 "address keys overflowing the live budget would disarm the latch with no clock involved."
+            tail -30 /tmp/mutant8.log; git checkout -- "$m"; exit 1
+          fi
+          echo "OK: forgetting the identity on eviction fails its test, as it must."
+          git checkout -- "$m"
+
+          # Mutant 9: the identity TTL bound. Without it a key latched by an
+          # in-place server version bump never serves again for the agent's life.
+          if ! grep -q 'now.Sub(v.seen) > identityTTL' "$m"; then
+            echo "::error::the identityTTL bound moved in $m; update this mutant with it"
+            exit 1
+          fi
+          perl -0pi -e 's/\t\t\tif now\.Sub\(v\.seen\) > identityTTL \{\n\t\t\t\tdelete\(s\.last, k\)\n\t\t\t\}\n//' "$m"
+          go build ./pkg/models/ || { echo "::error::mutant 9 does not compile"; git checkout -- "$m"; exit 1; }
+          if go test ./pkg/models/ -run 'TestIdentityRecordsExpireEventually' -count=1 >/tmp/mutant9.log 2>&1; then
+            echo "::error::VACUOUS TEST: an unbounded identity record still passes. A key latched by an" \
+                 "in-place version bump would stay dead for the agent's lifetime."
+            tail -30 /tmp/mutant9.log; git checkout -- "$m"; exit 1
+          fi
+          echo "OK: an unbounded identity record fails its test, as it must."
+          git checkout -- "$m"

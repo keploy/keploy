@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"net"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -937,40 +936,61 @@ func TestResolvePreTLSGreeting_GateHandlesNilAndEmptyAddr(t *testing.T) {
 	}
 }
 
-// TestLegacyPostTLSReadsLastGreetingCache pins that the LEGACY path
-// (KEPLOY_NEW_RELAY=off) also consults the last-greeting cache.
+// TestLegacyPostTLSUsesTheLastGreetingCacheInsteadOfDialling drives the LEGACY
+// post-TLS reader and asserts its BEHAVIOUR.
 //
-// That path is the documented escape hatch our own error messages tell users to
-// pull when a V2 parser misbehaves — proxy_v2.go, util.go and directive_proc.go
-// all name it — so it cannot simply be deleted. But handleInitialHandshake
-// SEEDS the cache there while the post-TLS reader only ever did PopWait, so the
-// seeding was a write with no reader and a pooled connection lost its command
-// phase exactly as it did on V2. A write with no reader is the defect class
-// this whole change exists to fix; leaving a second instance of it in place
-// would be careless.
-func TestLegacyPostTLSReadsLastGreetingCache(t *testing.T) {
-	src, err := os.ReadFile("conn.go")
-	if err != nil {
-		t.Fatalf("read conn.go: %v", err)
-	}
-	s := string(src)
+// It replaces a test that asserted on the SOURCE TEXT of conn.go: it read the
+// file and grepped for "hsStore.Last(lastKey)". That guard could only detect
+// textual deletion. Changing the surrounding condition to `if false` leaves the
+// string present, kills the entire fallback, and the whole suite stayed green --
+// verified. A write with no reader is the exact defect this fallback exists to
+// fix, so the guard for it must exercise the reader rather than look at it.
+//
+// The destination is a fabricated (capture-layer stand-in) address, which
+// separates the two paths cleanly: with the cache consulted the greeting comes
+// from the store and the flow reaches the client read; without it,
+// fetchServerGreeting REFUSES the address (it does not dial a stand-in) and the
+// call fails with "direct fetch failed".
+//
+// It asserts the success error POSITIVELY as well as the failure negatively. A
+// one-sided check would pass the moment some future change returned a different
+// error before the store lookup ever happened — the same vacuity that let the
+// predecessor of this test rot.
+func TestLegacyPostTLSUsesTheLastGreetingCacheInsteadOfDialling(t *testing.T) {
+	store := models.NewTLSHandshakeStore()
+	ctx := postTLSCtxWithStore(store)
 
-	// The seeding must still be there...
-	if !strings.Contains(s, "hsStore.RememberLast(models.HandshakeLastKey(opts.PassThroughScope, opts.DstCfg)") {
-		t.Error("conn.go no longer seeds the last-greeting cache")
+	scope := "ns/app/ts0"
+	// Port 1 is closed, so the direct-dial fallback cannot succeed.
+	dst := &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 1, AddrFabricated: true}
+	store.RememberLast(models.HandshakeLastKey(scope, dst), models.TLSHandshakeEntry{
+		RespPackets: [][]byte{cannedHandshakeV10(t)},
+	})
+
+	clientConn, peer := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+	// The command phase ends immediately; this test is about WHICH SOURCE the
+	// greeting came from, not about decoding traffic.
+	_ = peer.Close()
+
+	opts := models.OutgoingOptions{
+		DstCfg:           dst,
+		PassThroughScope: scope,
+		ConnKey:          "pooled-conn-whose-own-entry-was-consumed",
 	}
-	// ...and the post-TLS reader must actually consult it.
-	i := strings.Index(s, "PopWait(portKey")
-	if i < 0 {
-		t.Fatal("the legacy post-TLS port-key PopWait moved; update this guard with it")
+	mocks := make(chan *models.Mock, 16)
+
+	err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, nil, mocks,
+		buildPostHandshakeDecodeCtx(clientConn), opts)
+
+	if err != nil && strings.Contains(err.Error(), "direct fetch failed") {
+		t.Fatalf("the legacy post-TLS reader ignored the last-greeting cache and fell through to "+
+			"fetchServerGreeting for %s — the seeding in handleInitialHandshake is then a write with "+
+			"no reader, and a pooled connection loses its whole command phase here: %v", dst.Addr, err)
 	}
-	rest := s[i:]
-	if j := strings.Index(rest, "serverGreetingBuf = entry.RespPackets[0]"); j > 0 {
-		rest = rest[:j]
-	}
-	if !strings.Contains(rest, "hsStore.Last(lastKey)") {
-		t.Error("the legacy post-TLS reader does not consult the last-greeting cache between its " +
-			"PopWait misses and the direct dial; the seeding above is a write with no reader and " +
-			"a pooled connection still loses its command phase on this path")
+	// Positive assertion: having taken the greeting from the cache, the flow must
+	// reach the first client read and end there, because the peer is closed.
+	if err == nil || !strings.Contains(err.Error(), "first post-TLS client packet") {
+		t.Fatalf("expected the flow to consume the cached greeting and stop at the first client read, got: %v", err)
 	}
 }
