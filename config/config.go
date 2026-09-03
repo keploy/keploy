@@ -294,6 +294,18 @@ type RecordBuffer struct {
 	// you see drops with reason "consumer_gone"; lower it to cap how long
 	// a connection with a genuinely dead parser lingers at teardown.
 	ConsumerStallGrace time.Duration `json:"consumerStallGrace" yaml:"consumerStallGrace" mapstructure:"consumerStallGrace"`
+
+	// HalfCloseGrace bounds how long the recorder keeps copying the
+	// surviving direction after one side has half-closed (sent FIN while
+	// still able to receive). Maps to relay.Config.HalfCloseGrace. Zero
+	// resolves to the relay's built-in default (10s); NEGATIVE disables
+	// half-close entirely, restoring the pre-#4538 behaviour of tearing
+	// both directions down on the first EOF.
+	//
+	// It bounds IDLE time, not total time — every forwarded chunk
+	// re-arms it — so it only has to cover the gap before a peer starts
+	// answering, never the length of the answer.
+	HalfCloseGrace time.Duration `json:"halfCloseGrace" yaml:"halfCloseGrace" mapstructure:"halfCloseGrace"`
 }
 
 // MockCmd configures the `keploy mock record|replay` flow — using Keploy as a

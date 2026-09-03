@@ -302,11 +302,9 @@ type Config struct {
 	// reads a truncated body as a complete one. Every forwarded chunk
 	// re-arms the window.
 	//
-	// NOTE: unlike its siblings in config.RecordBuffer (PerConnCap,
-	// TeeChanBuf, ConsumerStallGrace) this is not yet reachable from
-	// keploy.yml, a flag or an env var — it is a compile-time knob and
-	// a programmatic one. Worth plumbing if an operator ever needs to
-	// turn it down in the field.
+	// Operators reach it exactly like its siblings in
+	// config.RecordBuffer: record.recordBuffer.halfCloseGrace in
+	// keploy.yml or the hidden --half-close-grace flag.
 	HalfCloseGrace time.Duration
 
 	// ParserCanResyncAfterGap tells the tees whether the parser on the other

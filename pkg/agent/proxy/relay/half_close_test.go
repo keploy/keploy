@@ -183,12 +183,11 @@ func TestHalfClose_GraceBoundsASilentPeer(t *testing.T) {
 
 // A negative grace restores the original behaviour exactly.
 //
-// This is a programmatic switch, not an operator one: HalfCloseGrace has
-// no keploy.yml key, flag or env var yet, unlike its siblings in
-// config.RecordBuffer. Turning it off in the field today means
-// KEPLOY_NEW_RELAY=off — which routes to the legacy path, where a
-// half-closing client HANGS instead (no CloseWrite there at all), so it
-// is a rollback with its own cost.
+// Operators reach it as record.recordBuffer.halfCloseGrace in keploy.yml
+// or the hidden --half-close-grace flag, so turning it off in the field
+// needs no new build — and specifically does not need
+// KEPLOY_NEW_RELAY=off, which routes to the legacy path where a
+// half-closing client hangs instead.
 func TestHalfClose_NegativeGraceOptsOut(t *testing.T) {
 	h := newHalfCloseHarness(t, Config{HalfCloseGrace: -1})
 
@@ -354,5 +353,34 @@ func TestHalfClose_SlowResponseIsNotTruncated(t *testing.T) {
 			"the %v grace — so a TOTAL bound truncates it, and the client sees a clean EOF on "+
 			"a half body rather than an error. The bound must be on IDLE time.",
 			len(got), want, time.Duration(chunks)*interval, grace)
+	}
+}
+
+// TestHalfCloseGrace_NegativeSurvivesDefaulting pins the one value that
+// is easy to lose in plumbing.
+//
+// Zero and negative both carry meaning here — "use the default" and
+// "disable half-close" — so every layer that forwards this value has to
+// use != 0 rather than the > 0 its siblings use, and withDefaults has to
+// resolve only the zero. A layer that drops the negative silently leaves
+// half-close ON for an operator who asked for it off, which is the
+// opposite of what they configured and impossible to see from the
+// outside.
+func TestHalfCloseGrace_NegativeSurvivesDefaulting(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"zero resolves to the default", 0, DefaultHalfCloseGrace},
+		{"negative is preserved as disabled", -1, -1},
+		{"explicit value is preserved", 250 * time.Millisecond, 250 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Config{HalfCloseGrace: tc.in}.withDefaults().HalfCloseGrace
+			if got != tc.want {
+				t.Fatalf("HalfCloseGrace %v resolved to %v, want %v", tc.in, got, tc.want)
+			}
+		})
 	}
 }

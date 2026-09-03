@@ -313,6 +313,7 @@ func (p *Proxy) recordViaSupervisor(
 		PerConnCap:         p.recordBufferCap,
 		TeeChanBuf:         p.recordBufferQueueSize,
 		ConsumerStallGrace: p.recordBufferStallGrace,
+		HalfCloseGrace:     p.recordBufferHalfCloseGrace,
 		PreDispatchPause:   preDispatchPause,
 		// Default false — see relay.Config.ParserCanResyncAfterGap for why
 		// "cannot resync" is the safe default for everything that has not
