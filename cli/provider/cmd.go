@@ -411,6 +411,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("health-url", c.cfg.Test.HealthURL, "HTTP(S) URL polled before the first test is fired; first 2xx response proceeds immediately. Empty (default) preserves the fixed --delay behavior.")
 		cmd.Flags().String("health-path", c.cfg.Test.HealthPath, "Request path polled on the address the recorded tests actually dial, before the first test is fired — e.g. /health. Needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready. Ignored when --health-url is set (that takes precedence). Empty (default) uses a keploy-reserved probe path.")
 		cmd.Flags().String("health-scheme", c.cfg.Test.HealthScheme, "Override the scheme for --health-path probing (http or https). Empty (default) uses the scheme the recorded tests dial. Ignored when --health-url is set.")
+		cmd.Flags().Bool("disable-app-ready-probe", c.cfg.Test.DisableAppReadyProbe, "Turn off every address-based readiness probe before the first test (the docker/compose published-port gates, --app-ready-probe-addr, and the recorded-target fallback), plus the reset-resend readiness re-gate. Use when a connect-then-close probe is destructive in your environment — notably an app reached through `kubectl port-forward`, where probing can tear the forward down. --health-url is unaffected. Replay falls back to the fixed --delay.")
 		cmd.Flags().Duration("health-poll-timeout", c.cfg.Test.HealthPollTimeout, "Ceiling for every pre-test readiness gate — --health-url, --health-path and the automatic docker/compose port gates (e.g. 60s, 3m). Only ever paid by an app that is not yet serving; a ready app satisfies the gate on the first probe. On timeout replay warns and fires anyway.")
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
@@ -519,6 +520,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"healthPath":                "health-path",
 		"healthScheme":              "health-scheme",
 		"healthPollTimeout":         "health-poll-timeout",
+		"disableAppReadyProbe":      "disable-app-ready-probe",
 		"urlMethods":                "url-methods",
 		"inCi":                      "in-ci",
 		"protoFile":                 "proto-file",
