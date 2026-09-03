@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
@@ -56,15 +58,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	// If recording is already paused, pure passthrough.
 	if memoryguard.IsRecordingPaused() {
 		logger.Debug("memory pressure detected, stopping MySQL recording and falling back to passthrough")
-		done := make(chan struct{}, 2)
-		cp := func(dst, src net.Conn) {
-			_, _ = io.Copy(dst, src)
-			done <- struct{}{}
-		}
-		go cp(destConn, clientConn)
-		go cp(clientConn, destConn)
-		<-done
-		<-done
+		relayRawPassthrough(clientConn, destConn)
 		return nil
 	}
 
@@ -1368,4 +1362,32 @@ func binaryRowHeadersOf(rows []*mysql.BinaryRow) []mysql.Header {
 		out = append(out, r.Header)
 	}
 	return out
+}
+
+// relayRawPassthrough copies both directions to completion and forwards
+// each side's FIN, for the memory-pressure fallback where nothing is
+// captured.
+//
+// Extracted so it can be tested. Inline inside the memoryguard branch it
+// was unreachable from a unit test — memoryguard's paused flag is
+// unexported — so the FIN forwarding here was shipped uncovered, which is
+// exactly how the same one-liner went out as a silent no-op elsewhere in
+// this change.
+//
+// The FIN is gated on a clean io.Copy: a read error, a reset, or a failed
+// write to the peer all exit that loop too, and forwarding a FIN for those
+// tells the peer "the request is complete" about a truncated message.
+func relayRawPassthrough(clientConn, destConn net.Conn) {
+	done := make(chan struct{}, 2)
+	cp := func(dst, src net.Conn) {
+		_, err := io.Copy(dst, src)
+		if err == nil {
+			_ = proxyutil.CloseWriteIfPossible(dst)
+		}
+		done <- struct{}{}
+	}
+	go cp(destConn, clientConn)
+	go cp(clientConn, destConn)
+	<-done
+	<-done
 }

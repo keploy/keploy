@@ -81,6 +81,27 @@ func (s *SafeConn) SetReadDeadline(_ time.Time) error { return nil }
 // SetWriteDeadline is a no-op in record mode.
 func (s *SafeConn) SetWriteDeadline(_ time.Time) error { return nil }
 
+// CloseWrite forwards a half-close to the wrapped conn: it tells the
+// peer this side has finished writing, while leaving the connection
+// readable.
+//
+// This is a deliberate, narrow hole in SafeConn's contract. Close and
+// the deadline setters are no-ops here precisely so a parser cannot
+// terminate a connection the proxy owns — but half-close is not
+// termination. It is protocol content: an EOF-delimited exchange only
+// learns the request has ended when the FIN arrives, so a parser that
+// cannot forward one leaves the peer waiting for bytes that will never
+// come while the client waits for a reply that will never be sent.
+// Swallowing it does not protect the connection, it deadlocks it.
+//
+// Nothing is promoted for free here: SafeConn holds its conn as an
+// unexported, non-embedded field, so without this method the type
+// assertion in [CloseWriteIfPossible] simply fails and every half-close
+// through a SafeConn is silently dropped.
+func (s *SafeConn) CloseWrite() error {
+	return CloseWriteIfPossible(s.conn)
+}
+
 // Unwrap returns the real underlying net.Conn. This method is
 // intentionally NOT part of the net.Conn interface. Only the proxy
 // layer (which creates SafeConn) should call this — parsers must not.

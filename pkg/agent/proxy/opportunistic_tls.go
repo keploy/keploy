@@ -587,11 +587,11 @@ func relayPlaintext(ctx context.Context, a, b net.Conn) error {
 // the peer's read returns EOF. Falls back to a no-op when the conn
 // type doesn't support half-close.
 func closeWriteIfPossible(c net.Conn) error {
-	type closeWriter interface{ CloseWrite() error }
-	if cw, ok := c.(closeWriter); ok {
-		return cw.CloseWrite()
-	}
-	return nil
+	// Thin alias kept for the call sites in this file; the
+	// implementation lives in util because that is the only package
+	// able to see through SafeConn, which wraps essentially every conn
+	// a parser touches.
+	return util.CloseWriteIfPossible(c)
 }
 
 // pushSignal publishes a goroutine's verdict. The send is unguarded on
