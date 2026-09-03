@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -427,5 +429,270 @@ func TestRememberLastForPortRefusesEmptyIdentity(t *testing.T) {
 	s.RememberLastForPort(key, "", TLSHandshakeEntry{RespPackets: [][]byte{{0x0a}}})
 	if !s.IsAmbiguous(key) {
 		t.Error("an untagged write cleared a latched port key")
+	}
+}
+
+// TestLatchSurvivesTheLiveEntryExpiring is the regression fence for a latch that
+// was defeated by its own TTL sweep.
+//
+// The ambiguity latch is the ONLY thing stopping a port key from serving one
+// server's greeting to a connection that talked to another. Only the TOMBSTONE
+// was TTL-exempt; the live entry carrying serverID was swept like any other. So:
+// server A writes at T, A goes quiet, and at T+31min server B's write finds no
+// serverID to disagree with and recreates the key CLEAN and SERVING. A reader
+// then gets B's capability flags and auth plugin while decoding A's connection.
+func TestLatchSurvivesTheLiveEntryExpiring(t *testing.T) {
+	s := NewTLSHandshakeStore()
+	key := HandshakeLastPortKey("ns/app/ts", 3306)
+	s.RememberLastForPort(key, "server-A", TLSHandshakeEntry{RespPackets: [][]byte{{0xAA}}})
+
+	// Age A's entry past the TTL and force the sweep to run.
+	s.mu.Lock()
+	v := s.last[key]
+	v.seen = time.Now().Add(-2 * lastGreetingTTL)
+	s.last[key] = v
+	s.lastPruned = time.Time{}
+	s.pruneLastLocked(time.Now())
+	s.mu.Unlock()
+
+	// A DIFFERENT server now writes the same scope+port.
+	s.RememberLastForPort(key, "server-B", TLSHandshakeEntry{RespPackets: [][]byte{{0xBB}}})
+
+	entry, ok, ambiguous := s.LastForPort(key)
+	if !ambiguous {
+		t.Fatalf("port key not latched after two different servers; LastForPort -> ok=%v entry=%v — "+
+			"server A's identity died with its payload, so B recreated the key clean and serving", ok, entry.RespPackets)
+	}
+	if ok {
+		t.Fatalf("latched key still served an entry: %v", entry.RespPackets)
+	}
+}
+
+// TestLatchSurvivesTheLiveEntryBeingEvicted is the same defect reached without a
+// clock: unrelated address keys overflow the live budget and evict the port
+// key's entry, taking its identity with it.
+func TestLatchSurvivesTheLiveEntryBeingEvicted(t *testing.T) {
+	s := NewTLSHandshakeStore()
+	key := HandshakeLastPortKey("ns/app/ts", 3306)
+	s.RememberLastForPort(key, "server-A", TLSHandshakeEntry{RespPackets: [][]byte{{0xAA}}})
+
+	// Overflow the live budget with unrelated address keys so the port key, being
+	// the oldest, is the eviction victim.
+	for i := 0; i < maxLastGreetings+16; i++ {
+		s.RememberLast(HandshakeLastKey("ns/app/ts", &ConditionalDstCfg{
+			Addr: fmt.Sprintf("10.9.%d.%d:3306", i/256, i%256)}),
+			TLSHandshakeEntry{RespPackets: [][]byte{{0x01}}})
+	}
+
+	s.RememberLastForPort(key, "server-B", TLSHandshakeEntry{RespPackets: [][]byte{{0xBB}}})
+
+	entry, ok, ambiguous := s.LastForPort(key)
+	if !ambiguous {
+		t.Fatalf("port key not latched after eviction forgot server A; ok=%v entry=%v", ok, entry.RespPackets)
+	}
+	if ok {
+		t.Fatalf("latched key still served an entry: %v", entry.RespPackets)
+	}
+}
+
+// TestIdentityRecordsAreBounded proves the durability above did not trade a
+// corruption bug for an unbounded-growth one. Identity records outlive their
+// payloads deliberately, so they need their own budget.
+func TestIdentityRecordsAreBounded(t *testing.T) {
+	s := NewTLSHandshakeStore()
+	for i := 0; i < maxLastGreetings*3; i++ {
+		k := HandshakeLastPortKey(fmt.Sprintf("ns/app/ts-%d", i), 3306)
+		s.RememberLastForPort(k, fmt.Sprintf("server-%d", i), TLSHandshakeEntry{RespPackets: [][]byte{{0x0a}}})
+		s.mu.Lock()
+		v := s.last[k]
+		v.seen = time.Now().Add(-2 * lastGreetingTTL)
+		s.last[k] = v
+		s.lastPruned = time.Time{}
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
+	s.lastPruned = time.Time{}
+	s.pruneLastLocked(time.Now())
+	var identity int
+	for _, v := range s.last {
+		if v.isIdentityOnly() {
+			identity++
+		}
+	}
+	total := len(s.last)
+	s.mu.Unlock()
+	if identity > maxLastGreetings {
+		t.Fatalf("identity records = %d, want <= %d — they outlive their payloads, so an unbudgeted class grows without bound", identity, maxLastGreetings)
+	}
+	if total > 3*maxLastGreetings {
+		t.Fatalf("cache holds %d entries across all classes, want <= %d", total, 3*maxLastGreetings)
+	}
+}
+
+// TestLastForPortIsAtomicAgainstLatching fences the check-then-act race that
+// composing IsAmbiguous with Last reintroduces.
+//
+// A latch landing between the two calls made Last report a plain miss, which the
+// caller read as "nothing cached" and answered from the UNGUARDED shared address
+// bucket — the one outcome the ambiguity check exists to prevent. It is a logic
+// race, so -race cannot see it: both calls are correctly locked, the composition
+// is not. LastForPort must never report (ok=false, ambiguous=false) for a key
+// that holds an entry or is latched.
+//
+// The reader spins against a concurrent latcher so the window between the two
+// lock acquisitions is actually entered; a single read per experiment almost
+// never lands in it and lets the composed version pass.
+//
+// Do NOT add runtime.Gosched() to the reader loop. It looks like an obvious
+// courtesy — the loop is a busy spin and costs ~80x under -race at
+// GOMAXPROCS=1 — but yielding hands the writer the lock at a predictable point
+// and the window stops being entered: MEASURED 0/5 kills with the yield versus
+// 5/5 without. A cheap test that cannot detect the defect is worth less than an
+// expensive one that can.
+func TestLastForPortIsAtomicAgainstLatching(t *testing.T) {
+	const experiments = 300
+	for iter := 0; iter < experiments; iter++ {
+		s := NewTLSHandshakeStore()
+		key := HandshakeLastPortKey("ns/app/ts", 3306)
+		s.RememberLastForPort(key, "server-A", TLSHandshakeEntry{RespPackets: [][]byte{{0xAA}}})
+
+		var violation atomic.Bool
+		var servedB atomic.Bool
+		stop := make(chan struct{})
+		ready := make(chan struct{})
+		var once sync.Once
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				entry, ok, ambiguous := s.LastForPort(key)
+				// Signal only after a read has completed, so the latch below
+				// lands while this loop is genuinely in flight. Writing before
+				// the reader spins leaves the window unentered and lets the
+				// composed implementation pass.
+				once.Do(func() { close(ready) })
+				if !ok && !ambiguous {
+					violation.Store(true)
+					return
+				}
+				if ok && len(entry.RespPackets) > 0 && entry.RespPackets[0][0] == 0xBB {
+					servedB.Store(true)
+					return
+				}
+				select {
+				case <-stop:
+					return
+				default:
+				}
+			}
+		}()
+
+		// A second server's raw leg latches the key while the reader is spinning.
+		<-ready
+		s.RememberLastForPort(key, "server-B", TLSHandshakeEntry{RespPackets: [][]byte{{0xBB}}})
+		close(stop)
+		wg.Wait()
+
+		if violation.Load() {
+			t.Fatalf("iter %d: LastForPort reported neither an entry nor the latch — "+
+				"the caller falls through to the unguarded address bucket after the guard proved reuse unsafe", iter)
+		}
+		if servedB.Load() {
+			t.Fatalf("iter %d: served server B's greeting under a key server A owned", iter)
+		}
+	}
+}
+
+// TestPayloadlessEntriesAreBounded fences the class-exhaustiveness invariant the
+// prune fast path depends on.
+//
+// The three eviction classes must cover EVERY entry. Defining live as
+// "!ambiguous && hasPayload()" left an entry that is not ambiguous, carries no
+// payload and carries no identity in no class at all: no pass counted it, none
+// evicted it, and the map grew without bound while every write past the budget
+// did a full scan that removed nothing. Measured at 2048 against a 512 budget.
+func TestPayloadlessEntriesAreBounded(t *testing.T) {
+	s := NewTLSHandshakeStore()
+	for i := 0; i < maxLastGreetings*4; i++ {
+		s.RememberLast(HandshakeLastKey("scope", &ConditionalDstCfg{
+			Addr: fmt.Sprintf("10.4.%d.%d:3306", i/256, i%256)}),
+			TLSHandshakeEntry{ReqPackets: [][]byte{{0x01}}})
+	}
+	s.mu.Lock()
+	n := len(s.last)
+	s.mu.Unlock()
+	if n > maxLastGreetings {
+		t.Fatalf("payload-less entries grew to %d against a %d budget — they fall into no eviction "+
+			"class, so nothing ever removes them and every write past the budget scans the whole map for nothing", n, maxLastGreetings)
+	}
+}
+
+// TestIdentityRecordsAreNeverServed pins the single most safety-critical property
+// of the identity class: it remembers WHICH server owned a key so the ambiguity
+// latch stays armed, and it must never be handed to a caller as a greeting.
+//
+// Without this, deleting the payload guard in lastLocked leaves the whole suite
+// green while Last returns ok=true with an empty entry.
+func TestIdentityRecordsAreNeverServed(t *testing.T) {
+	s := NewTLSHandshakeStore()
+	key := HandshakeLastPortKey("ns/app/ts", 3306)
+
+	// A record demoted by EVICTION keeps a fresh timestamp, so the TTL check
+	// cannot be what refuses it — the payload guard has to.
+	s.mu.Lock()
+	if s.last == nil {
+		s.last = make(map[string]lastGreeting)
+	}
+	s.last[key] = lastGreeting{serverID: "server-A", seen: time.Now()}
+	s.mu.Unlock()
+
+	if entry, ok := s.Last(key); ok {
+		t.Fatalf("Last served an identity record: ok=true entry=%v — it carries no greeting and must never be served", entry.RespPackets)
+	}
+	if entry, ok, ambiguous := s.LastForPort(key); ok || ambiguous {
+		t.Fatalf("LastForPort served or latched on an identity record: ok=%v ambiguous=%v entry=%v", ok, ambiguous, entry.RespPackets)
+	}
+}
+
+// TestIdentityRecordsExpireEventually pins the bound on the ambiguity latch.
+//
+// Identity records deliberately outlive the payload TTL so a rolling upgrade
+// cannot disarm the latch mid-drain. Unbounded, though, a key latched by an
+// in-place server version bump never serves again for the agent's lifetime:
+// greetingServerIdentity fingerprints ServerVersion, so a minor bump reads as a
+// second server, and the only other escape is the identity eviction budget,
+// which a low-cardinality node never reaches. identityTTL bounds that.
+func TestIdentityRecordsExpireEventually(t *testing.T) {
+	s := NewTLSHandshakeStore()
+	key := HandshakeLastPortKey("ns/app/ts", 3306)
+	s.RememberLastForPort(key, "server-A", TLSHandshakeEntry{RespPackets: [][]byte{{0xAA}}})
+
+	// Age past the PAYLOAD ttl and sweep: the payload goes, the identity stays.
+	s.mu.Lock()
+	v := s.last[key]
+	v.seen = time.Now().Add(-2 * lastGreetingTTL)
+	s.last[key] = v
+	s.lastPruned = time.Time{}
+	s.pruneLastLocked(time.Now())
+	held, ok := s.last[key]
+	s.mu.Unlock()
+	if !ok || !held.isIdentityOnly() {
+		t.Fatalf("after the payload TTL the key should hold an identity record, got ok=%v %+v", ok, held)
+	}
+
+	// Age past the IDENTITY ttl and sweep again: now it is forgotten, so the key
+	// is reusable rather than latched for the process lifetime.
+	s.mu.Lock()
+	v = s.last[key]
+	v.seen = time.Now().Add(-2 * identityTTL)
+	s.last[key] = v
+	s.lastPruned = time.Time{}
+	s.pruneLastLocked(time.Now())
+	_, stillThere := s.last[key]
+	s.mu.Unlock()
+	if stillThere {
+		t.Fatalf("identity record outlived identityTTL — a key latched by an in-place version bump " +
+			"would stay dead for the agent's lifetime")
 	}
 }
