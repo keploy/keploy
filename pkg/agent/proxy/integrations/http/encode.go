@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
@@ -154,7 +156,15 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				h.Logger.Debug("memory pressure detected, stopping HTTP recording and falling back to passthrough")
 				done := make(chan struct{}, 2)
 				cp := func(dst, src net.Conn) {
-					_, _ = io.Copy(dst, src)
+					_, err := io.Copy(dst, src)
+					// Forward the FIN on a clean copy: an
+					// EOF-delimited peer only learns the request
+					// ended when it arrives. Gated on err==nil so a
+					// truncated request is never reported as
+					// complete. See util.CloseWriteIfPossible.
+					if err == nil {
+						_ = proxyutil.CloseWriteIfPossible(dst)
+					}
 					done <- struct{}{}
 				}
 				go cp(destConn, clientConn)

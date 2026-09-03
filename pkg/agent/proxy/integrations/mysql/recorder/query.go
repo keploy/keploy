@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
@@ -58,7 +60,13 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		logger.Debug("memory pressure detected, stopping MySQL recording and falling back to passthrough")
 		done := make(chan struct{}, 2)
 		cp := func(dst, src net.Conn) {
-			_, _ = io.Copy(dst, src)
+			_, err := io.Copy(dst, src)
+			// Forward the FIN on a clean copy; see
+			// util.CloseWriteIfPossible. Gated on err==nil so a
+			// truncated request is never reported as complete.
+			if err == nil {
+				_ = proxyutil.CloseWriteIfPossible(dst)
+			}
 			done <- struct{}{}
 		}
 		go cp(destConn, clientConn)
