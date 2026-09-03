@@ -3181,13 +3181,26 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	if r.config != nil {
 		strictMockWindow = r.config.Test.StrictMockWindow
 	}
+	// EXPERIMENTAL, default OFF: when KEPLOY_AGENT_OWNS_CONSUMED is set, the
+	// agent applies filterOutDeleted from its own persistent consumption history
+	// instead of us re-sending the ever-growing TotalConsumedMocks map every
+	// testcase (O(testcases^2) marshaling). We then send a nil map to eliminate
+	// that cost. Off by default so behaviour is byte-identical until proven
+	// equivalent by the golden-reference harness.
+	agentOwnsConsumed := os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED") == "1" ||
+		strings.EqualFold(os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED"), "true")
+	consumedForAgent := totalConsumedMocks
+	if agentOwnsConsumed {
+		consumedForAgent = nil
+	}
 	params := models.MockFilterParams{
 		AfterTime:              afterTime,
 		BeforeTime:             beforeTime,
 		FirstRecordedTestStart: firstRecordedTestStart,
 		MockMapping:            expectedMockMapping,
 		UseMappingBased:        useMappingBased,
-		TotalConsumedMocks:     totalConsumedMocks,
+		AgentOwnsConsumed:      agentOwnsConsumed,
+		TotalConsumedMocks:     consumedForAgent,
 		StrictMockWindow:       strictMockWindow,
 	}
 

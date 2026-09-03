@@ -100,6 +100,11 @@ type MockFilterParams struct {
 	BeforeTime             time.Time            `json:"beforeTime,omitempty"`
 	MockMapping            []string             `json:"mockMapping,omitempty"`
 	UseMappingBased        bool                 `json:"useMappingBased"`
+	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
+	// from its OWN persistent consumption history instead of the
+	// TotalConsumedMocks map the client would otherwise re-send every testcase
+	// (which is O(testcases^2) marshaling). Default false = legacy behaviour.
+	AgentOwnsConsumed      bool                 `json:"agentOwnsConsumed,omitempty"`
 	TotalConsumedMocks     map[string]MockState `json:"totalConsumedMocks,omitempty"`
 	// StrictMockWindow controls whether out-of-window non-config mocks are
 	// dropped rather than being promoted into the cross-test config pool.

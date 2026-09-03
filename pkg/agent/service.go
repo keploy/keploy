@@ -153,6 +153,14 @@ type FirstWindowStartReader interface {
 	FirstTestWindowStart() time.Time
 }
 
+// ConsumedStateReader is implemented by proxies whose mock manager keeps a
+// persistent (never-drained) per-name consumption map. It lets the agent apply
+// filterOutDeleted from its OWN history instead of a copy the client re-sends
+// every testcase — see models.MockFilterParams.AgentOwnsConsumed.
+type ConsumedStateReader interface {
+	GetPersistentConsumed() map[string]models.MockState
+}
+
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }
