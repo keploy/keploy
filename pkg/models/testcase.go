@@ -85,14 +85,6 @@ type TestCase struct {
 	// each capture, not be inferred from mutable registries. Never set by
 	// agents or on the wire ("-" everywhere).
 	SourceNode string `json:"-" yaml:"-" bson:"-"`
-	// DuplicateOf marks this test case as a cross-pod duplicate within its
-	// recording: "<test-set>/<test-name>" of the first-stored copy, or a
-	// scope-only ref ("pod:<p>" / "node:<n>") when the winner's identity was
-	// recovered from dedup-stat snapshots rather than a stored test case. Set
-	// by the recording owner, never by agents. Persisted — JSON/BSON here,
-	// YAML via the spec Metadata map — so the mark survives to storage and
-	// the UI. Empty means not a known duplicate.
-	DuplicateOf string `json:"duplicate_of,omitempty" bson:"duplicate_of,omitempty"`
 }
 
 func (tc *TestCase) GetKind() string {
