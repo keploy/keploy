@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -464,4 +466,121 @@ func TestWaitForAppReady_DockerStartKeepsItsGate(t *testing.T) {
 			"round-trip. Its ports were published at create time, so there is no -p to parse "+
 			"and the resolved-test-target fallback is the only gate it has.", elapsed)
 	}
+}
+
+// TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved pins the
+// reason stage 1 exists at all, which is not what an earlier version of
+// this file assumed.
+//
+// That version skipped the fallback's stage-1 TCP dial, reasoning that
+// it was a redundant connect-then-close on a path where a port-forward
+// is hostile to exactly that shape. The reasoning was wrong and is worth
+// recording: waitForHTTPServingPath sets DisableKeepAlives, so EVERY one
+// of its 200ms polls is itself a fresh connect-then-close. Over the 3m
+// default ceiling that is ~900 of them, and dropping the single stage-1
+// dial removed roughly 1 in 900 — measured at 16 vs 15 against a 3s
+// ceiling. It bought nothing.
+//
+// What it cost is this: with stage 1 skipped, an app that never accepts
+// TCP at all is reported as "accepted TCP but never completed an HTTP
+// round-trip", and WaitForPort's specific error is flattened to a bare
+// context deadline. That is a false statement about the failure the
+// operator is staring at, on the very case this gate was added for
+// (status_code=0 because nothing was listening yet).
+func TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved(t *testing.T) {
+	// A port nothing listens on: TCP never accepts.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	_ = ln.Close() // free it so connects are refused
+
+	core, logs := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+
+	cfg := gateCfg(700 * time.Millisecond)
+	cfg.Command = "python3 recorded_app.py"
+	cfg.CommandType = "native"
+	cfg.Test.Delay = 0
+
+	if !waitForAppReady(context.Background(), logger, cfg,
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+		t.Fatal("the gate must stay best-effort and proceed, never fail the run")
+	}
+
+	var got string
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "app address did not accept a connection") {
+			got = e.Message
+		}
+		if strings.Contains(e.Message, "app accepted TCP but never completed") {
+			t.Fatalf("the gate reported %q for an address that never accepted TCP. Stage 1 is "+
+				"what tells those two apart; skipping it makes the warning describe an "+
+				"app-level HTTP problem when the truth is that nothing is listening.", e.Message)
+		}
+	}
+	if got == "" {
+		t.Fatal("no readiness warning was emitted for an address that never accepts; the " +
+			"operator gets no signal at all about why the first test fired early")
+	}
+}
+
+// The opt-out covers the reset-resend readiness re-gate too — that path
+// needs it MORE, since its trigger is a transport reset, which behind a
+// port-forward is what a dying forward produces. Asserted by counting
+// connections, because the probe returns in microseconds against a
+// listener that accepts.
+func TestWaitForResetResendReady_HonoursTheDisableFlag(t *testing.T) {
+	host, port, conns := countingListener(t)
+
+	for _, tc := range []struct {
+		name     string
+		disabled bool
+		wantMin  int64
+	}{
+		{"probing enabled", false, 1},
+		{"probing disabled", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := conns.Load()
+			cfg := gateCfg(500 * time.Millisecond)
+			cfg.Test.Host = host
+			cfg.Test.Port = uint32(mustAtoi(t, port))
+			cfg.Test.DisableAppReadyProbe = tc.disabled
+
+			r := &Replayer{config: cfg, logger: zap.NewNop()}
+			r.waitForResetResendReady(context.Background(),
+				&models.TestCase{
+					// Kind is load-bearing: resolveProbeTarget returns
+					// ok=false for anything that is not HTTP, so without
+					// it the probe never runs and BOTH cases would show
+					// zero connections — the disabled assertion would
+					// pass for the wrong reason.
+					Kind:    models.HTTP,
+					HTTPReq: models.HTTPReq{URL: "http://" + host + ":" + port + "/x"},
+				},
+				"test-set-0")
+
+			made := conns.Load() - before
+			if tc.disabled && made != 0 {
+				t.Fatalf("%d connection(s) made with probing disabled; the reset-resend re-gate "+
+					"re-opens the destructive probe in response to the very reset a dying "+
+					"port-forward produces", made)
+			}
+			if !tc.disabled && made < tc.wantMin {
+				t.Fatalf("no connection made with probing ENABLED: the disabled case above " +
+					"would then pass for the wrong reason")
+			}
+		})
+	}
+}
+
+func mustAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatalf("atoi %q: %v", s, err)
+	}
+	return n
 }
