@@ -356,3 +356,157 @@ func TestWriteLoggerInvoked(t *testing.T) {
 		t.Errorf("logger.Debug called %d times, want 2", log.warns)
 	}
 }
+
+// The DiscardBefore tests below pin the three properties the relay
+// depends on when it consumes bytes it has already teed (MySQL's
+// CLIENT_SSL ClientHello): the watermark reaches bytes wherever they
+// currently sit, it can split a chunk mid-way, and it never touches
+// anything above it.
+
+// TestDiscardBeforeSplitsAChunk: the parser consumed the head of a
+// chunk and the relay consumed its tail. This is the coalesced
+// SSLRequest+ClientHello case, and the reason the watermark counts
+// bytes rather than chunks.
+func TestDiscardBeforeSplitsAChunk(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 2)
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("HEADTAILTAIL"), ReadAt: time.Unix(1, 0)}
+	f := New(ch, nil, nil)
+
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(f, head); err != nil {
+		t.Fatalf("read head: %v", err)
+	}
+	if string(head) != "HEAD" {
+		t.Fatalf("head = %q, want HEAD", head)
+	}
+
+	// Everything the producer had accepted at this point (12 bytes) is
+	// off limits from here on.
+	if pending := f.DiscardBefore(12); pending != 8 {
+		t.Fatalf("DiscardBefore reported %d bytes pending, want the 8 unread tail bytes", pending)
+	}
+
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("NEXT"), ReadAt: time.Unix(2, 0)}
+	got := make([]byte, 4)
+	if _, err := io.ReadFull(f, got); err != nil {
+		t.Fatalf("read after discard: %v", err)
+	}
+	if string(got) != "NEXT" {
+		t.Fatalf("after the discard the reader got %q, want NEXT — the watermark must split "+
+			"the chunk it lands inside, not round to a chunk boundary", got)
+	}
+}
+
+// TestDiscardBeforeReachesUndeliveredChunks: the bytes to drop had not
+// reached this FakeConn yet when the watermark was set. Naming an
+// absolute offset is what makes that work without quiescing the
+// producer.
+func TestDiscardBeforeReachesUndeliveredChunks(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 3)
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("SSLREQ"), ReadAt: time.Unix(1, 0)}
+	f := New(ch, nil, nil)
+
+	first := make([]byte, 6)
+	if _, err := io.ReadFull(f, first); err != nil {
+		t.Fatalf("read first: %v", err)
+	}
+
+	// The producer has accepted 6+5 bytes; only the first 6 were ever
+	// the parser's. The 5 are still in the channel, unseen here.
+	f.DiscardBefore(11)
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("HELLO"), ReadAt: time.Unix(2, 0)}
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("AFTER"), ReadAt: time.Unix(3, 0)}
+
+	got := make([]byte, 5)
+	if _, err := io.ReadFull(f, got); err != nil {
+		t.Fatalf("read after discard: %v", err)
+	}
+	if string(got) != "AFTER" {
+		t.Fatalf("after the discard the reader got %q, want AFTER — a watermark set before the "+
+			"bytes arrived must still swallow them", got)
+	}
+}
+
+// TestDiscardBeforeIsMonotonicAndNeverOverruns: a lower offset is
+// ignored, and an offset already behind the reader is a no-op rather
+// than a rewind that would eat live traffic.
+func TestDiscardBeforeIsMonotonicAndNeverOverruns(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 2)
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("ABCDEF"), ReadAt: time.Unix(1, 0)}
+	f := New(ch, nil, nil)
+
+	f.DiscardBefore(3)
+	if pending := f.DiscardBefore(1); pending != 3 {
+		t.Fatalf("a lower offset moved the watermark: pending = %d, want 3", pending)
+	}
+	got := make([]byte, 3)
+	if _, err := io.ReadFull(f, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "DEF" {
+		t.Fatalf("got %q, want DEF", got)
+	}
+	if pending := f.DiscardBefore(2); pending != 0 {
+		t.Fatalf("an offset behind the reader reported %d bytes to discard, want 0", pending)
+	}
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("GHI"), ReadAt: time.Unix(2, 0)}
+	got = make([]byte, 3)
+	if _, err := io.ReadFull(f, got); err != nil {
+		t.Fatalf("read after stale watermark: %v", err)
+	}
+	if string(got) != "GHI" {
+		t.Fatalf("got %q, want GHI — a stale watermark must not consume live bytes", got)
+	}
+}
+
+// TestDiscardBeforeAfterCloseDoesNotBlock: a watermark armed against
+// bytes that will now never arrive must not turn every later read into
+// a block. Post-Close the discard is best effort.
+func TestDiscardBeforeAfterCloseDoesNotBlock(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 1)
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("XY"), ReadAt: time.Unix(1, 0)}
+	f := New(ch, nil, nil)
+	f.DiscardBefore(1000)
+	_ = f.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4)
+		_, _ = f.Read(buf)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read blocked forever on a discard that can never complete after Close")
+	}
+}
+
+// TestDiscardBeforeZeroLengthReadDoesNotBlock: a zero-length Read
+// consumes nothing, so it must not be made to wait on a discard that is
+// still waiting on the producer. The watermark check sits after the
+// len(p)==0 early return for exactly this reason.
+func TestDiscardBeforeZeroLengthReadDoesNotBlock(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk) // nothing queued, nothing coming
+	f := New(ch, nil, nil)
+	f.DiscardBefore(64)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		n, err := f.Read(nil)
+		if n != 0 || err != nil {
+			t.Errorf("Read(nil) = (%d, %v), want (0, nil)", n, err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read with a zero-length buffer blocked on a pending discard")
+	}
+}

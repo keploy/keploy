@@ -37,8 +37,11 @@ var ErrDeadlineExceeded net.Error = deadlineError{}
 // not touch any real socket — the relay owns those.
 //
 // FakeConn is safe for a single reader goroutine concurrent with
-// calls to Close and SetReadDeadline. Concurrent Read callers are
-// not supported; parsers are single-consumer by construction.
+// calls to Close, SetReadDeadline and DiscardBefore. Concurrent Read
+// callers are not supported; parsers are single-consumer by
+// construction. DiscardBefore carries one extra rule that the mutex
+// cannot enforce — it must not be called while the parser is inside a
+// read; see its doc.
 //
 // Satisfies [net.Conn] so that parsers coded against net.Conn can
 // consume it unchanged. Note that [FakeConn.Write] always returns
@@ -49,11 +52,23 @@ type FakeConn struct {
 	ch     <-chan Chunk
 	logger logger
 
-	mu              sync.Mutex
-	buf             bytes.Buffer
-	bufReadAt       time.Time // source ReadAt of bytes currently in buf
-	bufWrittenAt    time.Time // source WrittenAt of bytes currently in buf
-	bufDir          Direction // source direction of bytes currently in buf
+	mu           sync.Mutex
+	buf          bytes.Buffer
+	bufReadAt    time.Time // source ReadAt of bytes currently in buf
+	bufWrittenAt time.Time // source WrittenAt of bytes currently in buf
+	bufDir       Direction // source direction of bytes currently in buf
+	// pos is the absolute offset, in bytes of this stream, of the next
+	// byte the parser will be handed. Equivalently: how many bytes have
+	// already left this FakeConn, counting both bytes delivered to the
+	// parser and bytes swallowed on its behalf by [FakeConn.DiscardBefore].
+	//
+	// buf therefore holds the bytes at offsets [pos, pos+buf.Len()), and
+	// pos+buf.Len() is the number of bytes pulled off ch so far — the
+	// quantity the producer counts on its side.
+	pos int64
+	// discardTo is the discard watermark set by [FakeConn.DiscardBefore]:
+	// every byte below it is swallowed rather than delivered. Monotonic.
+	discardTo       int64
 	lastReadNano    atomic.Int64
 	lastWrittenNano atomic.Int64
 	closed          atomic.Bool
@@ -121,6 +136,21 @@ func newWithLogger(ch <-chan Chunk, localAddr, remoteAddr net.Addr, log logger) 
 // left over from a previous Chunk, then blocks for the next Chunk
 // (subject to read deadline and Close).
 func (f *FakeConn) Read(p []byte) (int, error) {
+	// A zero-length Read consumes nothing and must not block, so it is
+	// answered before the discard below can park on the channel. Kept
+	// above the closed check too, matching io.Reader's "Read(p) with
+	// len(p)==0 returns 0, nil" convention for a stream that has not
+	// otherwise failed.
+	if len(p) == 0 {
+		return 0, nil
+	}
+	// Honour any discard watermark BEFORE looking at the buffer: the
+	// bytes it wants gone may be sitting in buf, in ch, or still
+	// upstream in the relay's tee, and all three are reached by
+	// pulling forward from here. See [FakeConn.DiscardBefore].
+	if err := f.applyDiscard(); err != nil {
+		return 0, err
+	}
 	if f.closed.Load() {
 		// Close means "no more blocking", NOT "discard bytes already
 		// delivered to me". The relay tee drains its buffered chunks
@@ -134,25 +164,24 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 		// once nothing buffered remains.
 		if c, ok := f.drainBufferedLocked(); ok {
 			n := copy(p, c.Bytes)
+			f.mu.Lock()
+			f.pos += int64(n)
 			if n < len(c.Bytes) {
-				f.mu.Lock()
 				f.buf.Write(c.Bytes[n:])
 				f.bufReadAt = c.ReadAt
 				f.bufWrittenAt = c.WrittenAt
 				f.bufDir = c.Dir
-				f.mu.Unlock()
 			}
+			f.mu.Unlock()
 			return n, nil
 		}
 		return 0, ErrClosed
-	}
-	if len(p) == 0 {
-		return 0, nil
 	}
 
 	f.mu.Lock()
 	if f.buf.Len() > 0 {
 		n, err := f.buf.Read(p)
+		f.pos += int64(n)
 		f.mu.Unlock()
 		// bytes.Buffer.Read returns io.EOF whenever it drains the
 		// buffer to empty, even when we got bytes back on this call
@@ -178,14 +207,15 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 	// a later ReadChunk call that drains the stash returns them
 	// intact (documented contract on ReadChunk).
 	n := copy(p, chunk.Bytes)
+	f.mu.Lock()
+	f.pos += int64(n)
 	if n < len(chunk.Bytes) {
-		f.mu.Lock()
 		f.buf.Write(chunk.Bytes[n:])
 		f.bufReadAt = chunk.ReadAt
 		f.bufWrittenAt = chunk.WrittenAt
 		f.bufDir = chunk.Dir
-		f.mu.Unlock()
 	}
+	f.mu.Unlock()
 	return n, nil
 }
 
@@ -206,16 +236,31 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 // were drained from; callers should typically use Read XOR ReadChunk
 // on a single FakeConn to avoid mixing the two.
 func (f *FakeConn) ReadChunk() (Chunk, error) {
+	// See Read: the watermark is honoured before anything is handed
+	// back, and it reaches bytes wherever they currently sit.
+	if err := f.applyDiscard(); err != nil {
+		return Chunk{}, err
+	}
 	if f.closed.Load() {
 		// See Read: a chunk already delivered to f.ch (or stashed) is a
 		// recorded wire event and must survive Close. Drain what is
 		// buffered before reporting ErrClosed.
 		if c, ok := f.drainBufferedLocked(); ok {
+			f.mu.Lock()
+			f.pos += int64(len(c.Bytes))
+			f.mu.Unlock()
 			return c, nil
 		}
 		return Chunk{}, ErrClosed
 	}
-	return f.readChunkLocked()
+	c, err := f.readChunkLocked()
+	if err != nil {
+		return c, err
+	}
+	f.mu.Lock()
+	f.pos += int64(len(c.Bytes))
+	f.mu.Unlock()
+	return c, nil
 }
 
 // drainBufferedLocked returns the next chunk that is ALREADY available
@@ -297,6 +342,15 @@ func (f *FakeConn) readChunkLocked() (Chunk, error) {
 	}
 	f.mu.Unlock()
 
+	return f.recvChunk()
+}
+
+// recvChunk blocks for the next Chunk on f.ch, ignoring anything
+// residual in buf. Split out of readChunkLocked because
+// [FakeConn.applyDiscard] must pull the pipeline forward WITHOUT
+// draining buf into a synthetic chunk — it consumes buf itself, and
+// only as far as the watermark, so a discard can stop mid-chunk.
+func (f *FakeConn) recvChunk() (Chunk, error) {
 	// Re-fetch the deadline channel on each iteration so concurrent
 	// SetReadDeadline calls take effect on this in-flight read. The
 	// changed-notification channel (closed by SetReadDeadline) wakes
@@ -320,6 +374,130 @@ func (f *FakeConn) readChunkLocked() (Chunk, error) {
 		case <-changedCh:
 			// deadline changed; loop and re-fetch.
 		}
+	}
+}
+
+// DiscardBefore declares that the parser must never be handed a stream
+// byte whose absolute offset is below `offset`, and that its next read
+// resumes at `offset`. Returns how many bytes are still to be swallowed
+// at the moment of the call (0 when the watermark is already behind the
+// reader). The watermark is monotonic: a lower offset is ignored.
+//
+// # Why the consumer side, and why an absolute offset
+//
+// The relay sometimes CONSUMES bytes it has already teed here. The
+// canonical case is MySQL's CLIENT_SSL upgrade: the client sends a
+// 36-byte SSLRequest and, with no further server turn, immediately
+// starts a TLS handshake on the same socket. The relay's forwarder is
+// parked in Read, so it has both messages in hand long before the
+// parser has decoded the SSLRequest and asked for the upgrade — and
+// both get teed. The parser reads its 36 bytes; the ClientHello behind
+// them is then consumed by keploy's own client-side handshake, but a
+// copy of it is still sitting in this FakeConn, where the parser's next
+// read finds `16 03 01 ...` in place of the post-TLS message it
+// expects, mis-frames it as a packet header and hangs.
+//
+// Retracting those bytes on the PRODUCER side does not work: the tee is
+// a pipeline (staging queue -> drain goroutine -> channel -> this
+// buffer), so bytes to be dropped can simultaneously be in the queue,
+// in the drain goroutine's hand, in the channel, and in buf. Draining
+// that from outside means racing the drain goroutine. Here there is no
+// race at all: this FakeConn is single-consumer by construction, and
+// every one of those places is reached by pulling FORWARD from the
+// reader, which is what applyDiscard does.
+//
+// The offset is absolute rather than a count of "whatever is pending
+// now" for the same reason: the producer states a stream position, so
+// bytes that have not been teed yet when the watermark is set are still
+// covered, and bytes teed AFTER it (the post-upgrade plaintext) are
+// above the watermark and pass through untouched. No quiescing of the
+// pipeline is required, and arming the watermark before or after the
+// forwarders resume gives the same result.
+//
+// Caller contract: call it while the parser is not reading. The relay
+// does this under its directive pause, where the parser is blocked on
+// the directive ack by construction. A watermark armed against a reader
+// already blocked inside a channel receive cannot retract the chunk
+// that receive is about to return.
+//
+// The guarantee is exact while the FakeConn is open. After Close it
+// degrades to best effort: nothing more is coming, so applyDiscard stops
+// pulling rather than blocking, and a chunk that lands on the channel in
+// the window between that decision and the post-Close drain can still be
+// handed back. That window only exists on a connection whose parser is
+// already being retired.
+func (f *FakeConn) DiscardBefore(offset int64) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if offset > f.discardTo {
+		f.discardTo = offset
+	}
+	if n := f.discardTo - f.pos; n > 0 {
+		return n
+	}
+	return 0
+}
+
+// applyDiscard swallows bytes until the reader has reached the discard
+// watermark. It consumes buf first and then pulls chunks, so a
+// watermark that falls in the middle of a chunk splits it exactly.
+//
+// Blocking is correct while the FakeConn is open: the bytes below the
+// watermark were teed before it was set, so they are already on their
+// way and the parser's next read must not overtake them. Once closed,
+// nothing more is coming, so the pull is best-effort and non-blocking —
+// otherwise a discard armed just before teardown would turn every
+// subsequent read into an ErrClosed instead of letting the post-Close
+// drain paths hand back what did arrive.
+func (f *FakeConn) applyDiscard() error {
+	for {
+		f.mu.Lock()
+		need := f.discardTo - f.pos
+		if need <= 0 {
+			f.mu.Unlock()
+			return nil
+		}
+		if have := int64(f.buf.Len()); have > 0 {
+			n := have
+			if n > need {
+				n = need
+			}
+			f.buf.Next(int(n))
+			f.pos += n
+			if f.buf.Len() == 0 {
+				f.bufReadAt = time.Time{}
+				f.bufWrittenAt = time.Time{}
+				f.bufDir = 0
+			}
+			f.mu.Unlock()
+			continue
+		}
+		f.mu.Unlock()
+
+		var c Chunk
+		if f.closed.Load() {
+			var ok bool
+			select {
+			case c, ok = <-f.ch:
+				if !ok {
+					return nil
+				}
+			default:
+				return nil
+			}
+		} else {
+			var err error
+			c, err = f.recvChunk()
+			if err != nil {
+				return err
+			}
+		}
+		f.mu.Lock()
+		f.buf.Write(c.Bytes)
+		f.bufReadAt = c.ReadAt
+		f.bufWrittenAt = c.WrittenAt
+		f.bufDir = c.Dir
+		f.mu.Unlock()
 	}
 }
 
