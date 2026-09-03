@@ -14,6 +14,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/olekukonko/tablewriter"
@@ -446,6 +447,24 @@ func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
 	}
 }
 
+// appReadyObserved records whether the app under replay has EVER been seen
+// accepting a connection on cfg.Test.AppReadyProbeAddr in this process.
+//
+// It exists because --keep-app-alive skips the readiness wait for every
+// test-set after the first, on the stated reasoning that the app "already
+// passed its readiness check during the first test-set". That reasoning is only
+// sound if the check actually passed. The probe is best-effort — on timeout it
+// warns and fires the tests anyway — so an app that never came up produces a
+// first test-set that "completed" the wait, and every later test-set then skips
+// waiting for an app that has never been listening.
+//
+// Measured on a real cluster: a replay pod created at T+0 had its readiness
+// probe engage at T+4s and a later test-set log "app already warm" at T+4.4s;
+// the app first accepted connections at ~T+30s. The whole run finished at T+20s
+// having refused every request. Gating the skip on an OBSERVED accept makes the
+// optimisation apply only when it is true.
+var appReadyObserved atomic.Bool
+
 func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config) bool {
 	delay := time.Duration(cfg.Test.Delay) * time.Second
 
@@ -571,6 +590,12 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 						zap.String("addr", addr),
 						zap.Duration("ceiling", ceiling),
 						zap.Error(err))
+				} else {
+					// The app accepted a connection at least once. Only this
+					// observation makes it safe for a later test-set to skip the
+					// wait under --keep-app-alive; "not the first test-set" does
+					// not, because the app may never have come up at all.
+					appReadyObserved.Store(true)
 				}
 			}
 		}
