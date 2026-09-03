@@ -1254,23 +1254,6 @@ func (r *Relay) noteHeldClientBytes(n int64) bool {
 	return true
 }
 
-// ReleaseClientHold ends a [Config.HoldClientWrites] hold from outside
-// the directive path, delivering everything held to the real
-// destination. No-op when no hold is up, and safe to call repeatedly.
-//
-// This is the safety valve the supervisor's abort path needs. A hold is
-// normally ended by the parser, but hang, panic, memory-cap and context
-// cancellation all retire a parser without one — and the dispatcher's
-// response to those is to leave the relay running and let raw bytes
-// flow ("user traffic is unaffected"). A hold that survives the parser
-// falsifies exactly that promise: the client direction is blackholed
-// for the rest of the connection, and no cap rescues it because a
-// client blocked on a reply it cannot get sends nothing more. The
-// caller invokes this before it stops caring about the parser.
-func (r *Relay) ReleaseClientHold() error {
-	return r.releaseClientHold()
-}
-
 // releaseClientHold ends a client write hold: everything the C2D
 // forwarder held is written to the real destination in read order and
 // normal forwarding resumes. No-op when no hold is up.

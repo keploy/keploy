@@ -911,3 +911,49 @@ func TestClientWriteHold_MutuallyExclusiveWithPreDispatch(t *testing.T) {
 		t.Fatalf("release delivered %d of %d held bytes", len(got), len(held))
 	}
 }
+
+// TestClientWriteHold_WholeHoldFlushedIsNotDiscarded is the case that
+// separates heldConsumedByHandshake from `upgradedSrc != nil`, and the
+// reason the flag exists at all.
+//
+// A parser that flushes the WHOLE hold — ClientFlushBytes covering
+// everything held, so nothing is left to prepend — and then upgrades
+// successfully has `upgradedSrc != nil` true, but NO held byte was
+// consumed by the handshake: every one of them went to the real server.
+// Discarding them from the parser's stream on the strength of
+// `upgradedSrc != nil` would hide bytes the server actually received,
+// and the recording would be missing the request it answered.
+//
+// The predicate was originally justified by a ClientTLSFirst ordering
+// argument that does not hold — upgradedSrc is assigned at the end of
+// upgradeClient and a later dest failure only Closes it, so the two
+// agree there. This is the case that actually discriminates.
+func TestClientWriteHold_WholeHoldFlushedIsNotDiscarded(t *testing.T) {
+	// Flush everything the client sent: SSLRequest AND the bytes behind
+	// it. Nothing is left for the handshake to prepend.
+	whole := sslRequestLen + clientHelloLen
+	h, upstream, ack, _ := runSSLRequestUpgrade(t, Config{HoldClientWrites: true}, whole, false)
+	if !ack.OK {
+		t.Fatalf("TLS upgrade failed: %+v", ack)
+	}
+	if len(upstream) != whole {
+		t.Fatalf("upstream received %d bytes, want all %d held bytes flushed", len(upstream), whole)
+	}
+
+	// The parser must still see every byte the server received — and it
+	// sees them BEFORE the post-TLS traffic, because they legitimately
+	// preceded it on the wire. That ordering is the assertion: if the
+	// discard keyed on "the client side upgraded" rather than on "the
+	// handshake consumed the remainder", these 120 bytes vanish and the
+	// parser's stream jumps straight to the post-TLS message, silently
+	// missing the request the server actually answered.
+	tail := h.awaitParserSees(t, clientHelloLen)
+	if len(tail) != clientHelloLen || tail[0] != 0x16 {
+		t.Fatalf("parser read % x after the upgrade, want the %d bytes that were flushed "+
+			"upstream. The whole hold went to the server, so nothing was consumed by the "+
+			"handshake and nothing should have been discarded from the parser's stream.",
+			tail, clientHelloLen)
+	}
+	// ...and normal stream continuity resumes after them.
+	assertParserResumesAfterUpgrade(t, h)
+}

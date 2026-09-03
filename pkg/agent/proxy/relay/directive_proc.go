@@ -518,10 +518,19 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 		// unspent would have endUpgradePause try to deliver bytes that are
 		// already gone.
 		//
-		// Distinct from `upgradedSrc != nil` only under ClientTLSFirst,
-		// where the client handshake runs first and a later dest-side
-		// failure would otherwise claim the client never upgraded. See
-		// endUpgradePause.
+		// Distinct from `upgradedSrc != nil`, and NOT for the reason it
+		// is tempting to write down. It is not about ClientTLSFirst
+		// ordering: upgradedSrc is assigned at the end of upgradeClient
+		// and upgradeDest's failure path only Closes it, so
+		// `upgradedSrc != nil` is true there too.
+		//
+		// The case that separates them is a parser that flushes the
+		// WHOLE hold — ClientFlushBytes covering everything held, so
+		// nothing is left to prepend — and then upgrades successfully.
+		// `upgradedSrc != nil` is true, but no held byte was consumed by
+		// the handshake: every one of them went to the real server.
+		// Discarding them from the parser's stream on that basis would
+		// hide bytes the server actually received. See endUpgradePause.
 		heldConsumedByHandshake bool
 	)
 
