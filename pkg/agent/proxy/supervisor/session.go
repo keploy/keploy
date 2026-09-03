@@ -91,6 +91,21 @@ type Session struct {
 	// TLS keys, noise config, etc.).
 	Opts models.OutgoingOptions
 
+	// ClientWritesHeld reports that the relay behind this session armed
+	// a client write hold (relay.Config.HoldClientWrites), so nothing
+	// the client sends reaches the real destination until the parser
+	// ends the hold — with directive.ReleaseClient, or with a
+	// directive.UpgradeTLS carrying a ClientFlushBytes count.
+	//
+	// The dispatcher sets it from the same capability probe that arms
+	// the hold, so a parser can tell "I asked for a hold" from "a hold
+	// is actually in place". Those differ: an observe-only proxyless
+	// capture has no relay to hold anything, and a parser that assumed
+	// otherwise would send a release that nobody answers and block on
+	// the ack forever. False on every path that does not hold, which
+	// is every path today except MySQL under the V2 relay.
+	ClientWritesHeld bool
+
 	// --- Backward-compatibility (populated by the migration shim) ---
 
 	// Ingress is the legacy client-side net.Conn handle. nil on the

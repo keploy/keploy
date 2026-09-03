@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -108,6 +109,38 @@ type Relay struct {
 	// ErrRelayAlreadyRun.
 	runErr atomic.Pointer[error]
 
+	// holdClient is true while a [Config.HoldClientWrites] hold is up:
+	// the C2D forwarder reads and tees but does not write to the real
+	// destination, parking the client's bytes in stashedC2D instead.
+	// Armed by [Relay.Run] when the config asks for it, cleared by the
+	// KindReleaseClient or KindUpgradeTLS handler (or by the cap
+	// breach in noteHeldClientBytes).
+	//
+	// Separate from preDispatchActive because the two answer different
+	// questions: preDispatchActive is a property of a PAUSE WINDOW and
+	// dies with it, while a hold spans the parser's whole decision —
+	// across the server greeting's round trip, which for a
+	// server-speaks-first protocol happens before the client has said
+	// anything worth deciding on.
+	holdClient atomic.Bool
+
+	// heldClientBytes counts the bytes currently held by holdClient, so
+	// the forwarder can enforce [Config.ClientHoldCap] without taking
+	// stashMu on its hot path.
+	heldClientBytes atomic.Int64
+
+	// holdMu serialises hold releases so a claim-then-write pair is
+	// atomic with respect to any other releaser.
+	//
+	// It is NOT redundant with the pause barrier. waitForwardersParked
+	// gives up when `stopping` closes, and `stopping` closes as soon as
+	// the FIRST forwarder exits — so from the moment D2C sees EOF, a
+	// directive handler proceeds while C2D is still live inside the hold
+	// block. Without this lock the handler's take+write and the
+	// forwarder's cap-breach take+write can interleave and reach the
+	// upstream socket out of order.
+	holdMu sync.Mutex
+
 	// preDispatchActive is true between [Relay.Run]'s pre-spawn
 	// [installPreDispatchPause] call (gated on
 	// [Config.PreDispatchPause]) and the
@@ -158,6 +191,13 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	}
 	r.src.Store(&src)
 	r.dst.Store(&dst)
+
+	// Armed here rather than in run(): the caller registers its abort
+	// hook between New and Run, and an abort in that window must find a
+	// hold it can actually release. See the note in run().
+	if cfg.HoldClientWrites {
+		r.holdClient.Store(true)
+	}
 
 	r.teeC2D = newTee(
 		fakeconn.FromClient,
@@ -246,9 +286,24 @@ func (r *Relay) DropCounts() (c2d, d2c uint64) {
 //
 // Idempotent; calling after Run has returned is a no-op because the
 // tees are already closed.
+//
+// This also ENDS any client write hold, flushing what it held. The
+// coupling is not a convenience: this function's own contract is that
+// every incoming byte still reaches its peer, and a hold that outlives
+// its parser falsifies exactly that — the client direction stays
+// blackholed for the rest of the connection. "The parser is dead" and
+// "the parser can still decide what to do with the bytes we are holding
+// for it" cannot both be true, so the release belongs here rather than
+// at the call site, where forgetting it is a silent user-traffic
+// outage rather than a compile error.
 func (r *Relay) PauseTees() {
 	r.teeC2D.setPaused(true)
 	r.teeD2C.setPaused(true)
+	if err := r.releaseClientHold(); err != nil && r.cfg.Logger != nil {
+		r.cfg.Logger.Debug("relay: flushing the client hold while pausing tees failed",
+			zap.Error(err),
+		)
+	}
 }
 
 // Run starts the forwarder, drain, and directive-processor goroutines
@@ -348,6 +403,28 @@ func (r *Relay) run(ctx context.Context) error {
 		r.preDispatchActive.Store(true)
 	}
 
+	// Client write hold: armed before the forwarders start so it covers
+	// the connection from its first byte. Unlike the pre-dispatch pause
+	// this installs no pause barrier — the forwarders must keep reading
+	// (the parser needs to SEE the client's bytes to decide what to do
+	// about them) and the destination→client direction must keep
+	// flowing (a server-speaks-first protocol greets before the client
+	// says anything). Only the C2D Write is deferred. See
+	// [Config.HoldClientWrites].
+	// The hold itself is armed in New(), NOT here. Arming inside this
+	// goroutine loses a race with the caller: proxy_v2.go does
+	// relay.New, then `go r.Run(...)`, then registers SessionOnAbort. An
+	// abort firing before this goroutine got scheduled found holdClient
+	// still false, so PauseTees released nothing — and then Run armed a
+	// hold with no releaser left. On the FallthroughToPassthrough path
+	// the relay deliberately keeps running, so the client direction
+	// stayed blackholed until peer close: exactly the silent
+	// user-traffic outage PauseTees exists to prevent.
+	//
+	// withDefaults has already refused any HoldClientWrites +
+	// PreDispatchPause combination, so the block above cannot have
+	// installed a pause barrier that this hold would strand.
+
 	// When one forwarder exits, signal the other to exit too via the
 	// existing stopping/nudgeDeadline machinery. Without this signalling,
 	// if e.g. the upstream sends FIN → FromDest reads EOF and exits, the
@@ -438,6 +515,18 @@ func (r *Relay) run(ctx context.Context) error {
 	wgForward.Wait()
 	close(bothDone)
 	graceWG.Wait()
+
+	// Both forwarders are gone, so nothing can add to the hold stash
+	// any more. Anything still in it was read from the client and never
+	// delivered; flush it so "the relay forwards every byte it read"
+	// holds even when the parser never ended the hold. Errors are
+	// expected here (the peer is usually already gone) and are logged
+	// rather than surfaced — the connection is ending either way.
+	if err := r.releaseClientHold(); err != nil && r.cfg.Logger != nil {
+		r.cfg.Logger.Debug("relay: flushing the client hold at teardown failed",
+			zap.Error(err),
+		)
+	}
 
 	// Now it is safe to stop the tees: no more push() calls will
 	// fire. Close staging channels and wait for drain goroutines to
@@ -585,7 +674,16 @@ func (r *Relay) forward(
 				// (the client's first chunk) and nothing it didn't
 				// (the server's preamble reply belongs to the
 				// directive handler, not the parser).
-				if r.preDispatchActive.Load() && dir == fakeconn.FromClient {
+				// A hold gets the same treatment as pre-dispatch, and
+				// for the same reason. Under a hold every client byte is
+				// the parser's to see — that is the hold's contract, and
+				// what the upgrade's watermark later retracts is only
+				// the part the handshake consumed. Without this, bytes
+				// the forwarder happened to read inside the pause window
+				// are flushed upstream by the release but never teed, so
+				// the parser's stream has a hole covering bytes the real
+				// server received.
+				if (r.preDispatchActive.Load() || r.holdClient.Load()) && dir == fakeconn.FromClient {
 					chunk := fakeconn.Chunk{
 						Dir:    dir,
 						Bytes:  stash,
@@ -620,6 +718,102 @@ func (r *Relay) forward(
 			// Pause has lifted. err is preserved so a closed-conn
 			// condition still tears the forwarder down on the next
 			// loop trip.
+		}
+
+		// Client write hold. The bytes go to the parser but not to the
+		// real destination: they are teed and stashed, and the
+		// destination Write waits for the parser to say what should
+		// happen to them (KindReleaseClient flushes all of it,
+		// KindUpgradeTLS flushes a byte-exact prefix).
+		//
+		// This sits AFTER the pause recheck on purpose. Once a pause is
+		// up the directive handler owns the sockets and the stash, and
+		// the block above has already routed the bytes there; holding
+		// them a second time here would double-stash them.
+		if n > 0 && dir == fakeconn.FromClient && r.holdClient.Load() {
+			// holdMu, and re-check under it. Without the lock a
+			// releaser can clear the flag and start writing the stash
+			// to the upstream socket while this goroutine is deciding
+			// to stash-or-write, and the two writes reach the server
+			// out of order — observed 25/25 with a slow flush, which is
+			// exactly the case an abort correlates with (a full
+			// upstream socket buffer). Held chunks only occur during
+			// the pre-handshake window, so this is not a hot path.
+			r.holdMu.Lock()
+			if !r.holdClient.Load() {
+				// A release won the race; fall through and forward
+				// normally, after the flush it just completed.
+				r.holdMu.Unlock()
+			} else {
+				payload := make([]byte, n)
+				copy(payload, buf[:n])
+
+				// Stash BEFORE teeing, and the order is load-bearing.
+				//
+				// The parser's decision is what ends the hold, so everything
+				// downstream synchronises on having SEEN a chunk — a test
+				// waits for it on the FakeConn, and in production the parser
+				// issues its directive the moment it has decoded enough.
+				// Teeing first makes "the parser saw it" true while "it is in
+				// the stash" is not yet, so a release can run against an
+				// empty stash and strand the very bytes it was meant to
+				// deliver. Stashing first makes the visible event the LATER
+				// of the two, so anyone who observed the chunk is guaranteed
+				// the stash already holds it.
+				//
+				// The reverse hazard does not exist: if a release claims the
+				// stash between these two statements, the bytes go upstream
+				// and are teed immediately after, so the parser still sees
+				// every byte the connection carried.
+				r.stashInflightFromPause(dir, payload, readAt)
+				chunk := fakeconn.Chunk{
+					Dir:    dir,
+					Bytes:  payload,
+					ReadAt: readAt,
+					SeqNo:  seq.Add(1),
+				}
+				teed := t.push(chunk)
+				if teed && r.cfg.OnClientChunkTeed != nil {
+					r.cfg.OnClientChunkTeed()
+				}
+				// The connection IS carrying traffic even though nothing
+				// reaches the peer yet. Without this the only bump on this
+				// path is the one OnClientChunkTeed makes, so a held
+				// connection whose tee is dropping chunks (per-conn cap,
+				// memory pressure) stops bumping altogether and reads as
+				// idle to the hang watchdog while it is anything but.
+				if r.cfg.BumpActivity != nil {
+					r.cfg.BumpActivity()
+				}
+				if log != nil {
+					log.Debug("relay: holding client bytes from the destination",
+						zap.Int("held_bytes", n),
+						zap.Bool("teed", teed),
+					)
+				}
+				capBreached := r.noteHeldClientBytes(int64(n))
+				// Drop the lock BEFORE releasing: releaseClientHold
+				// takes holdMu itself, so calling it here would
+				// self-deadlock.
+				r.holdMu.Unlock()
+
+				// A hold that outgrows its cap is a parser that is not
+				// coming back. Release rather than keep buffering: the
+				// client is blocked on a reply it cannot get while we
+				// sit on its request. See [Config.ClientHoldCap].
+				if capBreached {
+					if werr := r.releaseClientHold(); werr != nil {
+						if log != nil {
+							log.Debug("relay: client hold cap release failed",
+								zap.Error(werr),
+							)
+						}
+						return werr
+					}
+				}
+				// Suppress the forward below; the bytes are accounted for.
+				n = 0
+			}
 		}
 
 		if n > 0 {
@@ -1044,6 +1238,224 @@ func (r *Relay) stashInflightFromPause(dir fakeconn.Direction, payload []byte, r
 	case fakeconn.FromDest:
 		r.stashedD2C = append(r.stashedD2C, stashed)
 	}
+}
+
+// noteHeldClientBytes adds n to the held-byte count and reports
+// whether the hold has now exceeded [Config.ClientHoldCap]. A
+// non-positive cap disables the bound. Reports true at most once per
+// hold: the caller releases on true, and releaseClientHold zeroes the
+// counter, so a hold cannot trip the cap twice.
+func (r *Relay) noteHeldClientBytes(n int64) bool {
+	total := r.heldClientBytes.Add(n)
+	limit := r.cfg.ClientHoldCap
+	if limit <= 0 || total <= limit {
+		return false
+	}
+	if r.cfg.Logger != nil {
+		r.cfg.Logger.Warn("relay: client write hold exceeded its cap; releasing",
+			zap.Int64("held_bytes", total),
+			zap.Int64("cap_bytes", limit),
+		)
+	}
+	if r.cfg.OnMarkMockIncomplete != nil {
+		r.cfg.OnMarkMockIncomplete("client_hold_cap")
+	}
+	return true
+}
+
+// releaseClientHold ends a client write hold: everything the C2D
+// forwarder held is written to the real destination in read order and
+// normal forwarding resumes. No-op when no hold is up.
+//
+// holdMu is held across the whole claim-then-write so two releasers
+// cannot interleave their writes onto the upstream socket. The hold
+// flag is cleared first so that anything the forwarder reads after this
+// point it forwards itself rather than adding to a stash nobody will
+// drain again.
+func (r *Relay) releaseClientHold() error {
+	r.holdMu.Lock()
+	defer r.holdMu.Unlock()
+
+	if !r.holdClient.Swap(false) {
+		return nil
+	}
+	r.heldClientBytes.Store(0)
+	held := r.takeStashed(fakeconn.FromClient)
+	if held.len() == 0 {
+		return nil
+	}
+	dstPtr := r.dst.Load()
+	if dstPtr == nil {
+		return fmt.Errorf("relay: client hold release: no destination to flush %d held bytes to", held.len())
+	}
+	if err := writeHeldBytes(*dstPtr, held.bytes); err != nil {
+		return err
+	}
+	return nil
+}
+
+// heldFlushWriteTimeout bounds a hold flush's Write.
+//
+// Without it the flush is an unbounded blocking Write on the abort path.
+// [Relay.PauseTees] is called from the supervisor's SessionOnAbort, whose
+// contract is explicitly that callbacks are NON-BLOCKING — they run where
+// further errors have nowhere to propagate to, and a blocked one wedges
+// the very teardown that was supposed to recover the connection. A held
+// payload is a MySQL handshake message, hundreds of bytes against a
+// socket buffer measured in tens of kilobytes, so this can only fire when
+// the peer has genuinely stopped reading — a connection already lost.
+const heldFlushWriteTimeout = 5 * time.Second
+
+// writeHeldBytes writes a claimed hold payload to dst under a bounded
+// deadline, clearing the deadline afterwards so the forwarders' own
+// writes are not left capped.
+//
+// SetWriteDeadline, never SetReadDeadline: the forwarders' Reads drive
+// the pause machinery and must not be disturbed by a flush.
+func writeHeldBytes(dst net.Conn, payload []byte) error {
+	if dst == nil {
+		return errors.New("relay: no destination to flush held bytes to")
+	}
+	_ = dst.SetWriteDeadline(time.Now().Add(heldFlushWriteTimeout))
+	defer func() { _ = dst.SetWriteDeadline(time.Time{}) }()
+
+	wn, err := dst.Write(payload)
+	if err != nil {
+		return err
+	}
+	if wn != len(payload) {
+		// A short write on a blocking Write is a net.Conn contract
+		// violation, and here it means the server holds half a message.
+		// Surface it rather than reporting a clean flush.
+		return fmt.Errorf("relay: short write %d of %d held bytes", wn, len(payload))
+	}
+	return nil
+}
+
+// stashedLen reports how many bytes the given direction's stash holds,
+// without claiming any of them. Callers that must validate a request
+// before consuming it use this; takeStashedPrefix mutates.
+func (r *Relay) stashedLen(dir fakeconn.Direction) int {
+	r.stashMu.Lock()
+	defer r.stashMu.Unlock()
+	var parts []stashedPayload
+	switch dir {
+	case fakeconn.FromClient:
+		parts = r.stashedC2D
+	case fakeconn.FromDest:
+		parts = r.stashedD2C
+	}
+	total := 0
+	for _, p := range parts {
+		total += p.len()
+	}
+	return total
+}
+
+// endUpgradePause ends the TLS-upgrade pause, first delivering any
+// client bytes still held if the client-side handshake did NOT take
+// them.
+//
+// heldConsumedByHandshake, not "the client side ended up behind TLS":
+// the two differ on exactly one path. Under [Config.ClientTLSFirst] the
+// client handshake runs FIRST and claims the held remainder, and a
+// dest-side handshake that then fails would report "not upgraded" for a
+// connection whose held bytes are already spent. Both halves of this
+// function want the same question answered — "is the remainder still
+// ours to deliver, and is a copy of it still stranded in the parser's
+// stream" — so the parameter asks that one.
+//
+// This is the whole reason handleUpgradeTLS does not call endPause
+// directly. endPause discards both stashes unconditionally, which is
+// right when the handshake consumed them — the held remainder IS the
+// client's ClientHello, and the client-side handshake reads it through
+// a prepending conn. It is wrong on every other exit. A preamble
+// mismatch (the documented "server declined TLS, record the cleartext
+// path" outcome, which acks OK=true), a failed handshake, a refused
+// flush: in all of those the connection stays cleartext, the server has
+// already received whatever prefix we flushed, and the bytes behind it
+// are the rest of a message it is still waiting for. Dropping them
+// truncates the client's request on the wire and then lets passthrough
+// feed the server the continuation of a message whose head is missing.
+//
+// So: flush first, end the pause second.
+//
+// The other half of the job is the parser's view of the stream, and it
+// is the mirror image. When the client side DID end up behind TLS, the
+// held remainder was consumed by keploy's own handshake — but a copy of
+// it was teed to the parser on the way in, because the forwarder had it
+// long before the parser had decoded enough to ask for the upgrade.
+// Left there, the parser's next read after the upgrade returns
+// `16 03 01 ...` where a post-TLS message should be, mis-frames it as a
+// packet header (a MySQL header reads that as payloadLength=66326) and
+// blocks until the hang watchdog retires it — a connection that records
+// zero mocks. barrierTeeOffset is the length of the parser's stream at
+// the pause barrier, so discarding below it removes everything teed
+// before the barrier that the parser had not yet read. That equals "the
+// bytes the handshake took" for a parser that read exactly its own flush
+// prefix — which is what ClientFlushBytes requires it to have measured —
+// rather than being a property of the mechanism on its own.
+//
+// Only under a hold. The pre-dispatch path reaches this function too,
+// but there the C2D stash is FLUSHED UPSTREAM whole before the
+// handshakes run, so its prepend is normally empty and what the parser
+// saw is what the server got — consistent, and not ours to change here.
+func (r *Relay) endUpgradePause(heldAtEntry, heldConsumedByHandshake bool, barrierTeeOffset int64) {
+	if heldAtEntry && heldConsumedByHandshake {
+		if pending := r.clientStream.DiscardBefore(barrierTeeOffset); pending > 0 && r.cfg.Logger != nil {
+			r.cfg.Logger.Debug("relay: dropping handshake bytes from the parser's client stream",
+				zap.Int64("discard_bytes", pending),
+				zap.Int64("stream_offset", barrierTeeOffset),
+			)
+		}
+	}
+	if heldAtEntry && !heldConsumedByHandshake {
+		// releaseClientHold, not flushHeldRemainder: the hold must be
+		// CLEARED here, not merely drained once. handleUpgradeTLS clears
+		// the flag itself only inside its hold branch, and the exits
+		// above that branch — no TLSUpgradeFn, a rejected flush request
+		// — never reach it. Draining without clearing leaves the
+		// forwarder holding every byte that arrives next, on a
+		// connection whose parser has just been told the upgrade
+		// failed. releaseClientHold is a no-op when the flag is already
+		// down, so the normal path is unaffected.
+		if err := r.releaseClientHold(); err != nil && r.cfg.Logger != nil {
+			r.cfg.Logger.Debug("relay: flushing the held remainder after a non-upgrade exit failed",
+				zap.Error(err),
+			)
+		}
+		// The hold branch clears the flag before flushing its prefix, so
+		// by the time we get here on THAT path releaseClientHold above
+		// found the flag down and did nothing. Drain what its prefix
+		// flush left behind.
+		if err := r.flushHeldRemainder(); err != nil && r.cfg.Logger != nil {
+			r.cfg.Logger.Debug("relay: flushing the held remainder after a non-upgrade exit failed",
+				zap.Error(err),
+			)
+		}
+	}
+	r.endPause()
+}
+
+// flushHeldRemainder writes whatever is left of the client hold stash
+// to the real destination. Unlike releaseClientHold it does not require
+// the hold flag to still be set: handleUpgradeTLS clears the flag early
+// so no failure path can strand the connection, and the bytes still
+// need delivering afterwards.
+func (r *Relay) flushHeldRemainder() error {
+	r.holdMu.Lock()
+	defer r.holdMu.Unlock()
+
+	r.heldClientBytes.Store(0)
+	held := r.takeStashed(fakeconn.FromClient)
+	if held.len() == 0 {
+		return nil
+	}
+	dstPtr := r.dst.Load()
+	if dstPtr == nil {
+		return fmt.Errorf("relay: no destination to flush %d held bytes to", held.len())
+	}
+	return writeHeldBytes(*dstPtr, held.bytes)
 }
 
 // takeStashed returns and clears the stash for the given direction.
