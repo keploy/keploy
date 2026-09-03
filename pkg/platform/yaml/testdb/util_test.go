@@ -31,97 +31,11 @@ func grpcTestCase() models.TestCase {
 	}
 }
 
-// TestDuplicateOfRoundTripYAML pins the cross-pod duplicate mark's persistence
-// through the YAML encode/decode pair for both testcase kinds. The mark rides
-// the spec Metadata map, so old readers (which only look up "description")
-// ignore it and old files (no metadata) decode to an empty mark.
-func TestDuplicateOfRoundTripYAML(t *testing.T) {
-	logger := zap.NewNop()
-
-	t.Run("http", func(t *testing.T) {
-		tc := httpTestCase()
-		tc.Description = "a described case"
-		tc.DuplicateOf = "test-set-0/test-3@pod-a"
-
-		doc, err := EncodeTestcase(tc, logger)
-		if err != nil {
-			t.Fatalf("encode: %v", err)
-		}
-		got, err := Decode(doc, logger)
-		if err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if got.DuplicateOf != tc.DuplicateOf {
-			t.Fatalf("DuplicateOf lost in yaml round-trip: got %q want %q", got.DuplicateOf, tc.DuplicateOf)
-		}
-		if got.Description != tc.Description {
-			t.Fatalf("Description must survive alongside the mark: got %q want %q", got.Description, tc.Description)
-		}
-	})
-
-	t.Run("grpc", func(t *testing.T) {
-		tc := grpcTestCase()
-		tc.DuplicateOf = "test-set-0/test-7@pod-b"
-
-		doc, err := EncodeTestcase(tc, logger)
-		if err != nil {
-			t.Fatalf("encode: %v", err)
-		}
-		got, err := Decode(doc, logger)
-		if err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if got.DuplicateOf != tc.DuplicateOf {
-			t.Fatalf("DuplicateOf lost in grpc yaml round-trip: got %q want %q", got.DuplicateOf, tc.DuplicateOf)
-		}
-	})
-}
-
-// TestDuplicateOfRoundTripJSON covers the JSON-native encoder/decoder pair
-// (the storage fast path) for both kinds.
-func TestDuplicateOfRoundTripJSON(t *testing.T) {
-	logger := zap.NewNop()
-
-	t.Run("http", func(t *testing.T) {
-		tc := httpTestCase()
-		tc.DuplicateOf = "test-set-0/test-3@pod-a"
-
-		doc, err := EncodeTestcaseJSON(tc, logger)
-		if err != nil {
-			t.Fatalf("encode: %v", err)
-		}
-		got, err := DecodeJSON(doc, logger)
-		if err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if got.DuplicateOf != tc.DuplicateOf {
-			t.Fatalf("DuplicateOf lost in json round-trip: got %q want %q", got.DuplicateOf, tc.DuplicateOf)
-		}
-	})
-
-	t.Run("grpc", func(t *testing.T) {
-		tc := grpcTestCase()
-		tc.DuplicateOf = "test-set-0/test-7@pod-b"
-
-		doc, err := EncodeTestcaseJSON(tc, logger)
-		if err != nil {
-			t.Fatalf("encode: %v", err)
-		}
-		got, err := DecodeJSON(doc, logger)
-		if err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if got.DuplicateOf != tc.DuplicateOf {
-			t.Fatalf("DuplicateOf lost in grpc json round-trip: got %q want %q", got.DuplicateOf, tc.DuplicateOf)
-		}
-	})
-}
-
 // TestSpecMetadataStaysAbsentWhenUnset pins byte-compatibility with existing
-// files: a testcase with neither description nor duplicate mark must encode a
-// nil Metadata map, exactly as before the mark existed.
+// files: a testcase with no description must encode a nil Metadata map,
+// exactly as before the metadata map existed.
 func TestSpecMetadataStaysAbsentWhenUnset(t *testing.T) {
-	if md := specMetadata("", ""); md != nil {
+	if md := specMetadata(""); md != nil {
 		t.Fatalf("expected nil metadata for unset fields, got %v", md)
 	}
 	if schema := buildHTTPSchema(httpTestCase(), zap.NewNop()); schema.Metadata != nil {
@@ -159,7 +73,7 @@ func TestDecodeIgnoresUnknownMetadataKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode with unknown metadata keys must not fail: %v", err)
 	}
-	if got.DuplicateOf != "" || got.Description != "" {
+	if got.Description != "" {
 		t.Fatalf("unknown keys must not bleed into fields: %+v", got)
 	}
 }
