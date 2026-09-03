@@ -1204,7 +1204,20 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
 
 	// Filter out deleted mocks if totalConsumedMocks is provided
-	if params.TotalConsumedMocks != nil {
+	if params.AgentOwnsConsumed {
+		// Agent applies filterOutDeleted from its OWN persistent consumption
+		// history — the client no longer re-sends the growing TotalConsumedMocks
+		// map. Equivalent by construction: that persistent map is the exact
+		// accumulation of the flagMockAsUsed states the client used to relay.
+		if reader, ok := a.Proxy.(coreAgent.ConsumedStateReader); ok {
+			filteredMocks = a.filterOutDeleted(filteredMocks, reader.GetPersistentConsumed())
+		} else if params.TotalConsumedMocks != nil {
+			// Proxy can't expose its persistent map — never silently skip the
+			// filter; fall back to any client-sent map.
+			a.logger.Warn("AgentOwnsConsumed set but proxy has no ConsumedStateReader; falling back to client-sent TotalConsumedMocks")
+			filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
+		}
+	} else if params.TotalConsumedMocks != nil {
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
 	}
 

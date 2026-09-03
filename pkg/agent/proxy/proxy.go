@@ -3402,6 +3402,17 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 	return m.GetConsumedMocks(), nil
 }
 
+// GetPersistentConsumed forwards the mock manager's never-drained per-name
+// consumption map (implements coreAgent.ConsumedStateReader; see
+// models.MockFilterParams.AgentOwnsConsumed). Returns nil when no manager.
+func (p *Proxy) GetPersistentConsumed() map[string]models.MockState {
+	m := p.getMockManager()
+	if m == nil {
+		return nil
+	}
+	return m.GetPersistentConsumed()
+}
+
 // testErrorAccumulator collects errors during an active test case.
 // It is goroutine-safe via an internal mutex.
 type testErrorAccumulator struct {
