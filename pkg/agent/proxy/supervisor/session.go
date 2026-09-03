@@ -544,6 +544,42 @@ func (s *Session) enforceReqMonotonic(m *models.Mock) {
 			panic("supervisor.Session.EmitMock: out-of-order ReqTimestampMock detected; parser emitted a mock with a timestamp earlier than a previously-emitted mock on the same session — this violates I5 in PLAN.md and would cause wrong-mock selection at replay time")
 		}
 		m.Spec.ReqTimestampMock = clamped
+
+		// Raising the request stamp can push it PAST the response stamp on a mock
+		// that arrived perfectly well-ordered. filterByTimeStamp drops any mock
+		// with res < req (pkg/util.go), so that mock is then silently discarded at
+		// replay -- orphaned by this function, not by the recorder. Measured: a
+		// pair (req 17.820597769, res 17.607310086) leaves EmitMock inverted by
+		// 79.4ms.
+		//
+		// This REPORTS it and does not repair it, deliberately. Two attempts to
+		// repair it by adjusting ResTimestampMock both regressed
+		// go-memory-load-mongo, and the second one narrowly:
+		//
+		//   - clamping every inverted window resurrected mocks the filter had been
+		//     discarding, and they were consumed ahead of the real ones: the lane
+		//     went from green to 52 "no matching mock" failures.
+		//   - carrying the response stamp along ONLY for the inversion introduced
+		//     here still broke record_build_replay_latest with candidates=0, while
+		//     record_build_replay_build passed. Same recording, different replay
+		//     binary, different outcome -- i.e. it produced recordings the
+		//     RELEASED replayer cannot consume. Those lanes exist to catch exactly
+		//     that.
+		//
+		// So ResTimestampMock is load-bearing at replay in ways this call site
+		// cannot see, and mutating it here is the wrong lever. The real repair
+		// belongs where the ordering invariant and the window filter are designed
+		// together. Until then this makes the loss visible instead of silent,
+		// which is what was actually missing: the first instance was found only by
+		// diffing recorded YAML by hand.
+		if s.Logger != nil && !m.Spec.ResTimestampMock.IsZero() && m.Spec.ResTimestampMock.Before(clamped) {
+			s.Logger.Warn("monotonic clamping inverted this mock's window; replay will DROP it (filterByTimeStamp discards res < req)",
+				zap.String("mock", m.Name),
+				zap.Duration("inversion", clamped.Sub(m.Spec.ResTimestampMock)),
+				zap.Time("reqTimestampMock", clamped),
+				zap.Time("resTimestampMock", m.Spec.ResTimestampMock),
+				zap.Time("originalReqTimestampMock", req))
+		}
 		req = clamped
 	}
 	s.lastReqTimestamp = req

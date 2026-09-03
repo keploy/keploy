@@ -15,7 +15,9 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // wrapPacket prepends the 4-byte MySQL packet header (3-byte little-
@@ -569,4 +571,99 @@ func assertQueryMock(t *testing.T, m *models.Mock) {
 	if got := m.Spec.MySQLRequests[0].Header.Type; got != "COM_QUERY" {
 		t.Errorf("query mock request type = %q, want COM_QUERY (seq==0 firstCmd mis-decoded as handshake?)", got)
 	}
+}
+
+// TestEmitMockV2ReportsAWindowInvertedByMonotonicClamping pins the diagnostic.
+//
+// enforceReqMonotonic raises ReqTimestampMock to lastReq+1ns to keep the
+// matcher's ordering invariant, and does not touch ResTimestampMock. On a mock
+// that arrived well-ordered that can push req PAST res, and filterByTimeStamp
+// then drops any mock with res < req (pkg/util.go) -- so the mock is orphaned by
+// this step, not by the recorder.
+//
+// The timestamps are deliberately NOT repaired here; see the comment at the call
+// site for the two attempts that regressed go-memory-load-mongo, the second of
+// which produced recordings the RELEASED replayer could not consume. What this
+// pins is that the loss is announced rather than silent: the first instance of it
+// was found only by diffing recorded YAML by hand.
+//
+// The inverted values are the real ones from k8s-proxy pipeline 6303, mock-61.
+func TestEmitMockV2ReportsAWindowInvertedByMonotonicClamping(t *testing.T) {
+	base := time.Date(2026, 9, 3, 0, 18, 17, 0, time.UTC)
+	req := func(op string) []mysql.Request {
+		return []mysql.Request{{PacketBundle: mysql.PacketBundle{Header: &mysql.PacketInfo{Type: op}}}}
+	}
+	resp := func(op string) []mysql.Response {
+		return []mysql.Response{{PacketBundle: mysql.PacketBundle{Header: &mysql.PacketInfo{Type: op}}}}
+	}
+
+	newHarnessWithLogs := func(t *testing.T) (*v2Harness, *observer.ObservedLogs) {
+		t.Helper()
+		h := newV2Harness(t)
+		core, logs := observer.New(zapcore.DebugLevel)
+		h.sess.Logger = zap.New(core)
+		return h, logs
+	}
+	emit := func(h *v2Harness, rq, rs time.Time) *models.Mock {
+		t.Helper()
+		emitMockV2(context.Background(), h.sess, req("COM_QUERY"), resp("OK"), "mocks", "COM_QUERY", "OK", rq, rs)
+		select {
+		case m := <-h.mocks:
+			return m
+		case <-time.After(5 * time.Second):
+			t.Fatal("emitMockV2 produced no mock within 5s")
+			return nil
+		}
+	}
+
+	t.Run("an inversion this step creates is reported", func(t *testing.T) {
+		t.Parallel()
+		h, logs := newHarnessWithLogs(t)
+		// A later request FIRST, so enforceReqMonotonic has a baseline to raise
+		// to. Without it the monotonic pass returns early on the session's first
+		// mock, the branch is never reached, and this subtest would pass no
+		// matter what the branch does.
+		_ = emit(h, base.Add(900*time.Millisecond), base.Add(900*time.Millisecond))
+		// Well-ordered on arrival (req < res); only the monotonic raise inverts it.
+		m := emit(h, base.Add(700*time.Millisecond), base.Add(750*time.Millisecond))
+
+		if !m.Spec.ResTimestampMock.Before(m.Spec.ReqTimestampMock) {
+			t.Fatalf("expected the monotonic raise to invert this window (req=%v res=%v); "+
+				"the fixture no longer exercises the branch",
+				m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+		}
+		warns := logs.FilterLevelExact(zapcore.WarnLevel).All()
+		if len(warns) != 1 {
+			t.Fatalf("got %d WARN entries, want 1 — a mock that replay will silently DROP "+
+				"was orphaned with no diagnostic at all", len(warns))
+		}
+		if got := warns[0].ContextMap()["inversion"]; got == nil {
+			t.Error("the warning does not carry the inversion magnitude")
+		}
+	})
+
+	t.Run("a window that stays well-ordered is not reported", func(t *testing.T) {
+		t.Parallel()
+		h, logs := newHarnessWithLogs(t)
+		_ = emit(h, base.Add(900*time.Millisecond), base.Add(900*time.Millisecond))
+		// Raised to lastReq+1ns, which is still before this response stamp.
+		m := emit(h, base.Add(700*time.Millisecond), base.Add(950*time.Millisecond))
+		if m.Spec.ResTimestampMock.Before(m.Spec.ReqTimestampMock) {
+			t.Fatalf("fixture inverted unexpectedly: req=%v res=%v", m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+		}
+		if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != 0 {
+			t.Errorf("got %d WARN entries for a well-ordered window, want 0", n)
+		}
+	})
+
+	t.Run("timestamps are not rewritten", func(t *testing.T) {
+		t.Parallel()
+		h, _ := newHarnessWithLogs(t)
+		rq, rs := base.Add(100*time.Millisecond), base.Add(150*time.Millisecond)
+		m := emit(h, rq, rs)
+		if !m.Spec.ReqTimestampMock.Equal(rq) || !m.Spec.ResTimestampMock.Equal(rs) {
+			t.Errorf("a well-ordered window was altered: got req=%v res=%v, want req=%v res=%v",
+				m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, rq, rs)
+		}
+	})
 }
