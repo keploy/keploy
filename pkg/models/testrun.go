@@ -138,9 +138,17 @@ type UnmatchedCall struct {
 	// render structured field-level drift instead of an opaque string. Paths
 	// in FieldDiffs use the noise-config vocabulary and can be copied
 	// verbatim into test.globalNoise / spec.assertions.noise.
-	MatchPhase     string          `json:"match_phase,omitempty" yaml:"match_phase,omitempty"`
-	CandidateCount int             `json:"candidate_count,omitempty" yaml:"candidate_count,omitempty"`
-	FieldDiffs     []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
+	MatchPhase string `json:"match_phase,omitempty" yaml:"match_phase,omitempty"`
+	// DestinationScope mirrors MockMismatchReport.DestinationScope
+	// (DestinationScope* constants). It is a separate axis from MatchPhase:
+	// "not_in_compared_set" says no mock this miss was compared against
+	// targeted the call's upstream, while MatchPhase still reports where the
+	// cascade stopped. Omitted when empty — the protocol supplied no
+	// destination evidence, and an absent field is the only honest rendering
+	// of "we did not check".
+	DestinationScope string          `json:"destination_scope,omitempty" yaml:"destination_scope,omitempty"`
+	CandidateCount   int             `json:"candidate_count,omitempty" yaml:"candidate_count,omitempty"`
+	FieldDiffs       []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
 	// ClosestMockReq / ReceivedReq carry the FULL rendered requests for the CLI
 	// side-by-side whole-mock diff (left = mock, right = live request).
 	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`

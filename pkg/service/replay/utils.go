@@ -1116,17 +1116,21 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 		ActualMocks:   []string{},
 		FailureReason: models.ErrMockNotFound,
 		MismatchReport: &models.MockMismatchReport{
-			Protocol:       call.Protocol,
-			ActualSummary:  call.ActualSummary,
-			Destination:    call.Destination,
-			ClosestMock:    call.ClosestMock,
-			Diff:           call.Diff,
-			NextSteps:      call.NextSteps,
-			MatchPhase:     call.MatchPhase,
-			CandidateCount: call.CandidateCount,
-			FieldDiffs:     call.FieldDiffs,
-			ClosestMockReq: call.ClosestMockReq,
-			ReceivedReq:    call.ReceivedReq,
+			Protocol:      call.Protocol,
+			ActualSummary: call.ActualSummary,
+			Destination:   call.Destination,
+			ClosestMock:   call.ClosestMock,
+			Diff:          call.Diff,
+			NextSteps:     call.NextSteps,
+			MatchPhase:    call.MatchPhase,
+			// Carried across so the CLI rendering can tell an out-of-scope
+			// destination from a drifted request; the two need different
+			// artifacts, not just different hints.
+			DestinationScope: call.DestinationScope,
+			CandidateCount:   call.CandidateCount,
+			FieldDiffs:       call.FieldDiffs,
+			ClosestMockReq:   call.ClosestMockReq,
+			ReceivedReq:      call.ReceivedReq,
 		},
 	}
 	tfs.failures = append(tfs.failures, failure)
@@ -1243,9 +1247,14 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 			fmt.Printf("\nTest: %s / %s\n", testSetID, testID)
 
 			var mappingNotes []string
+			var anyOutOfScope bool
 			for _, failure := range testIDGroups[testID] {
 				if failure.FailureReason == models.ErrMockNotFound {
 					printMismatchReport(failure.MismatchReport)
+					if failure.MismatchReport != nil &&
+						failure.MismatchReport.DestinationScope == models.DestinationScopeNotInComparedSet {
+						anyOutOfScope = true
+					}
 				}
 				if len(failure.ExpectedMocks) > 0 || len(failure.ActualMocks) > 0 {
 					differences := CompareMockSlices(failure.ExpectedMocks, failure.ActualMocks)
@@ -1269,6 +1278,14 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 			for _, note := range mappingNotes {
 				fmt.Printf("  %s\n", note)
 			}
+			// ONCE PER TEST, not once per missed call. The likely causes are
+			// static text that is identical for every out-of-scope miss, and
+			// one out-of-scope container produces one miss per outgoing call
+			// it makes — inlining them in each call's hint put the same ~1 KB
+			// paragraph on screen dozens of times per test.
+			if anyOutOfScope {
+				fmt.Println(models.RenderOutOfScopeDestinationCauses("  "))
+			}
 		}
 	}
 	fmt.Println()
@@ -1283,11 +1300,22 @@ func printMismatchReport(r *models.MockMismatchReport) {
 		fmt.Println("  Outgoing call mock was not matched")
 		return
 	}
+	// When nothing in the compared set targets this destination there is no
+	// meaningful "closest mock": the matcher picked the least-distant mock in
+	// the pool, which belongs to a DIFFERENT upstream. Naming it in the
+	// heading and rendering a side-by-side diff against it invites the reader
+	// to reconcile two requests that were never related — the first cut of
+	// this diagnostic fixed only the hint and left that diff leading the
+	// output. The structured evidence (ClosestMock, FieldDiffs, both rendered
+	// requests) stays on the report object for the yaml/platform consumers;
+	// only this human rendering suppresses it.
+	outOfScope := r.DestinationScope == models.DestinationScopeNotInComparedSet
+
 	heading := fmt.Sprintf("  Mock mismatch: [%s] %s", r.Protocol, r.ActualSummary)
 	if r.Destination != "" {
 		heading += fmt.Sprintf("  →  %s", r.Destination)
 	}
-	if r.ClosestMock != "" {
+	if r.ClosestMock != "" && !outOfScope {
 		heading += fmt.Sprintf("   (closest mock: %s)", r.ClosestMock)
 	}
 	if r.MatchPhase != "" {
@@ -1300,6 +1328,14 @@ func printMismatchReport(r *models.MockMismatchReport) {
 	fmt.Println(heading)
 
 	switch {
+	case outOfScope:
+		// Say why the diff is missing, so its absence reads as a deliberate
+		// answer rather than a renderer that gave up — but say it in six
+		// words: the hint printed immediately below already opens with "No
+		// recorded <protocol> mock in the compared set targets <host>." and a
+		// full second copy of that sentence, once per missed call, was pure
+		// duplication.
+		fmt.Println("  (closest-mock diff omitted — see hint)")
 	case r.ClosestMockReq != "" && r.ReceivedReq != "":
 		printRequestDiff(r.ClosestMock, r.ClosestMockReq, r.ReceivedReq)
 	case len(r.FieldDiffs) > 0:

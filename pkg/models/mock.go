@@ -2,6 +2,8 @@ package models
 
 import (
 	"encoding/gob"
+	"net/url"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -221,6 +223,54 @@ type TestModeInfo struct {
 
 func (m *Mock) GetKind() string {
 	return string(m.Kind)
+}
+
+// RecordedDestination reads the upstream authority a recorded mock was
+// captured against — "which host did this mock's call go to?" — for the
+// destination-scope diagnostic (see pkg/agent/proxy/integrations/mismatch).
+//
+// ok is false when the answer is UNKNOWN, and the caller must treat that as
+// "undecidable", never as "no destination": one mock whose host cannot be
+// read could be the very mock that targeted the live call, so it has to veto
+// the verdict rather than count as evidence. Today only HTTP mocks carry a
+// readable destination — the other protocols' recorded specs keep no
+// authority at all (Mongo/MySQL/Postgres store wire payloads, Generic stores
+// opaque buffers) — so every non-HTTP kind answers "unknown".
+//
+// Header Host first, URL authority second: the recorder stores an HTTP
+// request path-only ("/api/orders?id=90") with the authority in the
+// Host header, but a mock captured through a forward proxy carries an
+// absolute URL instead.
+func (m *Mock) RecordedDestination() (string, bool) {
+	if m == nil || m.Kind != Kind(HTTP) || m.Spec.HTTPReq == nil {
+		return "", false
+	}
+	// Case-insensitive lookup: recorded mock headers are a plain map (no
+	// textproto canonicalisation), so the key's case depends on whichever
+	// recorder wrote it.
+	//
+	// The two conventional spellings are probed directly first: the fallback
+	// scan below is O(headers) with a strings.EqualFold per key, and a real
+	// recorded request carries far more headers than a test fixture does, so
+	// the scan's cost grows with them while these two lookups do not. The
+	// scan still runs for anything else ("HOST", "hOst"), so no recording
+	// stops being readable.
+	h := m.Spec.HTTPReq.Header
+	if v := h["Host"]; v != "" {
+		return v, true
+	}
+	if v := h["host"]; v != "" {
+		return v, true
+	}
+	for k, v := range h {
+		if strings.EqualFold(k, "Host") && v != "" {
+			return v, true
+		}
+	}
+	if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
+		return u.Host, true
+	}
+	return "", false
 }
 
 type MockSpec struct {
