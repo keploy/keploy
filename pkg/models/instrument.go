@@ -312,8 +312,14 @@ type SetupOptions struct {
 	// config.Record.RecordBuffer.ConsumerStallGrace. See
 	// RecordBufferMaxMemoryPerConn for the propagation rationale.
 	RecordBufferConsumerStallGrace time.Duration
-	ExtraArgs                      []string
-	EnableSampling                 int
+
+	// RecordBufferHalfCloseGrace mirrors
+	// config.RecordBuffer.HalfCloseGrace. Zero means "unset, use the
+	// relay default"; NEGATIVE means "disable half-close", so the value
+	// must be forwarded on != 0 rather than > 0.
+	RecordBufferHalfCloseGrace time.Duration
+	ExtraArgs                  []string
+	EnableSampling             int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF

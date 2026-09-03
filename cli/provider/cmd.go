@@ -359,9 +359,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB).")
 		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recorder-to-parser hand-off channel (default 1024).")
 		cmd.Flags().Duration("consumer-stall-grace", c.cfg.Record.RecordBuffer.ConsumerStallGrace, "How long a closing connection waits on a parser that has stopped draining before abandoning its queued chunks (default 2s).")
+		cmd.Flags().Duration("half-close-grace", c.cfg.Record.RecordBuffer.HalfCloseGrace, "How long a half-closed connection keeps copying the other direction while it is IDLE, before giving up (default 10s). Every forwarded chunk re-arms it, so a peer that is still answering is never cut off. Negative disables half-close and restores tearing both directions down on the first EOF.")
 		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
 		_ = cmd.Flags().MarkHidden("queue-size")
 		_ = cmd.Flags().MarkHidden("consumer-stall-grace")
+		_ = cmd.Flags().MarkHidden("half-close-grace")
 
 	default:
 		return errors.New("unknown command name")
@@ -398,6 +400,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB). Bump if you see per_conn_cap drops.")
 		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recorder-to-parser hand-off channel (default 1024). Does not bound recording; raise max-memory-per-conn for per_conn_cap drops.")
 		cmd.Flags().Duration("consumer-stall-grace", c.cfg.Record.RecordBuffer.ConsumerStallGrace, "How long a closing connection waits on a parser that has stopped draining before abandoning its queued chunks (default 2s). Bounds stalled time, not elapsed time, and is only consulted after close.")
+		cmd.Flags().Duration("half-close-grace", c.cfg.Record.RecordBuffer.HalfCloseGrace, "How long a half-closed connection keeps copying the other direction while it is IDLE, before giving up (default 10s). Every forwarded chunk re-arms it, so a peer that is still answering is never cut off. Negative disables half-close and restores tearing both directions down on the first EOF.")
 		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
 		_ = cmd.Flags().MarkHidden("queue-size")
 		_ = cmd.Flags().MarkHidden("consumer-stall-grace")
@@ -503,6 +506,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"maxMemoryPerConnection":    "max-memory-per-conn",
 		"queueSize":                 "queue-size",
 		"consumerStallGrace":        "consumer-stall-grace",
+		"halfCloseGrace":            "half-close-grace",
 		"appId":                     "app-id",
 		"appName":                   "app-name",
 		"generateGithubActions":     "generate-github-actions",

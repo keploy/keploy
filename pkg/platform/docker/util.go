@@ -184,6 +184,11 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	if opts.RecordBufferConsumerStallGrace > 0 {
 		recordBufferFlags += " --consumer-stall-grace " + opts.RecordBufferConsumerStallGrace.String()
 	}
+	// != 0, not > 0: a NEGATIVE half-close grace is the documented way to
+	// disable half-close, so it has to reach the agent.
+	if opts.RecordBufferHalfCloseGrace != 0 {
+		recordBufferFlags += " --half-close-grace " + opts.RecordBufferHalfCloseGrace.String()
+	}
 
 	// Forward upstream TLS verification to the containerised agent — same
 	// argv-only propagation channel as recordBufferFlags above.

@@ -135,6 +135,7 @@ record:
     # a healthy connection never pays it. Zero falls through to the
     # built-in default (2s).
     consumerStallGrace: 2s
+    halfCloseGrace: 10s
 async:
     lanes: []
 configPath: ""

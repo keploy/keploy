@@ -21,8 +21,17 @@
 //
 // Lifecycle ownership: callers (proxy.go) create the Relay, pass in the
 // real net.Conns, and call [Relay.Run]. The Relay does NOT close the
-// real sockets on parser misbehavior or on its own Run returning — it
-// only reads and writes them. Callers close them at connection end.
+// real sockets on parser misbehavior or on its own Run returning —
+// callers close them at connection end.
+//
+// One qualification: the relay does half-close them. When one direction
+// reaches a clean EOF it calls CloseWrite on the conn that direction was
+// writing to, forwarding the peer's FIN so a client that did
+// shutdown(SHUT_WR) still receives its reply (see
+// [Config.HalfCloseGrace]). That shuts only the write half and leaves
+// the conn readable and closable, so full ownership still sits with the
+// caller — but "only reads and writes them" is no longer the whole
+// story.
 //
 // This package is wired into the record path via the V2 dispatcher
 // (see ../proxy_v2.go::recordViaSupervisor). V2-capable parsers
@@ -30,4 +39,11 @@
 // run inside a supervisor attached to a Relay; legacy parsers
 // continue on the pre-V2 path unchanged. The KEPLOY_NEW_RELAY=off
 // env var forces legacy routing for all parsers as a rollback knob.
+//
+// Note that the legacy path handles half-close differently rather than
+// identically: it waits for both directions instead of tearing the
+// second down, so it does not LOSE the reply — but it never forwards
+// the FIN either, so an EOF-delimited peer never learns the request
+// ended and the connection hangs until external teardown. Rolling back
+// to it trades one half-close defect for another.
 package relay

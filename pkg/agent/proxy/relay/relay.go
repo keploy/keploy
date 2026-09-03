@@ -90,6 +90,12 @@ type Relay struct {
 	stashedC2D []stashedPayload
 	stashedD2C []stashedPayload
 
+	// forwarded counts chunks successfully written to a real peer. The
+	// half-close grace watches it so the bound is on IDLE time rather
+	// than total time: a peer that is still streaming a response must
+	// never be cut off mid-body.
+	forwarded atomic.Uint64
+
 	// seqC2D and seqD2C are the per-direction monotonic Chunk sequence
 	// numbers, scoped to this connection.
 	seqC2D atomic.Uint64
@@ -359,26 +365,79 @@ func (r *Relay) run(ctx context.Context) error {
 	var stopOnce sync.Once
 	closeStopping := func() { stopOnce.Do(func() { close(stopping) }) }
 
+	// bothDone lets a half-close grace timer stop as soon as the other
+	// forwarder has returned, instead of always running to term.
+	bothDone := make(chan struct{})
+	var graceWG sync.WaitGroup
+
+	// onForwarderExit decides what a finished forwarder does to its
+	// peer, and it is where TCP half-close is honoured.
+	//
+	// A clean EOF means "this side has finished WRITING", not "this
+	// connection is over". A client that does shutdown(SHUT_WR) —
+	// Node's socket.end(data), Python's sock.shutdown(SHUT_WR), any
+	// request/EOF/response protocol — then waits for the reply. Tearing
+	// the other direction down here discards that reply, and the
+	// application sees its connection close before the answer arrives.
+	// That is a silent, protocol-level data loss for every such app.
+	//
+	// So on EOF we forward the FIN (CloseWrite on the conn this
+	// direction was writing to) and let the opposite direction keep
+	// copying. The peer learns the request is complete, answers, and
+	// closes; the other forwarder then reads its own EOF and the
+	// connection winds down naturally.
+	//
+	// The grace timer is not optional. If the peer answers neither with
+	// data nor with a FIN, the surviving forwarder stays parked in Read
+	// forever — which is the ~60s hang the unconditional teardown was
+	// added to prevent in the first place. Bounding the wait keeps that
+	// protection while giving a well-behaved peer time to reply.
+	//
+	// Anything that is NOT a clean EOF (a read error, a write error, a
+	// dead peer) keeps the original immediate teardown: there is no
+	// half-open state to preserve when the connection is already broken.
+	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[net.Conn]) {
+		if r.cfg.HalfCloseGrace < 0 || !errors.Is(err, io.EOF) || !halfCloseWrite(writeSide.Load()) {
+			closeStopping()
+			r.nudgeDeadline(nudgeSide.Load())
+			return
+		}
+		if log := r.cfg.Logger; log != nil {
+			log.Debug("relay: peer half-closed; forwarding FIN and draining the opposite direction",
+				zap.Duration("grace", r.cfg.HalfCloseGrace),
+			)
+		}
+		graceWG.Add(1)
+		go func() {
+			defer graceWG.Done()
+			r.awaitHalfCloseIdle(ctx, stopping, bothDone)
+			closeStopping()
+			r.nudgeDeadline(nudgeSide.Load())
+		}()
+	}
+
 	// Forwarder src → dst (Dir=FromClient).
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
-		defer closeStopping()
-		defer r.nudgeDeadline(r.dst.Load())
-		recordErr(r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D))
+		err := r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D)
+		recordErr(err)
+		onForwarderExit(err, &r.dst, &r.dst)
 	}()
 
 	// Forwarder dst → src (Dir=FromDest).
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
-		defer closeStopping()
-		defer r.nudgeDeadline(r.src.Load())
-		recordErr(r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C))
+		err := r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C)
+		recordErr(err)
+		onForwarderExit(err, &r.src, &r.src)
 	}()
 
 	// Block until both forwarders exit.
 	wgForward.Wait()
+	close(bothDone)
+	graceWG.Wait()
 
 	// Now it is safe to stop the tees: no more push() calls will
 	// fire. Close staging channels and wait for drain goroutines to
@@ -627,6 +686,7 @@ func (r *Relay) forward(
 			}
 
 			r.cfg.BumpActivity()
+			r.forwarded.Add(1)
 		}
 
 		if err != nil {
@@ -854,6 +914,97 @@ func (r *Relay) endPause() {
 	// and post-Read pauses would tee into the parser FakeConn even
 	// when they shouldn't).
 	r.preDispatchActive.Store(false)
+}
+
+// awaitHalfCloseIdle blocks until the surviving direction has been
+// IDLE for HalfCloseGrace — or until the connection ends by itself.
+//
+// The bound is on idle time, not total time, and that distinction is
+// the whole safety of this feature. A total bound cuts the surviving
+// direction off mid-response: measured on an upstream streaming 1 KiB
+// every 50ms against a 500ms bound, the client received half its body.
+// Worse, it does so SILENTLY — proxy.go closes the client socket once
+// Run returns, so an EOF-delimited protocol (exactly the shape that
+// motivated half-close support) sees a clean EOF on a truncated body
+// and believes it complete, and keploy records the truncation as a
+// mock. That converts a loud failure into corrupt user traffic and a
+// corrupt recording, which is far worse than the bug being fixed.
+//
+// Watching Relay.forwarded keeps the protection that matters — a peer
+// that says nothing at all is still bounded — while letting a peer that
+// is actively answering take as long as it needs.
+func (r *Relay) awaitHalfCloseIdle(ctx context.Context, stopping <-chan struct{}, bothDone <-chan struct{}) {
+	grace := r.cfg.HalfCloseGrace
+	// Poll well inside the grace so a burst of progress cannot be
+	// missed between ticks, but never so fast that a long quiet wait
+	// spins.
+	tick := grace / 4
+	if tick < 25*time.Millisecond {
+		tick = 25 * time.Millisecond
+	}
+	t := time.NewTicker(tick)
+	defer t.Stop()
+
+	last := r.forwarded.Load()
+	idle := time.Duration(0)
+	for {
+		select {
+		case <-bothDone:
+			return
+		case <-ctx.Done():
+			return
+		case <-stopping:
+			return
+		case <-t.C:
+			if now := r.forwarded.Load(); now != last {
+				last = now
+				idle = 0 // the peer is answering; give it room
+				continue
+			}
+			if idle += tick; idle >= grace {
+				return
+			}
+		}
+	}
+}
+
+// closeWriter is the half-close capability. *net.TCPConn, *tls.Conn and
+// *net.UnixConn all implement it; a wrapper that does not is simply not
+// half-closable and falls back to the original teardown.
+type closeWriter interface {
+	CloseWrite() error
+}
+
+// halfCloseWrite forwards a FIN on c — telling the peer "no more data
+// from this side" while leaving the peer free to keep sending. Reports
+// whether the half-close actually happened; false means the caller must
+// fall back to tearing the connection down.
+//
+// Unwrapping matters: the relay is handed conns that may be wrapped for
+// safety or accounting, and a wrapper that forwards Read/Write but not
+// CloseWrite would silently cost every connection its half-close. Any
+// wrapper exposing NetConn() (the convention *tls.Conn established) is
+// followed to the conn underneath.
+func halfCloseWrite(c *net.Conn) bool {
+	if c == nil || *c == nil {
+		return false
+	}
+	conn := *c
+	for i := 0; i < 4; i++ { // bounded: wrappers nest, cycles must not hang
+		if cw, ok := conn.(closeWriter); ok {
+			return cw.CloseWrite() == nil
+		}
+		u, ok := conn.(interface{ NetConn() net.Conn })
+		if !ok {
+			return false
+		}
+		inner := u.NetConn()
+		if inner == nil || inner == conn {
+			return false
+		}
+		conn = inner
+	}
+	return false
 }
 
 // clearDeadline drops any read deadline previously installed on the

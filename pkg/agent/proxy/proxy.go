@@ -320,6 +320,13 @@ type Proxy struct {
 	// package's DefaultConsumerStallGrace via withDefaults().
 	recordBufferStallGrace time.Duration
 
+	// recordBufferHalfCloseGrace mirrors
+	// config.RecordBuffer.HalfCloseGrace and is handed to every relay as
+	// relay.Config.HalfCloseGrace. Zero means "use the relay default";
+	// negative disables half-close, so it is NOT clamped to zero the way
+	// recordBufferStallGrace is.
+	recordBufferHalfCloseGrace time.Duration
+
 	// cbshim is the eBPF-backed channel-binding shim. When non-nil,
 	// upstream-TLS-handshake captures publish (mitm_hash, real_hash)
 	// pairs into its BPF map so SCRAM-SHA-256-PLUS auth succeeds across
@@ -927,6 +934,9 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		logger,
 		opts.Record.RecordBuffer.ConsumerStallGrace,
 	)
+	// Passed through unclamped: zero and negative both carry meaning
+	// (relay default / disabled), and relay.withDefaults resolves them.
+	proxy.recordBufferHalfCloseGrace = opts.Record.RecordBuffer.HalfCloseGrace
 
 	// Upstream TLS verification (record.upstreamTls). Only the PRECEDENCE is
 	// settled here; nothing is read off disk (see upstreamTLSOnce).
