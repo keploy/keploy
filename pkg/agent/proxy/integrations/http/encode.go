@@ -154,23 +154,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		for {
 			if memoryguard.IsRecordingPaused() {
 				h.Logger.Debug("memory pressure detected, stopping HTTP recording and falling back to passthrough")
-				done := make(chan struct{}, 2)
-				cp := func(dst, src net.Conn) {
-					_, err := io.Copy(dst, src)
-					// Forward the FIN on a clean copy: an
-					// EOF-delimited peer only learns the request
-					// ended when it arrives. Gated on err==nil so a
-					// truncated request is never reported as
-					// complete. See util.CloseWriteIfPossible.
-					if err == nil {
-						_ = proxyutil.CloseWriteIfPossible(dst)
-					}
-					done <- struct{}{}
-				}
-				go cp(destConn, clientConn)
-				go cp(clientConn, destConn)
-				<-done
-				<-done
+				relayRawPassthrough(clientConn, destConn)
 				return nil
 			}
 
@@ -453,4 +437,32 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		}
 		return err
 	}
+}
+
+// relayRawPassthrough copies both directions to completion and forwards
+// each side's FIN, for the memory-pressure fallback where nothing is
+// captured.
+//
+// Extracted so it can be tested. Inline inside the memoryguard branch it
+// was unreachable from a unit test — memoryguard's paused flag is
+// unexported — so the FIN forwarding here was shipped uncovered, which is
+// exactly how the same one-liner went out as a silent no-op elsewhere in
+// this change.
+//
+// The FIN is gated on a clean io.Copy: a read error, a reset, or a failed
+// write to the peer all exit that loop too, and forwarding a FIN for those
+// tells the peer "the request is complete" about a truncated message.
+func relayRawPassthrough(clientConn, destConn net.Conn) {
+	done := make(chan struct{}, 2)
+	cp := func(dst, src net.Conn) {
+		_, err := io.Copy(dst, src)
+		if err == nil {
+			_ = proxyutil.CloseWriteIfPossible(dst)
+		}
+		done <- struct{}{}
+	}
+	go cp(destConn, clientConn)
+	go cp(clientConn, destConn)
+	<-done
+	<-done
 }
