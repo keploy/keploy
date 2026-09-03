@@ -339,6 +339,20 @@ cleanup_compose
 section "Generating Keploy config"
 "$KEPLOY_BIN" config --generate
 
+# Measure the path REAL USERS get: mapping-based mock filtering ON (the shipped
+# default, config/default.go `disableMapping: false`). It records a mappings.yaml
+# and, on replay, loads only each test's mapped mocks (disk.LoadByNames) instead
+# of scanning the whole corpus — proven ~4.8x faster on a 3255-test/16.5k-mock
+# set. The go-memory-load-mysql sample commits `disableMapping: true`, and
+# `config --generate` will NOT overwrite an existing keploy.yml non-interactively
+# (it prompts), so without this the perf lane would silently measure the
+# ~5x-slower full-scan fallback — a misleading regression baseline. Force it on.
+if [ -f keploy.yml ] && grep -qE '^[[:space:]]*disableMapping:[[:space:]]*true' keploy.yml; then
+    sed -i 's/^\([[:space:]]*\)disableMapping:[[:space:]]*true/\1disableMapping: false/' keploy.yml
+    echo "Forced disableMapping: false (measure the mapping-ON path users get)"
+fi
+echo "Effective mapping config: $(grep -E 'disableMapping' keploy.yml || echo 'disableMapping unset -> default false (on)')"
+
 # ---------------------------- RECORD -------------------------------------
 section "RECORD: starting keploy record"
 run_with_keploy_privileges "$KEPLOY_BIN" record -c "docker compose up" \
@@ -367,6 +381,16 @@ wait "$record_pid" || true
 check_for_fatal "$RECORD_LOG"
 check_recorded_tests
 
+# Assert the recording produced a mappings.yaml — otherwise replay silently falls
+# back to the full-corpus scan and the ratio below reflects the slow path, not the
+# path users get. Non-fatal (report-only lane), but loud so it can't mislead.
+MAPPINGS_FILE="$(find keploy -name mappings.yaml 2>/dev/null | head -1)"
+if [ -n "$MAPPINGS_FILE" ]; then
+    echo "OK: recording produced $MAPPINGS_FILE ($(wc -l < "$MAPPINGS_FILE") lines) — replay will narrow the pool per test."
+else
+    echo "::warning::No mappings.yaml was recorded — replay will use the full-corpus scan (SLOW path). The ratio below is NOT the mapping-on path users get."
+fi
+
 # ---------------------------- REPLAY -------------------------------------
 section "REPLAY: preparing"
 cleanup_compose
@@ -387,6 +411,20 @@ wait "$replay_pid" || true
 check_for_fatal "$REPLAY_LOG"
 REPLAY_SECONDS="$(parse_replay_seconds "$REPLAY_LOG")"
 echo "Replay execution wall-clock: ${REPLAY_SECONDS}s"
+
+# Assert replay actually used mapping-based narrowing (the path we intend to
+# measure). keploy logs "Successfully loaded test-mock mappings" at INFO when the
+# mapping strategy activates; its absence means replay fell back to the slow
+# full-corpus scan, so the ratio is not comparable across runs. Report-only but
+# recorded in the machine summary as MAPPING_ACTIVE so a silent fallback is
+# visible rather than mistaken for a regression.
+if grep -qiE "Successfully loaded test-mock mappings|mapping-based mock filtering" "$REPLAY_LOG"; then
+    MAPPING_ACTIVE=yes
+    echo "OK: replay used mapping-based narrowing (per-test pool = mapped mocks only)."
+else
+    MAPPING_ACTIVE=no
+    echo "::warning::Replay did NOT activate mapping-based narrowing — it scanned the full corpus (SLOW path). Ratio is the fallback-path number, not the user default."
+fi
 
 collect_replay_profile
 
@@ -413,6 +451,7 @@ echo "RECORD=${RECORD_SECONDS} REPLAY=${REPLAY_SECONDS} RATIO=${RATIO} TARGET=${
     echo "VERDICT=${VERDICT}"
     echo "RECORDED_TESTS=${RECORDED_TESTS:-0}"
     echo "REQUESTS_SENT=${REQUESTS_SENT}"
+    echo "MAPPING_ACTIVE=${MAPPING_ACTIVE:-unknown}"
     echo "REQUESTS_OK=${REQUESTS_OK}"
     echo "ITERATIONS=${PERF_ITERATIONS}"
     echo "REPLAY_DELAY=${REPLAY_DELAY}"
