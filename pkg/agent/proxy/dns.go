@@ -377,6 +377,28 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.Error(fwdErr))
 		}
+		// grpc-go probes _grpc_config.<target> for a service-config TXT record on
+		// EVERY target, and the absence of that record is the normal answer —
+		// it means "no service config, use defaults". defaultDNSResponse below
+		// already returns exactly that, so for this query the synthetic answer
+		// is COMPLETE, not a degraded fallback.
+		//
+		// Reporting it as a missing mock therefore fails a replay that is
+		// behaving correctly: every gRPC test case in a stock grpc-go
+		// application reports two DNS mismatches it can do nothing about. That
+		// is what the first run of the integrations gRPC e2e lane hit — every
+		// test case failed on "Mock mismatch: [DNS] TXT _grpc_config.upstream"
+		// without a single gRPC assertion being reached.
+		//
+		// Narrow on purpose: only the _grpc_config probe. A missing TXT mock for
+		// any other name is still a real miss, because an application that reads
+		// its own TXT records would be silently served an empty answer.
+		if isGrpcServiceConfigProbe(question) {
+			p.logger.Debug("no mock for the gRPC service-config TXT probe; "+
+				"an empty TXT answer is the correct, complete response",
+				zap.String("query", question.Name))
+			return p.defaultDNSResponse(question)
+		}
 		if mockingEnabled {
 			// Send mock not found error if we couldn't match any DNS
 			// mock and upstream forwarding also failed.
@@ -417,6 +439,15 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// any other mode -> best-effort defaults
 		return p.defaultDNSResponse(question)
 	}
+}
+
+// isGrpcServiceConfigProbe reports whether q is grpc-go's service-config
+// lookup: a TXT query for _grpc_config.<target>.
+//
+// grpc-go's default (dns) resolver issues one per target. The record has no
+// bearing on the RPCs keploy captures, and its absence is the normal answer.
+func isGrpcServiceConfigProbe(q dns.Question) bool {
+	return q.Qtype == dns.TypeTXT && strings.HasPrefix(strings.ToLower(q.Name), "_grpc_config.")
 }
 
 func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
