@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -338,21 +339,29 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 }
 
 func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
-	readErr := errors.New("failed to read HTTP headers")
-
 	// Read the incoming data (headers)
 	initialBuf, err := ReadBytes(ctx, logger, conn)
 
 	// Early return if we receive EOF with no data
 	if err == io.EOF && len(initialBuf) == 0 {
 		logger.Debug("received EOF, closing conn", zap.Error(err))
-		return nil, readErr
+		return nil, fmt.Errorf("failed to read HTTP headers: %w", err)
 	}
 
 	// Handle errors other than EOF
 	if err != nil && err != io.EOF {
-		utils.LogError(logger, err, "failed to read HTTP headers")
-		return nil, readErr
+		// %w, NOT a bare errors.New. Callers classify this with errors.Is to
+		// decide whether a read that ended is an ordinary teardown or a fault;
+		// a bare error makes every teardown indistinguishable from a fault and
+		// they all get logged at ERROR. Log at Debug here when the cause is an
+		// ordinary close, so the caller's own classification is the only one
+		// that speaks.
+		if isBenignReadErr(err) {
+			logger.Debug("connection ended while reading HTTP headers", zap.Error(err))
+		} else {
+			utils.LogError(logger, err, "failed to read HTTP headers")
+		}
+		return nil, fmt.Errorf("failed to read HTTP headers: %w", err)
 	}
 
 	// Check if the initial buffer already contains complete headers
@@ -373,7 +382,7 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 			// Check if the connection is nil
 			if conn == nil {
 				logger.Debug("the conn is nil")
-				return nil, readErr
+				return nil, errors.New("failed to read HTTP headers: connection is nil")
 			}
 			// Read more data until we find the header end sequence
 			part, err := ReadBytes(ctx, logger, conn)
@@ -381,8 +390,12 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 				if err == io.EOF && len(part) == 0 {
 					break // EOF reached, but nothing more to read
 				}
-				utils.LogError(logger, err, "error while reading HTTP headers")
-				return nil, readErr
+				if isBenignReadErr(err) {
+					logger.Debug("connection ended while reading HTTP headers", zap.Error(err))
+				} else {
+					utils.LogError(logger, err, "error while reading HTTP headers")
+				}
+				return nil, fmt.Errorf("failed to read HTTP headers: %w", err)
 			}
 
 			// Append the new data to the buffer
@@ -397,9 +410,38 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 	}
 }
 
-func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
-	readErr := errors.New("failed to read the initial request buffer")
+// isBenignReadErr reports whether a read ended because the connection was torn
+// down in the ordinary way, rather than because something failed.
+//
+// It exists so ReadInitialBuf / ReadHTTPHeadersUntilEnd stop logging keploy's
+// OWN teardown as a fault: the proxy cancels each connection's parser context
+// and closes the socket at the end of a connection's life, which surfaces here
+// as net.ErrClosed or context.Canceled.
+//
+// Deliberately identity-based (errors.Is). Substring checks are the last resort
+// for Windows/driver errors that carry no sentinel. Timeouts are NOT included:
+// a deadline expiring mid-stream can mean a parser hung, which must stay loud.
+func isBenignReadErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
+		errors.Is(err, io.ErrClosedPipe), errors.Is(err, net.ErrClosed),
+		errors.Is(err, context.Canceled),
+		errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.ECONNABORTED),
+		errors.Is(err, syscall.EPIPE):
+		return true
+	}
+	e := err.Error()
+	return strings.Contains(e, "use of closed network connection") ||
+		strings.Contains(e, "connection reset by peer") ||
+		strings.Contains(e, "broken pipe") ||
+		strings.Contains(e, "wsarecv") || strings.Contains(e, "wsasend") ||
+		strings.Contains(e, "forcibly closed by the remote host")
+}
 
+func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
 	initialBuf, err := ReadBytes(ctx, logger, conn)
 
 	if err == io.EOF && len(initialBuf) == 0 {
@@ -408,8 +450,17 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 	}
 
 	if err != nil && err != io.EOF {
-		utils.LogError(logger, err, "failed to read the request message in proxy")
-		return nil, readErr
+		// %w, NOT a bare errors.New. See ReadHTTPHeadersUntilEnd: the proxy's
+		// isShutdownError / isNetworkClosedErr classifiers are correct, but a
+		// bare error reaches them as the literal string "failed to read the
+		// initial request buffer", which matches nothing — so every ordinary
+		// teardown was reported twice at ERROR.
+		if isBenignReadErr(err) {
+			logger.Debug("connection ended while reading the initial request buffer", zap.Error(err))
+		} else {
+			utils.LogError(logger, err, "failed to read the request message in proxy")
+		}
+		return nil, fmt.Errorf("failed to read the initial request buffer: %w", err)
 	}
 
 	return initialBuf, nil

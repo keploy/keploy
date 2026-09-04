@@ -1776,12 +1776,21 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				defer p.activeConns.Done()
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
-				if err != nil && err != io.EOF {
+				// errors.Is, not ==: a wrapped io.EOF (fmt.Errorf("...: %w", io.EOF))
+				// slipped past the == comparison and was reported as a fault.
+				if err != nil && !errors.Is(err, io.EOF) {
 					// Network closed errors are expected when client closes connection (e.g., app shutdown)
 					// Only log as error if it's not a shutdown/network closed error
-					if isShutdownError(err) || isNetworkClosedErr(err) {
+					switch {
+					case isShutdownError(err) || isNetworkClosedErr(err):
 						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
-					} else {
+					case errors.Is(err, models.ErrNoMockMatched):
+						// A miss is already surfaced once, with the full structured
+						// diff, by sendMockNotFoundError. Re-logging it here at ERROR
+						// reported one miss three times and buried the diagnostic
+						// that actually tells you what changed.
+						p.logger.Debug("client connection ended on a mock miss", zap.Error(err))
+					default:
 						utils.LogError(p.logger, err, "failed to handle the client connection")
 					}
 				}
@@ -2467,7 +2476,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// attempt to read conn until buffer is either filled or conn is closed
 	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
 	if err != nil {
-		utils.LogError(logger, err, "failed to read the initial buffer")
+		// A client that opens a connection and closes it without speaking — a
+		// pool pre-warm, a health probe, or keploy's own teardown closing the
+		// socket — is not a failure. It reaches here as io.EOF, net.ErrClosed
+		// or context.Canceled, all of which isShutdownError already recognises
+		// now that ReadInitialBuf wraps with %w instead of replacing the error.
+		if errors.Is(err, io.EOF) || isShutdownError(err) || isNetworkClosedErr(err) {
+			logger.Debug("client closed before sending a request", zap.Error(err))
+		} else {
+			utils.LogError(logger, err, "failed to read the initial buffer")
+		}
 		return err
 	}
 
@@ -2850,8 +2868,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// reports via this hook, replies normally, and keeps serving.
 			testCtx := models.WithMockMismatchReporter(parserCtx, p.sendMockNotFoundError)
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-				utils.LogError(logger, err, "failed to mock the outgoing message")
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
+				// A mock miss is a TEST result, not an infrastructure failure.
+				// sendMockNotFoundError below is the single canonical report —
+				// it emits the WARN carrying the structured diff AND feeds
+				// errChannel, which drives --strict and the end-of-run summary.
+				// Logging ERROR here as well reported the same miss twice and
+				// pushed the useful diff out of view.
+				if errors.Is(err, models.ErrNoMockMatched) {
+					logger.Debug("mock miss reported to the run summary", zap.Error(err))
+				} else {
+					utils.LogError(logger, err, "failed to mock the outgoing message")
+				}
 				// Send specific error type to error channel for external monitoring
 				p.sendMockNotFoundError(err)
 				return err
@@ -2870,8 +2898,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		} else {
 			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-				utils.LogError(logger, err, "failed to mock the outgoing message")
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
+				// A mock miss is a TEST result, not an infrastructure failure.
+				// sendMockNotFoundError below is the single canonical report —
+				// it emits the WARN carrying the structured diff AND feeds
+				// errChannel, which drives --strict and the end-of-run summary.
+				// Logging ERROR here as well reported the same miss twice and
+				// pushed the useful diff out of view.
+				if errors.Is(err, models.ErrNoMockMatched) {
+					logger.Debug("mock miss reported to the run summary", zap.Error(err))
+				} else {
+					utils.LogError(logger, err, "failed to mock the outgoing message")
+				}
 				// Send specific error type to error channel for external monitoring
 				p.sendMockNotFoundError(err)
 				return err
