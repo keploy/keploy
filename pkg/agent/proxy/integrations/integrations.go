@@ -54,6 +54,17 @@ import (
 // parser error there already becomes FallthroughToPassthrough with a
 // correctly activity-scoped orphan window, which is the better shape.
 //
+// Be aware that those legacy sites are no longer reachable for any parser
+// in tree. Every parser the dispatcher can route to record implements
+// IntegrationsV2, and the KEPLOY_NEW_RELAY knob that could force them onto
+// the legacy path has been removed — so in practice a decline is only
+// honoured for an out-of-tree parser that does not implement
+// IntegrationsV2, or for the not-registered guards at the MySQL and
+// generic sites. A V2 parser that returns this sentinel does NOT get the
+// relay-and-restore treatment above; it degrades to
+// FallthroughToPassthrough, which keeps user traffic alive but logs the
+// connection as a retired parser rather than a decline.
+//
 // On replay there is no upstream connection to relay to — every
 // destination dial in handleConnection is mode-gated — so a parser that
 // needs to decline during replay is not yet supported and must not rely

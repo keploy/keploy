@@ -571,7 +571,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				log.Debug("relay: dest-side TLS upgrade failed",
 					zap.Error(err),
 					zap.String("directive_reason", d.Reason),
-					zap.String("next_step", "if the upstream uses a self-signed or private-CA cert, either turn on record.upstreamTls.verify with record.upstreamTls.caCert pointing at its CA PEM (resolved on the agent's filesystem), or leave verification off — the default — and run with KEPLOY_NEW_RELAY=off to fall back to the legacy parser path"),
+					zap.String("next_step", "if the upstream uses a self-signed or private-CA cert, either turn on record.upstreamTls.verify with record.upstreamTls.caCert pointing at its CA PEM (resolved on the agent's filesystem), or leave verification off — the default"),
 				)
 			}
 			// If the client side was upgraded first (Config.ClientTLSFirst),

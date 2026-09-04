@@ -186,9 +186,9 @@ func TestHalfClose_GraceBoundsASilentPeer(t *testing.T) {
 //
 // Operators reach it as record.recordBuffer.halfCloseGrace in keploy.yml
 // or the hidden --half-close-grace flag, so turning it off in the field
-// needs no new build — and specifically does not need
-// KEPLOY_NEW_RELAY=off, which routes to the legacy path where a
-// half-closing client hangs instead.
+// needs no new build. There is no longer an env knob that would route to
+// the legacy path instead (KEPLOY_NEW_RELAY has been removed), and that
+// path hung a half-closing client anyway.
 func TestHalfClose_NegativeGraceOptsOut(t *testing.T) {
 	h := newHalfCloseHarness(t, Config{HalfCloseGrace: -1})
 

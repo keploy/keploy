@@ -882,6 +882,7 @@ func resolveUpstreamTLSConfig(opts *config.Config) (verify bool, caCert string) 
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
+	warnIfRemovedRelayKnobSet(logger)
 	proxy := &Proxy{
 		logger:                    logger,
 		Port:                      opts.ProxyPort,
@@ -997,10 +998,34 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	return proxy
 }
 
-// buildRecordSession constructs a RecordSession for a parser in record mode.
-// It wraps src/dst in SafeConn. The caller (handleConnection) is responsible
-// for creating the TLSUpgrader using pointers to its own srcConn/dstConn
-// variables, so the upgrader updates the correct references on TLS upgrade.
+// warnIfRemovedRelayKnobSet tells an operator that KEPLOY_NEW_RELAY no longer
+// does anything.
+//
+// It was the global V2 rollback: set it to off/0/false/no and every V2-capable
+// parser was forced onto the legacy record path. That knob is gone — every
+// parser the dispatcher can route to record implements IntegrationsV2, and the
+// legacy path it selected hangs EOF-delimited peers because it waits for both
+// copy directions instead of tearing the second down.
+//
+// Silence would be the dangerous outcome: someone reaches for a documented
+// rollback during an incident, sets it, restarts, sees no error, and believes
+// they have rolled back. Say so once, at startup, and name the lever that does
+// still work.
+func warnIfRemovedRelayKnobSet(logger *zap.Logger) {
+	if logger == nil {
+		return
+	}
+	v, ok := os.LookupEnv("KEPLOY_NEW_RELAY")
+	if !ok {
+		return
+	}
+	logger.Warn("KEPLOY_NEW_RELAY is set but has been REMOVED; it is ignored",
+		zap.String("value", v),
+		zap.String("impact", "no rollback is in effect — every parser records through the supervisor + relay path, which is what it would have done without this variable"),
+		zap.String("next_step", "unset KEPLOY_NEW_RELAY. To disable parsing during an incident use KEPLOY_DISABLE_PARSING=1 (or SIGUSR1 on Unix, or the admin endpoint), which routes new connections to raw passthrough"),
+	)
+}
+
 // shouldRecordViaSupervisor is the single decision for "does this parser record
 // through the supervisor + relay, or through the legacy path".
 //
@@ -1011,7 +1036,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 // inverted condition keeps every asserted substring and stays green.
 func shouldRecordViaSupervisor(parser integrations.Integrations) bool {
 	v2, ok := parser.(integrations.IntegrationsV2)
-	return ok && v2.IsV2() && !newRelayDisabled()
+	return ok && v2.IsV2()
 }
 
 // recordMySQLOutgoing dispatches a record-mode MySQL connection that
@@ -1050,6 +1075,37 @@ func (p *Proxy) recordMySQLOutgoing(
 	outgoingOpts models.OutgoingOptions,
 	tlsUpgrader models.TLSUpgrader,
 ) error {
+	// The record-mode parsing kill switch. The matched-parser path has its own
+	// gate far below in handleConnection, but the MySQL PROBE branch returns
+	// before ever reaching it — so without this check KEPLOY_DISABLE_PARSING /
+	// SIGUSR1 / the admin endpoint silently did NOTHING for MySQL on its normal
+	// route. probeMysql's zero-cost fast path is the port check against
+	// MysqlPorts (3306 and 4000 by default), so the probe branch IS the common
+	// MySQL path: an operator set the switch, restarted, and every MySQL
+	// connection was still parsed.
+	//
+	// Gated here rather than at the call site so it covers every caller of this
+	// dispatch function and is reachable from a test. The probe's connections
+	// are adopted unconditionally by the caller, so they already carry any
+	// bytes it consumed.
+	//
+	// util.RelayRawPassthrough, NOT globalPassThrough, for the reason
+	// relayDeclinedConn spells out below: globalPassThrough never calls
+	// CloseWrite and returns on io.EOF, so a client that does shutdown(SHUT_WR)
+	// — the end-of-request signal for every EOF-delimited exchange — has its
+	// connection torn down instead of receiving the reply. Reproduced on this
+	// exact path before the switch: the app half-closed and read back nothing.
+	// The probe's fast path admits by PORT alone (MysqlPorts, 3306/4000 by
+	// default, no content inspection), so any protocol on those ports reaches
+	// here, including half-closing ones.
+	if util.DefaultKillSwitch.Enabled() {
+		mysqlLogger.Debug("record-mode parsing kill switch tripped; relaying raw",
+			zap.String("parser", string(integrations.MYSQL)),
+			zap.String("dispatch_site", "mysql-probe"))
+		util.RelayRawPassthrough(srcConn, dstConn)
+		return nil
+	}
+
 	mysqlParser := p.Integrations[integrations.MYSQL]
 	if shouldRecordViaSupervisor(mysqlParser) {
 		if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, mysqlParser,
@@ -1059,7 +1115,7 @@ func (p *Proxy) recordMySQLOutgoing(
 				mysqlLogger.Debug("V2 record path: connection closed", zap.Error(err))
 			} else {
 				utils.LogError(mysqlLogger, err, "V2 record path failed for the MySQL probe branch",
-					zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force the legacy record path for MySQL while investigating, or KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough)"),
+					zap.String("next_step", "set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough) while investigating"),
 				)
 			}
 			return err
@@ -1214,6 +1270,10 @@ func relayableConn(c net.Conn) bool {
 	return true
 }
 
+// buildRecordSession constructs a RecordSession for a parser in record mode.
+// It wraps src/dst in SafeConn. The caller (handleConnection) is responsible
+// for creating the TLSUpgrader using pointers to its own srcConn/dstConn
+// variables, so the upgrader updates the correct references on TLS upgrade.
 func (p *Proxy) buildRecordSession(
 	srcConn, dstConn net.Conn,
 	mocks chan<- *models.Mock,
@@ -3040,7 +3100,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					} else {
 						utils.LogError(logger, err, "V2 record path failed",
 							zap.String("parser", string(parserType)),
-							zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force the legacy record path for this parser while investigating, or KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough); the supervisor has already fallen through to passthrough for this connection so user traffic continues"),
+							zap.String("next_step", "set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough) while investigating; the supervisor has already fallen through to passthrough for this connection so user traffic continues"),
 						)
 					}
 					return err
@@ -3099,46 +3159,112 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			genericParser := p.Integrations[integrations.GENERIC]
-			// Route through the supervisor exactly like the matched-parser path
-			// above. This branch previously called RecordOutgoing directly with
-			// NO IsV2 gate, so every connection that matched no parser recorded
-			// through generic's LEGACY path — on the default configuration, with
-			// no flag set. Generic has declared IsV2() == true all along; nothing
-			// consulted it here, so the migration silently skipped the widest
-			// code path in the proxy.
-			if shouldRecordViaSupervisor(genericParser) {
-				if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, genericParser, integrations.GENERIC, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts); err != nil {
-					if isNetworkClosedErr(err) {
-						logger.Debug("V2 generic record path: connection closed", zap.Error(err))
-					} else {
-						utils.LogError(logger, err, "V2 generic record path failed",
-							zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force the legacy record path while investigating, or KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough); the supervisor has already fallen through to passthrough for this connection so user traffic continues"),
-						)
-					}
-					return err
-				}
-				logger.Debug("V2 generic record path returned")
-			} else {
-				genericSession := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
-				err := genericParser.RecordOutgoing(parserCtx, genericSession)
-				if errors.Is(err, integrations.ErrParserDeclined) {
-					return p.relayDeclinedConn(parserCtx, err, logger, integrations.GENERIC, genericSession)
-				}
-				if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
-					utils.LogError(logger, err, "failed to record the outgoing message")
-					return err
-				}
-			}
-		} else {
-			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-				utils.LogError(logger, err, "failed to mock the outgoing message")
-				// Send specific error type to error channel for external monitoring
-				p.sendMockNotFoundError(err)
-				return err
-			}
+			return p.recordGenericOutgoing(parserCtx, srcConn, dstConn, rule.MC,
+				parserErrGrp, logger, clientConnID, destConnID, outgoingOpts)
 		}
+		return p.mockGenericOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts, logger)
+	}
+	return nil
+}
+
+// recordGenericOutgoing dispatches a record-mode connection that matched no
+// specific parser to the GENERIC catch-all.
+//
+// It is a function rather than an inlined block for the same reason
+// recordMySQLOutgoing is: inlined, the dispatch decision sat deep inside
+// handleConnection behind an eBPF-resolved destination, so no test could reach
+// it — deleting the unregistered-parser guard below left the whole proxy suite
+// green.
+func (p *Proxy) recordGenericOutgoing(
+	parserCtx context.Context,
+	srcConn, dstConn net.Conn,
+	mocks chan<- *models.Mock,
+	parserErrGrp *errgroup.Group,
+	logger *zap.Logger,
+	clientConnID, destConnID int64,
+	outgoingOpts models.OutgoingOptions,
+) error {
+	genericParser := p.Integrations[integrations.GENERIC]
+	// Route through the supervisor exactly like the matched-parser path. This
+	// branch previously called RecordOutgoing directly with NO IsV2 gate, so
+	// every connection that matched no parser recorded through generic's LEGACY
+	// path — on the default configuration, with no flag set. Generic has
+	// declared IsV2() == true all along; nothing consulted it here, so the
+	// migration silently skipped the widest code path in the proxy.
+	if shouldRecordViaSupervisor(genericParser) {
+		if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, genericParser, integrations.GENERIC, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts); err != nil {
+			if isNetworkClosedErr(err) {
+				logger.Debug("V2 generic record path: connection closed", zap.Error(err))
+			} else {
+				utils.LogError(logger, err, "V2 generic record path failed",
+					zap.String("next_step", "set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough) while investigating; the supervisor has already fallen through to passthrough for this connection so user traffic continues"),
+				)
+			}
+			return err
+		}
+		logger.Debug("V2 generic record path returned")
+		return nil
+	}
+
+	// Generic.IsV2() is unconditionally true, so reaching here means the GENERIC
+	// parser is not registered at all — and the legacy call below would nil-panic
+	// on the interface. The MySQL dispatch site guards the same case; this one
+	// did not, and with the KEPLOY_NEW_RELAY rollback removed an unregistered
+	// build is the ONLY way to get here, so the branch's sole remaining
+	// reachable state was a crash.
+	//
+	// Treat it as a decline, not a failure: relay the connection rather than
+	// letting the caller's deferred close drop it.
+	if genericParser == nil {
+		declined := fmt.Errorf("no generic parser is registered: %w", integrations.ErrParserDeclined)
+		return p.relayDeclinedConn(parserCtx, declined, logger, integrations.GENERIC,
+			p.buildRecordSession(srcConn, dstConn, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil))
+	}
+
+	genericSession := p.buildRecordSession(srcConn, dstConn, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
+	err := genericParser.RecordOutgoing(parserCtx, genericSession)
+	if errors.Is(err, integrations.ErrParserDeclined) {
+		return p.relayDeclinedConn(parserCtx, err, logger, integrations.GENERIC, genericSession)
+	}
+	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
+		utils.LogError(logger, err, "failed to record the outgoing message")
+		return err
+	}
+	return nil
+}
+
+// mockGenericOutgoing serves a replay-mode connection that matched no specific
+// parser from the GENERIC catch-all.
+//
+// Extracted for the same reason as recordGenericOutgoing: inlined in
+// handleConnection, the unregistered-parser guard below was unreachable from a
+// test and deleting it left the whole suite green.
+func (p *Proxy) mockGenericOutgoing(
+	parserCtx context.Context,
+	srcConn net.Conn,
+	dstCfg *models.ConditionalDstCfg,
+	m integrations.MockMemDb,
+	outgoingOpts models.OutgoingOptions,
+	logger *zap.Logger,
+) error {
+	genericParser := p.Integrations[integrations.GENERIC]
+	if genericParser == nil {
+		// Same unregistered-build case the record half guards; without it the
+		// map lookup nil-derefs. There is no upstream connection to relay to on
+		// the replay path (every destination dial in handleConnection is
+		// mode-gated), so report rather than relay — which is what the MySQL
+		// replay site does too.
+		err := errors.New("no generic parser is registered to mock this connection")
+		utils.LogError(logger, err, "failed to mock the outgoing message")
+		p.sendMockNotFoundError(err)
+		return err
+	}
+	err := genericParser.MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
+	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
+		utils.LogError(logger, err, "failed to mock the outgoing message")
+		// Send specific error type to error channel for external monitoring
+		p.sendMockNotFoundError(err)
+		return err
 	}
 	return nil
 }

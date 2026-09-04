@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,15 +95,6 @@ func trackOrphanWhileActive(stop <-chan struct{}, sess orphanWindowOpener, lastF
 			}
 		}
 	}
-}
-
-// newRelayDisabled reports whether the new supervisor+relay architecture
-// is disabled via environment. Set KEPLOY_NEW_RELAY to 0/false/off/no to
-// force the legacy path even for parsers that implement IntegrationsV2.
-// Any other value (or unset) enables the new path.
-func newRelayDisabled() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("KEPLOY_NEW_RELAY")))
-	return v == "0" || v == "false" || v == "off" || v == "no"
 }
 
 // recordViaSupervisor runs a V2-capable parser's RecordOutgoing inside
@@ -438,7 +427,7 @@ func (p *Proxy) recordViaSupervisor(
 				zap.String("parser", string(parserType)),
 				zap.String("status", result.Status.String()),
 				zap.String("clientConnID", svSess.ClientConnID),
-				zap.String("next_step", "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection, so tests recorded against it are dropped rather than shipped unreplayable. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_NEW_RELAY=off to force the legacy path for this parser, or KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely"),
+				zap.String("next_step", "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection, so tests recorded against it are dropped rather than shipped unreplayable. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"),
 			)
 		}
 		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close",

@@ -49,7 +49,8 @@ func TestMySQLV2_FullStackAgainstARealServer(t *testing.T) {
 		// wrapDest mirrors how handleConnection hands the destination to
 		// the dispatcher.
 		wrapDest func(net.Conn, *zap.Logger) (net.Conn, error)
-		// relayOff sets KEPLOY_NEW_RELAY, the documented escape hatch.
+		// relayOff sets the REMOVED KEPLOY_NEW_RELAY variable, to prove a
+		// stale value left in an operator's environment is inert.
 		relayOff string
 	}{
 		{
@@ -74,13 +75,13 @@ func TestMySQLV2_FullStackAgainstARealServer(t *testing.T) {
 			},
 		},
 		{
-			// The escape hatch this PR's own error message tells operators to
-			// reach for. Flipping the primary MySQL path to V2 is only safe if
-			// the documented way back still records — and nothing proved that
-			// against a real server. The dispatch test shows the parser is
-			// handed the legacy surface; this shows the legacy surface still
-			// produces mocks.
-			name:     "KEPLOY_NEW_RELAY=off still records via the legacy path",
+			// KEPLOY_NEW_RELAY was the rollback knob, and it is gone. Operators
+			// who set it once will still have it in their environment, so prove
+			// end-to-end against a real server that it no longer diverts
+			// anything: this case must record through the SAME V2 path as
+			// "bare socket", including the strict no-raw-mocks assertion that
+			// the legacy surface used to be exempt from.
+			name:     "a stale KEPLOY_NEW_RELAY=off is inert",
 			wrapDest: func(c net.Conn, _ *zap.Logger) (net.Conn, error) { return c, nil },
 			relayOff: "off",
 		},
@@ -88,13 +89,23 @@ func TestMySQLV2_FullStackAgainstARealServer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.relayOff != "" {
 				t.Setenv("KEPLOY_NEW_RELAY", tc.relayOff)
+				// Assert the DISPATCH DECISION, not just that mocks appear.
+				// MySQL's legacy path also routes its mocks through the
+				// SyncMockManager, so every downstream assertion in
+				// runFullStackMySQL is satisfied on either surface — this case
+				// stayed green with the kill switch restored until this check
+				// was added.
+				if !shouldRecordViaSupervisor(mysqlparser.New(zap.NewNop())) {
+					t.Fatal("a stale KEPLOY_NEW_RELAY in the environment diverted MySQL off " +
+						"the supervisor path; the rollback knob was removed and must be inert")
+				}
 			}
-			runFullStackMySQL(t, tc.wrapDest, tc.relayOff != "")
+			runFullStackMySQL(t, tc.wrapDest)
 		})
 	}
 }
 
-func runFullStackMySQL(t *testing.T, wrapDest func(net.Conn, *zap.Logger) (net.Conn, error), legacy bool) {
+func runFullStackMySQL(t *testing.T, wrapDest func(net.Conn, *zap.Logger) (net.Conn, error)) {
 	addr, user, pass, dbName := mysqlTestTarget(t)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -249,7 +260,7 @@ drain:
 	// Production does not deliver V2 parser mocks down the raw channel.
 	// If this ever fills, RouteMocksViaSyncMock has been turned off and
 	// the session-window buffering that replay depends on is bypassed.
-	if n := len(rawMocks); n != 0 && !legacy {
+	if n := len(rawMocks); n != 0 {
 		t.Errorf("%d mock(s) went down the raw Mocks channel; production routes V2 parser "+
 			"mocks through the SyncMockManager (RouteMocksViaSyncMock), and bypassing it loses "+
 			"the firstReqSeen session window at replay", n)
