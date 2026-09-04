@@ -308,7 +308,39 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 	}
 
-	// Calculate final match status based on remaining differences
+	// Compare grpc-status trailer — this is the canonical gRPC status code.
+	// HTTP/2 :status (always 200 for gRPC) is transport framing and must not
+	// be used as the gRPC status; grpc-status: 0 = OK, non-zero = error.
+	expectedGrpcStatus := parseGrpcStatus(expectedResp.Trailers.OrdinaryHeaders["grpc-status"])
+	actualGrpcStatus := parseGrpcStatus(actualResp.Trailers.OrdinaryHeaders["grpc-status"])
+	result.StatusCode = models.IntResult{
+		Normal:   expectedGrpcStatus == actualGrpcStatus,
+		Expected: expectedGrpcStatus,
+		Actual:   actualGrpcStatus,
+	}
+	if !result.StatusCode.Normal {
+		differences["trailers.grpc-status"] = struct {
+			Expected string
+			Actual   string
+			Message  string
+		}{
+			Expected: strconv.Itoa(expectedGrpcStatus),
+			Actual:   strconv.Itoa(actualGrpcStatus),
+			Message:  "grpc-status mismatch",
+		}
+		currentRisk = models.High
+		currentCategories = append(currentCategories, models.StatusCodeChanged)
+	}
+
+	// Calculate final match status based on remaining differences.
+	//
+	// The grpc-status comparison above MUST stay above this line. It was
+	// below it, so its difference was written after `matched` had already
+	// been decided: a response with a byte-identical body whose grpc-status
+	// flipped 0 -> 13 set result.StatusCode.Normal=false and still returned
+	// matched=true, printing "Testrun passed" for a failed RPC. Moving it up
+	// also gets the mismatch into the diff the user is shown, which it was
+	// previously excluded from.
 	matched := len(differences) == 0
 
 	if !matched {
@@ -396,30 +428,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			currentRisk = models.High
 			currentCategories = append(currentCategories, models.SchemaBroken)
 		}
-	}
-
-	// Compare grpc-status trailer — this is the canonical gRPC status code.
-	// HTTP/2 :status (always 200 for gRPC) is transport framing and must not
-	// be used as the gRPC status; grpc-status: 0 = OK, non-zero = error.
-	expectedGrpcStatus := parseGrpcStatus(expectedResp.Trailers.OrdinaryHeaders["grpc-status"])
-	actualGrpcStatus := parseGrpcStatus(actualResp.Trailers.OrdinaryHeaders["grpc-status"])
-	result.StatusCode = models.IntResult{
-		Normal:   expectedGrpcStatus == actualGrpcStatus,
-		Expected: expectedGrpcStatus,
-		Actual:   actualGrpcStatus,
-	}
-	if !result.StatusCode.Normal {
-		differences["trailers.grpc-status"] = struct {
-			Expected string
-			Actual   string
-			Message  string
-		}{
-			Expected: strconv.Itoa(expectedGrpcStatus),
-			Actual:   strconv.Itoa(actualGrpcStatus),
-			Message:  "grpc-status mismatch",
-		}
-		currentRisk = models.High
-		currentCategories = append(currentCategories, models.StatusCodeChanged)
 	}
 
 	// remove duplicates
