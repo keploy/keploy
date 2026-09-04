@@ -48,10 +48,11 @@ func (c *splitReadConn) CloseWrite() error { return proxyutil.CloseWriteIfPossib
 //
 // Scope it honestly, though. encodeGeneric is reached only via
 // Generic.recordLegacy, which needs session.V2 == nil, and
-// shouldRecordViaSupervisor routes to the supervisor unless
-// newRelayDisabled(). Every in-tree parser reports IsV2() == true, so this
-// path — like http's and mysql's siblings — runs only under
-// KEPLOY_NEW_RELAY=off. It is the rollback, not the default.
+// shouldRecordViaSupervisor routes every parser implementing
+// IntegrationsV2 to the supervisor, and every in-tree parser reports
+// IsV2() == true. With the KEPLOY_NEW_RELAY rollback knob removed there is
+// no way to reach this legacy path from the dispatcher at all; it is kept
+// covered because the code is still reachable by direct construction.
 //
 // Both orientations are driven on purpose. The survivor is whichever
 // direction did NOT report, so the drain has to poll that direction's byte

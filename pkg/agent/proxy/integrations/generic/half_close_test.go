@@ -13,8 +13,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// The legacy generic path is what KEPLOY_NEW_RELAY=off routes to, so it
-// is the rollback for the V2 relay's half-close support. It is broken
+// The legacy generic path is no longer reachable from the dispatcher —
+// the KEPLOY_NEW_RELAY rollback knob that routed to it has been removed.
+// It is still covered here because the code exists and is broken
 // differently from the relay rather than identically: it waits for BOTH
 // copy directions instead of tearing the second down, so it never lost
 // the reply — but it never forwarded the FIN either, so an EOF-delimited

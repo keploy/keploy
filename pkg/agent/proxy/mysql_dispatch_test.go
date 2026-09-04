@@ -82,8 +82,10 @@ func TestMySQLProbeBranchRoutesByShouldRecordViaSupervisor(t *testing.T) {
 			why: "a parser that opts out must not be handed FakeConns it cannot use",
 		},
 		{
-			name: "KEPLOY_NEW_RELAY=off forces legacy", v2: true, relayOff: "off", wantV2: false,
-			why: "the documented escape hatch must reach this dispatch site too",
+			// The rollback knob was removed. A stale KEPLOY_NEW_RELAY in the
+			// environment must not divert the probe branch back to legacy.
+			name: "the removed rollback knob no longer forces legacy", v2: true, relayOff: "off", wantV2: true,
+			why: "KEPLOY_NEW_RELAY is gone; leaving it set must be inert at this dispatch site too",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -359,4 +361,183 @@ func selfSignedForDispatch(t *testing.T) tls.Certificate {
 		t.Fatalf("createcert: %v", err)
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+// TestMySQLProbeBranchHonoursTheKillSwitch pins that the record-mode parsing
+// kill switch actually disables parsing on the MySQL probe branch.
+//
+// It did not. The only gate on util.DefaultKillSwitch lives in
+// handleConnection's matched-parser section; the probe branch dispatches and
+// returns several hundred lines earlier, so KEPLOY_DISABLE_PARSING / SIGUSR1 /
+// the admin endpoint were silently inert for MySQL on its normal route —
+// probeMysql's zero-cost fast path is the port check against MysqlPorts (3306
+// and 4000 by default), so the probe branch IS the common MySQL path. An
+// operator disabled parsing, restarted, and every MySQL connection was still
+// handed to the parser.
+//
+// The observable is the parser being invoked at all: with the switch tripped it
+// must never be called, whichever surface it would otherwise have been handed.
+func TestMySQLProbeBranchHonoursTheKillSwitch(t *testing.T) {
+	for _, v2 := range []bool{true, false} {
+		name := "V2 parser"
+		if !v2 {
+			name = "legacy parser"
+		}
+		t.Run(name, func(t *testing.T) {
+			util.DefaultKillSwitch.Trip()
+			defer util.DefaultKillSwitch.Reset()
+
+			parser := &recordingMySQLParser{v2Declared: v2}
+			p := &Proxy{
+				logger:                     zap.NewNop(),
+				Integrations:               map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: parser},
+				recordBufferCap:            8 << 20,
+				recordBufferQueueSize:      64,
+				recordBufferStallGrace:     5 * time.Second,
+				recordBufferHalfCloseGrace: 5 * time.Second,
+			}
+
+			srcRaw, destRaw, cleanup := tcpConnPair(t)
+			defer cleanup()
+			srcConn, destConn := srcRaw, destRaw
+			upgrader := util.NewConnTLSUpgrader(&srcConn, &destConn, zap.NewNop(), nil)
+
+			// globalPassThrough reads these two off the context and type-asserts
+			// them as strings, so the passthrough route panics without them.
+			// handleConnection sets both well before it reaches the probe
+			// branch, so production is safe; the test has to mirror that.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			ctx = context.WithValue(ctx, models.ClientConnectionIDKey, "1")
+			ctx = context.WithValue(ctx, models.DestConnectionIDKey, "2")
+			errGrp, gctx := errgroup.WithContext(ctx)
+
+			// globalPassThrough copies until both sides close; closing them
+			// immediately lets it return rather than blocking the test.
+			_ = srcRaw.Close()
+			_ = destRaw.Close()
+
+			_ = p.recordMySQLOutgoing(gctx, srcConn, destConn, make(chan *models.Mock, 8), errGrp,
+				zap.NewNop(), 1, 2, models.OutgoingOptions{
+					DstCfg: &models.ConditionalDstCfg{Addr: destConn.RemoteAddr().String()},
+				}, upgrader)
+
+			if called, _, _ := parser.snapshot(); called {
+				t.Fatal("the parser was invoked with the record-mode kill switch tripped — " +
+					"KEPLOY_DISABLE_PARSING / SIGUSR1 is documented as routing to raw " +
+					"passthrough, and every next_step message now points operators at it")
+			}
+		})
+	}
+}
+
+// TestMySQLProbeKillSwitchRelaysAndHonoursHalfClose is the other half of the
+// kill-switch contract: not just "the parser was not invoked", but "the
+// connection still works".
+//
+// TestMySQLProbeBranchHonoursTheKillSwitch closes both sockets before
+// dispatching and only inspects the parser, so it cannot tell a working
+// passthrough from a dropped connection — replacing the relay with a bare
+// `return nil` keeps it green. That gap hid a real defect: the gate first
+// routed through globalPassThrough, which never calls CloseWrite and returns
+// on io.EOF, so a client doing shutdown(SHUT_WR) — the end-of-request signal
+// for every EOF-delimited exchange — had its connection torn down instead of
+// receiving the reply. relayDeclinedConn documents exactly this and uses
+// util.RelayRawPassthrough; the gate now does too.
+//
+// This matters here specifically because probeMysql's fast path admits by PORT
+// alone (MysqlPorts, 3306/4000 by default, zero content inspection), so any
+// protocol on those ports reaches this dispatch site, half-closing ones
+// included.
+func TestMySQLProbeKillSwitchRelaysAndHonoursHalfClose(t *testing.T) {
+	util.DefaultKillSwitch.Trip()
+	defer util.DefaultKillSwitch.Reset()
+
+	// An upstream that replies only AFTER it observes end-of-request. If the
+	// FIN is never forwarded, it never speaks; if the reply is not relayed
+	// back, the client never hears it. Either failure mode shows up as an
+	// empty read below.
+	up, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer func() { _ = up.Close() }()
+	go func() {
+		c, err := up.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		buf := make([]byte, 512)
+		for {
+			if _, err := c.Read(buf); err != nil {
+				break
+			}
+		}
+		_, _ = c.Write([]byte("SERVER-REPLY"))
+	}()
+
+	appLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen app: %v", err)
+	}
+	defer func() { _ = appLn.Close() }()
+	appConn, err := net.Dial("tcp", appLn.Addr().String())
+	if err != nil {
+		t.Fatalf("dial app side: %v", err)
+	}
+	defer func() { _ = appConn.Close() }()
+	srcConn, err := appLn.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	dstConn, err := net.Dial("tcp", up.Addr().String())
+	if err != nil {
+		t.Fatalf("dial upstream: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ctx = context.WithValue(ctx, models.ClientConnectionIDKey, "1")
+	ctx = context.WithValue(ctx, models.DestConnectionIDKey, "2")
+	errGrp, gctx := errgroup.WithContext(ctx)
+
+	parser := &recordingMySQLParser{v2Declared: true}
+	p := &Proxy{
+		logger:                     zap.NewNop(),
+		Integrations:               map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: parser},
+		recordBufferCap:            8 << 20,
+		recordBufferQueueSize:      64,
+		recordBufferStallGrace:     5 * time.Second,
+		recordBufferHalfCloseGrace: 5 * time.Second,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = p.recordMySQLOutgoing(gctx, srcConn, dstConn, make(chan *models.Mock, 8), errGrp,
+			zap.NewNop(), 1, 2, models.OutgoingOptions{
+				DstCfg: &models.ConditionalDstCfg{Addr: dstConn.RemoteAddr().String()},
+			}, nil)
+	}()
+
+	if _, err := appConn.Write([]byte("REQUEST")); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	if err := appConn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("half-close: %v", err)
+	}
+
+	_ = appConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 64)
+	n, _ := appConn.Read(buf)
+	if got := string(buf[:n]); got != "SERVER-REPLY" {
+		t.Fatalf("app half-closed its write side and read back %q, want %q — the kill "+
+			"switch must relay the connection, not end it. globalPassThrough returns on "+
+			"io.EOF without forwarding the FIN or the reply; use util.RelayRawPassthrough", got, "SERVER-REPLY")
+	}
+	if called, _, _ := parser.snapshot(); called {
+		t.Error("the parser was invoked with the kill switch tripped")
+	}
+	<-done
 }

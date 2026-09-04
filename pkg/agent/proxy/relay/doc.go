@@ -36,14 +36,16 @@
 // This package is wired into the record path via the V2 dispatcher
 // (see ../proxy_v2.go::recordViaSupervisor). V2-capable parsers
 // (those implementing integrations.IntegrationsV2 with IsV2()==true)
-// run inside a supervisor attached to a Relay; legacy parsers
-// continue on the pre-V2 path unchanged. The KEPLOY_NEW_RELAY=off
-// env var forces legacy routing for all parsers as a rollback knob.
+// run inside a supervisor attached to a Relay. Every parser that the
+// dispatcher can route to record is V2, so this is the only record path
+// in practice; the pre-V2 branch survives solely for a parser that does
+// not implement IntegrationsV2 (today: none on the record path).
 //
-// Note that the legacy path handles half-close differently rather than
-// identically: it waits for both directions instead of tearing the
-// second down, so it does not LOSE the reply — but it never forwards
-// the FIN either, so an EOF-delimited peer never learns the request
-// ended and the connection hangs until external teardown. Rolling back
-// to it trades one half-close defect for another.
+// There is no longer an env knob that forces legacy routing — the
+// KEPLOY_NEW_RELAY rollback switch has been removed. That matters because
+// rolling back was never a clean escape: the legacy path waits for both
+// directions instead of tearing the second down, so it does not LOSE the
+// reply, but it never forwards the FIN either, so an EOF-delimited peer
+// never learns the request ended and the connection hangs until external
+// teardown. It traded one half-close defect for another.
 package relay
