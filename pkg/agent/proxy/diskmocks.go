@@ -272,6 +272,36 @@ func (d *DiskMocks) LoadByNames(names []string) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
+// LoadUnmapped returns every on-disk mock whose name is ABSENT from universe —
+// the union of every test's mappings.yaml entry. Those mocks belong to no test:
+// they were captured outside every scope window (a Playwright `beforeAll`, a
+// bootstrap handshake). They are the overflow tier a scoped test falls back to
+// once its own tape is exhausted; see FilterTcsMocksMappingWithShared.
+//
+// Entries are returned in d.entries order, which Finalize sorts by request
+// timestamp, so recorded order is preserved within the tier.
+func (d *DiskMocks) LoadUnmapped(universe []string) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	mapped := make(map[diskEntry]struct{}, len(universe))
+	for _, n := range universe {
+		if e, ok := d.byName[n]; ok {
+			mapped[e] = struct{}{}
+		}
+	}
+	sel := make([]diskEntry, 0, len(d.entries))
+	for _, e := range d.entries {
+		if _, isMapped := mapped[e]; !isMapped {
+			sel = append(sel, e)
+		}
+	}
+	d.mu.Unlock()
+	return d.decodeAll(sel)
+}
+
 // LoadAll returns every on-disk mock (lax mode needs the full per-test set).
 func (d *DiskMocks) LoadAll() ([]*models.Mock, error) {
 	d.mu.Lock()

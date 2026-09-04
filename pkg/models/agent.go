@@ -160,6 +160,20 @@ type MockFilterParams struct {
 	MockMapping        []string             `json:"mockMapping,omitempty"`
 	UseMappingBased    bool                 `json:"useMappingBased"`
 	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	// MockMappingUniverse is the union of every test's mapped mock names, i.e.
+	// every name that appears anywhere in mappings.yaml. A recorded mock whose
+	// name is ABSENT from it belongs to no test — traffic captured outside every
+	// scope window, such as a Playwright `beforeAll` or a bootstrap handshake.
+	//
+	// Set alongside MockMapping, it makes those shared recordings visible to a
+	// scoped test as OVERFLOW: the test's own mapped mocks are matched first and
+	// the shared ones only after they are exhausted. Ordering is load-bearing —
+	// see FilterTcsMocksMappingWithShared.
+	//
+	// nil restores the previous behaviour exactly (mapped-only pool). Only
+	// Agent.BeginScope populates it, so the `keploy test` replay path — which
+	// also sets UseMappingBased — is unaffected.
+	MockMappingUniverse []string `json:"mockMappingUniverse,omitempty"`
 	// StrictMockWindow controls whether out-of-window non-config mocks are
 	// dropped rather than being promoted into the cross-test config pool.
 	// Default TRUE (see config.Test default) — out-of-window per-test

@@ -216,9 +216,23 @@ type capturedMock struct {
 
 // correlateScopes buckets each recorded mock into the per-test scope window its
 // request timestamp falls within, producing the mappings.yaml structure. A mock
-// that matches no window (e.g. a boot-time handshake before the first scope)
-// is left out of every test's mapping — it stays reusable/session-tier at
-// replay, exactly as the timestamp-based fallback would treat it.
+// that matches no window — a boot-time handshake before the first scope, or a
+// Playwright `beforeAll`, whose fixtures are per-test so it runs before any
+// scope/begin — is left out of every test's mapping.
+//
+// Such a mock is NOT lost. At replay it becomes the shared overflow tier: the
+// agent hands MockMappingUniverse alongside the per-test mapping, and
+// pkg.FilterTcsMocksMappingWithShared keeps every name absent from that union
+// visible to each scoped test, after that test's own mocks. The per-worker path
+// reaches the same outcome by a different route (proxy.scopedMockDb.keep).
+//
+// This used to read "it stays reusable/session-tier at replay", which was false
+// for HTTP: the recorder tags HTTP captures "HTTP_CLIENT", DeriveLifetime
+// classifies those LifetimePerTest (HTTP is excluded from the lax promotion in
+// models.kindsWithLaxTaggedSessionPromotion), so they never reach the session
+// pool that survives mapping-based narrowing. The mock was silently invisible
+// for the whole of every scoped test and a call needing it missed with
+// candidates: 0.
 //
 // When a mock carries a source PID it is attributed to the SAME worker's window
 // (exact, so overlapping parallel windows don't steal each other's mocks). The

@@ -142,7 +142,10 @@ type Agent struct {
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
 	scopeTable   map[string][]string    // replay: test name -> mock names (from mappings.yaml)
-	loadedMocks  int                    // replay: count of mocks stored, for /agent/mock/stats
+	// replay: union of every test's mapped mock names. A recorded mock absent
+	// from it belongs to no test, and stays visible to a scoped test as overflow.
+	mappedUniverse []string
+	loadedMocks    int // replay: count of mocks stored, for /agent/mock/stats
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -946,6 +949,18 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	case params.UseMappingBased && len(params.MockMapping) > 0:
 		mode = "mapping"
 		loaded, err = disk.LoadByNames(params.MockMapping)
+		// Also load the mocks that belong to NO test (absent from the mapping
+		// universe). They are the overflow tier the scoped test falls back to;
+		// without this they are not merely filtered out later, they are never
+		// read off disk at all. Appended AFTER the mapped ones so the ordering
+		// FilterTcsMocksMappingWithShared depends on is already correct here.
+		if err == nil && len(params.MockMappingUniverse) > 0 {
+			var shared []*models.Mock
+			shared, err = disk.LoadUnmapped(params.MockMappingUniverse)
+			if err == nil {
+				loaded = append(loaded, shared...)
+			}
+		}
 	case pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
 		mode = "strict-window"
 		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
@@ -1086,7 +1101,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 
 	// Apply filtering based on parameters
 	if params.UseMappingBased && len(params.MockMapping) > 0 {
-		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
+		filteredMocks = pkg.FilterTcsMocksMappingWithShared(ctx, a.logger, originalFiltered, params.MockMapping, params.MockMappingUniverse)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
 	} else {
 		// Lax-mode promotion restoration: filterByTimeStamp moves

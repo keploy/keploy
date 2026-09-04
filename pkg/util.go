@@ -2904,6 +2904,69 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 	return filteredMocks
 }
 
+// FilterTcsMocksMappingWithShared narrows the per-test pool to this test's own
+// mapped mocks and then appends, as OVERFLOW, the mocks that belong to no test
+// at all — those whose name is absent from `universe`, the union of every test's
+// mappings.yaml entry. Traffic captured outside every scope window (a Playwright
+// `beforeAll`, a bootstrap handshake) lands there.
+//
+// Without the overflow tier such a recording is invisible for the whole of every
+// scoped test: FilterTcsMocksMapping keeps only in-mapping mocks, and an HTTP
+// mock is LifetimePerTest (the recorder tags it "HTTP_CLIENT", which rule 5's
+// lax promotion deliberately excludes), so it never reaches the session pool
+// that FilterConfigMocksMapping passes through whole. A call that needs it then
+// misses with candidates: 0 while an exact, unconsumed match sits in the set.
+//
+// ORDERING IS LOAD-BEARING, not cosmetic. The matcher takes the first match in
+// slice order, so this test's own recordings must precede the shared ones. Put
+// the shared tier first and a `beforeAll` recording of the same URL wins the tie
+// and the test is served another scope's response with missed: 0 — trading a
+// loud miss for a silent wrong answer, which is strictly worse. Mapped-first
+// means every call the mapping already covers behaves byte-for-byte as before
+// and the shared tier is reached only on overflow.
+//
+// Each tier stays sorted by request timestamp internally, so ordered-tape replay
+// (N identical requests, N different responses) is preserved within a tier.
+//
+// universe == nil ⇒ identical to FilterTcsMocksMapping.
+//
+// This mirrors the shape FilterConfigMocksMapping has always had for the session
+// pool (append(inMapping, everythingElse...)), and the semantics scopedMockDb.keep
+// already implements for the per-worker path (pkg/agent/proxy/scoped_mockdb.go).
+func FilterTcsMocksMappingWithShared(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, universe []string) []*models.Mock {
+	mine := FilterTcsMocksMapping(ctx, logger, m, mocksPresentInMapping)
+	if len(universe) == 0 {
+		return mine
+	}
+	mapped := make(map[string]struct{}, len(universe))
+	for _, n := range universe {
+		mapped[n] = struct{}{}
+	}
+	var shared []*models.Mock
+	for _, mock := range m {
+		if mock == nil {
+			continue
+		}
+		if _, isMapped := mapped[mock.Name]; isMapped {
+			continue
+		}
+		p := mock.DeepCopy()
+		// IsFiltered marks membership of the per-test pool, which is what this
+		// slice becomes; the tier a mock came from is carried by Lifetime, not
+		// by this flag.
+		p.TestModeInfo.IsFiltered = true
+		shared = append(shared, p)
+	}
+	sort.SliceStable(shared, func(i, j int) bool {
+		return shared[i].Spec.ReqTimestampMock.Before(shared[j].Spec.ReqTimestampMock)
+	})
+	if len(shared) > 0 {
+		logger.Debug("per-test pool: appended unmapped shared mocks as overflow",
+			zap.Int("mine", len(mine)), zap.Int("shared", len(shared)))
+	}
+	return append(mine, shared...)
+}
+
 func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
 	filteredMocks, unfilteredMocks := filterByMapping(ctx, logger, m, mocksPresentInMapping)
 
