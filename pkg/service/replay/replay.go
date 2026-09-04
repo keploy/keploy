@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -499,6 +500,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// keeps working unchanged (OR can only widen).
 	composeReuse := cmdType == utils.DockerCompose && r.config.Test.Mocking
 	effectiveKeepAlive := (r.config.Test.KeepAppAlive || composeReuse) && r.instrument && cmdType != utils.Empty
+
+	// Records a --keep-app-alive app failure so the run can exit non-zero on
+	// it. The errgroup alone cannot do that: nothing ever calls g.Wait(), so
+	// the error this goroutine returns is collected by no one, and the exit
+	// code is carried by utils.ErrCode rather than by Start's return value.
+	var keepAliveAppErr atomic.Pointer[models.AppError]
+
 	if effectiveKeepAlive {
 		g.Go(func() error {
 			defer utils.Recover(r.logger)
@@ -534,6 +542,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 						"Common causes: image build failure, port already in use, missing env var, dependency container crash-looped. "+
 						"If the app is expected to manage its own lifecycle across test-sets, drop --keep-app-alive and let keploy "+
 						"restart it per test-set instead."))
+			keepAliveAppErr.Store(&appErr)
 			return appErr
 		})
 	}
@@ -918,10 +927,36 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// return non-zero error code so that pipeline processes
 	// know that there is a failure in tests
-	if !testRunResult {
-		utils.ErrCode = 1
+	errCode, runErr := replayRunOutcome(testRunResult, keepAliveAppErr.Load())
+	utils.ErrCode = errCode
+	return runErr
+}
+
+// replayRunOutcome decides how a replay run reports itself: the process exit
+// code, and the error Start returns.
+//
+// Two things make this worth naming rather than inlining.
+//
+// The exit code does NOT travel through Start's return value — it is carried
+// by utils.ErrCode, so returning an error alone would still exit 0.
+//
+// And an app that died under --keep-app-alive is a failed run even when no
+// test reported a failure, which is exactly the case that used to escape.
+// testRunResult starts true and is only ever set false by a test-set that
+// actually RAN, so an app failing to start leaves it true: zero tests
+// execute, the summary reports nothing failed, and keploy exits 0 while
+// logging "replay completed successfully". Every CI pipeline downstream reads
+// that as a pass. The errgroup was supposed to carry the failure — the
+// goroutine's own comment says g.Wait() surfaces it — but nothing in this
+// package ever calls g.Wait(), so the error had nowhere to go.
+func replayRunOutcome(testRunResult bool, keepAliveAppErr *models.AppError) (int, error) {
+	if keepAliveAppErr != nil {
+		return 1, fmt.Errorf("user application failed under --keep-app-alive: %v", *keepAliveAppErr)
 	}
-	return nil
+	if !testRunResult {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
