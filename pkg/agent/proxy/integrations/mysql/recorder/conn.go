@@ -886,9 +886,40 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 			if c, found := hsStore.Last(lastKey); found && len(c.RespPackets) > 0 {
 				logger.Debug("Post-TLS MySQL: own handshake entry gone; reusing the last greeting recorded for this destination",
 					zap.String("lastKey", lastKey))
+				// Reuse the PACKETS, not the timing. The store's own contract
+				// says so (TLSHandshakeStore.Last: "reuse the server-stable
+				// parts ... but not per-connection metadata such as the request
+				// timestamp"), and this was the only in-tree violator: both
+				// config-mock emitters below pass entry.ReqTimestamp straight to
+				// recordMock, so adopting a borrowed one backdates this mock by
+				// up to lastGreetingTTL (30 min).
+				//
+				// That matters twice over. recordMock stamps a "config" mock as
+				// LifetimeSession, so it skips the per-test window entirely —
+				// but pkg/util.go still sorts the session pool by
+				// ReqTimestampMock, and treedb.sameMock IDENTIFIES a mock by
+				// Name+Kind+ReqTimestampMock. Every pooled connection borrowing
+				// the same cached entry would emit mutually indistinguishable
+				// config mocks, and the guard that stops UpdateUnFilteredMock
+				// touching the wrong entry silently abstains.
+				//
+				// The V2 path draws the same line (record_v2.go, staleEntry).
+				c.ReqTimestamp = models.CapturedReqTime(ctx)
 				entry, ok = c, true
 			}
 		}
+	}
+
+	// A zero ReqTimestamp is worse than a stale one: pkg/util.go routes any
+	// mock with a zero request OR response timestamp into filteredMocks with
+	// IsFiltered=true and stops there — ABOVE the lifetime-first routing — so
+	// a LifetimeSession config mock lands in the per-test pool. That happens
+	// whenever both PopWaits and the cache miss and the greeting comes from
+	// the direct fetch below, which never sets a timestamp. V2 handles the
+	// same case by re-sampling; normalise here so neither emitter can ship a
+	// zero.
+	if entry.ReqTimestamp.IsZero() {
+		entry.ReqTimestamp = models.CapturedReqTime(ctx)
 	}
 
 	var serverGreetingBuf []byte
