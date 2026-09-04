@@ -1110,6 +1110,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.RecordBufferConsumerStallGrace > 0 {
 		args = append(args, "--consumer-stall-grace", opts.RecordBufferConsumerStallGrace.String())
 	}
+	// != 0, not > 0: a NEGATIVE half-close grace disables half-close and
+	// must reach the agent.
+	if opts.RecordBufferHalfCloseGrace != 0 {
+		args = append(args, "--half-close-grace", opts.RecordBufferHalfCloseGrace.String())
+	}
 	a.logger.Debug("Starting native agent with args", zap.Strings("args", args))
 
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {

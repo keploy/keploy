@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
@@ -152,15 +154,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		for {
 			if memoryguard.IsRecordingPaused() {
 				h.Logger.Debug("memory pressure detected, stopping HTTP recording and falling back to passthrough")
-				done := make(chan struct{}, 2)
-				cp := func(dst, src net.Conn) {
-					_, _ = io.Copy(dst, src)
-					done <- struct{}{}
-				}
-				go cp(destConn, clientConn)
-				go cp(clientConn, destConn)
-				<-done
-				<-done
+				relayRawPassthrough(clientConn, destConn)
 				return nil
 			}
 
@@ -443,4 +437,18 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		}
 		return err
 	}
+}
+
+// relayRawPassthrough is the memory-pressure fallback: nothing is
+// captured, bytes are just relayed.
+//
+// It delegates to proxyutil.RelayRawPassthrough. http and mysql shared
+// this verbatim; generic had the same logic with the FIN factored into a
+// forwardFIN helper. See that function for the two rules
+// it enforces — forward the FIN only on a clean EOF, and give a surviving
+// direction a bounded drain when the other breaks rather than waiting for
+// it forever or abandoning it at once.
+
+func relayRawPassthrough(clientConn, destConn net.Conn) {
+	proxyutil.RelayRawPassthrough(clientConn, destConn)
 }

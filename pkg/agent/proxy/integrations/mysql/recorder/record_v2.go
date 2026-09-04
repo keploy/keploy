@@ -268,7 +268,22 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 			return res, nil
 		}
 
-		if err := performTLSUpgradeV2(ctx, logger, sess); err != nil {
+		// len(clientFirst) is the exact width of the SSLRequest packet
+		// we just consumed, and it is what the relay forwards upstream
+		// before handshaking. It has to be a measured count rather than
+		// a constant: the relay is holding the client's writes, and the
+		// SSLRequest and the ClientHello behind it frequently arrive in
+		// one read, so "forward the SSLRequest and nothing else" can
+		// only be expressed as a byte count. See
+		// relay.Config.HoldClientWrites.
+		// Zero when nothing is held: the relay ignores the count in
+		// that case, but passing the real width would misreport what
+		// the directive actually did.
+		clientFlush := 0
+		if sess.ClientWritesHeld {
+			clientFlush = len(clientFirst)
+		}
+		if err := performTLSUpgradeV2(ctx, logger, sess, clientFlush); err != nil {
 			sess.MarkMockIncomplete("tls upgrade failed")
 			return res, err
 		}
@@ -301,6 +316,22 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		}
 		decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
 		res.req = append(res.req, mysql.Request{PacketBundle: *hr41Pkt})
+	} else if sess.ClientWritesHeld {
+		// No TLS: the client authenticated in cleartext, so the hold
+		// the relay armed for this connection has to come off before
+		// anything else can happen. Nothing we have read so far has
+		// reached the server — that is the point of the hold — so the
+		// auth decider read below would block forever on a reply to a
+		// request the server never received.
+		//
+		// Gated on ClientWritesHeld rather than sent unconditionally:
+		// the release costs an ack round-trip, and on every path with
+		// no relay behind it (observe-only proxyless capture, unit
+		// harnesses) there is no one to answer it.
+		if err := releaseClientHoldV2(ctx, logger, sess); err != nil {
+			sess.MarkMockIncomplete("client hold release failed")
+			return res, err
+		}
 	}
 
 	// Auth decider: AuthSwitchRequest / AuthMoreData / OK / ERR.
@@ -1131,22 +1162,59 @@ func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *super
 	return nil
 }
 
+// releaseClientHoldV2 ends the relay's client write hold for a
+// connection that turned out not to use TLS, delivering the client's
+// HandshakeResponse41 to the real server.
+//
+// Sending it unconditionally is safe and deliberate. When no hold was
+// armed — a proxyless observe-only capture, or a relay built before
+// this capability existed — the relay refuses the directive and we
+// carry on: there is nothing held, so there is nothing to deliver, and
+// the connection was never blocked in the first place. Treating that
+// refusal as fatal would make the parser's correctness depend on how
+// the relay beneath it was configured.
+func releaseClientHoldV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case sess.Directives <- directive.ReleaseClient("mysql plaintext handshake"):
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case ack, ok := <-sess.Acks:
+		if !ok {
+			return errors.New("directive channel closed before client-hold release ack")
+		}
+		if !ack.OK {
+			logger.Debug("V2: relay declined the client-hold release; assuming no hold was armed",
+				zap.Error(ack.Err))
+		}
+		return nil
+	}
+}
+
 // performTLSUpgradeV2 builds TLS configs from the session options and
 // sends a KindUpgradeTLS directive on sess.Directives, blocking on the
 // ack. Returns nil on OK, an error on failure. Failure cases MUST call
 // sess.MarkMockIncomplete at the call site.
-func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) error {
+func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, clientFlushBytes int) error {
 	destCfg := buildDestTLSConfigV2(sess)
 	clientCfg := buildClientTLSConfigV2(sess)
 
 	logger.Debug("V2: sending mysql client_ssl upgrade directive",
 		zap.Bool("destCfg", destCfg != nil),
-		zap.Bool("clientCfg", clientCfg != nil))
+		zap.Bool("clientCfg", clientCfg != nil),
+		zap.Int("clientFlushBytes", clientFlushBytes))
+
+	d := directive.UpgradeTLS(destCfg, clientCfg, "mysql client_ssl")
+	d.TLS.ClientFlushBytes = clientFlushBytes
 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case sess.Directives <- directive.UpgradeTLS(destCfg, clientCfg, "mysql client_ssl"):
+	case sess.Directives <- d:
 	}
 
 	select {

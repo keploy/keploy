@@ -58,6 +58,33 @@ const (
 	// DefaultForwardBuf is the size of the per-iteration Read/Write
 	// scratch buffer used by the forwarder goroutines.
 	DefaultForwardBuf = 32 * 1024 // 32 KiB
+
+	// DefaultHalfCloseGrace bounds how long the surviving direction may
+	// sit IDLE after its peer half-closed. See [Config.HalfCloseGrace].
+	//
+	// Because the bound is on idle time and not on total time, it only
+	// has to cover the gap before a peer STARTS answering, never the
+	// length of the answer: a response that streams for ten minutes
+	// re-arms the window on every chunk. 10s is generous for
+	// "connection accepted, request complete, first byte not yet sent"
+	// while keeping the worst case — a peer that goes silent and never
+	// closes — short enough that a busy proxy is not holding file
+	// descriptors and tee buffers for half a minute per connection.
+	DefaultHalfCloseGrace = 10 * time.Second
+
+	// DefaultClientHoldCap bounds how many client bytes a
+	// [Config.HoldClientWrites] hold may accumulate before the relay
+	// gives up on the hold and releases it — see [Config.ClientHoldCap]
+	// for why the breach is handled by releasing rather than by
+	// dropping the connection.
+	//
+	// The window a hold covers is one client message: the parser is
+	// deciding, off the first chunk, whether this connection upgrades
+	// to TLS. MySQL's SSLRequest is 36 bytes and its plaintext
+	// HandshakeResponse is a few hundred, so 256 KiB is roughly three
+	// orders of magnitude of headroom over the real traffic while
+	// still bounding what one connection can pin in memory.
+	DefaultClientHoldCap int64 = 256 * 1024 // 256 KiB
 )
 
 // TLSUpgradeFn performs a TLS handshake on a real net.Conn and returns
@@ -263,6 +290,100 @@ type Config struct {
 	// this when the parser implements an opt-in capability method.
 	PreDispatchPause bool
 
+	// HalfCloseGrace bounds how long the relay keeps copying the
+	// surviving direction after one side has half-closed (sent FIN
+	// while still able to receive). Zero resolves to
+	// [DefaultHalfCloseGrace]; negative disables half-close entirely and
+	// restores the original behaviour of tearing both directions down
+	// on the first EOF.
+	//
+	// A clean EOF from one side means "I have finished writing", not
+	// "this connection is over". A client that does shutdown(SHUT_WR)
+	// and then reads the reply — Node's socket.end(data), Python's
+	// sock.shutdown(SHUT_WR), any request/EOF/response protocol — loses
+	// that reply if the relay closes the other direction, and the
+	// application sees its connection end before the answer arrives.
+	//
+	// The bound exists because the opposite risk is real too: a peer
+	// that answers with neither data nor a FIN would leave the
+	// surviving forwarder parked in Read forever. That is the ~60s hang
+	// the unconditional teardown originally prevented, and this keeps
+	// that protection while giving a well-behaved peer room to answer.
+	//
+	// It measures IDLE time, not total time. A total bound would cut a
+	// slow response off mid-body — and silently, since the caller closes
+	// the client socket once Run returns, so an EOF-delimited protocol
+	// reads a truncated body as a complete one. Every forwarded chunk
+	// re-arms the window.
+	//
+	// Operators reach it exactly like its siblings in
+	// config.RecordBuffer: record.recordBuffer.halfCloseGrace in
+	// keploy.yml or the hidden --half-close-grace flag.
+	HalfCloseGrace time.Duration
+
+	// HoldClientWrites, when true, stops the client→destination
+	// forwarder from writing to the real destination. Bytes are still
+	// read and still teed to the parser's FakeConn; only the
+	// destination Write is deferred. The hold stays up until the
+	// parser ends it with [directive.ReleaseClient] (which flushes
+	// everything held, in read order) or [directive.UpgradeTLS] (which
+	// flushes [directive.UpgradeTLSParams.ClientFlushBytes] and leaves
+	// the rest to the client-side handshake).
+	//
+	// This exists because [PreDispatchPause] cannot express MySQL's
+	// CLIENT_SSL upgrade, for two reasons:
+	//
+	//  1. It is all-or-nothing in TIME. The pre-dispatch pause parks
+	//     the forwarders at the first chunk and ends at dispatch; the
+	//     MySQL decision point is later, after the server's greeting
+	//     has already round-tripped through both directions.
+	//
+	//  2. It is all-or-nothing in BYTES. Its TLS flush is takeStashed,
+	//     the whole stash. MySQL needs a split: the 36-byte SSLRequest
+	//     must reach the server (or it never switches to TLS) and the
+	//     ClientHello immediately behind it must not (keploy terminates
+	//     that handshake itself). Those two routinely arrive in a
+	//     single read, so the split has to be by byte count.
+	//
+	// Without a hold, the C2D forwarder keeps running while the parser
+	// decides and forwards whatever the client wrote next. That is not
+	// a lost recording, it is a corrupted connection: the real server
+	// parses the ClientHello as MySQL protocol, and keploy's own
+	// destination handshake then runs against a desynchronised socket.
+	//
+	// The hold is directional. Destination→client forwarding is
+	// untouched, which is what lets a server-speaks-first protocol
+	// deliver its greeting while the client's reply is held.
+	//
+	// Default false. A parser that does not arm this sees today's
+	// behaviour exactly; a parser that arms it and then never sends a
+	// releasing directive wedges the connection until teardown, so the
+	// dispatcher only sets it for parsers that opt in via a capability
+	// method.
+	HoldClientWrites bool
+
+	// ClientHoldCap bounds the bytes a [HoldClientWrites] hold may
+	// accumulate. Zero resolves to [DefaultClientHoldCap]; negative
+	// disables the bound.
+	//
+	// On breach the relay releases the hold — flushing what it held
+	// and resuming normal forwarding — rather than dropping the
+	// connection, and reports "client_hold_cap" through
+	// [OnMarkMockIncomplete].
+	//
+	// Releasing is the right failure mode because of what a breach
+	// actually means. The hold covers one decision by the parser, over
+	// a message measured in hundreds of bytes; reaching 256 KiB means
+	// the parser is not going to answer. The client is by then blocked
+	// waiting for a server reply that cannot come, because its request
+	// is sitting in our stash. Flushing unwedges it: in the common
+	// no-TLS case the session simply proceeds, and the only casualty
+	// is the recording. Dropping the connection would take the user's
+	// application down to protect a mock, which inverts the priority
+	// the relay holds everywhere else — the forward path is not
+	// allowed to lose to the capture path.
+	ClientHoldCap int64
+
 	// ParserCanResyncAfterGap tells the tees whether the parser on the other
 	// end can re-anchor its framer after a HOLE in capture. Set by the
 	// dispatcher from the parser's optional
@@ -318,8 +439,36 @@ func (c Config) withDefaults() Config {
 	if out.ForwardBuf <= 0 {
 		out.ForwardBuf = DefaultForwardBuf
 	}
+	// == 0, not <= 0: a negative HalfCloseGrace is the documented way to
+	// opt out of half-close, so it must survive default resolution.
+	if out.HalfCloseGrace == 0 {
+		out.HalfCloseGrace = DefaultHalfCloseGrace
+	}
+	// == 0, not <= 0: a negative ClientHoldCap is the documented way to
+	// disable the bound, so it must survive default resolution.
+	if out.ClientHoldCap == 0 {
+		out.ClientHoldCap = DefaultClientHoldCap
+	}
 	if out.ConsumerStallGrace <= 0 {
 		out.ConsumerStallGrace = DefaultConsumerStallGrace
+	}
+	// The two client-direction brakes are alternatives, not layers, and
+	// the conflict is resolved HERE rather than in run() because run()
+	// installs the pre-dispatch pause barrier before it could act on
+	// the flag — clearing preDispatchActive afterwards leaves that
+	// barrier up with nothing to release it, and both forwarders park
+	// forever on a connection whose greeting never reaches the client.
+	//
+	// The hold wins. Pre-dispatch routes the client's first chunk
+	// through the pause stash, which bypasses the hold's byte
+	// accounting entirely (ClientHoldCap silently stops being
+	// enforced), and its resume handler acks OK while leaving the hold
+	// armed. See [HoldClientWrites].
+	if out.HoldClientWrites && out.PreDispatchPause {
+		out.PreDispatchPause = false
+		out.Logger.Error("relay: HoldClientWrites and PreDispatchPause are mutually exclusive; ignoring PreDispatchPause",
+			zap.String("next_step", "a parser should implement WantsClientWriteHold or WantsPreDispatchPause, never both — the hold subsumes pre-dispatch for the client direction"),
+		)
 	}
 	if out.MemoryGuardCheck == nil {
 		out.MemoryGuardCheck = memoryguard.IsRecordingPaused

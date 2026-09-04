@@ -57,35 +57,27 @@ func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 			return a
 		}(),
 	}
-	httpSchema.Metadata = specMetadata(tc.Description, tc.DuplicateOf)
+	httpSchema.Metadata = specMetadata(tc.Description)
 	return httpSchema
 }
 
 // specMetadata builds the spec-level Metadata map carrying the fields that
-// persist through the spec rather than the doc: the user-facing description
-// and the cross-pod duplicate mark. Returns nil when there is nothing to
-// carry, so specs without metadata keep encoding byte-identically to before.
-// The gRPC encoders pass description="" — gRPC specs have never persisted a
-// description and that stays unchanged.
-func specMetadata(description, duplicateOf string) map[string]string {
-	if description == "" && duplicateOf == "" {
+// persist through the spec rather than the doc: the user-facing description.
+// Returns nil when there is nothing to carry, so specs without metadata keep
+// encoding byte-identically to before. The gRPC encoders pass description="" —
+// gRPC specs have never persisted a description and that stays unchanged.
+func specMetadata(description string) map[string]string {
+	if description == "" {
 		return nil
 	}
-	md := make(map[string]string, 2)
-	if description != "" {
-		md["description"] = description
-	}
-	if duplicateOf != "" {
-		md["duplicate_of"] = duplicateOf
-	}
-	return md
+	return map[string]string{"description": description}
 }
 
 // buildGrpcSpec is the JSON-path counterpart of the gRPC branch in EncodeTestcase.
 func buildGrpcSpec(tc models.TestCase) models.GrpcSpec {
 	noise := tc.Noise
 	return models.GrpcSpec{
-		Metadata: specMetadata("", tc.DuplicateOf),
+		Metadata: specMetadata(""),
 		GrpcReq:  tc.GrpcReq,
 		GrpcResp: tc.GrpcResp,
 		Created:  tc.Created,
@@ -368,7 +360,6 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		tc.HTTPReq = httpSpec.Request
 		tc.HTTPResp = httpSpec.Response
 		tc.Description = httpSpec.Metadata["description"]
-		tc.DuplicateOf = httpSpec.Metadata["duplicate_of"]
 		tc.AppPort = httpSpec.AppPort
 
 		// single map-based loop for all assertions
@@ -406,7 +397,6 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		tc.Created = grpcSpec.Created
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
-		tc.DuplicateOf = grpcSpec.Metadata["duplicate_of"]
 		tc.AppPort = grpcSpec.AppPort
 
 		for key, raw := range grpcSpec.Assertions {
@@ -469,7 +459,6 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 		tc.HTTPReq = httpSpec.Request
 		tc.HTTPResp = httpSpec.Response
 		tc.Description = httpSpec.Metadata["description"]
-		tc.DuplicateOf = httpSpec.Metadata["duplicate_of"]
 		tc.AppPort = httpSpec.AppPort
 		expandAssertionsJSON(tc, httpSpec.Assertions)
 
@@ -482,7 +471,6 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 		tc.Created = grpcSpec.Created
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
-		tc.DuplicateOf = grpcSpec.Metadata["duplicate_of"]
 		tc.AppPort = grpcSpec.AppPort
 		expandAssertionsJSON(tc, grpcSpec.Assertions)
 

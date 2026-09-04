@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -499,6 +500,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// keeps working unchanged (OR can only widen).
 	composeReuse := cmdType == utils.DockerCompose && r.config.Test.Mocking
 	effectiveKeepAlive := (r.config.Test.KeepAppAlive || composeReuse) && r.instrument && cmdType != utils.Empty
+
+	// Records a --keep-app-alive app failure so the run can exit non-zero on
+	// it. The errgroup alone cannot do that: nothing ever calls g.Wait(), so
+	// the error this goroutine returns is collected by no one, and the exit
+	// code is carried by utils.ErrCode rather than by Start's return value.
+	var keepAliveAppErr atomic.Pointer[models.AppError]
+
 	if effectiveKeepAlive {
 		g.Go(func() error {
 			defer utils.Recover(r.logger)
@@ -534,6 +542,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 						"Common causes: image build failure, port already in use, missing env var, dependency container crash-looped. "+
 						"If the app is expected to manage its own lifecycle across test-sets, drop --keep-app-alive and let keploy "+
 						"restart it per test-set instead."))
+			keepAliveAppErr.Store(&appErr)
 			return appErr
 		})
 	}
@@ -918,10 +927,36 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// return non-zero error code so that pipeline processes
 	// know that there is a failure in tests
-	if !testRunResult {
-		utils.ErrCode = 1
+	errCode, runErr := replayRunOutcome(testRunResult, keepAliveAppErr.Load())
+	utils.ErrCode = errCode
+	return runErr
+}
+
+// replayRunOutcome decides how a replay run reports itself: the process exit
+// code, and the error Start returns.
+//
+// Two things make this worth naming rather than inlining.
+//
+// The exit code does NOT travel through Start's return value — it is carried
+// by utils.ErrCode, so returning an error alone would still exit 0.
+//
+// And an app that died under --keep-app-alive is a failed run even when no
+// test reported a failure, which is exactly the case that used to escape.
+// testRunResult starts true and is only ever set false by a test-set that
+// actually RAN, so an app failing to start leaves it true: zero tests
+// execute, the summary reports nothing failed, and keploy exits 0 while
+// logging "replay completed successfully". Every CI pipeline downstream reads
+// that as a pass. The errgroup was supposed to carry the failure — the
+// goroutine's own comment says g.Wait() surfaces it — but nothing in this
+// package ever calls g.Wait(), so the error had nowhere to go.
+func replayRunOutcome(testRunResult bool, keepAliveAppErr *models.AppError) (int, error) {
+	if keepAliveAppErr != nil {
+		return 1, fmt.Errorf("user application failed under --keep-app-alive: %v", *keepAliveAppErr)
 	}
-	return nil
+	if !testRunResult {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
@@ -1360,7 +1395,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// runs every test-set, matching the historical lifecycle.
 		if serveTest && !r.isFirstTestSet {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
+		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(r.config.Test, testCases, testSetID, r.logger)) {
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 	}
@@ -1530,7 +1565,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// one-shot spawn actually fired.
 			if serveTest && !r.isFirstTestSet {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
+			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(r.config.Test, testCases, testSetID, r.logger)) {
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
 
@@ -3181,13 +3216,26 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	if r.config != nil {
 		strictMockWindow = r.config.Test.StrictMockWindow
 	}
+	// EXPERIMENTAL, default OFF: when KEPLOY_AGENT_OWNS_CONSUMED is set, the
+	// agent applies filterOutDeleted from its own persistent consumption history
+	// instead of us re-sending the ever-growing TotalConsumedMocks map every
+	// testcase (O(testcases^2) marshaling). We then send a nil map to eliminate
+	// that cost. Off by default so behaviour is byte-identical until proven
+	// equivalent by the golden-reference harness.
+	agentOwnsConsumed := os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED") == "1" ||
+		strings.EqualFold(os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED"), "true")
+	consumedForAgent := totalConsumedMocks
+	if agentOwnsConsumed {
+		consumedForAgent = nil
+	}
 	params := models.MockFilterParams{
 		AfterTime:              afterTime,
 		BeforeTime:             beforeTime,
 		FirstRecordedTestStart: firstRecordedTestStart,
 		MockMapping:            expectedMockMapping,
 		UseMappingBased:        useMappingBased,
-		TotalConsumedMocks:     totalConsumedMocks,
+		AgentOwnsConsumed:      agentOwnsConsumed,
+		TotalConsumedMocks:     consumedForAgent,
 		StrictMockWindow:       strictMockWindow,
 	}
 
@@ -4312,6 +4360,17 @@ func (r *Replayer) resetResendUnsafe(ctx context.Context) (bool, []models.MockSt
 // published host-port TCP gate (no-op for native apps / unmapped publishes). On
 // timeout it returns and lets the bounded re-send attempts run.
 func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models.TestCase, testSetID string) {
+	// The same opt-out as the pre-test gate, and this path needs it more,
+	// not less. Its trigger is a transport-level reset — which, behind a
+	// kubectl port-forward, is exactly what a dying forward produces.
+	// Re-opening a connect-then-close probe against the same address in
+	// response is the one thing most likely to finish it off. The
+	// bounded re-sends themselves are unaffected; only the readiness
+	// re-gate is skipped. See config.Test.DisableAppReadyProbe.
+	if r.config.Test.DisableAppReadyProbe {
+		return
+	}
+
 	wctx, cancel := context.WithTimeout(ctx, resetResendReadyTimeout)
 	defer cancel()
 

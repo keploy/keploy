@@ -260,7 +260,8 @@ type UpstreamTLS struct {
 // giving up on the chunks still queued for it.
 //
 // Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN, KEPLOY_RECORD_QUEUE_SIZE and
-// KEPLOY_RECORD_CONSUMER_STALL_GRACE override the yaml/flag values when set.
+// KEPLOY_RECORD_CONSUMER_STALL_GRACE and KEPLOY_RECORD_HALF_CLOSE_GRACE
+// override the yaml/flag values when set.
 type RecordBuffer struct {
 	// MaxMemoryPerConnection caps the bytes the recorder may hold
 	// in the per-connection queue while the parser catches up.
@@ -294,6 +295,18 @@ type RecordBuffer struct {
 	// you see drops with reason "consumer_gone"; lower it to cap how long
 	// a connection with a genuinely dead parser lingers at teardown.
 	ConsumerStallGrace time.Duration `json:"consumerStallGrace" yaml:"consumerStallGrace" mapstructure:"consumerStallGrace"`
+
+	// HalfCloseGrace bounds how long the recorder keeps copying the
+	// surviving direction after one side has half-closed (sent FIN while
+	// still able to receive). Maps to relay.Config.HalfCloseGrace. Zero
+	// resolves to the relay's built-in default (10s); NEGATIVE disables
+	// half-close entirely, restoring the pre-#4538 behaviour of tearing
+	// both directions down on the first EOF.
+	//
+	// It bounds IDLE time, not total time — every forwarded chunk
+	// re-arms it — so it only has to cover the gap before a peer starts
+	// answering, never the length of the answer.
+	HalfCloseGrace time.Duration `json:"halfCloseGrace" yaml:"halfCloseGrace" mapstructure:"halfCloseGrace"`
 }
 
 // MockCmd configures the `keploy mock record|replay` flow — using Keploy as a
@@ -346,14 +359,55 @@ type Normalize struct {
 	EditedBy      string          `json:"-" yaml:"-" mapstructure:"-"`
 }
 
+// DefaultHealthPollTimeout is the ceiling for every pre-test app-readiness gate
+// when test.healthPollTimeout is unset or non-positive.
+//
+// It lives here, not beside the gate, because the yaml default in
+// config/default.go and the code fallback are two sources of truth for the same
+// number and nothing else makes them agree — the same reasoning as
+// relay.DefaultConsumerStallGrace. config/default_test.go asserts the parsed
+// yaml against this constant, so changing one without the other fails a test
+// instead of silently shipping a keploy.yml that disagrees with the code.
+//
+// Three minutes, not one. The bound is paid ONLY by an app that is not yet
+// serving: a ready app satisfies the gate on its first probe, so raising it costs
+// a healthy run nothing. A cold application start on a loaded shared runner —
+// the condition the gate exists for — was measured at 17-28s for the process and
+// ~55s from spawn to first serve, against a previous 60s ceiling that therefore
+// expired and fired tests into a not-yet-listening app. Timing out only warns and
+// proceeds, so an over-generous ceiling can never fail a run that would otherwise
+// pass; an under-generous one can.
+const DefaultHealthPollTimeout = 3 * time.Minute
+
 type Test struct {
-	SelectedTests               map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	GlobalNoise                 Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
-	ReplaceWith                 ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
-	Delay                       uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
-	HealthURL                   string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
-	HealthPollTimeout           time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
-	AppReadyProbeAddr           string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
+	SelectedTests     map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	GlobalNoise       Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
+	ReplaceWith       ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
+	Delay             uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
+	HealthURL         string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
+	HealthPollTimeout time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
+	HealthPath        string              `json:"healthPath" yaml:"healthPath" mapstructure:"healthPath"`                      // optional request path probed on the app's OWN auto-detected address (docker/compose published port, or appReadyProbeAddr) before the first test. Unlike healthUrl it needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready — a health endpoint returning 503 has still proved the app is answering. Empty uses a keploy-reserved probe path.
+	HealthScheme      string              `json:"healthScheme" yaml:"healthScheme" mapstructure:"healthScheme"`                // optional override for the readiness probe scheme ("http" or "https"). Empty (the default) uses the scheme the recorded tests actually dial; only consulted when the app is probed over HTTP, and ignored entirely when healthUrl is set.
+	AppReadyProbeAddr string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
+
+	// DisableAppReadyProbe turns off the app-readiness probing that
+	// runs before the first test fires — the docker/compose
+	// published-port gates, AppReadyProbeAddr, and the resolved
+	// test-target fallback. --health-url is unaffected: that is an
+	// explicit operator request, not an inferred probe.
+	//
+	// It exists for embedders that drive replay as a library in an
+	// environment where a connect-then-close probe is DESTRUCTIVE.
+	// keploy/k8s-proxy is the motivating case: on its cluster-mode path
+	// the app is reached through a kubectl port-forward, and probing it
+	// can make kubelet's SPDY relay tear the session down ("lost
+	// connection to pod"), killing the app and agent forwards together.
+	//
+	// Leaving a gate input unset is NOT a reliable way to express this:
+	// such a caller still sets Test.Host (it rewrites recorded request
+	// URLs), and the resolved-test-target fallback will reach for that
+	// address and probe it. Intent has to be stated, not inferred.
+	DisableAppReadyProbe        bool                `json:"disableAppReadyProbe" yaml:"disableAppReadyProbe" mapstructure:"disableAppReadyProbe"`
 	Host                        string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                        uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort                    uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`

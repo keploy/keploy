@@ -71,6 +71,8 @@ func (r *Relay) handleDirective(ctx context.Context, stopping <-chan struct{}, d
 		return directive.Ack{Kind: d.Kind, OK: true}
 	case directive.KindResumePreDispatch:
 		return r.handleResumePreDispatch(ctx, stopping, d)
+	case directive.KindReleaseClient:
+		return r.handleReleaseClient(ctx, stopping, d)
 	default:
 		return directive.Ack{
 			Kind: d.Kind,
@@ -125,12 +127,46 @@ func (r *Relay) handleDirective(ctx context.Context, stopping <-chan struct{}, d
 // parser can detect from already-forwarded bytes alone.
 func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, d directive.Directive) directive.Ack {
 	log := r.cfg.Logger
+
+	// Whether a client write hold was in force when this directive
+	// arrived. Every exit below routes through endUpgradePause, which
+	// uses this to decide what happens to bytes still held: if the
+	// client side did not end up behind TLS, they are ordinary
+	// cleartext that the server is still waiting for, and dropping them
+	// would truncate the connection mid-message.
+	//
+	// Computed FIRST, above every early return. An exit that skips it
+	// leaves the hold armed with no one left to release it, and the
+	// client direction is blackholed for the rest of the connection —
+	// the no-upgrader return below was exactly that bug.
+	heldAtEntry := r.holdClient.Load()
+
 	if r.cfg.TLSUpgradeFn == nil {
+		// No pause was installed, so endUpgradePause only does the
+		// flush half here — which is the half that matters: the parser
+		// asked for an upgrade this relay cannot perform, and the bytes
+		// it held for that upgrade still belong to the server.
+		r.endUpgradePause(heldAtEntry, false, 0)
 		return directive.Ack{Kind: d.Kind, OK: false, Err: ErrNoTLSUpgrader}
 	}
 	params := d.TLS
 	if params == nil {
 		params = &directive.UpgradeTLSParams{}
+	}
+
+	// A flush count is only meaningful under a hold. Asking for one
+	// without a hold means the parser believes bytes are being held
+	// back that were in fact forwarded in real time — exactly the leak
+	// the hold exists to prevent, and acking OK would tell the parser
+	// its byte-exact split had been honoured when nothing was split at
+	// all. Refuse before the barrier goes up.
+	if params.ClientFlushBytes > 0 && !heldAtEntry {
+		return directive.Ack{
+			Kind: d.Kind,
+			OK:   false,
+			Err: fmt.Errorf("TLS upgrade: ClientFlushBytes=%d but no client write hold is active",
+				params.ClientFlushBytes),
+		}
 	}
 
 	// Barrier up. Forwarders will park on their next loop iteration.
@@ -151,6 +187,26 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 	// has already been consumed by the forwarder Read that just woke
 	// up.
 	r.waitForwardersParked(ctx, stopping)
+
+	// The parser's client stream is now exactly this long, and it
+	// cannot grow while the forwarders are parked. Under a client
+	// write hold this number is the boundary between "bytes the parser
+	// was meant to read" and "bytes keploy's own client-side handshake
+	// is about to consume": the parser has read the SSLRequest it based
+	// this directive on, and everything the tee accepted after that is
+	// the ClientHello behind it. Captured here rather than derived
+	// later so it names a position the forwarders could not have moved.
+	// See the use in endUpgradePause.
+	//
+	// Both ways of being wrong here are safe in the same direction.
+	// waitForwardersParked gives up if the relay is stopping, so C2D can
+	// in principle still be live and tee past this point — those bytes
+	// are ABOVE the offset and are simply left alone, never swallowed.
+	// And a parser that had over-read past its own flush prefix has
+	// already seen bytes we cannot take back, but the offset still
+	// bounds the discard to what was teed before the barrier, so live
+	// post-upgrade traffic is untouchable either way.
+	barrierTeeOffset := r.teeC2D.acceptedBytes()
 
 	boundaryReadAt := time.Now()
 
@@ -204,7 +260,88 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 	// path — where the forwarder forwarded the SSLRequest in real time
 	// and only the post-pause-boundary 'S' byte ended up stashed on
 	// the D2C side — keeps the existing semantics.
-	if r.preDispatchActive.Load() {
+	//
+	// A client write hold (Config.HoldClientWrites) needs the same
+	// flush for the same reason, but a byte-exact one. Under
+	// pre-dispatch the stash is the client's first message and all of
+	// it belongs upstream. Under a hold the stash can hold the
+	// SSLRequest AND the ClientHello behind it — often from a single
+	// read — and only the first belongs upstream; the remainder is
+	// claimed further down as the prepend for the client-side
+	// handshake. So the hold branch flushes exactly
+	// params.ClientFlushBytes and leaves the rest in place.
+	if r.holdClient.Load() {
+		// Clear the hold before the flush, not after. The forwarders
+		// are parked behind the pause barrier and cannot observe the
+		// flag until endPause below, but leaving it set through an
+		// early return (a short stash, a failed Write) would strand
+		// the connection in a hold that nothing will ever release.
+		r.holdClient.Store(false)
+		r.heldClientBytes.Store(0)
+
+		if params.ClientFlushBytes > 0 {
+			// Check the length BEFORE claiming anything.
+			// takeStashedPrefix mutates the stash, so taking first and
+			// validating second would consume the prefix and then
+			// abandon it on the error return — the server would be left
+			// waiting for a message whose head we had silently eaten.
+			if avail := r.stashedLen(fakeconn.FromClient); avail < params.ClientFlushBytes {
+				// The parser asked us to forward more than it ever saw.
+				// Fail the directive; endUpgradePause below still
+				// delivers everything held, so the connection stays
+				// consistent even though the split did not happen.
+				if log != nil {
+					log.Debug("relay: TLS upgrade client-hold flush short",
+						zap.Int("requested", params.ClientFlushBytes),
+						zap.Int("available", avail),
+						zap.String("directive_reason", d.Reason),
+					)
+				}
+				r.endUpgradePause(heldAtEntry, false, barrierTeeOffset)
+				return directive.Ack{
+					Kind: d.Kind,
+					OK:   false,
+					Err: fmt.Errorf("TLS upgrade client-hold flush: asked for %d bytes, stash held %d",
+						params.ClientFlushBytes, avail),
+				}
+			}
+			c2dForward := r.takeStashedPrefix(fakeconn.FromClient, params.ClientFlushBytes)
+			dstPtr := r.dst.Load()
+			if dstPtr == nil || *dstPtr == nil {
+				r.endUpgradePause(heldAtEntry, false, barrierTeeOffset)
+				return directive.Ack{
+					Kind: d.Kind,
+					OK:   false,
+					Err:  errors.New("TLS upgrade client-hold C2D flush: no destination conn"),
+				}
+			}
+			wn, werr := (*dstPtr).Write(c2dForward.bytes)
+			if werr == nil && wn != c2dForward.len() {
+				werr = fmt.Errorf("short write %d of %d bytes", wn, c2dForward.len())
+			}
+			if werr != nil {
+				if log != nil {
+					log.Debug("relay: TLS upgrade client-hold C2D flush failed",
+						zap.Error(werr),
+						zap.Int("bytes", c2dForward.len()),
+						zap.String("directive_reason", d.Reason),
+					)
+				}
+				// The server did not get the client's message, so
+				// whatever this connection records next is missing its
+				// head. Say so rather than scoring the mock clean.
+				if r.cfg.OnMarkMockIncomplete != nil {
+					r.cfg.OnMarkMockIncomplete("write_error")
+				}
+				r.endUpgradePause(heldAtEntry, false, barrierTeeOffset)
+				return directive.Ack{
+					Kind: d.Kind,
+					OK:   false,
+					Err:  fmt.Errorf("TLS upgrade client-hold C2D flush: %w", werr),
+				}
+			}
+		}
+	} else if r.preDispatchActive.Load() {
 		c2dForward := r.takeStashed(fakeconn.FromClient)
 		if c2dForward.len() > 0 {
 			dst := *r.dst.Load()
@@ -216,7 +353,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 						zap.String("directive_reason", d.Reason),
 					)
 				}
-				r.endPause()
+				r.endUpgradePause(heldAtEntry, false, barrierTeeOffset)
 				return directive.Ack{
 					Kind: d.Kind,
 					OK:   false,
@@ -254,7 +391,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 							zap.String("next_step", "the upstream closed mid-preamble; verify the destination is the protocol the parser was matched to and consider KEPLOY_DISABLE_PARSING=1 to bypass parsing"),
 						)
 					}
-					r.endPause()
+					r.endUpgradePause(heldAtEntry, false, barrierTeeOffset)
 					return directive.Ack{
 						Kind:            d.Kind,
 						OK:              false,
@@ -292,7 +429,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 						zap.String("next_step", "the upstream closed the connection or returned fewer bytes than the parser expected for its preamble; verify the destination is the protocol the parser was matched to (Postgres on a non-Postgres port, etc.) and consider KEPLOY_DISABLE_PARSING=1 to bypass parsing"),
 					)
 				}
-				r.endPause()
+				r.endUpgradePause(heldAtEntry, false, barrierTeeOffset)
 				return directive.Ack{
 					Kind:            d.Kind,
 					OK:              false,
@@ -317,7 +454,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 						zap.String("directive_reason", d.Reason),
 					)
 				}
-				r.endPause()
+				r.endUpgradePause(heldAtEntry, false, barrierTeeOffset)
 				return directive.Ack{
 					Kind:            d.Kind,
 					OK:              false,
@@ -334,7 +471,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 		// marking it incomplete.
 		if len(params.ProceedOnPreamble) > 0 && !bytesEqual(params.ProceedOnPreamble, preamblePayload) {
 			boundaryWrittenAt := time.Now()
-			r.endPause()
+			r.endUpgradePause(heldAtEntry, false, barrierTeeOffset)
 			return directive.Ack{
 				Kind:              d.Kind,
 				OK:                true,
@@ -372,6 +509,29 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 	var (
 		upgradedDst net.Conn
 		upgradedSrc net.Conn
+		// heldConsumedByHandshake records that the client write hold's
+		// remainder was handed to the client-side handshake as a prepend,
+		// and is therefore no longer the relay's to deliver — while a copy
+		// of it is still stranded in the parser's stream. Set at the
+		// hand-over rather than after a successful handshake: the bytes are
+		// spent either way, and a failed handshake that reported them
+		// unspent would have endUpgradePause try to deliver bytes that are
+		// already gone.
+		//
+		// Distinct from `upgradedSrc != nil`, and NOT for the reason it
+		// is tempting to write down. It is not about ClientTLSFirst
+		// ordering: upgradedSrc is assigned at the end of upgradeClient
+		// and upgradeDest's failure path only Closes it, so
+		// `upgradedSrc != nil` is true there too.
+		//
+		// The case that separates them is a parser that flushes the
+		// WHOLE hold — ClientFlushBytes covering everything held, so
+		// nothing is left to prepend — and then upgrades successfully.
+		// `upgradedSrc != nil` is true, but no held byte was consumed by
+		// the handshake: every one of them went to the real server.
+		// Discarding them from the parser's stream on that basis would
+		// hide bytes the server actually received. See endUpgradePause.
+		heldConsumedByHandshake bool
 	)
 
 	upgradeDest := func() *directive.Ack {
@@ -411,7 +571,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				log.Debug("relay: dest-side TLS upgrade failed",
 					zap.Error(err),
 					zap.String("directive_reason", d.Reason),
-					zap.String("next_step", "if the upstream uses a self-signed or private-CA cert, either turn on record.upstreamTls.verify with record.upstreamTls.caCert pointing at its CA PEM (resolved on the agent's filesystem), or leave verification off — the default — and run with KEPLOY_NEW_RELAY=off to fall back to the legacy parser path"),
+					zap.String("next_step", "if the upstream uses a self-signed or private-CA cert, either turn on record.upstreamTls.verify with record.upstreamTls.caCert pointing at its CA PEM (resolved on the agent's filesystem), or leave verification off — the default"),
 				)
 			}
 			// If the client side was upgraded first (Config.ClientTLSFirst),
@@ -420,7 +580,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 			if upgradedSrc != nil {
 				_ = upgradedSrc.Close()
 			}
-			r.endPause()
+			r.endUpgradePause(heldAtEntry, heldConsumedByHandshake, barrierTeeOffset)
 			return &directive.Ack{
 				Kind:            d.Kind,
 				OK:              false,
@@ -484,6 +644,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				)
 			}
 			src = newPrependingConnWithReadAt(src, stashed.bytes, stashed.readAt)
+			heldConsumedByHandshake = true
 		}
 		trackedSrc := newReadTrackingConn(src)
 		var err error
@@ -506,7 +667,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 			if upgradedDst != nil {
 				_ = upgradedDst.Close()
 			}
-			r.endPause()
+			r.endUpgradePause(heldAtEntry, heldConsumedByHandshake, barrierTeeOffset)
 			return &directive.Ack{
 				Kind:            d.Kind,
 				OK:              false,
@@ -540,7 +701,11 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 	}
 
 	boundaryWrittenAt := time.Now()
-	r.endPause()
+	// The CLIENT-side handshake is what consumes the held remainder (it
+	// is that side's ClientHello). A dest-only upgrade never claims it,
+	// so it stays plain client bytes the server is still owed — and the
+	// parser's copy of them stays legitimate stream content.
+	r.endUpgradePause(heldAtEntry, heldConsumedByHandshake, barrierTeeOffset)
 
 	return directive.Ack{
 		Kind:              d.Kind,
@@ -674,6 +839,93 @@ func (r *Relay) handleAbortMock(d directive.Directive) directive.Ack {
 //
 //  5. Calls endPause to close the pause channel — forwarders parked on
 //     it wake up and resume normal Read→Write→Tee operation.
+//
+// handleReleaseClient ends a [Config.HoldClientWrites] hold without a
+// TLS upgrade: every byte held for the real destination is written to
+// it in read order and the C2D forwarder goes back to forwarding.
+//
+// This is the path a parser takes when it has inspected the client's
+// opening message and concluded the session stays cleartext — MySQL
+// sending a plain HandshakeResponse rather than an SSLRequest. Nothing
+// about the connection changes except that our brake comes off, so
+// unlike the TLS path there is no handshake, no socket swap, and the
+// bytes are delivered rather than consumed.
+//
+// It runs under the pause barrier for the same reason the TLS path
+// does: the forwarder appends to the same stash we are draining, and
+// the parked-wait is what makes "take the stash" mean "take all of it".
+func (r *Relay) handleReleaseClient(ctx context.Context, stopping <-chan struct{}, d directive.Directive) directive.Ack {
+	log := r.cfg.Logger
+
+	// Reject a release for a hold that is not up. As with
+	// resume-pre-dispatch, the alternative is worse than an error: the
+	// pause below nudges read deadlines into the past, and endPause
+	// only restores them while a pause is actually installed, so a
+	// stray directive could leave the forwarders spinning on EAGAIN
+	// for the rest of the connection.
+	if !r.holdClient.Load() {
+		return directive.Ack{
+			Kind: d.Kind,
+			OK:   false,
+			Err:  errors.New("release-client: no active client write hold to release"),
+		}
+	}
+
+	r.beginPause()
+	r.waitForwardersParked(ctx, stopping)
+
+	// beginPause put a past read deadline on both sockets to wake the
+	// forwarders. Clear it before writing: a *tls.Conn Write can need
+	// to read (renegotiation, or simply the handshake it defers to the
+	// first I/O), and it would fail on the stale deadline.
+	clearDeadline(r.dst.Load())
+	clearDeadline(r.src.Load())
+
+	err := r.releaseClientHold()
+	if err != nil && log != nil {
+		log.Debug("relay: client hold release flush failed",
+			zap.Error(err),
+			zap.String("directive_reason", d.Reason),
+		)
+	}
+	if err != nil && r.cfg.OnMarkMockIncomplete != nil {
+		r.cfg.OnMarkMockIncomplete("write_error")
+	}
+
+	// Deliver anything the D2C forwarder stashed at the pause boundary
+	// before endPause drops it.
+	//
+	// endPause discards both stashes unconditionally, which is right
+	// after a TLS upgrade — the socket underneath has been replaced and
+	// cleartext bytes read before it have nowhere sensible to go. It is
+	// wrong here: a plain release changes nothing about the connection,
+	// so server bytes read at the boundary are still ordinary response
+	// data the client is waiting for, and dropping them is silent
+	// user-traffic loss on a directive whose whole contract is "our
+	// brake comes off, nothing else changes".
+	if held := r.takeStashed(fakeconn.FromDest); held.len() > 0 {
+		if srcPtr := r.src.Load(); srcPtr != nil {
+			if _, werr := (*srcPtr).Write(held.bytes); werr != nil && log != nil {
+				log.Debug("relay: delivering the D2C pause stash on release failed",
+					zap.Error(werr),
+					zap.Int("bytes", held.len()),
+				)
+			}
+		}
+	}
+
+	r.endPause()
+
+	if err != nil {
+		return directive.Ack{
+			Kind: d.Kind,
+			OK:   false,
+			Err:  fmt.Errorf("release-client flush: %w", err),
+		}
+	}
+	return directive.Ack{Kind: d.Kind, OK: true}
+}
+
 func (r *Relay) handleResumePreDispatch(ctx context.Context, stopping <-chan struct{}, d directive.Directive) directive.Ack {
 	log := r.cfg.Logger
 
@@ -719,6 +971,18 @@ func (r *Relay) handleResumePreDispatch(ctx context.Context, stopping <-chan str
 	// behind pauseCh until endPause below — the flag clear here is
 	// belt-and-braces) sees the standard pause semantics.
 	r.preDispatchActive.Store(false)
+
+	// A client write hold means "resume" cannot be honoured by lifting
+	// the pause alone: the forward loop would come back up and keep
+	// swallowing client bytes, and this handler would have acked OK
+	// while doing it. Run() refuses to arm both brakes at once, so this
+	// is unreachable today and stays as a guard: if a hold is up, a
+	// resume ends it. The stash claimed above is drained below, so
+	// clear the flag and the counter rather than calling
+	// releaseClientHold, which would try to drain it a second time.
+	if r.holdClient.Swap(false) {
+		r.heldClientBytes.Store(0)
+	}
 
 	var drainErr error
 	if len(c2dStash) > 0 {

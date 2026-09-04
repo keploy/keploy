@@ -3,12 +3,73 @@ package integrations
 
 import (
 	"context"
+	"errors"
 	"net"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
+
+// ErrParserDeclined is returned by a parser that MATCHED a connection but
+// then decided not to handle it — a port outside its allowlist, a kill
+// switch, an unsupported sub-protocol.
+//
+// It exists because "return nil" cannot express that. The dispatcher reads
+// a nil error as "the parser handled this connection", logs success, and
+// falls through to handleConnection's deferred close — so a parser that
+// bailed politely had the user's connection torn down under it, which is
+// an I1 violation (keploy must never be what ends a connection). Parsers
+// documented that returning nil would "pass through"; it did not.
+//
+// Wrap it (fmt.Errorf("...: %w", integrations.ErrParserDeclined)) to carry
+// the reason.
+//
+// CONTRACT, and both clauses are load-bearing:
+//
+//  1. If the parser READ from a connection to make its decision, it must
+//     restore those bytes on the RecordSession conn it read from —
+//     RecordSession.Ingress and/or RecordSession.Egress. The dispatcher
+//     relays the SESSION's conns, not handleConnection's own, precisely so
+//     a consumed protocol preamble is not lost. Relaying a drained stream
+//     makes the peer reset the connection, which moves the user's break
+//     rather than removing it.
+//
+//     Note this is integrations.RecordSession, NOT supervisor.Session.
+//     supervisor.Session also has an Ingress field, but it is nil on the
+//     V2 path and ignored — bytes restored there vanish silently.
+//
+//     A parser that upgraded the connection to TLS before declining must
+//     not rely on this: util.ConnTLSUpgrader writes the upgraded conn back
+//     through handleConnection's pointers, not into RecordSession, so the
+//     session's Egress is the pre-upgrade socket.
+//
+//  2. The parser must not leave goroutines reading those conns. The relay
+//     becomes the sole reader; a surviving parser reader races it for
+//     bytes on the same socket.
+//
+// SCOPE: honoured on every legacy RECORD dispatch site — the
+// matched-parser branch, the generic catch-all, and the MySQL probe
+// branch. On the V2/supervisor path the sentinel is not consulted, but a
+// parser error there already becomes FallthroughToPassthrough with a
+// correctly activity-scoped orphan window, which is the better shape.
+//
+// Be aware that those legacy sites are no longer reachable for any parser
+// in tree. Every parser the dispatcher can route to record implements
+// IntegrationsV2, and the KEPLOY_NEW_RELAY knob that could force them onto
+// the legacy path has been removed — so in practice a decline is only
+// honoured for an out-of-tree parser that does not implement
+// IntegrationsV2, or for the not-registered guards at the MySQL and
+// generic sites. A V2 parser that returns this sentinel does NOT get the
+// relay-and-restore treatment above; it degrades to
+// FallthroughToPassthrough, which keeps user traffic alive but logs the
+// connection as a retired parser rather than a decline.
+//
+// On replay there is no upstream connection to relay to — every
+// destination dial in handleConnection is mode-gated — so a parser that
+// needs to decline during replay is not yet supported and must not rely
+// on this.
+var ErrParserDeclined = errors.New("parser declined to handle this connection")
 
 type Initializer func(logger *zap.Logger) Integrations
 

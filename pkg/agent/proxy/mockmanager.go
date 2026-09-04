@@ -80,6 +80,12 @@ type MockManager struct {
 	consumedMu    sync.Mutex
 	consumedList  []models.MockState
 	consumedIndex map[string]int
+	// consumedPersistent accumulates the LATEST MockState per mock name across
+	// the whole session and is NEVER drained (unlike consumedList, which
+	// GetConsumedMocks empties). It lets the agent apply filterOutDeleted from
+	// its OWN consumption history instead of a copy the client re-sends every
+	// testcase. Read only when MockFilterParams.AgentOwnsConsumed is set.
+	consumedPersistent map[string]models.MockState
 
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
@@ -288,6 +294,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		statelessUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
 		revByKind:           make(map[models.Kind]*uint64),
 		consumedIndex:       make(map[string]int),
+		consumedPersistent:  make(map[string]models.MockState),
 		connectionTrees:     make(map[string]*TreeDb),
 		connectionLastTs:    make(map[string]time.Time),
 		sweeperStop:         make(chan struct{}),
@@ -2506,6 +2513,12 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 		m.consumedIndex[mock.Name] = len(m.consumedList)
 		m.consumedList = append(m.consumedList, mock)
 	}
+	// Never-drained accumulation (latest state per name) mirroring exactly what
+	// the client builds from successive GetConsumedMocks drains — so the agent
+	// can self-apply filterOutDeleted with no client round-trip.
+	if m.consumedPersistent != nil {
+		m.consumedPersistent[mock.Name] = mock
+	}
 	m.consumedMu.Unlock()
 	return nil
 }
@@ -2519,6 +2532,21 @@ func (m *MockManager) GetConsumedMocks() []models.MockState {
 	m.consumedList = m.consumedList[:0]
 	m.consumedIndex = make(map[string]int)
 	m.consumedMu.Unlock()
+	return out
+}
+
+// GetPersistentConsumed returns a COPY of the never-drained per-name
+// consumption map (latest MockState per mock name for the whole session).
+// Unlike GetConsumedMocks it does NOT drain. It is the agent-side equivalent of
+// the client's accumulated totalConsumedMocks, used to apply filterOutDeleted
+// from the agent's own history when MockFilterParams.AgentOwnsConsumed is set.
+func (m *MockManager) GetPersistentConsumed() map[string]models.MockState {
+	m.consumedMu.Lock()
+	defer m.consumedMu.Unlock()
+	out := make(map[string]models.MockState, len(m.consumedPersistent))
+	for k, v := range m.consumedPersistent {
+		out[k] = v
+	}
 	return out
 }
 

@@ -119,6 +119,28 @@ func (m *MySQL) MatchType(_ context.Context, buf []byte) bool {
 // directive channel rather than touching the real sockets directly.
 func (m *MySQL) IsV2() bool { return true }
 
+// WantsClientWriteHold opts this parser into relay.Config.HoldClientWrites.
+//
+// MySQL needs it because its CLIENT_SSL upgrade gives the client no
+// reason to wait. The server greets, the client answers with a 36-byte
+// SSLRequest, and then — with no further server turn — it starts a TLS
+// handshake on the same socket. Without a hold the relay's forwarder,
+// which is always parked in Read on the client socket, has the
+// ClientHello in hand and on its way upstream before this parser has
+// even been scheduled to look at the SSLRequest. The real server then
+// reads TLS handshake bytes as MySQL protocol, and keploy's own
+// destination handshake runs against a socket that is already
+// desynchronised.
+//
+// Holding costs nothing on connections that never upgrade: the
+// plaintext path releases the hold as soon as it has decoded the
+// client's HandshakeResponse41, which is the same point at which it
+// would otherwise have had nothing left to decide.
+//
+// Duck-typed, matching WantsPreDispatchPause — see the probe in
+// proxy_v2.go.
+func (m *MySQL) WantsClientWriteHold() bool { return true }
+
 func (m *MySQL) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
 	if session != nil && session.V2 != nil {
 		return m.recordV2(ctx, session)
@@ -150,7 +172,7 @@ func (m *MySQL) recordV2(ctx context.Context, session *integrations.RecordSessio
 	err := recorder.RecordV2(ctx, logger, session.V2)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mysql message into the yaml",
-			zap.String("next_step", "set KEPLOY_NEW_RELAY=off to route MySQL through the legacy record path while investigating, or KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough); the supervisor will have already fallen through to passthrough on the affected connection so user traffic continues"),
+			zap.String("next_step", "set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough) while investigating; the supervisor will have already fallen through to passthrough on the affected connection so user traffic continues"),
 		)
 		return err
 	}
