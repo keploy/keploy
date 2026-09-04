@@ -1009,3 +1009,184 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		sentry.Flush(time.Second * 2)
 	}
 }
+
+// RelayDrainIdle is how long a surviving copy direction may go with NO
+// progress before it is abandoned. It is an IDLE timeout, not a deadline
+// on the transfer: a survivor that is still moving bytes keeps going for
+// as long as it keeps moving them.
+//
+// That distinction is the whole point. A fixed wall clock is just a
+// slower version of abandoning the survivor — measured at 33% of a
+// 960 KiB response delivered before the cut — and this proxy sits in
+// front of real upstreams, where a response taking longer than a fixed
+// grace is entirely ordinary.
+//
+// The window is deliberately generous, and the asymmetry is why. A clean
+// EOF, a reset, or a failed write all end io.Copy on their own and are
+// noticed the instant they happen, so what this timer actually bounds is
+// only two things: a source socket that is open and SILENT, and a write
+// to the destination that has not returned yet. Both of those are
+// ordinary traffic — an upstream still computing its first byte, a
+// database mid-query, an event stream between heartbeats, a peer whose
+// receive window is momentarily full. Cutting them off costs the user
+// bytes that were about to arrive.
+//
+// Waiting costs two goroutines and two fds per held connection (~48 KiB,
+// dominated by io.Copy's two 32 KiB buffers), bounded by this window.
+// Measured at 300 concurrently draining connections that is ~14 MiB, and
+// memoryguard's pause headroom is 128 MiB, so it does not meaningfully
+// worsen the condition the fallback runs under. That trade is not close,
+// which is why an earlier 500ms window is gone: it dropped entire
+// responses to nothing more exotic than an upstream that thought for
+// 800ms before its first byte.
+//
+// The tempting alternative — a long budget for the FIRST byte and a short
+// idle tick afterwards — was considered and rejected. It fixes the
+// upstream that has not answered yet and leaves a guillotine on every gap
+// AFTER the first byte, so a response that streams with pauses longer
+// than the short tick is still truncated: server-sent events between
+// heartbeats, a long-poll, a cursor that pages a large result set. Those
+// gaps are not a degraded state, they are how the protocols work.
+//
+// Be precise about what one window buys, though: it does not REMOVE the
+// truncation case, it moves the edge from sub-second to 30s. A stream
+// whose gaps exceed 30s is still cut. The claim is only that no ordinary
+// gap is sub-second, so a single generous window has no edge anywhere
+// real traffic lives, where two windows keep one.
+const RelayDrainIdle = 30 * time.Second
+
+// countingWriter records how many bytes have reached the destination, so
+// the drain can tell "still delivering" from "stalled".
+type countingWriter struct {
+	w io.Writer
+	n atomic.Int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// copyOutcome reports WHICH copy direction ended, and how.
+//
+// The index is not bookkeeping, it is the correctness of the drain. A
+// bare error says that a direction broke but not which one, and the
+// survivor to watch is always the other one. Assuming the first result
+// must have come from the first goroutine is wrong half the time, and
+// wrong in a way that looks like it works: it watches the counter of the
+// direction that just died, which never advances again, so the drain
+// sees "stalled" on its very first tick and returns after a single idle
+// window. That is precisely the fixed wall clock this mechanism exists
+// to avoid, reintroduced for half the failure orientations — and it is
+// the more common half, because the upstream read is where a reset or a
+// TLS alert surfaces first.
+type copyOutcome struct {
+	idx int
+	err error
+}
+
+// WaitForSurvivor blocks until the surviving copy direction finishes or
+// stalls, whichever comes first.
+//
+// Receiving anything on finished means that direction's copy is over, so
+// there is nothing left to wait for. delivered reports how many bytes it
+// has handed on so far; it is polled once per window, and any change at
+// all counts as progress and buys another full window. Only a window
+// that passes with the count unmoved ends the wait.
+func WaitForSurvivor[T any](finished <-chan T, delivered func() int64, idle time.Duration) {
+	last := delivered()
+	t := time.NewTimer(idle)
+	defer t.Stop()
+	for {
+		select {
+		case <-finished:
+			return
+		case <-t.C:
+			n := delivered()
+			if n == last {
+				return // stalled
+			}
+			last = n
+			t.Reset(idle)
+		}
+	}
+}
+
+// RelayRawPassthrough relays bytes both ways between two connections and
+// returns once the exchange is over. Nothing is captured — it is the
+// memory-pressure fallback, used when a parser stops recording but the
+// user's traffic must keep flowing.
+//
+// Two rules, and the second is the one that is easy to get wrong.
+//
+// FORWARD THE FIN ONLY ON A CLEAN EOF. A FIN means "I have sent
+// everything I am going to send", so forwarding it after a truncated
+// read, a reset, or a failed write tells the peer a partial message is
+// complete — and an EOF-delimited protocol acts on it. io.Copy exits the
+// same way for all of these, so err is the only thing that separates
+// them.
+//
+// WHEN ONE DIRECTION BREAKS, LET THE OTHER KEEP GOING WHILE IT IS STILL
+// MAKING PROGRESS, and abandon it only once it stalls.
+//
+// Waiting unconditionally wedges the CALLER, and that is the cost worth
+// naming. The survivor is blocked reading a socket whose peer will never
+// be told the stream ended, and keploy cannot wake it before session
+// teardown (SafeConn's Close and all three deadline setters are no-ops).
+// It is not literally forever — the surviving peer's own close or timeout
+// releases it — but handleConnection cannot proceed until this returns.
+//
+// Note what it is NOT: the goroutines do not linger past the return.
+// handleConnection's defer closes the real srcConn/dstConn directly and
+// connCloser fires on parserCtx cancellation, so the abandoned copier
+// exits as soon as this function hands control back — measured at +0
+// goroutines immediately after return and close.
+//
+// Abandoning it at once is worse, and was this function's first bug. The
+// two directions do NOT necessarily fail together: these conns are
+// SafeConns over *tls.Conn on every TLS-intercepted path, and Go's
+// tls.Conn keeps its read and write halves' errors separate, so a
+// read-side failure leaves a fully usable write half with
+// already-decrypted bytes still to deliver. Returning at once lets the
+// caller's deferred close land on that healthy direction and shred it.
+func RelayRawPassthrough(clientConn, destConn net.Conn) {
+	relayRawPassthrough(clientConn, destConn, RelayDrainIdle)
+}
+
+// relayRawPassthrough is RelayRawPassthrough with the idle window as a
+// parameter, so tests can drive the drain without waiting out the
+// production window. Production has exactly one caller, above, and it
+// always passes RelayDrainIdle.
+func relayRawPassthrough(clientConn, destConn net.Conn, idle time.Duration) {
+	done := make(chan copyOutcome, 2)
+	// counters[i] counts what direction i has delivered to its destination.
+	// Both are built before either goroutine starts.
+	counters := [2]*countingWriter{{w: destConn}, {w: clientConn}}
+	cp := func(idx int, dst, src net.Conn) {
+		_, err := io.Copy(counters[idx], src)
+		if err == nil {
+			_ = CloseWriteIfPossible(dst)
+		}
+		done <- copyOutcome{idx: idx, err: err}
+	}
+	go cp(0, destConn, clientConn)
+	go cp(1, clientConn, destConn)
+
+	for i := 0; i < 2; i++ {
+		res := <-done
+		if res.err == nil {
+			continue
+		}
+		// Both results are already in hand — nothing is left to drain, and
+		// waiting would just hold the caller for the full idle window on
+		// the very common "one side ends cleanly, the other resets".
+		if i == 1 {
+			return
+		}
+		// Let the survivor run while it is still delivering. The survivor
+		// is the direction that did NOT just report.
+		WaitForSurvivor(done, counters[1-res.idx].n.Load, idle)
+		return
+	}
+}
