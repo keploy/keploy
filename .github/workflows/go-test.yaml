@@ -21,10 +21,41 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "1" # Enable CGO for this job
+      # This lane PROVIDES the MySQL below, so it is the one lane entitled to
+      # fail when the server is missing. The real-server tests key their hard
+      # failure on this var rather than on the generic CI var: CI is set by
+      # every GitHub Actions run, including forks and lanes that promise no
+      # database, so keying on it would turn an unrelated contributor's PR red
+      # over a service they were never offered. Unset, the tests skip.
+      KEPLOY_TEST_MYSQL_REQUIRED: "1"
+      KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
+      KEPLOY_TEST_MYSQL_USER: root
+      KEPLOY_TEST_MYSQL_PASS: rootpass
+      KEPLOY_TEST_MYSQL_DB: sampledb
     permissions:
       contents: read
       packages: write
       id-token: write
+
+    # The MySQL V2 record path is the one place keploy terminates TLS on
+    # BOTH sides of a connection it is also parsing, and its client-write
+    # hold is only observable against a server that actually speaks the
+    # protocol: a scripted peer accepts a leaked ClientHello that a real
+    # mysqld rejects. mysql:8.0 generates its own certs at init, so
+    # have_ssl is YES with no extra configuration.
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpass
+          MYSQL_DATABASE: sampledb
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -prootpass"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
 
     steps:
       - uses: actions/checkout@v4

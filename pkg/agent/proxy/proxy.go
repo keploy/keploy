@@ -1014,6 +1014,88 @@ func shouldRecordViaSupervisor(parser integrations.Integrations) bool {
 	return ok && v2.IsV2() && !newRelayDisabled()
 }
 
+// recordMySQLOutgoing dispatches a record-mode MySQL connection that
+// arrived through the PROBE branch, to either the V2 supervisor path or
+// the legacy one.
+//
+// It is a method rather than an inlined block so the dispatch decision is
+// reachable from a test. Inlined, it sat ~250 lines into handleConnection
+// behind an eBPF-resolved destination and a live greeting probe, so no
+// test could assert which surface the parser was handed — reverting the
+// gate entirely left the whole suite green, and a source-scanning pin was
+// defeated by `if false &&` or by negating the condition.
+//
+// tlsUpgrader is a PARAMETER rather than built here, and that is
+// load-bearing. util.NewConnTLSUpgrader keeps the &srcConn/&dstConn
+// pointers it is given and writes the upgraded *tls.Conn back through
+// them, so that handleConnection's deferred close acts on the TLS conn
+// and sends close_notify. Constructing it here would alias this
+// function's PARAMETER COPIES: the legacy MySQL STARTTLS path
+// (recorder/conn.go UpgradeClientTLS/UpgradeDestTLS) would still
+// upgrade, but the caller's variables would keep pointing at the raw
+// sockets and the deferred close would tear them down without
+// close_notify. proxy.go's matched-parser site carries the same warning.
+//
+// The error handling deliberately mirrors the two sibling supervisor
+// dispatch sites: a network-closed error is logged at Debug rather than
+// as a failure, but is still returned, so all three sites answer the same
+// way for the same condition.
+func (p *Proxy) recordMySQLOutgoing(
+	parserCtx context.Context,
+	srcConn, dstConn net.Conn,
+	mocks chan<- *models.Mock,
+	parserErrGrp *errgroup.Group,
+	mysqlLogger *zap.Logger,
+	clientConnID, destConnID int64,
+	outgoingOpts models.OutgoingOptions,
+	tlsUpgrader models.TLSUpgrader,
+) error {
+	mysqlParser := p.Integrations[integrations.MYSQL]
+	if shouldRecordViaSupervisor(mysqlParser) {
+		if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, mysqlParser,
+			integrations.MYSQL, mocks, parserErrGrp, mysqlLogger,
+			clientConnID, destConnID, outgoingOpts); err != nil {
+			if isNetworkClosedErr(err) {
+				mysqlLogger.Debug("V2 record path: connection closed", zap.Error(err))
+			} else {
+				utils.LogError(mysqlLogger, err, "V2 record path failed for the MySQL probe branch",
+					zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force the legacy record path for MySQL while investigating, or KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough)"),
+				)
+			}
+			return err
+		}
+		mysqlLogger.Debug("V2 record path returned", zap.String("ParserType", string(integrations.MYSQL)))
+		return nil
+	}
+
+	// A probe verdict of IsMySQL does not imply the parser is registered
+	// (the configured-port and known-port verdicts never check), so the
+	// legacy path would nil-panic on an unregistered build.
+	if mysqlParser == nil {
+		utils.LogError(mysqlLogger, nil, "no MySQL parser is registered",
+			zap.String("next_step", "the MySQL probe matched but integrations.MYSQL is absent from p.Integrations; this is a build/registration bug"))
+		return errors.New("mysql parser not registered")
+	}
+
+	mysqlSession := &integrations.RecordSession{
+		Ingress:      util.NewSafeConn(srcConn, mysqlLogger),
+		Egress:       util.NewSafeConn(dstConn, mysqlLogger),
+		Mocks:        mocks,
+		ErrGroup:     parserErrGrp,
+		TLSUpgrader:  tlsUpgrader,
+		Logger:       mysqlLogger,
+		ClientConnID: fmt.Sprint(clientConnID),
+		DestConnID:   fmt.Sprint(destConnID),
+		Opts:         outgoingOpts,
+	}
+
+	if err := mysqlParser.RecordOutgoing(parserCtx, mysqlSession); err != nil {
+		utils.LogError(p.logger, err, "failed to record the outgoing message")
+		return err
+	}
+	return nil
+}
+
 func (p *Proxy) buildRecordSession(
 	srcConn, dstConn net.Conn,
 	mocks chan<- *models.Mock,
@@ -2070,25 +2152,27 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				zap.String("Destination ConnectionID", fmt.Sprint(destConnID)),
 				zap.String("Destination Address", dstAddr),
 			)
-			mysqlSession := &integrations.RecordSession{
-				Ingress:      util.NewSafeConn(srcConn, mysqlLogger),
-				Egress:       util.NewSafeConn(dstConn, mysqlLogger),
-				Mocks:        rule.MC,
-				ErrGroup:     parserErrGrp,
-				TLSUpgrader:  util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection),
-				Logger:       mysqlLogger,
-				ClientConnID: fmt.Sprint(clientConnID),
-				DestConnID:   fmt.Sprint(destConnID),
-				Opts:         outgoingOpts,
-			}
-
-			// Record the outgoing message into a mock
-			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, mysqlSession)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to record the outgoing message")
-				return err
-			}
-			return nil
+			// This branch used to build a legacy RecordSession and call
+			// RecordOutgoing directly, with no IsV2 gate — so a MySQL
+			// connection reaching keploy through the PROBE recorded
+			// legacy on the default configuration, while the very same
+			// parser recorded via the supervisor when it arrived through
+			// the matched-parser branch a few hundred lines below. Two
+			// dispatch sites, two different answers, for one parser.
+			//
+			// keploy#4526 fixed the identical omission on the generic
+			// catch-all and deliberately left this one alone, because
+			// MySQL's V2 path leaked the client's ClientHello upstream
+			// in cleartext and needed its own soak. That leak is fixed
+			// (the client write hold), so the gate goes on here too and
+			// shouldRecordViaSupervisor becomes the single answer for
+			// every dispatch site.
+			// Built HERE, in handleConnection scope, so it holds pointers to
+			// the real srcConn/dstConn variables the deferred close uses —
+			// not to copies. See recordMySQLOutgoing's doc comment.
+			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection)
+			return p.recordMySQLOutgoing(parserCtx, srcConn, dstConn, rule.MC,
+				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader)
 		}
 
 		m := p.getMockManager()
@@ -2097,8 +2181,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 
+		// Same registration hazard as the record path above: a probe verdict
+		// of IsMySQL does not imply the parser is registered (the
+		// configured-port and known-port verdicts never check), so an
+		// unregistered build nil-panics here instead of failing cleanly.
+		mysqlMocker := p.Integrations[integrations.MYSQL]
+		if mysqlMocker == nil {
+			utils.LogError(p.logger, nil, "no MySQL parser is registered",
+				zap.String("next_step", "the MySQL probe matched but integrations.MYSQL is absent from p.Integrations; this is a build/registration bug"))
+			return errors.New("mysql parser not registered")
+		}
+
 		//mock the outgoing message
-		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
+		err := mysqlMocker.MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
 			p.sendMockNotFoundError(err)
