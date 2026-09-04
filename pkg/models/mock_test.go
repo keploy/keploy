@@ -272,8 +272,9 @@ func TestPostgresV3Response_CopyIn_RoundTrip(t *testing.T) {
 	if decoded.CopyOut != nil {
 		t.Fatalf("CopyOut: omitempty should have kept this nil on the CopyIn-only fixture, got %+v", decoded.CopyOut)
 	}
-	// TODO(validation): once a Validate() method or a custom
-	// UnmarshalYAML lands on PostgresV3Response, add a separate test
-	// that feeds a malformed fixture carrying BOTH Rows and CopyIn
-	// and asserts the validator rejects it.
+	// PostgresV3Response.Validate() enforces mutual exclusion between
+	// Rows, CopyIn, CopyOut, and FunctionCall (see postgres_v3_response_validate_test.go).
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("Validate(): unexpected error on valid CopyIn fixture: %v", err)
+	}
 }
