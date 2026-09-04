@@ -1,0 +1,326 @@
+package proxy
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"fmt"
+	"io"
+	"math/big"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+)
+
+// recordingMySQLParser captures which SURFACE the dispatcher handed it.
+// The V2 path sets RecordSession.V2 and leaves Ingress/Egress nil; the
+// legacy path does the opposite. That difference is the only observable
+// the dispatch decision produces, so it is what the test asserts on.
+type recordingMySQLParser struct {
+	v2Declared bool
+
+	mu       sync.Mutex
+	called   bool
+	sawV2    bool
+	sawSocks bool
+}
+
+func (f *recordingMySQLParser) MatchType(context.Context, []byte) bool { return false }
+func (f *recordingMySQLParser) RecordOutgoing(_ context.Context, s *integrations.RecordSession) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.called = true
+	f.sawV2 = s.V2 != nil
+	f.sawSocks = s.Ingress != nil || s.Egress != nil
+	return nil
+}
+func (f *recordingMySQLParser) MockOutgoing(context.Context, net.Conn, *models.ConditionalDstCfg, integrations.MockMemDb, models.OutgoingOptions) error {
+	return nil
+}
+func (f *recordingMySQLParser) IsV2() bool { return f.v2Declared }
+
+func (f *recordingMySQLParser) snapshot() (called, v2, socks bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.called, f.sawV2, f.sawSocks
+}
+
+// TestMySQLProbeBranchRoutesByShouldRecordViaSupervisor pins the dispatch
+// decision of the MySQL PROBE branch behaviourally.
+//
+// This is the only test that covers the gate itself. The full-stack test
+// calls recordViaSupervisor directly, so it stays green with the gate
+// reverted, negated, or short-circuited; and a source-scanning pin is
+// defeated by `if false &&` or by inserting a `!`. Here the parser reports
+// which surface it was handed, so any of those mutations flips the
+// observable and fails.
+func TestMySQLProbeBranchRoutesByShouldRecordViaSupervisor(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		v2       bool
+		relayOff string
+		wantV2   bool
+		why      string
+	}{
+		{
+			name: "V2 parser goes to the supervisor", v2: true, wantV2: true,
+			why: "the probe branch recorded legacy on the default config while the matched-parser branch recorded V2 — one parser, two answers",
+		},
+		{
+			name: "non-V2 parser stays legacy", v2: false, wantV2: false,
+			why: "a parser that opts out must not be handed FakeConns it cannot use",
+		},
+		{
+			name: "KEPLOY_NEW_RELAY=off forces legacy", v2: true, relayOff: "off", wantV2: false,
+			why: "the documented escape hatch must reach this dispatch site too",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.relayOff != "" {
+				t.Setenv("KEPLOY_NEW_RELAY", tc.relayOff)
+			}
+
+			parser := &recordingMySQLParser{v2Declared: tc.v2}
+			p := &Proxy{
+				logger:                     zap.NewNop(),
+				Integrations:               map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: parser},
+				recordBufferCap:            8 << 20,
+				recordBufferQueueSize:      64,
+				recordBufferStallGrace:     5 * time.Second,
+				recordBufferHalfCloseGrace: 5 * time.Second,
+			}
+
+			srcRaw, destRaw, cleanup := tcpConnPair(t)
+			defer cleanup()
+			// Mirror handleConnection: the upgrader holds pointers to the
+			// caller's own conn variables, never to a callee's copies.
+			srcConn, destConn := srcRaw, destRaw
+			upgrader := util.NewConnTLSUpgrader(&srcConn, &destConn, zap.NewNop(), nil)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			errGrp, gctx := errgroup.WithContext(ctx)
+			mocks := make(chan *models.Mock, 8)
+
+			if err := p.recordMySQLOutgoing(gctx, srcConn, destConn, mocks, errGrp,
+				zap.NewNop(), 1, 2, models.OutgoingOptions{
+					DstCfg: &models.ConditionalDstCfg{Addr: destConn.RemoteAddr().String()},
+				}, upgrader); err != nil {
+				t.Fatalf("recordMySQLOutgoing: %v", err)
+			}
+
+			called, sawV2, sawSocks := parser.snapshot()
+			if !called {
+				t.Fatal("the parser was never invoked at all")
+			}
+			if sawV2 != tc.wantV2 {
+				t.Fatalf("parser was handed V2=%v, want V2=%v.\n%s", sawV2, tc.wantV2, tc.why)
+			}
+			// The two surfaces are mutually exclusive by construction; assert
+			// it so a session that carries both never passes silently.
+			if tc.wantV2 && sawSocks {
+				t.Error("V2 session also carried Ingress/Egress sockets the relay owns")
+			}
+			if !tc.wantV2 && !sawSocks {
+				t.Error("legacy session carried no sockets")
+			}
+		})
+	}
+}
+
+// tcpConnPair returns a connected pair of real TCP conns. Real sockets,
+// not net.Pipe: the relay needs CloseWrite and deadline support.
+func tcpConnPair(t *testing.T) (client, server net.Conn, cleanup func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	type res struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		c, err := ln.Accept()
+		ch <- res{c, err}
+	}()
+
+	dialed, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	got := <-ch
+	if got.err != nil {
+		t.Fatalf("accept: %v", got.err)
+	}
+	return dialed, got.c, func() {
+		_ = dialed.Close()
+		_ = got.c.Close()
+	}
+}
+
+// TestRecordMySQLOutgoing_UnregisteredParser covers the guard that stops
+// an unregistered build nil-panicking. The probe's configured-port and
+// known-port verdicts return IsMySQL without checking registration, so
+// this is reachable on a build that omits the parser.
+func TestRecordMySQLOutgoing_UnregisteredParser(t *testing.T) {
+	p := &Proxy{
+		logger:                     zap.NewNop(),
+		Integrations:               map[integrations.IntegrationType]integrations.Integrations{},
+		recordBufferCap:            8 << 20,
+		recordBufferQueueSize:      64,
+		recordBufferStallGrace:     5 * time.Second,
+		recordBufferHalfCloseGrace: 5 * time.Second,
+	}
+	srcRaw, dstRaw, cleanup := tcpConnPair(t)
+	defer cleanup()
+	src, dst := srcRaw, dstRaw
+	upgrader := util.NewConnTLSUpgrader(&src, &dst, zap.NewNop(), nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	errGrp, gctx := errgroup.WithContext(ctx)
+
+	err := p.recordMySQLOutgoing(gctx, srcRaw, dstRaw, make(chan *models.Mock, 1), errGrp,
+		zap.NewNop(), 1, 2, models.OutgoingOptions{}, upgrader)
+	if err == nil {
+		t.Fatal("an unregistered MySQL parser returned no error; the legacy path would have " +
+			"nil-panicked on p.Integrations[MYSQL].RecordOutgoing")
+	}
+}
+
+// upgradingParser drives the legacy TLSUpgrader the way the MySQL
+// recorder's STARTTLS path does (recorder/conn.go UpgradeDestTLS).
+type upgradingParser struct {
+	recordingMySQLParser
+	upgradeErr error
+}
+
+func (u *upgradingParser) RecordOutgoing(_ context.Context, s *integrations.RecordSession) error {
+	u.mu.Lock()
+	u.called = true
+	u.sawV2 = s.V2 != nil
+	u.mu.Unlock()
+	if s.TLSUpgrader == nil {
+		u.upgradeErr = fmt.Errorf("legacy session carried no TLSUpgrader")
+		return nil
+	}
+	if _, err := s.TLSUpgrader.UpgradeDestTLS(&tls.Config{InsecureSkipVerify: true}); err != nil { //nolint:gosec // test dial
+		u.upgradeErr = err
+	}
+	return nil
+}
+
+// TestRecordMySQLOutgoing_TLSUpgradeRebindsTheCallersConn pins the
+// pointer contract that makes deferred close correct after a STARTTLS.
+//
+// ConnTLSUpgrader exists to write the upgraded *tls.Conn back through
+// the &srcConn/&dstConn pointers it was given, so handleConnection's
+// deferred close acts on the TLS conn and sends close_notify. Build the
+// upgrader inside the dispatch helper instead of at the call site and
+// those pointers alias the helper's PARAMETER COPIES: the upgrade still
+// succeeds, the parser still works, every other test stays green — and
+// the caller closes the raw socket, so the peer sees a reset instead of
+// a clean shutdown. That is precisely the regression this test exists to
+// catch, because it has no other symptom.
+func TestRecordMySQLOutgoing_TLSUpgradeRebindsTheCallersConn(t *testing.T) {
+	// A real TLS server for the dest side to hand-shake against.
+	cert := selfSignedForDispatch(t)
+	tlsLn, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
+	if err != nil {
+		t.Fatalf("tls listen: %v", err)
+	}
+	defer func() { _ = tlsLn.Close() }()
+	go func() {
+		for {
+			c, err := tlsLn.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(io.Discard, c) }()
+		}
+	}()
+
+	parser := &upgradingParser{recordingMySQLParser: recordingMySQLParser{v2Declared: false}}
+	p := &Proxy{
+		logger:                     zap.NewNop(),
+		Integrations:               map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: parser},
+		recordBufferCap:            8 << 20,
+		recordBufferQueueSize:      64,
+		recordBufferStallGrace:     5 * time.Second,
+		recordBufferHalfCloseGrace: 5 * time.Second,
+	}
+
+	srcRaw, _, cleanup := tcpConnPair(t)
+	defer cleanup()
+	dstRaw, err := net.DialTimeout("tcp", tlsLn.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial tls listener: %v", err)
+	}
+	defer func() { _ = dstRaw.Close() }()
+
+	// These stand in for handleConnection's own variables — the ones its
+	// deferred close operates on.
+	var srcConn net.Conn = srcRaw
+	var dstConn net.Conn = dstRaw
+	before := dstConn
+
+	upgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	errGrp, gctx := errgroup.WithContext(ctx)
+
+	if err := p.recordMySQLOutgoing(gctx, srcConn, dstConn, make(chan *models.Mock, 8), errGrp,
+		zap.NewNop(), 1, 2, models.OutgoingOptions{}, upgrader); err != nil {
+		t.Fatalf("recordMySQLOutgoing: %v", err)
+	}
+	if parser.upgradeErr != nil {
+		t.Fatalf("the parser's dest TLS upgrade failed: %v", parser.upgradeErr)
+	}
+
+	if dstConn == before {
+		t.Fatal("after the parser upgraded the destination, the CALLER's dstConn still points " +
+			"at the raw socket. handleConnection's deferred close will shut down the TCP " +
+			"connection instead of the tls.Conn, so no close_notify is sent and the peer sees " +
+			"a reset. The TLSUpgrader must be built where the real conn variables live, not " +
+			"over a callee's parameter copies.")
+	}
+	if _, ok := dstConn.(*tls.Conn); !ok {
+		t.Fatalf("caller's dstConn is %T after the upgrade, want *tls.Conn", dstConn)
+	}
+}
+
+func selfSignedForDispatch(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "keploy-dispatch-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("createcert: %v", err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
