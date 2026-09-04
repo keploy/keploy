@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -765,7 +766,21 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	return grpcResp, nil
 }
 
-// CreateLengthPrefixedMessageFromPayload creates a GrpcLengthPrefixedMessage from raw payload data
+// CreateLengthPrefixedMessageFromPayload creates a GrpcLengthPrefixedMessage
+// from the FIRST length-prefixed message in data.
+//
+// It honours the declared length rather than protoscoping everything after
+// byte 5. Those are the same thing for a well-formed single message, where
+// 5+length == len(data), and different for a stream: decoding past the
+// declared end swallows the NEXT message's 5-byte header as if it were
+// protobuf payload, producing a DecodedData that disagrees with the
+// MessageLength beside it. Prefer SplitLengthPrefixedMessages when the input
+// may carry more than one message.
+//
+// A declared length longer than the data available means the capture was
+// truncated. The bytes present are still decoded — callers that must not
+// serve a partial body detect it by comparing MessageLength against the
+// re-encoded length — but nothing is invented to fill the gap.
 func CreateLengthPrefixedMessageFromPayload(data []byte) models.GrpcLengthPrefixedMessage {
 	msg := models.GrpcLengthPrefixedMessage{}
 
@@ -780,13 +795,84 @@ func CreateLengthPrefixedMessageFromPayload(data []byte) models.GrpcLengthPrefix
 	// The next 4 bytes are message length.
 	msg.MessageLength = binary.BigEndian.Uint32(data[1:5])
 
+	end := 5 + int(msg.MessageLength)
+	if end > len(data) || end < 5 {
+		// Truncated capture, or a length so large it overflowed the add.
+		end = len(data)
+	}
+
 	// The payload could be empty. We only parse it if it is present.
-	if len(data) > 5 {
+	if end > 5 {
 		// Use protoscope to decode the message.
-		msg.DecodedData = protoscope.Write(data[5:], protoscope.WriterOptions{})
+		msg.DecodedData = protoscope.Write(data[5:end], protoscope.WriterOptions{})
 	}
 
 	return msg
+}
+
+// ErrTrailingGrpcBytes reports that a length-prefixed chain did not consume
+// its input exactly — the last message's declared length ran past the end of
+// the buffer, or stopped short of it with fewer than 5 bytes left over.
+var ErrTrailingGrpcBytes = errors.New("grpc: length-prefixed chain does not consume its buffer exactly")
+
+// SplitLengthPrefixedMessages walks a contiguous stream of length-prefixed
+// gRPC messages and returns them in wire order.
+//
+// THIS IS THE ONLY CORRECT WAY TO FIND MESSAGE BOUNDARIES, and the reason is
+// worth stating because the obvious alternative is wrong. HTTP/2 DATA frame
+// boundaries are NOT message boundaries: one message may span several frames,
+// several messages may share one frame, and where the splits fall depends on
+// MTU, flow-control windows and write batching. Recording one entry per frame
+// would make the same RPC produce a different mock on every run and would
+// replay a message split across two frames as two corrupt ones. Boundaries
+// come from the 5-byte prefix and nowhere else.
+//
+// The walk is STRICT: the chain must consume the buffer exactly. A partial
+// trailing message means the capture was cut off, and inventing a message
+// from the remainder would record a body that cannot reproduce. Callers get
+// ErrTrailingGrpcBytes and the messages decoded so far, so they can decide
+// whether to skip the mock or record the prefix.
+//
+// An empty buffer yields no messages and no error — that is a legitimate
+// direction (a client-streaming call whose response carries only trailers).
+func SplitLengthPrefixedMessages(data []byte) ([]models.GrpcLengthPrefixedMessage, error) {
+	var msgs []models.GrpcLengthPrefixedMessage
+	for off := 0; off < len(data); {
+		if len(data)-off < 5 {
+			return msgs, fmt.Errorf("%w: %d trailing byte(s) after %d message(s), too few for a 5-byte prefix",
+				ErrTrailingGrpcBytes, len(data)-off, len(msgs))
+		}
+		length := binary.BigEndian.Uint32(data[off+1 : off+5])
+		end := off + 5 + int(length)
+		if end < off+5 || end > len(data) {
+			return msgs, fmt.Errorf("%w: message %d declares %d bytes but only %d remain",
+				ErrTrailingGrpcBytes, len(msgs), length, len(data)-off-5)
+		}
+		msg := models.GrpcLengthPrefixedMessage{
+			CompressionFlag: uint(data[off]),
+			MessageLength:   length,
+		}
+		if length > 0 {
+			msg.DecodedData = protoscope.Write(data[off+5:end], protoscope.WriterOptions{})
+		}
+		msgs = append(msgs, msg)
+		off = end
+	}
+	return msgs, nil
+}
+
+// CreatePayloadFromLengthPrefixedMessages re-encodes a whole direction back
+// into the contiguous wire form SplitLengthPrefixedMessages accepts.
+func CreatePayloadFromLengthPrefixedMessages(msgs []models.GrpcLengthPrefixedMessage) ([]byte, error) {
+	var out []byte
+	for i, m := range msgs {
+		b, err := CreatePayloadFromLengthPrefixedMessage(m)
+		if err != nil {
+			return nil, fmt.Errorf("message %d of %d: %w", i, len(msgs), err)
+		}
+		out = append(out, b...)
+	}
+	return out, nil
 }
 
 // CreatePayloadFromLengthPrefixedMessage converts a GrpcLengthPrefixedMessage to raw payload bytes
