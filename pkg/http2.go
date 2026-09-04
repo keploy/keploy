@@ -762,6 +762,15 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		// A response carrying only trailers is legitimate (an error status, or
 		// a client-streaming call the server rejects). Keep one empty message
 		// so the recorded shape matches what a single RecvMsg used to produce.
+		//
+		// GrpcResp can now express "zero messages" honestly via NoMessages, and
+		// this site deliberately does NOT use it. This is the ingress SIMULATE
+		// path: the value built here is the ACTUAL response, compared field by
+		// field against a mock recorded earlier. Every such mock predates the
+		// flag and carries one empty message for this shape, so emitting zero
+		// here would report a body.message_count mismatch (0 vs 1) on
+		// recordings that are perfectly fine. The honest zero belongs on the
+		// EGRESS record path, where both sides move together.
 		respMsgs = append(respMsgs, createLengthPrefixedMessage(nil))
 	}
 

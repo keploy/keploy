@@ -55,7 +55,22 @@ type GrpcReq struct {
 	// AdditionalMessages carries messages 1..N of a streaming request.
 	// omitempty keeps it off disk entirely for unary.
 	AdditionalMessages []GrpcLengthPrefixedMessage `json:"additional_messages,omitempty" yaml:"additional_messages,omitempty"`
-	Timestamp          time.Time                   `json:"timestamp" yaml:"timestamp"`
+	// NoMessages records that the direction carried ZERO messages, which is
+	// distinct from carrying one EMPTY message and cannot otherwise be
+	// expressed: a zero-value Body is indistinguishable from an absent one.
+	//
+	// Both shapes are legal gRPC. A server stream may end with no messages at
+	// all (grpc-go's own interop matrix calls this DoEmptyStream), while the
+	// health check records exactly one message of length 0. Without this flag
+	// AllMessages() returns one element for both, so a stream the server ended
+	// with NOTHING replayed as one empty message and the application saw a
+	// count of 1 where it had seen 0.
+	//
+	// omitempty, and false is the pre-existing meaning: every mock recorded
+	// before this field existed decodes with NoMessages=false and keeps exactly
+	// the old behaviour.
+	NoMessages bool      `json:"no_messages,omitempty" yaml:"no_messages,omitempty"`
+	Timestamp  time.Time `json:"timestamp" yaml:"timestamp"`
 }
 
 type GrpcResp struct {
@@ -63,8 +78,23 @@ type GrpcResp struct {
 	Body    GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
 	// AdditionalMessages carries messages 1..N of a streaming response.
 	AdditionalMessages []GrpcLengthPrefixedMessage `json:"additional_messages,omitempty" yaml:"additional_messages,omitempty"`
-	Trailers           GrpcHeaders                 `json:"trailers" yaml:"trailers"`
-	Timestamp          time.Time                   `json:"timestamp" yaml:"timestamp"`
+	// NoMessages records that the direction carried ZERO messages, which is
+	// distinct from carrying one EMPTY message and cannot otherwise be
+	// expressed: a zero-value Body is indistinguishable from an absent one.
+	//
+	// Both shapes are legal gRPC. A server stream may end with no messages at
+	// all (grpc-go's own interop matrix calls this DoEmptyStream), while the
+	// health check records exactly one message of length 0. Without this flag
+	// AllMessages() returns one element for both, so a stream the server ended
+	// with NOTHING replayed as one empty message and the application saw a
+	// count of 1 where it had seen 0.
+	//
+	// omitempty, and false is the pre-existing meaning: every mock recorded
+	// before this field existed decodes with NoMessages=false and keeps exactly
+	// the old behaviour.
+	NoMessages bool        `json:"no_messages,omitempty" yaml:"no_messages,omitempty"`
+	Trailers   GrpcHeaders `json:"trailers" yaml:"trailers"`
+	Timestamp  time.Time   `json:"timestamp" yaml:"timestamp"`
 }
 
 // AllMessages returns the direction's messages in wire order.
@@ -76,11 +106,17 @@ type GrpcResp struct {
 // empty slice for that would make `for range AllMessages()` send nothing and
 // hang the RPC, turning a passing unary test into a timeout.
 func (r GrpcReq) AllMessages() []GrpcLengthPrefixedMessage {
+	if r.NoMessages {
+		return nil
+	}
 	return allMessages(r.Body, r.AdditionalMessages)
 }
 
 // AllMessages returns the response's messages in wire order. See GrpcReq.AllMessages.
 func (r GrpcResp) AllMessages() []GrpcLengthPrefixedMessage {
+	if r.NoMessages {
+		return nil
+	}
 	return allMessages(r.Body, r.AdditionalMessages)
 }
 
@@ -95,11 +131,13 @@ func allMessages(head GrpcLengthPrefixedMessage, tail []GrpcLengthPrefixedMessag
 // An empty msgs zeroes the direction rather than leaving a stale body, so
 // callers cannot half-write a direction by passing nothing.
 func (r *GrpcReq) SetMessages(msgs []GrpcLengthPrefixedMessage) {
+	r.NoMessages = len(msgs) == 0
 	r.Body, r.AdditionalMessages = splitMessages(msgs)
 }
 
 // SetMessages stores msgs in wire order. See GrpcReq.SetMessages.
 func (r *GrpcResp) SetMessages(msgs []GrpcLengthPrefixedMessage) {
+	r.NoMessages = len(msgs) == 0
 	r.Body, r.AdditionalMessages = splitMessages(msgs)
 }
 
