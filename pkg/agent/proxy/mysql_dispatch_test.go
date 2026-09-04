@@ -173,11 +173,30 @@ func tcpConnPair(t *testing.T) (client, server net.Conn, cleanup func()) {
 	}
 }
 
-// TestRecordMySQLOutgoing_UnregisteredParser covers the guard that stops
-// an unregistered build nil-panicking. The probe's configured-port and
-// known-port verdicts return IsMySQL without checking registration, so
-// this is reachable on a build that omits the parser.
+// TestRecordMySQLOutgoing_UnregisteredParser covers the case where the
+// probe says IsMySQL but no parser is registered — reachable on a build
+// that omits it, because the configured-port and known-port verdicts never
+// check registration.
+//
+// It used to nil-panic; then it returned an error, which unwound to
+// handleConnection's deferred close and dropped the user's connection.
+// Neither is right: not having a parser is a reason to stop PARSING, not a
+// reason to end someone's connection. It now relays.
 func TestRecordMySQLOutgoing_UnregisteredParser(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		c, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		_, _ = io.Copy(c, c)
+	}()
+
 	p := &Proxy{
 		logger:                     zap.NewNop(),
 		Integrations:               map[integrations.IntegrationType]integrations.Integrations{},
@@ -186,20 +205,37 @@ func TestRecordMySQLOutgoing_UnregisteredParser(t *testing.T) {
 		recordBufferStallGrace:     5 * time.Second,
 		recordBufferHalfCloseGrace: 5 * time.Second,
 	}
-	srcRaw, dstRaw, cleanup := tcpConnPair(t)
+
+	appSide, proxySide, cleanup := tcpConnPair(t)
 	defer cleanup()
-	src, dst := srcRaw, dstRaw
+	dstConn, err := net.DialTimeout("tcp", upstream.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial upstream: %v", err)
+	}
+	defer func() { _ = dstConn.Close() }()
+
+	src, dst := proxySide, dstConn
 	upgrader := util.NewConnTLSUpgrader(&src, &dst, zap.NewNop(), nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	errGrp, gctx := errgroup.WithContext(ctx)
+	ctx = context.WithValue(gctx, models.ErrGroupKey, errGrp)
+	ctx = context.WithValue(ctx, models.ClientConnectionIDKey, "1")
+	ctx = context.WithValue(ctx, models.DestConnectionIDKey, "2")
 
-	err := p.recordMySQLOutgoing(gctx, srcRaw, dstRaw, make(chan *models.Mock, 1), errGrp,
-		zap.NewNop(), 1, 2, models.OutgoingOptions{}, upgrader)
-	if err == nil {
-		t.Fatal("an unregistered MySQL parser returned no error; the legacy path would have " +
-			"nil-panicked on p.Integrations[MYSQL].RecordOutgoing")
+	go func() {
+		_ = p.recordMySQLOutgoing(ctx, proxySide, dstConn, make(chan *models.Mock, 1), errGrp,
+			zap.NewNop(), 1, 2, models.OutgoingOptions{}, upgrader)
+	}()
+
+	if _, err := appSide.Write([]byte("ping")); err != nil {
+		t.Fatalf("app write: %v", err)
+	}
+	_ = appSide.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(appSide, buf); err != nil {
+		t.Fatalf("an unregistered parser dropped the connection instead of relaying it: %v", err)
 	}
 }
 
