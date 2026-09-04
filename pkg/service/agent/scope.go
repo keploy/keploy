@@ -51,6 +51,7 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) (models.Sc
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
 		tableSize := len(a.scopeTable)
+		universe := a.mappedUniverse
 		a.scopeMu.Unlock()
 		// No per-test mapping for this test — leave the whole pool armed. All
 		// three shapes below served the whole set silently before; they are
@@ -79,10 +80,21 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) (models.Sc
 		// a sequential single-worker suite, the pre-Design-A behavior).
 		a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)))
 		if err := a.UpdateMockParams(ctx, models.MockFilterParams{
-			MockMapping:     names,
-			UseMappingBased: true,
-			AfterTime:       models.BaseTime,
-			BeforeTime:      time.Now(),
+			MockMapping: names,
+			// Mocks belonging to no test stay reachable as overflow, after this
+			// test's own. Without it a `beforeAll` recording is invisible for the
+			// whole test and a call that needs it misses with candidates: 0,
+			// while the per-worker path (SetWorkerScope above) already keeps such
+			// mocks visible. The two paths agreed on nothing here until now.
+			MockMappingUniverse: universe,
+			UseMappingBased:     true,
+			AfterTime:           models.BaseTime,
+			BeforeTime:          time.Now(),
+			// Subtract what this session already served. Upstream's persistent
+			// ledger (#4534) exists but is not consulted unless the caller asks,
+			// so without this every scope boundary re-stages a pristine pool and
+			// resurrects the whole suite's consumption.
+			AgentOwnsConsumed: true,
 		}); err != nil {
 			return models.ScopeAck{}, err
 		}
@@ -248,6 +260,11 @@ func (a *Agent) SetScopeTable(_ context.Context, table map[string][]string) erro
 		}
 	}
 	a.SetMappedUniverse(universe)
+	// Cached for BeginScope's pid == 0 branch, which needs the same set to tell
+	// "another test's mock" from "belongs to no test" when it narrows the pool.
+	a.scopeMu.Lock()
+	a.mappedUniverse = universe
+	a.scopeMu.Unlock()
 	return nil
 }
 
