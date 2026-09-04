@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -657,6 +659,23 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		md[k] = []string{v}
 	}
 
+	// Bound the whole call, because the drain below is now a loop.
+	//
+	// A single RecvMsg was self-limiting. Draining to io.EOF is not: a bidi
+	// stream the server holds open — server reflection is exactly that shape
+	// — never reaches EOF, so without a deadline one bad test case blocks
+	// until the entire test-run context dies, taking the rest of the test set
+	// with it and attributing the hang to nothing in particular.
+	//
+	// APITimeout is the same knob the HTTP replay path uses. Zero means the
+	// caller did not set one, so fall back rather than leaving it unbounded.
+	timeout := time.Duration(cfg.APITimeout) * time.Second
+	if timeout <= 0 {
+		timeout = defaultGrpcCallTimeout
+	}
+	ctx, cancelCall := context.WithTimeout(ctx, timeout)
+	defer cancelCall()
+
 	// Create context with metadata
 	callCtx := metadata.NewOutgoingContext(ctx, md)
 
@@ -670,24 +689,31 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		return nil, fmt.Errorf("failed to create stream: %w", err)
 	}
 
-	// Convert the request body to raw message format
-	// For gRPC client with passthrough codec, we only need the protobuf bytes, not the full gRPC frame
-	var requestPayload []byte
-	if grpcReq.Body.DecodedData != "" {
-		// Parse the protoscope format back to bytes
-		scanner := protoscope.NewScanner(grpcReq.Body.DecodedData)
-		var err error
-		requestPayload, err = scanner.Exec()
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse request payload: %w", err)
+	// Send every recorded request message, in order.
+	//
+	// A client-streaming or bidi call records N messages; sending only the
+	// first replays a different request from the one that was captured, and
+	// the server's response to it is not the response that was recorded.
+	//
+	// AllMessages() always yields at least one element, including for a
+	// zero-value body — the health check records message_length 0 with empty
+	// decoded_data and expects exactly one empty message. An empty payload
+	// here is a real message, not the absence of one.
+	reqMsgs := grpcReq.AllMessages()
+	for i, m := range reqMsgs {
+		var requestPayload []byte
+		if m.DecodedData != "" {
+			// Parse the protoscope format back to bytes
+			scanner := protoscope.NewScanner(m.DecodedData)
+			var err error
+			requestPayload, err = scanner.Exec()
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse request payload (message %d of %d): %w", i, len(reqMsgs), err)
+			}
 		}
-	}
-
-	requestMsg := &rawMessage{data: requestPayload}
-
-	// Send the request
-	if err := stream.SendMsg(requestMsg); err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
+		if err := stream.SendMsg(&rawMessage{data: requestPayload}); err != nil {
+			return nil, fmt.Errorf("failed to send request (message %d of %d): %w", i, len(reqMsgs), err)
+		}
 	}
 
 	// Close the send side of the stream
@@ -701,13 +727,45 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		return nil, fmt.Errorf("failed to get response headers: %w", err)
 	}
 
-	// Read the response message
-	responseMsg := &rawMessage{}
-	if err := stream.RecvMsg(responseMsg); err != nil && err != io.EOF {
-		return nil, fmt.Errorf("failed to receive response: %w", err)
+	// Drain the response stream to io.EOF.
+	//
+	// A single RecvMsg captures the first message of a server-streaming or
+	// bidi response and abandons the rest, which also tears the connection
+	// down early — so the app handler aborts and any dependency calls behind
+	// messages 2..N never run.
+	//
+	// TRAILERS MUST BE READ AFTER THE DRAIN, NOT AFTER THE FIRST MESSAGE.
+	// grpc-go only populates Trailer() once RecvMsg has returned a non-nil
+	// error. Reading it earlier returns an empty map, the grpc-status fixup
+	// below then fabricates "0", and a stream that died partway replays as a
+	// clean success — the worst possible outcome, because it looks correct.
+	var respMsgs []models.GrpcLengthPrefixedMessage
+	var drainErr error
+	for {
+		responseMsg := &rawMessage{}
+		err := stream.RecvMsg(responseMsg)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			// Not fatal: this error IS the RPC's outcome and belongs in the
+			// mock. Stop draining and record it below, rather than discarding
+			// a partial stream and the reason it ended.
+			drainErr = err
+			logger.Debug("gRPC response stream ended with an error; recording what arrived",
+				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.Error(err))
+			break
+		}
+		respMsgs = append(respMsgs, createLengthPrefixedMessage(responseMsg.data))
+	}
+	if len(respMsgs) == 0 {
+		// A response carrying only trailers is legitimate (an error status, or
+		// a client-streaming call the server rejects). Keep one empty message
+		// so the recorded shape matches what a single RecvMsg used to produce.
+		respMsgs = append(respMsgs, createLengthPrefixedMessage(nil))
 	}
 
-	// Get trailers
+	// Now that the stream is finished, the trailers are real.
 	trailers := stream.Trailer()
 
 	// Construct the response
@@ -716,7 +774,6 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			PseudoHeaders:   make(map[string]string),
 			OrdinaryHeaders: make(map[string]string),
 		},
-		Body: createLengthPrefixedMessage(responseMsg.data),
 		Trailers: models.GrpcHeaders{
 			PseudoHeaders:   make(map[string]string),
 			OrdinaryHeaders: make(map[string]string),
@@ -754,6 +811,24 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		}
 	}
 
+	// The real status comes from the terminal RecvMsg error, NOT from the
+	// trailer map.
+	//
+	// grpc-go consumes grpc-status and grpc-message off the wire and turns
+	// them into the error RecvMsg returns; Trailer() carries only the
+	// application's own custom trailers. So a stream that ended INTERNAL has
+	// no grpc-status key at all, and the default below would fabricate "0" —
+	// replaying a failed RPC as a clean pass. Reading the status off the
+	// error is what makes a mid-stream failure visible.
+	if drainErr != nil {
+		if st, ok := status.FromError(drainErr); ok {
+			grpcResp.Trailers.OrdinaryHeaders["grpc-status"] = strconv.Itoa(int(st.Code()))
+			if msg := st.Message(); msg != "" {
+				grpcResp.Trailers.OrdinaryHeaders["grpc-message"] = msg
+			}
+		}
+	}
+
 	// Ensure mandatory gRPC status is present
 	if _, ok := grpcResp.Trailers.OrdinaryHeaders["grpc-status"]; !ok {
 		grpcResp.Trailers.OrdinaryHeaders["grpc-status"] = "0"
@@ -762,9 +837,17 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		grpcResp.Trailers.OrdinaryHeaders["grpc-message"] = ""
 	}
 
-	logger.Info("successfully completed gRPC simulation", zap.String("method", path))
+	grpcResp.SetMessages(respMsgs)
+
+	logger.Info("successfully completed gRPC simulation",
+		zap.String("method", path), zap.Int("response_messages", len(respMsgs)))
 	return grpcResp, nil
 }
+
+// defaultGrpcCallTimeout bounds a replayed gRPC call when the caller supplies
+// no APITimeout. It exists so the response drain can never hang a test set on
+// a stream the server holds open; it is not a latency target.
+const defaultGrpcCallTimeout = 30 * time.Second
 
 // CreateLengthPrefixedMessageFromPayload creates a GrpcLengthPrefixedMessage
 // from the FIRST length-prefixed message in data.
