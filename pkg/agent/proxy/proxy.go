@@ -1072,9 +1072,11 @@ func (p *Proxy) recordMySQLOutgoing(
 	// (the configured-port and known-port verdicts never check), so the
 	// legacy path would nil-panic on an unregistered build.
 	if mysqlParser == nil {
-		utils.LogError(mysqlLogger, nil, "no MySQL parser is registered",
-			zap.String("next_step", "the MySQL probe matched but integrations.MYSQL is absent from p.Integrations; this is a build/registration bug"))
-		return errors.New("mysql parser not registered")
+		// This is a decline, not a failure: relay rather than letting the
+		// caller's deferred close drop the connection.
+		declined := fmt.Errorf("no MySQL parser is registered: %w", integrations.ErrParserDeclined)
+		return p.relayDeclinedConn(parserCtx, declined, mysqlLogger, integrations.MYSQL,
+			mysqlSessionForRelay(srcConn, dstConn, mysqlLogger))
 	}
 
 	mysqlSession := &integrations.RecordSession{
@@ -1090,10 +1092,126 @@ func (p *Proxy) recordMySQLOutgoing(
 	}
 
 	if err := mysqlParser.RecordOutgoing(parserCtx, mysqlSession); err != nil {
+		// A decline is not a failure: relay rather than letting the caller's
+		// deferred close drop a connection keploy merely chose not to parse.
+		if errors.Is(err, integrations.ErrParserDeclined) {
+			return p.relayDeclinedConn(parserCtx, err, mysqlLogger, integrations.MYSQL, mysqlSession)
+		}
 		utils.LogError(p.logger, err, "failed to record the outgoing message")
 		return err
 	}
 	return nil
+}
+
+// mysqlSessionForRelay builds the minimal RecordSession the decline relay
+// needs when there is no parser to build a full one for.
+func mysqlSessionForRelay(srcConn, dstConn net.Conn, logger *zap.Logger) *integrations.RecordSession {
+	return &integrations.RecordSession{
+		Ingress: util.NewSafeConn(srcConn, logger),
+		Egress:  util.NewSafeConn(dstConn, logger),
+	}
+}
+
+// relayDeclinedConn relays a connection whose parser MATCHED it and then
+// declined it (port allowlist, kill switch, unsupported sub-protocol),
+// signalled by wrapping integrations.ErrParserDeclined.
+//
+// Without this the connection is left to handleConnection's deferred
+// close. That close is the bug: a declining parser returned nil, the
+// dispatcher logged "successfully recorded outgoing message", and the
+// user's connection was torn down — while the parser's own docs promised
+// the proxy would "treat the connection as a pass-through".
+//
+// The caller decides what a decline is; this function is only reached
+// once errors.Is(err, integrations.ErrParserDeclined) has already said
+// yes. It returns error to match the dispatch sites it returns through,
+// and that error is always nil: a relay ending is not a record failure.
+//
+// It relays the SESSION's conns, not handleConnection's srcConn/dstConn
+// locals, and that is load-bearing. A parser must read bytes to decide
+// whether it wants the connection — gRPC reads the HTTP/2 preface — and
+// it restores them by wrapping session.Ingress. handleConnection's local
+// still points at the drained socket, so relaying that sends a
+// preface-less stream and a real server answers GOAWAY(PROTOCOL_ERROR).
+// The user's break would move rather than disappear.
+//
+// RECORD ONLY. dstConn is nil at every dispatch site in MODE_TEST, so
+// there is no upstream to relay to; a parser that needs to decline during
+// replay should fall through to the generic mock path, which is a
+// separate change. (Note this is a property of the DISPATCH SITES, not of
+// the whole file: proxy.go also dials in MODE_TEST when !rule.Mocking,
+// and in any mode under GlobalPassthrough — both return before dispatch.)
+//
+// WHY util.RelayRawPassthrough AND NOT globalPassThrough. globalPassThrough
+// never calls CloseWrite on either side and returns on io.EOF, so a
+// client that does shutdown(SHUT_WR) — the end-of-request signal for
+// every EOF-delimited exchange — ends the connection instead of getting
+// its reply. Relaying through it would re-break, one round trip later,
+// the exact thing this function exists to stop breaking. That is also why
+// recordViaSupervisor refuses it (proxy_v2.go: "Critically we do NOT call
+// globalPassThrough here"). RelayRawPassthrough forwards the FIN on a
+// clean EOF and lets a surviving direction finish, which is what a
+// pass-through has to mean.
+//
+// WHY NO ORPHAN WINDOW. Nothing is captured on this connection from here
+// on, so the test cases recorded over the same window will fail at replay
+// with match_phase=no_mocks. Suppressing them was tried and removed: the
+// orphan window is a TIME range read by the GLOBAL syncMock manager, so it
+// suppresses every test case that overlaps it, including ones on
+// unrelated, fully captured connections. Activity-scoping only narrows the
+// range, never the blast radius — a busy connection never goes idle long
+// enough to close the window at all. And a decline is not a transient
+// incident like the V2 fallthrough's panic or memcap trip; it is a
+// persistent configuration state that holds for every connection, every
+// run. Suppression would turn "keploy drops my gRPC connections" into
+// "keploy hands back a recording with the passing cases stripped out",
+// which is not the better failure. The honest signal is the Warn below,
+// one per connection, which is also what the other two pass-through paths
+// (the record-mode kill switch and GlobalPassthrough) do.
+func (p *Proxy) relayDeclinedConn(ctx context.Context, err error, logger *zap.Logger, parserType integrations.IntegrationType, session *integrations.RecordSession) error {
+	if session == nil || !relayableConn(session.Ingress) || !relayableConn(session.Egress) {
+		utils.LogError(logger, err, "parser declined but the session carried no conns to relay",
+			zap.String("parser", string(parserType)))
+		return nil
+	}
+
+	// Suppressed on a clean stop, for the same reason the V2 fallthrough
+	// suppresses its own: on `keploy record` shutdown every in-flight
+	// connection unwinds at once, and telling the user their recording is
+	// incomplete at the moment they are reading the logs is noise about
+	// something that did not go wrong.
+	if ctx.Err() == nil {
+		// Warn, not Debug: this is permanent capture loss for the rest of
+		// the connection, and the user's recording is quietly smaller than
+		// they think.
+		logger.Warn("parser declined this connection; relaying raw and recording nothing for it",
+			zap.String("parser", string(parserType)),
+			zap.Error(err),
+			zap.String("next_step", "user traffic is unaffected, but nothing on this connection is captured, so its test cases will report no mocks at replay. If this is traffic keploy should record, the parser declined it deliberately — check its port allowlist or sub-protocol support"),
+		)
+	}
+
+	util.RelayRawPassthrough(session.Ingress, session.Egress)
+	return nil
+}
+
+// relayableConn reports whether c can actually be relayed.
+//
+// A nil check on the session field is not enough, and the difference is
+// not academic: buildRecordSession and mysqlSessionForRelay both wrap in
+// util.NewSafeConn, which returns a non-nil *SafeConn even around a nil
+// conn. `session.Egress == nil` is therefore false for every real caller,
+// and a nil upstream would sail straight past it into a nil dereference
+// inside the copy — recovered and swallowed, leaving the relay blocked
+// with no error anywhere.
+func relayableConn(c net.Conn) bool {
+	if c == nil {
+		return false
+	}
+	if sc, ok := c.(*util.SafeConn); ok {
+		return sc.Unwrap() != nil
+	}
+	return true
 }
 
 func (p *Proxy) buildRecordSession(
@@ -2187,6 +2305,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// unregistered build nil-panics here instead of failing cleanly.
 		mysqlMocker := p.Integrations[integrations.MYSQL]
 		if mysqlMocker == nil {
+			// Replay has no upstream to relay to, so a decline cannot be
+			// rescued here the way it is on the record path; fail cleanly
+			// rather than nil-panicking.
 			utils.LogError(p.logger, nil, "no MySQL parser is registered",
 				zap.String("next_step", "the MySQL probe matched but integrations.MYSQL is absent from p.Integrations; this is a build/registration bug"))
 			return errors.New("mysql parser not registered")
@@ -2944,6 +3065,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
+			if errors.Is(err, integrations.ErrParserDeclined) {
+				return p.relayDeclinedConn(parserCtx, err, logger, parserType, session)
+			}
 			if err != nil {
 				if isNetworkClosedErr(err) {
 					logger.Debug("failed to record the outgoing message (connection closed)", zap.Error(err))
@@ -2998,6 +3122,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			} else {
 				genericSession := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
 				err := genericParser.RecordOutgoing(parserCtx, genericSession)
+				if errors.Is(err, integrations.ErrParserDeclined) {
+					return p.relayDeclinedConn(parserCtx, err, logger, integrations.GENERIC, genericSession)
+				}
 				if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 					utils.LogError(logger, err, "failed to record the outgoing message")
 					return err
