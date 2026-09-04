@@ -2,6 +2,7 @@ package mapdb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 )
 
@@ -239,6 +241,44 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 		zap.String("testSetID", testSetID),
 		zap.Int("tests", len(byTest)))
 
+	return nil
+}
+
+// DeleteForSet removes the mappings file for a named set in every supported
+// format (mappings.yaml / mappings.json). It is the mapping-side counterpart
+// of mockdb's DeleteMocksForSet: a re-record must replace mocks.yaml AND
+// mappings.yaml together, otherwise the fresh mocks.yaml ships with stale
+// test-to-mock entries left over from the previous recording (keploy#4488).
+//
+// Missing files are tolerated; only permission/ownership errors surface. The
+// same pathsafe single-segment guard as the mock delete applies, because the
+// test-set ID reaches the filesystem here too.
+func (db *MappingDb) DeleteForSet(ctx context.Context, testSetID string) error {
+	_ = ctx
+	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
+		return fmt.Errorf("rejecting MappingDb.DeleteForSet: testSetID %q must be a non-empty single-segment name under the mocks output directory: %w", testSetID, err)
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	candidates := []string{
+		filepath.Join(mappingPath, fileName+"."+yaml.FormatYAML.FileExtension()),
+		filepath.Join(mappingPath, fileName+"."+yaml.FormatJSON.FileExtension()),
+	}
+	for _, candidate := range candidates {
+		validated, err := yaml.ValidatePath(candidate)
+		if err != nil {
+			utils.LogError(db.logger, err, "failed to validate mapping path for delete", zap.String("at_path", candidate))
+			return err
+		}
+		if err := os.Remove(validated); err != nil && !os.IsNotExist(err) {
+			utils.LogError(db.logger, err, "failed to delete stale mapping file during refresh; missing files are tolerated, only permission/ownership errors surface here", zap.String("path", validated))
+			return err
+		}
+	}
+	db.logger.Info("Successfully cleared old test-mock mappings for refresh.", zap.String("testSetID", testSetID))
 	return nil
 }
 
