@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -44,17 +45,18 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			svc, err := serviceFactory.GetService(ctx, "import")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
-				return nil
+				return fmt.Errorf("service doesn't satisfy tools service interface")
 			}
 			err = tools.Import(ctx, path, basePath)
 			if err != nil {
 				utils.LogError(logger, err, "failed to import Postman collection")
+				return err
 			}
 			return nil
 		},
