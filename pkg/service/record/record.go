@@ -707,6 +707,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
 		notifyCancel()
+		// AFTER the notification, because that is what closes the consumer
+		// recorder and mints its last unit. See reportConsumerRecording.
+		r.reportConsumerRecording()
 		// Pcap + keylog flow over long-lived HTTP streams started in
 		// Start() right after the agent's broadcaster came up. The
 		// streams unwind on their own when the agent closes the
@@ -1053,8 +1056,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
-			// Skip curl generation for either form data requests or large body (>1MB)
-			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
+			if shouldStampCurl(testCase) {
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
 			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromTestCase(testCase))
@@ -1717,4 +1719,90 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+// curlBodyThreshold is the request-body size above which no `curl`
+// reproduction command is generated. It mirrors testdb.LargeBodyThreshold; a
+// megabyte of body inlined into a shell command is unusable as a command and
+// expensive to build.
+const curlBodyThreshold = 1 * 1024 * 1024
+
+// shouldStampCurl reports whether a captured test case gets a `curl`
+// reproduction command stamped onto it.
+//
+// THE KIND TERM IS THE POINT. A Kind: Consumer test case carries an entirely
+// EMPTY HTTPReq — its trigger is a message a broker delivered, not a request
+// anyone made — so without it every consumer test is stamped with the literal
+// string `curl --request  --url `. The value does not reach disk (EncodeTestcase
+// writes doc.Curl on the HTTP and gRPC arms only), but it does reach
+// telemetry.ExtractDomainsFromTestCase and the BeforeTestCaseInsert hook on the
+// in-memory test case, and it is the kind of garbage that gets copied into a
+// report later.
+//
+// It EXCLUDES the new kind rather than requiring models.HTTP (which is what
+// keploy-consumer-design-v2.md §9 asked for) so no EXISTING kind changes
+// behaviour: gRPC test cases are stamped today, and narrowing to models.HTTP
+// would change the in-memory TestCase every gRPC recording produces. That is a
+// separate cleanup with its own blast radius.
+//
+// The same rule is applied again by testdb.InsertTestCase, which runs
+// afterwards on the same test case; the two are kept identical deliberately, so
+// a re-stamp on the persistence path cannot reintroduce what this one skipped.
+func shouldStampCurl(tc *models.TestCase) bool {
+	if tc == nil || tc.Kind == models.CONSUMER {
+		return false
+	}
+	return len(tc.HTTPReq.Body) <= curlBodyThreshold && len(tc.HTTPReq.Form) == 0
+}
+
+// reportConsumerRecording fetches the consumer recording's reconciliation and
+// FAILS the recording when it is degraded.
+//
+// WHY THE EXIT CODE AND NOT JUST A LOG LINE. Design §3 R6 requires a recording
+// that observed N consumer units and persisted M < N of them to fail. Until
+// this existed the only surface was one zap ERROR line in the AGENT's log,
+// which in the ordinary CLI deployment is a different process — so a user who
+// seeded ten messages and got eight test files got exit 0, and an agent loop
+// keying on the exit code went straight on to replay a suite that was silently
+// short. A unit refused by name and a unit that vanished produce the same
+// number of files, so the file count cannot say it either.
+//
+// SILENT FOR EVERY RECORDING WITH NO CONSUMER UNIT IN IT, which today is every
+// recording this repository can make on its own: no OSS parser stamps role
+// metadata, so nothing calls the consumer recorder at all. An agent that
+// predates the route, or one that is already gone by teardown, reports nothing
+// and is likewise silent — a fetch failure must never invent a recording
+// failure.
+func (r *Recorder) reportConsumerRecording() {
+	reporter, ok := r.instrumentation.(ConsumerRecordingReporter)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	report, err := reporter.ConsumerRecordingReport(ctx)
+	if err != nil {
+		r.logger.Debug("could not read the consumer recording reconciliation", zap.Error(err))
+		return
+	}
+	if !report.Observed() {
+		return
+	}
+	r.logger.Info("consumer recording reconciliation",
+		zap.Int("units_observed", report.UnitsObserved),
+		zap.Int("test_cases_persisted", report.UnitsPersisted),
+		zap.Int("units_refused", report.UnitsRefused),
+		zap.Int("units_lost", report.UnitsLost),
+		zap.Int("orphan_effect_records", report.OrphanEffects))
+	if !report.Degraded() {
+		return
+	}
+	utils.LogError(r.logger, errors.New(strings.Join(report.Problems, "; ")),
+		"this consumer recording is not trustworthy and must not be replayed as-is",
+		zap.Int("units_observed", report.UnitsObserved),
+		zap.Int("test_cases_persisted", report.UnitsPersisted),
+		zap.String("next_step", "re-record it, seeding one message at a time so each unit closes before the next begins"))
+	// The exit code is the point: it is what stops an agent loop from
+	// replaying a suite that is shorter than the recording the user watched.
+	utils.ErrCode = 1
 }

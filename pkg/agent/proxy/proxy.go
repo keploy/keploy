@@ -31,6 +31,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/consumer"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -185,6 +186,46 @@ type Proxy struct {
 	// "first window doesn't count as a completed test" rule is owned by
 	// Engine.AdvanceWindow, so this struct keeps no async bookkeeping.
 	asyncEngine *async.Engine
+
+	// consumerGate is the default-closed delivery gate for Kind: Consumer
+	// replay. It is allocated once per proxy and lives for the process: a
+	// consumer holds one long connection across a whole test set, so the gate
+	// cannot be per-connection, and --keep-app-alive reuses one application
+	// process across sets, so it cannot be per-set either (Gate.Reset is what
+	// clears it at a set boundary).
+	//
+	// It is installed on every MODE_TEST parser context, so a protocol parser
+	// reaches it with consumer.GateFromContext(ctx) without OSS having to know
+	// that protocol exists. It is also exposed through ConsumerGate() so the
+	// component implementing replay.ConsumerInstrumentation — which lives
+	// outside this repository until a parser does — can Arm, Await and Reset
+	// the very same instance the parsers are talking to. Both halves matter:
+	// a gate the parsers can see but nobody can arm delivers nothing, and one
+	// that can be armed but no parser can see refuses every poll.
+	consumerGate *consumer.Gate
+
+	// consumerRecorder mints Kind: Consumer test cases from role-tagged mocks
+	// during MODE_RECORD, and is installed on every record-branch parser
+	// context. It is rebuilt per recording session in Record() because a
+	// recorder owns per-session state (the open unit, the dedup-queue job, the
+	// reconciliation counters) that must not survive into the next session,
+	// and it is closed at wind-down so the LAST unit of a recording is minted
+	// rather than dropped.
+	//
+	// Nil until a test-case channel is installed with SetConsumerTestCases:
+	// the proxy is constructed before the ingress manager that owns that
+	// channel, and a recorder with nowhere to put a minted test case would
+	// resolve windows for tests that never reach disk.
+	consumerRecorderMu sync.Mutex
+	consumerRecorder   *consumer.Recorder
+	consumerTCChan     chan<- *models.TestCase
+	consumerMapping    bool
+	// consumerRecording is the LAST closed recording session's
+	// reconciliation, published for the record command to fetch at teardown.
+	// It is what makes a degraded consumer recording exit non-zero instead of
+	// producing one ERROR line in a busy log and a suite that is silently
+	// short. Guarded by consumerRecorderMu.
+	consumerRecording models.ConsumerRecordingReport
 
 	// sessionResolver, when set, maps a connection's owning TGID to the
 	// session that should handle it. It is the seam by which an external
@@ -949,6 +990,16 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		proxy.asyncEngine = async.NewEngine(logger, opts.Async.Lanes, map[string]async.AsyncParser{})
 	}
 
+	// The consumer delivery gate is allocated unconditionally and costs a
+	// mutex and two empty maps. It is DEFAULT-CLOSED: with no Deliverer
+	// registered and no test armed it refuses every delivery, so a proxy that
+	// never sees a consumer protocol behaves exactly as it did before.
+	proxy.consumerGate = consumer.NewGate(logger, consumer.RealClock())
+	// Mapping is on unless the user opted out; the recorder passes it straight
+	// through to the dedup queue, which is what decides whether a resolved
+	// window emits a test-mock mapping at all.
+	proxy.consumerMapping = !opts.DisableMapping
+
 	// Plumb the proxy logger into the package-singleton SyncMockManager
 	// so its drop-path Error emissions actually reach the host logger.
 	// zap.L() would silently fall back to Nop here — syncMock loads at
@@ -1315,6 +1366,207 @@ func (p *Proxy) GetSession() *agent.Session {
 	return p.getSession()
 }
 
+// ConsumerGate returns the proxy's delivery gate for Kind: Consumer replay.
+//
+// It is the seam a replay.ConsumerInstrumentation implementation uses: the
+// parsers find the same instance on their context, so arming here is what
+// opens the window they deliver through. Never nil for a proxy built by New.
+func (p *Proxy) ConsumerGate() *consumer.Gate {
+	if p == nil {
+		return nil
+	}
+	return p.consumerGate
+}
+
+// SetConsumerTestCases installs the channel minted consumer test cases are
+// pushed onto — the same channel the HTTP ingress pushes onto, so a consumer
+// test reaches persistence through the unchanged path.
+//
+// It is separate from New because the proxy is constructed BEFORE the ingress
+// manager that owns the channel (see cli/provider/agent_service.go, which owns
+// both and wires them together). Until it is called the consumer recorder is
+// nil and every installation of it on a parser context is a no-op, which is
+// the correct behaviour for an embedder that has no test-case sink.
+func (p *Proxy) SetConsumerTestCases(tc chan<- *models.TestCase) {
+	if p == nil {
+		return
+	}
+	p.consumerRecorderMu.Lock()
+	p.consumerTCChan = tc
+	p.consumerRecorderMu.Unlock()
+}
+
+// ConsumerRecorder returns the recorder for the current recording session, or
+// nil when there is none. Every method on *consumer.Recorder is nil-safe, so
+// callers pass the result straight into consumer.WithRecorder.
+func (p *Proxy) ConsumerRecorder() *consumer.Recorder {
+	if p == nil {
+		return nil
+	}
+	p.consumerRecorderMu.Lock()
+	defer p.consumerRecorderMu.Unlock()
+	return p.consumerRecorder
+}
+
+// installConsumerEgressObserver points the syncMock manager's egress observer
+// at whatever consumer recorder is current.
+//
+// It is registered once per recording session rather than per mock, and it
+// resolves the recorder at CALL time so a session boundary does not have to
+// re-register anything: startConsumerRecorder swaps p.consumerRecorder and the
+// next mock is counted against the new session's open unit, or against nothing
+// when there is no recorder.
+//
+// Recorder.OnEgress runs with the manager's own mutex held, so it must never
+// call back into the manager. It takes only the recorder's leaf mutex — see
+// the egressObserver field on SyncMockManager for the full rule, and
+// Recorder.onTrigger for why the lock order is manager -> recorder and never
+// the reverse.
+func (p *Proxy) installConsumerEgressObserver() {
+	// The PACKAGE-GLOBAL manager, which is the one every record path in this
+	// repository binds (see the syncMock.Get() call that installs rule.MC as
+	// its output channel). A multi-app composer that hands parsers a per-app
+	// manager on the context would need to register there too; nothing in OSS
+	// does, and Recorder.onTrigger resolves its manager the same way
+	// (FromContextOrGlobal), so the two agree for every deployment this
+	// repository ships.
+	mgr := syncMock.Get()
+	if mgr == nil {
+		return
+	}
+	mgr.SetEgressObserver(func(m *models.Mock) {
+		p.ConsumerRecorder().OnEgress(m)
+	})
+}
+
+// startConsumerRecorder begins a recording session's consumer recorder,
+// closing any recorder left over from a previous session first. A recorder
+// owns per-session state — the open unit, its dedup-queue job, the
+// reconciliation counters — and carrying that into the next session would
+// attribute one recording's trailing effects to the next one's first test.
+func (p *Proxy) startConsumerRecorder(ctx context.Context) {
+	ctx = detachedRecorderCtx(ctx)
+	p.consumerRecorderMu.Lock()
+	prev, tc := p.consumerRecorder, p.consumerTCChan
+	if tc == nil {
+		// No sink for minted test cases. Leave the recorder nil rather
+		// than resolving windows for tests that can never reach disk.
+		p.consumerRecorder = nil
+		p.consumerRecorderMu.Unlock()
+		if prev != nil {
+			p.reportConsumerRecording(prev.Close(ctx))
+		}
+		return
+	}
+	p.consumerRecorder = consumer.NewRecorder(consumer.RecorderOptions{
+		Logger:        p.logger,
+		TestCases:     tc,
+		EnableMapping: p.consumerMapping,
+	})
+	// A new session starts with a clean reconciliation. Leaving the previous
+	// one published would let a recording that has not finished yet answer
+	// with an older session's verdict.
+	p.consumerRecording = models.ConsumerRecordingReport{}
+	p.consumerRecorderMu.Unlock()
+	// THE SIDE-EFFECT INGEST, INSTALLED AT THE ONE PLACE EVERY MOCK PASSES.
+	// ConsumerSpec.SideEffects counts calls of a DIFFERENT protocol family
+	// made while a unit is open — a Kafka worker's database INSERT — and those
+	// mocks are emitted by parsers that are not consumer-aware. Reading them
+	// off a parser context seam is impossible by construction; the syncMock
+	// manager is where all of them meet.
+	//
+	// OUTSIDE consumerRecorderMu ON PURPOSE. The observer's own body takes
+	// that mutex (through ConsumerRecorder()) while the syncMock manager holds
+	// its lock, so registering it under the same mutex would put
+	// consumerRecorderMu on both sides of the manager's lock.
+	p.installConsumerEgressObserver()
+	if prev != nil {
+		p.reportConsumerRecording(prev.Close(ctx))
+	}
+}
+
+// stopConsumerRecorder closes the current recording session's recorder, which
+// mints the LAST open unit — without it the final message of every recording
+// would be observed and never persisted — and surfaces the reconciliation.
+func (p *Proxy) stopConsumerRecorder(ctx context.Context) {
+	ctx = detachedRecorderCtx(ctx)
+	p.consumerRecorderMu.Lock()
+	rec := p.consumerRecorder
+	p.consumerRecorder = nil
+	p.consumerRecorderMu.Unlock()
+	if rec != nil {
+		p.reportConsumerRecording(rec.Close(ctx))
+	}
+}
+
+// detachedRecorderCtx returns a context that keeps ctx's values but not its
+// cancellation.
+//
+// Closing a recorder MINTS ITS LAST OPEN UNIT, and both callers run on paths
+// whose context is about to be — or has just been — cancelled: wind-down, and
+// the start of the next session. Passing the live context through would race
+// the mint against the very signal that triggered it, and Recorder.closeUnit
+// counts a cancelled hand-off as a refusal by name. Nil is tolerated because
+// this is reached from HTTP handlers and embedder code.
+func detachedRecorderCtx(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(ctx)
+}
+
+// reportConsumerRecording PUBLISHES the reconciliation and fails a degraded
+// recording out loud.
+//
+// Recorder.Close already prints the "N units observed, M persisted, K refused"
+// reconciliation design §3 R6 requires (and prints nothing at all when no
+// consumer unit was ever observed, which is every HTTP-only recording). What
+// it does not do is decide whether the recording can be trusted, and that is
+// the whole point of counting: a user who watched ten messages go by must be
+// told when only eight files exist, and the test count alone cannot say it —
+// a unit refused by name and a unit that vanished produce the same number of
+// files.
+//
+// PUBLISHING IS WHAT MAKES IT A FAILURE RATHER THAN A LOG LINE. The log goes
+// to the agent's own logger, which in the ordinary CLI deployment is a
+// different process from `keploy record`; nothing in it can move an exit code.
+// ConsumerRecordingReport() is fetched by the record command at teardown
+// (through /agent/consumer/recording) and a degraded report sets a non-zero
+// exit, which is what design §3 R6 asks for and what an agent loop keys on.
+func (p *Proxy) reportConsumerRecording(stats consumer.RecorderStats) {
+	report := stats.Report()
+	p.consumerRecorderMu.Lock()
+	p.consumerRecording = report
+	p.consumerRecorderMu.Unlock()
+
+	err := stats.Err()
+	if err == nil {
+		return
+	}
+	utils.LogError(p.logger, err, "consumer recording finished with units that were not persisted",
+		zap.Int("units_observed", stats.UnitsObserved),
+		zap.Int("test_cases_persisted", stats.UnitsPersisted),
+		zap.Int("units_refused", stats.UnitsRefused),
+		zap.Int("units_lost", stats.UnitsLost()),
+		zap.Int("orphan_effect_records", stats.OrphanEffects),
+		zap.String("next_step", "this recording must not be replayed as-is: re-record it, seeding one message at a time so each unit closes before the next begins"))
+}
+
+// ConsumerRecordingReport returns the last closed recording session's
+// reconciliation. It is the capability pkg/service/agent.Agent forwards and
+// the /agent/consumer/recording route serves, so that `keploy record` can fail
+// a degraded consumer recording instead of exiting 0 with a suite that is
+// silently short.
+//
+// A recording that saw no consumer unit at all — every recording this
+// repository can make on its own, since no OSS parser stamps role metadata —
+// reports zeroes and no problems, and every caller stays silent on that.
+func (p *Proxy) ConsumerRecordingReport() models.ConsumerRecordingReport {
+	p.consumerRecorderMu.Lock()
+	defer p.consumerRecorderMu.Unlock()
+	return p.consumerRecording
+}
+
 // SetSessionResolver installs a per-TGID session resolver. Pass nil to
 // revert to single-session mode. Multi-app composers (the enterprise
 // agent) use this to route each app's captured traffic to its own
@@ -1382,8 +1634,15 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
 // When this flag is set, connection errors will be logged as debug instead of error
-func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
+func (p *Proxy) SetGracefulShutdown(ctx context.Context) error {
 	p.isGracefulShutdown.Store(true)
+	// Mint the recording's LAST consumer unit and surface the reconciliation.
+	// Without this the final message of every recording is observed and never
+	// persisted, which is exactly the silent shortfall the reconciliation
+	// exists to make impossible. Detached from ctx because this runs on the
+	// shutdown path and the mint must not be cancelled by the very signal that
+	// triggered it.
+	p.stopConsumerRecorder(ctx)
 	// Surface the async-egress verdict at replay wind-down. This fires per
 	// test-set on the native path and once per run on every path (replay.go's
 	// run-level defer is ungated), so it is what covers the FINAL test-set.
@@ -3083,6 +3342,26 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return p.globalPassThrough(parserCtx, srcConn, dstConn)
 	}
 
+	// Install the consumer recorder on EVERY record-branch parser context, not
+	// on one of the three.
+	//
+	// It used to be installed only on the legacy non-generic MODE_RECORD
+	// branch, and in OSS http.IsV2, mysql.IsV2 and generic.IsV2 all return
+	// true — so every one of those parsers took the supervisor or generic path
+	// and consumer.RecorderFromContext returned nil for them. A consumer
+	// protocol parser is exactly the kind of parser that is written against
+	// the V2 supervisor surface, so the seam was absent from the one path the
+	// feature will actually arrive on: OnMock could not be called even by a
+	// fully cooperative parser.
+	//
+	// A nil recorder (no test-case sink, or no recording session) returns
+	// parserCtx unchanged, so an HTTP-only run is byte-identical. MODE_TEST is
+	// deliberately untouched: the replay side installs the delivery gate
+	// instead, and a recorder on a replay context has nothing to record.
+	if rule.Mode == models.MODE_RECORD {
+		parserCtx = consumer.WithRecorder(parserCtx, p.ConsumerRecorder())
+	}
+
 	if !generic {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
@@ -3124,6 +3403,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection)
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
+			// parserCtx already carries the consumer recorder (installed for
+			// every record branch above), so a parser that stamps role/op/
+			// target metadata on its mocks can open and close consumer units
+			// without this package knowing its protocol exists.
 			err := matchedParser.RecordOutgoing(parserCtx, session)
 			if errors.Is(err, integrations.ErrParserDeclined) {
 				return p.relayDeclinedConn(parserCtx, err, logger, parserType, session)
@@ -3146,6 +3429,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// reconnect the producer and crash on a nil schema); such a parser
 			// reports via this hook, replies normally, and keeps serving.
 			testCtx := models.WithMockMismatchReporter(parserCtx, p.sendMockNotFoundError)
+			// Install the default-closed consumer delivery gate. A parser that
+			// serves a consumer protocol takes its trigger from here and
+			// answers every poll outside an armed window with a synthesized
+			// empty response; every other parser never looks. The gate is
+			// non-nil for any proxy built by New, and installing it changes
+			// nothing until something registers a Deliverer on it.
+			testCtx = consumer.WithGate(testCtx, p.ConsumerGate())
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
@@ -3527,6 +3817,11 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 		MC:              mocks,
 		OutgoingOptions: opts,
 	})
+	// One consumer recorder per recording session. Installed on every
+	// record-branch parser context below; a no-op for every protocol that
+	// does not stamp role metadata on its mocks, which today is all of them
+	// in this repository.
+	p.startConsumerRecorder(ctx)
 	p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	if opts.CapturePackets {
@@ -3551,7 +3846,7 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	return nil
 }
 
-func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
 	// Forget the previous recording's MySQL ports before this test set derives
@@ -3590,6 +3885,11 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
+	// Entering replay ends any recording session outright. Closing the
+	// recorder here rather than leaving it to drift mints its last unit and
+	// prints the reconciliation; leaving it open would let a record-mode unit
+	// resolve a window in the middle of a replay.
+	p.stopConsumerRecorder(ctx)
 	// Reuse the existing MockManager when this proxy has already been
 	// put into mock mode at least once. Replay calls Mock() per test-set
 	// (Agent.MockOutgoing → Proxy.Mock); allocating a fresh MockManager

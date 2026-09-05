@@ -183,18 +183,24 @@ func TestRunTestSetWiring(t *testing.T) {
 		{
 			name:       "the response diff is un-suppressed through the tested predicate",
 			assignment: "emitFailureLogs",
-			want:       []string{"shouldEmitFailureLogs", "mockSetMismatch", "AssertDependencies"},
+			want:       []string{"shouldEmitFailureLogs", "mockSetMismatch", "AssertDependencies", "neverDemotable"},
 			why: "Reverting this to `!mockSetMismatch` hands the user a test that --assert-dependencies " +
-				"just marked FAILED with its response diff suppressed as 're-record noise'.",
+				"just marked FAILED with its response diff suppressed as 're-record noise'. It must be " +
+				"the BY-KIND bit, not effectMockMissing: a consumer test whose mock set diverged only " +
+				"on coordination traffic still has a verdict that came from the judge, and suppressing " +
+				"its rows leaves a FAILED consumer test with no categories, no summary and no findings.",
 		},
 		{
 			name:       "the verdict goes through the single seam, carrying the raw response result and all three knobs",
 			assignment: "outcome",
 			want: []string{"resolveTestOutcome", "testPass", "mockSetMismatch",
-				"SchemaNoiseStrict", "AssertDependencies", "StrictFailure"},
+				"SchemaNoiseStrict", "AssertDependencies", "StrictFailure", "neverDemotable", "effectMockMissing"},
 			why: "resolveTestOutcome is where --assert-dependencies turns a PASSED-and-green test into a " +
-				"FAILED-and-red one. Passing anything other than the raw testPass and the three knobs " +
-				"silently removes a promotion.",
+				"FAILED-and-red one, and where a consumer test's verdict is kept out of the OBSOLETE " +
+				"demotion. BOTH trailing bits must reach it: neverDemotable stops a judge-FAILED " +
+				"consumer test being graded obsolete, effectMockMissing promotes a judge-PASSED one " +
+				"whose effect mock went unconsumed. Passing the same value for both, or a literal " +
+				"false for either, compiles and stays green while reopening one of the two holes.",
 		},
 		{
 			name:       "the resolved status is what gets persisted",
@@ -236,6 +242,46 @@ func TestRunTestSetWiring(t *testing.T) {
 				"instrumentConsumedFetchErr is the fourth reason: when the per-test consumed fetch fails the " +
 				"assertion cannot run either, and dropping it makes the run either say nothing at all or " +
 				"blame the recording's tier for a transport error.",
+		},
+		{
+			name:       "the consumer judge is what decides a consumer test",
+			assignment: "testPass",
+			want:       []string{"r", "CompareEffects", "testCase", "consumerRes", "testSetID", "emitFailureLogs", "consumerDep"},
+			why: "CompareEffects IS the slice: the pairing, the lanes, the payload diff, the count " +
+				"assertion and every refusal. Replacing this assignment with `true, &models.Result{}` " +
+				"compiles, leaves every consumer unit test green — they exercise pure functions in " +
+				"isolation — and passes every consumer test in the suite. Passing anything other than " +
+				"the agent's own result for THIS test judges one test's effects against another's spec.",
+		},
+		{
+			name:       "the consumer judge is told whether the sync path's dependency assertion ran",
+			assignment: "consumerDep",
+			want:       []string{"newConsumerDepAssertion", "hasExpectedMocks", "depAssertionValid", "filteredExpectedNames", "mockLookup"},
+			why: "A consume-and-write-to-a-database consumer test asserts NOTHING on its own: its whole " +
+				"claim is the sync path's deps[i] presence rows, and spec.SideEffects is a record-time " +
+				"count nothing at replay turns into an assertion. A literal consumerDepAssertion{Ran: " +
+				"true} here compiles and reports such a test PASSED with zero assertions executed " +
+				"whenever it has no usable mapping — design §5's false-pass row 0. mockLookup is " +
+				"load-bearing: without it the predicate degenerates to 'the mapping is non-empty', " +
+				"which the test's OWN TRIGGER satisfies.",
+		},
+		{
+			name: "the delivery gate is returned to boot at the start of the set",
+			call: "r.resetConsumerGate",
+			want: []string{"runTestSetCtx", "testSetID", "testCases"},
+			why: "--keep-app-alive reuses one application process across test sets, so a gate left armed " +
+				"by an interrupted set leaks onto this set's first test. It takes testCases because " +
+				"containsConsumerTest is what keeps an HTTP-only suite from making an agent round trip " +
+				"per test set; the hook it used to live in has no test cases in scope.",
+		},
+		{
+			name: "the delivery gate is drained at the end of the set, not only at the start",
+			call: "r.drainConsumerGate",
+			want: []string{"runTestSetCtx", "testSetID", "testCases"},
+			why: "An effect that lands after a test's grace fails the NEXT test as an extra. The last " +
+				"test of the last set has no next test, and the reset in BeforeTestSetReplay runs " +
+				"before a set, never after one — so without this call an N+1 emission at the very end " +
+				"of a run produces no row, no log line and no non-zero exit.",
 		},
 		{
 			name: "the per-test-set summary of unexercised dependencies is still emitted",
@@ -480,6 +526,72 @@ func TestNothingUnconditionallySkipsTheDepWriter(t *testing.T) {
 	}
 }
 
+// nonDemotable must be resolved FROM THE TEST CASE'S KIND, not from a config
+// knob and not from a literal. The identifier-set test above proves it reaches
+// resolveTestOutcome and shouldEmitFailureLogs; this proves it means what it
+// says. `nonDemotable := false` would satisfy every other test in this file
+// and would restore, for every consumer test, exactly the silent OBSOLETE
+// demotion that routes "the worker stopped producing" to a green run.
+func TestNonDemotableIsResolvedFromTheTestCaseKind(t *testing.T) {
+	fset, fn := runTestSetSource(t)
+
+	// TWO ASSIGNMENTS, TWO DIFFERENT CLAIMS, AND THEY MAY NOT BE THE SAME
+	// EXPRESSION. Collapsing them — either direction — reopens a hole:
+	// giving the promotion the by-Kind bit fails every clean consumer test
+	// whose coordination mock went unconsumed; giving the demotion veto the
+	// narrow bit persists a judge-FAILED consumer test as OBSOLETE with the
+	// run exiting 0.
+	pins := []struct {
+		assignment string
+		want       string
+		why        string
+	}{
+		{
+			assignment: "neverDemotable",
+			want:       "neverDemotableKind(testCase.Kind)",
+			why: "This is the whole of the consumer contract's first rule: a consumer test the JUDGE " +
+				"failed may never be graded OBSOLETE, whatever mock happened to go unconsumed. A " +
+				"literal false here compiles, keeps every identifier the wiring test looks for, and " +
+				"silently demotes every failing consumer test — which does not fail the test set and " +
+				"does not change the exit code. Narrowing it to 'an effect mock went unconsumed' does " +
+				"the same thing for the trigger-only and coordination-only mock sets.",
+		},
+		{
+			assignment: "effectMockMissing",
+			want:       "missingEffectMockPromotes(testCase.Kind, filteredExpectedNames, filteredMockNames, mockLookup)",
+			why: "This is the PROMOTION: a consumer test whose effects compared clean but whose effect " +
+				"mock was never consumed. It must stay narrow — promoting on coordination traffic a " +
+				"healthy client skips is a false RED — and it must stay computed, because a literal " +
+				"false restores the silent green for 'the worker stopped producing'.",
+		},
+	}
+
+	for _, pin := range pins {
+		t.Run(pin.assignment, func(t *testing.T) {
+			var got []string
+			ast.Inspect(fn, func(n ast.Node) bool {
+				assign, ok := n.(*ast.AssignStmt)
+				if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+					return true
+				}
+				ident, ok := assign.Lhs[0].(*ast.Ident)
+				if !ok || ident.Name != pin.assignment {
+					return true
+				}
+				got = append(got, printNode(t, fset, assign.Rhs[0]))
+				return true
+			})
+			for _, g := range got {
+				if g == pin.want {
+					return
+				}
+			}
+			t.Fatalf("no assignment to %s has the pinned right-hand side.\nfound: %v\nwant:  %q\n\nWHY THIS MATTERS: %s",
+				pin.assignment, got, pin.want, pin.why)
+		})
+	}
+}
+
 // TestRunTestSetWiring compares identifier SETS, which is deliberately tolerant
 // of a neutral argument rewrite — and therefore blind to a rewrite of the
 // BOOLEAN ALGEBRA. Two mutations proved it:
@@ -627,6 +739,11 @@ func posOfIf(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, cond string) *
 //
 // The second row is the same class with a smaller blast radius: neutering the
 // RecordMismatch guard silently empties the end-of-run mock-mismatch report.
+//
+// The third row is the consumer twin of the first, on the suffix of a run
+// nothing else watches: `_ = r.drainConsumerGate(...)` left the whole suite
+// green while a trailing effect after the last test of the last set produced
+// an ERROR line and exit 0.
 func TestOutcomeDrivesTheRunVerdict(t *testing.T) {
 	fset, fn := runTestSetSource(t)
 
@@ -651,6 +768,19 @@ func TestOutcomeDrivesTheRunVerdict(t *testing.T) {
 			want: "{ r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, filteredExpectedNames, filteredMockNames) }",
 			why: "It is the only per-test-set record of which expected mocks diverged; an empty " +
 				"store renders an end-of-run report that says nothing diverged.",
+		},
+		{
+			name: "a trailing effect after the last test of the set makes the run red",
+			cond: "r.drainConsumerGate(runTestSetCtx, testSetID, testCases)",
+			want: "{ testSetStatus = models.TestSetStatusFailed }",
+			why: "drainConsumerGate itself bites (TestDrainConsumerGate), but the line that CONSUMES " +
+				"its verdict did not: rewriting it as `_ = r.drainConsumerGate(...)` left the WHOLE " +
+				"suite green, because the only other pin on it (the r.drainConsumerGate row in " +
+				"TestRunTestSetWiring) asserts the call exists with the right arguments and says " +
+				"nothing about the result being used. This is the sole place an over-production " +
+				"after the LAST test of the LAST set can be seen — the reset in BeforeTestSetReplay " +
+				"runs before a set, never after one — so discarding it reopens the N+1 regression " +
+				"with a loud ERROR line and exit 0.",
 		},
 	}
 
@@ -695,13 +825,20 @@ func TestMockLookupCarriesATarget(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("expected exactly one mockDisplayInfo literal in RunTestSet, found %d: %v", len(found), found)
 	}
-	const want = "mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), }"
+	// `role` and `kind` are pinned alongside `target` because they carry the
+	// consumer contract's non-demotion: without them every unconsumed
+	// per-test mock looks like an effect mock, and a per-test coordination
+	// call the client legitimately skipped fails a clean consumer test with a
+	// message about the worker's production.
+	const want = "mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), kind: mock.Kind, role: mock.Spec.Metadata[models.MetaKeyRole], }"
 	if found[0] != want {
 		t.Fatalf("the mock display lookup is now %s, want %s.\n\n"+
 			"WHY THIS MATTERS: `target` is the only human-meaningful destination a dependency row "+
 			"can carry — neither models.MockEntry (the mapping side) nor models.MockState (the "+
 			"consumed side) records one. Dropping it collapses five outgoing calls to the same "+
-			"service into rows that differ only by index.", found[0], want)
+			"service into rows that differ only by index. `kind`/`role` are what scope the "+
+			"CONSUMER non-demotion to effect mocks; dropping them makes it fire on every "+
+			"unconsumed coordination mock.", found[0], want)
 	}
 }
 
@@ -988,5 +1125,124 @@ func TestRunTestSetDerivesItsExpectationListFromTheSharedFilter(t *testing.T) {
 				"reusableMockNames stops session/connection-tier ones being excluded, so healthy tests are "+
 				"reported with MISSING dependencies and --assert-dependencies fails them.", w, calls[0])
 		}
+	}
+}
+
+// enclosingBlock returns the innermost *ast.BlockStmt in file that strictly
+// contains pos.
+func enclosingBlock(file *ast.File, pos token.Pos) *ast.BlockStmt {
+	var found *ast.BlockStmt
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil || pos < n.Pos() || pos >= n.End() {
+			return false
+		}
+		if blk, ok := n.(*ast.BlockStmt); ok && blk.Pos() < pos {
+			found = blk
+		}
+		return true
+	})
+	return found
+}
+
+// GIVING UP ON ONE TEST CASE MUST LEAVE THE LOOP, NOT THE SWITCH.
+//
+// Every `switch testCase.Kind` arm opens by type-asserting the simulate
+// response, and when that fails it persists a synthetic FAILED result and
+// abandons the test. That block ended in `break` in the HTTP and gRPC arms for
+// years, and the consumer arm was added by copying them — the right instinct,
+// and it copied the bug. `break` inside a `switch` leaves the SWITCH: execution
+// falls through to recordReqResTimestamps, resolveTestOutcome and the status
+// switch with `testResult` still nil, so the same test is counted into
+// currentFailures twice, once in the arm and once in `default:`. The intent in
+// all three arms — and in the streaming loop's copy of the same block — is
+// `continue`.
+//
+// It is pinned by AST because nothing executes RunTestSet: the block is only
+// reachable when the simulate hook returns a response of the wrong dynamic
+// type AND the report writer then fails, which no unit harness in this package
+// can stage. Reverting any one of the four to `break` fails this test.
+func TestGivingUpOnATestCaseContinuesTheLoopRatherThanTheSwitch(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "replay.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse replay.go: %v", err)
+	}
+
+	// Every `if loopErr != nil { ... }` whose body logs an "insert test case
+	// result for ... type assertion error" — the abandon-this-test block.
+	var checked int
+	var abandonBlocks []*ast.IfStmt
+	ast.Inspect(file, func(n ast.Node) bool {
+		stmt, ok := n.(*ast.IfStmt)
+		if !ok || stmt.Body == nil {
+			return true
+		}
+		var cond strings.Builder
+		if err := printer.Fprint(&cond, fset, stmt.Cond); err != nil {
+			return true
+		}
+		if cond.String() != "loopErr != nil" {
+			return true
+		}
+		var buf strings.Builder
+		if err := printer.Fprint(&buf, fset, stmt); err != nil {
+			return true
+		}
+		src := buf.String()
+		if !strings.Contains(src, "type assertion error") {
+			return true
+		}
+		checked++
+		for _, s := range stmt.Body.List {
+			br, ok := s.(*ast.BranchStmt)
+			if !ok {
+				continue
+			}
+			if br.Tok == token.BREAK {
+				t.Errorf("%s: abandoning a test case with `break` leaves the switch, not the per-test loop:\n%s\n\n"+
+					"Execution falls through to resolveTestOutcome with testResult nil and counts this test into currentFailures twice. Use `continue`.",
+					fset.Position(br.Pos()), src)
+			}
+		}
+		abandonBlocks = append(abandonBlocks, stmt)
+		return true
+	})
+
+	// THE OTHER SPELLING OF THE SAME DEFECT, and the one the check above
+	// cannot see. The abandon block's trailing branch statement is a SIBLING
+	// of the `if loopErr != nil` — it is the last statement of the enclosing
+	// `if !ok { … }` (or `else { … }` in the streaming copy) — so replacing
+	// THAT `continue` with `break` has the identical consequence (execution
+	// leaves the switch, falls through to recordReqResTimestamps and
+	// resolveTestOutcome with testResult nil, and the test is counted into
+	// currentFailures twice) while the loop above sees nothing. Confirmed by
+	// mutation: rewriting the CONSUMER arm's trailing `continue` as `break`
+	// left the whole pkg/service/replay package green.
+	for _, stmt := range abandonBlocks {
+		blk := enclosingBlock(file, stmt.Pos())
+		if blk == nil || len(blk.List) == 0 {
+			t.Errorf("%s: could not find the block that owns this abandon-this-test guard", fset.Position(stmt.Pos()))
+			continue
+		}
+		last := blk.List[len(blk.List)-1]
+		br, ok := last.(*ast.BranchStmt)
+		if !ok || br.Tok != token.CONTINUE {
+			var buf strings.Builder
+			if err := printer.Fprint(&buf, fset, last); err != nil {
+				buf.WriteString("<unprintable>")
+			}
+			t.Errorf("%s: the abandon-this-test block ends in `%s`, want `continue`.\n\n"+
+				"That statement is a SIBLING of the `if loopErr != nil` guard, not inside it, so the "+
+				"check above cannot see it. `break` there leaves the SWITCH: execution falls through "+
+				"to resolveTestOutcome with testResult nil and this test is counted into "+
+				"currentFailures twice.", fset.Position(last.Pos()), buf.String())
+		}
+	}
+
+	// Four arms carry this block: HTTP, gRPC and CONSUMER in RunTestSet, plus
+	// the streaming loop's copy. A drop to zero means the search string
+	// stopped matching and this test silently stopped checking anything.
+	if checked != 4 {
+		t.Fatalf("found %d abandon-this-test blocks, want 4; the arms were renamed and this test is no longer looking at them", checked)
 	}
 }

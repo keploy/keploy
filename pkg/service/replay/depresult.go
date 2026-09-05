@@ -22,6 +22,16 @@ type mockDisplayInfo struct {
 	summary  string
 	protocol string
 	target   string
+	// kind is the mock's models.Kind, kept as a typed value alongside the
+	// display-oriented `protocol` string so the non-demotion rule can compare
+	// two mocks' families without re-parsing a rendered label.
+	kind models.Kind
+	// role is the consumer contract's models.MetaKeyRole value: trigger,
+	// effect, or empty for an ordinary mock. It is what lets the CONSUMER
+	// non-demotion apply to the mocks it is ABOUT (the effects) rather than to
+	// every per-test mock the test happened to map. Empty for every mock in
+	// this repository today: nothing in OSS stamps role metadata.
+	role string
 }
 
 // mockTargetFromSpec derives a human-meaningful destination for a mock.
@@ -473,8 +483,18 @@ func isDNSMockEntry(m models.MockEntry, mockKindByName map[string]models.Kind) b
 // --assert-dependencies that same test is about to be marked FAILED, and
 // suppressing its diffs would hand the user a red test with no explanation.
 // Knob off (the default) is byte-identical to before.
-func shouldEmitFailureLogs(mockSetMismatch, assertDependencies bool) bool {
-	return !mockSetMismatch || assertDependencies
+//
+// neverDemotable forces the diffs out for a Kind whose verdict can never be
+// demoted (see neverDemotableKind). It takes the BY-KIND bit, not the narrower
+// "an effect mock went unconsumed" one, and the difference is the whole
+// property: a consumer test whose mock set diverged only on coordination
+// traffic still has a verdict that came from the judge, and suppressing its
+// rows would leave a FAILED consumer test with no categories, no summary and
+// no findings list — the diff hidden on precisely the flagship regression this
+// contract exists to catch. For this Kind the judge's rows ARE the finding,
+// never mapping drift, so the historical suppression has no meaning here.
+func shouldEmitFailureLogs(mockSetMismatch, assertDependencies, neverDemotable bool) bool {
+	return !mockSetMismatch || assertDependencies || neverDemotable
 }
 
 // dependencyAssertionRejects reports whether the opt-in dependency assertion
@@ -498,8 +518,147 @@ func dependencyAssertionRejects(mockSetMismatch, assertDependencies bool) bool {
 // Three independent opt-ins veto the demotion: --schema-noise-strict
 // (strictMockReject), --assert-dependencies (depAssertFail) and
 // --strict-failure. All default false, so the default verdict is unchanged.
-func demoteToObsolete(mockSetMismatch, strictMockReject, depAssertFail, strictFailure bool) bool {
-	return mockSetMismatch && !strictMockReject && !depAssertFail && !strictFailure
+// neverDemotable is the fourth veto and is not a knob at all: see
+// neverDemotableKind.
+func demoteToObsolete(mockSetMismatch, strictMockReject, depAssertFail, strictFailure, neverDemotable bool) bool {
+	return mockSetMismatch && !strictMockReject && !depAssertFail && !strictFailure && !neverDemotable
+}
+
+// neverDemotableKind reports whether a test case Kind's verdict may NEVER be
+// demoted to OBSOLETE, whatever the knobs say and whatever mock happened to go
+// unconsumed.
+//
+// THIS IS THE FIRST LINE OF THE CONSUMER CONTRACT, not a refinement of it.
+// The OBSOLETE demotion exists for a real condition: a mock pool that drifted
+// away from the recording, where "an expected mock was not consumed" says
+// nothing about the application. For a CONSUMER test that reading is exactly
+// inverted. Its effect mocks ARE its assertions — an unconsumed effect mock
+// means the worker did not produce the message the recording says it
+// produces — so the demotion would route the flagship regression ("the worker
+// stopped producing") to OBSOLETE, which does not fail the test set and does
+// not change the exit code. The run would report verified_green for a broken
+// worker.
+//
+// IT IS KEYED ON Kind ALONE, AND THAT IS DELIBERATE. This predicate answers
+// only one question: may a test the judge ALREADY FAILED be graded OBSOLETE?
+// For a consumer test the answer is no in every configuration, whatever mock
+// happened to go unconsumed — the verdict came from the judge's own rows
+// (EFFECT_BODY_CHANGED, CONSUMER_COMPLETION_TIMEOUT, a named refusal), and
+// demoting it would drop a real failure to a green run with the mismatch as
+// its only explanation. Narrowing this to "an unconsumed effect mock is
+// present" reopens design §5's false-pass row 0 for the single most likely
+// slice-6 integration mistake: a parser that does not run its served trigger
+// through the DeleteFilteredMock / GetConsumedMocks bookkeeping makes the
+// mock set diverge on EVERY consumer test, and the unconsumed mock is a
+// trigger, which hasUnconsumedEffectMock deliberately skips.
+//
+// The OTHER question — may a test the judge PASSED be promoted to FAILED? —
+// is missingEffectMockPromotes, and that one MUST be narrow, because a
+// promotion on coordination traffic is a false RED. Two questions, two
+// predicates; they were one boolean and it could not be right for both.
+func neverDemotableKind(kind models.Kind) bool {
+	return kind == models.CONSUMER
+}
+
+// missingEffectMockPromotes reports whether a test whose response/verdict
+// PASSED must be FAILED anyway because a mock carrying one of its effect
+// claims was never consumed.
+//
+// This is the narrow half of the pair, and the narrowness is a false-RED
+// guard rather than a concession. mockSetMismatch fires for ANY unconsumed
+// per-test mock, and a consumer test legitimately maps per-test coordination
+// mocks it does not have to replay identically every run (design §4 P4
+// deliberately keeps OffsetFetch per-test: a client that had a cached
+// position, or that did not rejoin, skips it). Promoting a clean test on
+// those would fail it and hand the reader a message about the worker's
+// production that has nothing to do with what happened. Design §5 scopes the
+// missing-effect claim to "any mapped role=effect mock or spec.writes entry",
+// and this is that scope.
+func missingEffectMockPromotes(kind models.Kind, expected, consumed []string, lookup map[string]mockDisplayInfo) bool {
+	return kind == models.CONSUMER && hasUnconsumedEffectMock(expected, consumed, lookup)
+}
+
+// hasUnconsumedEffectMock reports whether any expected per-test mock that went
+// UNCONSUMED could be carrying one of this test's effect claims: a mock the
+// parser tagged role=effect, or a mapped call of a different protocol family
+// than the trigger (the spec.writes / consume-and-write case, which no parser
+// tags because the mock belongs to another protocol's parser entirely).
+//
+// IT IS WIDER THAN replay.mappingCanCarryAnEffectClaim ON PURPOSE, and the two
+// must not be re-unified. That one decides whether a test may PASS on a
+// delegated claim, so it accepts only positive attribution (role=effect):
+// untagged cross-family traffic is exactly what the sideEffects count is made
+// of, and letting it vouch is the count vouching for itself. This one decides
+// whether a PASSED test must be FAILED, where the same untagged mock is a
+// candidate regression and excusing it would be the silent green. Opposite
+// questions, opposite defaults, both landing on red when in doubt.
+//
+// IT FAILS CLOSED, AND THE DIRECTION IS THE WHOLE POINT. There is exactly one
+// shape of unconsumed mock this may excuse: same-family coordination traffic —
+// a fetch position, a heartbeat, a commit — which is the case the OBSOLETE
+// demotion exists for. Excusing it needs POSITIVE identification, all four of:
+// no role tag, a known Kind on the mock, a known Kind on the trigger, and the
+// two Kinds equal. Anything else — no entry in the lookup at all, an entry
+// with no Kind, no role=trigger mock to compare against — is treated as a
+// possible effect and vetoes.
+//
+// That matters because the lookup is BEST-EFFORT: RunTestSet builds it from
+// r.mockDB.GetUnFilteredMocks and both a nil mockDB and a fetch error leave it
+// empty (the error is logged, not swallowed, but it still cannot be repaired
+// here). Excusing a miss would mean a consume-and-write test whose write mock
+// went unconsumed — the flagship "the worker stopped writing" regression — is
+// reported PASSED because a side lookup did not load. A contract whose premise
+// is "no silent pass" must degrade to red, not to green.
+//
+// An unconsumed TRIGGER is the one unconditional exclusion, and it is not a
+// degradation: it is keploy failing to deliver, not the worker failing to
+// produce. The gate names that by itself (trigger_not_delivered), and routing
+// it through the worker-blaming promotion would point the reader at the
+// application for keploy's own miss. It does NOT rescue the verdict either
+// way — neverDemotableKind keeps a judge-failed consumer test FAILED whatever
+// this returns.
+//
+// Both name slices are the already-filtered per-test sets (DNS and
+// reusable-tier mocks removed) that mockSetMismatch itself is computed over,
+// so this cannot veto a demotion the mismatch signal did not raise.
+func hasUnconsumedEffectMock(expected, consumed []string, lookup map[string]mockDisplayInfo) bool {
+	consumedSet := make(map[string]bool, len(consumed))
+	for _, name := range consumed {
+		consumedSet[name] = true
+	}
+
+	// The trigger's family, read off the expectation rather than assumed.
+	var triggerKind models.Kind
+	for _, name := range expected {
+		if lookup[name].role == models.RoleTrigger {
+			triggerKind = lookup[name].kind
+			break
+		}
+	}
+
+	for _, name := range expected {
+		if consumedSet[name] {
+			continue
+		}
+		info := lookup[name]
+		if info.role == models.RoleTrigger {
+			continue
+		}
+		if isSameFamilyCoordination(info, triggerKind) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// isSameFamilyCoordination reports whether an unconsumed mock is POSITIVELY
+// identified as coordination traffic of the trigger's own protocol family, the
+// one shape hasUnconsumedEffectMock excuses. Every conjunct is a thing that
+// must be KNOWN, not merely absent: an empty lookup entry satisfies none of
+// them, so a degraded registry vetoes instead of excusing.
+func isSameFamilyCoordination(info mockDisplayInfo, triggerKind models.Kind) bool {
+	return info.role == "" && info.kind != "" && triggerKind != "" && info.kind == triggerKind
 }
 
 // resolveTestStatus turns an ALREADY-RESOLVED response outcome plus the three
@@ -516,11 +675,11 @@ func demoteToObsolete(mockSetMismatch, strictMockReject, depAssertFail, strictFa
 // failsSet is deliberately separate from "status == FAILED": OBSOLETE does not
 // fail the test set, and that asymmetry IS the silent-green hole
 // (keploy-consumer-design-v2.md §5, false-pass row 0).
-func resolveTestStatus(responseMatched, mockSetMismatch, strictMockReject, depAssertFail, strictFailure bool) (status models.TestStatus, failsSet bool) {
+func resolveTestStatus(responseMatched, mockSetMismatch, strictMockReject, depAssertFail, strictFailure, neverDemotable bool) (status models.TestStatus, failsSet bool) {
 	if responseMatched {
 		return models.TestStatusPassed, false
 	}
-	if demoteToObsolete(mockSetMismatch, strictMockReject, depAssertFail, strictFailure) {
+	if demoteToObsolete(mockSetMismatch, strictMockReject, depAssertFail, strictFailure, neverDemotable) {
 		return models.TestStatusObsolete, false
 	}
 	return models.TestStatusFailed, true
@@ -562,6 +721,13 @@ const (
 	// demotions by scraping it externally loses those hits — call it out in
 	// the release notes.
 	mismatchLogVetoedFailure
+	// mismatchLogNonDemotableReject: the response matched and the test is
+	// FAILED anyway because its Kind's verdict can never be demoted — a
+	// consumer test whose effect mock went unconsumed. It needs its own line
+	// because the other two promotion lines name a FLAG the user could turn
+	// off, and this one does not: the remedy is to look at the worker, not at
+	// the invocation.
+	mismatchLogNonDemotableReject
 )
 
 // testOutcome is the complete per-test decision for a diverged (or clean)
@@ -597,12 +763,12 @@ type testOutcome struct {
 //
 // Nothing here is reachable unless mockSetMismatch is true, which is itself
 // gated on depAssertionValid at the call site.
-func resolveTestOutcome(responseMatched, mockSetMismatch, schemaNoiseStrict, assertDependencies, strictFailure bool) testOutcome {
+func resolveTestOutcome(responseMatched, mockSetMismatch, schemaNoiseStrict, assertDependencies, strictFailure, neverDemotable, effectMockMissing bool) testOutcome {
 	depAssertFail := dependencyAssertionRejects(mockSetMismatch, assertDependencies)
 	out := testOutcome{DepAssertFail: depAssertFail}
 
 	if !mockSetMismatch {
-		out.Status, out.FailsTestSet = resolveTestStatus(responseMatched, false, false, false, strictFailure)
+		out.Status, out.FailsTestSet = resolveTestStatus(responseMatched, false, false, false, strictFailure, neverDemotable)
 		return out
 	}
 
@@ -617,6 +783,23 @@ func resolveTestOutcome(responseMatched, mockSetMismatch, schemaNoiseStrict, ass
 		strictMockReject = true
 		out.Log = mismatchLogSchemaNoiseReject
 		out.RecordMismatch = true
+	case responseMatched && effectMockMissing:
+		// A CONSUMER test whose effects all compared clean but whose expected
+		// effect mock was never consumed. For this Kind the two statements
+		// cannot both be true: an effect mock that nothing consumed is an
+		// effect the worker did not produce. Unconditional — there is no knob,
+		// because there is no configuration in which grading that green is
+		// correct.
+		//
+		// THIS ARM TAKES THE NARROW BIT. A promotion turns a passing test red,
+		// so it must fire only on a mock that could actually be carrying an
+		// effect claim — never on the coordination traffic a healthy consumer
+		// legitimately skips. The BY-KIND bit belongs to the two arms below,
+		// where the test has already failed and the only question is whether
+		// that failure may be graded away.
+		responseMatched = false
+		out.Log = mismatchLogNonDemotableReject
+		out.RecordMismatch = true
 	case responseMatched && depAssertFail:
 		// The slice's flagship promotion: response matched, recorded outgoing
 		// call not observed, knob on -> a real FAILED test and a red run.
@@ -628,19 +811,24 @@ func resolveTestOutcome(responseMatched, mockSetMismatch, schemaNoiseStrict, ass
 		// change — visibility comes from the DepResult rows, which are written
 		// and rendered either way.
 		out.Log = mismatchLogIgnoredResponseMatched
-	case depAssertFail || strictFailure:
+	case depAssertFail || strictFailure || neverDemotable:
 		// The response failed AND a veto keeps the test FAILED. The historical
 		// "marking testcase as obsolete / re-record" wording would contradict
-		// the verdict and point the user at the wrong fix, so name the flag.
+		// the verdict and point the user at the wrong fix, so name the reason.
+		//
+		// neverDemotable, not effectMockMissing. The judge already said this
+		// consumer test failed; which mock happened to go unconsumed cannot
+		// make that verdict obsolete, and letting it would drop a named
+		// refusal or a real effect diff to a green run.
 		out.Log = mismatchLogVetoedFailure
-		out.VetoFlags = vetoFlagName(depAssertFail, strictFailure)
+		out.VetoFlags = vetoFlagName(depAssertFail, strictFailure, neverDemotable)
 		out.RecordMismatch = true
 	default:
 		out.Log = mismatchLogObsolete
 		out.RecordMismatch = true
 	}
 
-	out.Status, out.FailsTestSet = resolveTestStatus(responseMatched, mockSetMismatch, strictMockReject, depAssertFail, strictFailure)
+	out.Status, out.FailsTestSet = resolveTestStatus(responseMatched, mockSetMismatch, strictMockReject, depAssertFail, strictFailure, neverDemotable)
 	return out
 }
 
@@ -681,7 +869,19 @@ func attachDepResults(
 	if tcResult == nil {
 		return nil, depLogNone
 	}
-	tcResult.Result.DepResult = dep.Rows
+	// APPEND, NEVER OVERWRITE. models.Result.DepResult has TWO producers: the
+	// sync path's presence rows (`deps[i]`, built here) and the consumer
+	// judge's per-effect rows (`effects[i]`, already on tcResult.Result
+	// because the comparator wrote them into the *models.Result the replay
+	// loop copied in). Assigning here would silently delete the judge's rows —
+	// which are the entire verdict of a consumer test — while leaving every
+	// call, argument and enclosing condition in RunTestSet untouched.
+	//
+	// For every other Kind nothing else writes the field, so the append is
+	// byte-identical to the assignment it replaces. The row-name prefixes stay
+	// disjoint (models.IsEffectRow), so a reader can still tell the producers
+	// apart.
+	tcResult.Result.DepResult = append(existingEffectRows(tcResult.Result.DepResult), dep.Rows...)
 	// The two scalars are what make `dep_result: []` unambiguous. They are
 	// written even when nothing is missing — that is the whole point of
 	// DepsChecked — and left at their zero values when the assertion did not
@@ -712,6 +912,30 @@ func attachDepResults(
 		return missingNames, depLogError
 	}
 	return missingNames, depLogDebug
+}
+
+// existingEffectRows returns the rows on a result that were written by the
+// CONSUMER judge rather than by this file, so attachDepResults can add the
+// sync-path rows without destroying them.
+//
+// It filters rather than simply keeping whatever is there, because
+// attachDepResults runs once per test per --retry-passing CYCLE against a
+// freshly built result: anything it does not recognise as another producer's
+// row would otherwise accumulate.
+func existingEffectRows(rows []models.DepResult) []models.DepResult {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]models.DepResult, 0, len(rows))
+	for _, r := range rows {
+		if models.IsEffectRow(r) {
+			out = append(out, r)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // recordUnexercised is the SINGLE writer of the per-test-set set that
@@ -753,16 +977,20 @@ func recordUnexercised(set map[string]models.TestStatus, name string, status mod
 // vetoFlagName names the flag that turned a mock-set mismatch into a FAILED
 // verdict, so the log tells the user which knob to look at instead of pointing
 // them at re-recording.
-func vetoFlagName(depAssertFail, strictFailure bool) string {
-	switch {
-	case depAssertFail && strictFailure:
-		return "--assert-dependencies, --strict-failure"
-	case depAssertFail:
-		return "--assert-dependencies"
-	case strictFailure:
-		return "--strict-failure"
+func vetoFlagName(depAssertFail, strictFailure, neverDemotable bool) string {
+	var parts []string
+	if depAssertFail {
+		parts = append(parts, "--assert-dependencies")
 	}
-	return ""
+	if strictFailure {
+		parts = append(parts, "--strict-failure")
+	}
+	if neverDemotable {
+		// Not a flag, and the wording says so: a reader who sees this must
+		// not go looking for an invocation to change.
+		parts = append(parts, "this test case Kind is never demoted to obsolete")
+	}
+	return strings.Join(parts, ", ")
 }
 
 // dependencyAssertionInertReason explains why --assert-dependencies cannot run

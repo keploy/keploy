@@ -1038,6 +1038,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	// REPEAT PASSES OVER A CONSUMER SET ARE REFUSED BY NAME, before anything
+	// runs. Both flags that cause one are named in the same place so they
+	// cannot drift apart. See refuseRepeatPassOverConsumerSet.
+	if err := r.refuseRepeatPassOverConsumerSet(testSetID, testCases); err != nil {
+		return models.TestSetStatusFailed, err
+	}
+
 	if len(testCases) == 0 {
 		r.logger.Debug("no valid test cases found to run for test set", zap.String("test-set", testSetID))
 
@@ -1276,7 +1283,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			MongoPassword:             r.config.Test.MongoPassword,
 			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                   r.config.Test.Mocking,
-			Backdate:                  testCases[0].HTTPReq.Timestamp,
+			Backdate:                  backdateFor(testCases),
 			NoiseConfig:               mockNoiseConfig,
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
@@ -1487,7 +1494,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			MongoPassword:             r.config.Test.MongoPassword,
 			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                   r.config.Test.Mocking,
-			Backdate:                  testCases[0].HTTPReq.Timestamp,
+			Backdate:                  backdateFor(testCases),
 			NoiseConfig:               mockNoiseConfig,
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
@@ -1577,6 +1584,27 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("testSetID", testSetID),
 		)
 	}
+
+	// A CONSUMER SET WHOSE PER-TEST MAPPINGS ARE NOT ARMED IS REFUSED, NOT
+	// DOWNGRADED. See refuseUnmappedConsumerSet.
+	//
+	// ONE CALL, HERE, RATHER THAN ONE PER MOCKING-STRATEGY BRANCH. It used to
+	// live inside both `if r.instrument && cmdType == DockerCompose` and
+	// `if cmdType != DockerCompose`, which between them do not cover
+	// `!r.instrument && cmdType == DockerCompose` — a consumer set there was
+	// never refused for any reason. This point is downstream of every branch
+	// that settles the three conjuncts, so there is exactly one place the
+	// decision is made and exactly one place to read it.
+	if err := r.refuseUnmappedConsumerSet(testSetID, testCases, useMappingBased, isMappingEnabled); err != nil {
+		return models.TestSetStatusFailed, err
+	}
+
+	// OPEN THIS SET WITH A DEFAULT-CLOSED GATE. --keep-app-alive reuses one
+	// application process across test sets, so a gate left armed by an
+	// interrupted set — or an effect adopted across the boundary — would land
+	// on this set's first test. Gated on the set actually containing a
+	// consumer test, which is why it is here and not in the hook above.
+	r.resetConsumerGate(runTestSetCtx, testSetID, testCases)
 
 	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
@@ -1691,12 +1719,32 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	depMissingTests := map[string]models.TestStatus{}
 	depAssertionInertWarned := false
 	if r.mockDB != nil {
-		if allMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now(), nil, nil); err == nil {
+		allMocks, mockRegistryErr := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now(), nil, nil)
+		if mockRegistryErr != nil {
+			// NOT SWALLOWED. Every consumer of mockLookup degrades on a miss,
+			// but two of them degrade in a direction the user must be told
+			// about: hasUnconsumedEffectMock vetoes a demotion it cannot rule
+			// out, and mappingCanCarryAnEffectClaim refuses to vouch for a
+			// claim it cannot confirm — opposite defaults, both landing on
+			// RED — so a registry that did not load turns clean consumer
+			// tests red rather than quietly green. A one-line Warn is the
+			// difference between "the contract found something" and "the mock
+			// registry did not load".
+			r.logger.Warn("could not load the mock registry for this test set; dependency rows lose their targets and the consumer effect classification degrades to fail-closed",
+				zap.String("testset", testSetID),
+				zap.Error(mockRegistryErr),
+				zap.String("next_step", "check that the test set's mocks.yaml is readable; consumer tests in this set may be reported FAILED because a mock could not be classified as coordination traffic"))
+		} else {
 			for _, mock := range allMocks {
 				mockLookup[mock.Name] = mockDisplayInfo{
 					summary:  models.MockSummaryFromSpec(mock),
 					protocol: string(mock.Kind),
 					target:   mockTargetFromSpec(mock),
+					kind:     mock.Kind,
+					// The consumer contract's role tag, read here because
+					// this is the only place in the replay loop that has the
+					// loaded mock. Empty for every mock OSS can record.
+					role: mock.Spec.Metadata[models.MetaKeyRole],
 				}
 			}
 		}
@@ -1873,6 +1921,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			case models.GRPC_EXPORT:
 				reqTime = testCase.GrpcReq.Timestamp
 				respTime = testCase.GrpcResp.Timestamp
+			case models.CONSUMER:
+				// A consumer unit's window is the TRIGGER's request and
+				// response times, carried on the spec. Leaving it at the zero
+				// value would send models.BaseTime to the agent as this test's
+				// window, which for the timestamp-based fallback selects every
+				// mock ever recorded.
+				reqTime, respTime = testCase.RecordWindow()
 			}
 
 			expectedNames := make([]string, len(expectedTestMockMappings[testCase.Name]))
@@ -2103,7 +2158,37 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// is about to be marked FAILED instead of demoted to OBSOLETE, so
 			// suppressing its diffs would hand the user a red test with no
 			// explanation. Knob off (the default) is byte-identical to before.
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.config.Test.AssertDependencies)
+			//
+			// TWO BITS, NOT ONE, AND THEY ANSWER DIFFERENT QUESTIONS.
+			//   neverDemotable  — may a test the judge ALREADY FAILED be
+			//     graded OBSOLETE? For a consumer test, never, whatever mock
+			//     went unconsumed. Keyed on Kind alone.
+			//   effectMockMissing — must a test the judge PASSED be promoted
+			//     to FAILED? Only when an unconsumed mock could be carrying an
+			//     effect claim; promoting on coordination traffic is a false
+			//     RED.
+			// They were one boolean, and narrowing it for the promotion also
+			// narrowed the demotion veto — which let a consumer test the judge
+			// FAILED be persisted OBSOLETE with the run exiting 0.
+			neverDemotable := neverDemotableKind(testCase.Kind)
+			effectMockMissing := missingEffectMockPromotes(testCase.Kind, filteredExpectedNames, filteredMockNames, mockLookup)
+
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.config.Test.AssertDependencies, neverDemotable)
+
+			// consumerDep tells the consumer judge whether the OTHER half of a
+			// consumer test's claim was actually checked. A
+			// consume-and-write-to-a-database test asserts nothing on its own
+			// — its whole claim is the sync path's deps[i] presence rows — so
+			// without this it would be reported PASSED with zero assertions
+			// executed whenever this test has no usable mapping.
+			//
+			// The decision is a pure function next to the judge, not an
+			// expression here: this line is unreachable from any test (nothing
+			// calls RunTestSet), and a `|| true` rewrite of it left the whole
+			// package green while reopening the vacuity guard. See
+			// newConsumerDepAssertion — including why "the mapping is
+			// non-empty" is the wrong predicate.
+			consumerDep := newConsumerDepAssertion(hasExpectedMocks, depAssertionValid, filteredExpectedNames, mockLookup)
 
 			switch testCase.Kind {
 			case models.HTTP:
@@ -2117,7 +2202,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
-						break
 					}
 					continue
 				}
@@ -2134,7 +2218,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
-						break
 					}
 					continue
 				}
@@ -2175,6 +2258,38 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			compareResp:
 				testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
+
+			case models.CONSUMER:
+				// A `break` HERE WOULD BREAK THE SWITCH, NOT THE LOOP. The
+				// HTTP and gRPC arms above carry the identical block and
+				// carried a `break` in this position for years: it leaves the
+				// per-test `for`, falls through to resolveTestOutcome with
+				// testResult still nil, and counts the same test into
+				// currentFailures TWICE — once in this arm and again in the
+				// status switch below. The intent in all three arms is "give
+				// up on this test and move to the next one", which is
+				// `continue`. Pinned by
+				// TestGivingUpOnATestCaseContinuesTheLoopRatherThanTheSwitch.
+				//
+				// THE CONSUMER JUDGE. It compares what the worker produced
+				// inside this test's delivery window against what the
+				// recording says it produced, and it shares no code with the
+				// mock matcher — see pkg/service/replay/consumer.go for why
+				// that is a correctness property and not a style choice.
+				consumerRes, ok := resp.(*models.ConsumerResult)
+				if !ok {
+					r.logger.Error("invalid response type for consumer test case")
+					currentFailures++
+					testSetStatus = models.TestSetStatusFailed
+					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for consumer test case")
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+					if loopErr != nil {
+						utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error in consumer test case")
+					}
+					continue
+				}
+				testPass, testResult = r.CompareEffects(testCase, consumerRes, testSetID, emitFailureLogs, consumerDep)
 			}
 
 			tcReqTime, tcRespTime := recordReqResTimestamps(testCase)
@@ -2220,7 +2335,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//     --format json — only the verdict differs.
 			//   - StrictFailure: the pre-existing veto of the OBSOLETE
 			//     demotion for a response-failing test.
-			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.SchemaNoiseStrict, r.config.Test.AssertDependencies, r.config.Test.StrictFailure)
+			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.SchemaNoiseStrict, r.config.Test.AssertDependencies, r.config.Test.StrictFailure, neverDemotable, effectMockMissing)
 			switch outcome.Log {
 			case mismatchLogSchemaNoiseReject:
 				r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
@@ -2240,6 +2355,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("testset", testSetID),
 					zap.Strings("expectedMocks", filteredExpectedNames),
 					zap.Strings("actualMocks", filteredMockNames))
+			case mismatchLogNonDemotableReject:
+				r.logger.Error("an expected effect mock was never consumed during this test's window; failing the testcase even though its effects compared clean, because for this test case Kind an unconsumed effect mock IS the missing effect",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.String("kind", string(testCase.Kind)),
+					zap.Strings("expectedMocks", filteredExpectedNames),
+					zap.Strings("actualMocks", filteredMockNames),
+					zap.String("next_step", "check whether the worker still produces every message the recording says it produces; if the recording itself is stale, re-record rather than silencing this"))
 			case mismatchLogVetoedFailure:
 				r.logger.Error("mock mapping mismatch detected; marking testcase as FAILED",
 					zap.String("testcase", testCase.Name),
@@ -2334,6 +2457,34 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 						Noise:        testCase.Noise,
 						Result:       *testResult,
+						TimeTaken:    time.Since(started).String(),
+					}
+				case models.CONSUMER:
+					// WITHOUT THIS ARM NOTHING IS PERSISTED AT ALL for a
+					// consumer test: testCaseResult stays nil, the block below
+					// takes its "test case result is nil" branch and the
+					// verdict never reaches the report, JUnit or --format json.
+					//
+					// Req/Res stay at their zero values on purpose. A consumer
+					// test has no HTTP exchange, and synthesising one would put
+					// a fabricated `status_code: 0` request/response pair into
+					// every consumer report. What the run actually looked like
+					// is carried by Consumer (the four scalars) and by
+					// Result.DepResult (the per-effect findings).
+					consumerRes, _ := resp.(*models.ConsumerResult)
+
+					testCaseResult = &models.TestResult{
+						Kind:         models.CONSUMER,
+						Name:         testSetID,
+						Status:       testStatus,
+						Started:      started.Unix(),
+						Completed:    time.Now().UTC().Unix(),
+						TestCaseID:   testCase.Name,
+						TestCasePath: filepath.Join(r.config.Path, testSetID),
+						MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+						Noise:        testCase.Noise,
+						Result:       *testResult,
+						Consumer:     consumerRes.Info(),
 						TimeTaken:    time.Since(started).String(),
 					}
 				}
@@ -2574,6 +2725,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testsToRun = nextTestsToRun
 		r.logger.Info("Retrying passing test cases to validate mock consistency", zap.Int("replay", replay+1), zap.Int("remaining_tests", len(testsToRun)))
 	}
+	// CLOSE THE CONSUMER DELIVERY GATE AT THE END OF THE SET, not only at the
+	// start. See drainConsumerGate: an over-production after the LAST test of
+	// the LAST set has nowhere else to be reported.
+	if r.drainConsumerGate(runTestSetCtx, testSetID, testCases) {
+		testSetStatus = models.TestSetStatusFailed
+	}
+
 	for _, tcResult := range finalTestCaseResults {
 		insertStart := time.Now()
 		err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, tcResult)
@@ -2811,7 +2969,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for type assertion error")
-						break
 					}
 					continue
 				}
@@ -4241,6 +4398,30 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 
 		testCaseResult.GrpcReq = testCase.GrpcReq
 		testCaseResult.GrpcRes = *actualResponse
+
+	case models.CONSUMER:
+		// Without this arm a consumer test whose simulation failed outright
+		// (the agent unreachable, the run torn down mid-request) is persisted
+		// with an EMPTY result: no rows, no failure category, nothing naming
+		// what went wrong. It is still red, which is why this is not a
+		// false-green — but a red test that says nothing is only marginally
+		// more useful than a green one, and it is the shape an agent loop
+		// cannot act on.
+		//
+		// The judge's own refusal path produces the row and the category, so
+		// this hands it a result that says exactly what happened rather than
+		// duplicating the formatting here.
+		// The zero consumerDepAssertion is correct here and not a shortcut: a
+		// result carrying a Refusal is decided by the judge's first branch,
+		// which runs before the vacuity guard that reads it. Nothing on this
+		// path has a per-test mock mapping in scope to describe anyway — the
+		// simulation never got far enough to have one.
+		_, result = r.CompareEffects(testCase, &models.ConsumerResult{
+			TestID:        testCase.Name,
+			Refusal:       models.CategoryConsumerUnsupportedAgent,
+			EndReason:     models.ConsumerEndReasonInternalError,
+			RefusalDetail: "the delivery window never completed: " + errorMessage,
+		}, testSetID, true, consumerDepAssertion{})
 	}
 
 	if result != nil {
