@@ -29,6 +29,7 @@ func (d *dummyConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Comman
 }
 
 func (d *dummyConfigurator) AddFlags(cmd *cobra.Command) error {
+	cmd.Flags().StringSlice("test-sets", nil, "")
 	return nil
 }
 
@@ -43,24 +44,24 @@ func TestToolsCommandsReturnErrorOnFailure(t *testing.T) {
 	t.Run("sanitize command error propagation", func(t *testing.T) {
 		cmd := Sanitize(ctx, logger, conf, factory, configurator)
 		err := cmd.RunE(cmd, []string{})
-		if err == nil {
-			t.Fatal("expected error from sanitize command RunE, got nil")
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("expected %q from sanitize command RunE, got %v", expectedErr, err)
 		}
 	})
 
 	t.Run("normalize command error propagation", func(t *testing.T) {
 		cmd := Normalize(ctx, logger, conf, factory, configurator)
 		err := cmd.RunE(cmd, []string{})
-		if err == nil {
-			t.Fatal("expected error from normalize command RunE, got nil")
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("expected %q from normalize command RunE, got %v", expectedErr, err)
 		}
 	})
 
 	t.Run("templatize command error propagation", func(t *testing.T) {
 		cmd := Templatize(ctx, logger, conf, factory, configurator)
 		err := cmd.RunE(cmd, []string{})
-		if err == nil {
-			t.Fatal("expected error from templatize command RunE, got nil")
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("expected %q from templatize command RunE, got %v", expectedErr, err)
 		}
 	})
 
@@ -77,8 +78,8 @@ func TestToolsCommandsReturnErrorOnFailure(t *testing.T) {
 			t.Fatal("postman subcommand not found on export")
 		}
 		err := postmanSubCmd.RunE(postmanSubCmd, []string{})
-		if err == nil {
-			t.Fatal("expected error from export postman command RunE, got nil")
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("expected %q from export postman command RunE, got %v", expectedErr, err)
 		}
 	})
 
@@ -95,17 +96,16 @@ func TestToolsCommandsReturnErrorOnFailure(t *testing.T) {
 			t.Fatal("postman subcommand not found on import")
 		}
 		err := postmanSubCmd.RunE(postmanSubCmd, []string{})
-		if err == nil {
-			t.Fatal("expected error from import postman command RunE, got nil")
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("expected %q from import postman command RunE, got %v", expectedErr, err)
 		}
 	})
 
 	t.Run("diff command error propagation", func(t *testing.T) {
 		cmd := Diff(ctx, logger, conf, factory, configurator)
 		err := cmd.RunE(cmd, []string{"run1", "run2"})
-		if err == nil {
-			t.Fatal("expected error from diff command RunE, got nil")
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("expected %q from diff command RunE, got %v", expectedErr, err)
 		}
 	})
 }
-
