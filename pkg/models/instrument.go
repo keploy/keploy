@@ -82,6 +82,8 @@ type HookOptions struct {
 	IsDocker      bool
 	ProxyPort     uint32
 	ServerPort    uint32
+	CgroupPath    string // optional: explicit cgroupv2 path override (used by DaemonSet agent)
+	SkipHooks     bool   // skip eBPF hook and proxy loading (used by DaemonSet orchestrator)
 }
 
 type IngressEvent struct {
@@ -346,6 +348,8 @@ type SetupOptions struct {
 	// environment variables to disk. When non-nil, SetupCompose uses this content
 	// directly instead of reading from a file path extracted from the command.
 	InMemoryCompose []byte
+	CgroupPath      string // optional: explicit cgroupv2 path override (used by DaemonSet agent)
+	SkipHooks       bool   // skip eBPF hook and proxy loading (used by DaemonSet orchestrator)
 }
 
 type RunOptions struct {
