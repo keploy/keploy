@@ -1302,6 +1302,8 @@ func buildClientTLSConfigV2(_ *supervisor.Session) *tls.Config {
 //
 // Exits cleanly on io.EOF / fakeconn.ErrClosed from either stream.
 func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKey net.Conn, firstCmd []byte) error {
+	cursorColumns := make(map[uint32][]*mysql.ColumnDefinition41)
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1336,6 +1338,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		// matching the legacy recorder shape. Response timestamp is
 		// the command arrival time since no server response exists.
 		if wire.IsNoResponseCommand(cmdPkt.Header.Type) {
+			if closePkt, ok := cmdPkt.Message.(*mysql.StmtClosePacket); ok {
+				delete(cursorColumns, closePkt.StatementID)
+				delete(decodeCtx.PreparedStatements, closePkt.StatementID)
+				delete(decodeCtx.LongDataParams, closePkt.StatementID)
+			}
 			emitMockV2(ctx, sess, []mysql.Request{{PacketBundle: *cmdPkt}}, nil, "mocks",
 				cmdPkt.Header.Type, "NO Response Packet", reqTs, reqTs)
 			continue
@@ -1350,13 +1357,43 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		// Load lastOp for response shape.
 		lastOp, _ := decodeCtx.LastOp.Load(clientKey)
 
-		respBundle, resTs, err := collectResponseV2(ctx, logger, sess, decodeCtx, clientKey, lastOp)
+		var respBundle *mysql.PacketBundle
+		var resTs time.Time
+		if fetchPkt, ok := cmdPkt.Message.(*mysql.StmtFetchPacket); ok {
+			columns := cursorColumns[fetchPkt.StatementID]
+			if len(columns) == 0 {
+				if prepared := decodeCtx.PreparedStatements[fetchPkt.StatementID]; prepared != nil {
+					columns = prepared.ColumnDefs
+				}
+			}
+			respBundle, resTs, err = collectStmtFetchResponseV2(ctx, logger, sess, decodeCtx, clientKey, fetchPkt.StatementID, columns)
+		} else {
+			respBundle, resTs, err = collectResponseV2(ctx, logger, sess, decodeCtx, clientKey, lastOp)
+		}
 		if err != nil {
 			return err
 		}
 		if respBundle == nil {
 			// Desync or benign decode failure — drop this exchange.
 			continue
+		}
+
+		switch cmd := cmdPkt.Message.(type) {
+		case *mysql.StmtExecutePacket:
+			if stmtUsesCursor(cmd.Flags) {
+				columns := cursorColumns[cmd.StatementID]
+				if prepared := decodeCtx.PreparedStatements[cmd.StatementID]; prepared != nil && len(prepared.ColumnDefs) > 0 {
+					columns = prepared.ColumnDefs
+				}
+				if resultSet, ok := respBundle.Message.(*mysql.BinaryProtocolResultSet); ok && len(resultSet.Columns) > 0 {
+					columns = resultSet.Columns
+				}
+				if len(columns) > 0 {
+					cursorColumns[cmd.StatementID] = append([]*mysql.ColumnDefinition41(nil), columns...)
+				}
+			}
+		case *mysql.StmtResetPacket:
+			delete(cursorColumns, cmd.StatementID)
 		}
 
 		mockType := "mocks"
@@ -1371,6 +1408,70 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			cmdPkt.Header.Type,
 			respBundle.Header.Type,
 			reqTs, resTs)
+	}
+}
+
+func stmtUsesCursor(flags byte) bool {
+	const cursorMask = mysql.CURSOR_TYPE_READ_ONLY | mysql.CURSOR_TYPE_FOR_UPDATE | mysql.CURSOR_TYPE_SCROLLABLE
+	return flags&cursorMask != 0
+}
+
+func collectStmtFetchResponseV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKey net.Conn, statementID uint32, columns []*mysql.ColumnDefinition41) (*mysql.PacketBundle, time.Time, error) {
+	response := &mysql.StmtFetchResponse{}
+	var responseHeader *mysql.Header
+	var ts time.Time
+
+	for {
+		buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		if err != nil {
+			return nil, ts, err
+		}
+		ts = sess.DestStream.LastReadTime()
+
+		packet, err := mysqlUtils.BytesToMySQLPacket(buf)
+		if err != nil {
+			return nil, ts, fmt.Errorf("parse COM_STMT_FETCH response packet: %w", err)
+		}
+		if len(packet.Payload) == 0 {
+			return nil, ts, fmt.Errorf("parse COM_STMT_FETCH response packet: payload is empty")
+		}
+		if responseHeader == nil {
+			header := packet.Header
+			responseHeader = &header
+		}
+
+		if packet.Payload[0] == mysql.ERR {
+			if len(response.Rows) != 0 {
+				return nil, ts, fmt.Errorf("COM_STMT_FETCH statement %d returned ERR after %d row packets", statementID, len(response.Rows))
+			}
+			errPkt, err := wire.DecodePayload(ctx, logger, buf, clientKey, decodeCtx)
+			if err != nil {
+				return nil, ts, fmt.Errorf("decode COM_STMT_FETCH ERR response: %w", err)
+			}
+			return errPkt, ts, nil
+		}
+
+		if mysqlUtils.IsResultSetTerminator(buf, decodeCtx.DeprecateEOF()) {
+			responseType := mysql.StatusToString(mysql.EOF)
+			if decodeCtx.DeprecateEOF() && mysqlUtils.IsOKReplacingEOF(buf) {
+				responseType = mysql.StatusToString(mysql.OK)
+			}
+			response.FinalResponse = &mysql.GenericResponse{Data: buf, Type: responseType}
+			decodeCtx.LastOp.Store(clientKey, wire.RESET)
+			return &mysql.PacketBundle{
+				Header:  &mysql.PacketInfo{Header: responseHeader, Type: mysql.COM_STMT_FETCH_RESPONSE},
+				Message: response,
+			}, ts, nil
+		}
+
+		if len(columns) == 0 {
+			return nil, ts, fmt.Errorf("decode COM_STMT_FETCH response for statement %d: column metadata is unavailable; record the COM_STMT_PREPARE and cursor COM_STMT_EXECUTE on the same connection", statementID)
+		}
+		row, _, err := rowscols.DecodeBinaryRow(ctx, logger, buf, columns)
+		if err != nil {
+			return nil, ts, fmt.Errorf("decode COM_STMT_FETCH row %d for statement %d: %w", len(response.Rows), statementID, err)
+		}
+		response.Rows = append(response.Rows, row)
 	}
 }
 

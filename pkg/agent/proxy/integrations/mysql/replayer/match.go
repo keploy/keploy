@@ -282,6 +282,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		sCOM_QUERY      = mysql.CommandStatusToString(mysql.COM_QUERY)
 		sCOM_STMT_PREP  = mysql.CommandStatusToString(mysql.COM_STMT_PREPARE)
 		sCOM_STMT_EXEC  = mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE)
+		sCOM_STMT_FETCH = mysql.CommandStatusToString(mysql.COM_STMT_FETCH)
 		sCOM_STMT_CLOSE = mysql.CommandStatusToString(mysql.COM_STMT_CLOSE)
 		sCOM_INIT_DB    = mysql.CommandStatusToString(mysql.COM_INIT_DB)
 		sCOM_STATS      = mysql.CommandStatusToString(mysql.COM_STATISTICS)
@@ -347,7 +348,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			// and the later "no matching mock" would mask the real
 			// root cause. Other command types tolerate the failure
 			// (connection pool is advisory for them) — log + continue.
-			if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
+			if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC || req.Header.Type == sCOM_STMT_FETCH {
 				utils.LogError(logger, cerr, "failed to get mysql connection mocks", zap.String("connID", connID))
 				return nil, false, nil, fmt.Errorf("failed to get mysql connection mocks for connID %q: %w", connID, cerr)
 			}
@@ -426,7 +427,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// Build recordedPrepByConn once (map[connID][]prepEntry) from recorded mocks
 	recordedPrepByConn := buildRecordedPrepIndex(pool)
 
-	if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
+	if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC || req.Header.Type == sCOM_STMT_FETCH {
 		var allEntries []string
 		for connID, prepEntries := range recordedPrepByConn {
 			for _, entry := range prepEntries {
@@ -464,6 +465,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		matchedMock      *models.Mock
 		queryMatched     bool
 		stmtMatched      bool
+		fetchMatched     bool
 		bestPartialMock  *models.Mock // closest non-exact match for diff reporting
 		bestPartialQuery string       // query of the closest partial match
 
@@ -521,6 +523,14 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		// genuinely reusable single-recording query.
 		queryExactResp *mysql.Response
 		queryExactMock *models.Mock
+
+		// COM_STMT_FETCH carries only a runtime statement ID and row limit.
+		// Resolve both recorded and live IDs through their PREPARE mappings,
+		// then retain the first out-of-window exact candidate as a fallback.
+		// In-window candidates win so identical fetch commands from different
+		// tests cannot cross-serve row chunks.
+		fetchExactResp *mysql.Response
+		fetchExactMock *models.Mock
 	)
 
 	// liveStatement is the incoming statement stripped of its inert leading
@@ -804,6 +814,32 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}
 				}
 
+			case sCOM_STMT_FETCH:
+				expected, expectedOK := mockReq.PacketBundle.Message.(*mysql.StmtFetchPacket)
+				actual, actualOK := req.PacketBundle.Message.(*mysql.StmtFetchPacket)
+				if !expectedOK || !actualOK || expected == nil || actual == nil {
+					continue
+				}
+
+				expectedQuery := lookupRecordedQuery(recordedPrepByConn, mock.Spec.Metadata["connID"], expected.StatementID)
+				actualQuery := ""
+				if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
+					actualQuery = decodeCtx.StmtIDToQuery[actual.StatementID]
+				}
+				if !matchStmtFetchPacketQueryAware(mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery) {
+					continue
+				}
+				if !gate.allows(mock) {
+					continue
+				}
+				if windowActive && !mockInCurrentWindow(mock) {
+					if fetchExactMock == nil {
+						fetchExactResp, fetchExactMock = &mock.Spec.MySQLResponses[0], mock
+					}
+				} else {
+					matchedResp, matchedMock, fetchMatched = &mock.Spec.MySQLResponses[0], mock, true
+				}
+
 			case sCOM_INIT_DB:
 				if c := matchInitDbPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
@@ -826,7 +862,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				}
 			}
 		}
-		if queryMatched || stmtMatched {
+		if queryMatched || stmtMatched || fetchMatched {
 			break
 		}
 	}
@@ -839,6 +875,10 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// candidate rather than dropping to the score-based partial pick.
 	if req.Header.Type == sCOM_QUERY && !queryMatched && queryExactMock != nil {
 		matchedResp, matchedMock, queryMatched = queryExactResp, queryExactMock, true
+	}
+
+	if req.Header.Type == sCOM_STMT_FETCH && !fetchMatched && fetchExactMock != nil {
+		matchedResp, matchedMock, fetchMatched = fetchExactResp, fetchExactMock, true
 	}
 
 	// COM_STMT_EXECUTE FIFO fallback. If the scan found no definitive
@@ -1674,6 +1714,24 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 
 	// Both queryMatched and allParamsMatched must be true for a definitive match. Otherwise, return the best-effort score.
 	return (queryMatched && allParamsMatched), matchCount, queryExactMatched
+}
+
+func matchStmtFetchPacketQueryAware(expected, actual mysql.PacketBundle, expectedQuery, actualQuery string) bool {
+	if expected.Header == nil || actual.Header == nil || expected.Header.Type != actual.Header.Type {
+		return false
+	}
+	expectedMessage, expectedOK := expected.Message.(*mysql.StmtFetchPacket)
+	actualMessage, actualOK := actual.Message.(*mysql.StmtFetchPacket)
+	if !expectedOK || !actualOK || expectedMessage == nil || actualMessage == nil {
+		return false
+	}
+	if expectedMessage.Status != actualMessage.Status || expectedMessage.NumRows != actualMessage.NumRows {
+		return false
+	}
+
+	expectedStatement := sqlStatementIdentity(expectedQuery)
+	actualStatement := sqlStatementIdentity(actualQuery)
+	return expectedStatement != "" && actualStatement != "" && strings.EqualFold(expectedStatement, actualStatement)
 }
 
 func paramValueEqual(a, b interface{}, nc *util.NoiseChecker) bool {

@@ -78,6 +78,7 @@ func init() {
 	gob.Register(&LocalInFileRequestPacket{})
 	gob.Register(&TextResultSet{})
 	gob.Register(&BinaryProtocolResultSet{})
+	gob.Register(&StmtFetchResponse{})
 	gob.Register(&GenericResponse{})
 	gob.Register(&ColumnCount{})
 	gob.Register(&ColumnDefinition41{})

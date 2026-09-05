@@ -19,6 +19,9 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	if packet == nil {
 		return nil, fmt.Errorf("packet is nil")
 	}
+	if packet.Header == nil {
+		return nil, fmt.Errorf("packet header is nil for message type %T", packet.Message)
+	}
 
 	var data []byte
 	var err error
@@ -145,12 +148,21 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 		if err != nil {
 			return nil, fmt.Errorf("error encoding BinaryProtocolResultSet: %v", err)
 		}
+
+	case *mysql.StmtFetchResponse:
+		pkt, ok := packet.Message.(*mysql.StmtFetchResponse)
+		if !ok {
+			return nil, fmt.Errorf("expected StmtFetchResponse, got %T", packet.Message)
+		}
+
+		data, err = query.EncodeStmtFetchResponse(ctx, logger, pkt)
+		if err != nil {
+			return nil, fmt.Errorf("error encoding StmtFetchResponse: %w", err)
+		}
+		logger.Debug("Encoded Packet", zap.String("packet", packet.Header.Type), zap.ByteString("data", data))
+		return data, nil
 	default:
 		return nil, fmt.Errorf("unhandled mysql message type %T for encoding", packet.Message)
-	}
-
-	if packet.Header == nil {
-		return nil, fmt.Errorf("packet header is nil for message type %T", packet.Message)
 	}
 
 	// Encode the header for the packet

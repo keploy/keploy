@@ -170,6 +170,13 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 						}
 						actualQuery = strings.TrimSpace(actualQuery + " " + formatExecParams(msg.Parameters))
 					}
+				case *mysql.StmtFetchPacket:
+					if msg != nil {
+						if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
+							actualQuery = sqlStatementIdentity(decodeCtx.StmtIDToQuery[msg.StatementID])
+						}
+						actualQuery = strings.TrimSpace(fmt.Sprintf("%s (fetch %d rows)", actualQuery, msg.NumRows))
+					}
 				case *mysql.StmtSendLongDataPacket:
 					if msg != nil {
 						actualQuery = fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
