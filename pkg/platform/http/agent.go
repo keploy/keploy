@@ -1323,6 +1323,28 @@ func (a *AgentClient) stopAgent() {
 	}
 }
 
+// logAgentContainerDiagnostics dumps the agent container's own logs and state
+// when it never became ready. Without it a readiness timeout is a black box:
+// the CLI prints the whole wait window of silence and then a generic error,
+// with no way to tell a docker-run/container-start stall from an in-agent hang
+// (eBPF load, OOM, panic). Best-effort and bounded — never blocks teardown.
+func (a *AgentClient) logAgentContainerDiagnostics(container string) {
+	if strings.TrimSpace(container) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logs, _ := exec.CommandContext(ctx, "docker", "logs", "--tail", "200", container).CombinedOutput()
+	state, _ := exec.CommandContext(ctx, "docker", "inspect", "-f",
+		"status={{.State.Status}} exitCode={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} error={{.State.Error}}",
+		container).CombinedOutput()
+	a.logger.Warn("keploy-agent did not become ready; captured agent container diagnostics",
+		zap.String("container", container),
+		zap.String("state", strings.TrimSpace(string(state))),
+		zap.String("agent_logs", strings.TrimSpace(string(logs))))
+}
+
 // monitorAgent monitors the agent process and handles cleanup
 func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.Context) {
 	select {
@@ -1434,7 +1456,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		// well over a minute just to start (observed: a local-image `docker run`
 		// taking 126s), so a 60s wait gave up prematurely and tore down a
 		// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
-		agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
+		readyTimeout := pkg.AgentReadyTimeout()
+		if opts.AgentReadyTimeout > 0 {
+			readyTimeout = opts.AgentReadyTimeout
+		}
+		agentCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -1445,7 +1471,18 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// Parent context cancelled (user pressed Ctrl+C)
 			return ctx.Err()
 		case <-agentCtx.Done():
-			return fmt.Errorf("keploy-agent did not become ready in time")
+			// The agent never reported healthy. The cleanup defer below is not in
+			// scope yet, so without this the wedged agent container and its
+			// goroutine leak — and any retry inherits the mess. Dump the container's
+			// own logs first: the CLI otherwise shows the full readiness window of
+			// silence followed by a bare error, with nothing to root-cause from.
+			if isDockerCmd {
+				a.logAgentContainerDiagnostics(opts.KeployContainer)
+			}
+			a.stopAgent()
+			// Sentinel so the caller can retry a fresh bring-up on this specific,
+			// nondeterministic stall without retrying deterministic failures.
+			return fmt.Errorf("%w", pkg.ErrAgentNotReady)
 		case <-agentReadyCh:
 		}
 	}
