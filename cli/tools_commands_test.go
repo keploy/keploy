@@ -99,4 +99,13 @@ func TestToolsCommandsReturnErrorOnFailure(t *testing.T) {
 			t.Fatal("expected error from import postman command RunE, got nil")
 		}
 	})
+
+	t.Run("diff command error propagation", func(t *testing.T) {
+		cmd := Diff(ctx, logger, conf, factory, configurator)
+		err := cmd.RunE(cmd, []string{"run1", "run2"})
+		if err == nil {
+			t.Fatal("expected error from diff command RunE, got nil")
+		}
+	})
 }
+
