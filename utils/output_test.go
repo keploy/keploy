@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"strings"
@@ -86,5 +87,71 @@ func TestJSONWriterIsEnabled(t *testing.T) {
 	}
 	if NewJSONWriter(false).IsEnabled() {
 		t.Fatal("expected writer to be disabled")
+	}
+}
+
+// --- NDJSON support (keploy-consumer-design-v2.md §7 slice 4) ---
+
+func TestJSONWriterOut(t *testing.T) {
+	type payload struct {
+		A string `json:"a"`
+	}
+
+	tests := []struct {
+		name    string
+		enabled bool
+		values  []any
+		want    []string
+	}{
+		{name: "disabled writes nothing", enabled: false, values: []any{payload{A: "x"}}, want: nil},
+		{name: "one value, one line", enabled: true, values: []any{payload{A: "x"}}, want: []string{`{"a":"x"}`}},
+		{
+			name:    "a loop produces NDJSON",
+			enabled: true,
+			values:  []any{payload{A: "x"}, payload{A: "y"}},
+			want:    []string{`{"a":"x"}`, `{"a":"y"}`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := NewJSONWriterOut(&buf, tt.enabled)
+			for _, v := range tt.values {
+				if err := w.Write(v); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if len(tt.want) == 0 {
+				if buf.Len() != 0 {
+					t.Fatalf("expected no output, got %q", buf.String())
+				}
+				return
+			}
+			lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+			if len(lines) != len(tt.want) {
+				t.Fatalf("got %d lines, want %d: %q", len(lines), len(tt.want), buf.String())
+			}
+			for i, want := range tt.want {
+				if lines[i] != want {
+					t.Errorf("line %d = %q, want %q", i, lines[i], want)
+				}
+				var decoded map[string]any
+				if err := json.Unmarshal([]byte(lines[i]), &decoded); err != nil {
+					t.Errorf("line %d is not standalone JSON: %v", i, err)
+				}
+			}
+		})
+	}
+}
+
+// A nil sink must not panic; it falls back to stdout like the original writer.
+func TestJSONWriterOutNilSinkFallsBack(t *testing.T) {
+	w := NewJSONWriterOut(nil, false)
+	if w == nil || w.IsEnabled() {
+		t.Fatal("expected a disabled writer")
+	}
+	if err := w.Write(struct{}{}); err != nil {
+		t.Fatalf("Write on a disabled writer: %v", err)
 	}
 }

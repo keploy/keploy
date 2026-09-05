@@ -259,6 +259,13 @@ const (
 	// a content regression. The synthetic status_code=0 such a failure records
 	// must not be read as a STATUS_CODE_CHANGED regression.
 	AppConnectionError FailureCategory = "APP_CONNECTION_ERROR"
+	// DependencyMissing means a per-test dependency the recording says this
+	// test exercised (a mapped, non-reusable-tier mock) went unconsumed during
+	// replay — the app stopped making an outgoing call it used to make. Set by
+	// the replayer's DepResult writer alongside the DepResult rows themselves
+	// (keploy-consumer-design-v2.md §5, false-pass row 0). Attached only to
+	// FAILED/OBSOLETE tests so a passing test never grows a failure label.
+	DependencyMissing FailureCategory = "DEPENDENCY_MISSING"
 )
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.
@@ -323,8 +330,88 @@ type Result struct {
 	HeadersResult  []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
 	BodyResult     []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
 	BodySizeResult IntResult      `json:"body_size_result,omitempty" bson:"body_size_result,omitempty" yaml:"body_size_result,omitempty"` // used when body was skipped (>1MB)
-	DepResult      []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
-	TrailerResult  []HeaderResult `json:"trailer_result,omitempty" bson:"trailer_result,omitempty" yaml:"trailer_result,omitempty"`
+	// DepResult carries per-test DEPENDENCY assertions: ONE ROW PER OUTGOING
+	// DEPENDENCY THAT WENT MISSING — a call the recording says this test
+	// exercised that was NOT observed during the test's window
+	// (Meta[i].Normal == false). Written by the replayer's standard
+	// (non-streaming) per-test result block for every test — passed, failed or
+	// obsolete — from the existing expected-vs-consumed mock bookkeeping.
+	//
+	// EMPTY IS NOT "NOT CHECKED": it means nothing went missing OR the
+	// assertion never ran, and the two are told apart by DepsChecked below,
+	// never by len(DepResult). Read it through Result.DependenciesChecked().
+	//
+	// SCOPE, so an absent row is not misread as coverage: only mocks recorded
+	// as PER-TEST tier are asserted. Session/connection-tier mocks and DNS are
+	// excluded, and an untagged HTTP / HTTP2 / Postgres / MySQL / Generic mock
+	// is classified session-tier by Mock.DeriveLifetime — so an ordinary
+	// recorded outgoing call is NOT necessarily covered, and a recording whose
+	// mocks carry no tier tag produces no rows and DepsChecked=false for every
+	// test.
+	//
+	// The dependencies that WERE exercised are NOT persisted here, in any
+	// mode: they collapse into the DepsConsumed count. Measured through
+	// reportdb.InsertReport, one row per consumed dependency costs ~190 bytes
+	// of YAML each, and a Postgres-chatty suite consumes 50-200 mocks per
+	// test — 3-11 MB per test-set report of `consumed/consumed` boilerplate no
+	// consumer reads. The identities are already persisted by
+	// TestResult.MatchedCalls.
+	//
+	// COMPATIBILITY: statuses, exit codes and every other field are unchanged
+	// when nothing is missing and --assert-dependencies is off, and a test
+	// that loses nothing serializes `dep_result: []` exactly as it did before
+	// this field had a writer — the only added bytes are the two scalars
+	// below.
+	//
+	// Deliberately carries NO omitempty — every report written before this
+	// field had a writer already serializes `dep_result: []`, and adding
+	// omitempty would change every existing report on disk.
+	//
+	// See keploy-consumer-design-v2.md §2 and §7 slice 4.
+	DepResult []DepResult `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
+
+	// DepsChecked is the persisted proof that the per-test dependency
+	// assertion RAN for this test, over AT LEAST ONE ELIGIBLE DEPENDENCY. It
+	// is the ONE BIT that makes `dep_result: []` unambiguous: without it a
+	// test that lost nothing and a test whose assertion never executed (a
+	// --base-path / remote-agent run, --disable-mapping, a test set with no
+	// usable mappings.yaml, a failed per-test consumed-mock fetch, the
+	// deferred streaming path, a test the mapping records no dependency for, a
+	// test whose every mapped dependency was ineligible, or any report written
+	// before this field had a writer) are byte-identical on disk — and a
+	// consumer applying the documented "any(matched == false)" rule reports
+	// "no dependency regressions" for a run in which the question was never
+	// asked.
+	//
+	// ELIGIBLE means recorded as PER-TEST tier. Session/connection-tier mocks
+	// are excluded from the assertion (shared across every test, so not
+	// attributable to one test's window) and so is DNS. Because
+	// Mock.DeriveLifetime classifies an untagged HTTP / HTTP2 / Postgres /
+	// MySQL / Generic mock as session-tier, a recording whose mocks carry no
+	// per-test tier tag has nothing eligible and this bit is false for every
+	// one of its tests — which is the honest answer, not a clean one.
+	//
+	// omitempty on purpose: false is the pre-slice-4 value, so an unchecked
+	// test and every report already on disk serialize exactly as before. A
+	// checked test costs one short key instead of the ~224-byte aggregate
+	// DepResult row an earlier revision of this slice wrote for the same bit.
+	//
+	// Read it through Result.DependenciesChecked().
+	DepsChecked bool `json:"deps_checked,omitempty" bson:"deps_checked,omitempty" yaml:"deps_checked,omitempty"`
+
+	// DepsConsumed is how many recorded per-test dependencies WERE observed
+	// during this test's window. Meaningful only when DepsChecked is true;
+	// omitempty keeps it off the wire for an unchecked test and for a checked
+	// test that consumed nothing.
+	//
+	// It replaces the per-dependency matched rows (see DepResult above): the
+	// magnitude is what a report consumer uses — "12 of 12 exercised" versus
+	// "0 of 12" is the difference between a healthy test and an app that never
+	// reached its database — while the identities live in
+	// TestResult.MatchedCalls.
+	DepsConsumed int `json:"deps_consumed,omitempty" bson:"deps_consumed,omitempty" yaml:"deps_consumed,omitempty"`
+
+	TrailerResult []HeaderResult `json:"trailer_result,omitempty" bson:"trailer_result,omitempty" yaml:"trailer_result,omitempty"`
 }
 
 type DepResult struct {

@@ -168,9 +168,17 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//sets the displayment of flag-related errors
 	cmd.SilenceErrors = true
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		PrintLogo(os.Stdout, true)
-		color.Red(fmt.Sprintf("❌ error: %v", err))
-		fmt.Println()
+		// Through the logger's sink, not color.Red's own os.Stdout. This is an
+		// error path with a non-zero exit, so nothing downstream would parse
+		// the corrupted document anyway — but the stdout/stderr split is only
+		// one mechanism if every writer honours it, and a suppression list
+		// that each new console print has to remember to join is exactly how
+		// `--format json|junit` came to print the logo over its own NDJSON.
+		PrintLogo(log.PrimarySink(), true)
+		// "%s\n\n" reproduces color.Red's own trailing newline plus the
+		// fmt.Println() that used to follow it, so the rendered text is
+		// unchanged — only its destination moved.
+		fmt.Fprintf(log.PrimarySink(), "%s\n\n", color.RedString("❌ error: %v", err))
 		return err
 	})
 
@@ -268,7 +276,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
-		cmd.Flags().String("format", "text", "Output format for test report (text or junit)")
+		cmd.Flags().String("format", "text", "Output format for test report: text (default), junit, or json. json emits NDJSON — one JSON object per test result, machine-readable, with a stable schema_version. junit and json write their document to stdout and every log line to stderr, so `keploy report --format json | jq` parses. Also settable as `report.format` in keploy.yml (this flag wins); an invalid value in the config is warned about and falls back to text, an invalid value on this flag is an error. Distinct from the global --json (whole-report blob) and from --storage-format (on-disk serialization).")
 	case "diff":
 		cmd.Flags().String("run1", "", "First test run ID to compare")
 		cmd.Flags().String("run2", "", "Second test run ID to compare")
@@ -453,6 +461,11 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared schema-noise adapter")
 		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared schema-noise adapter. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
 		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping (default behaviour demotes such cases to OBSOLETE). The per-test mappingDiff block is still written for diagnostics.")
+		// Default false is deliberate: today an expected-but-unconsumed mock
+		// demotes the test to OBSOLETE without failing the test set, so
+		// defaulting this true would flip existing suites red on upgrade.
+		// See keploy-consumer-design-v2.md §5 (false-pass row 0) and §7 slice 4.
+		cmd.Flags().Bool("assert-dependencies", c.cfg.Test.AssertDependencies, "Fail a test whose recorded per-test dependency was NOT observed during that test's window (an expected, mapped, non-reusable-tier mock went unconsumed): FAILED status, failed test set, non-zero exit. Default false — such a test is demoted to OBSOLETE today and the run still exits 0. Unlike --strict-failure (which promotes only tests whose RESPONSE also failed) this catches the response-matched-but-dependency-vanished case. ELIGIBILITY: only per-test-tier mocks are asserted; untagged HTTP/Postgres/MySQL egress is session-tier and is excluded, so for such a recording nothing is eligible and every test reports dependencies_checked=false (NOT CHECKED, not clean). keploy logs one warning per test set naming the reason whenever the assertion cannot run. Full contract: the assertDependencies doc in config.")
 		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
 		// Start the user app ONCE for the whole replay run instead of
 		// restarting it per test-set. Required to surface cross-test-set
@@ -822,6 +835,115 @@ func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configu
 	return string(detected), nil
 }
 
+// reportFormatSource says where the effective --format value came from, so the
+// two callers can react differently to an invalid one: a value the user typed
+// is a mistake worth stopping for, a stale value in keploy.yml is not.
+type reportFormatSource int
+
+const (
+	// reportFormatFromNone: this command has no report format at all.
+	reportFormatFromNone reportFormatSource = iota
+	// reportFormatFromFlag: --format was explicitly passed.
+	reportFormatFromFlag
+	// reportFormatFromConfig: the value came from keploy.yml /
+	// KEPLOY_REPORT_FORMAT.
+	reportFormatFromConfig
+	// reportFormatFromDefault: the flag's own default.
+	reportFormatFromDefault
+)
+
+// resolvedReportFormat returns the EFFECTIVE `keploy report --format` value
+// for this invocation — normalised (lower-cased, trimmed) but deliberately NOT
+// validated — together with where it came from.
+//
+// Precedence mirrors every other keploy setting: an explicitly passed flag
+// wins, otherwise the value PreProcessFlags already resolved from keploy.yml /
+// KEPLOY_REPORT_FORMAT, otherwise the flag's own default.
+//
+// cfgFormat is the config-resolved value (c.cfg.Report.Format). It has to be
+// consulted HERE and not only in the report arm: the two decisions that keep
+// stdout clean happen at the top of ValidateFlags, so a user with
+// `report: {format: json}` in keploy.yml would otherwise get the logo, the
+// version line and every zap record on stdout ahead of their NDJSON.
+//
+// Scoped to `keploy report` by NAME as well as by flag presence. Only that
+// command's stdout is a report document, and only it registers --format in the
+// OSS tree — but cli/provider is shared with the enterprise binary, where any
+// command that later grows an unrelated --format flag whose value happens to
+// be "json" or "junit" would otherwise silently suppress its logo and push its
+// logs to stderr. The keploy.yml `report.format` key is scoped the same way:
+// for `keploy test` the answer is "" even when the config carries a format.
+func resolvedReportFormat(cmd *cobra.Command, cfgFormat string) (string, reportFormatSource) {
+	if cmd.Name() != reportCmdName || cmd.Flags().Lookup("format") == nil {
+		return "", reportFormatFromNone
+	}
+	if !cmd.Flags().Changed("format") {
+		if v := strings.ToLower(strings.TrimSpace(cfgFormat)); v != "" {
+			return v, reportFormatFromConfig
+		}
+	}
+	format, err := cmd.Flags().GetString("format")
+	if err != nil {
+		return "", reportFormatFromNone
+	}
+	source := reportFormatFromDefault
+	if cmd.Flags().Changed("format") {
+		source = reportFormatFromFlag
+	}
+	return strings.ToLower(strings.TrimSpace(format)), source
+}
+
+// validateReportFormat resolves --format and applies the SOURCE-DEPENDENT
+// failure policy.
+//
+// A value the user typed is a mistake worth stopping for: they asked for
+// something keploy cannot produce, and silently giving them a text report
+// instead is worse than an error.
+//
+// A value sitting in keploy.yml is not. `report.format` ships in every
+// generated keploy.yml and was DEAD until this release, so anyone who set it
+// wrong got no feedback that it was wrong — exactly the population that would
+// be upgraded into a hard exit 1 on a command that used to work, with an error
+// naming a flag they never passed. One WARN naming the file, then text.
+func (c *CmdConfigurator) validateReportFormat(cmd *cobra.Command) error {
+	format, source := resolvedReportFormat(cmd, c.cfg.Report.Format)
+	if format == "" {
+		format = config.ReportFormatText
+	}
+	switch format {
+	case config.ReportFormatText, config.ReportFormatJUnit, config.ReportFormatJSON:
+		c.cfg.Report.Format = format
+		return nil
+	}
+	if source == reportFormatFromConfig {
+		c.logger.Warn("ignoring invalid report.format in the keploy config file; falling back to text",
+			zap.String("value", format),
+			zap.String("allowed", "text, junit, json"))
+		c.cfg.Report.Format = config.ReportFormatText
+		return nil
+	}
+	return fmt.Errorf("invalid --format value %q: allowed values are 'text', 'junit' and 'json'", format)
+}
+
+// isMachineReadableOutput reports whether this invocation's STDOUT is a
+// machine-readable document that must not be polluted with the logo, the
+// version line or zap records.
+//
+// Two independent sources say so:
+//   - the global --json flag (already resolved into jsonOutput by the caller);
+//   - `keploy report --format json|junit`, whose stdout is NDJSON / JUnit XML.
+func isMachineReadableOutput(cmd *cobra.Command, cfgFormat string, jsonOutput bool) bool {
+	if jsonOutput {
+		return true
+	}
+	format, _ := resolvedReportFormat(cmd, cfgFormat)
+	return config.IsMachineReportFormat(format)
+}
+
+// reportCmdName is the only command whose stdout is a report document, and so
+// the only one whose --format value can make stdout machine-readable.
+const reportCmdName = "report"
+
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	// The --json flag isn't registered on every subcommand (record / agent
 	// don't define it in enterprise builds), so Lookup + fallback avoids
@@ -838,8 +960,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	}
 	c.cfg.JSONOutput = jsonOutput
 
-	// In JSON mode, redirect logs to stderr so they don't contaminate JSON on stdout
-	if c.cfg.JSONOutput {
+	// --format has to be read HERE, next to --json, not in the `report` arm
+	// several hundred lines below: the two decisions that keep stdout clean
+	// (redirect the logger to stderr, suppress the logo + version line)
+	// happen right now. Gating them on --json alone left
+	// `keploy report --format json|junit` writing the ANSI logo, the
+	// "version: <v>" line and every zap INFO record onto stdout ahead of the
+	// document, so `keploy report --format json 2>/dev/null | jq` could never
+	// parse. --format is still VALIDATED in the report arm; this read is
+	// deliberately permissive so an invalid value falls through to that
+	// error path rather than being rejected twice.
+	machine := isMachineReadableOutput(cmd, c.cfg.Report.Format, c.cfg.JSONOutput)
+
+	// Machine-readable stdout: send logs to stderr so they can't contaminate
+	// the document. RedirectToStderr also moves the package-level sink, so a
+	// later logger rebuild (--debug, --disable-ansi, agent mode) cannot put
+	// them back on stdout.
+	if machine {
 		logger, err := log.RedirectToStderr()
 		if err == nil {
 			*c.logger = *logger
@@ -848,8 +985,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
-	if cmd.Name() != "agent" && !c.cfg.JSONOutput {
-		PrintLogo(os.Stdout, disableAnsi)
+	if cmd.Name() != "agent" && !machine {
+		PrintLogo(log.PrimarySink(), disableAnsi)
 	}
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
@@ -1035,22 +1172,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Report.TestCaseIDs = cleaned
 
-		format, err := cmd.Flags().GetString("format")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get the format flag")
-			return errors.New("failed to get the format flag")
+		// Resolved, not read raw: an unconditional overwrite from the flag
+		// clobbered whatever PreProcessFlags had loaded from keploy.yml, so
+		// the `report.format` yaml/mapstructure key was silently dead. Same
+		// resolver the stdout-cleanliness decision at the top of this function
+		// uses, so the two can never disagree about which format is in effect.
+		if err := c.validateReportFormat(cmd); err != nil {
+			return err
 		}
-		format = strings.ToLower(strings.TrimSpace(format))
-		if format == "" {
-			format = "text"
-		}
-		switch format {
-		case "text", "junit":
-			// valid
-		default:
-			return fmt.Errorf("invalid --format value %q: allowed values are 'text' and 'junit'", format)
-		}
-		c.cfg.Report.Format = format
 	case "diff":
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
