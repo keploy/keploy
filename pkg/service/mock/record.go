@@ -79,12 +79,20 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	// 2. Overwrite the named set in place: drop the previous mocks so the
-	//    re-record is a clean rewrite, not an append.
+	// 2. Overwrite the named set in place: drop the previous mocks AND their
+	//    per-test mappings so the re-record is a clean rewrite, not an append.
+	//    mappings.yaml must be cleared alongside mocks.yaml: UpsertBatch merges
+	//    (unions) with what is on disk, so surviving entries from the previous
+	//    recording would point tests at mocks that no longer exist (keploy#4488).
 	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
 		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
 	}
 	m.mockDB.ResetCounterID()
+	if m.mappingDB != nil {
+		if err := m.mappingDB.DeleteForSet(persistCtx, name); err != nil {
+			m.logger.Warn("failed to clear stale per-test mappings; replay may map tests to deleted mocks", zap.String("mock-set", name), zap.Error(err))
+		}
+	}
 
 	// 3. Arm the record proxy and stream captured mocks.
 	captureCtx, stopCapture := context.WithCancel(context.WithoutCancel(ctx))
