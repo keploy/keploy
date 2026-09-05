@@ -594,6 +594,11 @@ func (q PostgresV3QuerySpec) MarshalYAML() (any, error) {
 	}, nil
 }
 
+// PostgresV3Response is one backend response bundle for a Query
+// invocation. Its payload axes (Rows, CopyOut, CopyIn, FunctionCall)
+// are mutually exclusive per the PG wire protocol; the struct tags
+// cannot express that, so the invariant is enforced by
+// Validate() in postgres_v3_response_validate.go.
 type PostgresV3Response struct {
 	RowDescription []PostgresV3ColumnDescriptor `json:"rowDescription,omitempty" yaml:"rowDescription,omitempty" bson:"row_description,omitempty"`
 	// Rows stores each row as a []PostgresV3Cell via PostgresV3Cells.
