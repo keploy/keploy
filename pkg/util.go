@@ -2707,6 +2707,13 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 // `docker run` of an already-local image taking 126s before the agent process
 // ran. A shorter CLI wait gives up while the agent's own healthcheck still
 // considers it starting, tearing down a bring-up that would have succeeded.
+// ErrAgentNotReady is returned by an agent Setup whose agent never reported
+// healthy within AgentReadyTimeout. It is a distinct sentinel so callers can
+// retry a fresh bring-up on this — a nondeterministic container-runtime stall,
+// observed intermittently on macOS Docker Desktop — WITHOUT retrying
+// deterministic failures like missing kernel privileges or a bad config.
+var ErrAgentNotReady = errors.New("keploy-agent did not become ready in time")
+
 const DefaultAgentReadyTimeout = 330 * time.Second
 
 // AgentReadyTimeout returns how long to wait for the keploy-agent to become
@@ -2721,6 +2728,40 @@ func AgentReadyTimeout() time.Duration {
 		}
 	}
 	return DefaultAgentReadyTimeout
+}
+
+// agentSetupAttempts bounds how many times a stalled agent bring-up is retried
+// with a fresh agent before giving up. Three attempts takes a ~37%-per-attempt
+// intermittent stall (observed on macOS Docker Desktop) to ~5% while adding no
+// delay to the overwhelmingly common first-try success.
+const agentSetupAttempts = 3
+
+// RetryAgentSetup runs an agent Setup and retries it, up to agentSetupAttempts,
+// ONLY when it fails with ErrAgentNotReady. Each retry is a full fresh bring-up
+// (Setup re-draws ports and regenerates the agent container), which is what
+// clears a nondeterministic container-runtime stall. Deterministic failures
+// (missing privileges, bad config) do not match the sentinel and return at
+// once, and a cancelled context stops the loop immediately. The test assertions
+// downstream still run exactly once, against a healthy agent — this retries the
+// agent infrastructure, never a test.
+func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx context.Context, attempt int) error) error {
+	var err error
+	for attempt := 1; attempt <= agentSetupAttempts; attempt++ {
+		err = setup(ctx, attempt)
+		if err == nil || ctx.Err() != nil || !errors.Is(err, ErrAgentNotReady) {
+			return err
+		}
+		if attempt < agentSetupAttempts {
+			logger.Warn("keploy-agent bring-up stalled; retrying with a fresh agent",
+				zap.Int("attempt", attempt), zap.Int("of", agentSetupAttempts), zap.Error(err))
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return err
 }
 
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
