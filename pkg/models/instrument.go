@@ -346,6 +346,12 @@ type SetupOptions struct {
 	// environment variables to disk. When non-nil, SetupCompose uses this content
 	// directly instead of reading from a file path extracted from the command.
 	InMemoryCompose []byte
+	// AgentReadyTimeout, when > 0, overrides pkg.AgentReadyTimeout() for this
+	// bring-up. A retry after a stalled agent sets a shorter window than the
+	// generous first-attempt slow-start budget: a fresh agent reports healthy in
+	// a second or two, so a wedged retry should be cut short rather than re-wait
+	// minutes.
+	AgentReadyTimeout time.Duration
 }
 
 type RunOptions struct {
