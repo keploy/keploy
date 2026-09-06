@@ -185,7 +185,7 @@ func dockerPublishedHostPort(cmd string) (host, port string, ok bool) {
 // recognises -p/--publish on the command line, and `docker compose up` carries
 // none, so the fixed --delay is the entire protection. That is not a
 // theoretical gap — keploy's own generated compose holds the application behind
-// the agent's healthcheck (start_period 10s, interval 5s), so on a contended
+// the agent's ready-file healthcheck, so on a contended
 // machine the app starts as the delay expires, the first test window opens
 // while the app is still booting, and its bootstrap queries are scored against
 // a per-test pool that has nothing in it. The app then dies on a refused
