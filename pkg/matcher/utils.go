@@ -1857,7 +1857,12 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 				match = false
 				continue
 			}
-			if len(v) != len(val) {
+			// A recorded and a replayed header value are compared for
+			// EQUIVALENCE, not byte-for-byte identity of the recorded
+			// encoding: for a list-valued header whose elements are a set,
+			// "POST, OPTIONS" and "OPTIONS, POST" are the same header and
+			// must not fail the test (keploy/keploy#4349).
+			if !HeaderValuesMatch(k, v, val) {
 				if checkKey(res, k) {
 					*res = append(*res, models.HeaderResult{
 						Normal: false,
@@ -1873,25 +1878,6 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 				}
 				match = false
 				continue
-			}
-			for i, e := range v {
-				if val[i] != e {
-					if checkKey(res, k) {
-						*res = append(*res, models.HeaderResult{
-							Normal: false,
-							Expected: models.Header{
-								Key:   k,
-								Value: v,
-							},
-							Actual: models.Header{
-								Key:   k,
-								Value: val,
-							},
-						})
-					}
-					match = false
-					continue
-				}
 			}
 		}
 		if checkKey(res, k) {
@@ -2172,6 +2158,73 @@ func ParseContentType(raw string) (typ string, params map[string]string, okStric
 		return "", nil, false, e
 	}
 	return token, map[string]string{}, false, e
+}
+
+// HeaderValuesMatch reports whether the recorded and the replayed values of the
+// header called name assert the same thing.
+//
+// The default is the strict one: the value slices must be identical, element
+// for element. It is relaxed only for the headers models.IsUnorderedListHeader
+// names — those whose grammar makes the comma-separated elements a set rather
+// than a sequence. For those, both sides are flattened into their list elements
+// and compared as multisets, so a server that emits "POST, OPTIONS" on one run
+// and "OPTIONS, POST" on the next no longer fails the test, and so does a
+// server that switches between one comma-folded header and repeated same-name
+// headers — RFC 9110 §5.3 says those two encodings are equivalent.
+//
+// Element comparison stays case- and whitespace-exact within an element: only
+// the ORDER of the elements and the choice of encoding are forgiven, never a
+// changed element.
+func HeaderValuesMatch(name string, expected, actual []string) bool {
+	if slices.Equal(expected, actual) {
+		return true
+	}
+	if !models.IsUnorderedListHeader(name) {
+		return false
+	}
+	return CompareSlicesIgnoreOrder(splitHTTPListValues(expected), splitHTTPListValues(actual))
+}
+
+// splitHTTPListValues flattens a header's values into the list elements of
+// RFC 9110 §5.6.1: each value is split on the commas that sit outside a quoted
+// string, and each element is trimmed of the optional whitespace the grammar
+// allows around it.
+//
+// Commas inside a quoted-string are NOT separators — Cache-Control's
+// no-cache="X-Foo, X-Bar" is one directive, not two — so the scan tracks
+// quoting and the backslash escapes that may appear inside it.
+//
+// Empty elements are dropped rather than compared: the "#rule" grammar
+// explicitly tolerates them for compatibility with legacy senders, so
+// "gzip,,deflate" and "gzip, deflate" are the same list.
+func splitHTTPListValues(values []string) []string {
+	var out []string
+	for _, v := range values {
+		start := 0
+		inQuotes := false
+		escaped := false
+		flush := func(end int) {
+			if elem := strings.TrimSpace(v[start:end]); elem != "" {
+				out = append(out, elem)
+			}
+		}
+		for i := 0; i < len(v); i++ {
+			c := v[i]
+			switch {
+			case escaped:
+				escaped = false
+			case inQuotes && c == '\\':
+				escaped = true
+			case c == '"':
+				inQuotes = !inQuotes
+			case c == ',' && !inQuotes:
+				flush(i)
+				start = i + 1
+			}
+		}
+		flush(len(v))
+	}
+	return out
 }
 
 // compareSlicesIgnoreOrder checks if two string slices contain the same elements,
