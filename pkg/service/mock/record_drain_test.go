@@ -99,6 +99,35 @@ func (r *recordingMockDB) inserted() []string {
 	return append([]string(nil), r.names...)
 }
 
+type recordingMappingDB struct {
+	mu            sync.Mutex
+	deletedSets   []string
+	upsertBatches map[string][]models.MockEntry
+}
+
+func (r *recordingMappingDB) UpsertBatch(_ context.Context, testSetID string, byTest map[string][]models.MockEntry) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.upsertBatches == nil {
+		r.upsertBatches = make(map[string][]models.MockEntry)
+	}
+	for _, entries := range byTest {
+		r.upsertBatches[testSetID] = append(r.upsertBatches[testSetID], entries...)
+	}
+	return nil
+}
+
+func (r *recordingMappingDB) Get(_ context.Context, _ string) (map[string][]models.MockEntry, bool, error) {
+	return make(map[string][]models.MockEntry), false, nil
+}
+
+func (r *recordingMappingDB) DeleteMappingsForSet(_ context.Context, testSetID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deletedSets = append(r.deletedSets, testSetID)
+	return nil
+}
+
 // TestRecord_KeepsMockEmittedAfterRunnerExit is the regression guard for the
 // silent mock loss reproduced from CI runs 98492767425 / 97406735496 /
 // 98512662485, where a two-call recording persisted only the FIRST call.
@@ -119,11 +148,12 @@ func TestRecord_KeepsMockEmittedAfterRunnerExit(t *testing.T) {
 		emitAfter: 50 * time.Millisecond,
 	}
 	db := &recordingMockDB{}
+	mappingDB := &recordingMappingDB{}
 
 	cfg := &config.Config{}
 	cfg.Mock.Name = "drain-test"
 
-	svc := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg)
+	svc := New(zap.NewNop(), inst, db, mappingDB, FileStore{}, nil, cfg)
 
 	if err := svc.Record(context.Background()); err != nil {
 		t.Fatalf("Record: %v", err)
@@ -136,6 +166,13 @@ func TestRecord_KeepsMockEmittedAfterRunnerExit(t *testing.T) {
 	}
 	if got[0] != "mock-0" || got[1] != "mock-1" {
 		t.Fatalf("persisted %v, want [mock-0 mock-1]", got)
+	}
+
+	mappingDB.mu.Lock()
+	deleted := mappingDB.deletedSets
+	mappingDB.mu.Unlock()
+	if len(deleted) == 0 || deleted[0] != "drain-test" {
+		t.Fatalf("expected DeleteMappingsForSet to be called for drain-test, got %v", deleted)
 	}
 }
 

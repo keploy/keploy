@@ -108,6 +108,7 @@ type MockDB interface {
 type MappingDB interface {
 	UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
+	DeleteMappingsForSet(ctx context.Context, testSetID string) error
 }
 
 // Store is the mock-set persistence backend. OSS uses FileStore (mocks live on
