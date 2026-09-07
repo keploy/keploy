@@ -104,10 +104,14 @@ type MockDB interface {
 }
 
 // MappingDB persists and reads the per-test mock mapping for a set. Optional:
-// nil disables per-test scoping (suite-level record/replay).
+// nil disables per-test scoping (suite-level record/replay). DeleteForSet is
+// the re-record counterpart of MockDB.DeleteMocksForSet — a named-set refresh
+// must clear mappings.yaml alongside mocks.yaml so stale test-to-mock entries
+// from the previous recording cannot survive into the fresh set (keploy#4488).
 type MappingDB interface {
 	UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
+	DeleteForSet(ctx context.Context, testSetID string) error
 }
 
 // Store is the mock-set persistence backend. OSS uses FileStore (mocks live on
