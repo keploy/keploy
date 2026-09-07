@@ -272,6 +272,19 @@ func (r *Recorder) Start(ctx context.Context) error {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 
+		// End-of-recording hook (issue #1867 Basic-Auth re-key): every test case
+		// and mock is now drained to disk, so a cross-artifact pass can correlate
+		// them. Best-effort — a failure never invalidates the recording.
+		if recordingStarted && newTestSetID != "" {
+			if hookErr := r.hooks.AfterRecordingComplete(ctx, &RecordingCompleteContext{
+				TestSetID: newTestSetID,
+				Path:      r.config.Path,
+			}); hookErr != nil {
+				r.logger.Error("AfterRecordingComplete hook failed; recording is saved but a post-record pass may be incomplete. Check your RecordHooks implementation.",
+					zap.Error(hookErr), zap.String("testSetID", newTestSetID))
+			}
+		}
+
 		// Deferred-orphan revoke: delete TCs whose owned mock was capacity-dropped
 		// AFTER the TC streamed (the agent signalled them live via RevokedTests
 		// control frames). Applied here — after all inserts drained — so a revoke
