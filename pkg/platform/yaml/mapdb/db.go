@@ -242,6 +242,28 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	return nil
 }
 
+// DeleteMappingsForSet removes the mappings file for the given testSetID
+// when a mock set is re-recorded or cleared.
+func (db *MappingDb) DeleteMappingsForSet(ctx context.Context, testSetID string) error {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		filePath := filepath.Join(mappingPath, fileName+"."+format.FileExtension())
+		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+			utils.LogError(db.logger, err, "failed to delete mappings file",
+				zap.String("path", filePath),
+				zap.String("testSetID", testSetID))
+			return err
+		}
+	}
+	db.logger.Debug("Deleted stale test-mock mappings for set", zap.String("testSetID", testSetID))
+	return nil
+}
+
 // Exists reports whether mappings.yaml is on disk for the given
 // test-set. Used by the test-mode create-if-not-present write path —
 // distinct from Get's second return (which is "has at least one
