@@ -221,7 +221,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				// next_step reuses the strict-aware guidance computed for the
 				// mismatch report above — under schemaNoiseStrict the accurate
 				// advice is "mark/learn the drifted fields", not "re-record".
-				logger.Error("Connection closing due to no matching mock found.",
+				logger.Error("No matching mock found for command.",
 					zap.Int("commands_processed", commandCount),
 					zap.String("request_type", req.Header.Type),
 					zap.String("closest_mock", miss.closestMock),
@@ -229,8 +229,23 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					zap.String("match_phase", miss.matchPhase),
 					zap.Int("strict_rejected_candidates", miss.strictRejected),
 					zap.String("next_step", nextSteps))
-				baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)
-				return models.NewMockMismatchError(baseErr, report)
+
+				// A single unmatched command must NOT tear down the whole client
+				// connection. Mirroring the HTTP replayer's serve-without-mock
+				// intent, degrade this one query to a MySQL ERR packet, surface
+				// the miss to the test report out-of-band, and keep reading the
+				// next command. Tearing the connection down here turns one
+				// drifted/unrecorded query into a multi-second app outage (and,
+				// with pooled drivers like Rails/Makara, a connection-pool
+				// blacklist cascade). handleCommandMockMiss preserves the
+				// historical fatal behaviour when no mismatch reporter is
+				// installed (older agent / non-test path), so a miss is never
+				// silently swallowed.
+				outcome := handleCommandMockMiss(ctx, logger, clientConn, req, report, decodeCtx, commandCount)
+				if outcome.err != nil {
+					return outcome.err
+				}
+				continue
 			}
 
 			logger.Debug("Matched the command with the mock", zap.Any("mock", resp))
@@ -301,4 +316,111 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				zap.String("last_request", req.Header.Type))
 		}
 	}
+}
+
+// MySQL ERR packet fields for a command-phase mock-miss. 1105 (ER_UNKNOWN_ERROR)
+// with SQLSTATE HY000 is the generic server-error the client libraries surface
+// as an ordinary query failure — the app sees a failed query, not a dropped
+// connection.
+const (
+	mockMissErrorCode    uint16 = 1105 // ER_UNKNOWN_ERROR
+	mockMissSQLState            = "HY000"
+	mockMissErrorMessage        = "keploy: no matching mock for query"
+)
+
+// mockMissOutcome is the result of handling a command-phase mock-miss.
+type mockMissOutcome struct {
+	// err is non-nil only for a genuinely fatal outcome that must end the
+	// connection: a failure encoding/writing the ERR packet, or — when no
+	// mismatch reporter is installed to record the miss out-of-band — the
+	// original wrapped ErrNoMockMatched (preserving historical behaviour so a
+	// miss is never silently swallowed). When err is nil the caller keeps the
+	// connection open and reads the next command.
+	err error
+}
+
+// handleCommandMockMiss degrades a single unmatched command instead of tearing
+// down the whole client connection.
+//
+// This mirrors the HTTP replayer's serve-without-mock intent (see
+// http/decode.go): one drifted or unrecorded query becomes an error RESPONSE
+// for that query while the command loop keeps serving the connection. The miss
+// is still surfaced to the test report out-of-band via the MockMismatchReporter
+// installed on ctx (the same sink a returned ErrNoMockMatched feeds through the
+// proxy), so the test still fails with full diagnostics — it just no longer
+// takes the client connection down with it.
+//
+// When no reporter is installed (older agent, or a non-test path) reporting
+// out-of-band is impossible, so we fall back to the historical behaviour and
+// return the wrapped ErrNoMockMatched.
+func handleCommandMockMiss(ctx context.Context, logger *zap.Logger, clientConn net.Conn, req mysql.Request, report *models.MockMismatchReport, decodeCtx *wire.DecodeContext, commandCount int) mockMissOutcome {
+	baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)
+	mismatchErr := models.NewMockMismatchError(baseErr, report)
+
+	// Surface the miss to the test report without returning (and thus closing
+	// the connection). If no reporter is installed we cannot report the miss
+	// out-of-band, so preserve the historical fatal behaviour.
+	if !models.ReportMockMismatch(ctx, mismatchErr) {
+		logger.Error("Connection closing due to no matching mock found (no mismatch reporter installed to degrade per-query).",
+			zap.Int("commands_processed", commandCount),
+			zap.String("request_type", req.Header.Type))
+		return mockMissOutcome{err: mismatchErr}
+	}
+
+	// No-response commands (COM_STMT_CLOSE / COM_STMT_SEND_LONG_DATA /
+	// COM_QUIT) leave the client not reading a reply; writing an ERR packet
+	// would desync the stream. Report the miss and continue without a write.
+	if wire.IsNoResponseCommand(req.Header.Type) {
+		logger.Warn("No matching mock for a no-response command; reported the miss and keeping the connection open (no error packet sent).",
+			zap.Int("commands_processed", commandCount),
+			zap.String("request_type", req.Header.Type))
+		return mockMissOutcome{}
+	}
+
+	if err := writeMockMissErr(ctx, logger, clientConn, req, decodeCtx); err != nil {
+		// Failing to write the degraded response is a genuine I/O/encode
+		// error — this one IS fatal for the connection.
+		utils.LogError(logger, err, "failed to write mock-miss error packet to client; closing connection",
+			zap.Int("commands_processed", commandCount),
+			zap.String("request_type", req.Header.Type))
+		return mockMissOutcome{err: err}
+	}
+
+	logger.Warn("No matching mock for command; served an error packet to the client and keeping the connection open.",
+		zap.Int("commands_processed", commandCount),
+		zap.String("request_type", req.Header.Type))
+	return mockMissOutcome{}
+}
+
+// writeMockMissErr encodes and writes a single MySQL ERR packet to the client
+// as the degraded response for an unmatched command. The response sequence id
+// is one past the client's command packet, as the MySQL protocol requires.
+func writeMockMissErr(ctx context.Context, logger *zap.Logger, clientConn net.Conn, req mysql.Request, decodeCtx *wire.DecodeContext) error {
+	var seqID uint8 = 1
+	if req.Header != nil && req.Header.Header != nil {
+		seqID = req.Header.Header.SequenceID + 1
+	}
+
+	errBundle := &mysql.PacketBundle{
+		Header: &mysql.PacketInfo{
+			Type:   mysql.StatusToString(mysql.ERR),
+			Header: &mysql.Header{SequenceID: seqID},
+		},
+		Message: &mysql.ERRPacket{
+			Header:         mysql.ERR,
+			ErrorCode:      mockMissErrorCode,
+			SQLStateMarker: "#",
+			SQLState:       mockMissSQLState,
+			ErrorMessage:   mockMissErrorMessage,
+		},
+	}
+
+	buf, err := wire.EncodeToBinary(ctx, logger, errBundle, clientConn, decodeCtx)
+	if err != nil {
+		return fmt.Errorf("failed to encode mock-miss ERR packet: %w", err)
+	}
+	if _, err := clientConn.Write(buf); err != nil {
+		return fmt.Errorf("failed to write mock-miss ERR packet: %w", err)
+	}
+	return nil
 }
