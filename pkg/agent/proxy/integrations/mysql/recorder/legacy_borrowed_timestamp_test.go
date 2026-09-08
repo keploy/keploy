@@ -122,3 +122,59 @@ func TestLegacyPostTLS_BorrowedGreetingDoesNotBackdateTheConfigMock(t *testing.T
 			"(between %s and now)", got.Format(time.RFC3339Nano), t0.Format(time.RFC3339Nano))
 	}
 }
+
+// The legacy post-TLS reader draws from the same port-only FIFO the V2 path
+// does, and an empty ConnKey collapses its conn-specific key onto that shared
+// key — so its FIRST PopWait consumes a queue every other post-TLS stream to
+// this port is competing for. Popping is destructive: a stream that takes a
+// greeting and then fails has starved the connection that pushed it, which
+// loses its whole command phase with nothing logged. The entry must go back,
+// and without its ReqTimestamp (to the next consumer it is a borrowed entry —
+// see TestLegacyPostTLS_BorrowedGreetingDoesNotBackdateTheConfigMock).
+func TestLegacyPostTLS_RestoresUnusedSharedGreeting(t *testing.T) {
+	store := models.NewTLSHandshakeStore()
+	ctx := context.WithValue(postTLSCtxWithStore(store),
+		models.ClientConnectionIDKey, "restore-shared-conn")
+	mocks := make(chan *models.Mock, 16)
+	mgr := syncMock.New(zap.NewNop())
+	mgr.SetOutputChannel(mocks)
+	ctx = syncMock.NewContext(ctx, mgr)
+
+	portKey := models.HandshakeStoreKey("", 3306)
+	origTs := time.Now().Add(-time.Minute)
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{cannedHandshakeV10(t)},
+		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+		ReqTimestamp: origTs,
+	})
+
+	// Client closed before any post-TLS packet arrives: the greeting is popped
+	// and decoded, then the first-client-packet read fails. That is the measured
+	// production shape — a stream whose own bytes never arrive.
+	clientConn, peer := net.Pipe()
+	_ = peer.Close()
+	defer func() { _ = clientConn.Close() }()
+	destConn, destPeer := net.Pipe()
+	_ = destPeer.Close()
+	defer func() { _ = destConn.Close() }()
+
+	// ConnKey empty ⇒ storeKey == portKey ⇒ the pop reads the SHARED FIFO.
+	opts := models.OutgoingOptions{
+		DstCfg:  &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 3306, AddrFabricated: true},
+		ConnKey: "",
+	}
+	if err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
+		buildPostHandshakeDecodeCtx(clientConn), opts); err == nil {
+		t.Fatal("expected the legacy post-TLS record to fail with no client packet")
+	}
+
+	restored, ok := store.PopWait(portKey, 0)
+	if !ok {
+		t.Fatal("a greeting consumed by a FAILED legacy post-TLS attempt was never returned to the " +
+			"shared port FIFO; the connection it belonged to is starved")
+	}
+	if !restored.ReqTimestamp.IsZero() {
+		t.Fatalf("restored entry kept ReqTimestamp %v; it would backdate the next connection's config mock",
+			restored.ReqTimestamp)
+	}
+}

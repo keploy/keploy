@@ -405,8 +405,8 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 // the command phase to V2's structured per-direction reader (which reads the
 // client command then the server response in wire order, so it needs neither
 // the legacy path's ktime relay-merge nor its res>=req timestamp clamp).
-func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKeyPtr *net.Conn) (v2HandshakeResult, error) {
-	res := v2HandshakeResult{
+func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKeyPtr *net.Conn) (res v2HandshakeResult, err error) {
+	res = v2HandshakeResult{
 		req:  make([]mysql.Request, 0),
 		resp: make([]mysql.Response, 0),
 	}
@@ -435,10 +435,63 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	// post-TLS bytes are buffered on ClientStream and read only after this
 	// returns.
 	entry, source := resolvePreTLSGreeting(ctx, hsStore, sess.Opts.ConnKey, dstPort, sess.Opts.PassThroughScope, sess.Opts.DstCfg)
+	// A greetingShared entry came off the port-only FIFO, which is shared by
+	// every decrypted stream to this port — in proxyless that FIFO is the ONLY
+	// key that bridges the raw and decrypted legs, so all of them draw from it.
+	// Popping is destructive. If this stream then fails before producing a mock
+	// (the common case being a decrypted stream whose own bytes never arrive, so
+	// the first-client-packet read returns EOF), the greeting it consumed is
+	// gone and a LIVE connection that needed it is starved — silent decode loss,
+	// which is what made this a "served but not recorded" shortfall rather than
+	// an error. Put an unused entry back so the rightful owner still gets it;
+	// Push broadcasts the store's cond, so a sibling already blocked in
+	// resolvePreTLSGreeting wakes immediately.
+	//
+	// Restore-if-UNUSED, not restore-if-error: the direct-fetch branch below
+	// discards a payload-less entry and can then SUCCEED, which must still give
+	// the entry back. sharedAdopted tracks that directly.
+	//
+	// The restored entry is stripped of ReqTimestamp. Push re-stamps pushedAt,
+	// so a restored entry is rejuvenated rather than expiring, and it comes back
+	// as greetingShared — for which staleEntry is false — so keeping the
+	// timestamp would stamp a DEAD connection's capture time onto a live
+	// connection's config mock. Config mocks are identified by Name+Kind+
+	// ReqTimestampMock (treedb.sameMock) and ordered by it, so that is a replay
+	// break, and it is the same hazard conn.go already documents for the legacy
+	// borrowed greeting. A zero ReqTimestamp makes the next consumer sample its
+	// own first client read, which is exactly what the direct-fetch path does.
+	sharedAdopted := false
+	sharedUndecodable := false
+	if source == greetingShared {
+		sharedKey := models.HandshakeStoreKey("", dstPort)
+		sharedEntry := entry
+		sharedEntry.ReqTimestamp = time.Time{}
+		defer func() {
+			// Kept only when this stream both adopted the entry AND produced a
+			// mock from it. Anything else — never adopted (direct-fetch branch),
+			// or adopted then failed — leaves a live connection starved.
+			if sharedAdopted && err == nil {
+				return
+			}
+			// An entry whose greeting does not decode is garbage, and Push
+			// re-stamps pushedAt, so putting it back would make it immortal and
+			// trip every later stream to this port. Drop it — the connection it
+			// belonged to could not have used it either.
+			if sharedUndecodable {
+				return
+			}
+			hsStore.Push(sharedKey, sharedEntry)
+			logger.Debug("post-TLS V2: returned an unused shared greeting to the port FIFO",
+				zap.Uint16("dstPort", dstPort), zap.Error(err))
+		}()
+	}
 	staleEntry := source == greetingCached
 	var greetingBuf []byte
 	if source != greetingNone && len(entry.RespPackets) > 0 {
 		greetingBuf = entry.RespPackets[0]
+		// Adopted: this stream owns the entry from here. It goes back only if
+		// the stream fails before producing a mock (the defer above).
+		sharedAdopted = true
 		if staleEntry {
 			// The raw leg was genuinely lost (its capture event dropped by a
 			// full ringbuf, or delayed past the store TTL). Greetings for the
@@ -483,10 +536,12 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	// 2. Decode the greeting and seed the decode context (mirrors legacy).
 	greetingPkt, err := wire.DecodePayload(ctx, logger, greetingBuf, clientKey, decodeCtx)
 	if err != nil {
+		sharedUndecodable = true
 		return res, fmt.Errorf("post-TLS V2: decode stored greeting: %w", err)
 	}
 	sg, isHS := greetingPkt.Message.(*mysql.HandshakeV10Packet)
 	if !isHS {
+		sharedUndecodable = true
 		return res, fmt.Errorf("post-TLS V2: stored greeting is not HandshakeV10")
 	}
 	decodeCtx.ServerCaps = sg.CapabilityFlags
@@ -896,10 +951,20 @@ const (
 	// greetingNone: nothing available within the bounds — the caller must fetch
 	// the greeting directly or abort cleanly.
 	greetingNone preTLSGreetingSource = iota
-	// greetingOwn: this connection's own raw-leg stash (or, in the empty-connKey
-	// proxyless case, the port FIFO entry that bridges the two legs). Carries the
-	// real per-connection salt + request timestamp.
+	// greetingOwn: this connection's own raw-leg stash, found under the
+	// conn-specific key. Carries the real per-connection salt + request timestamp.
 	greetingOwn
+	// greetingShared: an entry taken from the port-only FIFO (e.g. "port:3306").
+	// That queue is CROSS-CONNECTION: in proxyless the raw and decrypted legs are
+	// different TCP connections, so this is the only key that bridges them, but
+	// the entry popped is not necessarily the one this connection's own raw leg
+	// pushed. Consuming it is destructive — every other decrypted stream waiting
+	// on that port is competing for the same FIFO — so a caller that fails before
+	// producing a mock MUST put it back (handlePostTLSHandshakeV2 does, via a
+	// defer on sharedAdopted). Otherwise a
+	// stream that pops one and then errors silently starves a live connection of
+	// the greeting it needed, which is decode loss with no diagnostic.
+	greetingShared
 	// greetingCached: another connection's most-recent greeting for the port,
 	// from the non-consuming last-greeting cache. Reusable for stitching
 	// (capabilities/plugin are per-server; the salt is never verified — see
@@ -975,16 +1040,24 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 
 	// popOwn returns this connection's own stashed entry (either key), if
 	// present, without blocking.
-	popOwn := func() (models.TLSHandshakeEntry, bool) {
+	popOwn := func() (models.TLSHandshakeEntry, preTLSGreetingSource) {
 		if entry, ok := hsStore.PopWait(connSpecificKey, 0); ok {
-			return entry, true
+			// An empty connKey (the proxyless decrypted stream, which cannot know
+			// the raw leg's connection identity) collapses the conn-specific key
+			// onto the port-only key. The entry then came off the SHARED FIFO
+			// even though this branch read it, so it must be classified — and
+			// restored on failure — as shared.
+			if connSpecificKey == portKey {
+				return entry, greetingShared
+			}
+			return entry, greetingOwn
 		}
 		if portKey != connSpecificKey {
 			if entry, ok := hsStore.PopWait(portKey, 0); ok {
-				return entry, true
+				return entry, greetingShared
 			}
 		}
-		return models.TLSHandshakeEntry{}, false
+		return models.TLSHandshakeEntry{}, greetingNone
 	}
 	// cachedGreeting returns the port's last-greeting cache entry, if usable.
 	cachedGreeting := func() (models.TLSHandshakeEntry, bool) {
@@ -1031,8 +1104,8 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 
 	for {
 		// 1. This connection's own entry is always preferred.
-		if entry, ok := popOwn(); ok {
-			return entry, greetingOwn
+		if entry, src := popOwn(); src != greetingNone {
+			return entry, src
 		}
 		now := time.Now()
 		// 2. Past the primary bound, a cached greeting is good enough — take it
@@ -1063,7 +1136,7 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 			continue
 		}
 		if entry, ok := hsStore.PopWait(portKey, slice); ok {
-			return entry, greetingOwn
+			return entry, greetingShared
 		}
 	}
 

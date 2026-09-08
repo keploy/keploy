@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -328,7 +329,15 @@ func TestResolvePreTLSGreeting_DroppedLegHitsCacheAtPrimaryBound(t *testing.T) {
 // TestResolvePreTLSGreeting_OwnLatePreferredOverCache pins that a merely-late
 // own leg arriving within the primary bound is preferred over the cache (it
 // carries this connection's real salt+timestamp): with the cache populated but
-// the own entry pushed shortly after start, resolve must return greetingOwn.
+// the own entry pushed shortly after start, resolve must take the stashed entry
+// rather than the cache.
+//
+// The connKey here is "" — the proxyless decrypted stream, which cannot know the
+// raw leg's connection identity — so the conn-specific key collapses onto the
+// port-only key and the entry necessarily comes off the SHARED port FIFO.
+// greetingShared is therefore the correct classification; what this test pins is
+// that the stashed entry (with its real timestamp) beats the cache, not which of
+// the two stash keys it arrived under.
 func TestResolvePreTLSGreeting_OwnLatePreferredOverCache(t *testing.T) {
 	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_PRIMARY_MS", "3000")
 
@@ -347,8 +356,8 @@ func TestResolvePreTLSGreeting_OwnLatePreferredOverCache(t *testing.T) {
 	}()
 
 	entry, source := resolvePreTLSGreeting(context.Background(), store, "", 3306, "", testDst("10.0.0.5:3306"))
-	if source != greetingOwn {
-		t.Fatalf("source = %v, want greetingOwn (a late own leg within the primary bound beats the cache)", source)
+	if source != greetingShared {
+		t.Fatalf("source = %v, want greetingShared (a late own leg within the primary bound beats the cache)", source)
 	}
 	if !entry.ReqTimestamp.Equal(ownTs) {
 		t.Errorf("ReqTimestamp = %v, want the own leg's %v", entry.ReqTimestamp, ownTs)
@@ -992,5 +1001,177 @@ func TestLegacyPostTLSUsesTheLastGreetingCacheInsteadOfDialling(t *testing.T) {
 	// reach the first client read and end there, because the peer is closed.
 	if err == nil || !strings.Contains(err.Error(), "first post-TLS client packet") {
 		t.Fatalf("expected the flow to consume the cached greeting and stop at the first client read, got: %v", err)
+	}
+}
+
+// The port-only FIFO ("port:3306") is CROSS-CONNECTION: in proxyless the raw and
+// decrypted legs are different TCP connections, so every decrypted stream to that
+// port draws from the same queue. Popping is destructive, so a stream that takes
+// a greeting and then fails has consumed a live connection's greeting and
+// produced nothing — silent decode loss, which is what made the
+// e2e-mysql-tls-lowlatency-cycle shortfall "served but NOT recorded" rather than
+// an error. An unused entry must go back.
+func TestPostTLSHandshakeV2_RestoresUnusedSharedGreeting(t *testing.T) {
+	h := newV2Harness(t)
+	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	store := models.NewTLSHandshakeStore()
+	portKey := models.HandshakeStoreKey("", 3306)
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{cannedHandshakeV10(t)},
+		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+		ReqTimestamp: base,
+	})
+
+	// This decrypted stream's own bytes never arrive — the connection completed
+	// and closed before its parser was wired. That is the measured failure: the
+	// first-client-packet read returns EOF after the greeting has been popped.
+	h.closeStreams()
+
+	decodeCtx := &wire.DecodeContext{
+		Mode:               models.MODE_RECORD,
+		LastOp:             wire.NewLastOpMap(),
+		ServerGreetings:    wire.NewGreetings(),
+		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
+	}
+	var clientKey net.Conn = h.sess.ClientStream
+
+	if _, err := handlePostTLSHandshakeV2(postTLSCtxWithStore(store), h.logger, h.sess, decodeCtx, &clientKey); err == nil {
+		t.Fatal("expected the post-TLS handshake to fail when the client stream is already closed")
+	}
+
+	// The greeting must still be available to the connection that actually needs
+	// it. Without the restore it was consumed and gone, and a live MySQL
+	// connection lost its command phase with nothing logged.
+	if _, ok := store.PopWait(portKey, 0); !ok {
+		t.Fatal("a greeting consumed by a FAILED post-TLS attempt was never returned to the shared " +
+			"port FIFO; the connection it belonged to is starved and its queries go unrecorded")
+	}
+}
+
+// The mirror case: a greeting this connection legitimately consumed and USED
+// must NOT be pushed back, or a later stream would stitch a duplicate.
+func TestPostTLSHandshakeV2_KeepsSharedGreetingOnSuccess(t *testing.T) {
+	h := newV2Harness(t)
+	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	handshakeBuf := cannedHandshakeV10(t)
+	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), handshakeBuf[4:])
+	if err != nil {
+		t.Fatalf("decode handshake v10: %v", err)
+	}
+
+	store := models.NewTLSHandshakeStore()
+	portKey := models.HandshakeStoreKey("", 3306)
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{handshakeBuf},
+		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+		ReqTimestamp: base,
+	})
+
+	h.pushClient(cannedHandshakeResponse41(t, 2, false), base.Add(5*time.Millisecond))
+	h.pushDest(cannedOK(t, 3, greeting.CapabilityFlags), base.Add(10*time.Millisecond))
+
+	decodeCtx := &wire.DecodeContext{
+		Mode:               models.MODE_RECORD,
+		LastOp:             wire.NewLastOpMap(),
+		ServerGreetings:    wire.NewGreetings(),
+		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
+	}
+	var clientKey net.Conn = h.sess.ClientStream
+
+	if _, err := handlePostTLSHandshakeV2(postTLSCtxWithStore(store), h.logger, h.sess, decodeCtx, &clientKey); err != nil {
+		t.Fatalf("post-TLS handshake failed unexpectedly: %v", err)
+	}
+	if _, ok := store.PopWait(portKey, 0); ok {
+		t.Fatal("a greeting that WAS used got pushed back; a later stream would stitch it a second time")
+	}
+}
+
+// A conn-specific entry is this connection's OWN. It must classify as
+// greetingOwn and must never be recycled — restoring it would hand one
+// connection's greeting to another. Without this, every direct
+// resolvePreTLSGreeting test passes connKey=="" and the own-key branch is
+// entirely uncovered.
+func TestResolvePreTLSGreeting_ConnKeyedEntryIsOwnNotShared(t *testing.T) {
+	store := models.NewTLSHandshakeStore()
+	store.Push(models.HandshakeStoreKey("conn-A", 3306), models.TLSHandshakeEntry{
+		RespPackets: [][]byte{[]byte("greeting")},
+	})
+
+	entry, source := resolvePreTLSGreeting(context.Background(), store, "conn-A", 3306, "", testDst("10.0.0.5:3306"))
+	if source != greetingOwn {
+		t.Fatalf("source = %v, want greetingOwn for an entry under the conn-specific key", source)
+	}
+	if len(entry.RespPackets) != 1 {
+		t.Fatalf("own entry not returned: %+v", entry)
+	}
+}
+
+// A restored greeting is, for whatever connection picks it up next, a BORROWED
+// entry from a dead connection. Push re-stamps the store's own expiry, so the
+// entry does not age out; if it also carried its original ReqTimestamp it would
+// backdate the next connection's config mock. Config mocks are identified by
+// Name+Kind+ReqTimestampMock and ordered by it, so that is a replay break — the
+// same hazard the legacy path documents for borrowed greetings.
+func TestPostTLSHandshakeV2_RestoredGreetingCarriesNoTimestamp(t *testing.T) {
+	h := newV2Harness(t)
+	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	store := models.NewTLSHandshakeStore()
+	portKey := models.HandshakeStoreKey("", 3306)
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{cannedHandshakeV10(t)},
+		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+		ReqTimestamp: base,
+	})
+	h.closeStreams()
+
+	decodeCtx := &wire.DecodeContext{
+		Mode:               models.MODE_RECORD,
+		LastOp:             wire.NewLastOpMap(),
+		ServerGreetings:    wire.NewGreetings(),
+		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
+	}
+	var clientKey net.Conn = h.sess.ClientStream
+	if _, err := handlePostTLSHandshakeV2(postTLSCtxWithStore(store), h.logger, h.sess, decodeCtx, &clientKey); err == nil {
+		t.Fatal("expected the post-TLS handshake to fail")
+	}
+
+	restored, ok := store.PopWait(portKey, 0)
+	if !ok {
+		t.Fatal("greeting was not restored")
+	}
+	if !restored.ReqTimestamp.IsZero() {
+		t.Fatalf("restored entry kept ReqTimestamp %v; it would backdate the next connection's config mock",
+			restored.ReqTimestamp)
+	}
+}
+
+// An entry whose greeting cannot decode is garbage. Restoring it would be worse
+// than dropping it: Push re-stamps the expiry, so it would never age out and
+// would trip every later decrypted stream to this port.
+func TestPostTLSHandshakeV2_DoesNotRecycleUndecodableGreeting(t *testing.T) {
+	h := newV2Harness(t)
+
+	store := models.NewTLSHandshakeStore()
+	portKey := models.HandshakeStoreKey("", 3306)
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets: [][]byte{{0x01, 0x00, 0x00, 0x00, 0xff}}, // not a HandshakeV10
+	})
+
+	decodeCtx := &wire.DecodeContext{
+		Mode:               models.MODE_RECORD,
+		LastOp:             wire.NewLastOpMap(),
+		ServerGreetings:    wire.NewGreetings(),
+		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
+	}
+	var clientKey net.Conn = h.sess.ClientStream
+	if _, err := handlePostTLSHandshakeV2(postTLSCtxWithStore(store), h.logger, h.sess, decodeCtx, &clientKey); err == nil {
+		t.Fatal("expected an undecodable greeting to fail the handshake")
+	}
+	if _, ok := store.PopWait(portKey, 0); ok {
+		t.Fatal("an undecodable greeting was put back into the shared FIFO; Push re-stamps its expiry so it " +
+			"would never age out and would trip every later stream to this port")
 	}
 }
