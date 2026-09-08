@@ -979,6 +979,12 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	}
 	pluginName, err := wire.GetPluginName(greetingPkt.Message)
 	if err != nil {
+		// Decodable but not a handshake (GetPluginName accepts only HandshakeV10
+		// / AuthSwitchRequest). This runs BEFORE the HandshakeV10 assertion
+		// below, so without clearing the flag here such an entry would be
+		// recycled — and Push re-stamps its expiry, making it immortal and
+		// tripping every later stream to this port.
+		restoreShared = false
 		return fmt.Errorf("failed to get plugin name from stored server greeting: %w", err)
 	}
 	decodeCtx.PluginName = pluginName
@@ -1044,6 +1050,12 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// Produce a synthetic config mock from pre-TLS data so test mode
 		// can match the SSLRequest + HandshakeResponse41 during replay.
 		if ok && len(entry.ReqPackets) > 0 {
+			// Spent: a mock is about to be built from this greeting. Past this
+			// point the entry must NOT go back — handleClientQueries below
+			// returns non-nil at ordinary teardown (ctx.Done), so the error
+			// alone cannot distinguish "never used" from "used and then the
+			// connection ended".
+			restoreShared = false
 			if err := recordSyntheticConfigMock(ctx, logger, clientConn, mocks, decodeCtx, greetingPkt, entry, opts); err != nil {
 				logger.Debug("best-effort synthetic config mock generation failed for seq=0 path; continuing with command-phase capture", zap.Error(err))
 			}
@@ -1156,6 +1168,8 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	if len(requests) > 0 && requests[0].Header != nil {
 		reqOp = requests[0].Header.Type // Use SSLRequest type if present
 	}
+	// Spent, for the same reason as the synthetic-config path above.
+	restoreShared = false
 	recordMock(ctx, requests, responses, "config",
 		reqOp, authRes.responseOperation,
 		mocks, entry.ReqTimestamp, models.CapturedRespTime(ctx), opts)

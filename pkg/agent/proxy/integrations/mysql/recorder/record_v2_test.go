@@ -1036,8 +1036,16 @@ func TestPostTLSHandshakeV2_RestoresUnusedSharedGreeting(t *testing.T) {
 	}
 	var clientKey net.Conn = h.sess.ClientStream
 
-	if _, err := handlePostTLSHandshakeV2(postTLSCtxWithStore(store), h.logger, h.sess, decodeCtx, &clientKey); err == nil {
+	_, err := handlePostTLSHandshakeV2(postTLSCtxWithStore(store), h.logger, h.sess, decodeCtx, &clientKey)
+	if err == nil {
 		t.Fatal("expected the post-TLS handshake to fail when the client stream is already closed")
+	}
+	// Pin WHICH failure: the greeting must have been popped and decoded, and the
+	// stream must have died on the first client packet. Any earlier error would
+	// leave the entry unconsumed and make the restore assertion vacuous.
+	if !strings.Contains(err.Error(), "read first client packet") {
+		t.Fatalf("failed before consuming the greeting (%v); this test must exercise the "+
+			"first-client-packet path or it proves nothing", err)
 	}
 
 	// The greeting must still be available to the connection that actually needs

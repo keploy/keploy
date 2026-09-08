@@ -477,7 +477,11 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 			// re-stamps pushedAt, so putting it back would make it immortal and
 			// trip every later stream to this port. Drop it — the connection it
 			// belonged to could not have used it either.
-			if sharedUndecodable {
+			// Only when the failure was THIS entry's own greeting. On the
+			// direct-fetch branch the buffer that failed to decode is the
+			// FETCHED greeting, not the shared entry, so dropping it on that
+			// basis would discard an untouched entry someone else needs.
+			if sharedAdopted && sharedUndecodable {
 				return
 			}
 			hsStore.Push(sharedKey, sharedEntry)
