@@ -290,6 +290,11 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// "mock not found" path: same error, same log line, same
 		// NXDOMAIN / synthetic fallback. Forwarding is strictly
 		// additive.
+		// Set when upstream answers authoritatively that the name does not
+		// exist. Such a name has no mock and never could: the record side
+		// deliberately skips non-Success rcodes, so its absence is correct
+		// rather than a recording gap. See the mock-miss report below.
+		upstreamSaysNameDoesNotExist := false
 		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
 			// A RcodeSuccess response splits into two cases by answer count:
 			// resolved (>=1 RR) vs NODATA (0 RRs). Both are relayed as-is; only
@@ -367,6 +372,13 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					zap.Int("rcode", fwdResp.Rcode))
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 			}
+			// ONLY NXDOMAIN. This branch also covers SERVFAIL, REFUSED,
+			// NOTIMP and FORMERR, which mean the resolver could not or would
+			// not answer -- they say nothing about whether the name exists,
+			// so they stay reportable like an unreachable upstream.
+			if fwdResp.Rcode == dns.RcodeNameError {
+				upstreamSaysNameDoesNotExist = true
+			}
 			p.logger.Debug("DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response",
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
@@ -399,7 +411,25 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				zap.String("query", question.Name))
 			return p.defaultDNSResponse(question)
 		}
-		if mockingEnabled {
+		// Skipped when upstream said NXDOMAIN: there is no mock to be missing.
+		// The record side deliberately does not store non-Success rcodes, so a
+		// name that does not resolve was never recordable, and the report's
+		// own advice -- "re-record to capture DNS queries" -- can never
+		// succeed for it. Kubernetes resolvers reach here routinely: with
+		// ndots:5 a name like appdb.ns.svc.cluster.local is first tried as
+		// appdb.ns.svc.cluster.local.ns.svc.cluster.local, which NXDOMAINs by
+		// design.
+		//
+		// Everything else that reaches this point is still reported: upstream
+		// unreachable, no upstream configured, a non-forwardable qtype, and
+		// SERVFAIL/REFUSED/NOTIMP/FORMERR -- none of which tell us the name is
+		// absent. (A name that DOES resolve never gets here; it returns
+		// upstream's answer above. So after this change DNS-miss reporting
+		// fires only when the forwarder itself could not reach a verdict.)
+		//
+		// The app is unaffected either way -- it still receives the synthetic
+		// NOERROR steer below (issue #2006). Only the spurious verdict goes.
+		if mockingEnabled && !upstreamSaysNameDoesNotExist {
 			// Send mock not found error if we couldn't match any DNS
 			// mock and upstream forwarding also failed.
 			p.logger.Debug("mock miss",
