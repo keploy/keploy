@@ -183,8 +183,6 @@ func GetReqMeta(req *http.Request) map[string]string {
 }
 
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
-	passThrough := false
-
 	for _, bypass := range opts.Rules {
 		if bypass.Host != "" {
 			regex, err := regexp.Compile(bypass.Host)
@@ -192,8 +190,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
 				continue
 			}
-			passThrough = regex.MatchString(req.Host)
-			if !passThrough {
+			if !regex.MatchString(req.Host) {
 				continue
 			}
 		}
@@ -203,21 +200,29 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
 				continue
 			}
-			passThrough = regex.MatchString(req.URL.String())
-			if !passThrough {
+			if !regex.MatchString(req.URL.String()) {
 				continue
 			}
 		}
-
-		if passThrough {
-			if bypass.Port == 0 || bypass.Port == destPort {
-				return true
-			}
-			passThrough = false
+		// A rule that constrains nothing is inert, not "bypass everything":
+		// `bypassRules: [{}]`, or a stray empty list entry, must never
+		// silently disable recording for the whole run. Mirrors the
+		// bypassEligible gate in pkg/agent/hooks/conn/util.go.
+		if bypass.Host == "" && bypass.Path == "" && bypass.Port == 0 {
+			continue
+		}
+		// Reached only once every field the rule DID set has matched, so a
+		// port-only rule -- what --pass-through-ports and `bypassRules:
+		// [{port: N}]` produce via config.SetByPassPorts -- is decided here on
+		// port alone. This branch used to be guarded by a `passThrough` flag
+		// that only the Host/Path arms ever assigned, so a port-only rule
+		// could never reach it and was a no-op at the proxy layer.
+		if bypass.Port == 0 || bypass.Port == destPort {
+			return true
 		}
 	}
 
-	return passThrough
+	return false
 }
 
 func kebabToCamel(s string) string {
