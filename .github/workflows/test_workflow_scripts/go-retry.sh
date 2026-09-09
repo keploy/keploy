@@ -42,6 +42,11 @@
 # Usage:  source .../go-retry.sh
 #         go_retry build -o app .
 #         go_retry mod tidy
+#
+# NEVER wrap `go test`. Retrying a suite hides a flaky test instead of fixing
+# it, and the transient regex is matched against stdout as well as stderr — so
+# ordinary test output containing "connection reset by peer" would arm the retry
+# on a genuine failure.
 
 # The transport subset of docker-build-retry.sh's DOCKER_BUILD_RETRY_RE (its
 # rate-limit terms are Docker-specific), plus the two proxy HTTP errors go

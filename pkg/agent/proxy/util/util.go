@@ -44,8 +44,12 @@ var Emoji = "\U0001F430" + " Keploy:"
 // behind a dual-stack name: that looks exactly like a dependency that has not
 // started yet. So name the address family as a possibility, conditionally, and
 // leave the timing advice as the other possibility rather than the answer.
+// The counterpart retry is SUPPRESSED for a Fabricated target, and PassThrough
+// (the two sites below) is the only site attaching this hint where a fabricated
+// address can arrive — so the wording must not promise a retry those callers
+// never get.
 // Kept as a const so all sites update together.
-const NextStepDialDestination = "check which address FAMILY the dependency binds — a container published port is IPv4-only by default, and a loopback destination is retried once on the other family, so this error means neither answered — and confirm the dependency is up before traffic starts (sequence its start, raise --delay, or add a readiness probe)"
+const NextStepDialDestination = "check which address FAMILY the dependency binds — a container published port is IPv4-only by default, and a loopback destination may be retried on the other family (not when the capture layer had to fabricate the address), so check both — and confirm the dependency is up before traffic starts (sequence its start, raise --delay, or add a readiness probe)"
 
 // ErrRecordingPausedDueToMemoryPressure tells record-mode parsers to stop
 // decoding and fall back to transparent passthrough while the agent is under

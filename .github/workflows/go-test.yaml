@@ -85,7 +85,25 @@ jobs:
             libxxf86vm-dev libx11-dev libx11-xcb-dev  
 
       - name: Install dependencies
-        run: go get .
+        run: |
+          # `cache: false` above means this lane re-downloads keploy's whole
+          # module graph on every run, before every test in this job.
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry get .
+          # `go get .` resolves the main module's NON-test import graph. The two
+          # test steps additionally load github.com/go-sql-driver/mysql and its
+          # dependency filippo.io/edwards25519, and neither step can be wrapped
+          # (go-retry.sh forbids wrapping `go test`), so a transient proxy error
+          # while those resolve kills the job unretried. Measured by evicting
+          # both from GOMODCACHE: `go get .` leaves them absent, and
+          # `go list -deps -test ./...` extracts exactly those two.
+          # `go list -deps -test` rather than `go mod download` is a preference,
+          # not a correctness point — both warm what the test steps need, and
+          # both leave go.sum byte-identical (measured +0 lines, 3/3 trials; the
+          # command that does rewrite go.sum is `go mod download all`, which is
+          # not this). `go list` warms only what these steps load and picks up
+          # new test-only deps by itself.
+          go_retry list -deps -test ./... > /dev/null
 
       - name: Running Unit Tests
         run: go test ./...
@@ -93,7 +111,12 @@ jobs:
       # The mock-manager's concurrency guards — the tier-key/HitCount race and
       # the hitMu/treesMu lock order — are only meaningful under -race: without
       # it their tests pass on a build that races, so they read as coverage
-      # while proving nothing. Scoped to this package rather than the whole
-      # tree to keep the lane fast.
+      # while proving nothing. That applies past the mock manager: util/ keeps the
+      # loopback fallback's process-wide atomic.Bool, and syncMock, supervisor and
+      # tls ship eight tests with Race/Concurrent/Deadlock in their names. Naming
+      # packages here left those eight raced by nothing, so race the whole subtree
+      # instead — it is not slower in any way that matters, because package tests
+      # run in parallel: measured 43s for all 29 packages against 40.5s for
+      # ./pkg/agent/proxy/ alone, which dominates either way.
       - name: Running Race Detector (agent proxy)
-        run: go test -race -count=1 ./pkg/agent/proxy/
+        run: go test -race -count=1 ./pkg/agent/proxy/...

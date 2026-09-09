@@ -165,8 +165,8 @@ func DialDestinationWith(ctx context.Context, logger *zap.Logger, target DialTar
 
 	if logger != nil && loopbackFallbackReported.CompareAndSwap(false, true) {
 		logger.Info("proxy: the dependency is reachable on only one loopback address family, so the dial "+
-			"fell back to the other — this is the retry the application itself would have made had its "+
-			"connect not been intercepted. Bind the dependency on both families to remove the extra dial",
+			"fell back to the other — the fallback an application resolving a dual-stack name would have "+
+			"made itself had its connect not been intercepted. Bind the dependency on both families to remove the extra dial",
 			zap.String("requested", target.Addr), zap.String("connected", alt))
 	}
 	return altConn, nil
