@@ -21,8 +21,16 @@
 json_pass_supported() {
     local _rec="${RECORD_BIN:-${RECORD_KEPLOY_BIN:-keploy}}"
     local _rep="${REPLAY_BIN:-${REPLAY_KEPLOY_BIN:-keploy}}"
-    "$_rec" --help 2>&1 | grep -q -- '--storage-format' || return 1
-    "$_rep" --help 2>&1 | grep -q -- '--storage-format' || return 1
+    # grep -c, not grep -q: -q exits at the first match, and with `set -o
+    # pipefail` — which ~10 of this helper's ~30 callers already set, so this is
+    # a pre-existing latent bug across many lanes, not one this PR introduced —
+    # that SIGPIPEs the writer and turns
+    # the pipeline into 141. This probe FAILING SILENTLY is the bad outcome —
+    # json_pass_supported would return 1, the caller would print "json pass
+    # skipped for compat-matrix cell", and the whole JSON record+replay pass
+    # would vanish with the lane still green.
+    "$_rec" --help 2>&1 | grep -c -- '--storage-format' >/dev/null || return 1
+    "$_rep" --help 2>&1 | grep -c -- '--storage-format' >/dev/null || return 1
     return 0
 }
 

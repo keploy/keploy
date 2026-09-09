@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 # safer bash, but we’ll locally disable -e around commands we want to inspectset -Eeuo pipefail
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
@@ -156,7 +157,7 @@ sudo rm -f /tmp/keploy-logs.txt
 
 sudo "$RECORD_BIN" config --generate
 sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' ./keploy.yml
-go build -o urlShort
+go_retry build -o urlShort
 endsec
 
 section "Start MySQL"
