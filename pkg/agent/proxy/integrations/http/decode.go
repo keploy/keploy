@@ -437,11 +437,21 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	if stub != nil {
 		name = stub.Name
 	}
+	// Hydrate BEFORE the nil-response guard, never after. A recorded body of at
+	// least responseSpillMinBytes is parked on the agent's per-test disk store
+	// with Spec.HTTPResp deliberately set to nil (proxy.DiskMocks.Add), and
+	// this call is the only thing that restores it — guarding first rejected
+	// every spilled mock as "no response to serialize". HydrateResponse is a
+	// no-op when the mock never spilled and self-clears after a successful
+	// load, so it is safe to call on every serve. It cannot rescue a response
+	// that is nil for any other reason, which is why the guard below stays.
+	if stub != nil {
+		if err := stub.HydrateResponse(); err != nil {
+			return nil, err
+		}
+	}
 	if stub == nil || stub.Spec.HTTPResp == nil {
 		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
-	}
-	if err := stub.HydrateResponse(); err != nil {
-		return nil, err
 	}
 	protoMajor, protoMinor := 1, 1
 	if stub.Spec.HTTPReq != nil {
