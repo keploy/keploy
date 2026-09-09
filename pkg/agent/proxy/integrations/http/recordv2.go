@@ -137,7 +137,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		finalResp := append([]byte(nil), firstRespChunk.Bytes...)
 		resTs := firstRespChunk.WrittenAt
 
-		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp)
+		// The request method decides whether the response may carry a body at
+		// all (RFC 9112 section 6.3 — a response to HEAD never does), so it has
+		// to travel with the response read.
+		reqMethod := httpRequestMethod(finalReq)
+		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, reqMethod)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// Legacy encodeHTTP treats EOF after some bytes as
@@ -271,28 +275,63 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 // Returns (lastWrittenAt, err). err may be io.EOF for the legitimate
 // "server closed after sending a full response" case; the caller
 // decides whether to emit a mock.
-func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte) (time.Time, error) {
+func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string) (time.Time, error) {
 	var lastWr time.Time
 
-	// 1. Complete headers.
-	for !hasCompleteHeaders(*finalResp) {
-		if err := ctx.Err(); err != nil {
-			return lastWr, err
+	// 1. Complete headers, discarding any INTERIM 1xx response first.
+	//
+	// RFC 9110 section 15.2: an interim response (100 Continue, 103 Early Hints)
+	// is not the response — the real one follows on the same connection. Framing
+	// the interim as if it were the response leaves the real response unread and,
+	// via the read-until-EOF fallback below, swallows every later exchange on the
+	// connection. 101 is deliberately NOT skipped: it IS the final response for
+	// an upgrade, so it is framed and recorded like any other bodyless
+	// response. What follows on the wire is no longer HTTP, and the parser
+	// blocks there until the hang watchdog retires it -- deliberately, because
+	// returning cleanly would end the supervisor run with a status that does
+	// not preserve the byte relay, killing the upgraded connection.
+	for interim := 0; ; interim++ {
+		for !hasCompleteHeaders(*finalResp) {
+			if err := ctx.Err(); err != nil {
+				return lastWr, err
+			}
+			chunk, err := stream.ReadChunk()
+			if err != nil {
+				return lastWr, err
+			}
+			if !chunk.WrittenAt.IsZero() {
+				lastWr = chunk.WrittenAt
+			}
+			if len(chunk.Bytes) == 0 {
+				return lastWr, io.EOF
+			}
+			*finalResp = append(*finalResp, chunk.Bytes...)
 		}
-		chunk, err := stream.ReadChunk()
-		if err != nil {
-			return lastWr, err
+		code := httpStatusCode(*finalResp)
+		if code < 100 || code >= 200 || code == 101 {
+			break
 		}
-		if !chunk.WrittenAt.IsZero() {
-			lastWr = chunk.WrittenAt
+		if interim >= maxInterimResponses {
+			return lastWr, fmt.Errorf("more than %d consecutive interim (1xx) responses", maxInterimResponses)
 		}
-		if len(chunk.Bytes) == 0 {
-			return lastWr, io.EOF
+		end := bytes.Index(*finalResp, []byte("\r\n\r\n"))
+		if end < 0 {
+			break
 		}
-		*finalResp = append(*finalResp, chunk.Bytes...)
+		h.Logger.Debug("V2 HTTP record: discarding an interim 1xx response and reading the real one",
+			zap.Int("status", code))
+		*finalResp = append([]byte(nil), (*finalResp)[end+4:]...)
 	}
 
-	// 2. Parse headers for body framing.
+	// 2. Bodyless by status/method (RFC 9112 section 6.3) — must be checked
+	//    BEFORE Content-Length / Transfer-Encoding, which are present on plenty
+	//    of 304s and HEAD responses and describe the body the response WOULD
+	//    have had. See responseHasNoBody.
+	if code := httpStatusCode(*finalResp); responseHasNoBody(code, reqMethod) {
+		return lastWr, nil
+	}
+
+	// 3. Parse headers for body framing.
 	contentLengthHeader, transferEncodingHeader := parseHeaders(*finalResp)
 
 	if contentLengthHeader != "" {
@@ -354,6 +393,17 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 	// Neither Content-Length nor chunked: read until EOF (RFC 7230
 	// permits this for HTTP/1.0 and for responses with "Connection:
 	// close"). The loop relies on the stream eventually closing.
+	//
+	// Say so. On a keep-alive connection the stream does NOT close after this
+	// response, so this loop consumes every later exchange as body and none of
+	// them is ever recorded — and because the parser then returns nil, the
+	// supervisor records StatusOK and no retire warning is emitted. That is
+	// silent recording loss, and it stayed invisible for exactly as long as this
+	// branch said nothing.
+	h.Logger.Warn("V2 HTTP record: response has neither Content-Length nor chunked framing; reading until the connection closes",
+		zap.Int("status", httpStatusCode(*finalResp)),
+		zap.String("method", reqMethod),
+		zap.String("impact", "if this connection is keep-alive, later requests on it will be consumed as this response's body and not recorded"))
 	for {
 		if err := ctx.Err(); err != nil {
 			return lastWr, err
@@ -370,6 +420,75 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		}
 		*finalResp = append(*finalResp, chunk.Bytes...)
 	}
+}
+
+// maxInterimResponses bounds the 1xx skip loop so a peer that only ever sends
+// interim responses cannot spin here.
+const maxInterimResponses = 8
+
+// httpStatusCode returns the status code from a response's start line, or 0 if
+// it cannot be parsed. Deliberately a byte-level parse of the first line rather
+// than http.ReadResponse: this runs before the body has been framed, which is
+// precisely what ReadResponse would need.
+func httpStatusCode(resp []byte) int {
+	end := bytes.IndexByte(resp, '\n')
+	if end < 0 {
+		end = len(resp)
+	}
+	fields := strings.Fields(string(resp[:end]))
+	if len(fields) < 2 || !strings.HasPrefix(fields[0], "HTTP/") {
+		return 0
+	}
+	code, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0
+	}
+	return code
+}
+
+// httpRequestMethod returns the method from a request's start line, uppercased,
+// or "" if it cannot be parsed. Needed because RFC 9112 section 6.3 makes the
+// response to HEAD bodyless regardless of its own headers.
+func httpRequestMethod(req []byte) string {
+	end := bytes.IndexByte(req, '\n')
+	if end < 0 {
+		end = len(req)
+	}
+	fields := strings.Fields(string(req[:end]))
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.ToUpper(fields[0])
+}
+
+// responseHasNoBody reports whether RFC 9112 section 6.3 forbids a message body
+// on this response, in which case Content-Length / Transfer-Encoding must be
+// ignored rather than used for framing.
+//
+// Getting this wrong is not a cosmetic bug. Framing a bodyless response from its
+// headers sends readResponseV2 into either the Content-Length wait or the
+// read-until-EOF fallback, and it then consumes every LATER exchange on the same
+// keep-alive connection as if it were this response's body. Chromium revalidates
+// static assets (304) and preflights CORS (204) constantly, so on a browser
+// workload this silently destroys most of a connection's recording.
+func responseHasNoBody(code int, reqMethod string) bool {
+	switch {
+	case code == 204, code == 304:
+		return true
+	case code >= 100 && code < 200:
+		// 101 reaches here; 1xx below it is consumed by the interim skip.
+		return true
+	case strings.EqualFold(reqMethod, "HEAD"):
+		return true
+	case code >= 200 && code < 300 && strings.EqualFold(reqMethod, "CONNECT"):
+		// RFC 9112 section 6.3: a 2xx to CONNECT turns the connection into a
+		// tunnel, so the response itself has no body and everything after it is
+		// opaque tunnelled bytes. Like a 101 it carries neither Content-Length
+		// nor chunked framing, so without this it lands in the read-until-close
+		// branch and swallows the rest of the connection.
+		return true
+	}
+	return false
 }
 
 // parseHeaders extracts Content-Length and Transfer-Encoding header
