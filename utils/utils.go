@@ -228,9 +228,43 @@ func kebabToCamel(s string) string {
 	return strings.Join(parts, "")
 }
 
+// NoViperBindAnnotation marks a flag whose value is consumed directly via
+// cmd.Flags().Get*, never through viper.Unmarshal into the config struct.
+// BindFlagsToViper skips such a flag entirely.
+//
+// Why this exists: BindFlagsToViper derives a command-scoped key
+// <cmd.Name()>.<camelCase(flag)>, which ASSUMES the flag's destination lives
+// under the command's own config section. When it does not, that derived key
+// can land on an unrelated field of an incompatible type and abort
+// viper.Unmarshal for the WHOLE config, taking the command down with it.
+//
+// --pass-through-ports is the case that exposed this. It is consumed directly
+// at cli/provider/cmd.go:1293 and :2077 (into Config.BypassRules, via
+// config.SetByPassPorts) and at :1790 (into Agent.PassThroughPorts, for
+// `keploy agent` only) -- never through viper.Unmarshal. But on any command
+// whose Name() is "record" -- both `keploy record` and `keploy mock record` --
+// the derived key is record.passThroughPorts, which maps onto
+// Record.PassThroughPorts ([]models.PassThroughRule, telemetry-egress rules: an
+// unrelated feature that merely shares the name). Decoding []uint into a struct
+// slice fails with 'record.passThroughPorts[0]' expected a map or struct, got
+// "uint", aborting the whole config unmarshal and with it the command. This
+// fires only when the flag is explicitly passed: its default is empty, and an
+// empty list decodes into []PassThroughRule cleanly. `keploy test` and
+// `keploy mock replay` are unaffected because their Name() differs.
+//
+// Note this skips the binds BindFlagsToViper itself makes; the separate
+// viper.BindPFlags(cmd.Flags()) at cli/provider/cmd.go:628 still binds the
+// literal kebab key, which is harmless because it matches no mapstructure name.
+const NoViperBindAnnotation = "keploy_no_viper_bind"
+
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		if _, skip := flag.Annotations[NoViperBindAnnotation]; skip {
+			logger.Debug("flag is read directly, not via viper; skipping bind",
+				zap.String("flag", flag.Name))
+			return
+		}
 		camelCaseName := kebabToCamel(flag.Name)
 		err := viper.BindPFlag(camelCaseName, flag)
 		if err != nil {
