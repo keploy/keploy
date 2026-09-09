@@ -481,9 +481,13 @@ func (s *TLSHandshakeStore) Push(key string, entry TLSHandshakeEntry) {
 	s.pruneExpiredLocked(time.Now())
 	q := s.m[key]
 	if len(q) >= tlsHandshakeMaxQueuePerKey {
+		// Drop the oldest. This MUST append to the trimmed q, not to s.m[key]:
+		// appending to the untrimmed slice discarded the trim entirely and the
+		// cap never applied, so a key with a producer and no matching consumer
+		// grew without bound.
 		q = q[1:]
 	}
-	s.m[key] = append(s.m[key], timedTLSHandshakeEntry{
+	s.m[key] = append(q, timedTLSHandshakeEntry{
 		entry:    entry,
 		pushedAt: time.Now(),
 	})
