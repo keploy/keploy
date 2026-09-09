@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -52,14 +53,24 @@ func (m *mockService) Replay(ctx context.Context) error {
 	}()
 
 	// 1. Instrument in mock (test) mode — no ingress port relocation.
+	// --pass-through-ports lands in BypassRules (config.SetByPassPorts, driven by
+	// cli/provider/cmd.go). The proxy-level rules were already forwarded via
+	// OutgoingOptions.Rules below, but the KERNEL-level bypass is a separate
+	// channel and mock mode never populated it -- so a bypassed port was still
+	// pulled through the proxy and recorded. Integration record/test have always
+	// set this (service/record/record.go, service/replay/replay.go); mock mode
+	// was the only path that did not.
+	passPortsUint := config.GetByPassPorts(m.config)
+
 	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
-		Container:   m.config.ContainerName,
-		CommandType: m.config.CommandType,
-		DockerDelay: m.config.BuildDelay,
-		BuildDelay:  m.config.BuildDelay,
-		Mode:        models.MODE_TEST,
-		MockMode:    true,
-		ConfigPath:  m.config.ConfigPath,
+		Container:        m.config.ContainerName,
+		CommandType:      m.config.CommandType,
+		DockerDelay:      m.config.BuildDelay,
+		BuildDelay:       m.config.BuildDelay,
+		Mode:             models.MODE_TEST,
+		MockMode:         true,
+		ConfigPath:       m.config.ConfigPath,
+		PassThroughPorts: passPortsUint,
 	}); err != nil {
 		if ctx.Err() != nil {
 			return nil
