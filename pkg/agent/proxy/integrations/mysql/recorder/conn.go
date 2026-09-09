@@ -965,7 +965,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 			zap.String("connKey", opts.ConnKey),
 			zap.Uint16("dstPort", dstPort))
 		var err error
-		serverGreetingBuf, err = fetchServerGreeting(ctx, opts)
+		serverGreetingBuf, err = fetchServerGreeting(ctx, logger, opts)
 		if err != nil {
 			return fmt.Errorf("no server greeting in TLSHandshakeStore for key %s and direct fetch failed: %w", storeKey, err)
 		}
@@ -1306,7 +1306,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 // initial HandshakeV10 greeting packet. This is used as a fallback when the
 // pre-TLS handshake was not captured by the proxy (e.g. the connection was
 // established before interception started).
-func fetchServerGreeting(ctx context.Context, opts models.OutgoingOptions) ([]byte, error) {
+func fetchServerGreeting(ctx context.Context, logger *zap.Logger, opts models.OutgoingOptions) ([]byte, error) {
 	addr := ""
 	if opts.DstCfg != nil {
 		addr = opts.DstCfg.Addr
@@ -1330,7 +1330,10 @@ func fetchServerGreeting(ctx context.Context, opts models.OutgoingOptions) ([]by
 	}
 
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	conn, err := pUtils.DialDestinationWith(ctx, logger, pUtils.DialTarget{Addr: addr},
+		func(ctx context.Context, a string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp", a)
+		})
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}

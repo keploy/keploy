@@ -642,7 +642,7 @@ func (p *Proxy) probeMysql(
 	// port; the negative cache makes it exactly once. A server-speaks-
 	// first protocol simply re-greets on the fresh connection, so
 	// discarding this one loses nothing.
-	dstConn, err := net.Dial("tcp", dstAddr)
+	dstConn, err := util.DialDestination(ctx, logger, "tcp", util.DialTarget{Addr: dstAddr})
 	if err != nil {
 		return &mysqlProbe{SrcConn: srcConn, Reason: "upstream-dial-failed"}, err
 	}

@@ -28,6 +28,15 @@ jobs:
       # database, so keying on it would turn an unrelated contributor's PR red
       # over a service they were never offered. Unset, the tests skip.
       KEPLOY_TEST_MYSQL_REQUIRED: "1"
+      # Same shape, different resource: the proxy's loopback address-family
+      # fallback tests need ::1 on lo. Without this they SKIP and the package
+      # still reports ok — a suite that tests nothing while looking healthy,
+      # which is the exact failure the fallback itself exists to prevent.
+      # Unlike MySQL this is not a service the lane provides, it is a property
+      # of the runner; every GitHub-hosted ubuntu image has ::1 on lo, so this
+      # only fires if that stops being true, and it stays unset elsewhere so a
+      # v6-less environment skips rather than fails.
+      KEPLOY_TEST_IPV6_REQUIRED: "1"
       KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
       KEPLOY_TEST_MYSQL_USER: root
       KEPLOY_TEST_MYSQL_PASS: rootpass

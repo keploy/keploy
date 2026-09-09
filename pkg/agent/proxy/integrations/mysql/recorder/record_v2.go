@@ -516,7 +516,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		// fabricated destinations (see models.ConditionalDstCfg.AddrFabricated),
 		// so this cannot dial an address the capture layer merely invented.
 		var gErr error
-		greetingBuf, gErr = fetchServerGreeting(ctx, sess.Opts)
+		greetingBuf, gErr = fetchServerGreeting(ctx, logger, sess.Opts)
 		if gErr != nil {
 			return res, fmt.Errorf("post-TLS V2: no greeting in store (key port %d) and direct fetch failed: %w", dstPort, gErr)
 		}
