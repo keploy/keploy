@@ -845,7 +845,7 @@ func handlePlainPassword(ctx context.Context, logger *zap.Logger, clientConn, de
 // In this mode, the SSL/GoTLS uprobes provide decrypted plaintext starting
 // from HandshakeResponse41 (the full auth after TLS handshake). The server
 // greeting was captured by the ringbuf path and stored in TLSHandshakeStore.
-func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
+func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (err error) {
 	// 1. Pop the server greeting from TLSHandshakeStore.
 	dstPort := uint16(0)
 	if opts.DstCfg != nil {
@@ -860,15 +860,44 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		zap.String("key", storeKey),
 		zap.String("connKey", opts.ConnKey),
 		zap.Uint16("dstPort", dstPort))
+	portOnlyKey := models.HandshakeStoreKey("", dstPort)
+	// fromShared: the entry came off the port-only FIFO, which is shared by every
+	// post-TLS stream to this port. An empty ConnKey collapses storeKey onto that
+	// same key, so the FIRST pop can read the shared queue too — classify by the
+	// key, not by which pop succeeded.
 	entry, ok := hsStore.PopWait(storeKey, 5*time.Second)
+	fromShared := ok && storeKey == portOnlyKey
 	// If conn-specific key missed, try the port-only fallback key.
 	// The proxy and uprobe see different TCP connections with different
 	// ephemeral ports, so conn-specific keys may not match.
 	if !ok && opts.ConnKey != "" {
-		portKey := models.HandshakeStoreKey("", dstPort)
 		logger.Debug("Conn-specific key missed, trying port-only fallback",
-			zap.String("portKey", portKey))
-		entry, ok = hsStore.PopWait(portKey, 2*time.Second)
+			zap.String("portKey", portOnlyKey))
+		entry, ok = hsStore.PopWait(portOnlyKey, 2*time.Second)
+		fromShared = ok
+	}
+	// Popping the shared FIFO is destructive: if this stream fails before
+	// recording anything, the greeting it consumed is gone and the connection
+	// that pushed it is starved, losing its whole command phase silently. Put an
+	// unused entry back. ReqTimestamp is stripped for the same reason the cached
+	// fallback below strips it — to the next consumer this is a BORROWED entry
+	// from another connection, and config mocks are identified and ordered by
+	// ReqTimestampMock. Mirrors handlePostTLSHandshakeV2 on the V2 path.
+	// Cleared at the greeting-decode failures below: an undecodable entry is
+	// garbage, and Push re-stamps its expiry, so recycling it would make it
+	// immortal and trip every later stream to this port.
+	restoreShared := true
+	if fromShared {
+		sharedEntry := entry
+		sharedEntry.ReqTimestamp = time.Time{}
+		defer func() {
+			if !restoreShared || err == nil {
+				return
+			}
+			hsStore.Push(portOnlyKey, sharedEntry)
+			logger.Debug("post-TLS MySQL: returned an unused shared greeting to the port FIFO",
+				zap.Uint16("dstPort", dstPort), zap.Error(err))
+		}()
 	}
 	// Both consumable keys missed. Before dialling the server, consult the
 	// last-greeting cache — the same fallback the V2 path uses, and the reason
@@ -945,10 +974,17 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	// 2. Decode the server greeting to initialize decode context.
 	greetingPkt, err := wire.DecodePayload(ctx, logger, serverGreetingBuf, clientConn, decodeCtx)
 	if err != nil {
+		restoreShared = false
 		return fmt.Errorf("failed to decode stored server greeting for post-TLS: %w", err)
 	}
 	pluginName, err := wire.GetPluginName(greetingPkt.Message)
 	if err != nil {
+		// Decodable but not a handshake (GetPluginName accepts only HandshakeV10
+		// / AuthSwitchRequest). This runs BEFORE the HandshakeV10 assertion
+		// below, so without clearing the flag here such an entry would be
+		// recycled — and Push re-stamps its expiry, making it immortal and
+		// tripping every later stream to this port.
+		restoreShared = false
 		return fmt.Errorf("failed to get plugin name from stored server greeting: %w", err)
 	}
 	decodeCtx.PluginName = pluginName
@@ -957,6 +993,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	// Store the server greeting for the clientConn (needed by DecodePayload for command phase).
 	sg, ok := greetingPkt.Message.(*mysql.HandshakeV10Packet)
 	if !ok {
+		restoreShared = false
 		return fmt.Errorf("stored server greeting is not HandshakeV10Packet")
 	}
 	decodeCtx.ServerGreetings.Store(clientConn, sg)
@@ -1013,6 +1050,12 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// Produce a synthetic config mock from pre-TLS data so test mode
 		// can match the SSLRequest + HandshakeResponse41 during replay.
 		if ok && len(entry.ReqPackets) > 0 {
+			// Spent: a mock is about to be built from this greeting. Past this
+			// point the entry must NOT go back — handleClientQueries below
+			// returns non-nil at ordinary teardown (ctx.Done), so the error
+			// alone cannot distinguish "never used" from "used and then the
+			// connection ended".
+			restoreShared = false
 			if err := recordSyntheticConfigMock(ctx, logger, clientConn, mocks, decodeCtx, greetingPkt, entry, opts); err != nil {
 				logger.Debug("best-effort synthetic config mock generation failed for seq=0 path; continuing with command-phase capture", zap.Error(err))
 			}
@@ -1125,6 +1168,8 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	if len(requests) > 0 && requests[0].Header != nil {
 		reqOp = requests[0].Header.Type // Use SSLRequest type if present
 	}
+	// Spent, for the same reason as the synthetic-config path above.
+	restoreShared = false
 	recordMock(ctx, requests, responses, "config",
 		reqOp, authRes.responseOperation,
 		mocks, entry.ReqTimestamp, models.CapturedRespTime(ctx), opts)

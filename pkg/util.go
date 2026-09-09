@@ -2950,18 +2950,70 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 	return filteredMocks
 }
 
-func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
-	filteredMocks, unfilteredMocks := filterByMapping(ctx, logger, m, mocksPresentInMapping)
+// FilterConfigMocksMapping tags the reusable (config/session/connection) pool
+// with its mapping membership and returns it in RECORDED order.
+//
+// Mapping membership is not a chronological signal and must not reorder this
+// pool. Its members are reusable tier — none is owned by a single test — so
+// membership only records which tests happened to consume a mock, and says
+// nothing about when it was recorded. Partitioning on it and concatenating
+// (mapped first, then unmapped) puts every consumed entry ahead of every
+// unconsumed one, inverting chronology whenever the two interleave: a pool
+// recorded rev1,rev2,rev3,rev4 with rev3,rev4 consumed came back as
+// rev3,rev4,rev1,rev2.
+//
+// That matters because downstream reads this pool as a SEQUENCE, not a set. The
+// slice order becomes TestModeInfo.SortOrder in MockManager.setUnFilteredMocks,
+// which keys the RB-tree that GetUnFilteredMocksByKind walks in order — so a
+// replayer that walks a recorded revision sequence (a cluster-config poll, a
+// bootstrap handshake) is handed it backwards.
+//
+// The tagging is done IN PLACE over m rather than by partitioning, so entries
+// with equal ReqTimestampMock keep their recorded order under the stable sort.
+// Partition-then-sort left ties in mapped-first order — the very inversion this
+// removes — and ties are not rare: a protocol encoder that drains several frames
+// from one TCP read stamps them all with that chunk's timestamp (see
+// mysql/recorder/record_v2.go, where ReqTimestampMock is the ReadAt of the chunk
+// that delivered the command bytes), which is exactly what a coalesced bootstrap
+// burst looks like. In a legacy pool carrying no timestamps at all the whole
+// slice is one tie, so the sort does nothing and the partition alone decided the
+// order — that is where the inversion was total, not absent.
+//
+// This deliberately does NOT try to reproduce FilterConfigMocksTierAware's
+// output. That path additionally applies window semantics the mapping path has
+// no equivalent of — it hoists a mock with a missing timestamp into its filtered
+// pool and drops one whose response predates its request — so the two agree only
+// on a pool where neither rule fires. The property claimed here is narrower and
+// is the one that matters: mapping membership is not a chronological signal, so
+// it must not reorder this pool.
+func FilterConfigMocksMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+	mapping := make(map[string]bool, len(mocksPresentInMapping))
+	for _, name := range mocksPresentInMapping {
+		mapping[name] = true
+	}
 
-	sort.SliceStable(filteredMocks, func(i, j int) bool {
-		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	isNonKeploy := false
+	pool := make([]*models.Mock, 0, len(m))
+	for _, mock := range m {
+		if mock == nil {
+			continue
+		}
+		p := mock.DeepCopy()
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+		p.TestModeInfo.IsFiltered = mapping[p.Name]
+		pool = append(pool, p)
+	}
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
+
+	sort.SliceStable(pool, func(i, j int) bool {
+		return pool[i].Spec.ReqTimestampMock.Before(pool[j].Spec.ReqTimestampMock)
 	})
 
-	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
-		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
-	})
-
-	return append(filteredMocks, unfilteredMocks...)
+	return pool
 }
 
 // strictWindowEnvOverride holds the result of one-time env-var parsing
