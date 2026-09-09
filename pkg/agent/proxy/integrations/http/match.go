@@ -454,6 +454,47 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 			return false
 		}
 	}
+
+	// Origin is the one header that must agree in BOTH directions.
+	//
+	// Everything above is a subset test — the mock's keys must be present in the
+	// request, extra request headers are fine — so a recording made with FEWER
+	// headers is MORE permissive. For every other header that is harmless. For
+	// Origin it is not, because Origin is what makes the server attach
+	// Access-Control-Allow-Origin to the RESPONSE. Two recordings of one endpoint
+	// therefore are not interchangeable:
+	//
+	//   browser call   Origin: http://app  ->  response HAS Access-Control-Allow-Origin
+	//   server-side    (no Origin)         ->  response has NO CORS headers at all
+	//
+	// Without this check the server-side recording (a strict subset of the
+	// browser one) matches a browser request, and the browser discards the
+	// CORS-less response with net::ERR_FAILED. keploy sees a SUCCESSFUL match and
+	// reports missed: 0, so no miss-based gate can catch it. Observed on a real
+	// Playwright suite: GET /cluster/proxy-origins and GET /auth/check are issued
+	// both by the browser and by the app's own server-side renderer; the
+	// server-side copies were served to browser calls, the app read that as
+	// logged-out, and 9 tests failed with the mock set reported clean throughout.
+	//
+	// Requiring agreement keeps each shape serving only its own caller. Users who
+	// genuinely want them interchangeable can put Origin in header noise, which
+	// shouldIgnore honours above and below.
+	if !shouldIgnore("Origin") {
+		mockHasOrigin := false
+		for k := range expected {
+			if strings.EqualFold(k, "Origin") {
+				mockHasOrigin = true
+				break
+			}
+		}
+		_, reqHasOrigin := actualKeys["origin"]
+		if mockHasOrigin != reqHasOrigin {
+			h.Logger.Debug("origin presence differs between mock and request",
+				zap.Bool("mock_has_origin", mockHasOrigin),
+				zap.Bool("request_has_origin", reqHasOrigin))
+			return false
+		}
+	}
 	return true
 }
 
