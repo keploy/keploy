@@ -2,7 +2,9 @@ package models
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	yamlLib "gopkg.in/yaml.v3"
@@ -258,22 +260,79 @@ func TestPostgresV3Response_CopyIn_RoundTrip(t *testing.T) {
 	// Serialization-stability check. The fixture set only CopyIn, so
 	// omitempty on Rows and CopyOut should keep both out of the
 	// emitted YAML and the re-decoded struct zero on those paths.
-	// This is NOT a schema-level mutual-exclusion guard — nothing in
-	// the struct today stops a caller from populating Rows + CopyIn
-	// simultaneously and marshaling that malformed shape. Enforcing
-	// the wire-level invariant (CopyIn and row-producing traffic
-	// never coexist on the same Query response) is the recorder's
-	// job in integrations; a misbehaving recorder would emit an
-	// invalid mock and this test would still pass. See the
-	// TODO(validation) below if we ever add struct-level validation.
+	// This is a serialization assertion, not the mutual-exclusion
+	// guard: the wire-level invariant (CopyIn and row-producing
+	// traffic never coexist on the same Query response) is enforced
+	// by PostgresV3Response.Validate(), exercised below in
+	// TestPostgresV3Response_RowsAndCopyIn_ValidateRejects.
 	if decoded.Rows != nil {
 		t.Fatalf("Rows: omitempty should have kept this nil on the CopyIn-only fixture, got %v", decoded.Rows)
 	}
 	if decoded.CopyOut != nil {
 		t.Fatalf("CopyOut: omitempty should have kept this nil on the CopyIn-only fixture, got %+v", decoded.CopyOut)
 	}
-	// TODO(validation): once a Validate() method or a custom
-	// UnmarshalYAML lands on PostgresV3Response, add a separate test
-	// that feeds a malformed fixture carrying BOTH Rows and CopyIn
-	// and asserts the validator rejects it.
+}
+
+// TestPostgresV3Response_RowsAndCopyIn_ValidateRejects feeds a
+// malformed on-disk fixture that carries BOTH `rows:` and `copyIn:`
+// on the same Query response and asserts PostgresV3Response.Validate()
+// rejects it.
+//
+// The shape is malformed per the PG wire protocol: a backend either
+// streams DataRow traffic ('D' rows terminated by CommandComplete) or
+// hands the conversation over to the client with CopyInResponse ('G')
+// — never both on one response. Nothing in the YAML layer stops such
+// a fixture from parsing (there is no custom UnmarshalYAML on
+// PostgresV3Response), so a hand-edited mock or a buggy recorder can
+// produce it; Validate() is the load-time guard that catches it before
+// the replay emitter silently picks one axis and drops the other.
+func TestPostgresV3Response_RowsAndCopyIn_ValidateRejects(t *testing.T) {
+	// Hand-written rather than Go-marshalled so the test exercises the
+	// real loader path a malformed mocks.yaml would arrive through.
+	const malformed = `
+rows:
+  - - "1"
+  - - "2"
+commandComplete: "SELECT 2"
+copyIn:
+  overallFormat: 0
+  columnFormatCodes: [0]
+`
+
+	var resp PostgresV3Response
+	if err := yamlLib.Unmarshal([]byte(malformed), &resp); err != nil {
+		t.Fatalf("yaml.Unmarshal of malformed fixture returned error: %v — "+
+			"the fixture must parse cleanly for Validate() to be the "+
+			"layer under test", err)
+	}
+	// Sanity-check the premise: both axes really are populated after
+	// the parse, otherwise the assertion below proves nothing.
+	if len(resp.Rows) != 2 {
+		t.Fatalf("Rows: want 2 rows from the malformed fixture, got %d", len(resp.Rows))
+	}
+	if resp.CopyIn == nil {
+		t.Fatalf("CopyIn: want non-nil from the malformed fixture, got nil")
+	}
+
+	err := resp.Validate()
+	if err == nil {
+		t.Fatalf("Validate(): want non-nil error on a response carrying " +
+			"both Rows and CopyIn, got nil")
+	}
+	if !errors.Is(err, ErrPostgresV3ResponseInvalid) {
+		t.Fatalf("Validate() error should wrap ErrPostgresV3ResponseInvalid, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Rows") || !strings.Contains(err.Error(), "CopyIn") {
+		t.Fatalf("Validate() error should name both colliding axes, got: %v", err)
+	}
+
+	// The CopyIn-only counterpart of the same fixture must still pass —
+	// Validate() rejects the collision, not the CopyIn axis itself.
+	valid := PostgresV3Response{
+		CommandComplete: "COPY 10",
+		CopyIn:          resp.CopyIn,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("Validate() returned %v on a CopyIn-only response — false positive", err)
+	}
 }
