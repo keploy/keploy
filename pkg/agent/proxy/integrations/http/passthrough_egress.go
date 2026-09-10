@@ -52,7 +52,18 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 	}
 	var fallback *models.Mock
 	for _, m := range candidates {
-		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || m.Spec.HTTPResp == nil {
+		// A response of at least responseSpillMinBytes is parked on the agent's
+		// disk store with Spec.HTTPResp nil and a lazy loader, and candidates
+		// here include the PER-TEST pool, which is exactly the tier that
+		// spills. Rejecting on Spec.HTTPResp == nil alone therefore skipped
+		// every spilled recording, and the caller writes a synthetic 200 with
+		// an empty body when nothing matches -- a wrong response, logged only
+		// at Debug. HasSpilledResponse distinguishes "elided, loadable" from
+		// "genuinely has no response".
+		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil {
+			continue
+		}
+		if m.Spec.HTTPResp == nil && !m.HasSpilledResponse() {
 			continue
 		}
 		if m.Spec.HTTPReq.Method != models.Method(input.method) {
@@ -76,9 +87,19 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 		if !mockQueryMatches(m.Spec.HTTPReq, input.url, queryKeys) {
 			continue
 		}
+		// Resolve the response only now. For a spilled mock this reads the
+		// disk store, so it sits AFTER every cheap gate above rather than in
+		// the filter -- otherwise each candidate would cost a read. It does
+		// not write to the mock (see models.Mock.HydratedHTTPResp), which is
+		// what makes it safe on a pooled pointer other connections are also
+		// reading.
+		resp, herr := m.HydratedHTTPResp()
+		if herr != nil || resp == nil {
+			continue
+		}
 		// Prefer a 2xx response (a warmup error may also have been recorded
 		// before the first success under recordOne's first-2xx policy).
-		if isSuccessStatus(m.Spec.HTTPResp.StatusCode) {
+		if isSuccessStatus(resp.StatusCode) {
 			if out, err := h.buildMockResponseBytes(m); err == nil {
 				return out
 			}
