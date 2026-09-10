@@ -143,8 +143,60 @@ func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
 // load all discriminate on.
 func (m *Mock) IsAsync() bool { return m.Spec.Async != nil }
 
-// HydrateResponse loads an elided response into Spec; no-op if not spilled, so
-// serve paths can call it unconditionally before reading the response.
+// HydratedHTTPResp returns the mock's HTTP response, fetching it from the
+// agent's spill store when the response was elided at ingest
+// (proxy.DiskMocks.Add). It returns nil when there is no response at all.
+//
+// It NEVER writes to the mock, and that is load-bearing rather than stylistic.
+// A pooled *Mock is shared by every proxy connection goroutine, and a
+// goroutine that matched the same mock reads it WHOLE by value on the consume
+// path -- `updatedMock := *matchedMock` and `deleteMock := *matchedMock` in
+// http.updateMock, `*old` in MockManager.UpdateUnFilteredMock. Those readers
+// cannot be made to take a lock without changing the by-value MockMemDb
+// interface, so the only contract that holds is: the serve path does not
+// write. See HydrateResponse for why that method is not the one to call here.
+//
+// A repeat serve re-reads the blob rather than caching it in Spec. That is the
+// intended trade: the spill exists to keep the resident matching window small,
+// and a per-test mock is consumed on first match, so a repeat serve is off the
+// normal path anyway.
+func (m *Mock) HydratedHTTPResp() (*HTTPResp, error) {
+	if m.Spec.HTTPResp != nil {
+		return m.Spec.HTTPResp, nil
+	}
+	fn := m.responseHydrator
+	if fn == nil {
+		return nil, nil
+	}
+	httpResp, _, err := fn()
+	return httpResp, err
+}
+
+// HydratedMongoResponses is the Mongo counterpart of HydratedHTTPResp. Nothing
+// in OSS calls it: DiskMocks.EligibleForResponseSpill spills every Mongo mock
+// with responses, but there is no Mongo parser in this repo, so a spilled
+// Mongo mock currently has no serve path that restores it. This exists so
+// wiring one up is a one-line change rather than a re-derivation.
+func (m *Mock) HydratedMongoResponses() ([]MongoResponse, error) {
+	if len(m.Spec.MongoResponses) > 0 {
+		return m.Spec.MongoResponses, nil
+	}
+	fn := m.responseHydrator
+	if fn == nil {
+		return nil, nil
+	}
+	_, mongoResp, err := fn()
+	return mongoResp, err
+}
+
+// HydrateResponse loads an elided response INTO Spec and clears the hydrator.
+//
+// Do not call this on a mock that is in a live pool. It mutates two fields
+// that other connection goroutines read by value off the same pointer, which
+// is a data race with no happens-before edge; use HydratedHTTPResp on any
+// serve path. It is retained for callers that own the mock outright -- a
+// freshly gob-decoded one, or a test fixture -- and for out-of-tree parsers
+// that already depend on the signature.
 func (m *Mock) HydrateResponse() error {
 	fn := m.responseHydrator
 	if fn == nil {

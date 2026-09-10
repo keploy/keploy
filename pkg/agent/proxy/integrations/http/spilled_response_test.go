@@ -200,9 +200,16 @@ func TestBuildMockResponseBytesServesSpilledResponse(t *testing.T) {
 }
 
 // TestBuildMockResponseBytesSpilledIsIdempotent covers the fact that the fix
-// makes HydrateResponse run on EVERY serialize, including repeat serves of one
+// makes the spill load run on EVERY serialize, including repeat serves of one
 // mock. serveOnePassThroughMock deliberately does not consume its mock, so the
 // second call must produce the same bytes rather than an empty or errored body.
+//
+// It also pins the invariant that makes a repeat serve safe at all: serving
+// must not WRITE the loaded response back onto the mock. A pooled mock is
+// shared with every other connection goroutine, and updateMock dereferences it
+// whole by value (`deleteMock := *matchedMock`) while a serve is in flight, so
+// a write here is a data race with no happens-before edge. Idempotence comes
+// from re-reading the blob, not from caching it in Spec.
 func TestBuildMockResponseBytesSpilledIsIdempotent(t *testing.T) {
 	body := bodyOfSize(spillMinBytes + 1)
 	store, err := proxy.NewDiskMocks(zap.NewNop())
@@ -223,8 +230,11 @@ func TestBuildMockResponseBytesSpilledIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first serialize: %v", err)
 	}
-	if loaded[0].HasSpilledResponse() {
-		t.Fatalf("hydration should have cleared the hydrator after the first serve")
+	if !loaded[0].HasSpilledResponse() {
+		t.Fatalf("serving must not clear the hydrator on the shared pooled mock")
+	}
+	if loaded[0].Spec.HTTPResp != nil {
+		t.Fatalf("serving must not write the loaded response back onto the shared pooled mock")
 	}
 	second, err := h.BuildMockResponseBytesForTest(loaded[0])
 	if err != nil {
