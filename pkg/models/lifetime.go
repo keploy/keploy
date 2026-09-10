@@ -150,7 +150,7 @@ func (m *Mock) DeriveLifetime() {
 	// know is input-independent. COM_QUERY / COM_INIT_DB /
 	// COM_CHANGE_USER / COM_SET_OPTION all depend on input and must
 	// stay per-test.
-	if m.Kind == MySQL && mysqlIsSessionReusableCommand(m) {
+	if m.IsSharedAcrossTests() {
 		m.TestModeInfo.Lifetime = LifetimeSession
 		return
 	}
@@ -176,29 +176,28 @@ func (m *Mock) DeriveLifetime() {
 	// request in them fails the browser's CORS check with
 	// net::ERR_FAILED.
 	//
-	// What session lifetime does and does not fix. It exempts the mock
-	// from consumption on match, from window filtering, and from the
-	// mapping-based narrowing that `scope/begin` applies when the runner
-	// reports no worker PID — that last one is why this override repairs
-	// this, because FilterConfigMocksMapping returns the whole session
-	// pool while FilterTcsMocksMapping returns only in-mapping mocks
-	// (see pkg/util.go). It does NOT exempt the mock from per-PID worker
-	// scoping: scopedMockDb.keep is Lifetime-blind and wraps the session
-	// readers too, so a preflight the current worker does not own is
-	// still dropped and the preflight starvation reproduces there.
+	// What session lifetime buys. It exempts the mock from consumption on
+	// match, from window filtering, and from the mapping-based narrowing
+	// that `scope/begin` applies when the runner reports no worker PID —
+	// FilterConfigMocksMapping returns the whole session pool while
+	// FilterTcsMocksMapping returns only in-mapping mocks (pkg/util.go).
 	//
-	// The gate for that residual case is ScopeReq.Pid > 0, NOT a worker
-	// count — keploy has no notion of how many workers a runner uses. A
-	// SINGLE-worker runner that reports its PID takes the same path and
-	// hits the same drop. Today's Playwright fixture happens to omit the
-	// pid, which is the only reason this override is sufficient for it;
-	// start sending a pid and this caveat applies immediately, at any
-	// worker count. Making keep() Lifetime-aware is the fix, and is
-	// deliberately out of scope here.
-	if m.Kind == HTTP && httpIsCORSPreflight(m) {
-		m.TestModeInfo.Lifetime = LifetimeSession
-		return
-	}
+	// That covers the pid == 0 path only. When a runner DOES report a PID,
+	// scope/begin installs the per-worker filter instead, and that filter
+	// matches on mock NAMES: correlateScopes buckets a capture into a test's
+	// mapping by request timestamp alone, so a preflight lands in whichever
+	// test's window it fired in and every other worker would lose it. The
+	// gate is ScopeReq.Pid > 0, not a worker count — a SINGLE-worker runner
+	// that reports its pid takes the same path.
+	//
+	// That is why the override is expressed as IsSharedAcrossTests rather
+	// than written inline here: scopedMockDb.keep consults the same
+	// predicate, so both paths agree on which mocks are reusable. Add a
+	// third rule-1 override and the scoping filter honours it with no second
+	// edit.
+	// Rule 1(b) is folded into the IsSharedAcrossTests call above, which
+	// covers both protocol overrides; the comment block here documents why the
+	// HTTP arm exists.
 	tag := ""
 	if m.Spec.Metadata != nil {
 		tag = m.Spec.Metadata["type"]
@@ -478,6 +477,36 @@ func mysqlIsSessionReusableCommand(m *Mock) bool {
 func IsMySQLSessionReusableCommandType(cmdType string) bool {
 	switch cmdType {
 	case "COM_PING", "COM_STATISTICS", "COM_DEBUG", "COM_RESET_CONNECTION":
+		return true
+	}
+	return false
+}
+
+// IsSharedAcrossTests reports whether DeriveLifetime's rule-1 protocol
+// overrides classify this mock as semantically reusable: its recorded response
+// is a property of the ENDPOINT, not of whichever test happened to trigger it.
+// A MySQL connection-alive command and a browser CORS preflight both qualify —
+// the answer does not depend on the caller.
+//
+// Deliberately NARROWER than Lifetime == LifetimeSession, and that gap is the
+// whole point. Most session mocks are session because of the tiering
+// fallbacks — rule 4 (untagged legacy recordings) and rule 5 (the lax-mode
+// promotion by kind) — which say nothing about reusability; under the default
+// lax mode that is the entire MySQL/Postgres/Generic/DNS data plane. Per-worker
+// scoping (pkg/agent/proxy/scoped_mockdb.go) must keep hiding those from other
+// workers, so it consults this predicate instead of Lifetime.
+//
+// Keep this the single definition of "rule 1 fired": DeriveLifetime calls it
+// too, so a future override added here is honoured by the scoping filter
+// automatically rather than needing a second edit someone will miss.
+func (m *Mock) IsSharedAcrossTests() bool {
+	if m == nil {
+		return false
+	}
+	switch {
+	case m.Kind == MySQL && mysqlIsSessionReusableCommand(m):
+		return true
+	case m.Kind == HTTP && httpIsCORSPreflight(m):
 		return true
 	}
 	return false

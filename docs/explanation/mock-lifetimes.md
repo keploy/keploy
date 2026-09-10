@@ -134,13 +134,16 @@ tag is empty:
    tests failed with `net::ERR_FAILED`. A bare `OPTIONS` with no
    `Access-Control-Request-Method` is NOT promoted — it may be a real
    data endpoint, and promoting one would make it replay its first
-   recording forever. Caveat: this exempts the mock from consumption,
-   window filtering, and mapping-based scope narrowing, but NOT from
-   per-PID worker scoping — `scopedMockDb.keep` matches on mock name
-   only and never consults `Lifetime`. That path is taken whenever a
-   runner sends `ScopeReq.Pid > 0`, which is independent of how many
-   workers it uses: a single-worker runner that reports its PID hits
-   the same drop.
+   recording forever. This exempts the mock from consumption, window
+   filtering, and mapping-based scope narrowing; per-PID worker scoping
+   is covered separately, because `scopedMockDb.keep` matches on mock
+   NAME and a preflight is attributed to whichever test's window it
+   happened to fire in. Both paths therefore consult one predicate,
+   `(*Mock).IsSharedAcrossTests`, which is narrower than
+   `Lifetime == LifetimeSession` on purpose: rules 2 and 3 below make
+   most of the pool session-lifetime for reasons unrelated to
+   reusability, and exempting those from worker scoping would make the
+   isolation a no-op.
 3. **Untagged legacy-kind fallback** — recordings captured before the
    tag convention rely on a kind-based inference inside
    `DeriveLifetime` that routes untagged (empty-string `type`) HTTP /
