@@ -120,78 +120,53 @@ run_record_iteration() {
 
   sudo rm -f /tmp/keploy-logs.txt
 
-  # Start recording in background so we capture its PID explicitly.
+  # A plain redirect, NOT `| tee`. A pipeline's $! is its LAST element, so this
+  # used to hold tee's pid and the recorder's own was never available — which is
+  # why the stop below had to guess with `pgrep keploy`. Measured: with the tee
+  # pipeline $! names tee, so signalling it never reached the recorder at all
+  # — the recorder instead died on its next stdout write, from SIGPIPE, which
+  # Go does not suppress on fd 1/2 (measured with a Go writer: exit 141, and its
+  # shutdown handler never ran). An ungraceful stop that skips the flush path.
+  # Six other lanes already record this way — spring_petclinic,
+  # express_mongoose, mysql_dual_conn, tidb_stmt_cache, mysql_auto_port and
+  # async_config_poll — all redirect to a file and signal $!.
   # extra_flags is intentionally unquoted so the empty default expands
   # to nothing; the json pass passes "--storage-format json".
   # shellcheck disable=SC2086
   "$RECORD_BIN" record $extra_flags -c "./urlShort" --generateGithubActions=false \
-    2>&1 | tee "${app_name}.txt" &
-  # $! is the LAST element of the pipeline — tee — not the recorder (measured).
-  # Nothing depends on that today: send_request ignores its argument, and the
-  # stop below locates the recorder with pgrep instead. Do not turn this into a
-  # signal target without changing the pipeline's shape first.
+    > "${app_name}.txt" 2>&1 &
   local KEPLOY_PID=$!
 
   # Drive traffic + stop keploy
   send_request "$KEPLOY_PID"
 
+  # tee used to stream this into the job log as it was written; a redirect only
+  # reaches the log when something prints it, so print it.
+  cat "${app_name}.txt" || true
+
   # Wait for keploy exit and capture code
   section "Stop Recording"
   sleep 10
   echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-  # NOT `pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill $pid`.
-  # `sudo kill` was the LAST command of that && list, so errexit checks its
-  # status — and errexit is on here today, from the step shell. pgrep→kill is a
-  # TOCTOU race: keploy can exit on its own between the two calls, and the kill
-  # then fails for a reason that carries no information, aborting the run at a
-  # point where the recording has already succeeded and skipping the artifact
-  # listing and the DATA RACE scan below. "Not running" is the state this block
-  # exists to reach, so a pid that is already gone is success — but a pid still
-  # running afterwards is a real failure and still fails the step, which the
-  # replaced line never checked at all.
-  local pid
-  pid=$(pgrep keploy || true)
-  if [ -n "$pid" ]; then
-    # shellcheck disable=SC2086  # split on purpose: pgrep can print several pids
-    if ! sudo kill $pid; then
-      # `sudo kill` reports failure if ANY named pid failed, and pgrep can name
-      # several, so a failing kill may still have delivered SIGTERM to a live
-      # one. Poll instead of judging instantly: a signalled process needs a
-      # moment to leave /proc.
-      # /proc, not `kill -0`: the process this stops needs sudo to signal —
-      # that is what the replaced line already assumed — so an UNPRIVILEGED
-      # `kill -0` on it returns a status indistinguishable from "no such
-      # process" (measured: `kill -0` on a live root pid and on a vanished pid
-      # both exit 1). A missing /proc/<pid> entry is unambiguous and needs no
-      # privilege; a zombie has already exited and only awaits reaping.
-      local waited=0 alive p stat_raw state
-      while :; do
-        alive=""
-        for p in $pid; do
-          # an unreadable /proc entry IS the answer here: the process is gone
-          stat_raw=$(cat "/proc/$p/stat" 2>/dev/null || true)
-          [ -n "$stat_raw" ] || continue
-          state=${stat_raw##*) }; state=${state%% *}
-          [ "$state" = "Z" ] || alive="$alive $p"
-        done
-        [ -n "$alive" ] || break
-        if [ "$waited" -ge 10 ]; then break; fi
-        sleep 1; waited=$((waited+1))
-      done
-      if [ -n "$alive" ]; then
-        echo "::error::keploy (pid$alive) still running ${waited}s after 'sudo kill' failed"
-        return 1
-      fi
-      # pgrep prints one pid per line, so the newlines are replaced before the
-      # list goes into a message. True whether the pid had already exited before
-      # the kill or died from a SIGTERM the same kill did deliver.
-      echo "no keploy process remains after 'sudo kill' reported failure (pid ${pid//$'\n'/ })"
-    fi
-    # `|| true`: pgrep can match a keploy that is not a child of this shell, and
-    # "not a child of this shell" carries no information about the recording.
-    # shellcheck disable=SC2086
-    wait $pid 2>/dev/null || true
-  fi
+  # Signal the recorder we started, by pid. `pgrep keploy` is gone from here: it
+  # named BOTH the CLI and the root agent — the agent is this same binary
+  # re-run under sudo (agent.go's GetCurrentBinaryPath into NewAgentCommand), so
+  # both carry comm `keploy`, which golang/mock_mismatch/golang-linux.sh relies
+  # on by name. It also matches by unanchored comm, so any other keploy* process
+  # on the host was in its blast radius. Signalling by pid removes both.
+  # `|| true` on the kill because keploy may have exited on its own first —
+  # pgrep-then-kill was a TOCTOU race whose failure carried no information, and
+  # errexit checking it aborted runs whose recording had already succeeded.
+  # The kill is not what establishes the outcome; `wait` is. KEPLOY_PID is this
+  # shell's own child, so wait returns only once it is really gone and yields
+  # its status — no /proc inspection and no privilege question, which is what
+  # the pgrep form needed because it signalled processes it did not start.
+  sudo kill "$KEPLOY_PID" 2>/dev/null || true
+  local rc=0
+  wait "$KEPLOY_PID" || rc=$?
+  # Reported, not gated: this lane has never failed on the recorder's exit
+  # status, and a SIGTERM'd process legitimately reports one.
+  echo "Record exit code: $rc"
   sleep 30
   echo "Recording stopped."
   endsec
