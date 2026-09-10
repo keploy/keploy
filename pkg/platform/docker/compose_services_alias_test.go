@@ -479,3 +479,141 @@ services: *thing
 		t.Errorf("the error should name the section: %v", err)
 	}
 }
+
+// TestSubKeyAlias_EnvAndVolumesResolve covers an alias one level BELOW the
+// service — `environment: *appenv`, `volumes: *appvols` — which is at least as
+// common an `x-*` idiom as aliasing a whole service.
+//
+// Unresolved, the two writers fail in opposite directions and neither says
+// anything. addServiceEnvVar's type switch matches neither SequenceNode nor
+// MappingNode for an AliasNode, so it falls straight through and keploy's CA and
+// JAVA_TOOL_OPTIONS never appear — the app runs uninstrumented.
+// addServiceListProperty appends into the alias, so the TLS-cert mount is
+// dropped. Both leave a file docker compose accepts.
+func TestSubKeyAlias_EnvAndVolumesResolve(t *testing.T) {
+	idc := &Impl{logger: zap.NewNop(), conf: &config.Config{}}
+	const in = `x-env: &appenv
+  SSL_CERT_FILE: /etc/mine/ca.pem
+x-vols: &appvols
+  - ./data:/data
+services:
+  app:
+    image: alpine:3.21
+    environment: *appenv
+    volumes: *appvols
+  sidecar:
+    image: busybox
+    environment: *appenv
+    volumes: *appvols
+`
+	var compose Compose
+	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	node, _, err := idc.findServiceNodeAndName(&compose, "app")
+	if err != nil {
+		t.Fatalf("findServiceNodeAndName: %v", err)
+	}
+	idc.addServiceEnvVar(node, "SSL_CERT_FILE", "/tmp/keploy-tls/ca.crt")
+	idc.addServiceListProperty(node, "volumes", "keploy-tls-certs:/tmp/keploy-tls")
+
+	data, err := idc.MarshalCompose(&compose)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out map[string]interface{}
+	if err := yaml.Unmarshal(data, &out); err != nil {
+		t.Fatalf("generated compose does not load: %v\n%s", err, data)
+	}
+	svcs, _ := out["services"].(map[string]interface{})
+
+	app, _ := svcs["app"].(map[string]interface{})
+	appEnv, _ := app["environment"].(map[string]interface{})
+	if appEnv == nil || appEnv["SSL_CERT_FILE"] != "/tmp/keploy-tls/ca.crt" {
+		t.Errorf("keploy's env var was dropped into an alias node and never emitted; "+
+			"the app would run without keploy's CA: %v\n%s", app["environment"], data)
+	}
+	appVols, _ := app["volumes"].([]interface{})
+	var mounted bool
+	for _, v := range appVols {
+		if s, _ := v.(string); strings.Contains(s, "keploy-tls-certs") {
+			mounted = true
+		}
+	}
+	if !mounted {
+		t.Errorf("keploy's TLS mount was dropped: %v\n%s", appVols, data)
+	}
+
+	// The sibling shares both fragments and must be untouched — it is not in the
+	// agent's network namespace, so keploy's CA would break its outbound TLS.
+	sidecar, _ := svcs["sidecar"].(map[string]interface{})
+	sideEnv, _ := sidecar["environment"].(map[string]interface{})
+	if sideEnv == nil || sideEnv["SSL_CERT_FILE"] != "/etc/mine/ca.pem" {
+		t.Errorf("the sibling's own SSL_CERT_FILE was replaced with keploy's: %v", sideEnv)
+	}
+	sideVols, _ := sidecar["volumes"].([]interface{})
+	for _, v := range sideVols {
+		if s, _ := v.(string); strings.Contains(s, "keploy-tls-certs") {
+			t.Errorf("the sibling inherited keploy's TLS mount: %v", sideVols)
+		}
+	}
+	// And the user's fragments themselves.
+	frag, _ := out["x-env"].(map[string]interface{})
+	if frag == nil || frag["SSL_CERT_FILE"] != "/etc/mine/ca.pem" {
+		t.Errorf("the user's own env fragment was rewritten: %v", frag)
+	}
+	if vf, _ := out["x-vols"].([]interface{}); len(vf) != 1 {
+		t.Errorf("the user's own volumes fragment gained entries: %v", vf)
+	}
+}
+
+// TestSubKeyAlias_SequenceStyleEnvResolves pins the other legal env shape: a
+// sequence of KEY=VALUE strings behind an alias.
+func TestSubKeyAlias_SequenceStyleEnvResolves(t *testing.T) {
+	idc := &Impl{logger: zap.NewNop(), conf: &config.Config{}}
+	const in = `x-env: &appenv
+  - APP_ENV=prod
+services:
+  app:
+    image: alpine:3.21
+    environment: *appenv
+`
+	var compose Compose
+	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	node, _, err := idc.findServiceNodeAndName(&compose, "app")
+	if err != nil {
+		t.Fatalf("findServiceNodeAndName: %v", err)
+	}
+	idc.addServiceEnvVar(node, "SSL_CERT_FILE", "/tmp/keploy-tls/ca.crt")
+
+	data, err := idc.MarshalCompose(&compose)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out map[string]interface{}
+	if err := yaml.Unmarshal(data, &out); err != nil {
+		t.Fatalf("reload: %v\n%s", err, data)
+	}
+	svcs, _ := out["services"].(map[string]interface{})
+	app, _ := svcs["app"].(map[string]interface{})
+	env, _ := app["environment"].([]interface{})
+	var got, kept bool
+	for _, e := range env {
+		s, _ := e.(string)
+		if strings.HasPrefix(s, "SSL_CERT_FILE=") {
+			got = true
+		}
+		if s == "APP_ENV=prod" {
+			kept = true
+		}
+	}
+	if !got {
+		t.Errorf("keploy's env var was dropped from a sequence-style aliased "+
+			"environment: %v\n%s", env, data)
+	}
+	if !kept {
+		t.Errorf("the user's own env var was lost: %v", env)
+	}
+}

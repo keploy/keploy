@@ -1379,9 +1379,12 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 	var valueNode *yaml.Node
 
 	// Check if key exists
-	for i := 0; i < len(serviceNode.Content); i += 2 {
+	for i := 0; i+1 < len(serviceNode.Content); i += 2 {
 		if serviceNode.Content[i].Value == key {
-			valueNode = serviceNode.Content[i+1]
+			// An aliased list (`volumes: *appvols`) holds no entries, so the
+			// append below would land in a node the encoder never emits and the
+			// TLS-cert mount would simply not appear.
+			valueNode = resolveAliasByCopy(serviceNode.Content[i+1])
 			break
 		}
 	}
@@ -1403,9 +1406,14 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 // a SequenceNode if none exists. It centralizes the lookup/create logic for
 // environment mutations performed by helper methods.
 func (idc *Impl) getOrCreateEnvNode(serviceNode *yaml.Node) *yaml.Node {
-	for i := 0; i < len(serviceNode.Content); i += 2 {
+	for i := 0; i+1 < len(serviceNode.Content); i += 2 {
 		if serviceNode.Content[i].Value == "environment" {
-			return serviceNode.Content[i+1]
+			// `environment: *appenv` is an alias: it holds no entries, so the
+			// callers' type switch matches nothing and keploy's variables are
+			// silently dropped. Resolving by copy also keeps a sibling service
+			// sharing that fragment from inheriting keploy's CA paths while
+			// living outside the agent's network namespace.
+			return resolveAliasByCopy(serviceNode.Content[i+1])
 		}
 	}
 
@@ -1613,10 +1621,33 @@ func resolvedKind(n *yaml.Node) yaml.Kind {
 // fragment is only ever appended to, so a duplicate definition cannot diverge
 // from the original. A copied service is edited, so it can.
 func resolveServiceAlias(n *yaml.Node) *yaml.Node {
+	if n != nil && n.Kind == yaml.AliasNode && n.Alias != nil &&
+		n.Alias.Kind != yaml.MappingNode {
+		// A service must be a mapping. Leave anything else exactly as written
+		// and let the caller report it.
+		return n
+	}
+	return resolveAliasByCopy(n)
+}
+
+// resolveAliasByCopy is resolveServiceAlias without the mapping-only
+// restriction, for the nodes INSIDE a service.
+//
+// `environment:` and `volumes:` are aliased at least as often as a whole
+// service, and keploy writes into both. Unresolved, the two helpers below fail
+// in opposite directions and neither says anything: addServiceEnvVar's type
+// switch matches neither SequenceNode nor MappingNode for an AliasNode and falls
+// straight through, so keploy's CA and JAVA_TOOL_OPTIONS are dropped and the app
+// runs uninstrumented; addServiceListProperty appends into the alias, so the
+// TLS-cert mount never appears. Both leave a file docker compose happily accepts.
+//
+// A sequence target is allowed here because `environment: - K=V` and
+// `volumes: - a:b` are the ordinary shapes.
+func resolveAliasByCopy(n *yaml.Node) *yaml.Node {
 	if n == nil || n.Kind != yaml.AliasNode || n.Alias == nil {
 		return n
 	}
-	if n.Alias.Kind != yaml.MappingNode {
+	if n.Alias.Kind != yaml.MappingNode && n.Alias.Kind != yaml.SequenceNode {
 		// Cannot hold entries. Left exactly as the user wrote it rather than
 		// reshaping a fragment they authored; the caller reports it.
 		return n
