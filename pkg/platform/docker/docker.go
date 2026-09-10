@@ -162,6 +162,140 @@ type Compose struct {
 	Volumes  yaml.Node `yaml:"volumes,omitempty"`
 	Configs  yaml.Node `yaml:"configs,omitempty"`
 	Secrets  yaml.Node `yaml:"secrets,omitempty"`
+
+	// raw is the original top-level mapping, kept so that a read/modify/write
+	// round trip does not silently discard the keys this struct does not name.
+	//
+	// It matters most for `x-*` extension fields. The Compose spec designates
+	// them as the place to put reusable fragments, and the conventional way to
+	// reuse one is a YAML anchor:
+	//
+	//	x-mysql-common: &mysql-common
+	//	  healthcheck: {...}
+	//	services:
+	//	  db:
+	//	    <<: *mysql-common
+	//
+	// Services is a yaml.Node, so it preserves `<<: *mysql-common` verbatim.
+	// Without raw, the anchor DEFINITION was dropped while that reference
+	// survived, and the compose file keploy generates to run the user's app
+	// failed to load with "unknown anchor 'mysql-common' referenced" -- the
+	// user's app never started, on a compose file docker itself accepts.
+	//
+	// Appending the missing keys instead of keeping the original node is not
+	// enough: an alias must follow its anchor in the document, and go-yaml
+	// emits inline/extra keys after the named struct fields, which puts the
+	// definition after the reference. Preserving the original mapping keeps
+	// the original order, and with it the comments and any other tooling's
+	// top-level keys.
+	raw *yaml.Node
+}
+
+// UnmarshalYAML captures the original mapping alongside the decoded fields, so
+// every path that parses a Compose (file or in-memory) keeps raw without having
+// to remember to do it.
+func (c *Compose) UnmarshalYAML(value *yaml.Node) error {
+	// plain drops the methods, so decoding below does not recurse into this one.
+	type plain Compose
+	var p plain
+	if err := value.Decode(&p); err != nil {
+		// Rewrite the shim's name out of the message; a user seeing this is
+		// looking at their own malformed compose file, not at keploy internals.
+		return fmt.Errorf("%s", strings.ReplaceAll(err.Error(), "docker.plain", "docker.Compose"))
+	}
+	*c = Compose(p)
+	if value.Kind == yaml.MappingNode {
+		node := *value
+		c.raw = &node
+	}
+	return nil
+}
+
+// MarshalYAML puts the round-trip fix on the TYPE rather than on individual
+// call sites, so `yaml.Marshal(compose)` is correct wherever it appears --
+// including callers outside this package, such as enterprise's --dump-compose
+// hook. Fixing only WriteComposeFile/MarshalCompose would leave the file keploy
+// RUNS and the file it hands an operator for debugging disagreeing, in exactly
+// the situation this bug shows up in.
+// The receiver is a VALUE, not a pointer, on purpose: a pointer-receiver method
+// is absent from the method set of a `Compose`, so `yaml.Marshal(*compose)`
+// would silently fall back to encoding the struct and emit the same unloadable
+// document this fixes. A value receiver is in both method sets, and copying is
+// harmless because the result is only ever marshalled.
+func (c Compose) MarshalYAML() (interface{}, error) {
+	if c.raw == nil {
+		// plain sheds the method set; returning c here would re-enter this
+		// method and recurse until the stack blows.
+		type plain Compose
+		return plain(c), nil
+	}
+	return composeDocument(&c), nil
+}
+
+// composeDocument rebuilds the document to serialise: the original mapping with
+// the (possibly modified) sections spliced back in. Only ever called with a
+// non-nil raw (see MarshalYAML).
+//
+// The result is for marshalling only. Its top-level node is a copy, but the
+// children it did not replace are the SAME pointers as raw's, so mutating the
+// returned document would reach back into the Compose.
+func composeDocument(compose *Compose) interface{} {
+	doc := *compose.raw
+	doc.Content = append([]*yaml.Node(nil), compose.raw.Content...)
+	// Version is a string rather than a node, so it needs its own splice to be
+	// write-through like the other five named fields.
+	//
+	// Only when it actually CHANGED, though. Splicing unconditionally replaces
+	// the original node with a fresh scalar, which drops any line comment on
+	// `version:` and re-quotes the value -- making it the one key in the file
+	// that loses the fidelity the rest of this function exists to preserve, on
+	// every compose that declares a version, to serve a write path no caller
+	// currently uses.
+	if compose.Version != "" && !hasSectionValue(&doc, "version", compose.Version) {
+		setComposeSection(&doc, "version",
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: compose.Version})
+	}
+	for _, section := range []struct {
+		key  string
+		node *yaml.Node
+	}{
+		{"services", &compose.Services},
+		{"networks", &compose.Networks},
+		{"volumes", &compose.Volumes},
+		{"configs", &compose.Configs},
+		{"secrets", &compose.Secrets},
+	} {
+		setComposeSection(&doc, section.key, section.node)
+	}
+	return &doc
+}
+
+// hasSectionValue reports whether key already maps to exactly this scalar, so a
+// splice that would change nothing can be skipped and the original node kept.
+func hasSectionValue(mapping *yaml.Node, key, value string) bool {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1].Value == value
+		}
+	}
+	return false
+}
+
+// setComposeSection replaces key's value in the mapping, appending the pair when
+// the key is absent. A zero node means the section was neither present nor added,
+// so it is skipped rather than written out as an explicit null.
+func setComposeSection(mapping *yaml.Node, key string, val *yaml.Node) {
+	if val == nil || val.Kind == 0 {
+		return
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			mapping.Content[i+1] = val
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, val)
 }
 
 func (idc *Impl) ReadComposeFile(filePath string) (*Compose, error) {
