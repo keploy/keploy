@@ -395,7 +395,13 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 	// Handle errors other than EOF
 	if err != nil && err != io.EOF {
 		utils.LogError(logger, err, "failed to read HTTP headers")
-		return nil, readErr
+		// Wrap, do not replace: utils.LogError swallows context.Canceled so the
+		// agent does not shout about connections it tore down itself, and that
+		// guard only works while the cancellation is still visible. Returning a
+		// bare readErr here erased it, so the next LogError up the stack
+		// reported a routine shutdown at ERROR — which the node lanes fail a
+		// recording on, turning a clean stop into a red run.
+		return nil, fmt.Errorf("%w: %w", readErr, err)
 	}
 
 	// Check if the initial buffer already contains complete headers
@@ -425,7 +431,8 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 					break // EOF reached, but nothing more to read
 				}
 				utils.LogError(logger, err, "error while reading HTTP headers")
-				return nil, readErr
+				// Wrap, not replace — see the note on the first read above.
+				return nil, fmt.Errorf("%w: %w", readErr, err)
 			}
 
 			// Append the new data to the buffer
@@ -452,7 +459,13 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 	if err != nil && err != io.EOF {
 		utils.LogError(logger, err, "failed to read the request message in proxy")
-		return nil, readErr
+		// Wrap, do not replace: utils.LogError swallows context.Canceled so the
+		// agent does not shout about connections it tore down itself, and that
+		// guard only works while the cancellation is still visible. Returning a
+		// bare readErr here erased it, so the next LogError up the stack
+		// reported a routine shutdown at ERROR — which the node lanes fail a
+		// recording on, turning a clean stop into a red run.
+		return nil, fmt.Errorf("%w: %w", readErr, err)
 	}
 
 	return initialBuf, nil
