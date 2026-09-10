@@ -3,6 +3,7 @@ package recorder
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,5 +121,158 @@ func TestLegacyPostTLS_BorrowedGreetingDoesNotBackdateTheConfigMock(t *testing.T
 	if got := cfg.Spec.ReqTimestampMock; got.Before(t0) || got.After(time.Now()) {
 		t.Errorf("config mock ReqTimestampMock = %s, want a time this connection produced "+
 			"(between %s and now)", got.Format(time.RFC3339Nano), t0.Format(time.RFC3339Nano))
+	}
+}
+
+// The legacy post-TLS reader draws from the same port-only FIFO the V2 path
+// does, and an empty ConnKey collapses its conn-specific key onto that shared
+// key — so its FIRST PopWait consumes a queue every other post-TLS stream to
+// this port is competing for. Popping is destructive: a stream that takes a
+// greeting and then fails has starved the connection that pushed it, which
+// loses its whole command phase with nothing logged. The entry must go back,
+// and without its ReqTimestamp (to the next consumer it is a borrowed entry —
+// see TestLegacyPostTLS_BorrowedGreetingDoesNotBackdateTheConfigMock).
+func TestLegacyPostTLS_RestoresUnusedSharedGreeting(t *testing.T) {
+	store := models.NewTLSHandshakeStore()
+	ctx := context.WithValue(postTLSCtxWithStore(store),
+		models.ClientConnectionIDKey, "restore-shared-conn")
+	mocks := make(chan *models.Mock, 16)
+	mgr := syncMock.New(zap.NewNop())
+	mgr.SetOutputChannel(mocks)
+	ctx = syncMock.NewContext(ctx, mgr)
+
+	portKey := models.HandshakeStoreKey("", 3306)
+	origTs := time.Now().Add(-time.Minute)
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{cannedHandshakeV10(t)},
+		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+		ReqTimestamp: origTs,
+	})
+
+	// Client closed before any post-TLS packet arrives: the greeting is popped
+	// and decoded, then the first-client-packet read fails. That is the measured
+	// production shape — a stream whose own bytes never arrive.
+	clientConn, peer := net.Pipe()
+	_ = peer.Close()
+	defer func() { _ = clientConn.Close() }()
+	destConn, destPeer := net.Pipe()
+	_ = destPeer.Close()
+	defer func() { _ = destConn.Close() }()
+
+	// ConnKey empty ⇒ storeKey == portKey ⇒ the pop reads the SHARED FIFO.
+	opts := models.OutgoingOptions{
+		DstCfg:  &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 3306, AddrFabricated: true},
+		ConnKey: "",
+	}
+	if err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
+		buildPostHandshakeDecodeCtx(clientConn), opts); err == nil {
+		t.Fatal("expected the legacy post-TLS record to fail with no client packet")
+	}
+
+	restored, ok := store.PopWait(portKey, 0)
+	if !ok {
+		t.Fatal("a greeting consumed by a FAILED legacy post-TLS attempt was never returned to the " +
+			"shared port FIFO; the connection it belonged to is starved")
+	}
+	if !restored.ReqTimestamp.IsZero() {
+		t.Fatalf("restored entry kept ReqTimestamp %v; it would backdate the next connection's config mock",
+			restored.ReqTimestamp)
+	}
+}
+
+// A greeting this connection USED must never go back. handlePostTLSRecord emits
+// its own mocks and then returns handleClientQueries, which returns non-nil at
+// ordinary teardown (ctx cancellation) — so "err != nil" does NOT mean "no mock
+// was produced". Restoring on that basis republishes a spent greeting and lets
+// another stream stitch a duplicate config mock from it.
+func TestLegacyPostTLS_DoesNotRestoreAGreetingItAlreadyUsed(t *testing.T) {
+	store := models.NewTLSHandshakeStore()
+	ctx := context.WithValue(postTLSCtxWithStore(store),
+		models.ClientConnectionIDKey, "used-greeting-conn")
+	mocks := make(chan *models.Mock, 16)
+	mgr := syncMock.New(zap.NewNop())
+	mgr.SetOutputChannel(mocks)
+	ctx = syncMock.NewContext(ctx, mgr)
+	// Teardown while the command phase is live — the normal end of a recorded
+	// connection, and the case that makes err != nil despite a mock existing.
+	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	portKey := models.HandshakeStoreKey("", 3306)
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{cannedHandshakeV10(t)},
+		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+		ReqTimestamp: time.Now(),
+	})
+
+	clientConn, peer := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+	destConn, destPeer := net.Pipe()
+	defer func() { _ = destConn.Close() }()
+	_ = destPeer.Close()
+
+	// seq==0 takes the already-authenticated branch, which records the synthetic
+	// config mock built FROM the popped greeting — i.e. the greeting is spent.
+	go func() {
+		_, _ = peer.Write(cannedCOMQuery(t, 0, "SELECT 1"))
+	}()
+
+	_ = handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
+		buildPostHandshakeDecodeCtx(clientConn), models.OutgoingOptions{
+			DstCfg:  &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 3306, AddrFabricated: true},
+			ConnKey: "",
+		})
+
+	if _, ok := store.PopWait(portKey, 0); ok {
+		t.Fatal("a greeting that was already used to build a config mock was pushed back into the " +
+			"shared FIFO; another stream would stitch a duplicate config mock from it")
+	}
+}
+
+// A greeting that DECODES but is not a HandshakeV10 must not be recycled either.
+// GetPluginName rejects it before the HandshakeV10 assertion, so that error path
+// needs its own guard; Push re-stamps the expiry, so a recycled entry would
+// never age out and would trip every later stream to this port.
+func TestLegacyPostTLS_DoesNotRecycleDecodableNonHandshakeGreeting(t *testing.T) {
+	store := models.NewTLSHandshakeStore()
+	ctx := context.WithValue(postTLSCtxWithStore(store),
+		models.ClientConnectionIDKey, "non-handshake-conn")
+	mocks := make(chan *models.Mock, 16)
+	mgr := syncMock.New(zap.NewNop())
+	mgr.SetOutputChannel(mocks)
+	ctx = syncMock.NewContext(ctx, mgr)
+
+	portKey := models.HandshakeStoreKey("", 3306)
+	// Decodes cleanly, but it is an OK packet, not a handshake. The capability
+	// flags must be REAL: with 0 the packet is too short to decode and the test
+	// would stop at the decode guard instead of reaching GetPluginName, which is
+	// the path under test.
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets: [][]byte{cannedOK(t, 1, 0x000FA68D)},
+	})
+
+	clientConn, peer := net.Pipe()
+	_ = peer.Close()
+	defer func() { _ = clientConn.Close() }()
+	destConn, destPeer := net.Pipe()
+	_ = destPeer.Close()
+	defer func() { _ = destConn.Close() }()
+
+	err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
+		buildPostHandshakeDecodeCtx(clientConn), models.OutgoingOptions{
+			DstCfg:  &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 3306, AddrFabricated: true},
+			ConnKey: "",
+		})
+	if err == nil {
+		t.Fatal("expected a non-handshake greeting to fail the legacy post-TLS record")
+	}
+	// Pin the path: it must fail at GetPluginName, which runs BEFORE the
+	// HandshakeV10 assertion and therefore needs its own guard.
+	if !strings.Contains(err.Error(), "get plugin name") {
+		t.Fatalf("failed on a different path (%v); this test must exercise GetPluginName", err)
+	}
+	if _, ok := store.PopWait(portKey, 0); ok {
+		t.Fatal("a decodable non-handshake greeting was recycled into the shared FIFO; Push re-stamps " +
+			"its expiry so it would never age out and would trip every later stream to this port")
 	}
 }

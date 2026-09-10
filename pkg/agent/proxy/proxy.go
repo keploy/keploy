@@ -595,7 +595,10 @@ func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.
 		deadline = time.Now().Add(10 * time.Second)
 	}
 	dialer := net.Dialer{Deadline: deadline}
-	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
+	rawConn, err := util.DialDestinationWith(ctx, logger, util.DialTarget{Addr: addr},
+		func(ctx context.Context, a string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp", a)
+		})
 	if err != nil {
 		return nil, fmt.Errorf("postgres SSL upstream: plain dial %s failed: %w", addr, err)
 	}
@@ -691,7 +694,7 @@ type speculativeUpstreamTLSResult struct {
 // participates in shutdown. The helper derives its own cancellable ctx so
 // the caller can tear the dial down independently (e.g. on client-handshake
 // failure or an ALPN mismatch).
-func startSpeculativeUpstreamTLS(parentCtx context.Context, addr string, cfg *tls.Config) *speculativeUpstreamTLS {
+func startSpeculativeUpstreamTLS(parentCtx context.Context, logger *zap.Logger, addr string, cfg *tls.Config) *speculativeUpstreamTLS {
 	dialCtx, cancel := context.WithCancel(parentCtx)
 	s := &speculativeUpstreamTLS{
 		done:   make(chan speculativeUpstreamTLSResult, 1),
@@ -700,7 +703,14 @@ func startSpeculativeUpstreamTLS(parentCtx context.Context, addr string, cfg *tl
 	}
 	go func() {
 		dialer := &tls.Dialer{Config: cfg}
-		c, err := dialer.DialContext(dialCtx, "tcp", addr)
+		// The logger matters here specifically: for a TLS dependency this
+		// speculative dial IS the primary path — when join() succeeds no other
+		// dial runs — so a nil logger would make the fallback permanently
+		// silent on exactly the topology this fixes.
+		c, err := util.DialDestinationWith(dialCtx, logger, util.DialTarget{Addr: addr},
+			func(ctx context.Context, a string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "tcp", a)
+			})
 		var tlsConn *tls.Conn
 		if err == nil {
 			if tc, ok := c.(*tls.Conn); ok {
@@ -2262,7 +2272,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//check for global passthrough in test mode
 	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
-		dstConn, err = net.Dial("tcp", dstAddr)
+		dstConn, err = util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 			return err
@@ -2313,7 +2323,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// probeMysql already dialed when it had to read the
 			// upstream greeting; dstConn then replays those bytes.
 			if dstConn == nil {
-				dstConn, err = net.Dial("tcp", dstAddr)
+				dstConn, err = util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
 				if err != nil {
 					utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 					return err
@@ -2510,7 +2520,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// In record mode, we need a connection to the corporate proxy.
 		var proxyConn net.Conn
 		if !isTestMode {
-			proxyConn, err = net.Dial("tcp", dstAddr)
+			proxyConn, err = util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to dial corporate proxy for CONNECT; verify the proxy address is correct, DNS/network is reachable, and HTTP_PROXY/HTTPS_PROXY settings are configured correctly",
 					zap.String("proxy_addr", dstAddr))
@@ -2635,7 +2645,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					NextProtos:         []string{"h2", "http/1.1"},
 					KeyLogWriter:       pTls.KeyLogWriter(),
 				}
-				speculativeDial = startSpeculativeUpstreamTLS(ctx, addr, specCfg)
+				speculativeDial = startSpeculativeUpstreamTLS(ctx, p.logger, addr, specCfg)
 				speculativeDialAddr = addr
 				p.logger.Debug("started speculative upstream TLS dial",
 					zap.String("addr", addr),
@@ -2982,7 +2992,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 								zap.String("negotiated", negotiated),
 								zap.Strings("wanted", cfg.NextProtos))
 							_ = specConn.Close()
-							dstConn, err = tls.Dial("tcp", addr, cfg)
+							dstConn, err = util.DialDestinationTLS(ctx, p.logger, "tcp", util.DialTarget{Addr: addr}, cfg)
 						} else {
 							dstConn = specConn
 						}
@@ -2998,7 +3008,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					}
 					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "synchronous"), zap.String("addr", addr))
 					dialStart := time.Now()
-					dstConn, err = tls.Dial("tcp", addr, cfg)
+					dstConn, err = util.DialDestinationTLS(ctx, p.logger, "tcp", util.DialTarget{Addr: addr}, cfg)
 					probeDial(p.logger, "synchronous-tls", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				}
 				if err != nil {
@@ -3020,7 +3030,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if rule.Mode != models.MODE_TEST && dstConn == nil {
 			probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "plain-tcp"), zap.String("addr", dstAddr))
 			dialStart := time.Now()
-			dstConn, err = net.Dial("tcp", dstAddr)
+			dstConn, err = util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
 			probeDial(p.logger, "plain-tcp", clientConnID, dstAddr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))

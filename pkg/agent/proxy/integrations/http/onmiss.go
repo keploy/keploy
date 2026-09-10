@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -156,7 +158,11 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 // on-miss path dials the real network, so it must not disable verification.
 func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCfg) (net.Conn, error) {
 	d := &net.Dialer{Timeout: 30 * time.Second}
-	raw, err := d.DialContext(ctx, "tcp", dstCfg.Addr)
+	raw, err := pUtil.DialDestinationWith(ctx, h.Logger,
+		pUtil.DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated},
+		func(ctx context.Context, a string) (net.Conn, error) {
+			return d.DialContext(ctx, "tcp", a)
+		})
 	if err != nil {
 		return nil, err
 	}
