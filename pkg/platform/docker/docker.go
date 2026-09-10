@@ -493,6 +493,12 @@ func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerNam
 // findContainerInServices searches for a container within the services of a compose file
 // This reuses the same iteration pattern as existing functions like SetPidContainer
 func (idc *Impl) findContainerInServices(compose *Compose, containerName string) ([]string, []string, string, bool) {
+	// This gate runs BEFORE ModifyComposeForAgent and its ports/networks become
+	// opts.AppPorts/AppNetworks. Read off an unresolved alias they come back
+	// empty, so the app's published port never reaches keploy-agent -- which
+	// publishes on the app's behalf under network_mode: service:keploy-agent --
+	// and the app is unreachable from the host.
+	resolveServiceAlias(&compose.Services)
 	if compose.Services.Content == nil {
 		return nil, nil, "", false
 	}
@@ -504,7 +510,7 @@ func (idc *Impl) findContainerInServices(compose *Compose, containerName string)
 		}
 
 		serviceNameNode := compose.Services.Content[i]
-		serviceContentNode := compose.Services.Content[i+1]
+		serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
 		serviceName := serviceNameNode.Value
 
 		// Check for explicit container_name using the same pattern as existing functions
@@ -1147,14 +1153,54 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 // AddKeployAgentToCompose adds the keploy-agent service to an existing Docker Compose file
 // This is a convenience function that shows how to use GenerateKeployAgentService
 func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOptions) error {
+	// Ensure services section exists. Resolve as well as normalise: an aliased
+	// `services:` would otherwise take the append into a node that is never
+	// emitted, and this must not depend on findServiceNodeAndName happening to
+	// run first.
+	ensureMapping(&compose.Services)
+	resolveServiceAlias(&compose.Services)
+
+	// A section that STILL cannot hold entries -- an alias to a scalar or a
+	// sequence -- would swallow the append and leave this returning nil with the
+	// agent service simply absent from the generated file.
+	if compose.Services.Kind != yaml.MappingNode {
+		return fmt.Errorf("`services:` is not a mapping (%s), so keploy cannot add "+
+			"its agent service to it", yamlKindName(compose.Services.Kind))
+	}
+
+	// Refuse to add a second keploy-agent, by service KEY or by container_name.
+	// A user service by that name is unusual but legal, and appending beside it
+	// produced a generated file that does not parse at all -- `mapping key
+	// "keploy-agent" already defined` -- reading as a keploy bug rather than the
+	// name collision it is. The container_name variant is worse than a duplicate
+	// key: findServiceNodeAndName matches on container_name too, so keploy would
+	// treat the USER's service as its agent and move the app's dns onto it, and
+	// compose rejects the file with `container name "keploy-agent" is already in
+	// use`.
+	//
+	// Checked before GenerateKeployAgentService so a doomed run does not first
+	// fire the enterprise compose hook.
+	for i := 0; i+1 < len(compose.Services.Content); i += 2 {
+		if compose.Services.Content[i].Value == "keploy-agent" {
+			return fmt.Errorf("the compose file already defines a service named " +
+				"\"keploy-agent\"; rename it so keploy can add its own")
+		}
+		svc := compose.Services.Content[i+1]
+		for j := 0; j+1 < len(svc.Content); j += 2 {
+			if svc.Content[j].Value == "container_name" &&
+				svc.Content[j+1].Value == "keploy-agent" {
+				return fmt.Errorf("service %q already uses container_name "+
+					"\"keploy-agent\"; rename it so keploy can add its own",
+					compose.Services.Content[i].Value)
+			}
+		}
+	}
+
 	// Generate the keploy-agent service configuration
 	keployServiceNode, err := idc.GenerateKeployAgentService(opts)
 	if err != nil {
 		return fmt.Errorf("failed to generate keploy-agent service: %w", err)
 	}
-
-	// Ensure services section exists
-	ensureMapping(&compose.Services)
 
 	// Add the keploy-agent service to the compose file
 	compose.Services.Content = append(compose.Services.Content,
@@ -1167,13 +1213,21 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 
 // Helper: findServiceNodeAndName finds the YAML node and the Service Key (name)
 func (idc *Impl) findServiceNodeAndName(compose *Compose, appIdentifier string) (*yaml.Node, string, error) {
+	// `services: *svcs` is legal compose, and an alias holds no entries of its
+	// own, so the scan below saw nothing and reported "no services found".
+	resolveServiceAlias(&compose.Services)
 	if compose.Services.Content == nil {
 		return nil, "", fmt.Errorf("no services found")
 	}
 
 	for i := 0; i < len(compose.Services.Content); i += 2 {
+		if i+1 >= len(compose.Services.Content) {
+			break // odd Content: guarded like the sibling loops rather than panicking
+		}
 		serviceNameNode := compose.Services.Content[i]
-		serviceContentNode := compose.Services.Content[i+1]
+		// Resolved at the loop top, not at either return, so the container_name
+		// match below scans real content instead of an alias's empty Content.
+		serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
 		serviceName := serviceNameNode.Value
 
 		// Check 1: Does the Service Key match?
@@ -1246,7 +1300,7 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 		}
 
 		serviceNameNode := compose.Services.Content[i]
-		serviceContentNode := compose.Services.Content[i+1]
+		serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
 		serviceName := serviceNameNode.Value
 
 		// Check if this is the target app service
@@ -1528,6 +1582,61 @@ func resolvedKind(n *yaml.Node) yaml.Kind {
 		return n.Alias.Kind
 	}
 	return n.Kind
+}
+
+// resolveServiceAlias replaces an alias node with a DEEP copy of what it names,
+// so the resolved node can be edited without reaching back into the shared
+// fragment.
+//
+// sectionForAppend's shallow copy is right for `volumes:`/`networks:`, whose
+// entries are inert and only ever appended to. It is wrong for a SERVICE,
+// because keploy does not only append to one: modifyAppServiceForKeploy DELETES
+// keys (networks, ports, dns/dns_search/dns_opt) and OVERWRITES values in place
+// (addServiceEnvVar), and enterprise's ComposeServiceHook rewrites
+// JAVA_TOOL_OPTIONS unconditionally on every replay.
+//
+// With children shared, a sibling service aliasing the same fragment inherits
+// all of it -- including a TLS environment pointing SSL_CERT_FILE,
+// REQUESTS_CA_BUNDLE and NODE_EXTRA_CA_CERTS at keploy's CA, inside a container
+// that is NOT in the agent's network namespace, so its outbound TLS fails
+// verification. Silently. A mapping-style `environment:` is worse: the user's
+// own value is overwritten inside their own fragment.
+//
+// Anchors are stripped from the copy. Keeping them would emit a SECOND
+// definition of the same anchor, and because this copy is about to be mutated
+// the two would diverge -- a later `*name` or `<<: *name` binds to the nearest
+// preceding definition, so an unrelated service would silently pick up keploy's
+// edits. Stripping leaves the user's fragment as the only definition, which is
+// what every other reference should still resolve to.
+//
+// Deliberately unlike sectionForAppend, which KEEPS the anchor: a copied volumes
+// fragment is only ever appended to, so a duplicate definition cannot diverge
+// from the original. A copied service is edited, so it can.
+func resolveServiceAlias(n *yaml.Node) *yaml.Node {
+	if n == nil || n.Kind != yaml.AliasNode || n.Alias == nil {
+		return n
+	}
+	if n.Alias.Kind != yaml.MappingNode {
+		// Cannot hold entries. Left exactly as the user wrote it rather than
+		// reshaping a fragment they authored; the caller reports it.
+		return n
+	}
+	clone := cloneYAMLNode(n.Alias)
+	stripAnchors(clone)
+	*n = *clone
+	return n
+}
+
+// stripAnchors clears anchor names throughout a subtree. See resolveServiceAlias
+// for why a copy must not carry them.
+func stripAnchors(n *yaml.Node) {
+	if n == nil {
+		return
+	}
+	n.Anchor = ""
+	for _, c := range n.Content {
+		stripAnchors(c)
+	}
 }
 
 // sectionForAppend returns the mapping a section's entries must actually be
