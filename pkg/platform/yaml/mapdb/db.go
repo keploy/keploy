@@ -2,6 +2,7 @@ package mapdb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 )
 
@@ -238,6 +240,37 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	db.logger.Debug("Successfully upserted test-mock mappings",
 		zap.String("testSetID", testSetID),
 		zap.Int("tests", len(byTest)))
+
+	return nil
+}
+
+// DeleteMappingsForSet removes the mapping artifact for a re-recorded mock set.
+// Missing files are fine; permission, ownership, or path-safety errors surface
+// so callers do not silently keep stale per-test mappings.
+func (db *MappingDb) DeleteMappingsForSet(ctx context.Context, testSetID string) error {
+	_ = ctx
+	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
+		return fmt.Errorf("rejecting DeleteMappingsForSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..') under the mappings output directory: %w", testSetID, err)
+	}
+
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		candidate := filepath.Join(mappingPath, fileName+"."+format.FileExtension())
+		validated, err := yaml.ValidatePath(candidate)
+		if err != nil {
+			utils.LogError(db.logger, err, "failed to validate mapping path for delete", zap.String("at_path", candidate))
+			return err
+		}
+		if err := os.Remove(validated); err != nil && !os.IsNotExist(err) {
+			utils.LogError(db.logger, err, "failed to delete stale mapping file during refresh", zap.String("path", validated))
+			return err
+		}
+	}
 
 	return nil
 }
