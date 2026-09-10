@@ -23,15 +23,16 @@ type AsyncRecorder struct {
 	lanes   []models.AsyncLane
 	parsers map[string]async.AsyncParser
 
-	mu    sync.Mutex
-	tests []testWindow   // ingress windows, by start timestamp
-	seq   map[string]int // per-lane counter
+	mu      sync.Mutex
+	tests   []testWindow      // ingress windows, by start timestamp
+	seq     map[string]int    // per-lane counter
+	lastKey map[string]string // per-poll-lane last emitted value key (change detection)
 }
 
 func NewAsyncRecorder(logger *zap.Logger, lanes []models.AsyncLane, parsers map[string]async.AsyncParser) *AsyncRecorder {
 	// Fill in any omitted lane names so the stamped Async.Lane value is the
 	// same deterministic key the replay engine re-derives.
-	return &AsyncRecorder{logger: logger, lanes: models.WithEffectiveNames(lanes), parsers: parsers, seq: map[string]int{}}
+	return &AsyncRecorder{logger: logger, lanes: models.WithEffectiveNames(lanes), parsers: parsers, seq: map[string]int{}, lastKey: map[string]string{}}
 }
 
 // AfterTestCaseInsert tracks each ingress testcase's window START. Uses the
@@ -75,28 +76,43 @@ func (r *AsyncRecorder) BeforeMockInsert(_ context.Context, info *MockContext) e
 		if !p.MatchesLane(m, lane) {
 			continue
 		}
+
+		if lane.IsPoll() {
+			// Poll lanes emit a minimal value-epoch timeline instead of a
+			// stamp-per-cycle: diff this response's value against the last
+			// emitted value for the lane. Unchanged => collapse (drop the
+			// mock); the first value => epoch-0 (effective from boot);
+			// a changed value => a new epoch anchored where it was received.
+			key := p.ResponseValueKey(m, lane)
+			r.mu.Lock()
+			prev, seen := r.lastKey[lane.Name]
+			if seen && key == prev {
+				r.mu.Unlock()
+				info.Skip = true // collapse unchanged cycle
+				return nil
+			}
+			var anchorID string
+			var pos int
+			if !seen {
+				anchorID, pos = models.AnchorStartup, 0 // initial value: effective from boot
+			} else {
+				anchorID, pos = r.anchorLocked(m.Spec.ResTimestampMock.UnixNano()) // change: where received
+			}
+			r.seq[lane.Name]++
+			seq := r.seq[lane.Name]
+			r.lastKey[lane.Name] = key
+			r.mu.Unlock()
+			m.Spec.Async = &models.AsyncMeta{Lane: lane.Name, Seq: seq, AnchorAfter: anchorID, AnchorPos: pos, Poll: true}
+			return nil
+		}
+
+		// non-poll async lane: unchanged (anchor by response completion).
 		r.mu.Lock()
 		r.seq[lane.Name]++
 		seq := r.seq[lane.Name]
-		// Anchor by the async COMPLETION time (response timestamp).
 		anchorID, anchorPos := r.anchorLocked(m.Spec.ResTimestampMock.UnixNano())
 		r.mu.Unlock()
-
-		// Async bookkeeping goes in its own block (Spec.Async), NOT the flat
-		// parser Metadata. The mock keeps its base kind (e.g. Http); poll-ness
-		// is Async.Poll, not a distinct Kind.
-		am := &models.AsyncMeta{
-			Lane:        lane.Name,
-			Seq:         seq,
-			AnchorAfter: anchorID,
-			AnchorPos:   anchorPos,
-		}
-		if lane.IsPoll() {
-			am.Poll = true
-			durMs := m.Spec.ResTimestampMock.Sub(m.Spec.ReqTimestampMock).Milliseconds()
-			am.PollDurationMs = max(durMs, 0)
-		}
-		m.Spec.Async = am
+		m.Spec.Async = &models.AsyncMeta{Lane: lane.Name, Seq: seq, AnchorAfter: anchorID, AnchorPos: anchorPos}
 		return nil
 	}
 	return nil

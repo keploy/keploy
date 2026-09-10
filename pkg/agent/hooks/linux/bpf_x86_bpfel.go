@@ -60,6 +60,8 @@ type bpfProgramSpecs struct {
 	K_connect6              *ebpf.ProgramSpec `ebpf:"k_connect6"`
 	K_getpeername4          *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
 	K_getpeername6          *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
+	K_postBind4             *ebpf.ProgramSpec `ebpf:"k_post_bind4"`
+	K_postBind6             *ebpf.ProgramSpec `ebpf:"k_post_bind6"`
 	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
 	K_udp4Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
@@ -80,6 +82,7 @@ type bpfMapSpecs struct {
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
 	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
+	PendingBinds                *ebpf.MapSpec `ebpf:"pending_binds"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 }
@@ -118,6 +121,7 @@ type bpfMaps struct {
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
 	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
+	PendingBinds                *ebpf.Map `ebpf:"pending_binds"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 }
@@ -132,6 +136,7 @@ func (m *bpfMaps) Close() error {
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
 		m.OrigDstByCookie,
+		m.PendingBinds,
 		m.RedirectProxyMap,
 		m.TargetNamespacePids,
 	)
@@ -153,6 +158,8 @@ type bpfPrograms struct {
 	K_connect6              *ebpf.Program `ebpf:"k_connect6"`
 	K_getpeername4          *ebpf.Program `ebpf:"k_getpeername4"`
 	K_getpeername6          *ebpf.Program `ebpf:"k_getpeername6"`
+	K_postBind4             *ebpf.Program `ebpf:"k_post_bind4"`
+	K_postBind6             *ebpf.Program `ebpf:"k_post_bind6"`
 	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
 	K_udp4Recvmsg           *ebpf.Program `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
@@ -169,6 +176,8 @@ func (p *bpfPrograms) Close() error {
 		p.K_connect6,
 		p.K_getpeername4,
 		p.K_getpeername6,
+		p.K_postBind4,
+		p.K_postBind6,
 		p.K_sockops,
 		p.K_udp4Recvmsg,
 		p.K_udp4Sendmsg,

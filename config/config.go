@@ -10,48 +10,74 @@ import (
 )
 
 type Config struct {
-	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
-	StorageFormat         string              `json:"storageFormat" yaml:"storageFormat" mapstructure:"storageFormat"` // serialization format for testcases/mocks/reports: "yaml" (default) or "json"
-	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
-	AppID                 uint64              `json:"appId" yaml:"appId" mapstructure:"appId"` // deprecated field
-	Command               string              `json:"command" yaml:"command" mapstructure:"command"`
-	Templatize            Templatize          `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
-	Port                  uint32              `json:"port" yaml:"port" mapstructure:"port"`
-	E2E                   bool                `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
-	DNSPort               uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
-	ProxyPort             uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
-	IncomingProxyPort     uint16              `json:"incomingProxyPort" yaml:"incomingProxyPort" mapstructure:"incomingProxyPort"`
-	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
-	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
-	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
-	JSONOutput            bool                `json:"jsonOutput" yaml:"jsonOutput" mapstructure:"jsonOutput"`
-	InDocker              bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
-	ContainerName         string              `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
-	NetworkName           string              `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
-	BuildDelay            uint64              `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
-	Test                  Test                `json:"test" yaml:"test" mapstructure:"test"`
-	Record                Record              `json:"record" yaml:"record" mapstructure:"record"`
-	Report                Report              `json:"report" yaml:"report" mapstructure:"report"`
-	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
-	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
-	RetryPassing          bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
-	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
-	BypassRules           []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
-	MysqlPorts            []uint32            `json:"mysqlPorts" yaml:"mysqlPorts" mapstructure:"mysqlPorts"`
-	EnableTesting         bool                `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
-	GenerateGithubActions bool                `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
-	KeployContainer       string              `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
-	KeployNetwork         string              `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
-	CommandType           string              `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
-	Contract              Contract            `json:"contract" yaml:"contract" mapstructure:"contract"`
-	Agent                 Agent               `json:"agent" yaml:"agent" mapstructure:"agent"`
-	Async                 Async               `json:"async" yaml:"async" mapstructure:"async"`
-	InCi                  bool                `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
-	InstallationID        string              `json:"-" yaml:"-" mapstructure:"-"`
-	ServerPort            uint32              `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
-	Version               string              `json:"-" yaml:"-" mapstructure:"-"`
-	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
-	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
+	Path              string              `json:"path" yaml:"path" mapstructure:"path"`
+	StorageFormat     string              `json:"storageFormat" yaml:"storageFormat" mapstructure:"storageFormat"` // serialization format for testcases/mocks/reports: "yaml" (default) or "json"
+	AppName           string              `json:"appName" yaml:"appName" mapstructure:"appName"`
+	AppID             uint64              `json:"appId" yaml:"appId" mapstructure:"appId"` // deprecated field
+	Command           string              `json:"command" yaml:"command" mapstructure:"command"`
+	Templatize        Templatize          `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
+	Port              uint32              `json:"port" yaml:"port" mapstructure:"port"`
+	E2E               bool                `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
+	DNSPort           uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
+	ProxyPort         uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	IncomingProxyPort uint16              `json:"incomingProxyPort" yaml:"incomingProxyPort" mapstructure:"incomingProxyPort"`
+	Debug             bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
+	DisableTele       bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
+	DisableANSI       bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
+	JSONOutput        bool                `json:"jsonOutput" yaml:"jsonOutput" mapstructure:"jsonOutput"`
+	InDocker          bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
+	ContainerName     string              `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
+	NetworkName       string              `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
+	BuildDelay        uint64              `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
+	Test              Test                `json:"test" yaml:"test" mapstructure:"test"`
+	Record            Record              `json:"record" yaml:"record" mapstructure:"record"`
+	Report            Report              `json:"report" yaml:"report" mapstructure:"report"`
+	Normalize         Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
+	DisableMapping    bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
+	RetryPassing      bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
+	ConfigPath        string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
+	BypassRules       []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	// MysqlPorts pins extra destination ports to the MySQL parser,
+	// skipping auto-detection for them. Rarely needed now that ports are
+	// detected automatically (see DisableMysqlAutoDetect); keep it for
+	// deployments that want the ~250ms first-connection probe skipped,
+	// or that disable detection entirely. Built-in defaults: 3306, 4000.
+	MysqlPorts []uint32 `json:"mysqlPorts" yaml:"mysqlPorts" mapstructure:"mysqlPorts"`
+	// DisableMysqlAutoDetect turns off automatic MySQL port detection.
+	// With detection on (the default), keploy identifies MySQL on any
+	// port by reading the server's handshake during record and by
+	// recalling the port from recorded mocks during replay. Turn it off
+	// to restore the strict port-list behaviour — then MySQL on a port
+	// outside MysqlPorts will hang its handshake.
+	DisableMysqlAutoDetect bool `json:"disableMysqlAutoDetect" yaml:"disableMysqlAutoDetect" mapstructure:"disableMysqlAutoDetect"`
+	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
+	// mocks on a port the recording never saw. Detection still runs; only
+	// the inference is turned off.
+	//
+	// Leave it on (the default) unless a dependency is being misread. The
+	// inference fires when a replayed app opens a connection to an unknown
+	// port and says nothing, which is the MySQL signature — but a client that
+	// stays silent for the whole confirmation window and only then speaks
+	// looks the same, and it will be answered with a handshake it did not ask
+	// for. Pinning the real mapping with MysqlPorts is the better fix when you
+	// know it; this is the escape hatch when you do not, and unlike
+	// DisableMysqlAutoDetect it keeps record-time detection working.
+	DisableMysqlEndpointDrift bool     `json:"disableMysqlEndpointDrift" yaml:"disableMysqlEndpointDrift" mapstructure:"disableMysqlEndpointDrift"`
+	EnableTesting             bool     `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
+	GenerateGithubActions     bool     `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
+	KeployContainer           string   `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
+	KeployNetwork             string   `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
+	CommandType               string   `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+	Contract                  Contract `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Mock                      MockCmd  `json:"mock" yaml:"mock" mapstructure:"mock"`
+	Agent                     Agent    `json:"agent" yaml:"agent" mapstructure:"agent"`
+	Async                     Async    `json:"async" yaml:"async" mapstructure:"async"`
+	InCi                      bool     `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	InstallationID            string   `json:"-" yaml:"-" mapstructure:"-"`
+	ServerPort                uint32   `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
+	Version                   string   `json:"-" yaml:"-" mapstructure:"-"`
+	APIServerURL              string   `json:"-" yaml:"-" mapstructure:"-"`
+	GitHubClientID            string   `json:"-" yaml:"-" mapstructure:"-"`
 	// InMemoryCompose holds docker-compose YAML content in memory to avoid writing
 	// sensitive environment variables (secrets, tokens) to disk. When set, the
 	// compose command uses "-f -" and pipes this content via stdin.
@@ -60,6 +86,23 @@ type Config struct {
 
 type Agent struct {
 	models.SetupOptions
+	// UpstreamTLSVerifySet / UpstreamTLSCACertSet record that the
+	// corresponding --upstream-tls-* flag was PRESENT on this agent's argv,
+	// as opposed to merely sitting at its zero value.
+	//
+	// They exist because a bare bool cannot express the difference between
+	// "the orchestrator said false" and "the orchestrator said nothing", and
+	// that difference is the entire off switch: the orchestrator forwards its
+	// resolved value unconditionally as --upstream-tls-verify=%t, and a native
+	// agent ALSO reads the very same keploy.yml through --config-path. Without
+	// the marker the agent has to guess, and the only safe-looking guess (OR
+	// the two) makes `--upstream-tls-verify=false` a no-op on native while it
+	// works under docker. See proxy.resolveUpstreamTLSConfig.
+	//
+	// Not user configuration — set by the CLI flag parser, never read from
+	// keploy.yml, hence the "-" tags.
+	UpstreamTLSVerifySet bool `json:"-" yaml:"-" mapstructure:"-"`
+	UpstreamTLSCACertSet bool `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 // Async configures the async-egress engine. Empty Lanes => feature off,
@@ -99,6 +142,11 @@ type Record struct {
 	MemoryLimit        uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
 	GlobalPassthrough  bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 	TLSPrivateKeyPath  string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	// UpstreamTLS controls whether keploy authenticates the REAL upstream
+	// server when it dials out on the application's behalf. TLSPrivateKeyPath
+	// above is the client half of the same story (upstream mTLS); this is the
+	// root half. See the UpstreamTLS type for why it is off by default.
+	UpstreamTLS UpstreamTLS `json:"upstreamTls" yaml:"upstreamTls" mapstructure:"upstreamTls"`
 	// MockFormat selects the on-disk format for recorded mocks.
 	// "" or "yaml" (default) writes mocks.yaml — human-readable, the
 	// format all tooling expects. "gob" writes a binary mocks.gob — a
@@ -138,19 +186,81 @@ type Record struct {
 
 	// RecordBuffer tunes the per-connection record buffer. Defaults
 	// suit ~99% of workloads; only touch these if you see "mock
-	// incomplete" warnings with reason "per_conn_cap" or "channel_full"
-	// in the agent logs.
+	// incomplete" warnings with reason "per_conn_cap" in the agent logs.
 	RecordBuffer RecordBuffer `json:"recordBuffer" yaml:"recordBuffer" mapstructure:"recordBuffer"`
+
+	// PassThroughPorts / PassThroughHosts configure telemetry-egress passthrough:
+	// destinations keploy should not record as normal dependencies. Each rule is
+	// {port|host, mode} where mode is "skip" (never record; synthesize success on
+	// replay) or "recordOne" (record exactly one exchange per host/port/path/method
+	// and serve it body-agnostically for every matching call on replay). Hosts are
+	// required to catch TLS-encrypted telemetry whose port isn't observable at
+	// capture. Built-in telemetry defaults (OTLP /v1/traces, Pyroscope /ingest,
+	// Azure App Insights host) are merged in unless overridden. See models.PassThroughRule.
+	PassThroughPorts []models.PassThroughRule `json:"passThroughPorts,omitempty" yaml:"passThroughPorts,omitempty" mapstructure:"passThroughPorts"`
+	PassThroughHosts []models.PassThroughRule `json:"passThroughHosts,omitempty" yaml:"passThroughHosts,omitempty" mapstructure:"passThroughHosts"`
+}
+
+// UpstreamTLS configures the upstream (destination-side) leg of keploy's TLS
+// MITM during record. Being a MITM constrains only the CLIENT-facing leg — the
+// cert keploy presents to the app is minted by keploy's own CA. The upstream
+// leg is an ordinary Go TLS client, so verifying the real server costs nothing
+// extra: crypto/tls uses the host's system root pool when RootCAs is nil, and
+// the agent additionally embeds the Mozilla NSS roots
+// (pkg/agent/proxy/tls/data/mozilla_roots.pem) for images with no trust store.
+//
+// Verify nevertheless defaults to FALSE, and the reason is fidelity, not a
+// missing CA bundle: a recording proxy must never be stricter than the
+// application it records. An app connecting with `sslmode=require` (postgres)
+// or `tls=skip-verify` (go-sql-driver/mysql) has deliberately chosen to encrypt
+// without authenticating its upstream. If keploy authenticated on its behalf it
+// would refuse connections the app would happily have made — and the failure is
+// silent rather than loud: on a dest-side handshake error the supervisor falls
+// through to raw passthrough, so the application keeps working while the mock
+// is DROPPED. The user sees a healthy app and a mysteriously empty mocks.yaml.
+// Self-signed upstreams and Kubernetes ClusterIP destinations whose cert SAN
+// does not match the address keploy dials both land in exactly that hole.
+//
+// Turn Verify on when the recording itself is security-relevant — e.g. recording
+// against public APIs in a regulated environment, where an on-path attacker at
+// record time could poison a mock set that later gates CI.
+type UpstreamTLS struct {
+	// Verify turns on certificate verification for keploy's own outbound TLS
+	// dials. False (the default) preserves today's behaviour exactly.
+	Verify bool `json:"verify" yaml:"verify" mapstructure:"verify"`
+	// CACert is an optional path to a PEM file of extra trust anchors, appended
+	// to the system pool (or, on an image with no trust store, to keploy's
+	// embedded Mozilla NSS roots). Use it for private/internal CAs instead of
+	// installing them into the agent's OS trust store. Only consulted when
+	// Verify is true. The path is resolved on the AGENT's filesystem, which for
+	// docker/k8s runs is not the host's — bind-mount the file or pass a path
+	// that exists inside the agent container.
+	CACert string `json:"caCert" yaml:"caCert" mapstructure:"caCert"`
 }
 
 // RecordBuffer tunes the per-connection recording queue used by the
-// agent's relay. The two knobs guard the same in-flight queue but in
-// different units: MaxMemoryPerConnection is a byte budget,
-// QueueSize is a slot count. Whichever fills first triggers a drop
-// and marks the in-flight mock incomplete (the forward path is
-// unaffected — user traffic always succeeds).
+// agent's relay.
 //
-// Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
+// MaxMemoryPerConnection is the one that bounds recording: the queue is
+// bounded by BYTES, and exceeding that budget is the only condition under
+// which a chunk is refused (reason "per_conn_cap"), marking the in-flight
+// mock incomplete. The forward path is unaffected — user traffic always
+// succeeds.
+//
+// QueueSize sizes the hand-off channel between the recorder and the parser.
+// It no longer bounds the recording queue itself, so it is not the knob to
+// reach for when mocks come back incomplete; raising MaxMemoryPerConnection
+// is. It was previously a slot count on an internal staging channel, and
+// running out of slots produced a "channel_full" drop — that failure mode no
+// longer exists, because bounding by slots discarded bursts of many small
+// chunks that used almost no memory (the boot-time "no mocks" loss).
+//
+// ConsumerStallGrace bounds teardown, not steady state: it is how long a
+// closing connection waits on a parser that has stopped draining before
+// giving up on the chunks still queued for it.
+//
+// Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN, KEPLOY_RECORD_QUEUE_SIZE and
+// KEPLOY_RECORD_CONSUMER_STALL_GRACE and KEPLOY_RECORD_HALF_CLOSE_GRACE
 // override the yaml/flag values when set.
 type RecordBuffer struct {
 	// MaxMemoryPerConnection caps the bytes the recorder may hold
@@ -161,13 +271,70 @@ type RecordBuffer struct {
 	// than the default budget (e.g. >10 MB query results).
 	MaxMemoryPerConnection uint64 `json:"maxMemoryPerConnection" yaml:"maxMemoryPerConnection" mapstructure:"maxMemoryPerConnection"`
 
-	// QueueSize is the number of chunk slots in the recording queue.
-	// Each slot holds one ~32 KiB chunk. Maps to
-	// relay.Config.TeeChanBuf. Zero resolves to the relay's built-in
-	// default (1024). Increase if you see drops with reason
-	// "channel_full" — usually means bursty traffic (many small
-	// messages back-to-back) that the parser can't keep up with.
+	// QueueSize is the number of chunk slots in the hand-off channel
+	// between the recorder and the parser. Each slot holds one ~32 KiB
+	// chunk. Maps to relay.Config.TeeChanBuf. Zero resolves to the
+	// relay's built-in default (1024).
+	//
+	// This does NOT bound how much the recorder may buffer — that is
+	// MaxMemoryPerConnection — so raising it will not stop
+	// "per_conn_cap" drops.
 	QueueSize int `json:"queueSize" yaml:"queueSize" mapstructure:"queueSize"`
+
+	// ConsumerStallGrace bounds how long the recorder waits on a parser
+	// that has stopped draining before abandoning the chunks still queued
+	// for it. Maps to relay.Config.ConsumerStallGrace. Zero resolves to
+	// the relay's built-in default (2s).
+	//
+	// It bounds STALLED time, not elapsed time: the wait ends the moment
+	// the parser takes anything at all, so a merely slow parser still
+	// receives every chunk. The bound is consulted only after the
+	// connection closes, so it costs nothing on a healthy connection.
+	//
+	// Raise it if a teardown-time parser is slow enough to look dead and
+	// you see drops with reason "consumer_gone"; lower it to cap how long
+	// a connection with a genuinely dead parser lingers at teardown.
+	ConsumerStallGrace time.Duration `json:"consumerStallGrace" yaml:"consumerStallGrace" mapstructure:"consumerStallGrace"`
+
+	// HalfCloseGrace bounds how long the recorder keeps copying the
+	// surviving direction after one side has half-closed (sent FIN while
+	// still able to receive). Maps to relay.Config.HalfCloseGrace. Zero
+	// resolves to the relay's built-in default (10s); NEGATIVE disables
+	// half-close entirely, restoring the pre-#4538 behaviour of tearing
+	// both directions down on the first EOF.
+	//
+	// It bounds IDLE time, not total time — every forwarded chunk
+	// re-arms it — so it only has to cover the gap before a peer starts
+	// answering, never the length of the answer.
+	HalfCloseGrace time.Duration `json:"halfCloseGrace" yaml:"halfCloseGrace" mapstructure:"halfCloseGrace"`
+}
+
+// MockCmd configures the `keploy mock record|replay` flow — using Keploy as a
+// framework-agnostic mocking layer for a user's own test runner (pytest, go
+// test, jest/playwright, mobile UI tests). Unlike record/test it captures ONLY
+// outgoing dependency calls (no incoming test cases) into a single named mock
+// set, and on replay serves that set back to the wrapped runner.
+type MockCmd struct {
+	// Name is the mock set to record into / replay from (the on-disk directory
+	// under keploy/, and the registry key). Defaults to "default". Re-recording
+	// the same name overwrites its mocks in place so a CI "re-record on merge to
+	// main" job produces a reviewable diff rather than an accumulating pile of
+	// test-set-N directories.
+	Name string `json:"name" yaml:"name" mapstructure:"name"`
+	// OnMiss is the replay-time miss policy: "fail" (default — deterministic,
+	// a miss is a hard error), "passthrough" (dial the real dependency, don't
+	// persist), or "record" (dial the real dependency AND append the new call
+	// to the set — VCR-style new_episodes for incremental refresh).
+	OnMiss string `json:"onMiss" yaml:"onMiss" mapstructure:"onMiss"`
+	// Strict makes replay exit non-zero if any recorded mock was missed, so a
+	// drifted dependency contract fails the build even when the runner passed.
+	Strict bool `json:"strict" yaml:"strict" mapstructure:"strict"`
+	// Local forces the file-backed store even when a cloud registry is
+	// configured (enterprise). Registry-first by default; --local opts out.
+	Local bool `json:"local" yaml:"local" mapstructure:"local"`
+	// RecordTimer optionally bounds a record session (e.g. "30s"); the wrapped
+	// runner exiting on its own ends recording first in almost all cases.
+	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 }
 
 type Contract struct {
@@ -192,14 +359,55 @@ type Normalize struct {
 	EditedBy      string          `json:"-" yaml:"-" mapstructure:"-"`
 }
 
+// DefaultHealthPollTimeout is the ceiling for every pre-test app-readiness gate
+// when test.healthPollTimeout is unset or non-positive.
+//
+// It lives here, not beside the gate, because the yaml default in
+// config/default.go and the code fallback are two sources of truth for the same
+// number and nothing else makes them agree — the same reasoning as
+// relay.DefaultConsumerStallGrace. config/default_test.go asserts the parsed
+// yaml against this constant, so changing one without the other fails a test
+// instead of silently shipping a keploy.yml that disagrees with the code.
+//
+// Three minutes, not one. The bound is paid ONLY by an app that is not yet
+// serving: a ready app satisfies the gate on its first probe, so raising it costs
+// a healthy run nothing. A cold application start on a loaded shared runner —
+// the condition the gate exists for — was measured at 17-28s for the process and
+// ~55s from spawn to first serve, against a previous 60s ceiling that therefore
+// expired and fired tests into a not-yet-listening app. Timing out only warns and
+// proceeds, so an over-generous ceiling can never fail a run that would otherwise
+// pass; an under-generous one can.
+const DefaultHealthPollTimeout = 3 * time.Minute
+
 type Test struct {
-	SelectedTests               map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	GlobalNoise                 Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
-	ReplaceWith                 ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
-	Delay                       uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
-	HealthURL                   string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
-	HealthPollTimeout           time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
-	AppReadyProbeAddr           string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
+	SelectedTests     map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	GlobalNoise       Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
+	ReplaceWith       ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
+	Delay             uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
+	HealthURL         string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
+	HealthPollTimeout time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
+	HealthPath        string              `json:"healthPath" yaml:"healthPath" mapstructure:"healthPath"`                      // optional request path probed on the app's OWN auto-detected address (docker/compose published port, or appReadyProbeAddr) before the first test. Unlike healthUrl it needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready — a health endpoint returning 503 has still proved the app is answering. Empty uses a keploy-reserved probe path.
+	HealthScheme      string              `json:"healthScheme" yaml:"healthScheme" mapstructure:"healthScheme"`                // optional override for the readiness probe scheme ("http" or "https"). Empty (the default) uses the scheme the recorded tests actually dial; only consulted when the app is probed over HTTP, and ignored entirely when healthUrl is set.
+	AppReadyProbeAddr string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
+
+	// DisableAppReadyProbe turns off the app-readiness probing that
+	// runs before the first test fires — the docker/compose
+	// published-port gates, AppReadyProbeAddr, and the resolved
+	// test-target fallback. --health-url is unaffected: that is an
+	// explicit operator request, not an inferred probe.
+	//
+	// It exists for embedders that drive replay as a library in an
+	// environment where a connect-then-close probe is DESTRUCTIVE.
+	// keploy/k8s-proxy is the motivating case: on its cluster-mode path
+	// the app is reached through a kubectl port-forward, and probing it
+	// can make kubelet's SPDY relay tear the session down ("lost
+	// connection to pod"), killing the app and agent forwards together.
+	//
+	// Leaving a gate input unset is NOT a reliable way to express this:
+	// such a caller still sets Test.Host (it rewrites recorded request
+	// URLs), and the resolved-test-target fallback will reach for that
+	// address and probe it. Intent has to be stated, not inferred.
+	DisableAppReadyProbe        bool                `json:"disableAppReadyProbe" yaml:"disableAppReadyProbe" mapstructure:"disableAppReadyProbe"`
 	Host                        string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                        uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort                    uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`

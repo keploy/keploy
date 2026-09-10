@@ -79,6 +79,21 @@ func ShouldReexecWithSudo() bool {
 		return true
 	}
 
+	// An explicit --cmd-type wins over sniffing the command string, and has
+	// to be read straight out of os.Args: this runs before cobra parses
+	// anything and long before any config file is read. Without it,
+	// `--cmd-type docker-compose -c "make up"` would take the native path
+	// here, start unprivileged, and then fail deep inside the docker branch
+	// trying to write /proc/sys/kernel/perf_event_paranoid (#4399).
+	if explicit := ExtractCmdTypeFromArgs(os.Args); explicit != "" {
+		switch kind := CmdType(explicit); kind {
+		case Native, DockerRun, DockerStart, DockerCompose:
+			return IsDockerCmd(kind)
+		}
+		// Anything else is rejected later by ValidateFlags with a proper
+		// message; fall through to sniffing rather than guessing here.
+	}
+
 	// Extract the command from arguments
 	cmd := ExtractCommandFromArgs(os.Args)
 	if cmd == "" {

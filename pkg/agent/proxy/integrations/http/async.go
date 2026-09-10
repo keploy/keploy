@@ -80,12 +80,12 @@ func queryOf(r *models.HTTPReq) url.Values {
 // MatchRequestShape reuses SchemaMatch against the single recorded mock.
 // Volatile query params (lane.VolatileParams) are stripped from BOTH the
 // live and the recorded request before comparison: SchemaMatch's query-param
-// check (MapsHaveSameKeys) compares the KEY SET of the live request's parsed
-// URL query against the recorded mock's URLParams, so stripping only one
-// side would leave the key counts unequal (e.g. "cursor" present on the live
-// side but absent on the stripped recorded side) and spuriously fail the
-// shape match — stripping both sides keeps the key-set comparison honest
-// while still ignoring the volatile key's value.
+// check (QueryParamsMatch) compares the KEY SET and VALUES of the live
+// request's parsed URL query against the recorded mock's URLParams, so
+// stripping only one side would leave the key counts unequal (e.g. "cursor"
+// present on the live side but absent on the stripped recorded side) and
+// spuriously fail the shape match — stripping both sides keeps the comparison
+// honest while still ignoring the volatile key's value.
 func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncLane) (bool, string) {
 	if live == nil || live.Spec.HTTPReq == nil || recorded == nil || recorded.Spec.HTTPReq == nil {
 		return false, "missing request payload"
@@ -112,6 +112,16 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 // EmptyResponse is a minimal 204 keep-alive.
 func (h *HTTP) EmptyResponse(_ models.AsyncLane) ([]byte, error) {
 	return []byte("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"), nil
+}
+
+// ResponseValueKey fingerprints the value the client consumes: response status
+// + body. Volatile response headers (Date, etc.) are not part of the value; the
+// body carries the config version/data, so a real change materially alters it.
+func (h *HTTP) ResponseValueKey(m *models.Mock, _ models.AsyncLane) string {
+	if m == nil || m.Spec.HTTPResp == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d\n%s", m.Spec.HTTPResp.StatusCode, m.Spec.HTTPResp.Body)
 }
 
 func hostAndPath(r *models.HTTPReq) (host, p string) {
@@ -207,13 +217,10 @@ func liveReqToMock(input *req) *models.Mock {
 	}}
 }
 
-// flakyHeaderNoise returns the package flaky-header list as a header-noise map.
-// Shared by MatchRequestShape and decode.go's auto-header-noise setup so the
-// two can't drift.
+// flakyHeaderNoise returns the flaky-header list as a header-noise map.
+// Shared by MatchRequestShape and decode.go's auto-header-noise setup so the two
+// can't drift. The response assertion shares the underlying models list but not
+// this function — it must compare names exactly, not through a noise map.
 func flakyHeaderNoise() map[string][]string {
-	nm := make(map[string][]string, len(flakyHeaders))
-	for _, fh := range flakyHeaders {
-		nm[fh] = []string{}
-	}
-	return nm
+	return models.FlakyHeaderNoise()
 }

@@ -128,7 +128,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 		if decodeCtx.UseSSL {
 			if result.tlsClientConn == nil || result.tlsDestConn == nil {
-				// TLS connections are nil — this is expected in sockmap
+				// TLS connections are nil — this is expected in observe-only
 				// mode where the proxy doesn't MITM the TLS session. The pre-TLS
 				// config mock has already been recorded above. Post-TLS command
 				// phase data is captured by SSL/GoTLS uprobes independently.
@@ -169,6 +169,18 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 }
 
 func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time, resTimestampMock time.Time, opts models.OutgoingOptions) {
+	// Clamp res >= req for EVERY mysql mock (query, handshake/config, no-response).
+	// On a reused/keepalive connection CapturedRespTime can carry over the
+	// previous exchange's response time, producing an invalid res<req order that
+	// the replay mock-load filters (filterByTimeStamp / MockManager) silently
+	// drop — orphaning the mock (a dropped config/handshake mock even breaks
+	// connection setup at replay). Response time only feeds ordering/windowing,
+	// so pinning it to the request time when the captured value is stale keeps the
+	// mock valid without loss. Done here, at the single choke point, rather than
+	// per call site.
+	if resTimestampMock.Before(reqTimestampMock) {
+		resTimestampMock = reqTimestampMock
+	}
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  requestOperation,

@@ -73,7 +73,10 @@ var BaseTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 //     non-zero start+end; BaseTime staging does NOT
 //     activate — see mockmanager.go isInitialStaging).
 //   - FirstTestFired: at least one real (non-BaseTime) test window has
-//     ever been set; sticky once true.
+//     been set for the test set currently being replayed.
+//     Sticky within a set; MockManager.ResetForReplaySession
+//     clears it at each set boundary, so a set being staged
+//     reads false again.
 //
 // The principal-engineer review flagged a torn-read hazard: the legacy
 // IsTestWindowActive / HasFirstTestFired accessors read under different

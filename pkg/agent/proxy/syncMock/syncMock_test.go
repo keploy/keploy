@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1383,7 +1384,7 @@ func TestDeleteMocksStrictlyBeforeRescuesLateKeptMock(t *testing.T) {
 	mapCh := make(chan models.TestMockMapping, 8)
 	mgr := &SyncMockManager{}
 	mgr.SetOutputChannel(ch)
-	mgr.SetMappingChannel(mapCh)
+	mgr.SetMappingChannel(context.Background(), mapCh)
 	mgr.SetFirstRequestSignaled()
 
 	base := time.Now().Add(-1 * time.Second)
@@ -1485,7 +1486,7 @@ func TestFlushOwnedWindowsPersistsLateMocksDuringRecording(t *testing.T) {
 	mapCh := make(chan models.TestMockMapping, 8)
 	mgr := &SyncMockManager{}
 	mgr.SetOutputChannel(ch)
-	mgr.SetMappingChannel(mapCh)
+	mgr.SetMappingChannel(context.Background(), mapCh)
 	mgr.SetFirstRequestSignaled()
 
 	base := time.Now().Add(-1 * time.Second)

@@ -95,8 +95,8 @@ type RequestBody struct {
 }
 
 type MediaType struct {
-	Schema  Schema                 `json:"schema" yaml:"schema"`
-	Example map[string]interface{} `json:"example" yaml:"example"`
+	Schema  Schema      `json:"schema" yaml:"schema"`
+	Example interface{} `json:"example" yaml:"example"`
 }
 
 type ResponseItem struct {
@@ -105,8 +105,16 @@ type ResponseItem struct {
 }
 
 type Schema struct {
-	Type       string                            `json:"type" yaml:"type"`
-	Properties map[string]map[string]interface{} `json:"properties" yaml:"properties"`
+	// Type is omitempty because an untyped schema is the only thing OpenAPI 3.0
+	// offers for a value whose observations conflict (an array holding both a
+	// string and a number). `type: ""` is not a legal type and kin-openapi
+	// rejects it, so the key has to be absent rather than empty. Every schema
+	// inferred from consistent data still carries a type, so no contract that
+	// generates today changes shape.
+	Type       string                            `json:"type,omitempty" yaml:"type,omitempty"`
+	Properties map[string]map[string]interface{} `json:"properties,omitempty" yaml:"properties,omitempty"`
+	Items      *Schema                           `json:"items,omitempty" yaml:"items,omitempty"`
+	Nullable   bool                              `json:"nullable,omitempty" yaml:"nullable,omitempty"`
 }
 
 type ParamSchema struct {

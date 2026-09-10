@@ -2,9 +2,11 @@ package models
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -86,8 +88,19 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		// Streaming response — encode as a YAML sequence of chunks
 		bodyNode = encodeStreamChunksNode(chunks)
 	} else {
-		// Non-streaming response — encode body as a plain string scalar
-		if err := bodyNode.Encode(h.Body); err != nil {
+		// Non-streaming response, OR a stream whose bytes cannot survive the
+		// chunked representation — encode the body as a plain string scalar
+		// (yaml.v3 auto-promotes an untagged non-UTF-8 scalar to !!binary).
+		//
+		// Reconstruct the flat body from the chunks when the chunk form was
+		// rejected and Body is empty: StreamBody travels independently of Body
+		// over the transport, so a producer that populated only the chunk form
+		// would otherwise have its entire body silently written as "".
+		body := h.Body
+		if body == "" && len(h.StreamBody) > 0 {
+			body = streamChunksToLegacyBody(h.StreamBody, detectStreamBodyKind(h.Header))
+		}
+		if err := bodyNode.Encode(body); err != nil {
 			return nil, err
 		}
 	}
@@ -176,14 +189,57 @@ const (
 	streamBodyKindRaw     streamBodyKind = "raw" // All other streaming formats (NDJSON, plain text, binary)
 )
 
-// streamChunksForYAML returns the chunks to encode if this response has a streaming body.
-// Returns (nil, false) for non-streaming responses.
+// streamChunksAreUTF8 reports whether every key and value in an already-parsed
+// chunk list is valid UTF-8. The chunked representation puts arbitrary body
+// bytes into YAML scalars, and an SSE field NAME additionally goes through
+// strings.ToLower during parsing, which rewrites every invalid byte to U+FFFD
+// — so a body that fails this check must fall back to the flat scalar form
+// rather than be chunked.
+func streamChunksAreUTF8(chunks []HTTPStreamChunk) bool {
+	for _, c := range chunks {
+		for _, f := range c.Data {
+			if !utf8.ValidString(f.Key) || !utf8.ValidString(f.Value) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// streamChunksForYAML returns the chunks to encode if this response has a
+// streaming body, and (nil, false) for a non-streaming response or one whose
+// bytes cannot survive the chunked representation.
 func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 	if len(resp.StreamBody) > 0 {
+		if !streamChunksAreUTF8(resp.StreamBody) {
+			return nil, false
+		}
 		return cloneStreamChunks(resp.StreamBody), true
 	}
 
 	if resp.Body != "" {
+		// A non-UTF-8 body is not a text stream, and must never reach the
+		// chunkers below.
+		//
+		// Two things go wrong if it does. The chunk encoder emits every key and
+		// value through stringNode, which stamps an explicit `!!str` tag, and
+		// yaml.v3 refuses that outright: "cannot marshal invalid UTF-8 data as
+		// !!str". That error is returned all the way out of InsertMock, and the
+		// recorder treats a failed insert as fatal — one gzip response body
+		// ended a 46-hour production recording of prod/api-server. Second, even
+		// when it does not abort, parseSSEBodyToChunks lower-cases the SSE field
+		// name, and strings.ToLower rewrites every invalid byte to U+FFFD, so
+		// the mock is silently corrupted and replays the wrong bytes.
+		//
+		// Falling through to the flat scalar body costs nothing and fixes both:
+		// yaml.v3 auto-promotes an untagged non-UTF-8 scalar to `!!binary` with
+		// base64, which is exactly how non-streaming bodies (application/json
+		// and friends) have always been stored. No schema change, and the
+		// decoder already handles it — decodeStreamBody dispatches on node kind
+		// and yaml.v3 base64-decodes `!!binary` scalars back into the string.
+		if !utf8.ValidString(resp.Body) {
+			return nil, false
+		}
 		kind := detectStreamBodyKind(resp.Header)
 		if kind == streamBodyKindSSE {
 			chunks := parseSSEBodyToChunks(resp.Body, resp.Timestamp)
@@ -347,8 +403,17 @@ func decodeStreamDataFields(dataNode *yamlLib.Node) ([]HTTPStreamDataField, erro
 		if keyNode == nil || valueNode == nil {
 			continue
 		}
+		// Keys decode the same way values do. stringNode can emit a key as
+		// !!binary, and yaml.v3 leaves the BASE64 TEXT in node.Value for those
+		// — reading Value raw would substitute the base64 for the real field
+		// name. TrimSpace stays off the binary branch: for decoded bytes it is
+		// not cosmetic, it would silently eat payload.
+		key := decodeYAMLScalarKey(keyNode)
+		if keyNode.Tag != "!!binary" {
+			key = strings.TrimSpace(key)
+		}
 		fields = append(fields, HTTPStreamDataField{
-			Key:   strings.TrimSpace(keyNode.Value),
+			Key:   key,
 			Value: yamlNodeToString(valueNode),
 		})
 	}
@@ -415,7 +480,18 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 				if key == "" {
 					continue
 				}
-				lines = append(lines, strings.ToLower(key)+":"+field.Value)
+				// strings.ToLower rewrites every invalid byte to U+FFFD, so it
+				// must not touch a field name that is not valid UTF-8. This is
+				// reachable precisely because MarshalYAML now routes non-UTF-8
+				// chunks through here as its flat-body fallback — lower-casing
+				// them would reintroduce the silent corruption the fallback
+				// exists to avoid. SSE field names are ASCII in practice, so
+				// skipping the fold for the pathological case costs nothing.
+				name := key
+				if utf8.ValidString(name) {
+					name = strings.ToLower(name)
+				}
+				lines = append(lines, name+":"+field.Value)
 			}
 			if len(lines) == 0 {
 				continue
@@ -622,6 +698,15 @@ func yamlNodeToString(node *yamlLib.Node) string {
 		return ""
 	}
 	if node.Kind == yamlLib.ScalarNode {
+		// yaml.v3 leaves the BASE64 TEXT in node.Value for a !!binary scalar
+		// rather than the decoded bytes, so returning it raw would hand replay
+		// the base64 string and silently mismatch. Decode it here, mirroring
+		// stringNode. Whitespace strip: yaml.v3 folds long base64 scalars.
+		if node.Tag == "!!binary" {
+			if raw, err := base64.StdEncoding.DecodeString(stripBase64Whitespace(node.Value)); err == nil {
+				return string(raw)
+			}
+		}
 		return node.Value
 	}
 	// Complex node (mapping or sequence) — decode then re-encode as JSON.
@@ -639,6 +724,19 @@ func yamlNodeToString(node *yamlLib.Node) string {
 // stringNode creates a YAML scalar string node with the given value.
 // Used as a helper when constructing YAML trees programmatically.
 func stringNode(value string) *yamlLib.Node {
+	// Defence in depth behind streamChunksForYAML's guard. yaml.v3 hard-fails
+	// on invalid UTF-8 under an EXPLICIT tag ("cannot marshal invalid UTF-8
+	// data as !!str") but silently base64s it under `!!binary`, so stamping
+	// !!str on arbitrary bytes is what turns one bad chunk into a failed mock
+	// insert — and a failed insert used to end the whole recording.
+	// yamlNodeToString decodes this back, so the round-trip is lossless.
+	if !utf8.ValidString(value) {
+		return &yamlLib.Node{
+			Kind:  yamlLib.ScalarNode,
+			Tag:   "!!binary",
+			Value: base64.StdEncoding.EncodeToString([]byte(value)),
+		}
+	}
 	return &yamlLib.Node{
 		Kind:  yamlLib.ScalarNode,
 		Tag:   "!!str",

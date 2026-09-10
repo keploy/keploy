@@ -20,7 +20,8 @@ func (f *fakeParser) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (b
 	}
 	return false, "shape drift"
 }
-func (f *fakeParser) EmptyResponse(_ models.AsyncLane) ([]byte, error) { return f.empty, nil }
+func (f *fakeParser) EmptyResponse(_ models.AsyncLane) ([]byte, error)       { return f.empty, nil }
+func (f *fakeParser) ResponseValueKey(*models.Mock, models.AsyncLane) string { return string(f.empty) }
 
 // compile-time assertion the fake satisfies the interface.
 var _ AsyncParser = (*fakeParser)(nil)

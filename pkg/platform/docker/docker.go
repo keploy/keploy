@@ -40,9 +40,75 @@ const (
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
-// ComposeServiceHook is called after the keploy-agent Docker Compose service
-// node is built, allowing downstream callers to mutate it.
-var ComposeServiceHook func(serviceNode *yaml.Node)
+// agentHealthcheckStartPeriod is the docker-compose healthcheck start_period for
+// the keploy-agent service: the window in which a FAILING healthcheck neither
+// counts toward `retries` nor marks the container unhealthy, so a dependent app
+// (depends_on: service_healthy) simply keeps waiting.
+//
+// WHAT IT IS NOT. For a LITERAL `docker compose` command it is NOT the
+// mechanism that detects a dead agent: keploy rewrites such commands to inject
+// `--abort-on-container-exit` (ensureComposeExitOnAppFailure, called from
+// modifyDockerComposeCommand / ensureInMemoryComposeFlags in pkg/client/app),
+// so a crashed or OOM-killed agent container EXITS and aborts the whole run
+// immediately, independent of this budget. That covers the go-memory-load lanes
+// this fix targets (they run `-c "docker compose up"`). For a WRAPPER command
+// (make / npm / a shell script) keploy passes its compose file via COMPOSE_FILE
+// and cannot splice the flag in — it warns about exactly this at app.go:~288 —
+// so there this window genuinely IS the backstop, which is a further reason to
+// keep it generous. In both cases the window's job is the same: avoid
+// false-failing an agent that is ALIVE and still doing its one-time setup.
+//
+// WHAT IT BOUNDS. The agent writes AgentReadyFile only after the CLI has read
+// and decoded the test-set's mock corpus (GetFilteredMocks) and streamed it to
+// the agent (StoreMocks -> MakeAgentReady). Measured, the stream+park itself is
+// not the cost — gob encode/decode + on-disk parking runs at ~380 MB/s, so even
+// a multi-hundred-MB corpus lands in seconds (measured with a throwaway
+// benchmark, since removed). What actually stretches the
+// wall-clock is the CLI-side corpus DECODE racing everything else on a
+// contended shared runner: on the go-memory-load lanes a ~80 MB / ~1.1k-mock
+// set decoded while the app's own DB seeded on the same 2 vCPUs took ~60s, and
+// on a slower run crossed the old fixed 10s+60x5s=310s budget — flipping a
+// healthy-but-still-setting-up agent to unhealthy and failing the app's
+// depends_on. That is the flake.
+//
+// WHY GENEROUS IS THE RIGHT SHAPE, NOT A GUESS. The container flips healthy the
+// instant the ready file appears, so in the common case the app starts in
+// seconds no matter how large this window is — a generous value costs the fast
+// path nothing. For literal compose, agent death is caught by container-exit
+// (--abort-on-container-exit), not by this window. So this
+// is a floor sized to "comfortably longer than any legitimate setup," not a
+// delicate estimate of load time; its exact value is not correctness-critical.
+// The only case it still bounds is an agent that is alive but wedged (never
+// ready, never exits): retries*interval past this window it is declared
+// unhealthy and the run fails with a clear cause rather than hanging to the CI
+// job timeout. 600s default keeps that backstop while giving the observed
+// worst case ~10x headroom.
+//
+// Overridable via KEPLOY_AGENT_HEALTHCHECK_START_PERIOD_SECONDS. Non-positive or
+// unparsable falls back to the default.
+func agentHealthcheckStartPeriod() time.Duration {
+	const def = 600 * time.Second
+	if v := strings.TrimSpace(os.Getenv("KEPLOY_AGENT_HEALTHCHECK_START_PERIOD_SECONDS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return def
+}
+
+// ComposeServiceHook is called for each keploy-managed Docker Compose service
+// node during generation so a downstream caller (the enterprise low-latency hook)
+// can mutate the right one. E.g. it adds the deterministic JVM agent (-javaagent
+// in JAVA_TOOL_OPTIONS, jar delivered via the shared keploy-tls volume) to the APP
+// service, and low-latency caps/tmpfs to the AGENT service.
+//
+// The identifier passed is what the downstream matches on, NOT the compose map
+// key: "keploy-agent" for the agent service, and the caller-supplied
+// appContainerName (the --container-name value) for the recorded app service. This
+// matters because the app service can be selected by its `container_name` rather
+// than its service key, so passing the map key would make the app hook silently
+// miss (and Java TLS would go uncaptured) whenever the two differ.
+var ComposeServiceHook func(serviceIdentifier string, serviceNode *yaml.Node)
 
 type Impl struct {
 	nativeDockerClient.APIClient
@@ -557,7 +623,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Generate ports
 	var ports []string
 	if opts.AgentPort != 0 {
-		ports = append(ports, fmt.Sprintf("%d:%d", opts.AgentPort, opts.AgentPort))
+		// The agent control-plane HTTP server is unauthenticated (it streams
+		// live TLS session keys on /agent/pcap/keylog and accepts
+		// unauthenticated /agent/stop and /agent/storemocks). Only the local
+		// keploy CLI needs to reach it, so publish it to the host's own
+		// loopback rather than every host-network interface.
+		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.AgentPort, opts.AgentPort))
 	}
 	if opts.ProxyPort != 0 {
 		ports = append(ports, fmt.Sprintf("%d:%d", opts.ProxyPort, opts.ProxyPort))
@@ -593,6 +664,11 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Debug {
 		command = append(command, "--debug")
 	}
+	if opts.MockMode {
+		// `keploy mock record|replay` — the containerised agent must skip
+		// ingress/bind relocation (the wrapped process is a test runner).
+		command = append(command, "--mock-mode")
+	}
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}
@@ -627,6 +703,15 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.ChannelBindingShim {
 		command = append(command, "--channel-binding-shim")
 	}
+	// Upstream TLS verification. Forwarded unconditionally as =%t, matching
+	// --disable-mapping above and the native launcher, so that the precedence
+	// flag > yaml > default resolves IDENTICALLY here and on a native run —
+	// see proxy.resolveUpstreamTLSConfig. The CA path is resolved inside the
+	// agent container, so the operator must bind-mount the PEM (or point at a
+	// path that already exists in the image); the host's keploy.yml is not
+	// visible here either, which is why this travels over argv at all.
+	command = append(command, fmt.Sprintf("--upstream-tls-verify=%t", opts.UpstreamTLSVerify))
+	command = append(command, fmt.Sprintf("--upstream-tls-ca-cert=%s", opts.UpstreamTLSCACert))
 
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
@@ -831,9 +916,14 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "retries"},
 			{Kind: yaml.ScalarNode, Value: "60"},
 
-			// start_period
+			// start_period — a generous, env-tunable readiness floor. For a
+			// literal `docker compose` command it is not the death detector (a
+			// dead agent exits and --abort-on-container-exit aborts the run); it
+			// only keeps a live, still-setting-up agent from being false-failed
+			// while the CLI decodes and streams the mock corpus. See
+			// agentHealthcheckStartPeriod for the full rationale.
 			{Kind: yaml.ScalarNode, Value: "start_period"},
-			{Kind: yaml.ScalarNode, Value: "10s"},
+			{Kind: yaml.ScalarNode, Value: fmt.Sprintf("%ds", int(agentHealthcheckStartPeriod().Seconds()))},
 		},
 	}
 
@@ -914,7 +1004,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Allow callers to mutate the fully-built service node. This runs last
 	// so the hook can see and modify all fields including volumes.
 	if ComposeServiceHook != nil {
-		ComposeServiceHook(serviceNode)
+		ComposeServiceHook("keploy-agent", serviceNode)
 	}
 
 	return serviceNode, nil
@@ -1078,6 +1168,19 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 
 			// Add network mode sharing
 			idc.addServiceProperty(serviceContentNode, "network_mode", fmt.Sprintf("service:%s", "keploy-agent"))
+
+			// Let a downstream caller mutate the APP service too — the enterprise
+			// low-latency hook uses this to append the deterministic JVM agent
+			// (-javaagent in JAVA_TOOL_OPTIONS). The app shares keploy-agent's PID
+			// AND network namespace (set above), so the JVM reaches the JSSE
+			// listener on 127.0.0.1 and its PID is directly resolvable — no jattach.
+			// Pass appContainerName (the --container-name value the downstream
+			// matches on), NOT serviceName (the compose map key): this service may
+			// have been selected by its container_name, in which case the key differs
+			// and the app hook would silently miss.
+			if ComposeServiceHook != nil {
+				ComposeServiceHook(appContainerName, serviceContentNode)
+			}
 
 			break
 		}

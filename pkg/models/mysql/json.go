@@ -31,6 +31,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -93,15 +94,12 @@ func (c *ColumnEntry) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("ColumnEntry value: %w", err)
 	}
-	// Coerce based on the column's FieldType so the integrations-side
-	// wire encoder's strict `.(int) / .(float32) / .(float64)` type
-	// assertions in binaryProtocolRowPacket.go can succeed. Without
-	// this, a JSON-recorded float64(42.0) round-trips as `42` (Go's
-	// json.Marshal strips trailing zeros), then UnmarshalJSON
-	// recovers int(42), then the encoder's `.(float64)` assertion
-	// for FieldTypeDouble panics. The coercer doesn't help if the
-	// recorder put a non-numeric value in a numeric-typed column —
-	// that's a real bug in the recorder, not a JSON-roundtrip issue.
+	// Restore the concrete Go type the column's FieldType implies.
+	// json.Marshal strips trailing zeros, so a recorded float64(42.0)
+	// is written as `42` and recovered as int(42) — a DOUBLE column
+	// whose value is integral changes Go type across the round trip.
+	// That drift ends up back on disk, because UpdateMocks re-serializes
+	// what it decodes; see coerceValueForFieldType.
 	c.Value = coerceValueForFieldType(v, c.Type)
 	return nil
 }
@@ -211,22 +209,35 @@ func recoverJSONValue(raw any) (any, error) {
 	case bool:
 		return x, nil
 	case json.Number:
-		// Match yaml.v3's reflective default for !!int into
-		// interface{}: it returns Go `int`, NOT int64. The
-		// integrations-side wire encoder (binaryProtocolRowPacket.go
-		// line ~297) does `ce.Value.(int)` for FieldTypeLongLong
-		// and friends — an int64 there panics the encoder, the
-		// MySQL parser recovers but the connection is dropped, and
-		// the fuzzer reports `query execution failed: invalid
-		// connection` on every subsequent op. Return int when the
-		// integer literal fits, fall back to int64 only for values
-		// outside int's range (32-bit hosts; modern keploy runs on
-		// 64-bit so this branch is empty in practice).
+		// Mirror yaml.v3's reflective default for !!int into
+		// interface{}: Go `int` when the literal fits, int64 above
+		// that (32-bit hosts; empty in practice on 64-bit), and
+		// uint64 for an integer literal that overflows int64.
+		//
+		// The uint64 rung matters: a BIGINT UNSIGNED above MaxInt64
+		// fails Int64(), and falling straight through to Float64()
+		// loses every bit below 2^11 — 18446744073709551614 and
+		// 9223372036854775808 both landed on the same float64 and
+		// then on the same wrong integer. yaml.v3 already yields
+		// uint64 here, so this is also what keeps the two mock
+		// formats agreeing on the same Go type.
 		if i, err := x.Int64(); err == nil {
 			if int64(int(i)) == i {
 				return int(i), nil
 			}
 			return i, nil
+		}
+		// Decoded as a JSON number rather than with strconv, to stay
+		// symmetric with the rest of this file: x is a JSON token, and
+		// encoding/json is what defines whether it names an integer.
+		// Behaviour matches strconv.ParseUint(s, 10, 64) exactly for
+		// every form reachable here — it accepts a plain integer
+		// literal up to MaxUint64 and rejects signed, fractional,
+		// exponent and overflowing forms, all of which fall through to
+		// the float64 rung below.
+		var u uint64
+		if err := json.Unmarshal([]byte(x), &u); err == nil {
+			return u, nil
 		}
 		f, err := x.Float64()
 		if err != nil {
@@ -287,27 +298,37 @@ func decodeBinaryValue(v any) ([]byte, error) {
 	return b, nil
 }
 
-// coerceValueForFieldType narrows a recovered any-typed value into the
-// concrete Go type the integrations-side wire encoder type-asserts on.
-// The mapping is taken straight from
-// pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols/binaryProtocolRowPacket.go:
+// coerceValueForFieldType restores the concrete Go type that the
+// column's FieldType implies, so that a value recovered from JSON has
+// the same Go type it would have had coming off the wire or out of
+// YAML:
 //
-//	FieldTypeTiny / Short / Year / Long / LongLong / Int24
-//	    encoder uses ce.Value.(int)
-//	FieldTypeFloat
-//	    encoder uses ce.Value.(float32)
-//	FieldTypeDouble
-//	    encoder uses ce.Value.(float64)
+//	FieldTypeTiny / Short / Year / Long / LongLong / Int24 → int
+//	FieldTypeFloat                                         → float32
+//	FieldTypeDouble                                        → float64
 //
-// Unsigned columns share the same Go type — the encoder casts after
-// asserting (`uint32(ce.Value.(int))`), so the unsigned bit doesn't
-// change the expected primitive type.
+// No wire encoder depends on this any more: the binary-row encoder
+// coerces whatever it is handed, and text rows are length-encoded
+// strings on the wire, so DecodeTextRow stores every value as a string
+// and this function passes strings through untouched.
 //
-// String / BLOB / Date-Time columns are left as-is: the encoder for
-// those types accepts a wider type set (string for string-likes,
-// []byte or string for blobs, time.Time / string for date-times) and
-// my MarshalJSON already preserves the Go type through the
-// round-trip ([]byte / time.Time go through the $type envelope).
+// What still depends on it is the mock file itself. MockYaml.UpdateMocks
+// is a read-modify-write — it decodes every mock, drops the unused ones,
+// and writes the survivors back over the user's file (see
+// pkg/platform/yaml/mockdb/db.go). So whatever Go type comes out of here
+// is the type that gets re-serialized onto disk. Letting a DOUBLE column
+// come back as an int would rewrite `9.0` as `9` in a file users keep in
+// git, and would keep drifting on every subsequent run.
+//
+// Unsigned columns share the same Go type; the unsigned bit selects
+// the wire width at encode time, not the Go type here. An integer
+// literal above MaxInt64 arrives as uint64 (see recoverJSONValue) and
+// is left alone — narrowing it to int is exactly the corruption that
+// rung exists to prevent.
+//
+// String / BLOB / Date-Time columns are left as-is: MarshalJSON
+// already preserves their Go type through the round trip ([]byte and
+// time.Time go through the $type envelope).
 func coerceValueForFieldType(v any, ftype FieldType) any {
 	if v == nil {
 		return nil
@@ -319,11 +340,38 @@ func coerceValueForFieldType(v any, ftype FieldType) any {
 		case int:
 			return x
 		case int64:
-			return int(x)
+			// recoverJSONValue only yields int64 when the literal did
+			// not fit int, which is a 32-bit host. Narrowing anyway
+			// would truncate exactly the value that rung exists to
+			// preserve, so leave it wide when it does not fit.
+			//
+			// Bounds first, conversion second. `int64(int(x)) == x`
+			// would round-trip through the very conversion being
+			// tested, which is implementation-defined when out of
+			// range — the same mistake exactInt exists to avoid.
+			if x >= math.MinInt && x <= math.MaxInt {
+				return int(x)
+			}
+			return x
+		case uint64:
+			// Above MaxInt64. Leave the width alone; the encoder
+			// narrows to the column's wire width and keeps the bits.
+			return x
 		case float64:
-			return int(x)
+			if n, ok := exactInt(x); ok {
+				return n
+			}
+			// Not integral, or outside int's range. Converting anyway is
+			// implementation-defined in Go and saturates to MinInt on
+			// amd64, which turns a corrupt mock into a plausible-looking
+			// wrong number. Hand it on untouched and let the encoder's
+			// coercion reject it by name.
+			return x
 		case float32:
-			return int(x)
+			if n, ok := exactInt(float64(x)); ok {
+				return n
+			}
+			return x
 		}
 	case FieldTypeFloat:
 		switch x := v.(type) {
@@ -334,6 +382,12 @@ func coerceValueForFieldType(v any, ftype FieldType) any {
 		case int:
 			return float32(x)
 		case int64:
+			return float32(x)
+		case uint64:
+			// Reachable, not defensive: encoding/json writes a float64
+			// in 'f' format for any magnitude below 1e21, so a DOUBLE
+			// holding 1e19 is marshalled as the integer literal
+			// 10000000000000000000 and recovered as uint64.
 			return float32(x)
 		}
 	case FieldTypeDouble:
@@ -346,9 +400,42 @@ func coerceValueForFieldType(v any, ftype FieldType) any {
 			return float64(x)
 		case int64:
 			return float64(x)
+		case uint64:
+			// See the FieldTypeFloat arm above.
+			return float64(x)
 		}
 	}
 	return v
+}
+
+// exactInt reports whether f names an integer that survives the trip
+// through int without loss. Go leaves an out-of-range float→int
+// conversion implementation-defined, so the range has to be checked
+// before the conversion, not after.
+//
+// There are two conversions here and each needs its own bound.
+//
+// float64 -> int64 is bounded in float space, because 2^63 is the first
+// float64 at or above MaxInt64 (float64(MaxInt64) itself rounds *up* to
+// it), so MaxInt64 is unreachable from a float64 and the top bound has
+// to be exclusive against 2^63 rather than inclusive against MaxInt64.
+//
+// int64 -> int is then bounded in integer space. On a 64-bit host that
+// second bound cannot fire; on a 32-bit one it is the only thing
+// standing between a perfectly valid float64 and a truncated int.
+func exactInt(f float64) (int, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
+		return 0, false
+	}
+	const twoPow63 = 9223372036854775808.0
+	if f < -twoPow63 || f >= twoPow63 {
+		return 0, false
+	}
+	n := int64(f)
+	if n < math.MinInt || n > math.MaxInt {
+		return 0, false
+	}
+	return int(n), true
 }
 
 func decodeTimestampValue(v any) (time.Time, error) {

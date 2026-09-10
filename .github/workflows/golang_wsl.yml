@@ -5,6 +5,10 @@ on:
 
 jobs:
   golang_wsl:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -86,8 +90,8 @@ jobs:
           fi
           # Verify the mount
           mount | grep debugfs || echo "debugfs not found in mount output"  
-          sudo apt-get update -y
-          sudo apt-get install -y golang-go curl git ca-certificates jq
+          sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y
+          sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y golang-go curl git ca-certificates jq
  
       - name: Prepare binaries for WSL
         shell: bash
@@ -115,16 +119,16 @@ jobs:
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y golang-go curl git ca-certificates
+          sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y
+          sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y golang-go curl git ca-certificates
 
           
       - name: Prepare CA tools in WSL
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y ca-certificates jq
+          sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y
+          sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y ca-certificates jq
           # Run Debian CA refresh (ok if no custom certs yet)
           sudo update-ca-certificates || true
           # Provide a no-op for RHEL's tool to avoid exit 127 if Keploy probes it
@@ -144,7 +148,7 @@ jobs:
           export RECORD_BIN="$WS/.wsl-bin/keploy_record"
           export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"
           chmod +x "$RECORD_BIN" "$REPLAY_BIN" || true
-          sudo apt-get install -y golang-go curl git ca-certificates
+          sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y golang-go curl git ca-certificates
           cd "$WS/samples-go/${{ matrix.app.path }}"
           # Source the existing Linux bash script under WSL
           source "$WS/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh"

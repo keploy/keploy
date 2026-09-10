@@ -80,6 +80,10 @@ jobs:
           retention-days: 7
 
   mysql_dual_conn:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -95,6 +99,13 @@ jobs:
           - job: record_build_replay_build
             record_src: build-no-race
             replay_src: build-no-race
+            # FLOAT/DOUBLE column fidelity (keploy#4426) needs BOTH
+            # binaries to carry the fix: a record binary without it
+            # writes the IEEE-754 bit pattern into the mock, and a
+            # replay binary without it panics on a correctly recorded
+            # FLOAT. So only this cell exercises the fixture; the
+            # cross-version cells leave the flag unset and skip.
+            numeric_fidelity: "true"
     name: mysql-dual-conn (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
@@ -128,11 +139,99 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          MYSQL_NUMERIC_FIDELITY: ${{ matrix.config.numeric_fidelity }}
         run: |
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_dual_conn/java-linux.sh
 
+  # Automatic MySQL port detection: same sample, relocated to :3307 by the
+  # script so nothing in the default port list or the config covers it.
+  # The cross-version cells self-skip via a capability probe — the feature
+  # needs detection at record time AND mock-derived recall at replay time,
+  # so a mixed-version pair cannot exercise it. See the script header.
+  mysql_auto_port:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_latest
+            record_src: build-no-race
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+            # Both binaries come from this commit, so the capability
+            # probe must succeed. Setting this turns a probe failure
+            # into a hard error instead of a silent skip, so this cell
+            # can never go green without asserting the behaviour.
+            require_auto_detect: "true"
+    name: mysql-auto-port (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout samples-java repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-java
+          path: samples-java
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: samples-java/mysql-dual-conn/pom.xml
+
+      - name: Run mysql-dual-conn app on a non-default MySQL port
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          REQUIRE_MYSQL_AUTO_DETECT: ${{ matrix.config.require_auto_detect }}
+        run: |
+          cd samples-java/mysql-dual-conn
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_auto_port/java-linux.sh
+
+      - name: Upload mysql-auto-port recordings and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-auto-port-${{ matrix.config.job }}-recordings
+          path: |
+            samples-java/mysql-dual-conn/keploy/
+            samples-java/mysql-dual-conn/test_logs.txt
+            samples-java/mysql-dual-conn/test_logs_drift.txt
+            samples-java/mysql-dual-conn/application.properties
+            samples-java/mysql-dual-conn/autoPort_record.txt
+            samples-java/mysql-dual-conn/mvn_build.log
+          if-no-files-found: warn
+          retention-days: 7
+
   tidb_stmt_cache:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -207,6 +306,10 @@ jobs:
           retention-days: 7
 
   async_config_poll:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
@@ -221,12 +324,17 @@ jobs:
           - job: record_build_replay_build
             record_src: build-no-race
             replay_src: build-no-race
-        # periodic: fast poller, stub answers immediately, lane type http ->
+        # periodic:      fast poller, stub answers immediately, lane type http ->
         #   asserts the async engine SERVED the polls (served >= 1).
-        # httppoll: one held long-poll (server timeout), lane type httpPoll ->
-        #   asserts kind:HttpPoll + pollDurationMs recorded and the engine HELD
-        #   it until its resolve testcase at replay (held >= 1).
-        scenario: [periodic, httppoll]
+        # httppoll:      one held long-poll (server timeout), lane type httpPoll ->
+        #   asserts it is recorded as a collapsed value epoch (kind Http, async
+        #   poll: true, no pollDurationMs) and SERVED on replay (served >= 1).
+        # boot_blocking: record as httppoll, but replay with the app boot-blocking
+        #   synchronously on the watch (BLOCK_BOOT_ON_WATCH) -> asserts the value-
+        #   epoch engine serves the startup epoch so the app boots and ingress
+        #   PASSES (the old anchor-hold engine would park it -> boot deadlock).
+        #   Needs keploy/samples-java#148 (the BLOCK_BOOT_ON_WATCH app support).
+        scenario: [periodic, httppoll, boot_blocking]
     name: async-config-poll (${{ matrix.scenario }} / ${{ matrix.config.job }})
     steps:
       - name: Checkout repository
@@ -261,6 +369,12 @@ jobs:
       - name: Set up Go (for the config-service stub)
         uses: actions/setup-go@v6
         with:
+          # Deliberately NOT go.mod's version: this Go is only used to build
+          # the config-service stub in keploy/samples-java, whose own
+          # async-config-poll/config-stub/go.mod declares `go 1.21`. It never
+          # compiles keploy itself (the binaries under test are downloaded by
+          # the download-binary steps above), so it is not part of the repo's
+          # toolchain bump and must track the sample instead.
           go-version: "1.21"
 
       - name: Run async-config-poll app

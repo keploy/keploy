@@ -555,18 +555,37 @@ type PostmanResponse struct {
 }
 
 func (ic *ItemsContainer) UnmarshalJSON(data []byte) error {
-	var postmanItems []PostmanItem
-	if err := json.Unmarshal(data, &postmanItems); err == nil {
-		ic.PostmanItems = postmanItems
-	}
-
-	var items []TestData
-
-	if err := json.Unmarshal(data, &items); err != nil {
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(data, &rawItems); err != nil {
 		return err
 	}
 
-	ic.TestDataItems = items
+	for _, raw := range rawItems {
+		var shape struct {
+			Item    *json.RawMessage `json:"item"`
+			Request *json.RawMessage `json:"request"`
+		}
+		if err := json.Unmarshal(raw, &shape); err != nil {
+			return err
+		}
+
+		if shape.Item != nil {
+			var folder PostmanItem
+			if err := json.Unmarshal(raw, &folder); err != nil {
+				return err
+			}
+			ic.PostmanItems = append(ic.PostmanItems, folder)
+			continue
+		}
+
+		if shape.Request != nil {
+			var item TestData
+			if err := json.Unmarshal(raw, &item); err != nil {
+				return err
+			}
+			ic.TestDataItems = append(ic.TestDataItems, item)
+		}
+	}
 
 	return nil
 }

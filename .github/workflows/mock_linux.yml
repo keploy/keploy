@@ -1,0 +1,57 @@
+name: Mock Mode Regression (Linux)
+# End-to-end guard for `keploy mock record|replay` — Keploy used as a
+# framework-agnostic mocking layer for a user's OWN test runner (here pytest).
+# Self-contained: the script embeds a tiny HTTP dependency and a pytest suite,
+# records the dependency calls, then replays them with the dependency STOPPED
+# and asserts (a) the suite still passes entirely from mocks, (b) per-test
+# mappings are written via the scope API, and (c) a failing runner propagates a
+# non-zero exit code. Runs the PR `build` binary for both record and replay.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
+
+jobs:
+  mock_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: mock-mode (record_replay_build)
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run mock-mode e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-linux.sh"
+
+      - name: Run mock-mode parallel-scope e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-parallel-linux.sh"

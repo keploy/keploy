@@ -194,7 +194,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tcs1.HTTPReq.Body, tcs2.HTTPReq.Body
 	var jsonComparisonResult matcher.JSONComparisonResult
-	if !matcher.Contains(matcher.MapToArray(reqBodyNoise), "body") && bodyType1 == models.JSON {
+	if bodyType1 == models.JSON {
 		//validate the stored json
 		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
@@ -203,7 +203,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 			return false, reqCompare
 		}
 		if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, reqBodyNoise, ignoreOrdering)
+			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, reqBodyNoise, ignoreOrdering, logger)
 			exact := jsonComparisonResult.IsExact()
 			if err != nil {
 				logger.Error("failed to compare json", zap.Error(err))
@@ -224,7 +224,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
 		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
-		if !matcher.Contains(matcher.MapToArray(reqBodyNoise), "body") && tcs1.HTTPReq.Body != tcs2.HTTPReq.Body {
+		if tcs1.HTTPReq.Body != tcs2.HTTPReq.Body {
 			pass = false
 			bodyRes = false
 		}
@@ -324,26 +324,18 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 
 	noise := noise1
 
+	// Copy before merging: noiseConfig is the caller's long-lived global map.
 	var (
-		bodyNoise   = noiseConfig["body"]
-		headerNoise = noiseConfig["header"]
+		bodyNoise   = matcher.CloneNoiseMap(noiseConfig["body"])
+		headerNoise = matcher.CloneNoiseMap(noiseConfig["header"])
 	)
 
-	if bodyNoise == nil {
-		bodyNoise = map[string][]string{}
+	tcBodyNoise, tcHeaderNoise, skipBody := matcher.SplitNoise(noise, logger)
+	for field, regexArr := range tcBodyNoise {
+		bodyNoise[field] = regexArr
 	}
-	if headerNoise == nil {
-		headerNoise = map[string][]string{}
-	}
-
-	for field, regexArr := range noise {
-		a := strings.Split(field, ".")
-		if len(a) > 1 && a[0] == "body" {
-			x := strings.Join(a[1:], ".")
-			bodyNoise[strings.ToLower(x)] = regexArr
-		} else if a[0] == "header" {
-			headerNoise[strings.ToLower(a[len(a)-1])] = regexArr
-		}
+	for field, regexArr := range tcHeaderNoise {
+		headerNoise[field] = regexArr
 	}
 
 	// compare http resp headers
@@ -376,7 +368,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tcs1.HTTPResp.Body, tcs2.HTTPResp.Body
 	var jsonComparisonResult matcher.JSONComparisonResult
-	if !matcher.Contains(matcher.MapToArray(noise), "body") && bodyType1 == models.JSON {
+	if !skipBody && bodyType1 == models.JSON {
 		//validate the stored json
 		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
@@ -385,7 +377,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 			return false, respCompare
 		}
 		if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)
 			exact := jsonComparisonResult.IsExact()
 			if err != nil {
 				logger.Error("failed to compare json", zap.Error(err))
@@ -405,7 +397,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
 		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
-		if !matcher.Contains(matcher.MapToArray(noise), "body") && tcs1.HTTPResp.Body != tcs2.HTTPResp.Body {
+		if !skipBody && tcs1.HTTPResp.Body != tcs2.HTTPResp.Body {
 			pass = false
 			bodyRes = false
 		}

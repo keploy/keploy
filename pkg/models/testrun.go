@@ -138,9 +138,17 @@ type UnmatchedCall struct {
 	// render structured field-level drift instead of an opaque string. Paths
 	// in FieldDiffs use the noise-config vocabulary and can be copied
 	// verbatim into test.globalNoise / spec.assertions.noise.
-	MatchPhase     string          `json:"match_phase,omitempty" yaml:"match_phase,omitempty"`
-	CandidateCount int             `json:"candidate_count,omitempty" yaml:"candidate_count,omitempty"`
-	FieldDiffs     []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
+	MatchPhase string `json:"match_phase,omitempty" yaml:"match_phase,omitempty"`
+	// DestinationScope mirrors MockMismatchReport.DestinationScope
+	// (DestinationScope* constants). It is a separate axis from MatchPhase:
+	// "not_in_compared_set" says no mock this miss was compared against
+	// targeted the call's upstream, while MatchPhase still reports where the
+	// cascade stopped. Omitted when empty — the protocol supplied no
+	// destination evidence, and an absent field is the only honest rendering
+	// of "we did not check".
+	DestinationScope string          `json:"destination_scope,omitempty" yaml:"destination_scope,omitempty"`
+	CandidateCount   int             `json:"candidate_count,omitempty" yaml:"candidate_count,omitempty"`
+	FieldDiffs       []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
 	// ClosestMockReq / ReceivedReq carry the FULL rendered requests for the CLI
 	// side-by-side whole-mock diff (left = mock, right = live request).
 	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`
@@ -272,6 +280,29 @@ const (
 	NoiseFailureNoDiffsFound   NoiseFailureReason = "NO_DIFFS_FOUND"        // no specific differing fields identified
 	NoiseFailureRootLevel      NoiseFailureReason = "ROOT_LEVEL_CHANGE"     // entire response value changed at root level
 	NoiseFailureEmptyHeaderKey NoiseFailureReason = "HEADER_ONLY_EMPTY_KEY" // header diff but field name is empty
+
+	// The reasons below are refusals rather than failures: the difference was
+	// identified precisely, and suppressing it would delete an assertion instead
+	// of tolerating nondeterminism. The first five carry a matcher.NoiseSkipReason
+	// through; the last two are the producer's own and have no matcher analogue.
+	NoiseFailureStructuralChange  NoiseFailureReason = "STRUCTURAL_CHANGE"    // field appeared, vanished, or changed shape
+	NoiseFailureArrayLengthChange NoiseFailureReason = "ARRAY_LENGTH_CHANGE"  // array grew or shrank; only a subtree-wide entry excuses it
+	NoiseFailureUnrepresentable   NoiseFailureReason = "UNREPRESENTABLE_PATH" // a JSON key contains ".", so no path names it alone
+	NoiseFailureOverBroadPath     NoiseFailureReason = "OVER_BROAD_PATH"      // the path would also silence a field that did not drift
+	NoiseFailureOrderAmbiguous    NoiseFailureReason = "ORDER_AMBIGUOUS"      // ignoreOrdering: which array element drifted is unknowable
+	NoiseFailureBodyDerivedHeader NoiseFailureReason = "BODY_DERIVED_HEADER"  // e.g. Content-Length; fix the body diff instead
+	NoiseFailureTooManyDiffs      NoiseFailureReason = "TOO_MANY_DIFFS"       // a broken endpoint, not a noisy one
+	// NoiseFailurePatternTooNarrow — the field already carries a noise entry, but
+	// a regex-guarded one whose pattern does not describe the replayed value.
+	// Only the author of that pattern can say whether the new value belongs in
+	// it, so auto-noise reports it rather than quietly widening the assertion
+	// someone deliberately narrowed.
+	NoiseFailurePatternTooNarrow NoiseFailureReason = "PATTERN_TOO_NARROW"
+	// NoiseFailureUnresolved — the derived entries do not make the matcher accept
+	// the response. It is the backstop: the matcher is asked directly rather than
+	// modelled, so a difference can never be reported as handled when the next
+	// replay would fail on it again.
+	NoiseFailureUnresolved NoiseFailureReason = "UNRESOLVED"
 )
 
 // FailureAssessment contains JSON structural analysis of response body differences.

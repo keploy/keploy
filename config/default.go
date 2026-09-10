@@ -41,7 +41,10 @@ test:
     test-sets: {}
   delay: 5
   healthUrl: ""
-  healthPollTimeout: 60s
+  healthPath: ""
+  healthScheme: ""
+  healthPollTimeout: 3m
+  disableAppReadyProbe: false
   host: "localhost"
   port: 0
   grpcPort: 0
@@ -57,7 +60,7 @@ test:
   skipCoverage: false
   coverageReportPath: ""
   ignoreOrdering: true
-  mongoPassword: "default@123"
+  mongoPassword: ""
   language: ""
   removeUnusedMocks: false
   fallBackOnMiss: false
@@ -93,24 +96,78 @@ record:
   sync: false
   memoryLimit: 0
   testCaseNaming: descriptive
+  # upstreamTls controls whether keploy authenticates the REAL upstream
+  # server when it dials out on your application's behalf. Being a TLS
+  # MITM constrains only the app-facing leg; the upstream leg is an
+  # ordinary Go TLS client, so verification needs no extra CA bundle.
+  upstreamTls:
+    # Off by default because keploy must never be stricter than the app
+    # it records: an app using sslmode=require / tls=skip-verify chose
+    # not to authenticate its upstream, and verifying on its behalf
+    # would refuse connections the app would have made. The failure is
+    # also silent — a dest-side handshake error falls through to raw
+    # passthrough, so the app keeps working while the mock is dropped.
+    # Turn this on when the recording itself is security-relevant.
+    verify: false
+    # Optional PEM file of extra trust anchors, appended to the system
+    # pool when verify is true. Use it for private/internal CAs. The
+    # path is resolved on the AGENT's filesystem, which for docker/k8s
+    # runs is not the host's.
+    caCert: ""
   # recordBuffer tunes the per-connection recording queue. Touch only
-  # if you see "mock incomplete" warnings (reason: per_conn_cap or
-  # channel_full) in the agent logs. Env vars
-  # KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
+  # if you see "mock incomplete" warnings (reason: per_conn_cap) in
+  # the agent logs. Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN,
+  # KEPLOY_RECORD_QUEUE_SIZE, KEPLOY_RECORD_CONSUMER_STALL_GRACE and
+  # KEPLOY_RECORD_HALF_CLOSE_GRACE
   # override these values.
   recordBuffer:
     # Bytes. 67108864 = 64 MiB. Zero falls through to the built-in
     # default. Bump for workloads with large responses (e.g. >10 MB
     # query results).
     maxMemoryPerConnection: 67108864
-    # Number of chunk slots (~32 KiB each). Zero falls through to
-    # the built-in default. Bump for bursty traffic.
+    # Number of chunk slots (~32 KiB each) in the recorder-to-parser
+    # hand-off channel. Zero falls through to the built-in default.
+    # This does not bound how much the recorder buffers, so raising it
+    # will not stop per_conn_cap drops — raise maxMemoryPerConnection.
     queueSize: 1024
+    # How long a closing connection waits on a parser that has stopped
+    # draining before abandoning the chunks still queued for it. Bounds
+    # stalled time, not elapsed time, and is only consulted after close —
+    # a healthy connection never pays it. Zero falls through to the
+    # built-in default (2s).
+    consumerStallGrace: 2s
+    halfCloseGrace: 10s
 async:
     lanes: []
 configPath: ""
 bypassRules: []
+# MySQL is detected automatically on any port: at record time keploy
+# reads the server's handshake to identify it, and at replay time it
+# recalls the port from the recorded mocks. You normally do not need to
+# configure anything here.
+#
+# mysqlPorts pins extra ports to the MySQL parser, skipping detection
+# for them (the built-in list is 3306 and 4000). Useful only to avoid
+# the ~250ms probe on the first connection to a port, or alongside
+# disableMysqlAutoDetect.
+mysqlPorts: []
+# Set to true to turn detection off and go back to matching mysqlPorts
+# strictly. MySQL on any other port will then hang its handshake.
+disableMysqlAutoDetect: false
+# During replay, keploy serves recorded MySQL mocks even when the app
+# connects to a port the recording never saw — an app whose environment
+# was rebuilt does not always get the endpoint it had while recording,
+# and refusing would leave it waiting for a greeting only keploy can
+# send. Set to true if a non-MySQL dependency is being misread as MySQL;
+# unlike disableMysqlAutoDetect this keeps record-time detection on.
+disableMysqlEndpointDrift: false
 disableMapping: false
+mock:
+  name: "default"
+  onMiss: "fail"
+  strict: false
+  local: false
+  recordTimer: 0s
 contract:
   driven: "consumer"
   mappings:

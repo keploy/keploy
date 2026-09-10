@@ -3,10 +3,11 @@ package replayer
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -173,21 +174,40 @@ type queryShape struct {
 	ok       bool
 }
 
+// queryShapeCacheSize bounds queryShapeCache. Same reasoning as match.go's
+// querySigCacheSize: the key is the raw SQL text (unbounded once a client
+// inlines literals) while the value is a pure memo of a deterministic parse,
+// so an eviction costs one re-parse and can never change a match verdict. Kept
+// equal to querySigCacheSize because both caches are fed from exactly the same
+// SQL texts on the same code paths.
+const queryShapeCacheSize = querySigCacheSize
+
 // queryShapeCache memoizes extractQueryShape per SQL text — the same query is
 // re-canonicalized for every candidate mock during a pool scan, and mock-side
-// texts repeat across commands. Sibling of match.go's querySigCache.
-var queryShapeCache sync.Map // map[string]*queryShape
+// texts repeat across commands. Sibling of match.go's querySigCache, 2Q for
+// the same scan-resistance reason documented on newQuerySigCache.
+var queryShapeCache = newQueryShapeCache()
+
+func newQueryShapeCache() *lru.TwoQueueCache[string, *queryShape] {
+	c, err := lru.New2Q[string, *queryShape](queryShapeCacheSize)
+	if err != nil {
+		// Unreachable: New2Q only errors on a non-positive size. Fail loudly
+		// rather than leave a nil cache that panics on the first lookup.
+		panic(fmt.Sprintf("mysql replayer: invalid queryShapeCacheSize %d: %v", queryShapeCacheSize, err))
+	}
+	return c
+}
 
 // extractQueryShape parses sql with the vitess parser (the one the matcher
 // already uses for AST-structure signatures) and splits it into template +
 // literals + comments — the MySQL equivalent of the "give it a query, get its
 // fields" helper the Postgres integration uses. Results are memoized.
 func extractQueryShape(sql string) *queryShape {
-	if v, ok := queryShapeCache.Load(sql); ok {
-		return v.(*queryShape)
+	if v, ok := queryShapeCache.Get(sql); ok {
+		return v
 	}
 	shape := computeQueryShape(sql)
-	queryShapeCache.Store(sql, shape)
+	queryShapeCache.Add(sql, shape)
 	return shape
 }
 

@@ -21,6 +21,13 @@ type mockMiss struct {
 	closestMock    string
 	fieldDiffs     []models.MockFieldDiff
 	strictRejected int
+	// candidateCount is how many MySQL mocks the scan actually considered, and
+	// matchPhase how far the cascade got. Both must be SET, not left zero: the
+	// mismatch report renders them verbatim, and a zero candidateCount reads as
+	// "the pool was empty" — which is what turned a drifted-query miss into a
+	// hunt for a lost recording.
+	candidateCount int
+	matchPhase     string
 }
 
 // formatExecParams renders bound parameter values for mismatch reports,

@@ -10,15 +10,14 @@ import (
 
 // An async mock keeps kind Http (poll-ness is not a distinct kind) and carries
 // its bookkeeping in a top-level async block that must round-trip through
-// mocks.yaml byte-equivalently — including a held long-poll's poll/pollDurationMs.
+// mocks.yaml byte-equivalently — including a held long-poll's poll flag.
 func TestAsyncBlockRoundTrips(t *testing.T) {
 	want := &models.AsyncMeta{
-		Lane:           "config-watch",
-		Seq:            1,
-		AnchorAfter:    "get-rules-1",
-		AnchorPos:      3,
-		Poll:           true,
-		PollDurationMs: 300099,
+		Lane:        "config-watch",
+		Seq:         1,
+		AnchorAfter: "get-rules-1",
+		AnchorPos:   3,
+		Poll:        true,
 	}
 	m := &models.Mock{
 		Version: models.GetVersion(),

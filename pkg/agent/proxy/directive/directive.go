@@ -60,6 +60,22 @@ const (
 	// can either continue (via the surviving peer if any) or be torn
 	// down by the supervisor's fallthrough-to-passthrough path.
 	KindResumePreDispatch
+
+	// KindReleaseClient ends a client→destination write hold set up by
+	// [relay.Config.HoldClientWrites]. The relay writes every byte it
+	// held, in read order, to the real destination and then resumes
+	// normal forwarding on that direction.
+	//
+	// It is the "no TLS after all" counterpart to [KindUpgradeTLS] for
+	// held connections, and a parser that arms the hold MUST send one
+	// of the two: while the hold is up, nothing the client writes
+	// reaches the server, so a parser that decides "this session stays
+	// cleartext" and then stays silent wedges the connection.
+	//
+	// The bytes have already been teed to the parser's FakeConn — the
+	// hold defers the destination Write, not the parser's view — so
+	// releasing does not re-deliver them to the parser.
+	KindReleaseClient
 )
 
 // String returns a short label for logging.
@@ -77,6 +93,8 @@ func (k Kind) String() string {
 		return "finalize-mock"
 	case KindResumePreDispatch:
 		return "resume-pre-dispatch"
+	case KindReleaseClient:
+		return "release-client"
 	default:
 		return "unknown"
 	}
@@ -152,6 +170,31 @@ type UpgradeTLSParams struct {
 	// letting the C2D forwarder pick up the client's reply (TLS
 	// ClientHello after 'S') as cleartext.
 	PreambleForwardToSrc bool
+
+	// ClientFlushBytes is how many bytes from the head of a held
+	// client→destination stash the relay writes to the real
+	// destination before any handshake begins. It is consulted ONLY
+	// when [relay.Config.HoldClientWrites] armed a hold on this
+	// connection; without a hold the client's bytes were forwarded in
+	// real time and there is nothing to flush.
+	//
+	// MySQL is the motivating case and shows why a count is needed
+	// rather than a flush-all. Its CLIENT_SSL choreography is
+	// server-greets, client sends a 36-byte SSLRequest, and then —
+	// with no further server turn — the client begins its TLS
+	// handshake on the same connection. The server must receive the
+	// SSLRequest, or it will not switch to TLS; it must NOT receive
+	// the ClientHello that follows, because keploy is the one that
+	// terminates that handshake. Both can already be sitting in the
+	// same stash (they frequently arrive coalesced in a single read),
+	// so the split is by byte count: ClientFlushBytes=36 forwards the
+	// SSLRequest and leaves the ClientHello for the client-side
+	// handshake to consume via the prepending conn.
+	//
+	// Zero flushes nothing, which is the safe default for a hold: a
+	// parser that does not say what the server needs does not get to
+	// leak the rest of the client's cleartext upstream by accident.
+	ClientFlushBytes int
 
 	// ProceedOnPreamble, when non-empty, gates the TLS handshakes on
 	// an exact byte-for-byte match against the read preamble. A
@@ -256,6 +299,12 @@ func Pause(d fakeconn.Direction, reason string) Directive {
 // Resume returns a [KindResumeDir] directive for the given direction.
 func Resume(d fakeconn.Direction, reason string) Directive {
 	return Directive{Kind: KindResumeDir, Dir: d, Reason: reason}
+}
+
+// ReleaseClient returns a [KindReleaseClient] directive. See the
+// kind's docstring for the hold lifecycle it completes.
+func ReleaseClient(reason string) Directive {
+	return Directive{Kind: KindReleaseClient, Reason: reason}
 }
 
 // ResumePreDispatch returns a [KindResumePreDispatch] directive. See

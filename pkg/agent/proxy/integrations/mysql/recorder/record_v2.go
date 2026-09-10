@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,7 +86,26 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 	var clientKeyNetConn net.Conn = clientKey
 	decodeCtx.LastOp.Store(clientKeyNetConn, wire.RESET)
 
-	handshake, err := handleInitialHandshakeV2(ctx, logger, sess, decodeCtx, &clientKeyNetConn)
+	// Post-TLS mode: this is a decrypted (uprobe) tls-* stream. Its server
+	// greeting was sent in plaintext BEFORE the TLS handshake and captured on
+	// the separate raw stream (stashed in TLSHandshakeStore) — there is none to
+	// read off DestStream here. Route to the post-TLS handshake, which pops the
+	// stashed greeting instead of reading it, then falls into the normal V2
+	// command loop. (Previously this stream was forced onto the legacy recorder
+	// because handleInitialHandshakeV2 unconditionally reads the greeting off
+	// DestStream and would misparse.)
+	postTLS := false
+	if v, ok := ctx.Value(models.PostTLSModeKey).(bool); ok && v {
+		postTLS = true
+	}
+
+	var handshake v2HandshakeResult
+	var err error
+	if postTLS {
+		handshake, err = handlePostTLSHandshakeV2(ctx, logger, sess, decodeCtx, &clientKeyNetConn)
+	} else {
+		handshake, err = handleInitialHandshakeV2(ctx, logger, sess, decodeCtx, &clientKeyNetConn)
+	}
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 			logger.Debug("EOF during MySQL V2 initial handshake")
@@ -109,7 +130,15 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 		emitMockV2(ctx, sess, handshake.req, handshake.resp, "config", handshake.requestOperation, handshake.responseOperation, handshake.reqTimestamp, handshake.resTimestamp)
 	}
 
-	if err := handleCommandsV2(ctx, logger, sess, decodeCtx, clientKeyNetConn); err != nil {
+	// Observe-only pre-TLS handshake was stored for the decrypted stream's
+	// post-TLS stitch; the rest of THIS raw stream is encrypted TLS records
+	// (not decodable command traffic), so stop here.
+	if handshake.preTLSStored {
+		logger.Debug("V2: pre-TLS handshake stored; raw stream ends here, post-TLS capture continues on the decrypted tls-* stream")
+		return nil
+	}
+
+	if err := handleCommandsV2(ctx, logger, sess, decodeCtx, clientKeyNetConn, handshake.firstCmd); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 			return nil
 		}
@@ -131,6 +160,20 @@ type v2HandshakeResult struct {
 	reqTimestamp      time.Time
 	resTimestamp      time.Time
 	skipConfigMock    bool
+	// preTLSStored is set when the observe-only (SkipTLSMITM) path has
+	// pushed the pre-TLS server greeting + SSLRequest into
+	// TLSHandshakeStore and handed the post-TLS continuation off to the
+	// decrypted (tls-*) stream's handlePostTLSRecord. The caller must
+	// stop after the handshake: the remaining bytes on THIS raw stream
+	// are opaque TLS records, not decodable MySQL command traffic.
+	preTLSStored bool
+	// firstCmd carries a command-phase packet that the post-TLS handshake
+	// (handlePostTLSHandshakeV2) had to read off ClientStream to distinguish a
+	// fresh connection (HandshakeResponse41, seq>=1) from a pre-warmed pool
+	// connection joined mid-stream (a command, seq==0). On the seq==0 path
+	// there is no auth exchange to consume, so the already-read command is
+	// handed to handleCommandsV2 as its first packet instead of being lost.
+	firstCmd []byte
 }
 
 // handleInitialHandshakeV2 walks the MySQL connection phase on the V2
@@ -165,9 +208,11 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		return res, fmt.Errorf("decode server greeting: %w", err)
 	}
 	res.requestOperation = handshakePkt.Header.Type
+	var serverID string
 	if greeting, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet); ok {
 		decodeCtx.ServerCaps = greeting.CapabilityFlags
 		decodeCtx.ServerGreetings.Store(clientKey, greeting)
+		serverID = greetingServerIdentity(greeting)
 	}
 	pluginName, err := wire.GetPluginName(handshakePkt.Message)
 	if err != nil {
@@ -191,13 +236,54 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	res.req = append(res.req, mysql.Request{PacketBundle: *clientFirstPkt})
 
 	if decodeCtx.UseSSL {
-		// Before the TLS upgrade we could record an incomplete mock
-		// shape mirroring the legacy SkipTLSMITM branch; on the V2
-		// path, however, we must ALWAYS attempt the upgrade via the
-		// directive channel. SkipTLSMITM is a legacy concept tied to
-		// uprobe coordination that does not exist in V2.
+		// Observe-only capture (proxyless): there is no relay
+		// that can perform a real TLS handshake for us, so we cannot
+		// (and must not) send a KindUpgradeTLS directive — the
+		// observe-only supervisor would reject it ("proxyless observe-only
+		// capture cannot perform a TLS upgrade"), abort this stream, and
+		// the pre-TLS greeting would never be stored.
+		//
+		// Instead, mirror the legacy conn.go SkipTLSMITM branch: push the
+		// raw server greeting + SSLRequest into TLSHandshakeStore keyed by
+		// dest port, so the separately-captured, uprobe-decrypted tls-*
+		// stream's handlePostTLSRecord can pop it and reconstruct the
+		// decode context for the post-TLS auth + command phase. The
+		// remaining bytes on THIS raw stream are encrypted TLS records, so
+		// we stop after storing (preTLSStored) rather than continuing into
+		// the command phase.
+		//
+		// SkipTLSMITM here means "observe-only capture: there is no MITM
+		// relay to drive the TLS upgrade with". In that mode the greeting +
+		// SSLRequest arrived in plaintext on this raw stream and the post-TLS
+		// phase is lifted separately by the uprobe (tls-*) stream, so we
+		// stash the handshake and stop. When a relay IS present (SkipTLSMITM
+		// is false) control falls through to the directive-based upgrade
+		// below instead.
+		if sess.Opts.SkipTLSMITM {
+			if err := storePreTLSHandshakeV2(ctx, logger, sess, handshake, clientFirst, res.reqTimestamp, serverID); err != nil {
+				return res, err
+			}
+			res.skipConfigMock = true
+			res.preTLSStored = true
+			return res, nil
+		}
 
-		if err := performTLSUpgradeV2(ctx, logger, sess); err != nil {
+		// len(clientFirst) is the exact width of the SSLRequest packet
+		// we just consumed, and it is what the relay forwards upstream
+		// before handshaking. It has to be a measured count rather than
+		// a constant: the relay is holding the client's writes, and the
+		// SSLRequest and the ClientHello behind it frequently arrive in
+		// one read, so "forward the SSLRequest and nothing else" can
+		// only be expressed as a byte count. See
+		// relay.Config.HoldClientWrites.
+		// Zero when nothing is held: the relay ignores the count in
+		// that case, but passing the real width would misreport what
+		// the directive actually did.
+		clientFlush := 0
+		if sess.ClientWritesHeld {
+			clientFlush = len(clientFirst)
+		}
+		if err := performTLSUpgradeV2(ctx, logger, sess, clientFlush); err != nil {
 			sess.MarkMockIncomplete("tls upgrade failed")
 			return res, err
 		}
@@ -230,6 +316,22 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		}
 		decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
 		res.req = append(res.req, mysql.Request{PacketBundle: *hr41Pkt})
+	} else if sess.ClientWritesHeld {
+		// No TLS: the client authenticated in cleartext, so the hold
+		// the relay armed for this connection has to come off before
+		// anything else can happen. Nothing we have read so far has
+		// reached the server — that is the point of the hold — so the
+		// auth decider read below would block forever on a reply to a
+		// request the server never received.
+		//
+		// Gated on ClientWritesHeld rather than sent unconditionally:
+		// the release costs an ack round-trip, and on every path with
+		// no relay behind it (observe-only proxyless capture, unit
+		// harnesses) there is no one to answer it.
+		if err := releaseClientHoldV2(ctx, logger, sess); err != nil {
+			sess.MarkMockIncomplete("client hold release failed")
+			return res, err
+		}
 	}
 
 	// Auth decider: AuthSwitchRequest / AuthMoreData / OK / ERR.
@@ -285,6 +387,313 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	// arrived at the relay — sampled from DestStream's chunk time.
 	res.resTimestamp = sess.DestStream.LastReadTime()
 
+	return res, nil
+}
+
+// handlePostTLSHandshakeV2 is the V2 handshake for a decrypted (uprobe) tls-*
+// stream. Unlike handleInitialHandshakeV2 it does NOT read the server greeting
+// off DestStream — on this stream there is none, because the greeting was sent
+// in plaintext before the TLS handshake and captured on the separate raw
+// stream, which stashed it in TLSHandshakeStore (the same stash
+// handleInitialHandshakeV2/storePreTLSHandshakeV2 produces on the raw side).
+// It pops that greeting, seeds the decode context identically, reads the
+// post-TLS HandshakeResponse41 + auth off the decrypted streams, and returns a
+// config mock. handleCommandsV2 then records the command phase exactly as for
+// plaintext MySQL — so this stream no longer needs the legacy recorder.
+//
+// It mirrors the legacy conn.go handlePostTLSRecord pop/seed logic, but hands
+// the command phase to V2's structured per-direction reader (which reads the
+// client command then the server response in wire order, so it needs neither
+// the legacy path's ktime relay-merge nor its res>=req timestamp clamp).
+func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKeyPtr *net.Conn) (res v2HandshakeResult, err error) {
+	res = v2HandshakeResult{
+		req:  make([]mysql.Request, 0),
+		resp: make([]mysql.Response, 0),
+	}
+	clientKey := *clientKeyPtr
+
+	// 1. Pop the pre-TLS server greeting (+ SSLRequest) from TLSHandshakeStore.
+	//    The proxy/uprobe see different TCP connections, so the conn-specific
+	//    key usually misses in proxyless — fall back to the port-only key
+	//    (port:3306), the same convention the legacy handlePostTLSRecord uses.
+	dstPort := uint16(0)
+	if sess.Opts.DstCfg != nil {
+		dstPort = uint16(sess.Opts.DstCfg.Port)
+	}
+	hsStore, _ := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+	if hsStore == nil {
+		return res, fmt.Errorf("post-TLS V2: PostTLSModeKey is set but TLSHandshakeStore is missing from the context — the SSL/GoTLS reader callback must set models.TLSHandshakeStoreKey (same store the pre-TLS raw stream pushes the greeting into) before dispatching the decrypted tls-* stream")
+	}
+	// The raw leg's push rides the SAME capture as this decrypted stream, so
+	// under CPU pressure it can land arbitrarily late — a short fixed timeout
+	// here converted that lateness into total capture loss (the CI "served but
+	// NOT recorded" shortfall). resolvePreTLSGreeting waits (bounded by ctx and
+	// by the store TTL) for this connection's own greeting, but falls back FAST
+	// to the port's last-greeting cache when the raw leg was genuinely dropped —
+	// so a dropped leg does not stall the whole overall window and push the
+	// COM_QUERY decode past the CI (2a) gate. Waiting is free: the client's
+	// post-TLS bytes are buffered on ClientStream and read only after this
+	// returns.
+	entry, source := resolvePreTLSGreeting(ctx, hsStore, sess.Opts.ConnKey, dstPort, sess.Opts.PassThroughScope, sess.Opts.DstCfg)
+	// A greetingShared entry came off the port-only FIFO, which is shared by
+	// every decrypted stream to this port — in proxyless that FIFO is the ONLY
+	// key that bridges the raw and decrypted legs, so all of them draw from it.
+	// Popping is destructive. If this stream then fails before producing a mock
+	// (the common case being a decrypted stream whose own bytes never arrive, so
+	// the first-client-packet read returns EOF), the greeting it consumed is
+	// gone and a LIVE connection that needed it is starved — silent decode loss,
+	// which is what made this a "served but not recorded" shortfall rather than
+	// an error. Put an unused entry back so the rightful owner still gets it;
+	// Push broadcasts the store's cond, so a sibling already blocked in
+	// resolvePreTLSGreeting wakes immediately.
+	//
+	// Restore-if-UNUSED, not restore-if-error: the direct-fetch branch below
+	// discards a payload-less entry and can then SUCCEED, which must still give
+	// the entry back. sharedAdopted tracks that directly.
+	//
+	// The restored entry is stripped of ReqTimestamp. Push re-stamps pushedAt,
+	// so a restored entry is rejuvenated rather than expiring, and it comes back
+	// as greetingShared — for which staleEntry is false — so keeping the
+	// timestamp would stamp a DEAD connection's capture time onto a live
+	// connection's config mock. Config mocks are identified by Name+Kind+
+	// ReqTimestampMock (treedb.sameMock) and ordered by it, so that is a replay
+	// break, and it is the same hazard conn.go already documents for the legacy
+	// borrowed greeting. A zero ReqTimestamp makes the next consumer sample its
+	// own first client read, which is exactly what the direct-fetch path does.
+	sharedAdopted := false
+	sharedUndecodable := false
+	if source == greetingShared {
+		sharedKey := models.HandshakeStoreKey("", dstPort)
+		sharedEntry := entry
+		sharedEntry.ReqTimestamp = time.Time{}
+		defer func() {
+			// Kept only when this stream both adopted the entry AND produced a
+			// mock from it. Anything else — never adopted (direct-fetch branch),
+			// or adopted then failed — leaves a live connection starved.
+			if sharedAdopted && err == nil {
+				return
+			}
+			// An entry whose greeting does not decode is garbage, and Push
+			// re-stamps pushedAt, so putting it back would make it immortal and
+			// trip every later stream to this port. Drop it — the connection it
+			// belonged to could not have used it either.
+			// Only when the failure was THIS entry's own greeting. On the
+			// direct-fetch branch the buffer that failed to decode is the
+			// FETCHED greeting, not the shared entry, so dropping it on that
+			// basis would discard an untouched entry someone else needs.
+			if sharedAdopted && sharedUndecodable {
+				return
+			}
+			hsStore.Push(sharedKey, sharedEntry)
+			logger.Debug("post-TLS V2: returned an unused shared greeting to the port FIFO",
+				zap.Uint16("dstPort", dstPort), zap.Error(err))
+		}()
+	}
+	staleEntry := source == greetingCached
+	var greetingBuf []byte
+	if source != greetingNone && len(entry.RespPackets) > 0 {
+		greetingBuf = entry.RespPackets[0]
+		// Adopted: this stream owns the entry from here. It goes back only if
+		// the stream fails before producing a mock (the defer above).
+		sharedAdopted = true
+		if staleEntry {
+			// The raw leg was genuinely lost (its capture event dropped by a
+			// full ringbuf, or delayed past the store TTL). Greetings for the
+			// same destination are reusable for stitching: capabilities,
+			// protocol version and auth plugin are per-server, and the
+			// per-connection salt is never verified on the record or replay
+			// path (the replayer skips AuthResponse comparison — see
+			// replayer/match.go). Reuse the most recent greeting (+SSLRequest)
+			// another connection pushed for this port instead of losing the
+			// whole command phase.
+			logger.Debug("post-TLS V2: raw-leg greeting lost; falling back to the last cached greeting for this port",
+				zap.Uint16("dstPort", dstPort))
+		}
+	} else {
+		// The pre-TLS handshake was never captured (connection opened before
+		// interception started) and no greeting is cached for the port. Fetch
+		// the greeting directly, matching legacy. fetchServerGreeting refuses
+		// fabricated destinations (see models.ConditionalDstCfg.AddrFabricated),
+		// so this cannot dial an address the capture layer merely invented.
+		var gErr error
+		greetingBuf, gErr = fetchServerGreeting(ctx, sess.Opts)
+		if gErr != nil {
+			return res, fmt.Errorf("post-TLS V2: no greeting in store (key port %d) and direct fetch failed: %w", dstPort, gErr)
+		}
+		// A directly-fetched greeting carries no stashed SSLRequest or
+		// timestamp; make downstream treat it as such.
+		entry = models.TLSHandshakeEntry{}
+		staleEntry = false
+		source = greetingNone
+	}
+
+	// Config-mock request timestamp = when the greeting arrived (stashed on the
+	// raw stream). Zero when we fell back to a direct fetch; sampled from the
+	// first client read below in that case.
+	res.reqTimestamp = entry.ReqTimestamp
+	if staleEntry {
+		// The cached entry belongs to an EARLIER connection; its timestamp
+		// would backdate this mock. Sample from the first client read below.
+		res.reqTimestamp = time.Time{}
+	}
+
+	// 2. Decode the greeting and seed the decode context (mirrors legacy).
+	greetingPkt, err := wire.DecodePayload(ctx, logger, greetingBuf, clientKey, decodeCtx)
+	if err != nil {
+		sharedUndecodable = true
+		return res, fmt.Errorf("post-TLS V2: decode stored greeting: %w", err)
+	}
+	sg, isHS := greetingPkt.Message.(*mysql.HandshakeV10Packet)
+	if !isHS {
+		sharedUndecodable = true
+		return res, fmt.Errorf("post-TLS V2: stored greeting is not HandshakeV10")
+	}
+	decodeCtx.ServerCaps = sg.CapabilityFlags
+	decodeCtx.ServerGreetings.Store(clientKey, sg)
+	decodeCtx.LastOp.Store(clientKey, mysql.HandshakeV10)
+	decodeCtx.UseSSL = true
+	pluginName, err := wire.GetPluginName(greetingPkt.Message)
+	if err != nil {
+		return res, fmt.Errorf("post-TLS V2: get plugin name: %w", err)
+	}
+	decodeCtx.PluginName = pluginName
+	res.requestOperation = greetingPkt.Header.Type
+	res.resp = append(res.resp, mysql.Response{PacketBundle: *greetingPkt})
+
+	// 3. Prepend the stored SSLRequest so the config mock matches the hosted
+	//    shape (req: [SSLRequest, HandshakeResponse41, ...]). It MUST decode
+	//    before the HandshakeResponse41 below, while LastOp is still
+	//    HandshakeV10 — same ordering constraint as legacy handlePostTLSRecord.
+	var sslReqPkt *mysql.PacketBundle
+	if source != greetingNone && len(entry.ReqPackets) > 0 {
+		if pkt, sErr := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientKey, decodeCtx); sErr == nil {
+			sslReqPkt = pkt
+			res.req = append(res.req, mysql.Request{PacketBundle: *pkt})
+		} else {
+			logger.Debug("post-TLS V2: decode stored SSLRequest failed; config mock will omit it", zap.Error(sErr))
+		}
+	}
+
+	// 4. Read the first client packet. seq>=1 = HandshakeResponse41 (fresh
+	//    connection captured from the start); seq==0 = a command on a pre-warmed
+	//    pool connection joined mid-stream (already authed).
+	firstBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+	if err != nil {
+		return res, fmt.Errorf("post-TLS V2: read first client packet: %w", err)
+	}
+	if len(firstBuf) < 4 {
+		return res, fmt.Errorf("post-TLS V2: first client packet too short (%d bytes)", len(firstBuf))
+	}
+	if res.reqTimestamp.IsZero() {
+		res.reqTimestamp = sess.ClientStream.LastReadTime()
+	}
+
+	if firstBuf[3] == 0 {
+		// seq==0: existing connection, already authenticated. No HandshakeResponse41
+		// and no auth exchange to consume. Assume a modern client (every supported
+		// driver negotiates CLIENT_DEPRECATE_EOF) so the EOF-less result-set decode
+		// path is used, emit the config mock from the stored greeting + SSLRequest,
+		// and hand the command back to handleCommandsV2 as its first packet.
+		logger.Debug("post-TLS V2: existing connection detected (seq=0), skipping auth; entering command phase",
+			zap.Uint16("dstPort", dstPort))
+		decodeCtx.ClientCaps = wire.CLIENT_DEPRECATE_EOF
+		decodeCtx.ClientCapabilities = wire.CLIENT_DEPRECATE_EOF
+		// firstBuf is a COMMAND, not a handshake response — but LastOp is still
+		// HandshakeV10 from the greeting seed above, and DecodePayload treats
+		// LastOp==HandshakeV10 as "expect HandshakeResponse41/SSLRequest". Reset
+		// it so handleCommandsV2 decodes firstCmd as a command (mirrors the legacy
+		// handlePostTLSRecord seq==0 path, conn.go).
+		decodeCtx.LastOp.Store(clientKey, wire.RESET)
+		res.responseOperation = greetingPkt.Header.Type
+		// The replayer matches a connection by finding a HandshakeResponse41 in
+		// the config mock's requests[0]/[1] — but a seq==0 connection had no HR41
+		// captured. Synthesize one (+ auth) from the stored SSLRequest so this
+		// config mock is replay-matchable, mirroring the legacy seq==0 path
+		// (recordSyntheticConfigMock). Without a stored SSLRequest we fall back to
+		// the greeting-only config (best-effort; will not match at replay).
+		if sslReqPkt != nil {
+			reqs, resps, respOp, sErr := buildSyntheticPostTLSConfig(ctx, logger, decodeCtx, greetingPkt, sslReqPkt)
+			if sErr != nil {
+				logger.Debug("post-TLS V2: synthesize seq==0 config mock failed; emitting greeting-only config", zap.Error(sErr))
+			} else {
+				res.req = reqs
+				res.resp = resps
+				res.requestOperation = sslReqPkt.Header.Type
+				res.responseOperation = respOp
+			}
+		}
+		res.firstCmd = firstBuf
+		res.resTimestamp = res.reqTimestamp
+		return res, nil
+	}
+
+	// seq>=1: HandshakeResponse41. Decoding it populates ClientCapabilities.
+	hr41Pkt, err := wire.DecodePayload(ctx, logger, firstBuf, clientKey, decodeCtx)
+	if err != nil {
+		return res, fmt.Errorf("post-TLS V2: decode HandshakeResponse41: %w", err)
+	}
+	decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
+	res.req = append(res.req, mysql.Request{PacketBundle: *hr41Pkt})
+
+	// 5. Auth exchange off DestStream — reuse the same decider + AuthSwitch +
+	//    handleAuthV2 flow as handleInitialHandshakeV2.
+	authData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+	if err != nil {
+		return res, fmt.Errorf("post-TLS V2: read auth data from server: %w", err)
+	}
+	authDecider, err := wire.DecodePayload(ctx, logger, authData, clientKey, decodeCtx)
+	if err != nil {
+		return res, fmt.Errorf("post-TLS V2: decode auth data from server: %w", err)
+	}
+	if asr, isSwitch := authDecider.Message.(*mysql.AuthSwitchRequestPacket); isSwitch {
+		res.resp = append(res.resp, mysql.Response{PacketBundle: *authDecider})
+		decodeCtx.PluginName = asr.PluginName
+
+		switchResp, sErr := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+		if sErr != nil {
+			return res, fmt.Errorf("post-TLS V2: read auth switch response: %w", sErr)
+		}
+		switchPkt, pErr := mysqlUtils.BytesToMySQLPacket(switchResp)
+		if pErr != nil {
+			return res, fmt.Errorf("post-TLS V2: parse auth switch response: %w", pErr)
+		}
+		res.req = append(res.req, mysql.Request{
+			PacketBundle: mysql.PacketBundle{
+				Header:  &mysql.PacketInfo{Header: &switchPkt.Header, Type: mysql.AuthSwithResponse},
+				Message: intgUtils.EncodeBase64(switchPkt.Payload),
+			},
+		})
+
+		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		if err != nil {
+			return res, fmt.Errorf("post-TLS V2: read auth data after switch: %w", err)
+		}
+		authDecider, err = wire.DecodePayload(ctx, logger, authData, clientKey, decodeCtx)
+		if err != nil {
+			return res, fmt.Errorf("post-TLS V2: decode auth data after switch: %w", err)
+		}
+	}
+
+	authRes, err := handleAuthV2(ctx, logger, sess, decodeCtx, clientKey, authDecider)
+	if err != nil {
+		return res, err
+	}
+	res.req = append(res.req, authRes.req...)
+	res.resp = append(res.resp, authRes.resp...)
+	res.responseOperation = authRes.responseOperation
+	res.resTimestamp = sess.DestStream.LastReadTime()
+
+	// Clamp res>=req for the config mock. Unlike the normal V2 handshake — where
+	// req (greeting) and res (auth) are read sequentially off the SAME DestStream
+	// so res>=req always holds — this post-TLS config mock crosses two captures:
+	// req is the pre-TLS greeting time stamped on the RAW stream (entry.ReqTimestamp)
+	// while res is the post-TLS auth time on the DECRYPTED stream. Chronologically
+	// the greeting precedes the auth, but if those cross-stream timestamps ever
+	// invert, the replay-load filters (filterByTimeStamp / MockManager) would drop
+	// this LifetimeSession config mock and break connection setup at replay. Pin it.
+	if res.resTimestamp.Before(res.reqTimestamp) {
+		res.resTimestamp = res.reqTimestamp
+	}
 	return res, nil
 }
 
@@ -479,22 +888,410 @@ func handlePlainPasswordV2(ctx context.Context, logger *zap.Logger, sess *superv
 	return res, nil
 }
 
+// mysqlPostTLSStashWaitDefault is the OVERALL upper bound on how long
+// resolvePreTLSGreeting waits for a pre-TLS greeting when it has NO cached
+// greeting to fall back on (the first connection to a destination port, or one
+// where every sibling connection's raw leg was also dropped). 30s deliberately
+// matches the store's own unconsumed-entry TTL: an entry older than that is
+// pruned anyway, so waiting longer can only be serviced by entries pushed
+// DURING the wait — which the loop already catches. It still bounds teardown
+// when the raw leg was genuinely dropped. Override with
+// KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS (0 = single immediate check, no blocking).
+const mysqlPostTLSStashWaitDefault = 30 * time.Second
+
+// mysqlPostTLSStashPrimaryDefault is the SHORT primary bound: how long
+// resolvePreTLSGreeting waits for THIS connection's own raw leg before, if a
+// reusable greeting is already cached for the port, falling back to it rather
+// than blocking out the full overall window.
+//
+// CI (2a) observed the raw leg landing >5s late under CPU pressure, so 8s
+// comfortably absorbs that observed lateness — a merely-late own leg is still
+// preferred and stitched with its real per-connection salt+timestamp — while
+// leaving ~22s of the 30s "served but NOT recorded" decode gate as headroom for
+// the COM_QUERY to decode AFTER the greeting is resolved. The load-bearing
+// property: a genuinely-DROPPED raw leg whose port already has a cached greeting
+// reaches that cache at ~8s, NOT ~30s, so the command phase records well inside
+// the gate under the exact CPU pressure this fix targets. It is capped at the
+// overall bound, so a small KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS (tests, or 0)
+// collapses both bounds to a single short phase. Override the primary bound
+// itself with KEPLOY_MYSQL_POSTTLS_STASH_PRIMARY_MS.
+const mysqlPostTLSStashPrimaryDefault = 8 * time.Second
+
+// mysqlPostTLSStashPollSlice is the per-blocking-PopWait slice inside
+// resolvePreTLSGreeting's loop. The loop re-checks ctx (and the primary/overall
+// deadlines) between slices, so this is the worst-case reaction time to context
+// cancellation. A push wakes the blocked PopWait immediately, so it does NOT
+// delay the success path.
+const mysqlPostTLSStashPollSlice = 500 * time.Millisecond
+
+func mysqlPostTLSStashWait() time.Duration {
+	if v := os.Getenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return mysqlPostTLSStashWaitDefault
+}
+
+// mysqlPostTLSStashPrimary returns the primary (fast-fallback) bound, never
+// longer than the overall bound.
+func mysqlPostTLSStashPrimary(overall time.Duration) time.Duration {
+	primary := mysqlPostTLSStashPrimaryDefault
+	if v := os.Getenv("KEPLOY_MYSQL_POSTTLS_STASH_PRIMARY_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
+			primary = time.Duration(ms) * time.Millisecond
+		}
+	}
+	if primary > overall {
+		return overall
+	}
+	return primary
+}
+
+// preTLSGreetingSource records where resolvePreTLSGreeting obtained the greeting.
+type preTLSGreetingSource int
+
+const (
+	// greetingNone: nothing available within the bounds — the caller must fetch
+	// the greeting directly or abort cleanly.
+	greetingNone preTLSGreetingSource = iota
+	// greetingOwn: this connection's own raw-leg stash, found under the
+	// conn-specific key. Carries the real per-connection salt + request timestamp.
+	greetingOwn
+	// greetingShared: an entry taken from the port-only FIFO (e.g. "port:3306").
+	// That queue is CROSS-CONNECTION: in proxyless the raw and decrypted legs are
+	// different TCP connections, so this is the only key that bridges them, but
+	// the entry popped is not necessarily the one this connection's own raw leg
+	// pushed. Consuming it is destructive — every other decrypted stream waiting
+	// on that port is competing for the same FIFO — so a caller that fails before
+	// producing a mock MUST put it back (handlePostTLSHandshakeV2 does, via a
+	// defer on sharedAdopted). Otherwise a
+	// stream that pops one and then errors silently starves a live connection of
+	// the greeting it needed, which is decode loss with no diagnostic.
+	greetingShared
+	// greetingCached: another connection's most-recent greeting for the port,
+	// from the non-consuming last-greeting cache. Reusable for stitching
+	// (capabilities/plugin are per-server; the salt is never verified — see
+	// replayer/match.go), but its per-connection metadata (the timestamp) must
+	// NOT leak into this mock.
+	greetingCached
+)
+
+// resolvePreTLSGreeting obtains the pre-TLS greeting (+SSLRequest) for a
+// decrypted tls-* stream. It prefers THIS connection's own raw-leg stash, but a
+// genuinely-dropped raw leg must NOT block the full overall window before using
+// a reusable cached greeting — that stall could push the COM_QUERY decode past
+// the CI (2a) 30s "served but NOT recorded" gate. So the wait is two-phase:
+//
+//   - up to `primary` (short): wait for this connection's own entry, waking the
+//     instant a Push arrives (the store broadcasts its cond). A merely-late own
+//     leg is absorbed here and stitched with its real salt+timestamp.
+//   - once `primary` elapses AND a greeting is cached for the port: use the
+//     cache immediately (the dropped-leg fast path).
+//   - only when NO greeting is cached yet (the first connection to the port, or
+//     every sibling leg also dropped) keep waiting for the own entry up to
+//     `overall`, since nothing better can serve this connection.
+//
+// ctx cancellation (stream/session teardown) cuts any wait short within one
+// poll slice. On a final miss it returns greetingNone so the caller can
+// fetchServerGreeting / abort cleanly.
+//
+// It checks the conn-specific key and the port-only key on every pass: in
+// proxyless the raw and decrypted legs are different TCP connections, so only
+// the port-only key (e.g. "port:3306") reliably bridges them — the raw leg
+// pushes under both (storePreTLSHandshakeV2).
+func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, connKey string, dstPort uint16, scope string, dst *models.ConditionalDstCfg) (models.TLSHandshakeEntry, preTLSGreetingSource) {
+	connSpecificKey := models.HandshakeStoreKey(connKey, dstPort)
+	portKey := models.HandshakeStoreKey("", dstPort)
+	// The cross-connection fallback has TWO keys. One names the destination: the
+	// fields it lets us reuse (capability flags, protocol version, auth plugin)
+	// are per-server, so an entry is only reusable for the same server. The key
+	// combines the app/session scope with the address so that a shared
+	// DaemonSet store cannot serve one app's greeting to another.
+	lastKey := models.HandshakeLastKey(scope, dst)
+	// The decrypted leg's address is frequently a capture-layer stand-in, which
+	// can never match what the raw leg wrote. The port is agreed between the two
+	// legs, so it is the key that actually bridges them here.
+	lastPortKey := models.HandshakeLastPortKey(scope, dstPort)
+	// The port key exists ONLY for a leg that cannot identify its own server. If
+	// this leg's destination was genuinely resolved, a key that names no server
+	// must never be allowed to answer for it: the latch cannot save us here,
+	// because it only trips once the OTHER server's raw leg writes the key, and
+	// by construction that has not happened — that is precisely why the fallback
+	// was reached. Without this gate a fully-resolved connection is stitched with
+	// another server's capability flags and auth plugin, turning a missing mock
+	// into a WRONG one, which is strictly worse.
+	// NOTE ON REACHABILITY: AddrFabricated has NO producer in this repository —
+	// every assignment is in a _test.go. It is set by the out-of-tree proxyless
+	// capture layer (enterprise pkg/agent/proxy, routeEgressToParser, which
+	// propagates its destInfoResult.Fabricated into DstCfg.AddrFabricated) when
+	// it could not resolve a decrypted TLS leg's destination and had to
+	// substitute a stand-in. So in a plain OSS/sidecar deployment this gate is
+	// always false and the port key never answers; the path below is exercised
+	// only under that capture layer, and OSS tests must set the flag by hand.
+	// This is stated because "a mechanism with no in-tree caller" is exactly the
+	// defect being fixed here — RememberLast had one, in a legacy path the
+	// proxyless flow never runs — and it should not be rediscovered by accident.
+	if dst != nil && dst.Addr != "" && !dst.AddrFabricated {
+		lastPortKey = ""
+	}
+
+	overall := mysqlPostTLSStashWait()
+	primary := mysqlPostTLSStashPrimary(overall)
+	start := time.Now()
+	overallDeadline := start.Add(overall)
+	primaryDeadline := start.Add(primary)
+
+	// popOwn returns this connection's own stashed entry (either key), if
+	// present, without blocking.
+	popOwn := func() (models.TLSHandshakeEntry, preTLSGreetingSource) {
+		if entry, ok := hsStore.PopWait(connSpecificKey, 0); ok {
+			// An empty connKey (the proxyless decrypted stream, which cannot know
+			// the raw leg's connection identity) collapses the conn-specific key
+			// onto the port-only key. The entry then came off the SHARED FIFO
+			// even though this branch read it, so it must be classified — and
+			// restored on failure — as shared.
+			if connSpecificKey == portKey {
+				return entry, greetingShared
+			}
+			return entry, greetingOwn
+		}
+		if portKey != connSpecificKey {
+			if entry, ok := hsStore.PopWait(portKey, 0); ok {
+				return entry, greetingShared
+			}
+		}
+		return models.TLSHandshakeEntry{}, greetingNone
+	}
+	// cachedGreeting returns the port's last-greeting cache entry, if usable.
+	cachedGreeting := func() (models.TLSHandshakeEntry, bool) {
+		// A latched port key is POSITIVE proof that this scope+port serves more
+		// than one server. Falling through to the address key would then quietly
+		// answer from the shared placeholder bucket — which carries no identity
+		// at all — after the guarded key just told us reuse is unsafe. Decline
+		// outright instead; a missing mock beats one stitched from a server we
+		// have already proven is not necessarily this connection's.
+		// Port key FIRST, and the latch check and the read must be ONE
+		// acquisition of the store lock. It is the only one of the two with a
+		// runtime guard: RememberLastForPort tags every entry with the
+		// destination that produced it and latches the key unusable once a
+		// second server appears. The address key has no such guard, and on this
+		// path the reader's address is usually a capture-layer stand-in, so
+		// "dst:<scope>|127.0.0.1:3306" is a shared bucket that any unresolved
+		// connection in the scope can land in — consulting it first would let it
+		// shadow the guarded answer.
+		//
+		// Composing IsAmbiguous with Last is NOT equivalent: another connection's
+		// raw leg can latch the key between the two calls, Last then reports a
+		// plain miss, and control falls through to that unguarded address bucket
+		// after the guard just proved reuse unsafe. LastForPort answers both
+		// under one lock.
+		if lastPortKey != "" {
+			c, ok, ambiguous := hsStore.LastForPort(lastPortKey)
+			if ambiguous {
+				// POSITIVE proof this scope+port serves more than one server.
+				// A missing mock beats one stitched from a server we have already
+				// proven is not necessarily this connection's.
+				return models.TLSHandshakeEntry{}, false
+			}
+			if ok && len(c.RespPackets) > 0 {
+				return c, true
+			}
+		}
+		if lastKey != "" {
+			if c, ok := hsStore.Last(lastKey); ok && len(c.RespPackets) > 0 {
+				return c, true
+			}
+		}
+		return models.TLSHandshakeEntry{}, false
+	}
+
+	for {
+		// 1. This connection's own entry is always preferred.
+		if entry, src := popOwn(); src != greetingNone {
+			return entry, src
+		}
+		now := time.Now()
+		// 2. Past the primary bound, a cached greeting is good enough — take it
+		//    rather than blocking out the full overall window (the dropped-leg
+		//    fast path that keeps the decode inside the CI gate).
+		if !now.Before(primaryDeadline) {
+			if entry, ok := cachedGreeting(); ok {
+				return entry, greetingCached
+			}
+		}
+		// 3. Overall bound / teardown.
+		if !now.Before(overallDeadline) || ctx.Err() != nil {
+			break
+		}
+		// 4. Block on the port-only key (the one the raw leg reliably lands
+		//    under), waking the moment a Push broadcasts the cond. Bound the
+		//    slice by the next deadline so the cache is re-checked promptly at
+		//    the primary boundary.
+		nextEval := overallDeadline
+		if now.Before(primaryDeadline) && primaryDeadline.Before(nextEval) {
+			nextEval = primaryDeadline
+		}
+		slice := mysqlPostTLSStashPollSlice
+		if d := time.Until(nextEval); d < slice {
+			slice = d
+		}
+		if slice <= 0 {
+			continue
+		}
+		if entry, ok := hsStore.PopWait(portKey, slice); ok {
+			return entry, greetingShared
+		}
+	}
+
+	// Final miss on the own entry: the cache is the last resort before a direct
+	// fetch (it may have been populated by a sibling during the overall wait).
+	if entry, ok := cachedGreeting(); ok {
+		return entry, greetingCached
+	}
+	return models.TLSHandshakeEntry{}, greetingNone
+}
+
+// greetingServerIdentity fingerprints the SERVER-STABLE parts of a HandshakeV10
+// greeting: protocol version, server version, capability flags, default charset
+// and auth plugin. These are exactly the fields a borrowed greeting contributes
+// to a config mock (ServerCaps drives DeprecateEOF and result-set parsing;
+// PluginName drives auth-flow selection), so two greetings with the same
+// fingerprint are interchangeable for stitching no matter which address or
+// connection they arrived on.
+//
+// The per-connection fields — connection id, auth-plugin-data salt, status flags
+// — are deliberately excluded: they differ on every connection to the SAME
+// server, and none of them is verified on the record or replay path (the
+// replayer skips AuthResponse comparison precisely because it is salt-derived).
+// Including them would make every connection look like a different server.
+func greetingServerIdentity(g *mysql.HandshakeV10Packet) string {
+	if g == nil {
+		return ""
+	}
+	return fmt.Sprintf("v%d|%s|caps=%d|cs=%d|%s",
+		g.ProtocolVersion, g.ServerVersion, g.CapabilityFlags, g.CharacterSet, g.AuthPluginName)
+}
+
+// storePreTLSHandshakeV2 pushes the pre-TLS MySQL server greeting and the
+// client SSLRequest into the shared TLSHandshakeStore so the decrypted
+// (uprobe) tls-* stream's handlePostTLSRecord can recover them. It mirrors
+// the legacy conn.go SkipTLSMITM branch exactly: it stores under both the
+// conn-specific key and the port-only fallback key, because the raw
+// observe-only stream and the decrypted uprobe stream are different TCP
+// connections with different connIDs — only the port-only key (port:3306)
+// reliably bridges the two.
+func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, greeting, sslRequest []byte, reqTimestamp time.Time, serverID string) error {
+	hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+	if !ok || hsStore == nil {
+		return fmt.Errorf("SkipTLSMITM requires TLSHandshakeStore in context for MySQL handshake reconstruction")
+	}
+	dstPort := uint16(0)
+	if sess.Opts.DstCfg != nil {
+		dstPort = uint16(sess.Opts.DstCfg.Port)
+	}
+	hsEntry := models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{greeting},
+		ReqPackets:   [][]byte{sslRequest},
+		ReqTimestamp: reqTimestamp,
+	}
+	storeKey := models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort)
+	hsStore.Push(storeKey, hsEntry)
+	// Port-only fallback: the proxy/uprobe see different ephemeral ports,
+	// so conn-specific keys won't match across the two streams.
+	portKey := models.HandshakeStoreKey("", dstPort)
+	if portKey != storeKey {
+		hsStore.Push(portKey, hsEntry)
+	}
+	// Seed the last-greeting cache too. Push/PopWait entries are CONSUMED, so a
+	// connection whose own raw leg never produced one — a pooled connection
+	// reused long after its handshake, or a leg the ringbuf dropped under load —
+	// finds both keys above empty and has nothing left to stitch with. That is
+	// what resolvePreTLSGreeting's cachedGreeting fallback exists for, but until
+	// now nothing on this path ever wrote it: the only RememberLast caller was
+	// the legacy handleInitialHandshake, which the proxyless V2 flow never runs.
+	// The fallback was therefore dead code on every proxyless MySQL-over-TLS
+	// recording, and the command phase of such a connection was dropped outright
+	// (the "served but NOT recorded" capture shortfall).
+	//
+	// Both keys are written because the two legs disagree about the address: the
+	// decrypted leg's destination is often unresolvable, so it presents a
+	// synthesized stand-in and could never match an address-keyed entry. See
+	// models.HandshakeLastPortKey.
+	scope := sess.Opts.PassThroughScope
+	hsStore.RememberLast(models.HandshakeLastKey(scope, sess.Opts.DstCfg), hsEntry)
+	// The port-scoped copy is tagged with the SERVER's identity, taken from the
+	// greeting itself rather than from the address it arrived from. Address is
+	// the wrong identity here: in Kubernetes the same logical MySQL gets a new
+	// pod IP on every rollout, and a Service with several endpoints hands out a
+	// different IP per connection, so an address-tagged latch would fire on two
+	// connections to the SAME server and permanently disable the fallback in the
+	// environment it exists for. The greeting fingerprint is stable across those
+	// and captures exactly the fields a borrower reuses, so it latches only when
+	// reuse would genuinely be unsafe.
+	hsStore.RememberLastForPort(models.HandshakeLastPortKey(scope, dstPort), serverID, hsEntry)
+	logger.Debug("V2: pushed pre-TLS MySQL greeting + SSLRequest to TLSHandshakeStore for post-TLS stitch",
+		zap.String("key", storeKey),
+		zap.String("portKey", portKey),
+		zap.String("connKey", sess.Opts.ConnKey),
+		zap.String("scope", scope),
+		zap.Uint16("dstPort", dstPort))
+	return nil
+}
+
+// releaseClientHoldV2 ends the relay's client write hold for a
+// connection that turned out not to use TLS, delivering the client's
+// HandshakeResponse41 to the real server.
+//
+// Sending it unconditionally is safe and deliberate. When no hold was
+// armed — a proxyless observe-only capture, or a relay built before
+// this capability existed — the relay refuses the directive and we
+// carry on: there is nothing held, so there is nothing to deliver, and
+// the connection was never blocked in the first place. Treating that
+// refusal as fatal would make the parser's correctness depend on how
+// the relay beneath it was configured.
+func releaseClientHoldV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case sess.Directives <- directive.ReleaseClient("mysql plaintext handshake"):
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case ack, ok := <-sess.Acks:
+		if !ok {
+			return errors.New("directive channel closed before client-hold release ack")
+		}
+		if !ack.OK {
+			logger.Debug("V2: relay declined the client-hold release; assuming no hold was armed",
+				zap.Error(ack.Err))
+		}
+		return nil
+	}
+}
+
 // performTLSUpgradeV2 builds TLS configs from the session options and
 // sends a KindUpgradeTLS directive on sess.Directives, blocking on the
 // ack. Returns nil on OK, an error on failure. Failure cases MUST call
 // sess.MarkMockIncomplete at the call site.
-func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) error {
+func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, clientFlushBytes int) error {
 	destCfg := buildDestTLSConfigV2(sess)
 	clientCfg := buildClientTLSConfigV2(sess)
 
 	logger.Debug("V2: sending mysql client_ssl upgrade directive",
 		zap.Bool("destCfg", destCfg != nil),
-		zap.Bool("clientCfg", clientCfg != nil))
+		zap.Bool("clientCfg", clientCfg != nil),
+		zap.Int("clientFlushBytes", clientFlushBytes))
+
+	d := directive.UpgradeTLS(destCfg, clientCfg, "mysql client_ssl")
+	d.TLS.ClientFlushBytes = clientFlushBytes
 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case sess.Directives <- directive.UpgradeTLS(destCfg, clientCfg, "mysql client_ssl"):
+	case sess.Directives <- d:
 	}
 
 	select {
@@ -515,17 +1312,34 @@ func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervis
 }
 
 // buildDestTLSConfigV2 constructs the TLS client config used by the
-// relay when dialing TLS to the real upstream MySQL server. We derive
-// the ServerName from the destination address (host portion of
-// host:port in Opts.DstCfg.Addr) so the handshake uses correct SNI.
+// relay when dialing TLS to the real upstream MySQL server.
 //
-// Certificate verification uses the system trust store by default.
-// If the upstream's cert does not verify (e.g. self-signed), the
-// relay's TLS handshake fails and the supervisor falls through to
-// raw passthrough — the application's connection continues but the
-// mock is dropped. This is the intended trade-off: stability over
-// fidelity. Users who need to record against non-system-trust
-// upstreams should add the cert to their system store.
+// ServerName is a BEST-EFFORT default only. It is derived from the
+// destination address (host portion of host:port in Opts.DstCfg.Addr),
+// which the proxy always sets to the `ip:port` eBPF reported — never
+// the hostname the application dialled. That is the right value when
+// the app itself dialled by IP and the upstream cert carries an IP
+// SAN, and the wrong one for every hostname DSN. It is not the last
+// word: proxy.newProxyTLSUpgradeFn overrides it with the SNI the
+// application actually sent whenever verification is on.
+//
+// This config sets NO InsecureSkipVerify, and that is deliberate —
+// the decision does not belong here. proxy.newProxyTLSUpgradeFn owns
+// it for every V2 parser: it clones this config and sets
+// InsecureSkipVerify = !record.upstreamTls.verify, which is OFF by
+// default. So by default keploy does NOT authenticate the upstream —
+// a recording proxy must never be stricter than the app it records,
+// and a MySQL client on tls=skip-verify chose not to authenticate its
+// own upstream.
+//
+// If verification IS turned on and the upstream's cert does not
+// verify, the relay's TLS handshake fails and the supervisor falls
+// through to raw passthrough — the application's connection continues
+// but the mock is dropped. To record against a private-CA or
+// self-signed upstream, point record.upstreamTls.caCert at the CA PEM
+// (resolved on the AGENT's filesystem — bind-mount it for docker/k8s
+// runs); installing the cert in the system trust store is NOT what
+// makes this work, since with verification off no chain is ever built.
 func buildDestTLSConfigV2(sess *supervisor.Session) *tls.Config {
 	var serverName string
 	if sess.Opts.DstCfg != nil {
@@ -564,17 +1378,28 @@ func buildClientTLSConfigV2(_ *supervisor.Session) *tls.Config {
 //     one mock matching the legacy path's shape.
 //
 // Exits cleanly on io.EOF / fakeconn.ErrClosed from either stream.
-func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKey net.Conn) error {
+func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKey net.Conn, firstCmd []byte) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		cmdBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
-		if err != nil {
-			return err
+		var cmdBuf []byte
+		var err error
+		if firstCmd != nil {
+			// A command the post-TLS handshake pre-read off ClientStream to
+			// distinguish HandshakeResponse41 from a mid-stream command (see
+			// v2HandshakeResult.firstCmd). Consume it once, then fall back to
+			// reading the stream normally.
+			cmdBuf, firstCmd = firstCmd, nil
+		} else {
+			cmdBuf, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+			if err != nil {
+				return err
+			}
 		}
-		// Chunk-derived timestamp: ReadPacketBuffer succeeded, so at
-		// least one chunk has been consumed and LastReadTime is set.
+		// Chunk-derived timestamp: a ReadPacketBuffer has succeeded (either the
+		// prefetch read in the handshake, or the read just above), so at least
+		// one chunk has been consumed and LastReadTime is set.
 		reqTs := sess.ClientStream.LastReadTime()
 
 		cmdPkt, err := wire.DecodePayload(ctx, logger, cmdBuf, clientKey, decodeCtx)

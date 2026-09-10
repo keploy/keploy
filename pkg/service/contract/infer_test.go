@@ -69,7 +69,9 @@ func TestInferSchemaPOSTEndpointWithJSONBody(t *testing.T) {
 	schema := requestBody.Value.Content["application/json"].Schema
 	assertSchemaType(t, schema, "object")
 	assertSchemaType(t, schema.Value.Properties["name"], "string")
-	assertSchemaType(t, schema.Value.Properties["age"], "number")
+	// 30 is an integer literal. This asserted "number" while InferSchema
+	// decoded with encoding/json, which makes every JSON number a float64.
+	assertSchemaType(t, schema.Value.Properties["age"], "integer")
 }
 
 func TestInferSchemaMultipleEndpoints(t *testing.T) {
@@ -116,7 +118,8 @@ func TestInferSchemaTypeInferenceNestedObjects(t *testing.T) {
 	schema := response.Value.Content["application/json"].Schema
 
 	assertSchemaType(t, schema.Value.Properties["name"], "string")
-	assertSchemaType(t, schema.Value.Properties["age"], "number")
+	// See TestInferSchemaPOSTEndpointWithJSONBody: 30 is an integer.
+	assertSchemaType(t, schema.Value.Properties["age"], "integer")
 	assertSchemaType(t, schema.Value.Properties["active"], "boolean")
 
 	profile := schema.Value.Properties["profile"]

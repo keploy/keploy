@@ -7,8 +7,9 @@
 # 4. HTTP MatchType: POST through forward proxy
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
-docker compose build
+docker_build_retry docker compose build
 sudo rm -rf keploy/
 $RECORD_BIN config --generate
 

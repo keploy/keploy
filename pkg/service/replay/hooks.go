@@ -108,6 +108,9 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		}
 
 		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
+			// Bounds the response drain. Without it a bidi stream the server
+			// holds open hangs the whole test set instead of failing one case.
+			APITimeout:      h.cfg.Test.APITimeout,
 			ConfigPort:      configPort,
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,

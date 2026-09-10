@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -499,6 +500,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// keeps working unchanged (OR can only widen).
 	composeReuse := cmdType == utils.DockerCompose && r.config.Test.Mocking
 	effectiveKeepAlive := (r.config.Test.KeepAppAlive || composeReuse) && r.instrument && cmdType != utils.Empty
+
+	// Records a --keep-app-alive app failure so the run can exit non-zero on
+	// it. The errgroup alone cannot do that: nothing ever calls g.Wait(), so
+	// the error this goroutine returns is collected by no one, and the exit
+	// code is carried by utils.ErrCode rather than by Start's return value.
+	var keepAliveAppErr atomic.Pointer[models.AppError]
+
 	if effectiveKeepAlive {
 		g.Go(func() error {
 			defer utils.Recover(r.logger)
@@ -534,6 +542,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 						"Common causes: image build failure, port already in use, missing env var, dependency container crash-looped. "+
 						"If the app is expected to manage its own lifecycle across test-sets, drop --keep-app-alive and let keploy "+
 						"restart it per test-set instead."))
+			keepAliveAppErr.Store(&appErr)
 			return appErr
 		})
 	}
@@ -558,6 +567,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
+	testSets = r.applyTestSetOrder(testSets)
 	// cmdType is hoisted above the one-shot RunApplication block; the
 	// original assignment that lived here is removed to keep a single
 	// canonical declaration.
@@ -917,10 +927,36 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// return non-zero error code so that pipeline processes
 	// know that there is a failure in tests
-	if !testRunResult {
-		utils.ErrCode = 1
+	errCode, runErr := replayRunOutcome(testRunResult, keepAliveAppErr.Load())
+	utils.ErrCode = errCode
+	return runErr
+}
+
+// replayRunOutcome decides how a replay run reports itself: the process exit
+// code, and the error Start returns.
+//
+// Two things make this worth naming rather than inlining.
+//
+// The exit code does NOT travel through Start's return value — it is carried
+// by utils.ErrCode, so returning an error alone would still exit 0.
+//
+// And an app that died under --keep-app-alive is a failed run even when no
+// test reported a failure, which is exactly the case that used to escape.
+// testRunResult starts true and is only ever set false by a test-set that
+// actually RAN, so an app failing to start leaves it true: zero tests
+// execute, the summary reports nothing failed, and keploy exits 0 while
+// logging "replay completed successfully". Every CI pipeline downstream reads
+// that as a pass. The errgroup was supposed to carry the failure — the
+// goroutine's own comment says g.Wait() surfaces it — but nothing in this
+// package ever calls g.Wait(), so the error had nowhere to go.
+func replayRunOutcome(testRunResult bool, keepAliveAppErr *models.AppError) (int, error) {
+	if keepAliveAppErr != nil {
+		return 1, fmt.Errorf("user application failed under --keep-app-alive: %v", *keepAliveAppErr)
 	}
-	return nil
+	if !testRunResult {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
@@ -934,7 +970,18 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		passPortsUint32[i] = uint32(port)
 	}
 
-	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose})
+	setupOpts := models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose}
+	// Retry only a stalled agent bring-up (pkg.ErrAgentNotReady) with a fresh
+	// agent; a healthy agent is set up once and the test set runs against it.
+	err := pkg.RetryAgentSetup(ctx, r.logger, func(c context.Context, attempt int) error {
+		o := setupOpts
+		if attempt > 1 {
+			// The first attempt keeps the full slow-start budget; a retry's fresh
+			// agent is ready in a second or two, so cut a wedged retry short.
+			o.AgentReadyTimeout = 120 * time.Second
+		}
+		return r.instrumentation.Setup(c, r.config.Command, o)
+	})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -1236,16 +1283,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:                  r.config.BypassRules,
-			MongoPassword:          r.config.Test.MongoPassword,
-			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
-			Mocking:                r.config.Test.Mocking,
-			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            mockNoiseConfig,
-			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
-			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
-			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
-			MysqlPorts:             r.config.MysqlPorts,
+			Rules:                     r.config.BypassRules,
+			MongoPassword:             r.config.Test.MongoPassword,
+			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
+			Mocking:                   r.config.Test.Mocking,
+			Backdate:                  testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:               mockNoiseConfig,
+			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
+			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
+			SchemaNoiseStrict:         r.config.Test.SchemaNoiseStrict,
+			MysqlPorts:                r.config.MysqlPorts,
+			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
+			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+			PassThroughPorts:          r.config.Record.PassThroughPorts,
+			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1307,6 +1358,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if err := mutator.AfterGetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 				return models.TestSetStatusFailed, err
 			}
+			// Honour any reusable retagging the mutator applied (e.g. the mongo/v2
+			// stable-metadata promotion): move retagged mocks from the per-test pool
+			// into the reusable pool so SetMocksWithWindow does not window-filter them.
+			filteredMocks, unfilteredMocks = rebalanceReusableMocks(filteredMocks, unfilteredMocks)
 		}
 
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
@@ -1320,7 +1375,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -1351,7 +1406,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// runs every test-set, matching the historical lifecycle.
 		if serveTest && !r.isFirstTestSet {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
+		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(r.config.Test, testCases, testSetID, r.logger)) {
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 	}
@@ -1404,6 +1459,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if err := mutator.AfterGetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 				return models.TestSetStatusFailed, err
 			}
+			// Honour any reusable retagging the mutator applied (see the
+			// non-DockerCompose branch above for the rationale).
+			filteredMocks, unfilteredMocks = rebalanceReusableMocks(filteredMocks, unfilteredMocks)
 		}
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
@@ -1436,16 +1494,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:                  r.config.BypassRules,
-			MongoPassword:          r.config.Test.MongoPassword,
-			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
-			Mocking:                r.config.Test.Mocking,
-			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            mockNoiseConfig,
-			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
-			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
-			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
-			MysqlPorts:             r.config.MysqlPorts,
+			Rules:                     r.config.BypassRules,
+			MongoPassword:             r.config.Test.MongoPassword,
+			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
+			Mocking:                   r.config.Test.Mocking,
+			Backdate:                  testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:               mockNoiseConfig,
+			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
+			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
+			SchemaNoiseStrict:         r.config.Test.SchemaNoiseStrict,
+			MysqlPorts:                r.config.MysqlPorts,
+			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
+			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+			PassThroughPorts:          r.config.Record.PassThroughPorts,
+			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1455,7 +1517,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -1514,7 +1576,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// one-shot spawn actually fired.
 			if serveTest && !r.isFirstTestSet {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
+			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(r.config.Test, testCases, testSetID, r.logger)) {
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
 
@@ -1807,7 +1869,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			for i, m := range expectedTestMockMappings[testCase.Name] {
 				expectedNames[i] = m.Name
 			}
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased)
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased, time.Time{})
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 					testSetStatus = resolvedStatus
@@ -2400,7 +2462,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Mock Window: Calculate the effective mock filter window for streaming
 			// using the request timestamp to the response timestamp plus a timeout buffer.
 			streamReqTime, streamRespTime := effectiveStreamMockWindow(tc, r.config.Test.APITimeout)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, deferred.expectedMocks, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased)
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, deferred.expectedMocks, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased, time.Time{})
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
@@ -2492,7 +2554,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					streamBodyNoise := map[string][]string{}
 					if bodyNoise, ok := noiseConfig["body"]; ok {
-						streamBodyNoise = cloneNoiseMap(bodyNoise)
+						streamBodyNoise = matcherUtils.CloneNoiseMap(bodyNoise)
 					}
 					jsonNoiseKeys := pkg.CollectStreamingGlobalNoiseKeys(streamBodyNoise, tc.Noise)
 
@@ -3130,7 +3192,27 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 }
 
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of sending filtered mocks
-func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
+// firstRecordedTestStart is the request time of the EARLIEST RECORDED test in
+// the set, and is only meaningful on the initial staging call. It lets the agent
+// seed the startup-init cutoff from the set's recorded shape instead of from
+// whichever test fires first; pass the zero time on per-test calls.
+// firstRecordedTestStart returns the request time of the earliest RECORDED test
+// in the set. testDB returns cases sorted by request timestamp, so it is the
+// first one's; a case with no request time contributes nothing rather than
+// pinning the cutoff to the zero time.
+func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
+	for _, tc := range testCases {
+		if tc == nil {
+			continue
+		}
+		if ts := tc.HTTPReq.Timestamp; !ts.IsZero() {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, firstRecordedTestStart time.Time) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -3145,13 +3227,27 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	if r.config != nil {
 		strictMockWindow = r.config.Test.StrictMockWindow
 	}
+	// EXPERIMENTAL, default OFF: when KEPLOY_AGENT_OWNS_CONSUMED is set, the
+	// agent applies filterOutDeleted from its own persistent consumption history
+	// instead of us re-sending the ever-growing TotalConsumedMocks map every
+	// testcase (O(testcases^2) marshaling). We then send a nil map to eliminate
+	// that cost. Off by default so behaviour is byte-identical until proven
+	// equivalent by the golden-reference harness.
+	agentOwnsConsumed := os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED") == "1" ||
+		strings.EqualFold(os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED"), "true")
+	consumedForAgent := totalConsumedMocks
+	if agentOwnsConsumed {
+		consumedForAgent = nil
+	}
 	params := models.MockFilterParams{
-		AfterTime:          afterTime,
-		BeforeTime:         beforeTime,
-		MockMapping:        expectedMockMapping,
-		UseMappingBased:    useMappingBased,
-		TotalConsumedMocks: totalConsumedMocks,
-		StrictMockWindow:   strictMockWindow,
+		AfterTime:              afterTime,
+		BeforeTime:             beforeTime,
+		FirstRecordedTestStart: firstRecordedTestStart,
+		MockMapping:            expectedMockMapping,
+		UseMappingBased:        useMappingBased,
+		AgentOwnsConsumed:      agentOwnsConsumed,
+		TotalConsumedMocks:     consumedForAgent,
+		StrictMockWindow:       strictMockWindow,
 	}
 
 	// Send parameters to agent for filtering and mock updates
@@ -3190,7 +3286,7 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 		return pass, result
 	}
 
-	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, r.autoHeaderNoiseOpt())
 	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 
 	return pass, result
@@ -3207,7 +3303,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	}
 
 	if emitFailureLogs {
-		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false)
+		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, r.autoHeaderNoiseOpt())
 		if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return true, result
@@ -3218,13 +3314,24 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 		}
 	}
 
-	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, r.autoHeaderNoiseOpt())
 	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 	if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 		return true, result
 	}
 
 	return pass, result
+}
+
+// autoHeaderNoiseOpt ignores response headers Keploy already treats as
+// per-request volatile for egress mock matching — X-Request-Id, Date, W3C and
+// Datadog trace ids, cloud signing headers — so a test whose status and body
+// match cannot fail on a value the application mints fresh every call.
+//
+// Honours the existing --disableAutoHeaderNoise flag, which until now only
+// covered mock matching. One switch, both places.
+func (r *Replayer) autoHeaderNoiseOpt() httpMatcher.MatchOption {
+	return httpMatcher.WithAutoHeaderNoise(!r.config.Test.DisableAutoHeaderNoise)
 }
 
 func (r *Replayer) httpNoiseConfig(testSetID string) map[string]map[string][]string {
@@ -3425,31 +3532,17 @@ func normalizePassingHTTPResult(result *models.Result) {
 }
 
 func bodyNoiseForTestCase(testCaseNoise map[string][]string, noiseConfig map[string]map[string][]string) map[string][]string {
-	bodyNoise := cloneNoiseMap(noiseConfig["body"])
+	bodyNoise := matcherUtils.CloneNoiseMap(noiseConfig["body"])
 
-	for field, regexArr := range testCaseNoise {
-		parts := strings.Split(field, ".")
-		if len(parts) <= 1 || parts[0] != "body" {
-			continue
-		}
-
-		bodyNoise[strings.ToLower(strings.Join(parts[1:], "."))] = append([]string(nil), regexArr...)
+	// nil logger on purpose: Match already ran SplitNoise for this same test
+	// case and emitted any warning, so passing one here would only duplicate it.
+	tcBodyNoise, _, _ := matcherUtils.SplitNoise(testCaseNoise, nil)
+	for field, regexArr := range tcBodyNoise {
+		// SplitNoise already returns freshly-allocated slices.
+		bodyNoise[field] = regexArr
 	}
 
 	return bodyNoise
-}
-
-func cloneNoiseMap(input map[string][]string) map[string][]string {
-	if len(input) == 0 {
-		return map[string][]string{}
-	}
-
-	out := make(map[string][]string, len(input))
-	for key, values := range input {
-		out[key] = append([]string(nil), values...)
-	}
-
-	return out
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
@@ -3730,7 +3823,7 @@ func (r *Replayer) executeScript(ctx context.Context, script string) error {
 		}
 	}
 
-	cmdErr := utils.ExecuteCommand(ctx, r.logger, script, cmdCancel, 25*time.Second, nil)
+	cmdErr := utils.ExecuteCommand(ctx, r.logger, script, utils.Empty, cmdCancel, 25*time.Second, nil)
 	if cmdErr.Err != nil {
 		return fmt.Errorf("failed to execute script: %w", cmdErr.Err)
 	}
@@ -4028,7 +4121,19 @@ func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-	return testSets, nil
+	return r.applyTestSetOrder(testSets), nil
+}
+
+func (r *Replayer) applyTestSetOrder(testSets []string) []string {
+	orderer, ok := r.hookImpl.(TestSetOrderer)
+	if !ok {
+		return testSets
+	}
+	reordered := orderer.OrderTestSets(testSets)
+	if len(reordered) != len(testSets) {
+		return testSets
+	}
+	return reordered
 }
 
 func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
@@ -4266,6 +4371,17 @@ func (r *Replayer) resetResendUnsafe(ctx context.Context) (bool, []models.MockSt
 // published host-port TCP gate (no-op for native apps / unmapped publishes). On
 // timeout it returns and lets the bounded re-send attempts run.
 func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models.TestCase, testSetID string) {
+	// The same opt-out as the pre-test gate, and this path needs it more,
+	// not less. Its trigger is a transport-level reset — which, behind a
+	// kubectl port-forward, is exactly what a dying forward produces.
+	// Re-opening a connect-then-close probe against the same address in
+	// response is the one thing most likely to finish it off. The
+	// bounded re-sends themselves are unaffected; only the readiness
+	// re-gate is skipped. See config.Test.DisableAppReadyProbe.
+	if r.config.Test.DisableAppReadyProbe {
+		return
+	}
+
 	wctx, cancel := context.WithTimeout(ctx, resetResendReadyTimeout)
 	defer cancel()
 
@@ -4391,6 +4507,44 @@ func isReusableTierMock(m *models.Mock) bool {
 		}
 	}
 	return false
+}
+
+// rebalanceReusableMocks moves any mock that a MockMutator.AfterGetMocks
+// re-tagged as reusable (isReusableTierMock — Lifetime Session/Connection or
+// metadata type config/connection) out of the per-test `filtered` pool and into
+// the reusable `unfiltered` pool, and returns the adjusted slices.
+//
+// It exists because AfterGetMocks receives the two pools BY VALUE: a mutator can
+// retag a mock's Lifetime/metadata in place, but it cannot move a mock between
+// the slices (a shrink of `filtered` or a grow of `unfiltered` does not
+// propagate to the caller). Since the agent's SetMocksWithWindow window-filters
+// every mock in `filtered` regardless of its per-mock tag, a mock retagged
+// reusable but left in `filtered` would still be dropped when it fires outside
+// its record-time window — defeating the retag. Running this immediately after
+// AfterGetMocks honours the retag by physically re-partitioning.
+//
+// Memory: `filtered` is compacted in place (its backing array is reused via the
+// [:0] read/write cursor); `unfiltered` grows only by the promoted count. No
+// second copy of the corpus is allocated. Relative order within each pool is
+// preserved. Safe on nil/empty inputs.
+func rebalanceReusableMocks(filtered, unfiltered []*models.Mock) ([]*models.Mock, []*models.Mock) {
+	if len(filtered) == 0 {
+		return filtered, unfiltered
+	}
+	keep := filtered[:0]
+	for _, m := range filtered {
+		if m == nil {
+			// A nil entry can never match; drop it from the per-test pool rather
+			// than carrying it forward (SetMocksWithWindow skips nils anyway).
+			continue
+		}
+		if isReusableTierMock(m) {
+			unfiltered = append(unfiltered, m)
+			continue
+		}
+		keep = append(keep, m)
+	}
+	return keep, unfiltered
 }
 
 // isReusableTierState is the MockState (consumed-mock) equivalent of

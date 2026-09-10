@@ -25,6 +25,8 @@ var keployBPFProgNames = map[string]ebpf.AttachType{
 	"k_connect6":     ebpf.AttachCGroupInet6Connect,
 	"k_bind4":        ebpf.AttachCGroupInet4Bind,
 	"k_bind6":        ebpf.AttachCGroupInet6Bind,
+	"k_post_bind4":   ebpf.AttachCGroupInet4PostBind,
+	"k_post_bind6":   ebpf.AttachCGroupInet6PostBind,
 	"k_getpeername4": ebpf.AttachCgroupInet4GetPeername,
 	"k_getpeername6": ebpf.AttachCgroupInet6GetPeername,
 	"k_sockops":      ebpf.AttachCGroupSockOps,

@@ -24,8 +24,8 @@ import (
 type proxyStop func() error
 
 // IngressHook defines the interface for ingress forwarding implementations.
-// Both the default Go TCP forwarder and external components (e.g. enterprise
-// sockmap proxy) implement this interface.
+// Both the default Go TCP forwarder and external components (e.g. an
+// enterprise ingress handler) implement this interface.
 type IngressHook interface {
 	// StartIngress begins ingress forwarding for the given port pair.
 	// The provided context should be used for lifetime management of the
@@ -114,7 +114,7 @@ func (pm *IngressProxyManager) loadIncomingOpts() models.IncomingOptions {
 }
 
 // SetIngressHook replaces the default Go TCP forwarder with an external
-// ingress handler (e.g. enterprise sockmap proxy).
+// ingress handler supplied by an enterprise build.
 func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -142,7 +142,7 @@ func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOp
 }
 
 // TCChan returns the test case channel for direct use by external consumers
-// (e.g., the enterprise sockmap proxy) without going through Start().
+// (e.g., the enterprise proxyless agent) without going through Start().
 func (pm *IngressProxyManager) TCChan() chan *models.TestCase {
 	return pm.tcChan
 }
@@ -431,20 +431,12 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		return
 	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
-		// Get the actual destination for gRPC on Windows
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
-		// Determine the correct port for the test case:
-		// On Windows, getActualDestination resolves the real destination dynamically,
-		// so we extract the port from the resolved address.
-		// On non-Windows (Linux/Docker), getActualDestination returns the fallback (newAppAddr)
-		// which contains the eBPF-redirected port, NOT the original app port.
-		// In that case, we use the passed-in appPort which carries the correct OrigAppPort.
+		// newAppAddr holds the port Keploy moved the application to, not the port
+		// it advertises, so the test case records the caller-supplied appPort
+		// (the original) instead.
 		actualPort := appPort
-		if finalAppAddr != newAppAddr {
-			// Destination was dynamically resolved (Windows) — extract port from resolved address
-			actualPort = extractPortFromAddr(finalAppAddr, appPort)
-		}
 
 		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 		if err != nil {
@@ -479,20 +471,4 @@ func newReplayConn(initial []byte, c net.Conn) net.Conn {
 
 func (r *replayConn) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
-}
-
-// extractPortFromAddr extracts the port from an address string (host:port).
-// If extraction fails, it returns the fallback port.
-// This is needed because on Windows, the actual destination port is obtained
-// dynamically and may differ from the originally passed appPort.
-func extractPortFromAddr(addr string, fallback uint16) uint16 {
-	_, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fallback
-	}
-	port64, err := strconv.ParseUint(portStr, 10, 16)
-	if err != nil {
-		return fallback
-	}
-	return uint16(port64)
 }

@@ -5,6 +5,7 @@ set -euo pipefail
 
 # for the below shource make it such a way that if the file is not present or already present it does not error
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # Function to find available port
 find_available_port() {
@@ -69,6 +70,7 @@ docker network create "$NETWORK_NAME"
 
 # --- Start fresh Mongo (force remove any stale one first) ---
 docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+docker_pull_retry mongo
 docker run --name "$DB_CONTAINER" --rm \
   --net "$NETWORK_NAME" --network-alias mongo \
   -p "${DB_PORT}:27017" -d mongo
@@ -77,7 +79,7 @@ docker run --name "$DB_CONTAINER" --rm \
 rm -rf keploy/  # Clean up old test data
 rm ./keploy.yml >/dev/null 2>&1 || true
 
-docker build -t $APP_IMAGE .
+docker_build_retry docker build -t $APP_IMAGE .
 
 
 # Generate the keploy-config file.

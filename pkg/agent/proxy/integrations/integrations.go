@@ -3,12 +3,73 @@ package integrations
 
 import (
 	"context"
+	"errors"
 	"net"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
+
+// ErrParserDeclined is returned by a parser that MATCHED a connection but
+// then decided not to handle it — a port outside its allowlist, a kill
+// switch, an unsupported sub-protocol.
+//
+// It exists because "return nil" cannot express that. The dispatcher reads
+// a nil error as "the parser handled this connection", logs success, and
+// falls through to handleConnection's deferred close — so a parser that
+// bailed politely had the user's connection torn down under it, which is
+// an I1 violation (keploy must never be what ends a connection). Parsers
+// documented that returning nil would "pass through"; it did not.
+//
+// Wrap it (fmt.Errorf("...: %w", integrations.ErrParserDeclined)) to carry
+// the reason.
+//
+// CONTRACT, and both clauses are load-bearing:
+//
+//  1. If the parser READ from a connection to make its decision, it must
+//     restore those bytes on the RecordSession conn it read from —
+//     RecordSession.Ingress and/or RecordSession.Egress. The dispatcher
+//     relays the SESSION's conns, not handleConnection's own, precisely so
+//     a consumed protocol preamble is not lost. Relaying a drained stream
+//     makes the peer reset the connection, which moves the user's break
+//     rather than removing it.
+//
+//     Note this is integrations.RecordSession, NOT supervisor.Session.
+//     supervisor.Session also has an Ingress field, but it is nil on the
+//     V2 path and ignored — bytes restored there vanish silently.
+//
+//     A parser that upgraded the connection to TLS before declining must
+//     not rely on this: util.ConnTLSUpgrader writes the upgraded conn back
+//     through handleConnection's pointers, not into RecordSession, so the
+//     session's Egress is the pre-upgrade socket.
+//
+//  2. The parser must not leave goroutines reading those conns. The relay
+//     becomes the sole reader; a surviving parser reader races it for
+//     bytes on the same socket.
+//
+// SCOPE: honoured on every legacy RECORD dispatch site — the
+// matched-parser branch, the generic catch-all, and the MySQL probe
+// branch. On the V2/supervisor path the sentinel is not consulted, but a
+// parser error there already becomes FallthroughToPassthrough with a
+// correctly activity-scoped orphan window, which is the better shape.
+//
+// Be aware that those legacy sites are no longer reachable for any parser
+// in tree. Every parser the dispatcher can route to record implements
+// IntegrationsV2, and the KEPLOY_NEW_RELAY knob that could force them onto
+// the legacy path has been removed — so in practice a decline is only
+// honoured for an out-of-tree parser that does not implement
+// IntegrationsV2, or for the not-registered guards at the MySQL and
+// generic sites. A V2 parser that returns this sentinel does NOT get the
+// relay-and-restore treatment above; it degrades to
+// FallthroughToPassthrough, which keeps user traffic alive but logs the
+// connection as a retired parser rather than a decline.
+//
+// On replay there is no upstream connection to relay to — every
+// destination dial in handleConnection is mode-gated — so a parser that
+// needs to decline during replay is not yet supported and must not rely
+// on this.
+var ErrParserDeclined = errors.New("parser declined to handle this connection")
 
 type Initializer func(logger *zap.Logger) Integrations
 
@@ -62,6 +123,48 @@ type IntegrationsV2 interface {
 	// dynamically (e.g. if a required config is missing) to opt out
 	// on a per-instance basis.
 	IsV2() bool
+}
+
+// GapResyncCapable is the optional capability interface implemented by
+// parsers that can recover a byte stream after a HOLE in capture — bytes
+// the proxy observed on the wire, forwarded to the real peer, but never
+// delivered to the parser.
+//
+// Optional by design, in the same style as agent.WindowedProxy (pkg/agent/service.go): the
+// relay type-asserts for it and falls back to the conservative answer when
+// the assertion fails, so no existing parser breaks and third-party parsers
+// keep compiling.
+//
+// # Why the relay needs to ask
+//
+// Every V2 parser frames a length-prefixed byte stream (mongo, mysql,
+// postgres all read a header, then that many bytes). A hole therefore does
+// not cost one message: the next header is read from the middle of a body,
+// so every subsequent frame on the connection is garbage. That garbage is
+// not inert — a Postgres framer once read four bytes of misread row data as
+// a uint32 length and tried to allocate multiple gigabytes. So once the tee
+// has permanently desynced, continuing to feed the parser produces no mocks
+// and can produce a pathological allocation.
+//
+// Returning true asserts that the parser DETECTS the hole (the relay stamps
+// a monotonic fakeconn.Chunk.SeqNo per direction, and a dropped chunk
+// still consumes its ordinal, so a gap is visible as a SeqNo discontinuity)
+// and re-anchors on a real message boundary before framing resumes. mongo/v2
+// is the in-tree example: resyncReassemblyOnGap → beginResync →
+// resyncToNextHeader. Such a parser MUST keep receiving bytes after the
+// hole — that is the only way it can find the next boundary — so the relay
+// keeps feeding it.
+//
+// Returning false, or not implementing this at all, means the parser has no
+// recovery path. The relay then stops feeding that direction once it has
+// desynced. Forwarding to the real peer is unaffected either way: this
+// changes only what is CAPTURED, never what the application sees.
+type GapResyncCapable interface {
+	// CanResyncAfterGap reports whether this parser re-anchors its framer
+	// after a hole in the delivered byte stream. It is consulted once per
+	// connection, before the relay starts, so it must not depend on
+	// per-connection state.
+	CanResyncAfterGap() bool
 }
 
 func Register(name IntegrationType, p *Parsers) {
@@ -302,7 +405,11 @@ type WindowAware interface {
 	// HasFirstTestFired reports whether at least one real test window
 	// has been set on the underlying MockManager via SetMocksWithWindow
 	// (non-zero start that is not the BaseTime staging sentinel).
-	// Sticky — once true, stays true.
+	// Sticky within a test-set; ResetForReplaySession clears it at each
+	// set boundary, so a set being staged reads false again. This is the
+	// same underlying value FirstTestWindowStart below exposes as a
+	// timestamp — "has this set's first test fired" and "when did it fire"
+	// are one field, so they share that per-set lifetime.
 	//
 	// Parsers use this alongside IsTestWindowActive to distinguish
 	// "app bootstrap" (before first test) from "between tests" (after
@@ -323,9 +430,11 @@ type WindowAware interface {
 	HasFirstTestFired() bool
 
 	// FirstTestWindowStart returns the earliest test window start observed
-	// by the MockManager, or zero if no real test has fired yet (i.e. every
-	// SetMocksWithWindow call so far was either absent or fired with the
-	// models.BaseTime staging sentinel). Used by filter / strict-gate
+	// by the MockManager FOR THE TEST SET BEING REPLAYED, or zero if no real
+	// test has fired in it yet (i.e. every SetMocksWithWindow call so far was
+	// either absent or fired with the models.BaseTime staging sentinel).
+	// ResetForReplaySession clears it at each set boundary, so each set
+	// classifies against its own first test. Used by filter / strict-gate
 	// callers to distinguish startup-init mocks (req_ts < firstWindowStart)
 	// from stale previous-test mocks (firstWindowStart <= req_ts <
 	// currentStart): the former are legitimate app-bootstrap traffic that

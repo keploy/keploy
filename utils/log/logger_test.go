@@ -2,8 +2,10 @@ package log
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -370,6 +372,321 @@ func TestDebugFileSink_RotateBackToOrigin(t *testing.T) {
 	if !strings.Contains(string(scopedBytes), "scoped-record") {
 		t.Errorf("scoped record missing from scoped file: %s", scopedBytes)
 	}
+}
+
+// TestDebugFileSink_RotateForScope_RejectsPathTraversal is the
+// regression test for the path traversal in RotateForScope. The scope
+// is the test-set ID, which reaches the agent straight off the wire
+// (HandleBeforeTestSetCompose json-decodes it out of an HTTP request
+// body), so it is fully caller-controlled. The rotation target used to
+// be filepath.Join'd from it with no validation, and the file is
+// opened with O_TRUNC — so a scope of "../<name>" truncated an
+// arbitrary file the process could write, which for keploy is often
+// everything because the eBPF hooks need root.
+func TestDebugFileSink_RotateForScope_RejectsPathTraversal(t *testing.T) {
+	SetRedactor(nil)
+
+	root := t.TempDir()
+	originDir := filepath.Join(root, "origin")
+	if err := os.MkdirAll(originDir, 0o755); err != nil {
+		t.Fatalf("mkdir origin dir: %v", err)
+	}
+
+	// Canary outside the origin directory: scope "../escaped" resolves
+	// to exactly this file, and the O_TRUNC open empties it.
+	victimDir := filepath.Join(root, "escaped")
+	if err := os.MkdirAll(victimDir, 0o755); err != nil {
+		t.Fatalf("mkdir victim dir: %v", err)
+	}
+	victimPath := filepath.Join(victimDir, "agent-debug.log")
+	const victimContents = "precious-contents"
+	if err := os.WriteFile(victimPath, []byte(victimContents), 0o644); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+
+	console := &syncBuffer{}
+	logger := newConsoleLogger(console, zap.InfoLevel)
+	originPath := filepath.Join(originDir, "agent-debug.log")
+	originFile, err := os.Create(originPath)
+	if err != nil {
+		t.Fatalf("create origin: %v", err)
+	}
+	defer originFile.Close()
+
+	wrapped, sink := AddDebugFileSink(logger, originFile, 0)
+	if sink == nil {
+		t.Fatalf("AddDebugFileSink returned nil")
+	}
+	defer SetDebugFileSink(nil)
+	wrapped.Debug("origin-line")
+
+	// Every one of these must be refused before any filesystem call.
+	// The windows-flavoured ones ("..\\escaped", "C:") are inert on
+	// linux/darwin but must be rejected on every platform so the linux
+	// build refuses exactly what the windows runtime would honour.
+	for _, scope := range []string{
+		"../escaped",
+		"..",
+		".",
+		"nested/child",
+		`..\escaped`,
+		filepath.Join(root, "absolute-escape"),
+		"C:",
+	} {
+		err := sink.RotateForScope(scope)
+		if err == nil {
+			t.Errorf("RotateForScope(%q): expected rejection, got nil", scope)
+			continue
+		}
+		// The rejection must name the offending value; errors quote it
+		// with %q, so compare against the quoted form.
+		if !strings.Contains(err.Error(), fmt.Sprintf("%q", scope)) {
+			t.Errorf("RotateForScope(%q): error must name the offending scope, got %v", scope, err)
+		}
+		if got := sink.CurrentScope(); got != "" {
+			t.Errorf("RotateForScope(%q) was accepted: CurrentScope=%q", scope, got)
+		}
+	}
+
+	if got, err := os.ReadFile(victimPath); err != nil || string(got) != victimContents {
+		t.Errorf("file outside the origin dir was truncated/rewritten: contents=%q err=%v", got, err)
+	}
+
+	// Nothing may have been created next to the origin directory either
+	// (scope ".." targets <root>/agent-debug.log).
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read root: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != "origin" && e.Name() != "escaped" {
+			t.Errorf("RotateForScope created %q outside the origin directory", filepath.Join(root, e.Name()))
+		}
+	}
+
+	// A rejected rotation must leave the sink usable and still bound to
+	// the previous file rather than half-swapped.
+	wrapped.Debug("still-on-origin")
+	if err := sink.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	originBytes, _ := os.ReadFile(originPath)
+	if !strings.Contains(string(originBytes), "origin-line") || !strings.Contains(string(originBytes), "still-on-origin") {
+		t.Errorf("origin file lost records across the rejected rotations: %s", originBytes)
+	}
+
+	// A legitimate single-segment scope still rotates.
+	if err := sink.RotateForScope("test-set-0"); err != nil {
+		t.Fatalf("RotateForScope on a valid scope: %v", err)
+	}
+	wrapped.Debug("scoped-line")
+	if err := sink.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	scopedBytes, err := os.ReadFile(filepath.Join(originDir, "test-set-0", "agent-debug.log"))
+	if err != nil {
+		t.Fatalf("read scoped file: %v", err)
+	}
+	if !strings.Contains(string(scopedBytes), "scoped-line") {
+		t.Errorf("scoped-line missing from scoped file: %s", scopedBytes)
+	}
+}
+
+func TestValidateScope(t *testing.T) {
+	valid := []string{
+		"",            // rotate back to origin
+		"test-set-0",  // the real-world shape
+		"v1..v2",      // ".." as a substring, not as a path element
+		"..hidden",    //
+		"a.b.c",       //
+		"UPPER_case1", //
+	}
+	for _, scope := range valid {
+		if err := validateScope(scope); err != nil {
+			t.Errorf("validateScope(%q): want nil, got %v", scope, err)
+		}
+	}
+
+	invalid := []string{
+		".", "..", "../x", "a/b", "/abs", `a\b`, `..\x`, `\\server\share`,
+		"C:", "C:/x", "./a", "a/", "x/..",
+	}
+	for _, scope := range invalid {
+		if err := validateScope(scope); err == nil {
+			t.Errorf("validateScope(%q): want rejection, got nil", scope)
+		}
+	}
+}
+
+// TestDebugFileSink_RotateForScope_RejectsSymlinkEscape covers what a purely
+// lexical containment check (Abs + Clean + Rel) cannot: the scope is a
+// perfectly valid single segment, but a symlink already sitting in the debug
+// log directory points out of it. A plain MkdirAll + O_TRUNC open follows that
+// link and truncates the file on the other side — with the agent running as
+// root for its eBPF hooks, and the debug log directory being the user's
+// git-committed keploy folder bind-mounted into the container, both halves of
+// that setup are attacker/repo-reachable.
+func TestDebugFileSink_RotateForScope_RejectsSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation on windows")
+	}
+	SetRedactor(nil)
+
+	root := t.TempDir()
+	originDir := filepath.Join(root, "origin")
+	outsideDir := filepath.Join(root, "outside")
+	for _, d := range []string{originDir, outsideDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	const victimContents = "precious-contents"
+	// Victim 1: reached through a symlinked SCOPE DIRECTORY.
+	victimViaDir := filepath.Join(outsideDir, "agent-debug.log")
+	if err := os.WriteFile(victimViaDir, []byte(victimContents), 0o644); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(originDir, "dir-link")); err != nil {
+		t.Fatalf("symlink scope dir: %v", err)
+	}
+	// Victim 2: reached through a symlinked TARGET FILE inside a real dir.
+	victimViaFile := filepath.Join(root, "shadow")
+	if err := os.WriteFile(victimViaFile, []byte(victimContents), 0o644); err != nil {
+		t.Fatalf("write shadow: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(originDir, "file-link"), 0o755); err != nil {
+		t.Fatalf("mkdir file-link: %v", err)
+	}
+	if err := os.Symlink(victimViaFile, filepath.Join(originDir, "file-link", "agent-debug.log")); err != nil {
+		t.Fatalf("symlink target file: %v", err)
+	}
+
+	console := &syncBuffer{}
+	logger := newConsoleLogger(console, zap.InfoLevel)
+	originPath := filepath.Join(originDir, "agent-debug.log")
+	originFile, err := os.Create(originPath)
+	if err != nil {
+		t.Fatalf("create origin: %v", err)
+	}
+	defer originFile.Close()
+
+	wrapped, sink := AddDebugFileSink(logger, originFile, 0)
+	if sink == nil {
+		t.Fatalf("AddDebugFileSink returned nil")
+	}
+	defer SetDebugFileSink(nil)
+
+	for _, scope := range []string{"dir-link", "file-link"} {
+		if err := sink.RotateForScope(scope); err == nil {
+			t.Errorf("RotateForScope(%q): expected rejection of a symlinked target, got nil", scope)
+		}
+		if got := sink.CurrentScope(); got != "" {
+			t.Errorf("RotateForScope(%q) was accepted: CurrentScope=%q", scope, got)
+		}
+	}
+
+	// Writes must still land on the origin file, and neither victim may have
+	// been touched.
+	wrapped.Debug("still-on-origin")
+	if err := sink.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	for _, victim := range []string{victimViaDir, victimViaFile} {
+		got, err := os.ReadFile(victim)
+		if err != nil || string(got) != victimContents {
+			t.Errorf("file outside the debug log dir was truncated through a symlink: %s contents=%q err=%v", victim, got, err)
+		}
+	}
+	originBytes, _ := os.ReadFile(originPath)
+	if !strings.Contains(string(originBytes), "still-on-origin") {
+		t.Errorf("sink stopped writing to the origin file after the rejections: %s", originBytes)
+	}
+}
+
+// TestDebugFileSink_RotateForScope_ClosesPreviousFile pins the descriptor
+// lifetime the RotateForScope doc promises. The scope is caller-supplied and
+// unbounded in cardinality, so leaking one descriptor per rotation (until the
+// GC happens to run os.File's finalizer) walks the agent's descriptor table up
+// under a burst of distinct test sets.
+//
+// The file the CALLER supplied to AddDebugFileSink is explicitly excluded: the
+// caller owns it and closes it itself.
+func TestDebugFileSink_RotateForScope_ClosesPreviousFile(t *testing.T) {
+	SetRedactor(nil)
+
+	dir := t.TempDir()
+	console := &syncBuffer{}
+	logger := newConsoleLogger(console, zap.InfoLevel)
+	originPath := filepath.Join(dir, "agent-debug.log")
+	originFile, err := os.Create(originPath)
+	if err != nil {
+		t.Fatalf("create origin: %v", err)
+	}
+	defer originFile.Close()
+
+	wrapped, sink := AddDebugFileSink(logger, originFile, 0)
+	if sink == nil {
+		t.Fatalf("AddDebugFileSink returned nil")
+	}
+	defer SetDebugFileSink(nil)
+
+	const rotations = 40
+	for i := 0; i < rotations; i++ {
+		if err := sink.RotateForScope(fmt.Sprintf("ts-%d", i)); err != nil {
+			t.Fatalf("RotateForScope(ts-%d): %v", i, err)
+		}
+		wrapped.Debug(fmt.Sprintf("line-%d", i))
+	}
+	if err := sink.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// The caller's file must still be usable — the sink must not have closed
+	// it out from under the caller on the first rotation.
+	if _, err := originFile.WriteString("caller-still-owns-this\n"); err != nil {
+		t.Errorf("sink closed the caller-owned origin file: %v", err)
+	}
+
+	// Every rotated-away file must be closed. os.File.Close on an
+	// already-closed file reports ErrClosed, which is what we assert against
+	// the sink's own bookkeeping: only the CURRENT file may still be open.
+	sink.mu.Lock()
+	current := sink.owned
+	sink.mu.Unlock()
+	if current == nil {
+		t.Fatal("sink did not record ownership of the rotated file")
+	}
+	if _, err := current.WriteString(""); err != nil {
+		t.Errorf("the current rotated file must stay open: %v", err)
+	}
+	// At most two descriptors under dir may remain: the caller-owned origin
+	// file and the file the last rotation opened. A leak shows up as ~one per
+	// rotation. (Linux-only introspection; a no-op elsewhere.)
+	if n := countOpenFDs(t, dir); n > 2 {
+		t.Errorf("rotation leaked descriptors: %d files under %s still open after %d rotations, want ≤2", n, dir, rotations)
+	}
+}
+
+// countOpenFDs reports how many of this process's open descriptors point at a
+// file under dir. Linux-only introspection; other platforms return 0 so the
+// caller's assertion is a no-op there.
+func countOpenFDs(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return 0 // not linux (or /proc not mounted) — nothing to assert
+	}
+	n := 0
+	for _, e := range entries {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(target, dir+string(filepath.Separator)) {
+			n++
+		}
+	}
+	return n
 }
 
 func TestRotateDebugFileForTestSet_NilSinkIsSafe(t *testing.T) {

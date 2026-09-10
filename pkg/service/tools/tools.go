@@ -17,6 +17,7 @@ import (
 
 	glamour "charm.land/glamour/v2"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/service/export"
 	postmanimport "go.keploy.io/server/v3/pkg/service/import"
@@ -206,7 +207,18 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 	return nil
 }
 
+// maxExtractedArchiveBytes caps the decompressed size of the self-update
+// tarball. A keploy release archive is well under this; the bound stops a
+// crafted artifact from exhausting disk or RAM (#3867).
+const maxExtractedArchiveBytes = 1 << 30 // 1 GiB
+
 func extractTarGz(gzipPath, destDir string) error {
+	return extractTarGzWithLimit(gzipPath, destDir, maxExtractedArchiveBytes)
+}
+
+// extractTarGzWithLimit is the testable seam: the production cap stays a
+// constant while tests exercise the bound without gigabyte archives.
+func extractTarGzWithLimit(gzipPath, destDir string, limit int64) error {
 	file, err := os.Open(gzipPath)
 	if err != nil {
 		return err
@@ -229,7 +241,11 @@ func extractTarGz(gzipPath, destDir string) error {
 		}
 	}()
 
-	tarReader := tar.NewReader(gzipReader)
+	// Cap total decompressed output: the update artifact is a keploy
+	// release tarball (well under the cap), and without a bound a crafted
+	// archive can exhaust disk/RAM via io.Copy below (#3867). Note /tmp is
+	// commonly tmpfs, so the copy target may be RAM-backed.
+	tarReader := tar.NewReader(pkg.NewCappedReader(gzipReader, limit))
 
 	for {
 		header, err := tarReader.Next()

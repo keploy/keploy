@@ -78,6 +78,17 @@ func encodeWithMapper(mock *models.Mock, doc *yaml.NetworkTrafficDoc) (bool, err
 	return true, v.(MockYAMLMapper).Encode(mock, doc)
 }
 
+// hasMapperForKind reports whether an out-of-tree MockYAMLMapper is registered
+// for kind. The JSON encoder does not consult the mapper registry at all — it
+// projects the OSS kinds it knows and returns handled=false for anything else —
+// so callers need this to tell "kind keploy genuinely cannot encode" from "kind
+// an enterprise mapper owns", which must not be treated as a skippable payload
+// fault. See the errMapperEncode note in util.go.
+func hasMapperForKind(kind models.Kind) bool {
+	_, ok := mockYAMLMappers.Load(kind)
+	return ok
+}
+
 func decodeWithMapper(doc *yaml.NetworkTrafficDoc, mock *models.Mock) (bool, error) {
 	if doc == nil {
 		return false, nil

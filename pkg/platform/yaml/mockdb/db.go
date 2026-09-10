@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -934,10 +934,25 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	case yaml.FormatJSON:
 		jsonDoc, handled, err := EncodeMockJSON(mock, ys.Logger)
 		if err != nil {
-			return fmt.Errorf("failed to encode mock (json): %w", err)
+			// No errMapperEncode arm here on purpose: EncodeMockJSON projects
+			// the OSS kinds itself and never invokes a registered mapper, so
+			// every error it returns is json.Marshal on keploy's own spec —
+			// i.e. genuinely a payload fault. The mapper case arrives as
+			// handled=false and is caught below.
+			return fmt.Errorf("%w (json): %w", models.ErrMockEncode, err)
 		}
 		if !handled {
-			return fmt.Errorf("mockdb: unsupported mock kind %q for JSON format", mock.Kind)
+			// EncodeMockJSON projects only the OSS kinds; it never consults the
+			// mapper registry. A kind an enterprise mapper owns therefore lands
+			// here looking exactly like "keploy cannot encode this" — and
+			// tagging it ErrMockEncode would make the recorder skip EVERY mock
+			// of that kind and revoke every test that touched it, finishing
+			// green with an empty test set. That is the outcome errMapperEncode
+			// exists to prevent, so stay fatal when a mapper is registered.
+			if hasMapperForKind(mock.Kind) {
+				return fmt.Errorf("%w: mockdb: kind %q has a registered MockYAMLMapper but the json format cannot encode it; record with storageFormat yaml", errMapperEncode, mock.Kind)
+			}
+			return fmt.Errorf("%w (json): unsupported mock kind %q", models.ErrMockEncode, mock.Kind)
 		}
 		if err := json.NewEncoder(writer).Encode(jsonDoc); err != nil {
 			return fmt.Errorf("failed to encode mock json: %w", err)
@@ -946,20 +961,36 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	default:
 		// YAML path — keeps streaming via yamlLib.Encoder for wire
 		// compatibility with pre-existing mocks.yaml files.
+		// The version header is keyed off isFileEmpty, which CreateFileF only
+		// reports true for the call that CREATED the file. So it has exactly one
+		// chance: skip it here and the whole test set loses its provenance
+		// comment, because every later InsertMock sees a file that exists.
+		// Write it before the encode.
 		if isFileEmpty {
 			if version := utils.GetVersionAsComment(); version != "" {
 				if _, err := writer.WriteString(version); err != nil {
 					return fmt.Errorf("failed to write version comment: %w", err)
 				}
 			}
-		} else {
+		}
+		// The SEPARATOR, by contrast, must wait for a successful encode. A
+		// skippable failure returns below and the deferred flush commits
+		// whatever is already buffered, so writing "---" first injected a stray
+		// empty YAML document into mocks.yaml for every dropped mock.
+		mockYaml, err := EncodeMock(mock, ys.Logger)
+		if err != nil {
+			// Only keploy's own encoders are pure enough to be skippable. A
+			// registered mapper can fail for environmental reasons, so those stay
+			// fatal — see errMapperEncode.
+			if errors.Is(err, errMapperEncode) {
+				return fmt.Errorf("failed to encode mock (yaml): %w", err)
+			}
+			return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+		}
+		if !isFileEmpty {
 			if _, err := writer.WriteString("---\n"); err != nil {
 				return fmt.Errorf("failed to write document separator: %w", err)
 			}
-		}
-		mockYaml, err := EncodeMock(mock, ys.Logger)
-		if err != nil {
-			return fmt.Errorf("failed to encode mock (yaml): %w", err)
 		}
 		encoder := yamlLib.NewEncoder(writer)
 		if err := encoder.Encode(&mockYaml); err != nil {
@@ -1025,7 +1056,15 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	// cost is bounded by the mock's own size and is acceptable vs.
 	// the alternative (encoding to bytes synchronously on every
 	// InsertMock, which would defeat the whole async-writer win).
-	job := gobWriteJob{mock: mock.DeepCopy(), testSetPath: mockPath, filename: mockFileName}
+	// Strip the runtime-only lifetime fields before they reach the encoder —
+	// gob ignores the json:"-" tags that keep them out of every other format.
+	// The reader clears them too (so existing files are repaired), but not
+	// writing them keeps the on-disk shape honest about what it means.
+	gobMock := mock.DeepCopy()
+	var zeroLifetime models.Lifetime
+	gobMock.TestModeInfo.Lifetime = zeroLifetime
+	gobMock.TestModeInfo.LifetimeDerived = false
+	job := gobWriteJob{mock: gobMock, testSetPath: mockPath, filename: mockFileName}
 	select {
 	case ys.gobQueue <- job:
 		ys.gobLifecycleMu.Unlock()
@@ -1325,6 +1364,24 @@ func readGobMocks(path string) ([]*models.Mock, error) {
 			}
 			return out, fmt.Errorf("decode gob mock: %w", err)
 		}
+		// Lifetime and LifetimeDerived are RUNTIME-ONLY (models.Mock tags them
+		// json:"-" bson:"-" and says persisting them would create a second
+		// source of truth). encoding/gob ignores struct tags, so a gob file
+		// carries whatever the recorder stamped — and DeriveLifetime then
+		// short-circuits on the reloaded flag instead of re-deriving.
+		//
+		// The effect is that the SAME recording replays into a different tier
+		// depending on the storage format: gob keeps the recorder's per-test
+		// tag, while yaml drops it and the lax kind-fallback promotes the mock
+		// to session. A call two tests depend on is then consumed by the first
+		// and missing for the second — a CPU-optimisation knob silently
+		// changing replay semantics.
+		//
+		// Clearing on READ (not just on write) also repairs the recordings
+		// already on disk.
+		var zeroLifetime models.Lifetime
+		m.TestModeInfo.Lifetime = zeroLifetime
+		m.TestModeInfo.LifetimeDerived = false
 		out = append(out, &m)
 	}
 }
@@ -1458,8 +1515,21 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	}
 
 	if !hasContent {
-		utils.LogError(ys.Logger, nil, "failed to read the mocks from file (empty)", zap.String("session", filepath.Base(path)))
-		return nil, fmt.Errorf("failed to get mocks, empty file")
+		// The file exists and parsed cleanly; it just holds no documents. That
+		// is now a reachable state rather than a corruption signal: a recording
+		// whose every mock was unencodable writes only the version comment (the
+		// recorder skips a bad mock instead of dying, and a skipped mock leaves
+		// no document behind). A malformed or truncated file does NOT land here
+		// — the decode above returns an error for that.
+		//
+		// So report zero mocks, loudly, instead of failing the whole test set.
+		// The hard error made every test in the set unrunnable and said nothing
+		// about why; zero mocks lets the run proceed and produce per-test
+		// results that point at the real problem.
+		ys.Logger.Warn("mock file contains no mocks; every test in this set will run without mocks",
+			zap.String("session", filepath.Base(path)),
+			zap.String("next_step", "check the recording logs for dropped mocks (mocks-dropped) — if non-zero, the payloads could not be encoded and the set needs re-recording"))
+		return nil, nil
 	}
 
 	// NO disk-level window filter: return every per-test mock this
@@ -1645,36 +1715,15 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	// different test-set's directory; guard before we touch the
 	// filesystem.
 	//
-	// Legitimate names with a '..' substring (e.g. "v1..v2", "team..a")
-	// are allowed as long as no path element equals "." or "..". We
-	// check that by enforcing: no separator, no volume qualifier,
-	// not absolute, not "." or ".." verbatim, and stable under
-	// filepath.Clean.
-	//
-	// The VolumeName check is the Windows-only escape Copilot
-	// flagged on keploy#4045 review round 26: `filepath.IsAbs("C:")`
-	// returns false, `Clean("C:") == "C:"`, and there are no
-	// separators, but `filepath.Join(base, "C:")` on Windows
-	// absorbs the volume qualifier and drops the base, so a
-	// re-record request with testSetID="C:" would turn os.Remove
-	// into a delete at the root of drive C: on a Windows runner.
-	// filepath.VolumeName returns the drive / UNC prefix when the
-	// path carries one, and is empty on the legitimate path.
-	// filepath.VolumeName is Windows-specific at runtime and returns
-	// "" for "C:" on Linux, so we ALSO explicitly reject any ID
-	// containing ':' — a legitimate test-set name has no reason
-	// to carry one, and this makes the Linux build reject the
-	// same strings the Windows runtime would. strings.HasPrefix
-	// catches UNC-style ("\\\\server") and extended-length
-	// ("\\\\?\\C:") prefixes for the same cross-platform reason.
-	if testSetID == "" ||
-		testSetID == "." ||
-		testSetID == ".." ||
-		strings.ContainsAny(testSetID, "/\\:") ||
-		filepath.VolumeName(testSetID) != "" ||
-		filepath.IsAbs(testSetID) ||
-		filepath.Clean(testSetID) != testSetID {
-		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..') under the mocks output directory", testSetID)
+	// The rules (no separator on either platform's spelling, no volume
+	// qualifier, not absolute, no "." / ".." element, while still
+	// allowing a '..' SUBSTRING like "v1..v2") live in utils/pathsafe,
+	// shared with DebugFileSink.RotateForScope — the other place a
+	// test-set ID reaches the filesystem. One definition, so the two
+	// cannot drift; see the package doc for why each rule is there,
+	// including the Windows "C:" escape from keploy#4045 review round 26.
+	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
+		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..') under the mocks output directory: %w", testSetID, err)
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
 
@@ -1713,4 +1762,14 @@ func (ys *MockYaml) GetCurrMockID() int64 {
 
 func (ys *MockYaml) ResetCounterID() {
 	atomic.StoreInt64(&ys.idCounter, -1)
+}
+
+// SetCounterID seeds the mock-name counter so the NEXT InsertMock names its
+// mock "mock-<id+1>". Used when APPENDING to an existing set (the `keploy mock
+// replay --on-miss record` incremental-refresh path) so newly-captured mocks
+// don't reuse names already present on disk. Recording a fresh set uses
+// ResetCounterID (seed -1 → first mock is mock-0); appending seeds from the
+// set's highest existing index instead.
+func (ys *MockYaml) SetCounterID(id int64) {
+	atomic.StoreInt64(&ys.idCounter, id)
 }

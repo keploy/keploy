@@ -1,9 +1,11 @@
 #!/bin/bash
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # Start mongo before starting keploy.
 docker network create keploy-network
+docker_pull_retry mongo
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Generate the keploy-config file.
@@ -18,7 +20,7 @@ sudo rm -rf keploy/
 docker logs mongoDb &
 
 # Start keploy in record mode.
-docker build -t gin-mongo .
+docker_build_retry docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
 container_kill() {

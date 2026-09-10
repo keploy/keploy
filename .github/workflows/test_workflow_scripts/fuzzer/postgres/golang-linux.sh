@@ -7,6 +7,7 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # --- Helper Functions for Logging and Error Handling ---
@@ -205,6 +206,7 @@ sudo chmod +x $POSTGRES_FUZZER_BIN
 sudo chown -R $(whoami):$(whoami) golden
 
 # Start a Postgres instance for the recording session
+docker_pull_retry postgres:latest
 docker run --name postgres-container \
   -e POSTGRES_PASSWORD=password \
   -e POSTGRES_USER=postgres \

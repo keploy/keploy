@@ -62,7 +62,13 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26'
+          # No go-version here on purpose: actions/setup-go uses go-version and
+          # IGNORES go-version-file when both are set (docs/advanced-usage.md:
+          # "If both the go-version and the go-version-file inputs are provided
+          # then the go-version input is used"). A hardcoded version would
+          # therefore silently defeat the repo-aware selection below AND, since
+          # setup-go exports GOTOOLCHAIN=local, pin the job to a toolchain that
+          # cannot build a go.mod requiring a newer Go.
           go-version-file: ${{ github.event_name == 'workflow_dispatch' && 'keploy-to-test/go.mod' || 'keploy/go.mod' }}
           cache: true
           cache-dependency-path: |

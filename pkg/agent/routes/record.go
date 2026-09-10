@@ -40,6 +40,15 @@ type Agent struct {
 // into /tmp on the host. Production code MUST NOT mutate it.
 var agentReadyFilePath = kdocker.AgentReadyFile
 
+// massSuppressionPercent is the share of a session's test cases that must be
+// suppressed before the completion summary is raised from Info to Warn.
+//
+// Not a threshold that changes behaviour — nothing is suppressed differently —
+// only one that decides whether the operator is told loudly. Set well above the
+// handful of test cases a brief memory-pressure blip costs, and well below the
+// point where the recording has quietly become unrepresentative.
+const massSuppressionPercent = 25
+
 // firstCARefusalLog ensures we emit exactly one Info-level line the
 // first time /agent/ready is called before the CA bundle is written.
 // This is the observability signal operators rely on — subsequent
@@ -75,6 +84,15 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
 		r.Post("/test-capture/begin", a.BeginTestErrorCapture)
+		// Per-test scope API for `keploy mock record|replay` — a user's test
+		// runner marks per-test boundaries so mocks are attributed / restricted
+		// per test. See pkg/agent/routes/scope.go.
+		r.Post("/scope/begin", a.HandleScopeBegin)
+		r.Post("/scope/end", a.HandleScopeEnd)
+		r.Get("/scope/windows", a.HandleScopeWindows)
+		r.Post("/scope/table", a.HandleScopeTable)
+		r.Get("/mock/stats", a.HandleMockStats)
+		r.Get("/mock/captured", a.HandleCapturedMocks)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		// Long-lived streaming endpoints. /pcap/traffic emits a
@@ -342,7 +360,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
 	var tcsSentSoFar int       // TCs sent to CLI this session
-	var tcsSuppressedSoFar int // TCs suppressed because pressure overlapped the TC's HTTP window
+	var tcsSuppressedSoFar int // TCs suppressed: pressure OR resync-hole overlapped the TC's HTTP window, or its mock was capacity-dropped
 	for {
 		select {
 		case <-r.Context().Done():
@@ -352,10 +370,27 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				// Channel closed = recording session over.
 				_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
-				a.logger.Info("agent: recording complete",
+				orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
+				// Suppression protects replay from test cases whose mocks
+				// were never captured, but it is coarse: the windows are
+				// timestamp-based and session-wide, so a connection that
+				// stays busy while un-capturable can take a large share of
+				// the run with it — including test cases that other,
+				// healthy connections served completely. At a few percent
+				// that is the intended trade; at a third of the session the
+				// operator has a materially thinner recording than they
+				// think, and must be told at a level they actually see.
+				logRecordingComplete := a.logger.Info
+				if total := tcsSentSoFar + tcsSuppressedSoFar; total > 0 &&
+					tcsSuppressedSoFar*100/total >= massSuppressionPercent {
+					logRecordingComplete = a.logger.Warn
+				}
+				logRecordingComplete("agent: recording complete",
 					zap.Int("tcs_sent_to_cli", tcsSentSoFar),
-					zap.Int("tcs_suppressed_pressure_overlap", tcsSuppressedSoFar),
+					zap.Int("tcs_suppressed_total", tcsSuppressedSoFar),
 					zap.Int("pressure_ranges_total", syncmgr.Get().PressureRangeCount()),
+					zap.Int("orphan_ranges_total", orphanClosed),
+					zap.Int("orphan_ranges_still_open", orphanOpen),
 					zap.Int64("mocks_dropped_by_pressure", finalDropped),
 					zap.Int64("mocks_added_successfully", finalAdded),
 					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
@@ -371,7 +406,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// drops) because that check is race-free regardless of when the
 			// mock's goroutine runs relative to this handler.
 			tcRespTime := t.HTTPResp.Timestamp
-			hasOverlap, overlapCount := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+			hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+			// A mongo/v2 reassembly resync hole strands a delivered-but-unframable
+			// op: its TC records mock-less though no pressure range covers it. The
+			// enterprise parser reports the hole via Session.RecordOrphanWindow;
+			// suppress any TC whose window overlaps it, same as for pressure.
+			hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
 			// A capacity drop (outChan overflow / already-closed channel)
 			// feeds nothing into pressureRanges, so the pressure-overlap check
 			// above cannot catch it. Suppress by EXACT owning test name so a
@@ -380,13 +420,14 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// concurrent TC that kept all its mocks.
 			mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
 
-			if hasOverlap || mockDropped {
+			if hasPressure || hasOrphan || mockDropped {
 				tcsSuppressedSoFar++
-				a.logger.Debug("agent: TC suppressed — memory pressure overlapped TC window or a mock was capacity-dropped, not sent to CLI",
+				a.logger.Debug("agent: TC suppressed — memory pressure / resync-hole overlapped TC window or a mock was capacity-dropped, not sent to CLI",
 					zap.String("tc_name", t.Name),
 					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
 					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
-					zap.Int("pressure_overlaps", overlapCount),
+					zap.Int("pressure_overlaps", pressureOverlaps),
+					zap.Int("resync_orphan_overlaps", orphanOverlaps),
 					zap.Bool("capacity_drop", mockDropped),
 					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 				)

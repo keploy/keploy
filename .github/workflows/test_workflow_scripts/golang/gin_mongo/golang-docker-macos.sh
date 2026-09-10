@@ -11,6 +11,7 @@ if [[ ! -f "${TEST_IID_SCRIPT}" ]]; then
   exit 1
 fi
 source "${TEST_IID_SCRIPT}"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # Verify Docker Desktop is running -- never start it from CI.
 if ! docker info >/dev/null 2>&1; then
@@ -77,6 +78,7 @@ docker network create "$NETWORK_NAME"
 
 # Start MongoDB with a unique container name but a network alias of "mongoDb"
 # so the gin-mongo app (which hardcodes "mongoDb:27017") resolves correctly.
+docker_pull_retry mongo
 docker run --name "$MONGO_CONTAINER" --rm \
   --net "$NETWORK_NAME" --network-alias mongoDb \
   -p "${DB_PORT}:27017" -d mongo
@@ -102,7 +104,7 @@ for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" \));
 done
 
 # Build the app image with a unique tag.
-docker build -t "$APP_IMAGE" .
+docker_build_retry docker build -t "$APP_IMAGE" .
 
 send_request(){
     echo "Sending requests to the application..."

@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
@@ -64,6 +66,15 @@ func probeHTTP(ctx context.Context, logger *zap.Logger, phase string, fields ...
 func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, onMockRecorded integrations.PostRecordHook) error {
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
+	// Prefer the resolved destination port from DstCfg when present. In proxyless
+	// (observe-only) mode destConn is a SimulatedConn with no real upstream
+	// socket, so remoteAddr.Port is 0 — which would break port-keyed matching
+	// (telemetry passthrough rules, MySQL/bypass port checks). DstCfg.Port is set
+	// authoritatively by the classic proxy AND by the proxyless routeEgressToParser,
+	// and equals remoteAddr.Port on the classic path, so this is a no-op there.
+	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
+		destPort = opts.DstCfg.Port
+	}
 
 	probeHTTP(ctx, h.Logger, "encode-start",
 		zap.String("dstAddr", destConn.RemoteAddr().String()),
@@ -143,15 +154,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		for {
 			if memoryguard.IsRecordingPaused() {
 				h.Logger.Debug("memory pressure detected, stopping HTTP recording and falling back to passthrough")
-				done := make(chan struct{}, 2)
-				cp := func(dst, src net.Conn) {
-					_, _ = io.Copy(dst, src)
-					done <- struct{}{}
-				}
-				go cp(destConn, clientConn)
-				go cp(clientConn, destConn)
-				<-done
-				<-done
+				relayRawPassthrough(clientConn, destConn)
 				return nil
 			}
 
@@ -434,4 +437,18 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		}
 		return err
 	}
+}
+
+// relayRawPassthrough is the memory-pressure fallback: nothing is
+// captured, bytes are just relayed.
+//
+// It delegates to proxyutil.RelayRawPassthrough. http and mysql shared
+// this verbatim; generic had the same logic with the FIN factored into a
+// forwardFIN helper. See that function for the two rules
+// it enforces — forward the FIN only on a clean EOF, and give a surviving
+// direction a bounded drain when the other breaks rather than waiting for
+// it forever or abandoning it at once.
+
+func relayRawPassthrough(clientConn, destConn net.Conn) {
+	proxyutil.RelayRawPassthrough(clientConn, destConn)
 }

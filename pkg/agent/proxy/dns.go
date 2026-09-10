@@ -82,6 +82,18 @@ const (
 	// recordedDNSMocksTTL is the TTL for recorded DNS mock entries.
 	// Recording sessions typically don't last longer than this.
 	recordedDNSMocksTTL = 30 * time.Minute
+
+	// nodataRelayLogMaxSize / nodataRelayLogTTL bound the "relayed NODATA"
+	// log-dedupe tracker. Deliberately the same shape and numbers as
+	// recordedDNSMocks: identical key space (the generateCacheKey
+	// (name, qtype) pair, which is app-controlled and therefore unbounded —
+	// per-request hostnames and search-domain permutations mint a fresh key
+	// every time) and identical lifetime expectations. Re-logging a line
+	// after eviction or expiry is harmless — this tracker only suppresses
+	// duplicate log output, it carries no replay state — so the bound has
+	// no correctness cost.
+	nodataRelayLogMaxSize = 1024
+	nodataRelayLogTTL     = 30 * time.Minute
 )
 
 // newDNSCache creates a new thread-safe, size-bounded, TTL-expiring DNS cache.
@@ -119,6 +131,35 @@ func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
 // newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
 func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
 	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
+}
+
+// newNodataRelayLogCache creates the bounded, TTL-expiring tracker that dedupes
+// the "relayed NODATA" Info log to once per (name, qtype).
+func newNodataRelayLogCache() *expirable.LRU[string, bool] {
+	return expirable.NewLRU[string, bool](nodataRelayLogMaxSize, nil, nodataRelayLogTTL)
+}
+
+// shouldLogNodataRelay reports whether the "relayed NODATA" Info line has not
+// yet been emitted for this (name, qtype), recording it as emitted when it
+// returns true.
+//
+// Non-atomic Get-then-Add on purpose: this is a log-dedupe, so the worst a
+// concurrent race can do is print the same line twice. It mirrors the
+// recordedDNSMocks dedupe a few hundred lines below.
+//
+// Nil-tolerant because the tracker is one optional field on a large struct: a
+// construction path that forgets it should lose deduplication, not take the
+// DNS server down mid-resolution. (It also keeps the bare &Proxy{} literals in
+// this package's tests exercising the surrounding DNS logic.)
+func (p *Proxy) shouldLogNodataRelay(key string) bool {
+	if p.nodataRelayLogged == nil {
+		return true
+	}
+	if _, dup := p.nodataRelayLogged.Get(key); dup {
+		return false
+	}
+	p.nodataRelayLogged.Add(key, true)
+	return true
 }
 
 func generateCacheKey(name string, qtype uint16) string {
@@ -249,6 +290,11 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// "mock not found" path: same error, same log line, same
 		// NXDOMAIN / synthetic fallback. Forwarding is strictly
 		// additive.
+		// Set when upstream answers authoritatively that the name does not
+		// exist. Such a name has no mock and never could: the record side
+		// deliberately skips non-Success rcodes, so its absence is correct
+		// rather than a recording gap. See the mock-miss report below.
+		upstreamSaysNameDoesNotExist := false
 		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
 			// A RcodeSuccess response splits into two cases by answer count:
 			// resolved (>=1 RR) vs NODATA (0 RRs). Both are relayed as-is; only
@@ -292,7 +338,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				//     record of this type also relays empty here) but dedupe to
 				//     once per (name,qtype) so the signal survives without the spam.
 				if mockingEnabled {
-					if _, dup := p.nodataRelayLogged.LoadOrStore(generateCacheKey(question.Name, question.Qtype), struct{}{}); !dup {
+					if p.shouldLogNodataRelay(generateCacheKey(question.Name, question.Qtype)) {
 						p.logger.Info("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
 							zap.String("query", question.Name),
 							zap.String("qtype", dns.TypeToString[question.Qtype]))
@@ -326,6 +372,13 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					zap.Int("rcode", fwdResp.Rcode))
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 			}
+			// ONLY NXDOMAIN. This branch also covers SERVFAIL, REFUSED,
+			// NOTIMP and FORMERR, which mean the resolver could not or would
+			// not answer -- they say nothing about whether the name exists,
+			// so they stay reportable like an unreachable upstream.
+			if fwdResp.Rcode == dns.RcodeNameError {
+				upstreamSaysNameDoesNotExist = true
+			}
 			p.logger.Debug("DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response",
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
@@ -336,7 +389,47 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.Error(fwdErr))
 		}
-		if mockingEnabled {
+		// grpc-go probes _grpc_config.<target> for a service-config TXT record on
+		// EVERY target, and the absence of that record is the normal answer —
+		// it means "no service config, use defaults". defaultDNSResponse below
+		// already returns exactly that, so for this query the synthetic answer
+		// is COMPLETE, not a degraded fallback.
+		//
+		// Reporting it as a missing mock therefore fails a replay that is
+		// behaving correctly: every gRPC test case in a stock grpc-go
+		// application reports two DNS mismatches it can do nothing about. That
+		// is what the first run of the integrations gRPC e2e lane hit — every
+		// test case failed on "Mock mismatch: [DNS] TXT _grpc_config.upstream"
+		// without a single gRPC assertion being reached.
+		//
+		// Narrow on purpose: only the _grpc_config probe. A missing TXT mock for
+		// any other name is still a real miss, because an application that reads
+		// its own TXT records would be silently served an empty answer.
+		if isGrpcServiceConfigProbe(question) {
+			p.logger.Debug("no mock for the gRPC service-config TXT probe; "+
+				"an empty TXT answer is the correct, complete response",
+				zap.String("query", question.Name))
+			return p.defaultDNSResponse(question)
+		}
+		// Skipped when upstream said NXDOMAIN: there is no mock to be missing.
+		// The record side deliberately does not store non-Success rcodes, so a
+		// name that does not resolve was never recordable, and the report's
+		// own advice -- "re-record to capture DNS queries" -- can never
+		// succeed for it. Kubernetes resolvers reach here routinely: with
+		// ndots:5 a name like appdb.ns.svc.cluster.local is first tried as
+		// appdb.ns.svc.cluster.local.ns.svc.cluster.local, which NXDOMAINs by
+		// design.
+		//
+		// Everything else that reaches this point is still reported: upstream
+		// unreachable, no upstream configured, a non-forwardable qtype, and
+		// SERVFAIL/REFUSED/NOTIMP/FORMERR -- none of which tell us the name is
+		// absent. (A name that DOES resolve never gets here; it returns
+		// upstream's answer above. So after this change DNS-miss reporting
+		// fires only when the forwarder itself could not reach a verdict.)
+		//
+		// The app is unaffected either way -- it still receives the synthetic
+		// NOERROR steer below (issue #2006). Only the spurious verdict goes.
+		if mockingEnabled && !upstreamSaysNameDoesNotExist {
 			// Send mock not found error if we couldn't match any DNS
 			// mock and upstream forwarding also failed.
 			p.logger.Debug("mock miss",
@@ -376,6 +469,15 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// any other mode -> best-effort defaults
 		return p.defaultDNSResponse(question)
 	}
+}
+
+// isGrpcServiceConfigProbe reports whether q is grpc-go's service-config
+// lookup: a TXT query for _grpc_config.<target>.
+//
+// grpc-go's default (dns) resolver issues one per target. The record has no
+// bearing on the RPCs keploy captures, and its absence is the normal answer.
+func isGrpcServiceConfigProbe(q dns.Question) bool {
+	return q.Qtype == dns.TypeTXT && strings.HasPrefix(strings.ToLower(q.Name), "_grpc_config.")
 }
 
 func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {

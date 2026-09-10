@@ -17,6 +17,10 @@ type TestCaseContext struct {
 type MockContext struct {
 	Mock      *models.Mock
 	TestSetID string
+	// Skip, when set by a BeforeMockInsert hook, tells the recorder to DROP this
+	// mock (do not persist/map/correlate it) — e.g. the AsyncRecorder collapsing
+	// an unchanged poll cycle.
+	Skip bool
 }
 
 // RecordingCompleteContext is passed to the end-of-recording hook, once every

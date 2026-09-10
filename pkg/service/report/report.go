@@ -867,6 +867,10 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 		return
 	}
 	sb.WriteString("=== OUTGOING CALLS WITH NO MATCHING MOCK (likely root cause) ===\n")
+	// Set by any out-of-scope call below; the shared explanation is written
+	// ONCE for the whole test after the loop, never once per call — see
+	// models.OutOfScopeDestinationCauses.
+	var outOfScope bool
 	for _, uc := range test.FailureInfo.UnmatchedCalls {
 		sb.WriteString(fmt.Sprintf("  [%s] %s", uc.Protocol, uc.ActualSummary))
 		if uc.MatchPhase != "" {
@@ -877,6 +881,31 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 			sb.WriteString(")")
 		}
 		sb.WriteString("\n")
+		// An upstream that nothing in the compared set targets has no
+		// comparable "closest mock": the matcher picked the least-distant
+		// mock in the pool, which belongs to a DIFFERENT host. Its field
+		// diffs are worse than useless here — the paths in this block are
+		// advertised as copy-pasteable noise configuration, so rendering them
+		// invites the reader to noise a `path` difference between two
+		// unrelated calls. The values stay on the UnmatchedCall for machine
+		// consumers; only this human rendering drops them, and says so.
+		if uc.DestinationScope == models.DestinationScopeNotInComparedSet {
+			outOfScope = true
+			// Name the destination. "this destination" only ever resolved
+			// because the default NextSteps happens to spell the host out
+			// two lines down, and a parser that supplies its own hint (via
+			// WithNextSteps) removes that accident — leaving a line that
+			// refers to a host it never prints.
+			dest := uc.Destination
+			if dest == "" {
+				dest = "an unidentified upstream"
+			}
+			sb.WriteString(fmt.Sprintf("    no recorded mock in the compared set targets %s; closest-mock diff omitted (it would compare against a different upstream)\n", dest))
+			if uc.NextSteps != "" {
+				sb.WriteString(fmt.Sprintf("    next steps: %s\n", uc.NextSteps))
+			}
+			continue
+		}
 		if uc.ClosestMock != "" {
 			sb.WriteString(fmt.Sprintf("    closest mock: %s\n", uc.ClosestMock))
 		}
@@ -900,6 +929,10 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 		if uc.NextSteps != "" {
 			sb.WriteString(fmt.Sprintf("    next steps: %s\n", uc.NextSteps))
 		}
+	}
+	if outOfScope {
+		sb.WriteString(models.RenderOutOfScopeDestinationCauses("  "))
+		sb.WriteString("\n")
 	}
 	sb.WriteString("\n")
 }

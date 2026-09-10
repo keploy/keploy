@@ -2,6 +2,7 @@ package models
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"time"
 )
 
@@ -25,6 +26,46 @@ const (
 	OR  MatchType = "OR"
 	AND MatchType = "AND"
 )
+
+// MissPolicy decides what the proxy does in MODE_TEST when an outgoing call
+// matches no recorded mock. It is the VCR-style "record mode" for the
+// `keploy mock replay` flow.
+type MissPolicy string
+
+const (
+	// MissFail is the historical, deterministic behaviour: a miss is a hard
+	// failure (HTTP 502 / protocol error, connection torn down) and never
+	// reaches the real dependency. This is the default.
+	MissFail MissPolicy = "fail"
+	// MissPassthrough dials the real upstream on a miss, relays the exchange,
+	// and does NOT persist it. The equivalent of VCR's `once` on an existing
+	// cassette / go-vcr passthrough — new calls succeed against the real
+	// dependency but the cassette is not grown.
+	MissPassthrough MissPolicy = "passthrough"
+	// MissRecord dials the real upstream on a miss, relays the exchange, AND
+	// captures it back into the active mock set (VCR `new_episodes`). Newly
+	// observed calls are appended so the next replay serves them from the mock.
+	MissRecord MissPolicy = "record"
+)
+
+// Valid reports whether p is a recognised policy; the empty string is treated
+// as MissFail by callers.
+func (p MissPolicy) Valid() bool {
+	switch p {
+	case "", MissFail, MissPassthrough, MissRecord:
+		return true
+	}
+	return false
+}
+
+// RecordsOnMiss reports whether the policy captures newly-seen calls.
+func (p MissPolicy) RecordsOnMiss() bool { return p == MissRecord }
+
+// PassesThroughOnMiss reports whether the policy dials the real upstream on a
+// miss (both passthrough and record do).
+func (p MissPolicy) PassesThroughOnMiss() bool {
+	return p == MissPassthrough || p == MissRecord
+}
 
 type FilterPolicy string
 
@@ -57,8 +98,14 @@ type OutgoingOptions struct {
 	TLSPrivateKey string
 	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
-	SQLDelay               time.Duration // This is the same as Application delay.
-	Mocking                bool          // used to enable/disable mocking
+	SQLDelay time.Duration // This is the same as Application delay.
+	Mocking  bool          // used to enable/disable mocking
+	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
+	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
+	// default), "passthrough" (dial the real upstream, don't persist), or
+	// "record" (dial the real upstream AND capture the exchange back into the
+	// active mock set). Only consulted on the `keploy mock replay` path.
+	OnMiss                 MissPolicy
 	DstCfg                 *ConditionalDstCfg
 	Backdate               time.Time                      // used to set backdate in cacert request
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
@@ -100,7 +147,39 @@ type OutgoingOptions struct {
 	// protocol; the generic dispatch path waits to peek client bytes
 	// before dialing and deadlocks otherwise. When nil/empty, the
 	// proxy falls back to the built-in defaults [3306, 4000].
+	//
+	// Since automatic detection landed this list is an optimisation and
+	// an escape hatch rather than a requirement: a port listed here
+	// skips the detection probe entirely. See DisableMysqlAutoDetect.
 	MysqlPorts []uint32
+	// PassThroughPorts / PassThroughHosts mark telemetry / noisy egress that
+	// keploy should not record normally (see PassThroughRule). Ports gate on the
+	// destination port; Hosts gate on the destination host/authority (needed for
+	// TLS egress where the port is not observable at capture). A matched rule is
+	// either "skip" (never record; synth success on replay) or "recordOne"
+	// (keep one exchange per (host,port,path,method); serve it body-agnostic on
+	// replay). Empty ⇒ built-in telemetry defaults only (see MergePassThroughDefaults).
+	PassThroughPorts []PassThroughRule
+	PassThroughHosts []PassThroughRule
+	// PassThroughScope isolates recordOne de-duplication to one app/session. The
+	// HTTP integration (and its ptRecorder) is a single instance shared across
+	// apps in a long-lived proxyless/DaemonSet agent, so without a scope the first
+	// app's recordOne capture would suppress a second app's identical endpoint.
+	// Callers that share a recorder across tenants (the enterprise DaemonSet gate)
+	// set this to a per-app/per-session key; the classic sidecar leaves it empty
+	// (process-per-session, so the plain key already isolates).
+	PassThroughScope string
+	// DisableMysqlAutoDetect turns off automatic MySQL port detection,
+	// restoring the strict "MysqlPorts or nothing" behaviour. With
+	// detection on (the default), a MySQL server on any port is
+	// identified from its handshake at record time and recalled from
+	// the recorded mocks' destAddr at replay time.
+	DisableMysqlAutoDetect bool
+	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
+	// mocks on a port the recording never saw. Detection still runs; only the
+	// inference that covers a moved endpoint is turned off. See
+	// Config.DisableMysqlEndpointDrift.
+	DisableMysqlEndpointDrift bool
 	// SupportsDroppedRevoke is a capability flag set by the CLI on the
 	// /outgoing request: when true, the CLI understands the reserved
 	// Kind=RevokedTests control frame (it diverts it into a revoke set and
@@ -109,12 +188,57 @@ type OutgoingOptions struct {
 	// older CLI that never sets it never receives one — the version-skew
 	// guard for the deferred-orphan revoke protocol. Record path only.
 	SupportsDroppedRevoke bool
+	// UpstreamTLSVerify mirrors config.Record.UpstreamTLS.Verify: when true,
+	// keploy's own dial to the REAL destination validates the server's
+	// certificate chain and hostname instead of skipping verification.
+	//
+	// Default false, and deliberately so — a recording proxy must never be
+	// stricter than the application it records. An app on sslmode=require /
+	// tls=skip-verify chose not to authenticate its upstream; verifying on its
+	// behalf would break connections the app would have made, and the failure
+	// is silent (the supervisor falls through to raw passthrough and the mock
+	// is dropped). This is NOT a CA-bundle limitation: crypto/tls uses the
+	// system pool for free when RootCAs is nil.
+	UpstreamTLSVerify bool
+	// UpstreamTLSRootCAs is the trust anchor set for those verifying dials.
+	// nil means "use Go's default" (crypto/tls falls back to the platform
+	// root pool) — it never means "trust nothing".
+	//
+	// json:"-" is load-bearing, not cosmetic. OutgoingOptions is JSON-encoded
+	// on the CLI → agent /outgoing request (pkg/platform/http/agent.go), and
+	// x509.CertPool has only unexported fields: it would marshal to `{}` and
+	// decode on the agent into a NON-NIL EMPTY pool, i.e. a trust store that
+	// trusts nothing, failing every handshake. The pool is therefore built
+	// agent-side from UpstreamTLSCACert, which does travel: proxy.New settles
+	// only the argv-vs-yaml precedence for the CA PATH, and the pool itself is
+	// read from disk lazily, under a sync.Once, on the first record session.
+	UpstreamTLSRootCAs *x509.CertPool `json:"-"`
+	// SrcPid is the kernel (root-namespace) PID of the process that opened THIS
+	// outgoing connection, taken from the eBPF redirect map per connection. It
+	// is a runtime, per-connection value — never session config — so it is
+	// json:"-" (OutgoingOptions is JSON-marshaled CLI→agent and this must not
+	// travel as a rule). The proxy stamps it on its per-connection copy of the
+	// options and uses it to pick the worker's scoped mock view (per-PID
+	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
+	SrcPid uint32 `json:"-"`
 }
 
 type ConditionalDstCfg struct {
 	Addr   string // Destination Addr (ip:port)
 	Port   uint
 	TLSCfg *tls.Config
+	// AddrFabricated marks Addr/Port as a stand-in the capture layer
+	// synthesized because it could not resolve the connection's REAL
+	// destination (e.g. the proxyless SSL-uprobe path substitutes
+	// 127.0.0.1:0 when the pid→dest cache is ambiguous, and content
+	// matching later forces the well-known port, yielding
+	// "127.0.0.1:3306"). Such an address is good enough for parser
+	// selection and mock metadata (grouping), but it does NOT point at
+	// the server this connection actually talked to — consumers MUST
+	// NOT dial it (the MySQL recorder's fetchServerGreeting fallback
+	// would otherwise connect to an unrelated local server, or fail
+	// instantly with ECONNREFUSED and abort the capture).
+	AddrFabricated bool
 }
 
 type IncomingOptions struct {
@@ -129,14 +253,20 @@ type SetupOptions struct {
 	DockerDelay     uint64
 	Synchronous     bool
 	// Cmd               string
-	AgentURI                  string
-	IsDocker                  bool
-	CommandType               string
-	EnableTesting             bool
-	ProxyPort                 uint32
-	IncomingProxyPort         uint16
-	DnsPort                   uint32
-	Mode                      Mode
+	AgentURI          string
+	IsDocker          bool
+	CommandType       string
+	EnableTesting     bool
+	ProxyPort         uint32
+	IncomingProxyPort uint16
+	DnsPort           uint32
+	Mode              Mode
+	// MockMode marks a `keploy mock record|replay` session: the agent must
+	// NOT relocate the application's listening ports (no ingress/bind hooks)
+	// because the wrapped process is a test runner, not a server whose
+	// incoming traffic becomes test cases. Only outgoing calls are captured
+	// (record) or served (replay). Forwarded to the agent via --mock-mode.
+	MockMode                  bool
 	GlobalPassthrough         bool
 	CapturePackets            bool
 	OpportunisticTLSIntercept bool
@@ -146,14 +276,27 @@ type SetupOptions struct {
 	// so containerised agents honour the user's choice without seeing the
 	// host's keploy.yml.
 	ChannelBindingShim bool
-	AgentPort          uint32
-	AppPorts           []string
-	AppNetworks        []string
-	NetworkAliases     map[string][]string
-	BuildDelay         uint64
-	PassThroughPorts   []uint
-	MemoryLimit        uint64
-	ConfigPath         string
+	// UpstreamTLSVerify / UpstreamTLSCACert mirror config.Record.UpstreamTLS.
+	// Forwarded orchestrator → agent over the --upstream-tls-verify /
+	// --upstream-tls-ca-cert argv flags, the same propagation channel
+	// CapturePackets / OpportunisticTLSIntercept / ChannelBindingShim use, so a
+	// containerised agent honours the operator's choice without ever seeing the
+	// host's keploy.yml.
+	//
+	// The CA pool itself cannot travel — see OutgoingOptions.UpstreamTLSRootCAs
+	// — so the PATH travels and the agent loads it locally. That path is
+	// resolved on the AGENT's filesystem; for docker/k8s runs the operator must
+	// bind-mount the PEM or point at a path that exists inside the container.
+	UpstreamTLSVerify bool
+	UpstreamTLSCACert string
+	AgentPort         uint32
+	AppPorts          []string
+	AppNetworks       []string
+	NetworkAliases    map[string][]string
+	BuildDelay        uint64
+	PassThroughPorts  []uint
+	MemoryLimit       uint64
+	ConfigPath        string
 	// RecordBufferMaxMemoryPerConn mirrors config.Record.RecordBuffer.MaxMemoryPerConnection.
 	// Forwarded from orchestrator → agent so containerised agents (docker-compose,
 	// k8s sidecar) honour the user's tuning; the agent's filesystem doesn't have
@@ -165,8 +308,18 @@ type SetupOptions struct {
 	// RecordBufferQueueSize mirrors config.Record.RecordBuffer.QueueSize.
 	// See RecordBufferMaxMemoryPerConn for the propagation rationale.
 	RecordBufferQueueSize int
-	ExtraArgs             []string
-	EnableSampling        int
+	// RecordBufferConsumerStallGrace mirrors
+	// config.Record.RecordBuffer.ConsumerStallGrace. See
+	// RecordBufferMaxMemoryPerConn for the propagation rationale.
+	RecordBufferConsumerStallGrace time.Duration
+
+	// RecordBufferHalfCloseGrace mirrors
+	// config.RecordBuffer.HalfCloseGrace. Zero means "unset, use the
+	// relay default"; NEGATIVE means "disable half-close", so the value
+	// must be forwarded on != 0 rather than > 0.
+	RecordBufferHalfCloseGrace time.Duration
+	ExtraArgs                  []string
+	EnableSampling             int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF
@@ -193,6 +346,12 @@ type SetupOptions struct {
 	// environment variables to disk. When non-nil, SetupCompose uses this content
 	// directly instead of reading from a file path extracted from the command.
 	InMemoryCompose []byte
+	// AgentReadyTimeout, when > 0, overrides pkg.AgentReadyTimeout() for this
+	// bring-up. A retry after a stalled agent sets a shorter window than the
+	// generous first-attempt slow-start budget: a fresh agent reports healthy in
+	// a second or two, so a wedged retry should be cut short rather than re-wait
+	// minutes.
+	AgentReadyTimeout time.Duration
 }
 
 type RunOptions struct {

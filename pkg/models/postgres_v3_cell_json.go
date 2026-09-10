@@ -504,11 +504,11 @@ func numericFromJSON(m map[string]any) (pgtype.Numeric, error) {
 		}
 	}
 	if v, ok := m["exp"]; ok && v != nil {
-		n, err := asInt64(v)
+		n, err := asInt32(v)
 		if err != nil {
 			return out, fmt.Errorf("pg/numeric exp: %w", err)
 		}
-		out.Exp = int32(n)
+		out.Exp = n
 	}
 	if v, ok := m["nan"]; ok && v != nil {
 		b, err := asBool(v)
@@ -518,7 +518,9 @@ func numericFromJSON(m map[string]any) (pgtype.Numeric, error) {
 		out.NaN = b
 	}
 	if v, ok := m["infinitymodifier"]; ok && v != nil {
-		n, err := asInt64(v)
+		// pgtype.InfinityModifier is an int8 (only -1/0/1 are meaningful,
+		// but the width is what bounds the decode).
+		n, err := asInt8(v)
 		if err != nil {
 			return out, fmt.Errorf("pg/numeric infinitymodifier: %w", err)
 		}
@@ -544,18 +546,18 @@ func intervalFromJSON(m map[string]any) (pgtype.Interval, error) {
 		out.Microseconds = n
 	}
 	if v, ok := m["days"]; ok && v != nil {
-		n, err := asInt64(v)
+		n, err := asInt32(v)
 		if err != nil {
 			return out, fmt.Errorf("pg/interval days: %w", err)
 		}
-		out.Days = int32(n)
+		out.Days = n
 	}
 	if v, ok := m["months"]; ok && v != nil {
-		n, err := asInt64(v)
+		n, err := asInt32(v)
 		if err != nil {
 			return out, fmt.Errorf("pg/interval months: %w", err)
 		}
-		out.Months = int32(n)
+		out.Months = n
 	}
 	if v, ok := m["valid"]; ok && v != nil {
 		b, err := asBool(v)
@@ -602,11 +604,11 @@ func bitsFromJSON(m map[string]any) (pgtype.Bits, error) {
 			// equivalent fall-through in decodePgBitsMapping).
 			b := make([]byte, 0, len(t))
 			for i, e := range t {
-				n, err := asInt64(e)
+				n, err := asUint8(e)
 				if err != nil {
 					return out, fmt.Errorf("pg/bits bytes[%d]: %w", i, err)
 				}
-				b = append(b, byte(n))
+				b = append(b, n)
 			}
 			out.Bytes = b
 		default:
@@ -614,11 +616,11 @@ func bitsFromJSON(m map[string]any) (pgtype.Bits, error) {
 		}
 	}
 	if v, ok := m["len"]; ok && v != nil {
-		n, err := asInt64(v)
+		n, err := asInt32(v)
 		if err != nil {
 			return out, fmt.Errorf("pg/bits len: %w", err)
 		}
-		out.Len = int32(n)
+		out.Len = n
 	}
 	if v, ok := m["valid"]; ok && v != nil {
 		b, err := asBool(v)
@@ -834,18 +836,18 @@ func circleFromJSON(m map[string]any) (pgtype.Circle, error) {
 func tidFromJSON(m map[string]any) (pgtype.TID, error) {
 	out := pgtype.TID{}
 	if v, ok := m["blocknumber"]; ok && v != nil {
-		n, err := asInt64(v)
+		n, err := asUint32(v)
 		if err != nil {
 			return out, fmt.Errorf("pg/tid blocknumber: %w", err)
 		}
-		out.BlockNumber = uint32(n)
+		out.BlockNumber = n
 	}
 	if v, ok := m["offsetnumber"]; ok && v != nil {
-		n, err := asInt64(v)
+		n, err := asUint16(v)
 		if err != nil {
 			return out, fmt.Errorf("pg/tid offsetnumber: %w", err)
 		}
-		out.OffsetNumber = uint16(n)
+		out.OffsetNumber = n
 	}
 	if v, ok := m["valid"]; ok && v != nil {
 		b, err := asBool(v)
@@ -891,14 +893,16 @@ func tsvectorFromJSON(m map[string]any) (pgtype.TSVector, error) {
 					}
 					pos := pgtype.TSVectorPosition{}
 					if pn, ok := pm["position"]; ok && pn != nil {
-						n, err := asInt64(pn)
+						n, err := asUint16(pn)
 						if err != nil {
 							return out, fmt.Errorf("pg/tsvector lexemes[%d] positions[%d] position: %w", i, j, err)
 						}
-						pos.Position = uint16(n)
+						pos.Position = n
 					}
 					if wn, ok := pm["weight"]; ok && wn != nil {
-						n, err := asInt64(wn)
+						// pgtype.TSVectorWeight is a byte — it carries the
+						// ASCII weight letter ('A'..'D') or 0.
+						n, err := asUint8(wn)
 						if err != nil {
 							return out, fmt.Errorf("pg/tsvector lexemes[%d] positions[%d] weight: %w", i, j, err)
 						}
@@ -962,14 +966,16 @@ func rangeFromJSON(m map[string]any) (pgtype.Range[any], error) {
 		out.Upper = rec
 	}
 	if v, ok := m["lowertype"]; ok && v != nil {
-		n, err := asInt64(v)
+		// pgtype.BoundType is a byte holding the ASCII bound marker
+		// ('i', 'e', 'U', 'E' — see pgtype/range.go).
+		n, err := asUint8(v)
 		if err != nil {
 			return out, fmt.Errorf("pg/range lowertype: %w", err)
 		}
 		out.LowerType = pgtype.BoundType(n)
 	}
 	if v, ok := m["uppertype"]; ok && v != nil {
-		n, err := asInt64(v)
+		n, err := asUint8(v)
 		if err != nil {
 			return out, fmt.Errorf("pg/range uppertype: %w", err)
 		}
@@ -1115,11 +1121,11 @@ func decodeJSONHWAddr(v any) (net.HardwareAddr, error) {
 func rawCellFromJSON(m map[string]any) (PostgresV3CellRaw, error) {
 	out := PostgresV3CellRaw{}
 	if v, ok := m["format"]; ok && v != nil {
-		n, err := asInt64(v)
+		n, err := asInt16(v)
 		if err != nil {
 			return out, fmt.Errorf("pg/raw format: %w", err)
 		}
-		out.Format = int16(n)
+		out.Format = n
 	}
 	if v, ok := m["bytes"]; ok && v != nil {
 		s, err := asString(v)
@@ -1146,9 +1152,9 @@ func asInt64(v any) (int64, error) {
 	case json.Number:
 		return t.Int64()
 	case float64:
-		return int64(t), nil
+		return floatToInt64(t)
 	case float32:
-		return int64(t), nil
+		return floatToInt64(float64(t))
 	case int:
 		return int64(t), nil
 	case int8:
@@ -1160,6 +1166,14 @@ func asInt64(v any) (int64, error) {
 	case int64:
 		return t, nil
 	case uint:
+		// uint is 64 bits wide on every 64-bit platform keploy ships, so
+		// it is exactly as wide as the uint64 arm below and wraps
+		// identically — uint(math.MaxUint64) would otherwise come back
+		// as -1. Guard with the same bound; on a 32-bit build the
+		// comparison is simply never true.
+		if uint64(t) > math.MaxInt64 {
+			return 0, fmt.Errorf("value %d out of range for int64", t)
+		}
 		return int64(t), nil
 	case uint8:
 		return int64(t), nil
@@ -1168,6 +1182,11 @@ func asInt64(v any) (int64, error) {
 	case uint32:
 		return int64(t), nil
 	case uint64:
+		// As wide as int64 (see the uint arm). Wrapping here would hand
+		// back a negative count for a legitimately huge literal.
+		if t > math.MaxInt64 {
+			return 0, fmt.Errorf("value %d out of range for int64", t)
+		}
 		return int64(t), nil
 	case string:
 		n, err := strconv.ParseInt(t, 10, 64)
@@ -1177,6 +1196,107 @@ func asInt64(v any) (int64, error) {
 		return n, nil
 	}
 	return 0, fmt.Errorf("expected number, got %T", v)
+}
+
+// floatToInt64 truncates f toward zero, rejecting the inputs for which
+// Go leaves the float→int conversion implementation-defined: NaN, ±Inf
+// and anything outside int64's range (on amd64 they all land on
+// math.MinInt64, which is indistinguishable from a real value).
+// Fractional in-range floats still truncate, which is the behaviour
+// hand-built map fixtures have always had.
+//
+// The bound is the power of two rather than math.MaxInt64 because
+// MaxInt64 is not exactly representable in float64 — it rounds up to
+// 2^63, so `f > math.MaxInt64` would let 2^63 itself slip through.
+func floatToInt64(f float64) (int64, error) {
+	const limit = 1 << 63 // untyped, so it converts to an exact float64 here
+	if math.IsNaN(f) || f >= limit || f < -limit {
+		return 0, fmt.Errorf("value %v out of range for int64", f)
+	}
+	return int64(f), nil
+}
+
+// ===== Range-checked narrowing =====
+//
+// Every pgtype field below is narrower than the int64 asInt64 hands
+// back, and Go's conversions truncate silently — int32(1<<31) is
+// -2147483648, uint16(65536) is 0, uint8(-1) is 255. The JSON being
+// decoded is a mock file users hand-edit and keploy round-trips, so an
+// out-of-range literal must be REJECTED, not rewritten into a
+// different, plausible-looking value that then replays as if the user
+// had written it.
+//
+// The YAML path never had this hole: yaml.v3 decodes each field
+// straight into its target width (decodePgNumericMapping reads `exp`
+// into an int32 and `infinitymodifier` into an int8) and errors on
+// overflow. These helpers give the JSON path the same guarantee, and
+// callers keep wrapping the result with the existing per-field prefix
+// ("pg/numeric exp: ...") so the field name stays in the message.
+
+func asInt8(v any) (int8, error) {
+	n, err := asInt64(v)
+	if err != nil {
+		return 0, err
+	}
+	if n < math.MinInt8 || n > math.MaxInt8 {
+		return 0, fmt.Errorf("value %d out of range for int8", n)
+	}
+	return int8(n), nil
+}
+
+func asInt16(v any) (int16, error) {
+	n, err := asInt64(v)
+	if err != nil {
+		return 0, err
+	}
+	if n < math.MinInt16 || n > math.MaxInt16 {
+		return 0, fmt.Errorf("value %d out of range for int16", n)
+	}
+	return int16(n), nil
+}
+
+func asInt32(v any) (int32, error) {
+	n, err := asInt64(v)
+	if err != nil {
+		return 0, err
+	}
+	if n < math.MinInt32 || n > math.MaxInt32 {
+		return 0, fmt.Errorf("value %d out of range for int32", n)
+	}
+	return int32(n), nil
+}
+
+func asUint8(v any) (uint8, error) {
+	n, err := asInt64(v)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 || n > math.MaxUint8 {
+		return 0, fmt.Errorf("value %d out of range for uint8", n)
+	}
+	return uint8(n), nil
+}
+
+func asUint16(v any) (uint16, error) {
+	n, err := asInt64(v)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 || n > math.MaxUint16 {
+		return 0, fmt.Errorf("value %d out of range for uint16", n)
+	}
+	return uint16(n), nil
+}
+
+func asUint32(v any) (uint32, error) {
+	n, err := asInt64(v)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 || n > math.MaxUint32 {
+		return 0, fmt.Errorf("value %d out of range for uint32", n)
+	}
+	return uint32(n), nil
 }
 
 func asFloat64(v any) (float64, error) {

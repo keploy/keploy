@@ -44,7 +44,7 @@ func TestDecodeStmtExecute_ParameterCountFix(t *testing.T) {
 	// Test with CLIENT_QUERY_ATTRIBUTES disabled (common case)
 	clientCapabilities := uint32(0)
 
-	packet, err := DecodeStmtExecute(ctx, logger, data, preparedStmts, clientCapabilities)
+	packet, err := DecodeStmtExecute(ctx, logger, data, preparedStmts, clientCapabilities, nil)
 
 	if err != nil {
 		t.Fatalf("DecodeStmtExecute failed: %v", err)
@@ -91,7 +91,7 @@ func TestDecodeStmtExecute_NoParameters(t *testing.T) {
 	ctx := context.Background()
 	clientCapabilities := uint32(0)
 
-	packet, err := DecodeStmtExecute(ctx, logger, data, preparedStmts, clientCapabilities)
+	packet, err := DecodeStmtExecute(ctx, logger, data, preparedStmts, clientCapabilities, nil)
 
 	if err != nil {
 		t.Fatalf("DecodeStmtExecute failed: %v", err)
@@ -134,7 +134,7 @@ func TestDecodeStmtExecute_DateTimeThenString(t *testing.T) {
 	ctx := context.Background()
 	clientCapabilities := uint32(0)
 
-	packet, err := DecodeStmtExecute(ctx, logger, data, preparedStmts, clientCapabilities)
+	packet, err := DecodeStmtExecute(ctx, logger, data, preparedStmts, clientCapabilities, nil)
 	if err != nil {
 		t.Fatalf("DecodeStmtExecute failed: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestDecodeStmtExecute_QueryAttrsExtension(t *testing.T) {
 
 	clientCapabilities := mysql.CLIENT_QUERY_ATTRIBUTES
 
-	packet, err := DecodeStmtExecute(context.Background(), zap.NewNop(), data, preparedStmts, clientCapabilities)
+	packet, err := DecodeStmtExecute(context.Background(), zap.NewNop(), data, preparedStmts, clientCapabilities, nil)
 	if err != nil {
 		t.Fatalf("DecodeStmtExecute failed: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestDecodeStmtExecute_QueryAttrsExtensionTwoStrings(t *testing.T) {
 
 	clientCapabilities := mysql.CLIENT_QUERY_ATTRIBUTES
 
-	packet, err := DecodeStmtExecute(context.Background(), zap.NewNop(), data, preparedStmts, clientCapabilities)
+	packet, err := DecodeStmtExecute(context.Background(), zap.NewNop(), data, preparedStmts, clientCapabilities, nil)
 	if err != nil {
 		t.Fatalf("DecodeStmtExecute failed: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestDecodeStmtExecute_IntegerAsDouble(t *testing.T) {
 
 			clientCapabilities := mysql.CLIENT_QUERY_ATTRIBUTES
 
-			packet, err := DecodeStmtExecute(context.Background(), zap.NewNop(), data, preparedStmts, clientCapabilities)
+			packet, err := DecodeStmtExecute(context.Background(), zap.NewNop(), data, preparedStmts, clientCapabilities, nil)
 			if err != nil {
 				t.Fatalf("DecodeStmtExecute failed: %v", err)
 			}
@@ -380,7 +380,7 @@ func TestDecodeStmtExecute_QueryAttrsExtensionZeroParams(t *testing.T) {
 		0x00, // length-encoded parameter_count = 0
 	}
 
-	packet, err := DecodeStmtExecute(context.Background(), zap.NewNop(), data, preparedStmts, mysql.CLIENT_QUERY_ATTRIBUTES)
+	packet, err := DecodeStmtExecute(context.Background(), zap.NewNop(), data, preparedStmts, mysql.CLIENT_QUERY_ATTRIBUTES, nil)
 	if err != nil {
 		t.Fatalf("DecodeStmtExecute failed: %v", err)
 	}
@@ -389,5 +389,55 @@ func TestDecodeStmtExecute_QueryAttrsExtensionZeroParams(t *testing.T) {
 	}
 	if len(packet.Parameters) != 0 {
 		t.Fatalf("Parameters: expected len 0, got %d", len(packet.Parameters))
+	}
+}
+
+// A parameter whose value was streamed ahead with COM_STMT_SEND_LONG_DATA is
+// absent from the COM_STMT_EXECUTE payload, but the null bitmap still reports
+// it as NOT NULL — the server already holds the bytes. Reading a value for it
+// walks off the end of the packet, so the command is rejected and never
+// recorded, which is what dropped every streamed-BLOB EXECUTE from the trace
+// and made replay fail with "Can not read response from server" (#4262).
+func TestDecodeStmtExecute_ParameterSentAsLongData(t *testing.T) {
+	const stmtID = uint32(7)
+	preparedStmts := map[uint32]*mysql.StmtPrepareOkPacket{
+		stmtID: {StatementID: stmtID, NumParams: 1},
+	}
+
+	// One parameter, not NULL, types bound — and no value bytes, because the
+	// value travelled in a preceding COM_STMT_SEND_LONG_DATA.
+	data := []byte{
+		0x17,                   // COM_STMT_EXECUTE
+		0x07, 0x00, 0x00, 0x00, // statement id
+		0x00,                   // flags
+		0x01, 0x00, 0x00, 0x00, // iteration count
+		0x00,       // NULL bitmap: parameter 0 is NOT null
+		0x01,       // new params bind flag
+		0xfc, 0x00, // type = MYSQL_TYPE_BLOB, unsigned = false
+	}
+
+	logger := zap.NewNop()
+
+	// Without the long-data hint the decoder looks for a value that is not
+	// there and rejects the whole command.
+	if _, err := DecodeStmtExecute(context.Background(), logger, data, preparedStmts, 0, nil); err == nil {
+		t.Fatal("premise broken: the payload is supposed to be short by one parameter value")
+	}
+
+	longData := map[uint16]bool{0: true}
+	packet, err := DecodeStmtExecute(context.Background(), logger, data, preparedStmts, 0, longData)
+	if err != nil {
+		t.Fatalf("a parameter sent via COM_STMT_SEND_LONG_DATA must not make the EXECUTE "+
+			"undecodable — the command is then dropped and replay has no mock for it: %v", err)
+	}
+	if packet.StatementID != stmtID {
+		t.Errorf("StatementID = %d, want %d", packet.StatementID, stmtID)
+	}
+	if len(packet.Parameters) != 1 {
+		t.Fatalf("got %d parameters, want 1", len(packet.Parameters))
+	}
+	if packet.Parameters[0].Value != nil {
+		t.Errorf("the long-sent parameter carries %v; its bytes live in the SEND_LONG_DATA "+
+			"mock, not here", packet.Parameters[0].Value)
 	}
 }

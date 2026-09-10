@@ -146,6 +146,17 @@ type MockMutator interface {
 	AfterGetMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error
 }
 
+// TestSetOrderer is an optional extension to TestHooks.
+// Start and GetSelectedTestSets detect it via type assertion after the
+// natural-sort of test-set IDs; implementations that do not need a custom
+// run order can safely omit it and keep the sorted order.
+type TestSetOrderer interface {
+	// OrderTestSets receives the natural-sorted test-set IDs and returns
+	// them in the order they should run. The result must contain exactly
+	// the same IDs; a result of a different length is ignored.
+	OrderTestSets(testSets []string) []string
+}
+
 type Storage interface {
 	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error // 3
 	Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error)

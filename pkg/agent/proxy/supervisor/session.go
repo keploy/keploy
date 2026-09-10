@@ -91,6 +91,21 @@ type Session struct {
 	// TLS keys, noise config, etc.).
 	Opts models.OutgoingOptions
 
+	// ClientWritesHeld reports that the relay behind this session armed
+	// a client write hold (relay.Config.HoldClientWrites), so nothing
+	// the client sends reaches the real destination until the parser
+	// ends the hold — with directive.ReleaseClient, or with a
+	// directive.UpgradeTLS carrying a ClientFlushBytes count.
+	//
+	// The dispatcher sets it from the same capability probe that arms
+	// the hold, so a parser can tell "I asked for a hold" from "a hold
+	// is actually in place". Those differ: an observe-only proxyless
+	// capture has no relay to hold anything, and a parser that assumed
+	// otherwise would send a release that nobody answers and block on
+	// the ack forever. False on every path that does not hold, which
+	// is every path today except MySQL under the V2 relay.
+	ClientWritesHeld bool
+
 	// --- Backward-compatibility (populated by the migration shim) ---
 
 	// Ingress is the legacy client-side net.Conn handle. nil on the
@@ -232,6 +247,56 @@ func (s *Session) IsMockIncomplete() bool {
 		return false
 	}
 	return s.mockIncomplete.Load()
+}
+
+// RecordOrphanWindow marks a [start,end] interval during which a mock could not
+// be framed for a NON-pressure reason (currently a mongo/v2 reassembly resync
+// hole — a dropped chunk desyncs the framer, so a message delivered during the
+// hole is never turned into a mock). It routes to the session's
+// SyncMockManager (the per-app s.Mgr, or the package singleton) — matching how
+// EmitMock resolves the manager — so record.go's TC-suppression treats the hole
+// like a memory-pressure interval and suppresses every TC whose window overlaps
+// it, instead of shipping that TC mock-less (replay would then report
+// match_phase=no_mocks). This is the keploy side of the enterprise mongo
+// parser's OPTIONAL orphanWindowRecorder capability (integrations pkg/mongo/v2):
+// the parser probes for this method via an interface assertion, so pins without
+// it simply degrade resync-orphan suppression to a no-op. RecordOrphanWindow
+// itself no-ops on a zero start and a nil manager.
+//
+// Reader/writer symmetry: the suppressor (routes/record.go) must query
+// WasMockOrphanedInWindow on the SAME manager this writes to. In OSS that always
+// holds — nothing calls syncMock.NewContext, so s.Mgr is always nil and both the
+// write here and the read there resolve to syncMock.Get(). A multi-app composer
+// that sets a per-app s.Mgr must likewise give its suppressor a per-app reader;
+// there is no global fan-out for orphan windows (unlike memory pressure).
+func (s *Session) RecordOrphanWindow(start, end time.Time) {
+	if s == nil {
+		return
+	}
+	mgr := s.Mgr
+	if mgr == nil {
+		mgr = syncMock.Get()
+	}
+	mgr.RecordOrphanWindow(start, end)
+}
+
+// OpenOrphanWindow is the open-ended twin of RecordOrphanWindow, for a hole
+// whose end is not yet known. It resolves the manager the same way and returns
+// the closer; see SyncMockManager.OpenOrphanWindow.
+//
+// The caller is the V2 dispatcher on a passthrough fallthrough: once a parser
+// is retired the relay raw-forwards the rest of that connection, so it emits no
+// further mock and every test case recorded against it would otherwise ship
+// mock-less and replay as match_phase=no_mocks.
+func (s *Session) OpenOrphanWindow(start time.Time) func() {
+	if s == nil {
+		return func() {}
+	}
+	mgr := s.Mgr
+	if mgr == nil {
+		mgr = syncMock.Get()
+	}
+	return mgr.OpenOrphanWindow(start)
 }
 
 // EmitMock sends m to the mocks channel. If the session's active mock
@@ -494,6 +559,42 @@ func (s *Session) enforceReqMonotonic(m *models.Mock) {
 			panic("supervisor.Session.EmitMock: out-of-order ReqTimestampMock detected; parser emitted a mock with a timestamp earlier than a previously-emitted mock on the same session — this violates I5 in PLAN.md and would cause wrong-mock selection at replay time")
 		}
 		m.Spec.ReqTimestampMock = clamped
+
+		// Raising the request stamp can push it PAST the response stamp on a mock
+		// that arrived perfectly well-ordered. filterByTimeStamp drops any mock
+		// with res < req (pkg/util.go), so that mock is then silently discarded at
+		// replay -- orphaned by this function, not by the recorder. Measured: a
+		// pair (req 17.820597769, res 17.607310086) leaves EmitMock inverted by
+		// 79.4ms.
+		//
+		// This REPORTS it and does not repair it, deliberately. Two attempts to
+		// repair it by adjusting ResTimestampMock both regressed
+		// go-memory-load-mongo, and the second one narrowly:
+		//
+		//   - clamping every inverted window resurrected mocks the filter had been
+		//     discarding, and they were consumed ahead of the real ones: the lane
+		//     went from green to 52 "no matching mock" failures.
+		//   - carrying the response stamp along ONLY for the inversion introduced
+		//     here still broke record_build_replay_latest with candidates=0, while
+		//     record_build_replay_build passed. Same recording, different replay
+		//     binary, different outcome -- i.e. it produced recordings the
+		//     RELEASED replayer cannot consume. Those lanes exist to catch exactly
+		//     that.
+		//
+		// So ResTimestampMock is load-bearing at replay in ways this call site
+		// cannot see, and mutating it here is the wrong lever. The real repair
+		// belongs where the ordering invariant and the window filter are designed
+		// together. Until then this makes the loss visible instead of silent,
+		// which is what was actually missing: the first instance was found only by
+		// diffing recorded YAML by hand.
+		if s.Logger != nil && !m.Spec.ResTimestampMock.IsZero() && m.Spec.ResTimestampMock.Before(clamped) {
+			s.Logger.Warn("monotonic clamping inverted this mock's window; replay will DROP it (filterByTimeStamp discards res < req)",
+				zap.String("mock", m.Name),
+				zap.Duration("inversion", clamped.Sub(m.Spec.ResTimestampMock)),
+				zap.Time("reqTimestampMock", clamped),
+				zap.Time("resTimestampMock", m.Spec.ResTimestampMock),
+				zap.Time("originalReqTimestampMock", req))
+		}
 		req = clamped
 	}
 	s.lastReqTimestamp = req

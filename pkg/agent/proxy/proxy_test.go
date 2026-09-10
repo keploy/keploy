@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.uber.org/zap"
 )
 
@@ -277,25 +278,35 @@ func TestNextProtosSubset(t *testing.T) {
 	}
 }
 
-// TestNewProxyTLSUpgradeFn_DestSide_AlwaysInsecureSkipVerify locks in the
-// MITM-correct dest-side posture: when the upgrade fn is invoked with
-// isClient=true (keploy dialing the real upstream), it MUST handshake
-// without verifying the upstream cert, regardless of what
-// InsecureSkipVerify the caller-supplied cfg held. The supplied cfg
-// must NOT be mutated — only the per-dial clone gets the flag flipped.
+// TestNewProxyTLSUpgradeFn_DestSide_DefaultSkipsVerification locks in the
+// DEFAULT dest-side posture: when the upgrade fn is invoked with
+// isClient=true (keploy dialing the real upstream) and upstream
+// verification has NOT been opted into, it MUST handshake without
+// verifying the upstream cert, regardless of what InsecureSkipVerify the
+// caller-supplied cfg held. The supplied cfg must NOT be mutated — only
+// the per-dial clone gets the flag flipped.
 //
 // This is a regression test for the dest-side passthrough drop reported
 // as `dest TLS handshake failed: x509: certificate is valid for
 // 127.0.0.1, not 10.224.0.152` against in-cluster K8s services whose
 // upstream cert SAN doesn't match the ClusterIP keploy sees.
-func TestNewProxyTLSUpgradeFn_DestSide_AlwaysInsecureSkipVerify(t *testing.T) {
+//
+// The override used to be unconditional; it is now driven by
+// record.upstreamTls.verify (see the companion
+// TestNewProxyTLSUpgradeFn_DestSide_VerifyFlag* tests). This case is the
+// one that must never change: false — the zero value, and what every
+// existing user gets — has to reproduce the old behaviour exactly,
+// including on a strict caller cfg like the one below, which is precisely
+// the shape the K8s incident produced.
+func TestNewProxyTLSUpgradeFn_DestSide_DefaultSkipsVerification(t *testing.T) {
 	// Self-signed cert with CN "test.local"; we'll dial it asking for
 	// a different ServerName to force the strict-verify path to fail
 	// if the fix is missing.
 	ln, _ := newTLSTestServer(t, 0, []string{"h2", "http/1.1"}, nil)
 	defer ln.Close()
 
-	upgrade := newProxyTLSUpgradeFn(zap.NewNop())
+	// verify=false, rootCAs=nil — the zero-config default.
+	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, nil, nil)
 
 	rawConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -325,4 +336,101 @@ func TestNewProxyTLSUpgradeFn_DestSide_AlwaysInsecureSkipVerify(t *testing.T) {
 	if caller.InsecureSkipVerify {
 		t.Fatalf("caller cfg.InsecureSkipVerify was mutated to true; expected the upgrade fn to clone before flipping the flag")
 	}
+	if caller.ServerName != "wrong.example.invalid" {
+		t.Fatalf("caller cfg.ServerName was mutated to %q; expected the upgrade fn to clone before touching it", caller.ServerName)
+	}
+	if caller.RootCAs != nil {
+		t.Fatalf("caller cfg.RootCAs was mutated; expected the upgrade fn to clone before touching it")
+	}
+}
+
+// TestClampConsumerStallGrace pins the validation of the operator-supplied
+// teardown grace.
+//
+// The zero cases are the load-bearing ones: zero must survive as zero so
+// relay.withDefaults() can substitute DefaultConsumerStallGrace. keploy.yml
+// ships an explicit 2s, so this is not the path most users take — but zero
+// still arrives here from an operator who writes 0s, a programmatically built
+// Config, and any enterprise SetDefaultConfig string that omits the key.
+// Clamping it up to the 100ms floor would hand those callers a twentyfold cut
+// to the window a briefly-stalled parser gets at teardown, i.e. exactly the
+// mock loss the grace exists to prevent.
+func TestClampConsumerStallGrace(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+
+	cases := []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		// Literals, deliberately, not minRecordBufferStallGrace /
+		// maxRecordBufferStallGrace: the bounds ARE the safety contract, and a
+		// table that reads them back from the constants it is checking moves
+		// with any edit to them and pins nothing.
+		{"zero defers to the relay default", 0, 0},
+		{"negative defers to the relay default", -5 * time.Second, 0},
+		{"below the floor clamps up", 50 * time.Millisecond, 100 * time.Millisecond},
+		{"just below the floor clamps up", 99 * time.Millisecond, 100 * time.Millisecond},
+		{"the floor itself is kept", 100 * time.Millisecond, 100 * time.Millisecond},
+		{"an in-range value is untouched", 2 * time.Second, 2 * time.Second},
+		{"the ceiling itself is kept", 10 * time.Second, 10 * time.Second},
+		{"just above the ceiling clamps down", 10*time.Second + time.Nanosecond, 10 * time.Second},
+		{"above the ceiling clamps down", 5 * time.Minute, 10 * time.Second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := clampConsumerStallGrace(logger, tc.in); got != tc.want {
+				t.Errorf("clampConsumerStallGrace(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewSnapshotsStallGrace pins that the configured grace actually reaches
+// the Proxy.
+//
+// A correct clamp is worthless if nothing calls it. Without this, deleting the
+// clampConsumerStallGrace call in New — or the ConsumerStallGrace field in
+// proxy_v2.go's relay.Config literal — turns the whole knob into a no-op with
+// every package still green, which is precisely how a config option rots into
+// decoration. This covers the config -> Proxy half; the Proxy -> relay.Config
+// half is a private field read inside recordViaSupervisor and is left to
+// relay's own TestNewWiresTheStallGraceIntoBothTees.
+func TestNewSnapshotsStallGrace(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"zero stays zero so the relay default applies", 0, 0},
+		{"an in-range value reaches the proxy", 5 * time.Second, 5 * time.Second},
+		{"an out-of-range value is clamped on the way in", 10 * time.Minute, 10 * time.Second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := config.New()
+			cfg.Record.RecordBuffer.ConsumerStallGrace = tc.in
+			if got := New(zap.NewNop(), nil, cfg).recordBufferStallGrace; got != tc.want {
+				t.Fatalf("recordBufferStallGrace = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The value a user who never touches the knob actually gets, end to end
+	// through the real default config rather than a hand-built one.
+	t.Run("the shipped default arrives intact", func(t *testing.T) {
+		t.Parallel()
+		cfg := config.New()
+		if got, want := New(zap.NewNop(), nil, cfg).recordBufferStallGrace, 2*time.Second; got != want {
+			t.Fatalf("recordBufferStallGrace = %v, want %v", got, want)
+		}
+	})
 }

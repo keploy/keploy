@@ -19,9 +19,15 @@ ARG TARGETARCH
 
 ENV KEPLOY_INDOCKER=true
 
+# --no-install-recommends (~3.6MB unpacked) and no apt-get clean, matching
+# the main Dockerfile and tests/e2e/ca-bundle-merge/Dockerfile.setup - see
+# the Dockerfile for the rationale. ca-certificates must stay in the
+# explicit list; it is only a Recommends of libcurl4t64.
 RUN apt-get update && \
-    apt-get install -y ca-certificates curl sudo && \
-    apt-get clean && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        sudo && \
     rm -rf /var/lib/apt/lists/*
 
 COPY dist/keploy-linux-${TARGETARCH}/keploy /app/keploy

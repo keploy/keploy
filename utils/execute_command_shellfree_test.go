@@ -61,7 +61,7 @@ func TestExecuteCommand_RunsCloudReplayShapeWithoutShell(t *testing.T) {
 	cmdStr := "tee " + capturedPath
 	noopCancel := func(_ *exec.Cmd) func() error { return func() error { return nil } }
 
-	cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), cmdStr, noopCancel, time.Second, composeDoc)
+	cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), cmdStr, Empty, noopCancel, time.Second, composeDoc)
 	if cmdErr.Err != nil {
 		t.Fatalf("ExecuteCommand failed in a shell-less env (a hard `sh -c` regression?): type=%s err=%v",
 			cmdErr.Type, cmdErr.Err)

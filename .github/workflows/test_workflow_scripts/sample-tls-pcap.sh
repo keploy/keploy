@@ -2,9 +2,12 @@
 # E2E validation for keploy's TLS capture features.
 #
 # Runs the sample-tls-app under keploy with $KEPLOY_FLAGS — either
-# "--capture-packets" alone (default record path) or together with
-# "--opportunistic-tls-intercept" (peek-and-hijack passthrough). In
-# both modes it asserts:
+# "--capture-packets" alone (default record path), or together with
+# "--opportunistic-tls-intercept" (peek-and-hijack passthrough), or
+# together with "--upstream-tls-verify" (opt-in upstream certificate
+# verification), or with BOTH of the latter two (the opportunistic
+# hijack's own upstream dial site, which is not reachable from any of
+# the other three). In every mode it asserts:
 #
 #   1. <test-set>/traffic.pcap and <test-set>/sslkeys.log appeared
 #      and grew during the recording (proves the streaming model).
@@ -22,6 +25,14 @@
 #   6. Postgres TLS round-trip works through the proxy: same shape.
 #   7. mocks.yaml exists and (for capture-only mode) contains
 #      kind: Http records — proves the HTTP parser dispatch fired.
+#   8. For the verify-upstream* modes: the agent reported that upstream
+#      certificate verification was actually ON. In verify-upstream the
+#      mock inventory must still cover all three upstreams (Http, MySQL,
+#      Postgres) — see that case below for why the mocks, not the exit
+#      code, are the load-bearing assertion. In
+#      verify-upstream-opportunistic it is the reverse: the hijack owns
+#      the connection, so a verification failure kills the application's
+#      socket and the round-trips above are what fail.
 #
 # Run from the sample-tls-app working directory. RECORD_BIN must
 # point at a keploy build with the postgres parsers linked. KEPLOY_FLAGS
@@ -99,6 +110,21 @@ openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
 # same CI CA that gets installed into the OS trust store below, with
 # SANs for both hostnames, so the app's system-pool verification passes
 # directly and through keploy's MITM exactly as the public certs did.
+#
+# The SANs are DNS-ONLY, deliberately. This cert used to also carry
+# DNS:localhost and IP:127.0.0.1, and that IP SAN was actively harmful:
+# the app reaches these hostnames over loopback, so keploy's destination
+# address is 127.0.0.1:7443, and an IP SAN made "verify against the dial
+# address" succeed BY ACCIDENT. Every ServerName-plumbing defect on the
+# verifying path — keploy checking the destination IP instead of the SNI
+# the application sent — therefore passed CI while breaking every
+# hostname-addressed upstream in the real world. Without the IP SAN the
+# HTTPS leg can only verify if keploy carries the application's SNI
+# through to its own dial, which is the property under test. Nothing
+# dials this listener by IP or as "localhost" (grep UPSTREAM_PORT: every
+# reference is $QUOTE_HOST / $ECHO_HOST), so no other mode is affected.
+# The DB cert (server.cnf above) keeps its IP SAN on purpose — MySQL is
+# dialled at an IP literal and sends no SNI, which is the OTHER path.
 openssl genrsa -out upstream.key 2048 >/dev/null 2>&1
 cat > upstream.cnf <<EOF
 [req]
@@ -108,7 +134,7 @@ prompt=no
 [dn]
 CN=keploy-ci-upstream
 [ext]
-subjectAltName=DNS:quote.keploy.local,DNS:echo.keploy.local,DNS:localhost,IP:127.0.0.1
+subjectAltName=DNS:quote.keploy.local,DNS:echo.keploy.local
 EOF
 openssl req -new -key upstream.key -out upstream.csr -config upstream.cnf >/dev/null 2>&1
 openssl x509 -req -in upstream.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
@@ -365,6 +391,29 @@ endsec
 
 # ----- assertions on the captured artifacts -----
 
+if [[ "$MODE_NAME" == verify-upstream* ]]; then
+  section "Assert the agent actually turned upstream TLS verification ON"
+  # --upstream-tls-verify FAILS OPEN by design: if the trust anchors
+  # cannot be loaded, proxy.New logs the error, flips upstreamTLSVerify
+  # back to false and records exactly as the default path does. That is
+  # the correct production behaviour — a misconfigured CA must never turn
+  # into silently dropped mocks — but it means a green run proves nothing
+  # on its own: this job would just be re-testing capture-only under a
+  # different name. So assert the positive log line the agent emits once
+  # per process after it has resolved the pool (pkg/agent/proxy/proxy.go,
+  # "upstream TLS certificate verification is enabled"). The native agent
+  # is a child process whose stdout/stderr are the record command's, so
+  # its logs land in keploy-record.log with everything else.
+  grep -q "upstream TLS certificate verification is enabled" keploy-record.log || {
+    echo "::error::the agent never reported upstream TLS verification enabled — either --upstream-tls-verify did not reach it, or loading the trust anchors failed and verification silently fell back to skip"
+    echo "== upstream-TLS lines in keploy-record.log =="
+    grep -n -i "upstream tls" keploy-record.log || echo "(none — the flag never reached the agent)"
+    exit 1
+  }
+  echo "good! agent reported upstream TLS certificate verification enabled"
+  endsec
+fi
+
 PCAP=keploy/test-set-0/traffic.pcap
 KEYLOG=keploy/test-set-0/sslkeys.log
 MOCKS=keploy/test-set-0/mocks.yaml
@@ -487,6 +536,105 @@ case "$MODE_NAME" in
       echo "::error::found $HTTP_MOCKS 'kind: Http' mocks in with-opportunistic mode — parser dispatch should be bypassed"
       exit 1
     fi
+    ;;
+  verify-upstream)
+    # Same record path as capture-only (parsers still dispatch), except
+    # every outbound dial keploy makes now authenticates the REAL
+    # upstream instead of skipping. The trust material is already in
+    # place: the CI CA was installed into the OS trust store above, and
+    # it signed both the DB cert (SANs DNS:localhost, IP:127.0.0.1) and
+    # the HTTPS upstream cert (SANs DNS:quote.keploy.local,
+    # DNS:echo.keploy.local), so nothing extra needs configuring.
+    #
+    # The three upstreams cover the two distinct ServerName paths:
+    #   - the HTTPS upstreams send SNI, so keploy verifies the exact name
+    #     the app asked for — and their cert has NO IP SAN, so this leg
+    #     can ONLY pass if keploy carried that SNI through to its own
+    #     dial rather than substituting the destination IP;
+    #   - MySQL is dialled at an IP literal (tcp(127.0.0.1:3306)) and
+    #     RFC 6066 forbids IP literals in SNI, so keploy captures NO
+    #     ServerName and must fall back to the dial address and match the
+    #     cert's IP:127.0.0.1 SAN. Postgres lands on whichever of the two
+    #     paths its driver picks for sslmode=verify-ca; the cert carries
+    #     DNS:localhost *and* IP:127.0.0.1, so either is covered.
+    #
+    # Why the MOCKS are the assertion and not the exit code: a
+    # verification error does NOT fail the application. The dest-side
+    # handshake fails, the supervisor falls through to raw passthrough,
+    # the app's connection continues to work — and the mock is DROPPED.
+    # Every round-trip driven above would still return 200 and this job
+    # would go green having captured nothing. The mock inventory is the
+    # only signal that separates "verified, then recorded" from "failed
+    # verification, then silently degraded".
+    sudo test -s "$MOCKS" || {
+      echo "::error::missing or empty $MOCKS with verification on — every upstream failed to verify and fell through to raw passthrough"
+      exit 1
+    }
+    echo "== recorded mock kinds =="
+    sudo grep "^kind: " "$MOCKS" | sort | uniq -c || true
+
+    HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    MYSQL_MOCKS=$(sudo grep -c "^kind: MySQL" "$MOCKS" || true)
+    # The `Postgres` prefix deliberately covers all three parser
+    # generations (Postgres / PostgresV2 / PostgresV3) — which one is
+    # linked is a property of the build, not of this feature.
+    PG_MOCKS=$(sudo grep -c "^kind: Postgres" "$MOCKS" || true)
+    echo "Http mocks: $HTTP_MOCKS, MySQL mocks: $MYSQL_MOCKS, Postgres mocks: $PG_MOCKS"
+
+    if [[ "$HTTP_MOCKS" -lt 2 ]]; then
+      echo "::error::expected >=2 'kind: Http' mocks (one per upstream host) with verification on; saw $HTTP_MOCKS — the HTTPS upstream's certificate failed to verify against the CI CA and the sessions degraded to raw passthrough"
+      exit 1
+    fi
+    if [[ "$MYSQL_MOCKS" -lt 1 ]]; then
+      echo "::error::no 'kind: MySQL' mocks with verification on — MySQL is dialled at an IP literal so no SNI is sent; this is the ServerName-from-dial-address fallback failing to match the cert's IP:127.0.0.1 SAN"
+      exit 1
+    fi
+    if [[ "$PG_MOCKS" -lt 1 ]]; then
+      echo "::error::no 'kind: Postgres*' mocks with verification on — the Postgres dest-side handshake failed to verify and the session fell through to raw passthrough"
+      exit 1
+    fi
+    echo "good! all three upstreams verified and recorded with --upstream-tls-verify"
+    ;;
+  verify-upstream-opportunistic)
+    # --opportunistic-tls-intercept + --upstream-tls-verify. This is the
+    # combination that the verify-upstream mode alone cannot reach: the
+    # opportunistic path hijacks the connection BEFORE parser dispatch and
+    # owns its own upstream tls.Config (proxy/opportunistic_tls.go,
+    # hijackAndMITM), which is a completely separate dial site from the
+    # one verify-upstream exercises.
+    #
+    # The load-bearing assertion for this mode is NOT down here — it is the
+    # `retry_curl http://localhost:8080/quote` above. On this path a failed
+    # upstream verification is not a dropped mock, it is a dropped
+    # CONNECTION: hijackAndMITM defers srcConn.Close()/dstConn.Close() and
+    # its error propagates out of handleConnection, so the application's
+    # socket dies after it had already completed its handshake with keploy
+    # and the route returns 502. The upstream cert carries DNS SANs only
+    # (see upstream.cnf), so that is exactly what happens if keploy dials
+    # with the destination IP as its ServerName instead of the SNI the app
+    # sent — the defect this combination exists to catch.
+    #
+    # Mock shape here is the with-opportunistic shape, not the
+    # verify-upstream one: parser dispatch is bypassed, so there must be
+    # NO Http mocks. Verification changes which upstreams keploy is
+    # willing to talk to, never whether parsers run.
+    if sudo test -s "$MOCKS"; then
+      HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    else
+      HTTP_MOCKS=0
+    fi
+    echo "Http mock records (must be 0): $HTTP_MOCKS"
+    if [[ "$HTTP_MOCKS" -gt 0 ]]; then
+      echo "::error::found $HTTP_MOCKS 'kind: Http' mocks in verify-upstream-opportunistic mode — parser dispatch should be bypassed"
+      exit 1
+    fi
+    # Belt to the braces of the round-trips above: if the opportunistic
+    # upstream handshake had failed, the hijack would have torn the
+    # connection down and no application bytes would have reached the
+    # upstream at all — so the decrypted-pcap assertion earlier (which
+    # greps the ci-${MODE_NAME} query string out of the TLS keylog-decrypted
+    # capture) would have found nothing to decrypt.
+    echo "good! opportunistic hijack completed against a DNS-SAN-only upstream with verification on"
     ;;
 esac
 endsec

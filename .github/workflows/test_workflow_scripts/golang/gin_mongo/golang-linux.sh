@@ -1,5 +1,6 @@
 #!/bin/bash
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 dump_gin_mongo_ci_diagnostics() {
@@ -23,6 +24,7 @@ dump_gin_mongo_ci_diagnostics() {
 
 # Start mongo before starting keploy.
 docker rm -f mongoDb >/dev/null 2>&1 || true
+docker_pull_retry mongo
 docker run --rm -d -p27017:27017 --name mongoDb mongo
 trap 'docker rm -f mongoDb >/dev/null 2>&1 || true' EXIT
 

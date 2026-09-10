@@ -48,6 +48,11 @@ type MockDB interface {
 type MappingDb interface {
 	Insert(ctx context.Context, mapping *models.Mapping) error
 	Upsert(ctx context.Context, testSetID string, testID string, mockEntries []models.MockEntry) error
+	// UpsertBatch persists several tests' mappings in one file rewrite. Recording
+	// must use this rather than a per-mapping Upsert: the per-mapping cost grows
+	// with the file, and a slow consumer back-pressures the agent's mapping stream
+	// into dropping entries (its send is non-blocking so capture is never stalled).
+	UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
 }
 
 type TestSetConfig interface {

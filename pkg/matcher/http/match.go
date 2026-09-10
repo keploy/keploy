@@ -27,7 +27,28 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
-func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+// MatchOption tunes Match without changing its signature — enterprise and
+// k8s-proxy both call Match, so a new parameter would break them on their next
+// OSS bump.
+type MatchOption func(*matchOptions)
+
+type matchOptions struct{ autoHeaderNoise bool }
+
+// WithAutoHeaderNoise forgives a VALUE difference on response headers the server
+// mints fresh on every call — the HTTP date, request/correlation ids and
+// distributed-trace ids (models.IsVolatileResponseHeader).
+//
+// Presence is still asserted: a header that only one side carries stays a
+// failure. Off unless the caller asks.
+func WithAutoHeaderNoise(enabled bool) MatchOption {
+	return func(o *matchOptions) { o.autoHeaderNoise = enabled }
+}
+
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool, opts ...MatchOption) (bool, *models.Result) {
+	var mo matchOptions
+	for _, opt := range opts {
+		opt(&mo)
+	}
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
 	var bodySizeResult models.IntResult
@@ -84,45 +105,45 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	}
 
 	noise := tc.Noise
+	// Copy the shared config maps before merging this test case's noise into
+	// them, otherwise each test case permanently widens the noise applied to
+	// every later one.
 	var (
-		bodyNoise   = noiseConfig["body"]
-		headerNoise = noiseConfig["header"]
+		bodyNoise    = matcherUtils.CloneNoiseMap(noiseConfig["body"])
+		headerNoise  = matcherUtils.CloneNoiseMap(noiseConfig["header"])
+		wildcardBody bool
 	)
-	if bodyNoise != nil {
-		if ignoreFields, ok := bodyNoise["*"]; ok && len(ignoreFields) > 0 && ignoreFields[0] == "*" {
-			if noise["body"] == nil {
-				noise["body"] = make([]string, 0)
-			}
-		}
-	} else {
-		bodyNoise = map[string][]string{}
-	}
-	if headerNoise == nil {
-		headerNoise = map[string][]string{}
-	}
+	// wildcardBody carries this on its own. Writing the sentinel back into
+	// tc.Noise used to be how it reached the body-skip check; that mutated the
+	// caller's test case, panicked when tc.Noise was nil, and could be persisted
+	// back to disk by a later re-encode.
+	ignoreFields, hasWildcard := bodyNoise["*"]
+	wildcardBody = hasWildcard && len(ignoreFields) > 0 && ignoreFields[0] == "*"
 
-	for field, regexArr := range noise {
-		a := strings.Split(field, ".")
-		if len(a) > 1 && a[0] == "body" {
-			x := strings.Join(a[1:], ".")
-			bodyNoise[strings.ToLower(x)] = regexArr
-		} else if a[0] == "header" {
-			headerNoise[strings.ToLower(a[len(a)-1])] = regexArr
-		}
+	tcBodyNoise, tcHeaderNoise, skipBody := matcherUtils.SplitNoise(noise, logger)
+	// The global wildcard means "ignore every response body" on its own; it
+	// must not depend on the test case also carrying a bare "body" key, which
+	// stops being the skip sentinel once that key lists field paths.
+	skipBody = skipBody || wildcardBody
+	for field, regexArr := range tcBodyNoise {
+		bodyNoise[field] = regexArr
+	}
+	for field, regexArr := range tcHeaderNoise {
+		headerNoise[field] = regexArr
 	}
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
 
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
-	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
+	if !skipBody && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
 		//validate the stored json
 		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
 			return false, res
 		}
 		if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)
 			pass = jsonComparisonResult.IsExact()
 			if err != nil {
 				return false, res
@@ -139,15 +160,73 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if !compareAll && bodyType != models.JSON {
 			logger.Debug("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
 			// Mark body as passing when compareAll is false and body is not JSON
-		} else if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
+		} else if !skipBody && tc.HTTPResp.Body != actualResponse.Body {
 			pass = false
 		}
 	}
 
 	res.BodyResult[0].Normal = pass
 
+	// A body that failed while carrying noise is the one moment the user needs to
+	// know that some of that noise is inert: the report names a field they
+	// believe they already excluded. Only on a JSON failure — noise paths address
+	// JSON fields, so on any other body every entry would read as dead and the
+	// advice would be nonsense. Only on failure, so the happy path pays nothing
+	// for the extra walk.
+	//
+	// tcBodyNoise, not the merged map: a globalNoise entry applies to every
+	// endpoint by design, so naming it dead on each case that happens not to have
+	// that field would emit a line per failing case and bury the real failures.
+	// Only the test case's own recorded noise is a claim about THIS response.
+	if !pass && !skipBody && bodyType == models.JSON {
+		matcherUtils.WarnUnmatchableBodyNoise(logger, tc.Name, tcBodyNoise, tc.HTTPResp.Body, actualResponse.Body)
+	}
+
 	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
 		res.HeadersResult = *hRes
+
+		// Forgive a VALUE difference on a header the server mints fresh per call.
+		//
+		// Applied to the comparison RESULT, deliberately not by seeding
+		// headerNoise: that map is resolved by matcher.SubstringKeyMatch, which
+		// uses strings.Contains, so a "date" entry would also swallow
+		// "X-Candidate-Id" and "X-Validate-Token" — headers that merely contain
+		// the word. Matching the result's key exactly confines the forgiveness to
+		// the header it was meant for.
+		//
+		// Only when BOTH sides carried the header. CompareHeaders reports a
+		// missing or unexpected header with a nil Value on the absent side, and
+		// those stay failures: a server that stops emitting X-Request-Id, or
+		// starts emitting one it never did, is a real change and must not be
+		// hidden by a rule about values.
+		if mo.autoHeaderNoise {
+			for i := range res.HeadersResult {
+				hr := &res.HeadersResult[i]
+				if hr.Normal || hr.Expected.Value == nil || hr.Actual.Value == nil {
+					continue
+				}
+				name := hr.Expected.Key
+				if name == "" {
+					name = hr.Actual.Key
+				}
+				// An explicit user pattern outranks this. If the user wrote a
+				// regex for this header they narrowed it on purpose, and
+				// CompareHeaders already judged the replayed value against it —
+				// widening that into a blanket ignore would silently discard the
+				// constraint. Resolved through SubstringKeyMatch so the lookup
+				// sees the entry exactly as CompareHeaders did, whatever the
+				// user's casing. (An UNCONDITIONAL user entry never reaches here:
+				// CompareHeaders would already have marked the header normal.)
+				if patterns, constrained := matcherUtils.SubstringKeyMatch(name, headerNoise); constrained && len(patterns) > 0 {
+					continue
+				}
+				if models.IsVolatileResponseHeader(name) {
+					logger.Debug("ignoring value drift on a per-request-volatile response header",
+						zap.String("header", name))
+					hr.Normal = true
+				}
+			}
+		}
 
 		// If body matches but content-length differs, ignore the content-length difference
 		if res.BodyResult[0].Normal {
@@ -318,7 +397,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 				isBodyMismatch = false
 				if validatedJSON.IsIdentical() {
-					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)
 					if err != nil {
 						return false, res
 					}
@@ -512,7 +591,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			} else {
 				classStr = class
 			}
-			actualClass := fmtSprintf234("%dxx", 200/100)
+			actualClass := fmtSprintf234("%dxx", actualResponse.StatusCode/100)
 			if classStr != actualClass {
 				pass = false
 				logger.Error("status_code_class assertion failed", zap.String("expected", class), zap.String("actual", actualClass))

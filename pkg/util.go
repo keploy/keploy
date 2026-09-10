@@ -30,13 +30,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg/models"
 
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -627,7 +627,7 @@ const (
 // errors.Is unwraps the *url.Error -> *net.OpError -> *os.SyscallError ->
 // syscall.Errno chain, so no manual unwrapping is needed.
 func isPreResponseConnRefused(err error) bool {
-	return errors.Is(err, syscall.ECONNREFUSED)
+	return neterr.IsConnRefused(err)
 }
 
 // IsTransportConnReset reports whether err is a transport-level connection
@@ -657,7 +657,7 @@ func IsTransportConnReset(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+	if neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) {
 		return true
 	}
 	// net/http surfaces a peer-side drop during the response read as a bare
@@ -743,7 +743,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	// Decompress if needed
 	if httpResp.Header.Get("Content-Encoding") != "" {
-		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody, MaxDecompressedSize)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decode response body")
 			return nil, err
@@ -822,9 +822,11 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
 			return nil, gzErr
 		}
-		streamReader = &gzipReadCloser{gzipReader: gzipReader, underlying: httpResp.Body}
+		// Cap decompressed output so a bomb fails the test instead of
+		// OOMing while CompareHTTPStream accumulates the body (#3867).
+		streamReader = NewCappedReadCloser(&gzipReadCloser{gzipReader: gzipReader, underlying: httpResp.Body}, MaxDecompressedSize)
 	case "br":
-		streamReader = &brotliReadCloser{reader: brotli.NewReader(httpResp.Body), underlying: httpResp.Body}
+		streamReader = NewCappedReadCloser(&brotliReadCloser{reader: brotli.NewReader(httpResp.Body), underlying: httpResp.Body}, MaxDecompressedSize)
 	case "":
 		// no-op, use httpResp.Body directly
 	default:
@@ -2462,112 +2464,6 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 	return &rendered, nil
 }
 
-// DetectNoiseFieldsInResp inspects a rendered HTTP response and returns a map
-// of noise fields that should be marked on the testcase so matchers ignore
-// them during comparison. It uses current templated values from utils.
-func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
-	noise := make(map[string][]string)
-	if resp == nil {
-		return noise
-	}
-
-	templatedValues, _ := snapshotTemplateState()
-
-	// headers: if a header value contains a templated value, mark header.<name>
-	for hk, hv := range resp.Header {
-		for _, v := range templatedValues {
-			if v == nil {
-				continue
-			}
-			lit := fmt.Sprintf("%v", v)
-			if lit == "" {
-				continue
-			}
-			if strings.Contains(hv, lit) {
-				key := fmt.Sprintf("header.%s", strings.ToLower(hk))
-				noise[key] = []string{}
-				break
-			}
-		}
-	}
-
-	// body: if JSON, traverse and mark specific json paths where templated values appear
-	var parsed interface{}
-	if json.Valid([]byte(resp.Body)) {
-		if err := json.Unmarshal([]byte(resp.Body), &parsed); err == nil {
-			for _, v := range templatedValues {
-				if v == nil {
-					continue
-				}
-				lit := fmt.Sprintf("%v", v)
-				if lit == "" {
-					continue
-				}
-				paths := findJSONPathsWithValue(parsed, lit, "")
-				for _, p := range paths {
-					key := fmt.Sprintf("body.%s", p)
-					noise[key] = []string{}
-				}
-				// also mark literal occurrences in raw body (fallback)
-				if strings.Contains(resp.Body, lit) && len(paths) == 0 {
-					noise["body"] = []string{}
-				}
-			}
-		}
-	} else {
-		// non-json body: if any templated literal present, mark the full body as noisy
-		for _, v := range templatedValues {
-			if v == nil {
-				continue
-			}
-			lit := fmt.Sprintf("%v", v)
-			if lit == "" {
-				continue
-			}
-			if strings.Contains(resp.Body, lit) {
-				noise["body"] = []string{}
-				break
-			}
-		}
-	}
-
-	return noise
-}
-
-// findJSONPathsWithValue recursively searches parsed JSON for values equal to target
-// and returns dot-separated paths (no leading dot). For arrays, indices are used.
-func findJSONPathsWithValue(node interface{}, target, prefix string) []string {
-	var paths []string
-	switch t := node.(type) {
-	case map[string]interface{}:
-		for k, v := range t {
-			p := k
-			if prefix != "" {
-				p = prefix + "." + k
-			}
-			paths = append(paths, findJSONPathsWithValue(v, target, p)...)
-		}
-	case []interface{}:
-		for i, v := range t {
-			idx := fmt.Sprintf("%d", i)
-			p := idx
-			if prefix != "" {
-				p = prefix + "." + idx
-			}
-			paths = append(paths, findJSONPathsWithValue(v, target, p)...)
-		}
-	case string:
-		if t == target {
-			paths = append(paths, prefix)
-		}
-	case float64, bool, nil:
-		if fmt.Sprintf("%v", t) == target {
-			paths = append(paths, prefix)
-		}
-	}
-	return paths
-}
-
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
@@ -2646,15 +2542,12 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 func NextID(IDs []string, identifier string) string {
 	latestIndx := 0
 	for _, ID := range IDs {
-		namePackets := strings.Split(ID, "-")
-		if len(namePackets) == 3 {
-			Indx, err := strconv.Atoi(namePackets[2])
-			if err != nil {
-				continue
-			}
-			if latestIndx < Indx+1 {
-				latestIndx = Indx + 1
-			}
+		Indx, ok := parseIDIndex(ID, identifier)
+		if !ok {
+			continue
+		}
+		if latestIndx < Indx+1 {
+			latestIndx = Indx + 1
 		}
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
@@ -2663,18 +2556,34 @@ func NextID(IDs []string, identifier string) string {
 func LastID(IDs []string, identifier string) string {
 	latestIndx := 0
 	for _, ID := range IDs {
-		namePackets := strings.Split(ID, "-")
-		if len(namePackets) == 3 {
-			Indx, err := strconv.Atoi(namePackets[2])
-			if err != nil {
-				continue
-			}
-			if latestIndx < Indx {
-				latestIndx = Indx
-			}
+		Indx, ok := parseIDIndex(ID, identifier)
+		if !ok {
+			continue
+		}
+		if latestIndx < Indx {
+			latestIndx = Indx
 		}
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
+}
+
+func parseIDIndex(ID, identifier string) (int, bool) {
+	if !strings.HasPrefix(ID, identifier) {
+		return 0, false
+	}
+	suffix := strings.TrimPrefix(ID, identifier)
+	// Digits only. strconv.Atoi accepts a leading sign, so without this a
+	// directory literally named "test-set--1" would parse as index -1 and a
+	// "test-set-+5" as 5. Neither is an ID keploy generates, and the old
+	// len(Split(ID, "-")) == 3 check rejected both.
+	if suffix == "" || strings.ContainsFunc(suffix, func(r rune) bool { return r < '0' || r > '9' }) {
+		return 0, false
+	}
+	Indx, err := strconv.Atoi(suffix)
+	if err != nil {
+		return 0, false
+	}
+	return Indx, true
 }
 
 var (
@@ -2791,13 +2700,23 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 }
 
 // DefaultAgentReadyTimeout is how long keploy waits for the in-docker
-// keploy-agent to report ready before giving up. It is sized to the agent
-// container's OWN healthcheck budget (start_period 10s + interval 5s × retries
-// 60 ≈ 310s, see pkg/platform/docker): under heavy CI docker-daemon contention
-// the agent container can take ~2 minutes just to start — observed in CI as a
-// `docker run` of an already-local image taking 126s before the agent process
-// ran. A shorter CLI wait gives up while the agent's own healthcheck still
-// considers it starting, tearing down a bring-up that would have succeeded.
+// keploy-agent's HTTP endpoint to become reachable before giving up. This
+// bounds container BOOT only — the AgentHealthTicker gate that runs before
+// StoreMocks — not the compose ready-file healthcheck, which has its own
+// generous, env-tunable start_period floor (see agentHealthcheckStartPeriod in
+// pkg/platform/docker). Under heavy CI docker-daemon contention the agent
+// container can take ~2 minutes just to start — observed in CI as a `docker
+// run` of an already-local image taking 126s before the agent process ran. A
+// shorter CLI wait gives up while the container is still booting, tearing down
+// a bring-up that would have succeeded.
+//
+// ErrAgentNotReady is returned by an agent Setup whose agent never reported
+// healthy within AgentReadyTimeout. It is a distinct sentinel so callers can
+// retry a fresh bring-up on this — a nondeterministic container-runtime stall,
+// observed intermittently on macOS Docker Desktop — WITHOUT retrying
+// deterministic failures like missing kernel privileges or a bad config.
+var ErrAgentNotReady = errors.New("keploy-agent did not become ready in time")
+
 const DefaultAgentReadyTimeout = 330 * time.Second
 
 // AgentReadyTimeout returns how long to wait for the keploy-agent to become
@@ -2812,6 +2731,40 @@ func AgentReadyTimeout() time.Duration {
 		}
 	}
 	return DefaultAgentReadyTimeout
+}
+
+// agentSetupAttempts bounds how many times a stalled agent bring-up is retried
+// with a fresh agent before giving up. Three attempts takes a ~37%-per-attempt
+// intermittent stall (observed on macOS Docker Desktop) to ~5% while adding no
+// delay to the overwhelmingly common first-try success.
+const agentSetupAttempts = 3
+
+// RetryAgentSetup runs an agent Setup and retries it, up to agentSetupAttempts,
+// ONLY when it fails with ErrAgentNotReady. Each retry is a full fresh bring-up
+// (Setup re-draws ports and regenerates the agent container), which is what
+// clears a nondeterministic container-runtime stall. Deterministic failures
+// (missing privileges, bad config) do not match the sentinel and return at
+// once, and a cancelled context stops the loop immediately. The test assertions
+// downstream still run exactly once, against a healthy agent — this retries the
+// agent infrastructure, never a test.
+func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx context.Context, attempt int) error) error {
+	var err error
+	for attempt := 1; attempt <= agentSetupAttempts; attempt++ {
+		err = setup(ctx, attempt)
+		if err == nil || ctx.Err() != nil || !errors.Is(err, ErrAgentNotReady) {
+			return err
+		}
+		if attempt < agentSetupAttempts {
+			logger.Warn("keploy-agent bring-up stalled; retrying with a fresh agent",
+				zap.Int("attempt", attempt), zap.Int("of", agentSetupAttempts), zap.Error(err))
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return err
 }
 
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
@@ -2932,15 +2885,17 @@ func FilterPerTestAndLaxPromoted(ctx context.Context, logger *zap.Logger, m []*m
 // test window start observed by the agent's MockManager, or zero before
 // any real test has fired) so the strict gate can preserve per-test
 // startup-init mocks (req < firstWindowStart) in the returned perTestIn
-// slice instead of dropping them. MockManager.SetMocksWithWindow's
+// slice instead of dropping them. The preservation runs in BOTH strict and
+// lax mode: agentStrict is false on a WindowedProxy, so a strict-only
+// preservation never runs on a windowed replay. MockManager.SetMocksWithWindow's
 // startup-tier partition then routes those preserved mocks into the
 // dedicated startup tree, and the v3 tier-aware dispatcher reaches them
 // via GetStartupMocks.
 //
 // Passing firstWindowStart == time.Time{} reproduces the legacy blanket-
-// drop contract (strict mode drops every per-test mock outside the
-// current window, regardless of whether the mock predates the first
-// test). Legacy callers that don't know firstWindowStart can keep
+// drop contract (every per-test mock outside the current window is dropped
+// in strict mode / promoted in lax, regardless of whether the mock predates
+// the first test), because there is no cutoff to preserve against. Legacy callers that don't know firstWindowStart can keep
 // calling FilterPerTestAndLaxPromoted unchanged.
 func FilterPerTestAndLaxPromotedTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
 	perTestInWindow, promotedToSession := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
@@ -2995,18 +2950,70 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 	return filteredMocks
 }
 
-func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
-	filteredMocks, unfilteredMocks := filterByMapping(ctx, logger, m, mocksPresentInMapping)
+// FilterConfigMocksMapping tags the reusable (config/session/connection) pool
+// with its mapping membership and returns it in RECORDED order.
+//
+// Mapping membership is not a chronological signal and must not reorder this
+// pool. Its members are reusable tier — none is owned by a single test — so
+// membership only records which tests happened to consume a mock, and says
+// nothing about when it was recorded. Partitioning on it and concatenating
+// (mapped first, then unmapped) puts every consumed entry ahead of every
+// unconsumed one, inverting chronology whenever the two interleave: a pool
+// recorded rev1,rev2,rev3,rev4 with rev3,rev4 consumed came back as
+// rev3,rev4,rev1,rev2.
+//
+// That matters because downstream reads this pool as a SEQUENCE, not a set. The
+// slice order becomes TestModeInfo.SortOrder in MockManager.setUnFilteredMocks,
+// which keys the RB-tree that GetUnFilteredMocksByKind walks in order — so a
+// replayer that walks a recorded revision sequence (a cluster-config poll, a
+// bootstrap handshake) is handed it backwards.
+//
+// The tagging is done IN PLACE over m rather than by partitioning, so entries
+// with equal ReqTimestampMock keep their recorded order under the stable sort.
+// Partition-then-sort left ties in mapped-first order — the very inversion this
+// removes — and ties are not rare: a protocol encoder that drains several frames
+// from one TCP read stamps them all with that chunk's timestamp (see
+// mysql/recorder/record_v2.go, where ReqTimestampMock is the ReadAt of the chunk
+// that delivered the command bytes), which is exactly what a coalesced bootstrap
+// burst looks like. In a legacy pool carrying no timestamps at all the whole
+// slice is one tie, so the sort does nothing and the partition alone decided the
+// order — that is where the inversion was total, not absent.
+//
+// This deliberately does NOT try to reproduce FilterConfigMocksTierAware's
+// output. That path additionally applies window semantics the mapping path has
+// no equivalent of — it hoists a mock with a missing timestamp into its filtered
+// pool and drops one whose response predates its request — so the two agree only
+// on a pool where neither rule fires. The property claimed here is narrower and
+// is the one that matters: mapping membership is not a chronological signal, so
+// it must not reorder this pool.
+func FilterConfigMocksMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+	mapping := make(map[string]bool, len(mocksPresentInMapping))
+	for _, name := range mocksPresentInMapping {
+		mapping[name] = true
+	}
 
-	sort.SliceStable(filteredMocks, func(i, j int) bool {
-		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	isNonKeploy := false
+	pool := make([]*models.Mock, 0, len(m))
+	for _, mock := range m {
+		if mock == nil {
+			continue
+		}
+		p := mock.DeepCopy()
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+		p.TestModeInfo.IsFiltered = mapping[p.Name]
+		pool = append(pool, p)
+	}
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
+
+	sort.SliceStable(pool, func(i, j int) bool {
+		return pool[i].Spec.ReqTimestampMock.Before(pool[j].Spec.ReqTimestampMock)
 	})
 
-	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
-		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
-	})
-
-	return append(filteredMocks, unfilteredMocks...)
+	return pool
 }
 
 // strictWindowEnvOverride holds the result of one-time env-var parsing
@@ -3190,19 +3197,6 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			continue
 		}
 
-		// Defensive sanity check: if the response-timestamp is BEFORE the
-		// request-timestamp the recording is inconsistent (clock skew,
-		// serialisation bug, or file corruption). Skip it — keeping such
-		// a mock in either pool risks confusing downstream scoring.
-		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
-			logger.Debug("mock has response timestamp before request timestamp; dropping",
-				zap.String("mock", p.Name),
-				zap.Time("req", p.Spec.ReqTimestampMock),
-				zap.Time("res", p.Spec.ResTimestampMock))
-			droppedInvalidOrder++
-			continue
-		}
-
 		// Lifetime-first routing (mockdb/filter-layer authoritative
 		// attribution design): Session- and Connection-lifetime mocks
 		// belong in the session/unfiltered pool REGARDLESS of whether
@@ -3227,6 +3221,26 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			p.TestModeInfo.Lifetime == models.LifetimeConnection {
 			p.TestModeInfo.IsFiltered = false
 			unfilteredMocks = append(unfilteredMocks, p)
+			continue
+		}
+		// NOTE: this runs BELOW the session/connection short-circuit above,
+		// deliberately. It is a window-ordering sanity check, and only per-test
+		// mocks are window-routed — a session or config mock is never compared
+		// against a test window, so a skewed pair cannot mis-route it. Running
+		// it above the short-circuit dropped clock-skewed session mocks (an
+		// auth or handshake recording) out of EVERY pool, which is a hard miss
+		// on traffic that had a perfectly good mock. mockmanager's own
+		// equivalent check is per-test-scoped for the same reason.
+		// Defensive sanity check: if the response-timestamp is BEFORE the
+		// request-timestamp the recording is inconsistent (clock skew,
+		// serialisation bug, or file corruption). Skip it — keeping such
+		// a mock in either pool risks confusing downstream scoring.
+		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
+			logger.Debug("mock has response timestamp before request timestamp; dropping",
+				zap.String("mock", p.Name),
+				zap.Time("req", p.Spec.ReqTimestampMock),
+				zap.Time("res", p.Spec.ResTimestampMock))
+			droppedInvalidOrder++
 			continue
 		}
 		// Defensive fallback: DeriveLifetime may not have run on mocks
@@ -3277,25 +3291,38 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// the unfiltered pool by the lifetime-first short-circuit
 		// above, so the strict/lax divergence here applies exclusively
 		// to the perTest class that actually needs window containment.
+		// Startup-init (req < firstWindowStart) is preserved in the filtered
+		// slice so MockManager.SetMocksWithWindow's startup-tier partition
+		// routes it into the startup tree, where the tier-aware dispatcher
+		// reaches it via GetStartupMocks.
+		//
+		// This runs in BOTH modes, deliberately. It used to sit inside the
+		// strict branch below, and `agentStrict` is permanently false on a
+		// WindowedProxy (agent.go: `params.StrictMockWindow && !isWindowedProxy`),
+		// so on every windowed replay the lax branch diverted these mocks into
+		// the session/unfiltered pool instead — a pool the mongo tier-aware
+		// path never consults for bootstrap traffic (it reads GetFilteredMocks
+		// and GetStartupMocks only). The startup tier was therefore EMPTY for
+		// the whole run, and a bootstrap query issued while a window was open
+		// missed with candidates:0 even though its mock was on disk.
+		//
+		// It is not a widening of what may be served: these mocks predate the
+		// first test window, so they can only be bootstrap traffic, and routing
+		// them to the tier built for exactly that is what both modes intend.
+		// A zero firstWindowStart still means "no cutoff yet" and falls through
+		// to the legacy behaviour below, unchanged.
+		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			preservedStartup++
+			continue
+		}
+
 		if strict {
-			// Per-test, out-of-window. Tier-aware split: startup-init
-			// (req < firstWindowStart) is preserved in the filtered slice
-			// so MockManager.SetMocksWithWindow's startup-tier partition
-			// routes it into the startup tree. Genuine stale cross-test
-			// bleed (firstWindowStart <= req < afterTime, or req >
-			// beforeTime) is dropped — the strictMockWindow guarantee.
-			//
-			// When firstWindowStart is zero we have no cutoff yet (either
-			// the agent hasn't observed a real test window on this
-			// MockManager, or the caller didn't thread the value through).
-			// In that case fall back to the legacy blanket-drop contract
-			// so the behaviour is strictly no worse than before.
-			if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
-				p.TestModeInfo.IsFiltered = true
-				filteredMocks = append(filteredMocks, p)
-				preservedStartup++
-				continue
-			}
+			// Per-test, out-of-window. Genuine stale cross-test bleed
+			// (firstWindowStart <= req < afterTime, or req > beforeTime) is
+			// dropped — the strictMockWindow guarantee. The startup-init band
+			// was already preserved above, in both modes.
 			// Per-mock diagnostic: emit the hash + window + actual ts
 			// at Debug for the strict-drop path so a CI log can
 			// pinpoint which postgres / http / mongo mock the per-test
@@ -3462,15 +3489,23 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			continue
 		}
 
-		// Out-of-window per-test: strict drops (with startup-init
-		// preservation), lax promotes to unfiltered.
+		// Startup-init band, preserved in BOTH modes. Identical reasoning to
+		// filterByTimeStampTierAware: agentStrict is false on a WindowedProxy, so
+		// a strict-only preservation never runs on a windowed replay and the
+		// startup tier stays empty for the whole run. This twin is only
+		// test-called today, but fixing one of two identical functions would
+		// guarantee the bug returns the moment the three-tier path is wired for
+		// postgres v3 / mysql.
+		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+			p.TestModeInfo.IsFiltered = true
+			startup = append(startup, p)
+			preservedStartup++
+			continue
+		}
+
+		// Out-of-window per-test: strict drops, lax promotes to unfiltered.
+		// The startup-init band was already claimed above, in both modes.
 		if strict {
-			if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
-				p.TestModeInfo.IsFiltered = true
-				startup = append(startup, p)
-				preservedStartup++
-				continue
-			}
 			// Per-mock diagnostic: emit hash + window deltas at Debug
 			// for the three-tier strict-drop path so a CI log can
 			// identify which postgres / mongo / etc. mock the per-test
@@ -3632,14 +3667,124 @@ func IsCSV(data []byte) bool {
 	return false
 }
 
-func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
-	switch encoding {
+// MaxDecompressedSize caps Decompress on paths with no downstream size limit
+// (replay, mock decode, SimulateHTTP) so a decompression bomb errors instead
+// of OOMing. The capture path passes the tighter conn.MaxTestCaseSize, since
+// larger testcases are dropped anyway. See #3867.
+const MaxDecompressedSize = 100 * 1024 * 1024 // 100 MiB
+
+// ErrDecompressedTooLarge reports that a body inflated past the caller's
+// limit during Decompress. Callers use errors.Is against it to distinguish
+// an oversized (but valid) body from a corrupt stream, which deserve
+// different handling (e.g. capture drops oversized bodies with the regular
+// size-limit message instead of a scary bomb error).
+var ErrDecompressedTooLarge = errors.New("decompressed size exceeds limit")
+
+// NewCappedReader wraps r so cumulative reads past limit fail with an error
+// wrapping ErrDecompressedTooLarge instead of streaming unbounded data. It
+// bounds streaming decompression (replay streams, mock downloads, archive
+// extraction) where readAllCapped's materialize-everything shape doesn't
+// fit. A stream of exactly limit bytes still reaches its natural EOF; the
+// error surfaces only when the stream holds at least one byte more.
+func NewCappedReader(r io.Reader, limit int64) io.Reader {
+	return &cappedReader{r: r, limit: limit}
+}
+
+type cappedReader struct {
+	r     io.Reader
+	read  int64
+	limit int64
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.read > c.limit {
+		return 0, fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, c.limit)
+	}
+	// Budget reads to limit+1: an exactly-limit stream hits its natural
+	// EOF, while a single extra byte reveals an oversized stream.
+	if max := c.limit + 1 - c.read; int64(len(p)) > max {
+		p = p[:max]
+	}
+	n, err := c.r.Read(p)
+	c.read += int64(n)
+	if c.read > c.limit {
+		return 0, fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, c.limit)
+	}
+	return n, err
+}
+
+// NewCappedReadCloser applies NewCappedReader to a ReadCloser, preserving
+// Close so consumers can still release the underlying resource (e.g. an
+// HTTP response body) after a capped read.
+func NewCappedReadCloser(rc io.ReadCloser, limit int64) io.ReadCloser {
+	return &cappedReadCloser{Reader: NewCappedReader(rc, limit), closer: rc}
+}
+
+type cappedReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (c *cappedReadCloser) Close() error { return c.closer.Close() }
+
+// readAllCapped reads r to EOF, failing with ErrDecompressedTooLarge once
+// the stream exceeds limit bytes. Unlike io.ReadAll, buffer capacity is
+// never grown past limit+1, so at most limit+1 bytes are read from r and
+// the returned slice retains no doubling slack (io.ReadAll can retain ~2x
+// the limit near the cap).
+func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
+	errTooLarge := fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, limit)
+	startCap := int64(64 * 1024)
+	if startCap > limit+1 {
+		startCap = limit + 1
+	}
+	data := make([]byte, 0, startCap)
+	for {
+		if len(data) == cap(data) {
+			if int64(len(data)) > limit {
+				return nil, errTooLarge
+			}
+			newCap := int64(cap(data)) * 2
+			if newCap > limit+1 {
+				newCap = limit + 1
+			}
+			grown := make([]byte, len(data), newCap)
+			copy(grown, data)
+			data = grown
+		}
+		n, err := r.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err == io.EOF {
+			if int64(len(data)) > limit {
+				return nil, errTooLarge
+			}
+			return data, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// Decompress inflates data per the given Content-Encoding, reading at most
+// limit bytes (see MaxDecompressedSize) so a bomb errors instead of OOMing;
+// errors.Is(err, ErrDecompressedTooLarge) distinguishes that from a corrupt
+// stream. The encoding is matched case-insensitively after trimming —
+// Compress uses the same matching, so a recorded body round-trips at replay.
+// An unsupported encoding (e.g. zstd, deflate) is returned undecompressed.
+func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "br":
 		logger.Debug("decompressing brotli compressed data")
 		reader := brotli.NewReader(bytes.NewReader(data))
-		decodedData, err := io.ReadAll(reader)
+		decodedData, err := readAllCapped(reader, limit)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the brotli compressed data")
+			// Over-limit is reported by the caller (e.g. Capture logs it as
+			// the regular size-limit drop) — logging it here too would
+			// double-report every oversized body as a decode failure.
+			if !errors.Is(err, ErrDecompressedTooLarge) {
+				utils.LogError(logger, err, "failed to read the brotli compressed data")
+			}
 			return nil, err
 		}
 		return decodedData, nil
@@ -3651,18 +3796,35 @@ func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error
 			return nil, err
 		}
 		defer reader.Close()
-		decodedData, err := io.ReadAll(reader)
+		decodedData, err := readAllCapped(reader, limit)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the gzip compressed data")
+			// See the brotli branch: over-limit is the caller's to report.
+			if !errors.Is(err, ErrDecompressedTooLarge) {
+				utils.LogError(logger, err, "failed to read the gzip compressed data")
+			}
 			return nil, err
 		}
 		return decodedData, nil
+	case "", "identity":
+		// No Content-Encoding, or "identity" (RFC 9110 §8.4.1): the body
+		// is already uncompressed.
+		return data, nil
+	default:
+		// Common on proxied traffic (zstd, deflate, ...) — debug, not warn,
+		// matching the streaming path in SimulateHTTPStreaming.
+		logger.Debug("unsupported Content-Encoding; storing body without decompression",
+			zap.String("encoding", encoding))
+		return data, nil
 	}
-	return data, nil
 }
 
+// Compress deflates data per the given Content-Encoding. The encoding is
+// matched case-insensitively after trimming — symmetric with Decompress, so
+// a body stored decompressed at record time is re-compressed at replay even
+// when the recorded header used a non-canonical spelling (e.g. "GZIP").
+// An unsupported encoding is returned uncompressed, mirroring Decompress.
 func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
-	switch encoding {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "gzip":
 		logger.Debug("compressing data using gzip")
 		var compressedBuffer bytes.Buffer

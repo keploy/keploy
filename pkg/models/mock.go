@@ -2,6 +2,8 @@ package models
 
 import (
 	"encoding/gob"
+	"net/url"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -10,12 +12,24 @@ import (
 )
 
 func init() {
-	gob.Register(bson.D{})
-	gob.Register(bson.E{})
-	gob.Register(bson.A{})
-	gob.Register(bson.Binary{})
-	gob.Register(bson.M{})
-	gob.Register(bson.ObjectID{})
+	// gob.RegisterName with an EXPLICIT wire name, not gob.Register, so the name
+	// gob writes into every mocks.gob (and the interface payloads streamed
+	// between the keploy binaries) is fixed here rather than derived from the Go
+	// package path and type name. gob.Register(&T{}) keys the wire on the live
+	// identifier, so renaming or moving one of these types silently changes the
+	// on-disk format and makes previously recorded mocks fail to decode — the
+	// stability gap env-vars.md flags for the gob format. Each literal below is
+	// exactly the name gob.Register produced before, so this is byte-identical on
+	// the wire (verified by the round-trip + golden tests in gob_register_test.go)
+	// and existing mocks keep decoding; the difference is only that a future
+	// rename can no longer move it. Frozen: change a literal only with intent, and
+	// update the golden test.
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.D", bson.D{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.E", bson.E{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.A", bson.A{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.Binary", bson.Binary{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.M", bson.M{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.ObjectID", bson.ObjectID{})
 }
 
 type Kind string
@@ -97,6 +111,12 @@ type Mock struct {
 	Spec         MockSpec     `json:"Spec,omitempty" bson:"Spec,omitempty"`
 	TestModeInfo TestModeInfo `json:"TestModeInfo,omitempty"  bson:"TestModeInfo,omitempty"` // Map for additional test mode information
 	ConnectionID string       `json:"ConnectionId,omitempty" bson:"ConnectionId,omitempty"`
+	// SourcePID is the kernel PID of the process that made this outgoing call,
+	// carried transiently from capture to the recorder so `keploy mock record`
+	// can attribute the mock to the test WORKER that made it (per-PID scoping
+	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
+	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
+	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
 	// Noise holds exact-match regex patterns for obfuscated values.
 	// During mock matching, any stored value matching a pattern in this
 	// list is skipped (treated as noise). Written by the enterprise
@@ -215,6 +235,54 @@ type TestModeInfo struct {
 
 func (m *Mock) GetKind() string {
 	return string(m.Kind)
+}
+
+// RecordedDestination reads the upstream authority a recorded mock was
+// captured against — "which host did this mock's call go to?" — for the
+// destination-scope diagnostic (see pkg/agent/proxy/integrations/mismatch).
+//
+// ok is false when the answer is UNKNOWN, and the caller must treat that as
+// "undecidable", never as "no destination": one mock whose host cannot be
+// read could be the very mock that targeted the live call, so it has to veto
+// the verdict rather than count as evidence. Today only HTTP mocks carry a
+// readable destination — the other protocols' recorded specs keep no
+// authority at all (Mongo/MySQL/Postgres store wire payloads, Generic stores
+// opaque buffers) — so every non-HTTP kind answers "unknown".
+//
+// Header Host first, URL authority second: the recorder stores an HTTP
+// request path-only ("/api/orders?id=90") with the authority in the
+// Host header, but a mock captured through a forward proxy carries an
+// absolute URL instead.
+func (m *Mock) RecordedDestination() (string, bool) {
+	if m == nil || m.Kind != Kind(HTTP) || m.Spec.HTTPReq == nil {
+		return "", false
+	}
+	// Case-insensitive lookup: recorded mock headers are a plain map (no
+	// textproto canonicalisation), so the key's case depends on whichever
+	// recorder wrote it.
+	//
+	// The two conventional spellings are probed directly first: the fallback
+	// scan below is O(headers) with a strings.EqualFold per key, and a real
+	// recorded request carries far more headers than a test fixture does, so
+	// the scan's cost grows with them while these two lookups do not. The
+	// scan still runs for anything else ("HOST", "hOst"), so no recording
+	// stops being readable.
+	h := m.Spec.HTTPReq.Header
+	if v := h["Host"]; v != "" {
+		return v, true
+	}
+	if v := h["host"]; v != "" {
+		return v, true
+	}
+	for k, v := range h {
+		if strings.EqualFold(k, "Host") && v != "" {
+			return v, true
+		}
+	}
+	if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
+		return u.Host, true
+	}
+	return "", false
 }
 
 type MockSpec struct {

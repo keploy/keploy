@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"net"
 	"sync/atomic"
 	"time"
@@ -70,6 +71,18 @@ func (c *readTrackingConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// CloseWrite forwards a half-close, for the same reason
+// readTimeReportingConn does: this type also embeds net.Conn as an
+// interface, so CloseWrite is not promoted. Both wrappers delegate so a
+// half-close survives however they end up nested.
+func (c *readTrackingConn) CloseWrite() error {
+	cw, ok := c.Conn.(interface{ CloseWrite() error })
+	if !ok {
+		return errNoCloseWrite
+	}
+	return cw.CloseWrite()
+}
+
 func (c *readTrackingConn) LastReadTime() time.Time {
 	n := c.lastReadNano.Load()
 	if n == 0 {
@@ -77,6 +90,10 @@ func (c *readTrackingConn) LastReadTime() time.Time {
 	}
 	return time.Unix(0, n)
 }
+
+// errNoCloseWrite reports that the conn underneath cannot half-close,
+// so the caller must fall back to a full teardown.
+var errNoCloseWrite = errors.New("relay: underlying conn does not support CloseWrite")
 
 type readTimeReportingConn struct {
 	net.Conn
@@ -92,4 +109,27 @@ func newReadTimeReportingConn(conn net.Conn, source readTimeProvider) net.Conn {
 
 func (c *readTimeReportingConn) LastReadTime() time.Time {
 	return c.source.LastReadTime()
+}
+
+// CloseWrite forwards a half-close to the conn underneath.
+//
+// This type is what the TLS upgrade stores into Relay.src / Relay.dst
+// (directive_proc.go), and it embeds net.Conn as an INTERFACE — so Go
+// promotes only net.Conn's method set, and CloseWrite is not in it.
+// Without this method every TLS-upgraded connection silently loses the
+// ability to half-close, which is to say the half-close support in
+// Relay.run would be dead on exactly the MITM'd traffic keploy exists
+// to record.
+//
+// The same blind spot is already documented one file over, where the
+// RealCertHook has to run BEFORE this wrapper because unwrapToTLSConn
+// cannot see through it either. Delegating explicitly is deliberately
+// narrower than adding NetConn(): it fixes half-close without silently
+// changing what every other unwrap in the tree can now see through.
+func (c *readTimeReportingConn) CloseWrite() error {
+	cw, ok := c.Conn.(interface{ CloseWrite() error })
+	if !ok {
+		return errNoCloseWrite
+	}
+	return cw.CloseWrite()
 }

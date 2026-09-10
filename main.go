@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -51,6 +52,7 @@ func start(ctx context.Context) {
 	logger, logFile, err := log.New()
 	if err != nil {
 		fmt.Println("Failed to start the logger for the CLI", err)
+		utils.ErrCode = 1
 		return
 	}
 	utils.LogFile = logFile
@@ -191,10 +193,10 @@ func start(ctx context.Context) {
 					utils.LogError(logger, err, "Failed to close Keploy Logs")
 				}
 			}
-			if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
+			if err := utils.DeleteFileIfExists(logger, "keploy-logs.txt"); err != nil {
 				return
 			}
-			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+			if err := utils.DeleteFileIfExists(logger, "docker-compose-tmp.yaml"); err != nil {
 				return
 			}
 		}
@@ -233,11 +235,7 @@ func start(ctx context.Context) {
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
-		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
-			fmt.Println("Error: ", err.Error())
-			fmt.Println("Run 'keploy --help' for usage.")
-			os.Exit(1)
-		}
+		utils.ErrCode = exitCodeForCmdErr(err, os.Stderr)
 	}
 
 	// Restore keploy folder ownership if running under sudo (for Docker mode)
@@ -359,4 +357,26 @@ func printEnterpriseUpgradeBanner() {
 	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+"curl --silent -O -L https://keploy.io/ent/install.sh && source install.sh"+reset)
 	fmt.Fprintln(os.Stderr, orange+bar+reset)
 	fmt.Fprintln(os.Stderr)
+}
+
+// exitCodeForCmdErr maps an error returned by the root command onto the
+// process exit code, writing the unknown-command hint to w when that is what
+// went wrong.
+//
+// Any non-nil error means the command did not run successfully, so the
+// process must not report success. This used to convert only "unknown
+// command" and "unknown shorthand" into a non-zero exit; every other error
+// fell through with utils.ErrCode still 0. That silently exited 0 for all
+// flag-parsing errors - CmdConfigurator.AddFlags sets SilenceErrors and
+// prints them through SetFlagErrorFunc, so `keploy test --typo` showed a red
+// error message and still reported success to the shell and to CI.
+func exitCodeForCmdErr(err error, w io.Writer) int {
+	if err == nil {
+		return 0
+	}
+	if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
+		fmt.Fprintln(w, "Error: ", err.Error())
+		fmt.Fprintln(w, "Run 'keploy --help' for usage.")
+	}
+	return 1
 }

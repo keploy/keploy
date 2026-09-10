@@ -1,0 +1,191 @@
+package http
+
+import (
+	"net/url"
+	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+func TestPassThroughEgressDecision(t *testing.T) {
+	opts := models.OutgoingOptions{
+		PassThroughPorts: []models.PassThroughRule{{Port: 8126, Mode: models.PassThroughRecordOne}},
+		PassThroughHosts: []models.PassThroughRule{{Host: "*.datadoghq.com", Mode: models.PassThroughSkip}},
+	}
+	cases := []struct {
+		name     string
+		host     string
+		port     uint32
+		path     string
+		wantOK   bool
+		wantMode models.PassThroughMode
+	}{
+		{"config port recordOne", "", 8126, "/v0.4/traces", true, models.PassThroughRecordOne},
+		{"config host skip", "intake.datadoghq.com", 443, "/api/v2/series", true, models.PassThroughSkip},
+		{"builtin OTLP default skip", "otel-collector", 4318, "/v1/traces", true, models.PassThroughSkip},
+		{"no match", "example.com", 9999, "/orders", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			u := &url.URL{Path: c.path, Host: c.host}
+			rule, ok := passThroughEgressDecision(opts, c.host, c.port, "POST", u)
+			if ok != c.wantOK {
+				t.Fatalf("ok=%v want %v", ok, c.wantOK)
+			}
+			if ok && rule.Mode != c.wantMode {
+				t.Fatalf("mode=%q want %q", rule.Mode, c.wantMode)
+			}
+		})
+	}
+}
+
+// A user mode:"off" rule overrides a built-in skip and makes the endpoint NOT a
+// passthrough target, so it is recorded/replayed as a normal dependency.
+func TestPassThroughEgressDecision_OffOverridesBuiltin(t *testing.T) {
+	u := &url.URL{Path: "/v1/traces", Host: "otel-collector"}
+	// Baseline: with no user rule the OTLP path is a built-in skip.
+	if _, ok := passThroughEgressDecision(models.OutgoingOptions{}, "otel-collector", 4318, "POST", u); !ok {
+		t.Fatal("baseline: /v1/traces should be a built-in passthrough")
+	}
+	// With an off rule for the same path, the decision must report NOT-passthrough.
+	opts := models.OutgoingOptions{
+		PassThroughHosts: []models.PassThroughRule{{Path: "/v1/traces", Mode: models.PassThroughOff}},
+	}
+	if rule, ok := passThroughEgressDecision(opts, "otel-collector", 4318, "POST", u); ok {
+		t.Fatalf("off rule should make it not-passthrough, got ok=true mode=%q", rule.Mode)
+	}
+}
+
+// mockHostPortMatches gates replay by the mock's recorded host/port, but only
+// enforces a component the mock actually carries.
+func TestMockHostPortMatches(t *testing.T) {
+	full := &models.HTTPReq{URL: "http://collector.newrelic.com:8200/x"}
+	if !mockHostPortMatches(full, "collector.newrelic.com", 8200) {
+		t.Fatal("matching host+port should match")
+	}
+	if mockHostPortMatches(full, "other.host", 8200) {
+		t.Fatal("different host must not match")
+	}
+	if mockHostPortMatches(full, "collector.newrelic.com", 9999) {
+		t.Fatal("different port must not match")
+	}
+	// A mock recorded with no host in the URL must not over-filter.
+	rel := &models.HTTPReq{URL: "/x"}
+	if !mockHostPortMatches(rel, "anything", 1234) {
+		t.Fatal("host-less recorded URL should not filter")
+	}
+	// Request host carrying a :port compares against the mock's hostname.
+	if !mockHostPortMatches(full, "collector.newrelic.com:8200", 8200) {
+		t.Fatal("request host with :port should still match on hostname")
+	}
+}
+
+func TestPtRecorder_FirstSuccess(t *testing.T) {
+	r := &ptRecorder{}
+	key := ptRecordKey("", "POST", "dd-agent", 8126, "/v0.4/traces", nil, nil)
+
+	// A warmup 503 records once (nothing better yet).
+	if !r.shouldRecord(key, 503) {
+		t.Fatal("first (error) exchange should record")
+	}
+	// A second error is dropped (we already have one representative).
+	if r.shouldRecord(key, 500) {
+		t.Fatal("second error should be dropped")
+	}
+	// The first 2xx records (upgrades the representative).
+	if !r.shouldRecord(key, 200) {
+		t.Fatal("first 2xx should record")
+	}
+	// Everything after a 2xx is dropped.
+	if r.shouldRecord(key, 200) {
+		t.Fatal("subsequent 2xx should be dropped")
+	}
+	// A different key is independent.
+	if !r.shouldRecord(ptRecordKey("", "POST", "dd-agent", 8126, "/v0.7/config", nil, nil), 200) {
+		t.Fatal("distinct endpoint key should record")
+	}
+}
+
+// New Relic multiplexes every RPC onto ONE path via ?method=. QueryKeys:[method]
+// must make each method a distinct recordOne key while ignoring the per-session
+// run_id, so repeat calls of the same method still collapse.
+func TestPtRecordKey_QueryMux(t *testing.T) {
+	qk := []string{"method"}
+	p := "/agent_listener/invoke_raw_method"
+	q := func(vals url.Values) url.Values { return vals }
+
+	connect := ptRecordKey("", "POST", "collector.newrelic.com", 443, p, qk,
+		q(url.Values{"method": {"connect"}, "run_id": {"111"}}))
+	metric := ptRecordKey("", "POST", "collector.newrelic.com", 443, p, qk,
+		q(url.Values{"method": {"metric_data"}, "run_id": {"111"}}))
+	metric2 := ptRecordKey("", "POST", "collector.newrelic.com", 443, p, qk,
+		q(url.Values{"method": {"metric_data"}, "run_id": {"999"}})) // different run_id
+
+	if connect == metric {
+		t.Fatal("connect and metric_data must be distinct keys under QueryKeys[method]")
+	}
+	if metric != metric2 {
+		t.Fatal("same method with a different run_id must collapse to one key")
+	}
+
+	// A recorder keeps connect and metric_data as separate representatives.
+	r := &ptRecorder{}
+	if !r.shouldRecord(connect, 200) || !r.shouldRecord(metric, 200) {
+		t.Fatal("distinct methods should each record once")
+	}
+	if r.shouldRecord(metric2, 200) {
+		t.Fatal("a second metric_data (varying run_id) must be dropped")
+	}
+}
+
+// A non-empty scope isolates recordOne dedup per app/session: the same endpoint
+// under two different scopes records once EACH (so a shared DaemonSet recorder
+// doesn't let app A suppress app B). Empty scope reproduces the sidecar key.
+func TestPtRecordKey_Scope(t *testing.T) {
+	a := ptRecordKey("ns/dep/tsA", "POST", "collector.newrelic.com", 443, "/x", nil, nil)
+	b := ptRecordKey("ns/dep/tsB", "POST", "collector.newrelic.com", 443, "/x", nil, nil)
+	if a == b {
+		t.Fatal("different scopes must produce different keys")
+	}
+	r := &ptRecorder{}
+	if !r.shouldRecord(a, 200) || !r.shouldRecord(b, 200) {
+		t.Fatal("same endpoint under different scopes should each record once")
+	}
+	if r.shouldRecord(a, 200) {
+		t.Fatal("a repeat within the same scope must still be dropped")
+	}
+}
+
+// mockQueryMatches gates replay selection so a connect request is never served a
+// metric_data mock, while non-significant params (run_id) don't affect matching.
+func TestMockQueryMatches(t *testing.T) {
+	mock := &models.HTTPReq{
+		URL:       "http://collector.newrelic.com/agent_listener/invoke_raw_method?method=connect&run_id=111",
+		URLParams: map[string]string{"method": "connect", "run_id": "111"},
+	}
+	qk := []string{"method"}
+
+	same := &url.URL{Path: "/agent_listener/invoke_raw_method", RawQuery: "method=connect&run_id=999"}
+	if !mockQueryMatches(mock, same, qk) {
+		t.Fatal("same method (differing run_id) should match")
+	}
+	other := &url.URL{Path: "/agent_listener/invoke_raw_method", RawQuery: "method=metric_data"}
+	if mockQueryMatches(mock, other, qk) {
+		t.Fatal("different method must not match")
+	}
+	// Empty queryKeys → query-agnostic (default recordOne behavior).
+	if !mockQueryMatches(mock, other, nil) {
+		t.Fatal("empty queryKeys should match regardless of query")
+	}
+}
+
+func TestPtRecorder_2xxFirstDropsRest(t *testing.T) {
+	r := &ptRecorder{}
+	key := ptRecordKey("", "GET", "dd-agent", 8126, "/info", nil, nil)
+	if !r.shouldRecord(key, 200) {
+		t.Fatal("first 2xx should record")
+	}
+	if r.shouldRecord(key, 503) {
+		t.Fatal("nothing records once a 2xx is captured")
+	}
+}

@@ -37,7 +37,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	tel.Ping(ctx)
 
 	switch cmd {
-	case "record", "test", "normalize", "contract", "config", "update", "export", "import", "templatize", "report", "sanitize", "diff":
+	case "record", "test", "normalize", "contract", "config", "update", "export", "import", "templatize", "report", "sanitize", "diff", "mock-record", "mock-replay":
 		return Get(ctx, cmd, n.cfg, n.logger, tel)
 	case "agent":
 		return GetAgent(ctx, cmd, n.cfg, n.logger)

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -256,4 +257,119 @@ func TestDNSCacheLifecycle_DedupeStillCatchesDuplicates(t *testing.T) {
 			t.Fatalf("dedupe cache must consistently signal a duplicate (iter=%d)", i)
 		}
 	}
+}
+
+// TestShouldLogNodataRelay_DedupesPerNameAndQtype locks in the behaviour the
+// tracker exists for: the "relayed NODATA" Info line is emitted once per
+// (name, qtype) and suppressed thereafter.
+func TestShouldLogNodataRelay_DedupesPerNameAndQtype(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), nodataRelayLogged: newNodataRelayLogCache()}
+
+	keyA := generateCacheKey("payments.svc.cluster.local", dns.TypeAAAA)
+	keyB := generateCacheKey("payments.svc.cluster.local", dns.TypeA)
+
+	if !p.shouldLogNodataRelay(keyA) {
+		t.Fatal("first sighting of a (name,qtype) must log")
+	}
+	if p.shouldLogNodataRelay(keyA) {
+		t.Error("second sighting of the same (name,qtype) must be suppressed")
+	}
+	if !p.shouldLogNodataRelay(keyB) {
+		t.Error("a different qtype for the same name is a different key and must log")
+	}
+}
+
+// TestShouldLogNodataRelay_IsBounded is the retention contract. The key is
+// (name, qtype) and the name is chosen by the application under test — a
+// client resolving per-request hostnames, or a k8s search-domain/ndots setup
+// fanning one lookup into many qualified names, mints keys without limit. The
+// tracker only suppresses duplicate log output, so capping it is free; letting
+// it grow costs the agent memory for its entire lifetime.
+func TestShouldLogNodataRelay_IsBounded(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), nodataRelayLogged: newNodataRelayLogCache()}
+
+	const distinct = nodataRelayLogMaxSize + 500
+	for i := 0; i < distinct; i++ {
+		p.shouldLogNodataRelay(generateCacheKey(fmt.Sprintf("req-%d.tenant.example", i), dns.TypeA))
+	}
+
+	if got := p.nodataRelayLogged.Len(); got > nodataRelayLogMaxSize {
+		t.Errorf("nodataRelayLogged holds %d entries after %d distinct names, must never exceed the %d cap: the tracker is following its input, not bounding it",
+			got, distinct, nodataRelayLogMaxSize)
+	}
+}
+
+// TestShouldLogNodataRelay_NilTrackerNeverPanics covers the many unit tests
+// (and any future caller) that build a bare &Proxy{} literal: an uninitialised
+// tracker must degrade to "never dedupe", not crash the DNS server.
+func TestShouldLogNodataRelay_NilTrackerNeverPanics(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	key := generateCacheKey("bare.proxy.literal", dns.TypeA)
+	if !p.shouldLogNodataRelay(key) || !p.shouldLogNodataRelay(key) {
+		t.Error("a nil tracker must report every sighting as loggable")
+	}
+}
+
+// TestResetRecordedDNSMocks_ClearsBothTrackers pins the session boundary. Both
+// DNS dedupe trackers are per-session state: carrying them across a
+// record/replay session boundary silently suppresses the current session's
+// first-sighting signals.
+func TestResetRecordedDNSMocks_ClearsBothTrackers(t *testing.T) {
+	p := &Proxy{
+		logger:            zap.NewNop(),
+		recordedDNSMocks:  newRecordedDNSMocksCache(),
+		nodataRelayLogged: newNodataRelayLogCache(),
+	}
+
+	key := generateCacheKey("carryover.example", dns.TypeA)
+	p.recordedDNSMocks.Add(key, true)
+	if !p.shouldLogNodataRelay(key) {
+		t.Fatal("first sighting must log")
+	}
+
+	p.ResetRecordedDNSMocks()
+
+	if p.recordedDNSMocks.Len() != 0 {
+		t.Errorf("recordedDNSMocks still holds %d entries after reset", p.recordedDNSMocks.Len())
+	}
+	if p.nodataRelayLogged.Len() != 0 {
+		t.Errorf("nodataRelayLogged still holds %d entries after reset", p.nodataRelayLogged.Len())
+	}
+	if !p.shouldLogNodataRelay(key) {
+		t.Error("after a session reset the same (name,qtype) must log again")
+	}
+}
+
+// TestResetRecordedDNSMocks_PurgesInPlace guards against reintroducing a
+// goroutine + heap leak that is worse than the retention this file fixes.
+//
+// expirable.NewLRU with a non-zero TTL starts a janitor goroutine whose done
+// channel is never closed, and that goroutine captures the cache. Allocating a
+// replacement tracker on every reset would therefore strand one goroutine per
+// reset and pin every discarded entry beyond the reach of the GC. The reset
+// must clear the existing trackers, not swap in new ones — which also keeps
+// the pointer stable for the DNS handler goroutines reading it concurrently.
+func TestResetRecordedDNSMocks_PurgesInPlace(t *testing.T) {
+	p := &Proxy{
+		logger:            zap.NewNop(),
+		recordedDNSMocks:  newRecordedDNSMocksCache(),
+		nodataRelayLogged: newNodataRelayLogCache(),
+	}
+	beforeMocks, beforeNodata := p.recordedDNSMocks, p.nodataRelayLogged
+
+	p.ResetRecordedDNSMocks()
+
+	if p.recordedDNSMocks != beforeMocks {
+		t.Error("recordedDNSMocks was reallocated: the discarded cache and its janitor goroutine leak for the process lifetime")
+	}
+	if p.nodataRelayLogged != beforeNodata {
+		t.Error("nodataRelayLogged was reallocated: the discarded cache and its janitor goroutine leak for the process lifetime")
+	}
+}
+
+// TestResetRecordedDNSMocks_NilTrackersNeverPanic covers the bare &Proxy{}
+// literals: a reset on an uninitialised proxy must be a no-op, not a crash.
+func TestResetRecordedDNSMocks_NilTrackersNeverPanic(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	p.ResetRecordedDNSMocks()
 }

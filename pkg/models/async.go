@@ -6,21 +6,21 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 )
 
 // AsyncMeta is the async-egress engine's per-mock bookkeeping. It is carried in
 // its OWN block — Spec.Async in memory, a top-level `async:` block on the
 // recorded doc — rather than merged into the owning parser's flat Spec.Metadata.
 // Its PRESENCE (non-nil) marks a mock as async egress; Poll marks a held
-// long-poll delivery whose open-duration is captured in PollDurationMs. A poll
-// mock keeps its base kind (e.g. Http) — poll-ness lives here, not in the Kind.
+// long-poll delivery. A poll mock keeps its base kind (e.g. Http) — poll-ness
+// lives here, not in the Kind.
 type AsyncMeta struct {
-	Lane           string `yaml:"lane" json:"lane" bson:"lane"`                                                             // lane name (routing identity)
-	Seq            int    `yaml:"seq" json:"seq" bson:"seq"`                                                                // per-lane order counter
-	AnchorAfter    string `yaml:"anchorAfter,omitempty" json:"anchorAfter,omitempty" bson:"anchorAfter,omitempty"`          // last completed testcase Name, or "startup" (readability)
-	AnchorPos      int    `yaml:"anchorPos" json:"anchorPos" bson:"anchorPos"`                                              // number of testcases completed before this egress fired
-	Poll           bool   `yaml:"poll,omitempty" json:"poll,omitempty" bson:"poll,omitempty"`                               // held long-poll delivery
-	PollDurationMs int64  `yaml:"pollDurationMs,omitempty" json:"pollDurationMs,omitempty" bson:"pollDurationMs,omitempty"` // recorded open-duration (ms), fidelity only
+	Lane        string `yaml:"lane" json:"lane" bson:"lane"`                                                    // lane name (routing identity)
+	Seq         int    `yaml:"seq" json:"seq" bson:"seq"`                                                       // per-lane order counter
+	AnchorAfter string `yaml:"anchorAfter,omitempty" json:"anchorAfter,omitempty" bson:"anchorAfter,omitempty"` // last completed testcase Name, or "startup" (readability)
+	AnchorPos   int    `yaml:"anchorPos" json:"anchorPos" bson:"anchorPos"`                                     // epoch effective-from: testcases completed before this value took effect (0 = boot)
+	Poll        bool   `yaml:"poll,omitempty" json:"poll,omitempty" bson:"poll,omitempty"`                      // held long-poll delivery
 }
 
 // AnchorStartup is the AsyncMeta.AnchorAfter value for async mocks that fired
@@ -46,6 +46,10 @@ type AsyncLane struct {
 	// (watch=false) as ordinary non-async egress.
 	MatchQuery     map[string]string `json:"matchQuery,omitempty" yaml:"matchQuery,omitempty" mapstructure:"matchQuery"`
 	VolatileParams []string          `json:"volatileParams,omitempty" yaml:"volatileParams,omitempty" mapstructure:"volatileParams"`
+	// ThrottleMs bounds how often an UNCHANGED poll is answered during replay,
+	// preventing a long-poll client from busy-looping when answers are instant.
+	// It never changes which value is served — purely a resource knob. 0 => 1s.
+	ThrottleMs int `json:"throttleMs,omitempty" yaml:"throttleMs,omitempty" mapstructure:"throttleMs"`
 }
 
 // EffectiveName returns the caller-supplied Name, or a deterministic name
@@ -125,6 +129,15 @@ func writeSortedKV(w io.Writer, m map[string]string) {
 // HELD open until their resolve testcase instead of served immediately.
 func (l AsyncLane) IsPoll() bool {
 	return len(l.Type) > len("Poll") && strings.EqualFold(l.Type[len(l.Type)-len("Poll"):], "Poll")
+}
+
+// ThrottleDuration is the maximum hold before an unchanged poll is answered at
+// replay. Defaults to 1s when ThrottleMs is unset or non-positive.
+func (l AsyncLane) ThrottleDuration() time.Duration {
+	if l.ThrottleMs <= 0 {
+		return time.Second
+	}
+	return time.Duration(l.ThrottleMs) * time.Millisecond
 }
 
 // BaseType returns the parser type backing the lane: the Type with any "Poll"

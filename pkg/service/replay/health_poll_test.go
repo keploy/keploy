@@ -38,7 +38,7 @@ func TestWaitForAppReady_200OnFirstTry(t *testing.T) {
 	logger := zap.NewNop()
 
 	start := time.Now()
-	ok := waitForAppReady(context.Background(), logger, cfg)
+	ok := waitForAppReady(context.Background(), logger, cfg, httpProbeTarget{})
 	elapsed := time.Since(start)
 
 	if !ok {
@@ -70,7 +70,7 @@ func TestWaitForAppReady_503ThenOK(t *testing.T) {
 	logger := zap.NewNop()
 
 	start := time.Now()
-	ok := waitForAppReady(context.Background(), logger, cfg)
+	ok := waitForAppReady(context.Background(), logger, cfg, httpProbeTarget{})
 	elapsed := time.Since(start)
 
 	if !ok {
@@ -111,7 +111,7 @@ func TestWaitForAppReady_NeverOK(t *testing.T) {
 	logger := zap.New(core)
 
 	start := time.Now()
-	ok := waitForAppReady(context.Background(), logger, cfg)
+	ok := waitForAppReady(context.Background(), logger, cfg, httpProbeTarget{})
 	elapsed := time.Since(start)
 
 	if !ok {
@@ -151,7 +151,7 @@ func TestWaitForAppReady_EmptyURLUsesFixedDelay(t *testing.T) {
 	cfg.Test.Delay = 0 // keep the test fast; semantics are the same
 	logger := zap.NewNop()
 
-	ok := waitForAppReady(context.Background(), logger, cfg)
+	ok := waitForAppReady(context.Background(), logger, cfg, httpProbeTarget{})
 	if !ok {
 		t.Fatalf("expected waitForAppReady to return true in the default path")
 	}
@@ -187,7 +187,7 @@ func TestWaitForAppReady_CtxCanceledAtCeiling(t *testing.T) {
 	}()
 
 	start := time.Now()
-	ok := waitForAppReady(ctx, logger, cfg)
+	ok := waitForAppReady(ctx, logger, cfg, httpProbeTarget{})
 	elapsed := time.Since(start)
 
 	if ok {
@@ -234,7 +234,7 @@ func TestWaitForAppReady_MalformedURL_FallsBackToDelay(t *testing.T) {
 	logger := zap.New(core)
 
 	start := time.Now()
-	ok := waitForAppReady(context.Background(), logger, cfg)
+	ok := waitForAppReady(context.Background(), logger, cfg, httpProbeTarget{})
 	elapsed := time.Since(start)
 
 	if !ok {
@@ -303,7 +303,7 @@ func TestWaitForAppReady_MalformedURL_TableDriven(t *testing.T) {
 			cfg.Test.Delay = 0
 			logger := zap.NewNop()
 
-			ok := waitForAppReady(context.Background(), logger, cfg)
+			ok := waitForAppReady(context.Background(), logger, cfg, httpProbeTarget{})
 
 			if !ok {
 				t.Fatalf("expected true (fall through to fixed-delay) for malformed URL %q, got false — callers would misclassify this as user abort", c.url)
@@ -330,7 +330,7 @@ func TestWaitForAppReady_CtxCanceled(t *testing.T) {
 	}()
 
 	start := time.Now()
-	ok := waitForAppReady(ctx, logger, cfg)
+	ok := waitForAppReady(ctx, logger, cfg, httpProbeTarget{})
 	elapsed := time.Since(start)
 
 	if ok {
