@@ -274,6 +274,14 @@ type Proxy struct {
 	// dnsUpstreamPort is the port read alongside dnsUpstreamServers.
 	// Defaults to "53" when resolv.conf does not specify one.
 	dnsUpstreamPort string
+	// dnsSearch is the resolv.conf search list, kept so a query can be
+	// recognised as a redundant search expansion without asking upstream.
+	// A resolver probes name.S for each search domain S — before the name
+	// absolutely when it carries fewer than ndots dots (5 in Kubernetes),
+	// after otherwise — so a name that already ends in S is probed as
+	// name.S.S. That shape is decidable from the name alone, whatever
+	// upstream says, and nothing answers it, so capture never recorded it.
+	dnsSearch []string
 	// dnsForwardTimeout caps how long a single upstream Exchange is
 	// allowed to block. Short by design — a flaky resolver must never
 	// stall the app's DNS lookup. On timeout we fall through to the
