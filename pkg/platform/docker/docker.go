@@ -517,7 +517,7 @@ func (idc *Impl) findContainerInServices(compose *Compose, containerName string)
 		var containerNameMatch bool
 		for j := 0; j < len(serviceContentNode.Content)-1; j++ {
 			if serviceContentNode.Content[j].Kind == yaml.ScalarNode && serviceContentNode.Content[j].Value == "container_name" &&
-				serviceContentNode.Content[j+1].Kind == yaml.ScalarNode && serviceContentNode.Content[j+1].Value == containerName {
+				aliasTarget(serviceContentNode.Content[j+1]).Value == containerName {
 				containerNameMatch = true
 				break
 			}
@@ -550,7 +550,7 @@ func (idc *Impl) extractServiceNetworks(serviceNode *yaml.Node, serviceName stri
 		valueNode := serviceNode.Content[i+1]
 
 		if keyNode.Value == "networks" {
-			return idc.parseNetworksNode(valueNode)
+			return idc.parseNetworksNode(aliasTarget(valueNode))
 		}
 	}
 
@@ -574,7 +574,11 @@ func (idc *Impl) extractServicePorts(serviceNode *yaml.Node) []string {
 		valueNode := serviceNode.Content[i+1]
 
 		if keyNode.Value == "ports" {
-			return idc.parsePortsNode(valueNode)
+			// `ports: *appports` matches no arm of the switch below, so the app's
+			// published ports came back empty. keploy-agent publishes on the app's
+			// behalf under `network_mode: service:keploy-agent`, so the app then
+			// has no published port at all and is unreachable from the host.
+			return idc.parsePortsNode(aliasTarget(valueNode))
 		}
 	}
 
@@ -590,7 +594,12 @@ func (idc *Impl) parseNetworksNode(networksNode *yaml.Node) []string {
 	case yaml.SequenceNode:
 		// Array format: networks: [network1, network2]
 		for _, networkNode := range networksNode.Content {
-			if networkNode.Kind == yaml.ScalarNode {
+			// An element can be an alias too, and dropping it is worse than
+			// reading nothing: the fallback below then puts keploy-agent on
+			// `default` while the app, sharing the agent's netns, silently loses
+			// the network its database is on.
+			networkNode = aliasTarget(networkNode)
+			if networkNode.Kind == yaml.ScalarNode && !isEmptyNode(networkNode) {
 				networks = append(networks, networkNode.Value)
 			}
 		}
@@ -603,8 +612,13 @@ func (idc *Impl) parseNetworksNode(networksNode *yaml.Node) []string {
 			}
 		}
 	case yaml.ScalarNode:
-		// Single network as string
-		networks = []string{networksNode.Value}
+		// Single network as string. `networks:` with nothing under it is also a
+		// scalar, and taking its empty Value produced a network named "" -- which
+		// keploy then copied onto keploy-agent, where compose rejects it with
+		// "additional properties '' not allowed".
+		if !isEmptyNode(networksNode) {
+			networks = []string{networksNode.Value}
+		}
 	}
 
 	// If no networks are specified, use default
@@ -623,7 +637,8 @@ func (idc *Impl) parsePortsNode(portsNode *yaml.Node) []string {
 	case yaml.SequenceNode:
 		// Array format: ports: ["80:80", "443:443"] or ports: [8080, "9000:9000"]
 		for _, portNode := range portsNode.Content {
-			if portNode.Kind == yaml.ScalarNode {
+			portNode = aliasTarget(portNode)
+			if portNode.Kind == yaml.ScalarNode && !isEmptyNode(portNode) {
 				ports = append(ports, portNode.Value)
 			} else if portNode.Kind == yaml.MappingNode {
 				// Extended format within array: ports: [{ target: 80, published: 8080 }]
@@ -640,8 +655,11 @@ func (idc *Impl) parsePortsNode(portsNode *yaml.Node) []string {
 			ports = []string{portMapping}
 		}
 	case yaml.ScalarNode:
-		// Single port as string: ports: "80:80"
-		ports = []string{portsNode.Value}
+		// Single port as string: ports: "80:80". An empty `ports:` is a scalar
+		// too, and publishing "" on keploy-agent fails with "invalid proto: ".
+		if !isEmptyNode(portsNode) {
+			ports = []string{portsNode.Value}
+		}
 	}
 
 	return ports
@@ -657,7 +675,7 @@ func (idc *Impl) parseExtendedPortMapping(portNode *yaml.Node) string {
 		}
 
 		keyNode := portNode.Content[i]
-		valueNode := portNode.Content[i+1]
+		valueNode := aliasTarget(portNode.Content[i+1])
 
 		if keyNode.Kind == yaml.ScalarNode && valueNode.Kind == yaml.ScalarNode {
 			switch keyNode.Value {
@@ -1188,7 +1206,7 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 		svc := compose.Services.Content[i+1]
 		for j := 0; j+1 < len(svc.Content); j += 2 {
 			if svc.Content[j].Value == "container_name" &&
-				svc.Content[j+1].Value == "keploy-agent" {
+				aliasTarget(svc.Content[j+1]).Value == "keploy-agent" {
 				return fmt.Errorf("service %q already uses container_name "+
 					"\"keploy-agent\"; rename it so keploy can add its own",
 					compose.Services.Content[i].Value)
@@ -1238,7 +1256,10 @@ func (idc *Impl) findServiceNodeAndName(compose *Compose, appIdentifier string) 
 		// Check 2: Does the container_name match?
 		for j := 0; j < len(serviceContentNode.Content)-1; j += 2 {
 			if serviceContentNode.Content[j].Value == "container_name" {
-				if serviceContentNode.Content[j+1].Value == appIdentifier {
+				// `container_name: *n` is legal; matching on the alias node's own
+				// Value compares against the anchor NAME, so the lookup misses and
+				// keploy aborts with "failed to find target service".
+				if aliasTarget(serviceContentNode.Content[j+1]).Value == appIdentifier {
 					return serviceContentNode, serviceName, nil
 				}
 			}
@@ -1254,6 +1275,32 @@ func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOption
 	targetServiceNode, serviceName, err := idc.findServiceNodeAndName(compose, appContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to find target service '%s': %w", appContainerName, err)
+	}
+
+	// Detach before anything is written. keploy deletes, moves and overwrites
+	// keys on this service, and every one of those corrupts a node the rest of
+	// the user's file reads through an alias -- see detachSubtree. The top-level
+	// sections keploy appends to need the same treatment, one node deep: it adds
+	// a key to `services:` and a volume to `volumes:`, and an anchored section
+	// shared with, say, `networks: *v` would carry those into it.
+	roots := compose.documentRoots()
+	owned := map[*yaml.Node]bool{}
+	collectNodes(targetServiceNode, owned)
+	// The sections themselves, one node deep -- keploy adds a key to `services:`
+	// and a volume to `volumes:`. Both the struct's copy and the live node the
+	// aliases actually point at, since they are not the same pointer.
+	for _, key := range []string{"services", "volumes"} {
+		if n := compose.rawSection(key); n != nil {
+			owned[n] = true
+		}
+	}
+	owned[&compose.Services] = true
+	owned[&compose.Volumes] = true
+	if n := detachSubtree(roots, owned); n > 0 {
+		idc.logger.Debug("expanded YAML aliases that read through nodes keploy edits, "+
+			"so the generated compose file carries keploy's changes without them "+
+			"reaching services keploy was not asked to touch",
+			zap.Int("references", n), zap.String("service", serviceName))
 	}
 
 	existingNetworks := idc.extractServiceNetworks(targetServiceNode, serviceName)
@@ -1383,8 +1430,19 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 		if serviceNode.Content[i].Value == key {
 			// An aliased list (`volumes: *appvols`) holds no entries, so the
 			// append below would land in a node the encoder never emits and the
-			// TLS-cert mount would simply not appear.
+			// TLS-cert mount would simply not appear. A present-but-empty
+			// `volumes:` fails the same way; unlike environment, a service list
+			// has exactly one legal shape, so an empty mapping is reshaped too.
 			valueNode = resolveAliasByCopy(serviceNode.Content[i+1])
+			ensureSequence(valueNode)
+			if valueNode.Kind != yaml.SequenceNode {
+				idc.logger.Warn("a service list cannot hold keploy's entry, so it will "+
+					"not appear in the generated compose file",
+					zap.String("key", key), zap.String("entry", value),
+					zap.String("shape", yamlKindName(serviceNode.Content[i+1].Kind)),
+					zap.String("resolvesTo", yamlKindName(resolvedKind(serviceNode.Content[i+1]))),
+					zap.String("anchor", serviceNode.Content[i+1].Anchor))
+			}
 			break
 		}
 	}
@@ -1402,6 +1460,32 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 	valueNode.Content = append(valueNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: value})
 }
 
+// setScalarValue replaces a value node with a scalar, rather than writing
+// through the node it finds.
+//
+// `SSL_CERT_FILE: *ca` is an alias, and assigning to its Value overwrites the
+// alias NAME -- marshalling then fails with "alias value must contain
+// alphanumerical characters only" and keploy aborts on a compose file docker
+// accepts. `x-*` plus an anchor is the conventional way to share config, so this
+// is not an exotic shape.
+//
+// detachSubtree cannot help here: the anchor lives outside the app service, so
+// it is not one of the nodes keploy claims ownership of.
+func setScalarValue(slot **yaml.Node, value string) {
+	old := *slot
+	*slot = &yaml.Node{
+		Kind:  yaml.ScalarNode,
+		Value: value,
+		// Head and line comments both attach to a VALUE node in real files --
+		// `KEY:` with the value on the next line under a comment, and a trailing
+		// `# note` -- and both are pinned by a test. FootComment is not carried:
+		// no shape I could construct puts one on a value node, so copying it
+		// would be code no test could justify.
+		HeadComment: old.HeadComment,
+		LineComment: old.LineComment,
+	}
+}
+
 // getOrCreateEnvNode finds the 'environment' node inside a service, creating
 // a SequenceNode if none exists. It centralizes the lookup/create logic for
 // environment mutations performed by helper methods.
@@ -1413,7 +1497,26 @@ func (idc *Impl) getOrCreateEnvNode(serviceNode *yaml.Node) *yaml.Node {
 			// silently dropped. Resolving by copy also keeps a sibling service
 			// sharing that fragment from inheriting keploy's CA paths while
 			// living outside the agent's network namespace.
-			return resolveAliasByCopy(serviceNode.Content[i+1])
+			env := resolveAliasByCopy(serviceNode.Content[i+1])
+			// A present-but-empty `environment:` fails the same way. An empty
+			// MAPPING is exempt: it already holds entries fine, and reshaping it
+			// would rewrite the user's chosen style for no gain.
+			if env.Kind != yaml.MappingNode {
+				ensureSequence(env)
+			}
+			if env.Kind != yaml.SequenceNode && env.Kind != yaml.MappingNode {
+				// Nothing below this can land. Say so here: the symptom is a TLS
+				// verification failure at replay, which points nowhere near
+				// compose generation.
+				idc.logger.Warn("`environment:` cannot hold an entry, so keploy cannot "+
+					"give the app its CA paths (NODE_EXTRA_CA_CERTS, "+
+					"REQUESTS_CA_BUNDLE, SSL_CERT_FILE, CARGO_HTTP_CAINFO) or "+
+					"JAVA_TOOL_OPTIONS; expect TLS verification failures at replay",
+					zap.String("environmentShape", yamlKindName(serviceNode.Content[i+1].Kind)),
+					zap.String("resolvesTo", yamlKindName(resolvedKind(serviceNode.Content[i+1]))),
+					zap.String("anchor", serviceNode.Content[i+1].Anchor))
+			}
+			return env
 		}
 	}
 
@@ -1434,10 +1537,15 @@ func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue strin
 	// Handle Sequence (array) style environment: ["KEY=VAL"]
 	if envNode.Kind == yaml.SequenceNode {
 		prefix := envKey + "="
-		for _, node := range envNode.Content {
-			if strings.HasPrefix(node.Value, prefix) {
-				// Key already exists — update in place.
-				node.Value = fmt.Sprintf("%s=%s", envKey, envValue)
+		for i, node := range envNode.Content {
+			// An element can be an alias, whose own Value is the anchor NAME --
+			// so `- *jopts` naming "JAVA_TOOL_OPTIONS=-Xmx1g" matched nothing and
+			// keploy appended a SECOND JAVA_TOOL_OPTIONS entry. compose takes the
+			// last, so the user's setting is silently gone.
+			if strings.HasPrefix(aliasTarget(node).Value, prefix) {
+				// Key already exists — replace the element rather than writing
+				// through it, for the reason setScalarValue exists.
+				setScalarValue(&envNode.Content[i], fmt.Sprintf("%s=%s", envKey, envValue))
 				return
 			}
 		}
@@ -1451,8 +1559,9 @@ func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue strin
 	if envNode.Kind == yaml.MappingNode {
 		for i := 0; i < len(envNode.Content)-1; i += 2 {
 			if envNode.Content[i].Value == envKey {
-				// Key already exists — update in place.
-				envNode.Content[i+1].Value = envValue
+				// Key already exists — replace its value. See setScalarValue for
+				// why this is not an in-place write.
+				setScalarValue(&envNode.Content[i+1], envValue)
 				return
 			}
 		}
@@ -1472,7 +1581,8 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 	// Handle Sequence (array) style: ["KEY=VAL", ...]
 	if envNode.Kind == yaml.SequenceNode {
 		prefix := envKey + "="
-		for _, node := range envNode.Content {
+		for i, node := range envNode.Content {
+			node = aliasTarget(node)
 			if strings.HasPrefix(node.Value, prefix) {
 				existingVal := strings.TrimPrefix(node.Value, prefix)
 				existingTokens := strings.Fields(existingVal)
@@ -1487,7 +1597,7 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 					// All tokens already present — skip to avoid double-injection.
 					return
 				}
-				node.Value = node.Value + " " + strings.Join(missing, " ")
+				setScalarValue(&envNode.Content[i], node.Value+" "+strings.Join(missing, " "))
 				return
 			}
 		}
@@ -1500,7 +1610,10 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 	if envNode.Kind == yaml.MappingNode {
 		for i := 0; i < len(envNode.Content)-1; i += 2 {
 			if envNode.Content[i].Value == envKey {
-				existingVal := envNode.Content[i+1].Value
+				// Read through an alias: its own Value is the anchor NAME, so
+				// `JAVA_TOOL_OPTIONS: *jopts` would otherwise compare keploy's
+				// tokens against "jopts" and append to that.
+				existingVal := aliasTarget(envNode.Content[i+1]).Value
 				existingTokens := strings.Fields(existingVal)
 				newTokens := strings.Fields(appendValue)
 				var missing []string
@@ -1513,7 +1626,7 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 					// All tokens already present — skip to avoid double-injection.
 					return
 				}
-				envNode.Content[i+1].Value = existingVal + " " + strings.Join(missing, " ")
+				setScalarValue(&envNode.Content[i+1], existingVal+" "+strings.Join(missing, " "))
 				return
 			}
 		}
@@ -1559,6 +1672,145 @@ func (idc *Impl) addTopLevelVolume(compose *Compose, volumeName string) {
 	)
 }
 
+// detachSubtree makes every node in a subtree safe for keploy to edit in place,
+// by giving each alias that reads through it an inline copy of what it names
+// TODAY and then dropping the anchor.
+//
+// keploy does not merely append to the app service. It DELETES `networks` and
+// `ports`, MOVES `dns*` onto keploy-agent, OVERWRITES `network_mode` and `pid`,
+// and appends to `environment` and `volumes`. Every one of those is wrong on a
+// node the user's file reads through an alias, and the failures are not subtle:
+//
+//	networks: &n [default]    deleting the app's key deletes the anchor
+//	sidecar: {networks: *n}   DEFINITION, and the generated file then fails to
+//	                          load at all -- "unknown anchor 'n' referenced"
+//
+//	environment: &e [MINE=1]  appending hands the sidecar keploy's CA paths
+//	sidecar: {environment: *e}  while it lives OUTSIDE the agent's network
+//	                          namespace, so its TLS fails verification against a
+//	                          certificate file its container does not have
+//
+// Expanding a reference costs its reader nothing -- it names exactly the content
+// it named before -- and the file this produces is the temporary one keploy
+// runs, not the user's source. Declining to edit instead was tried and is worse:
+// it leaves the app half-wired (pid set, network_mode not), which docker compose
+// accepts and which records nothing at all.
+//
+// Returns the number of references expanded, for the caller to log.
+func detachSubtree(roots []*yaml.Node, owned map[*yaml.Node]bool) int {
+	if len(owned) == 0 {
+		return 0
+	}
+
+	expanded := 0
+	// Expanding one reference can copy an alias naming another node inside the
+	// subtree, so repeat until the document holds none.
+	//
+	// No fixture I could build needs a second pass, and no test here
+	// distinguishes this loop from a single pass. The loop stays regardless.
+	//
+	// The tempting argument for dropping it -- YAML requires an alias to follow
+	// its anchor, so a reference nested inside a fragment is always reached
+	// first -- does not actually hold: the walk below runs over `roots` in list
+	// order, not document order, so an alias in an `x-*` key written ABOVE
+	// `services:` is visited last. Getting that wrong leaves a dangling alias,
+	// which does not degrade the generated file, it makes it unloadable. The
+	// bound is a termination guarantee, not a policy.
+	for range 64 {
+		refs := aliasRefsInto(roots, owned)
+		if len(refs) == 0 {
+			break
+		}
+		for _, ref := range refs {
+			clone := cloneYAMLNode(ref.Alias)
+			stripAnchors(clone)
+			*ref = *clone
+			expanded++
+		}
+	}
+
+	// Nothing reads through them any more, so the anchors are free to go. Left
+	// in place they would be duplicated by any later copy of this subtree.
+	for n := range owned {
+		n.Anchor = ""
+	}
+	return expanded
+}
+
+func collectNodes(n *yaml.Node, into map[*yaml.Node]bool) {
+	if n == nil || into[n] {
+		return
+	}
+	into[n] = true
+	for _, c := range n.Content {
+		collectNodes(c, into)
+	}
+}
+
+// aliasRefsInto finds every alias in the document that resolves to a node the
+// caller is about to mutate.
+func aliasRefsInto(roots []*yaml.Node, owned map[*yaml.Node]bool) []*yaml.Node {
+	var found []*yaml.Node
+	seen := map[*yaml.Node]bool{}
+	var walk func(*yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n == nil || seen[n] {
+			return
+		}
+		seen[n] = true
+		if n.Kind == yaml.AliasNode && n.Alias != nil && owned[n.Alias] {
+			found = append(found, n)
+			return
+		}
+		for _, c := range n.Content {
+			walk(c)
+		}
+	}
+	for _, r := range roots {
+		walk(r)
+	}
+	return found
+}
+
+// rawSection returns the LIVE node for a top-level key.
+//
+// The Compose struct's section fields are value copies made when the file was
+// decoded -- their Content children are the same pointers as the original's, but
+// the section nodes themselves are not. An alias to `volumes: &v` therefore
+// points at raw's node, never at `&compose.Volumes`, so anything matching on
+// node identity has to look here or it silently matches nothing.
+func (c *Compose) rawSection(key string) *yaml.Node {
+	if c.raw == nil {
+		return nil
+	}
+	for i := 0; i+1 < len(c.raw.Content); i += 2 {
+		if c.raw.Content[i].Value == key {
+			return c.raw.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// documentRoots returns the nodes to search for aliases: the struct's section
+// fields AND raw, always. Neither alone is enough.
+//
+// raw is the original mapping and its children are the same pointers as the live
+// tree, but MarshalCompose splices the struct's own section fields back over it,
+// and those are value copies made at decode time. An alias sitting directly
+// under `volumes:` therefore exists as two separate nodes; expanding only raw's
+// leaves the copy -- the one that gets emitted -- pointing at an anchor about to
+// be cleared, and the generated file fails to load with "unknown anchor".
+func (c *Compose) documentRoots() []*yaml.Node {
+	// Networks, Configs and Secrets are here for the same reason even though
+	// keploy never writes to them: a service's `volumes: &v` can be named by
+	// `networks: *v`, and that reference has to be expanded like any other.
+	roots := []*yaml.Node{&c.Services, &c.Networks, &c.Volumes, &c.Configs, &c.Secrets}
+	if c.raw != nil {
+		roots = append(roots, c.raw)
+	}
+	return roots
+}
+
 // yamlKindName renders a yaml.Kind for a log line. The raw enum means nothing to
 // an operator reading it.
 func yamlKindName(k yaml.Kind) string {
@@ -1577,6 +1829,24 @@ func yamlKindName(k yaml.Kind) string {
 		return "alias"
 	}
 	return "unknown"
+}
+
+// aliasTarget follows an alias to what it names, WITHOUT mutating anything.
+//
+// The read paths must not use resolveAliasByCopy: that rewrites the node in
+// place. The gate around them already resolves SERVICE aliases in place -- it
+// has to, or the lookup finds nothing -- but that is a deliberate, narrow
+// exception, and reading a port list is no reason to widen it.
+func aliasTarget(n *yaml.Node) *yaml.Node {
+	// Bounded rather than recursive: an anchor cannot be cyclic, but the node
+	// comes from a user's file and this is a cheap way not to depend on that.
+	for i := 0; i < 16; i++ {
+		if n == nil || n.Kind != yaml.AliasNode || n.Alias == nil {
+			return n
+		}
+		n = n.Alias
+	}
+	return n
 }
 
 // resolvedKind reports what a node ultimately names, following one alias hop, so
@@ -1714,10 +1984,13 @@ func sectionForAppend(n *yaml.Node) *yaml.Node {
 		return n
 	}
 	target := n.Alias
-	if target.Kind != yaml.MappingNode && !isEmptySection(target) {
+	if target.Kind != yaml.MappingNode {
 		// Resolves to something that cannot hold entries (a populated scalar or
 		// sequence). Leave the alias exactly as written -- the caller warns --
 		// rather than reshaping a fragment the user wrote.
+		//
+		// An alias to an EMPTY fragment never reaches here: ensureMapping above
+		// has already reshaped the reference, so n is no longer an alias.
 		return n
 	}
 	// Replace the alias with a copy of what it named.
@@ -1765,7 +2038,7 @@ func sectionForAppend(n *yaml.Node) *yaml.Node {
 // handed to debug. Value is deliberately NOT cleared: the encoder never reads it
 // for a mapping, so clearing it would be an unobservable no-op.
 func ensureMapping(n *yaml.Node) {
-	if n == nil || n.Kind == yaml.MappingNode || !isEmptySection(n) {
+	if n == nil || n.Kind == yaml.MappingNode || !isEmptyNode(n) {
 		return
 	}
 	n.Kind = yaml.MappingNode
@@ -1778,25 +2051,63 @@ func ensureMapping(n *yaml.Node) {
 	n.Content = []*yaml.Node{}
 }
 
-// isEmptySection reports whether a section node holds nothing, in any of the
-// shapes YAML can express that: an absent key (zero node), a null in any
-// spelling, an empty string, or an empty sequence.
+// isEmptyNode reports whether a node holds nothing, in any of the shapes YAML
+// can express that: an absent key (zero node), a null in any spelling, an empty
+// string, an empty sequence or mapping, or an alias naming any of those.
 //
 // A node carrying content is NOT empty, and that includes shapes whose payload
-// does not live in Content: a scalar keeps its text in Value, and an alias
-// resolves elsewhere entirely. Treating those as empty would silently discard
-// what the user wrote.
-func isEmptySection(n *yaml.Node) bool {
+// does not live in Content: a scalar keeps its text in Value, so `len(Content)`
+// is the tempting test and the wrong one -- it would report `volumes: appdata`
+// as empty and discard what the user wrote. An alias is judged by what it names,
+// for the same reason.
+func isEmptyNode(n *yaml.Node) bool {
 	switch n.Kind {
 	case 0:
 		return true
 	case yaml.ScalarNode:
 		return n.Tag == "!!null" || n.Value == ""
-	case yaml.SequenceNode:
+	case yaml.SequenceNode, yaml.MappingNode:
 		return len(n.Content) == 0
+	case yaml.AliasNode:
+		// An alias to an empty fragment holds nothing either. Reshaping the
+		// REFERENCE is safe -- the anchored fragment itself is a separate node
+		// and stays exactly as the user wrote it.
+		return n.Alias == nil || isEmptyNode(n.Alias)
 	default:
 		return false
 	}
+}
+
+// ensureSequence reshapes a present-but-empty node into an empty sequence so an
+// append lands somewhere the encoder emits.
+//
+// `environment:` or `volumes:` with nothing under them -- what a commented-out
+// block leaves behind -- is not a zero node: it decodes to a `!!null` scalar, or
+// to an alias naming an empty fragment. The writers' type switch matches neither
+// shape, so every variable and mount keploy adds was dropped without a word and
+// the app ran without keploy's CA. A node carrying anything is left untouched.
+//
+// Reshaping in place is safe for a node the app OWNS, because detachSubtree has
+// already given away copies of anything shared. It is also safe for an alias
+// naming an `x-*` fragment, which detach deliberately leaves alone: what gets
+// reshaped there is the app's own reference node, not the fragment.
+func ensureSequence(n *yaml.Node) {
+	if n == nil || n.Kind == yaml.SequenceNode || !isEmptyNode(n) {
+		return
+	}
+	n.Kind = yaml.SequenceNode
+	// A leftover `!!null` tag is emitted verbatim onto the sequence, and Style
+	// carries the flow bits of the shape being replaced, so `volumes: {}` would
+	// otherwise normalise into a flow-style list in a block-style file. Both are
+	// pinned by a test.
+	//
+	// Value and Alias are deliberately not cleared: the encoder reads neither
+	// once Kind is a sequence. Content is left as isEmptyNode found it -- empty
+	// for every shape that reaches here today, since yaml.v3 never gives an alias
+	// node children. Re-check that if isEmptyNode ever admits a node with
+	// children of its own.
+	n.Tag = ""
+	n.Style = 0
 }
 
 func cloneYAMLNode(node *yaml.Node) *yaml.Node {
@@ -1879,8 +2190,19 @@ func (idc *Impl) addServiceProperty(serviceNode *yaml.Node, key, value string) {
 		}
 
 		if serviceNode.Content[i].Kind == yaml.ScalarNode && serviceNode.Content[i].Value == key {
-			// Update existing property
-			serviceNode.Content[i+1].Value = value
+			// Replace rather than write through. Setting .Value only works when
+			// the node is already a
+			// scalar. On a `!!null` (`network_mode:` with nothing after it) the
+			// tag survives and the file is emitted as `network_mode: !!null
+			// service:keploy-agent`, which does not parse; on a mapping or
+			// sequence the write is ignored and interception is silently off; on
+			// an alias it overwrites the alias NAME and marshalling fails with
+			// "alias value must contain alphanumerical characters only".
+			//
+			// Replacing the node is what "set this property" means in every one
+			// of those cases. Comments are carried over so a `# keep me` above
+			// the value is not dropped.
+			setScalarValue(&serviceNode.Content[i+1], value)
 			return
 		}
 	}
@@ -1905,15 +2227,35 @@ func (idc *Impl) addOrUpdateDependsOn(serviceNode *yaml.Node) {
 		}
 
 		if serviceNode.Content[i].Kind == yaml.ScalarNode && serviceNode.Content[i].Value == "depends_on" {
-			// Update existing depends_on
-			dependsOnNode := serviceNode.Content[i+1]
+			// Update existing depends_on.
+			//
+			// An aliased or present-but-empty `depends_on:` matches neither
+			// branch below, and falling through drops the `keploy-agent:
+			// {condition: service_healthy}` gate without a word -- so the app
+			// container starts before the agent's proxy is listening and races
+			// it, which surfaces as a handful of unrecorded calls at the head of
+			// the session rather than as an error.
+			dependsOnNode := resolveAliasByCopy(serviceNode.Content[i+1])
+			ensureSequence(dependsOnNode)
+			if dependsOnNode.Kind != yaml.SequenceNode && dependsOnNode.Kind != yaml.MappingNode {
+				idc.logger.Warn("`depends_on:` cannot hold an entry, so keploy cannot "+
+					"make the app wait for keploy-agent to become healthy; the app "+
+					"may start before interception is ready",
+					zap.String("dependsOnShape", yamlKindName(serviceNode.Content[i+1].Kind)),
+					zap.String("resolvesTo", yamlKindName(resolvedKind(serviceNode.Content[i+1]))))
+				return
+			}
 
 			// Check if it's a simple array or extended format
 			if dependsOnNode.Kind == yaml.SequenceNode {
 				// Store existing dependencies first
 				existingDeps := make([]string, 0)
 				for _, dep := range dependsOnNode.Content {
-					if dep.Kind == yaml.ScalarNode && dep.Value != "keploy-agent" {
+					// `- *db` is an alias; dropping it here silently removes a
+					// real dependency, and the app stops waiting for it.
+					dep = aliasTarget(dep)
+					if dep.Kind == yaml.ScalarNode && !isEmptyNode(dep) &&
+						dep.Value != "keploy-agent" {
 						existingDeps = append(existingDeps, dep.Value)
 					}
 				}
