@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/proxy"
@@ -162,26 +163,66 @@ func TestRetryResetOnce_FailSafeOnConsumedFetchError(t *testing.T) {
 	}
 }
 
-// A persistently reset app stops after maxResetResends and reports not-retried,
-// so the caller surfaces the original transport error (no fabricated success).
-// Driven by a REAL MockManager that records nothing, so every per-call drain is
-// empty and every attempt is deemed safe-to-resend.
+// A persistently reset app stops after the re-send DEADLINE and reports
+// not-retried, so the caller surfaces the original transport error (no
+// fabricated success). Driven by a REAL MockManager that records nothing, so
+// every per-call drain is empty and every attempt is deemed safe-to-resend. A
+// short HealthPollTimeout makes the re-send budget small so the test is fast
+// while still proving the loop is bounded by wall-clock (not the old fixed
+// count) and terminates.
 func TestRetryResetOnce_BoundedAndStopsWithoutFabricating(t *testing.T) {
 	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
-	hook := &realMockManagerHook{mm: mm, failFirst: 100} // always resets
+	hook := &realMockManagerHook{mm: mm, failFirst: 1_000_000} // always resets
 	r := newTestReplayer(hook)
+	r.config.Test.HealthPollTimeout = 1500 * time.Millisecond // short re-send budget
 	tc := &models.TestCase{Name: "get-root-1", Kind: models.HTTP}
 
+	start := time.Now()
 	resp, retried, drained := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
+	elapsed := time.Since(start)
+
 	if retried || resp != nil {
 		t.Fatalf("a persistently reset app must not yield a fabricated response; retried=%v resp=%#v", retried, resp)
 	}
 	if len(drained) != 0 {
 		t.Fatalf("no mock was consumed, so nothing should be drained, got %#v", drained)
 	}
-	if got := atomic.LoadInt32(&hook.calls); got != maxResetResends {
-		t.Fatalf("expected exactly %d bounded re-sends, got %d", maxResetResends, got)
+	// Deadline-bounded: it must loop more than once (proving it is no longer
+	// capped at the old fixed 6) yet still terminate near the budget.
+	if got := atomic.LoadInt32(&hook.calls); got < 2 {
+		t.Fatalf("expected the re-send to loop until the deadline (>=2 attempts), got %d", got)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("a 1.5s re-send budget should bound the loop well under 5s, took %s", elapsed)
+	}
+}
+
+// resetResendMaxWait defaults to the floor, passes a configured HealthPollTimeout
+// through, clamps a very large one to the ceiling (so a crash-looping container
+// can't hang a test for minutes), and is nil-config safe.
+func TestResetResendMaxWait_FloorAndCeiling(t *testing.T) {
+	cases := []struct {
+		name string
+		hpt  time.Duration
+		want time.Duration
+	}{
+		{"unset uses floor", 0, resetResendFloor},
+		{"negative uses floor", -1 * time.Second, resetResendFloor},
+		{"below ceiling passes through", 45 * time.Second, 45 * time.Second},
+		{"above ceiling clamps", 10 * time.Minute, resetResendCeiling},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Replayer{config: &config.Config{}}
+			r.config.Test.HealthPollTimeout = tc.hpt
+			if got := r.resetResendMaxWait(); got != tc.want {
+				t.Fatalf("HealthPollTimeout=%s: want %s, got %s", tc.hpt, tc.want, got)
+			}
+		})
+	}
+	if got := (&Replayer{}).resetResendMaxWait(); got != resetResendFloor {
+		t.Fatalf("nil config: want floor %s, got %s", resetResendFloor, got)
 	}
 }
 
