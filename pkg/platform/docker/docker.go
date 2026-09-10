@@ -162,6 +162,140 @@ type Compose struct {
 	Volumes  yaml.Node `yaml:"volumes,omitempty"`
 	Configs  yaml.Node `yaml:"configs,omitempty"`
 	Secrets  yaml.Node `yaml:"secrets,omitempty"`
+
+	// raw is the original top-level mapping, kept so that a read/modify/write
+	// round trip does not silently discard the keys this struct does not name.
+	//
+	// It matters most for `x-*` extension fields. The Compose spec designates
+	// them as the place to put reusable fragments, and the conventional way to
+	// reuse one is a YAML anchor:
+	//
+	//	x-mysql-common: &mysql-common
+	//	  healthcheck: {...}
+	//	services:
+	//	  db:
+	//	    <<: *mysql-common
+	//
+	// Services is a yaml.Node, so it preserves `<<: *mysql-common` verbatim.
+	// Without raw, the anchor DEFINITION was dropped while that reference
+	// survived, and the compose file keploy generates to run the user's app
+	// failed to load with "unknown anchor 'mysql-common' referenced" -- the
+	// user's app never started, on a compose file docker itself accepts.
+	//
+	// Appending the missing keys instead of keeping the original node is not
+	// enough: an alias must follow its anchor in the document, and go-yaml
+	// emits inline/extra keys after the named struct fields, which puts the
+	// definition after the reference. Preserving the original mapping keeps
+	// the original order, and with it the comments and any other tooling's
+	// top-level keys.
+	raw *yaml.Node
+}
+
+// UnmarshalYAML captures the original mapping alongside the decoded fields, so
+// every path that parses a Compose (file or in-memory) keeps raw without having
+// to remember to do it.
+func (c *Compose) UnmarshalYAML(value *yaml.Node) error {
+	// plain drops the methods, so decoding below does not recurse into this one.
+	type plain Compose
+	var p plain
+	if err := value.Decode(&p); err != nil {
+		// Rewrite the shim's name out of the message; a user seeing this is
+		// looking at their own malformed compose file, not at keploy internals.
+		return fmt.Errorf("%s", strings.ReplaceAll(err.Error(), "docker.plain", "docker.Compose"))
+	}
+	*c = Compose(p)
+	if value.Kind == yaml.MappingNode {
+		node := *value
+		c.raw = &node
+	}
+	return nil
+}
+
+// MarshalYAML puts the round-trip fix on the TYPE rather than on individual
+// call sites, so `yaml.Marshal(compose)` is correct wherever it appears --
+// including callers outside this package, such as enterprise's --dump-compose
+// hook. Fixing only WriteComposeFile/MarshalCompose would leave the file keploy
+// RUNS and the file it hands an operator for debugging disagreeing, in exactly
+// the situation this bug shows up in.
+// The receiver is a VALUE, not a pointer, on purpose: a pointer-receiver method
+// is absent from the method set of a `Compose`, so `yaml.Marshal(*compose)`
+// would silently fall back to encoding the struct and emit the same unloadable
+// document this fixes. A value receiver is in both method sets, and copying is
+// harmless because the result is only ever marshalled.
+func (c Compose) MarshalYAML() (interface{}, error) {
+	if c.raw == nil {
+		// plain sheds the method set; returning c here would re-enter this
+		// method and recurse until the stack blows.
+		type plain Compose
+		return plain(c), nil
+	}
+	return composeDocument(&c), nil
+}
+
+// composeDocument rebuilds the document to serialise: the original mapping with
+// the (possibly modified) sections spliced back in. Only ever called with a
+// non-nil raw (see MarshalYAML).
+//
+// The result is for marshalling only. Its top-level node is a copy, but the
+// children it did not replace are the SAME pointers as raw's, so mutating the
+// returned document would reach back into the Compose.
+func composeDocument(compose *Compose) interface{} {
+	doc := *compose.raw
+	doc.Content = append([]*yaml.Node(nil), compose.raw.Content...)
+	// Version is a string rather than a node, so it needs its own splice to be
+	// write-through like the other five named fields.
+	//
+	// Only when it actually CHANGED, though. Splicing unconditionally replaces
+	// the original node with a fresh scalar, which drops any line comment on
+	// `version:` and re-quotes the value -- making it the one key in the file
+	// that loses the fidelity the rest of this function exists to preserve, on
+	// every compose that declares a version, to serve a write path no caller
+	// currently uses.
+	if compose.Version != "" && !hasSectionValue(&doc, "version", compose.Version) {
+		setComposeSection(&doc, "version",
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: compose.Version})
+	}
+	for _, section := range []struct {
+		key  string
+		node *yaml.Node
+	}{
+		{"services", &compose.Services},
+		{"networks", &compose.Networks},
+		{"volumes", &compose.Volumes},
+		{"configs", &compose.Configs},
+		{"secrets", &compose.Secrets},
+	} {
+		setComposeSection(&doc, section.key, section.node)
+	}
+	return &doc
+}
+
+// hasSectionValue reports whether key already maps to exactly this scalar, so a
+// splice that would change nothing can be skipped and the original node kept.
+func hasSectionValue(mapping *yaml.Node, key, value string) bool {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1].Value == value
+		}
+	}
+	return false
+}
+
+// setComposeSection replaces key's value in the mapping, appending the pair when
+// the key is absent. A zero node means the section was neither present nor added,
+// so it is skipped rather than written out as an explicit null.
+func setComposeSection(mapping *yaml.Node, key string, val *yaml.Node) {
+	if val == nil || val.Kind == 0 {
+		return
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			mapping.Content[i+1] = val
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, val)
 }
 
 func (idc *Impl) ReadComposeFile(filePath string) (*Compose, error) {
@@ -359,6 +493,12 @@ func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerNam
 // findContainerInServices searches for a container within the services of a compose file
 // This reuses the same iteration pattern as existing functions like SetPidContainer
 func (idc *Impl) findContainerInServices(compose *Compose, containerName string) ([]string, []string, string, bool) {
+	// This gate runs BEFORE ModifyComposeForAgent and its ports/networks become
+	// opts.AppPorts/AppNetworks. Read off an unresolved alias they come back
+	// empty, so the app's published port never reaches keploy-agent -- which
+	// publishes on the app's behalf under network_mode: service:keploy-agent --
+	// and the app is unreachable from the host.
+	resolveServiceAlias(&compose.Services)
 	if compose.Services.Content == nil {
 		return nil, nil, "", false
 	}
@@ -370,7 +510,7 @@ func (idc *Impl) findContainerInServices(compose *Compose, containerName string)
 		}
 
 		serviceNameNode := compose.Services.Content[i]
-		serviceContentNode := compose.Services.Content[i+1]
+		serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
 		serviceName := serviceNameNode.Value
 
 		// Check for explicit container_name using the same pattern as existing functions
@@ -1013,16 +1153,53 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 // AddKeployAgentToCompose adds the keploy-agent service to an existing Docker Compose file
 // This is a convenience function that shows how to use GenerateKeployAgentService
 func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOptions) error {
+	// Ensure services section exists. Resolve as well as normalise: an aliased
+	// `services:` would otherwise take the append into a node that is never
+	// emitted, and this must not depend on findServiceNodeAndName happening to
+	// run first.
+	ensureMapping(&compose.Services)
+	resolveServiceAlias(&compose.Services)
+
+	// A section that STILL cannot hold entries -- an alias to a scalar or a
+	// sequence -- would swallow the append and leave this returning nil with the
+	// agent service simply absent from the generated file.
+	if compose.Services.Kind != yaml.MappingNode {
+		return fmt.Errorf("`services:` is not a mapping (%s), so keploy cannot add "+
+			"its agent service to it", yamlKindName(compose.Services.Kind))
+	}
+
+	// Refuse to add a second keploy-agent, by service KEY or by container_name.
+	// A user service by that name is unusual but legal, and appending beside it
+	// produced a generated file that does not parse at all -- `mapping key
+	// "keploy-agent" already defined` -- reading as a keploy bug rather than the
+	// name collision it is. The container_name variant is worse than a duplicate
+	// key: findServiceNodeAndName matches on container_name too, so keploy would
+	// treat the USER's service as its agent and move the app's dns onto it, and
+	// compose rejects the file with `container name "keploy-agent" is already in
+	// use`.
+	//
+	// Checked before GenerateKeployAgentService so a doomed run does not first
+	// fire the enterprise compose hook.
+	for i := 0; i+1 < len(compose.Services.Content); i += 2 {
+		if compose.Services.Content[i].Value == "keploy-agent" {
+			return fmt.Errorf("the compose file already defines a service named " +
+				"\"keploy-agent\"; rename it so keploy can add its own")
+		}
+		svc := compose.Services.Content[i+1]
+		for j := 0; j+1 < len(svc.Content); j += 2 {
+			if svc.Content[j].Value == "container_name" &&
+				svc.Content[j+1].Value == "keploy-agent" {
+				return fmt.Errorf("service %q already uses container_name "+
+					"\"keploy-agent\"; rename it so keploy can add its own",
+					compose.Services.Content[i].Value)
+			}
+		}
+	}
+
 	// Generate the keploy-agent service configuration
 	keployServiceNode, err := idc.GenerateKeployAgentService(opts)
 	if err != nil {
 		return fmt.Errorf("failed to generate keploy-agent service: %w", err)
-	}
-
-	// Ensure services section exists
-	if compose.Services.Content == nil {
-		compose.Services.Kind = yaml.MappingNode
-		compose.Services.Content = make([]*yaml.Node, 0)
 	}
 
 	// Add the keploy-agent service to the compose file
@@ -1036,13 +1213,21 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 
 // Helper: findServiceNodeAndName finds the YAML node and the Service Key (name)
 func (idc *Impl) findServiceNodeAndName(compose *Compose, appIdentifier string) (*yaml.Node, string, error) {
+	// `services: *svcs` is legal compose, and an alias holds no entries of its
+	// own, so the scan below saw nothing and reported "no services found".
+	resolveServiceAlias(&compose.Services)
 	if compose.Services.Content == nil {
 		return nil, "", fmt.Errorf("no services found")
 	}
 
 	for i := 0; i < len(compose.Services.Content); i += 2 {
+		if i+1 >= len(compose.Services.Content) {
+			break // odd Content: guarded like the sibling loops rather than panicking
+		}
 		serviceNameNode := compose.Services.Content[i]
-		serviceContentNode := compose.Services.Content[i+1]
+		// Resolved at the loop top, not at either return, so the container_name
+		// match below scans real content instead of an alias's empty Content.
+		serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
 		serviceName := serviceNameNode.Value
 
 		// Check 1: Does the Service Key match?
@@ -1115,7 +1300,7 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 		}
 
 		serviceNameNode := compose.Services.Content[i]
-		serviceContentNode := compose.Services.Content[i+1]
+		serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
 		serviceName := serviceNameNode.Value
 
 		// Check if this is the target app service
@@ -1194,9 +1379,12 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 	var valueNode *yaml.Node
 
 	// Check if key exists
-	for i := 0; i < len(serviceNode.Content); i += 2 {
+	for i := 0; i+1 < len(serviceNode.Content); i += 2 {
 		if serviceNode.Content[i].Value == key {
-			valueNode = serviceNode.Content[i+1]
+			// An aliased list (`volumes: *appvols`) holds no entries, so the
+			// append below would land in a node the encoder never emits and the
+			// TLS-cert mount would simply not appear.
+			valueNode = resolveAliasByCopy(serviceNode.Content[i+1])
 			break
 		}
 	}
@@ -1218,9 +1406,14 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 // a SequenceNode if none exists. It centralizes the lookup/create logic for
 // environment mutations performed by helper methods.
 func (idc *Impl) getOrCreateEnvNode(serviceNode *yaml.Node) *yaml.Node {
-	for i := 0; i < len(serviceNode.Content); i += 2 {
+	for i := 0; i+1 < len(serviceNode.Content); i += 2 {
 		if serviceNode.Content[i].Value == "environment" {
-			return serviceNode.Content[i+1]
+			// `environment: *appenv` is an alias: it holds no entries, so the
+			// callers' type switch matches nothing and keploy's variables are
+			// silently dropped. Resolving by copy also keeps a sibling service
+			// sharing that fragment from inheriting keploy's CA paths while
+			// living outside the agent's network namespace.
+			return resolveAliasByCopy(serviceNode.Content[i+1])
 		}
 	}
 
@@ -1332,23 +1525,278 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 
 // Helper to ensure top-level volumes exists
 func (idc *Impl) addTopLevelVolume(compose *Compose, volumeName string) {
-	if compose.Volumes.Kind == 0 {
-		compose.Volumes.Kind = yaml.MappingNode
-		compose.Volumes.Content = []*yaml.Node{}
+	vols := sectionForAppend(&compose.Volumes)
+	if vols.Kind != yaml.MappingNode {
+		// Reached in three shapes: a populated scalar, a populated sequence, or
+		// an ALIAS whose target is one of those (kind 16 in the log below, not
+		// the scalar/sequence a reader might expect). None can hold entries, and
+		// none is reshaped -- rewriting a fragment the user authored to suit us
+		// is worse than declining.
+		//
+		// The append cannot land, so the generated file declares no volume while
+		// the agent service mounts one, and docker compose rejects it with
+		// "refers to undefined volume". That error names the agent, not the
+		// user's `volumes:` line, so say here what actually has to change.
+		idc.logger.Warn("top-level `volumes:` cannot hold a volume entry, so keploy "+
+			"cannot declare its own there and docker compose will reject the "+
+			"generated file; `volumes:` must be a mapping (or an anchor naming one)",
+			zap.String("volume", volumeName),
+			zap.String("volumesShape", yamlKindName(compose.Volumes.Kind)),
+			zap.String("resolvesTo", yamlKindName(resolvedKind(&compose.Volumes))))
 	}
 
 	// Check if volume exists
-	for i := 0; i < len(compose.Volumes.Content); i += 2 {
-		if compose.Volumes.Content[i].Value == volumeName {
+	for i := 0; i < len(vols.Content); i += 2 {
+		if vols.Content[i].Value == volumeName {
 			return // Already exists
 		}
 	}
 
 	// Add it (empty content is fine for local driver)
-	compose.Volumes.Content = append(compose.Volumes.Content,
+	vols.Content = append(vols.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Value: volumeName},
 		&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{}}, // {}
 	)
+}
+
+// yamlKindName renders a yaml.Kind for a log line. The raw enum means nothing to
+// an operator reading it.
+func yamlKindName(k yaml.Kind) string {
+	switch k {
+	case 0:
+		return "absent"
+	case yaml.DocumentNode:
+		return "document"
+	case yaml.SequenceNode:
+		return "sequence"
+	case yaml.MappingNode:
+		return "mapping"
+	case yaml.ScalarNode:
+		return "scalar"
+	case yaml.AliasNode:
+		return "alias"
+	}
+	return "unknown"
+}
+
+// resolvedKind reports what a node ultimately names, following one alias hop, so
+// a diagnostic can point at the anchor the user has to fix rather than at the
+// `volumes:` line that merely references it.
+func resolvedKind(n *yaml.Node) yaml.Kind {
+	if n == nil {
+		return 0
+	}
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		return n.Alias.Kind
+	}
+	return n.Kind
+}
+
+// resolveServiceAlias replaces an alias node with a DEEP copy of what it names,
+// so the resolved node can be edited without reaching back into the shared
+// fragment.
+//
+// sectionForAppend's shallow copy is right for `volumes:`/`networks:`, whose
+// entries are inert and only ever appended to. It is wrong for a SERVICE,
+// because keploy does not only append to one: modifyAppServiceForKeploy DELETES
+// keys (networks, ports, dns/dns_search/dns_opt) and OVERWRITES values in place
+// (addServiceEnvVar), and enterprise's ComposeServiceHook rewrites
+// JAVA_TOOL_OPTIONS unconditionally on every replay.
+//
+// With children shared, a sibling service aliasing the same fragment inherits
+// all of it -- including a TLS environment pointing SSL_CERT_FILE,
+// REQUESTS_CA_BUNDLE and NODE_EXTRA_CA_CERTS at keploy's CA, inside a container
+// that is NOT in the agent's network namespace, so its outbound TLS fails
+// verification. Silently. A mapping-style `environment:` is worse: the user's
+// own value is overwritten inside their own fragment.
+//
+// Anchors are stripped from the copy. Keeping them would emit a SECOND
+// definition of the same anchor, and because this copy is about to be mutated
+// the two would diverge -- a later `*name` or `<<: *name` binds to the nearest
+// preceding definition, so an unrelated service would silently pick up keploy's
+// edits. Stripping leaves the user's fragment as the only definition, which is
+// what every other reference should still resolve to.
+//
+// Deliberately unlike sectionForAppend, which KEEPS the anchor: a copied volumes
+// fragment is only ever appended to, so a duplicate definition cannot diverge
+// from the original. A copied service is edited, so it can.
+func resolveServiceAlias(n *yaml.Node) *yaml.Node {
+	if n != nil && n.Kind == yaml.AliasNode && n.Alias != nil &&
+		n.Alias.Kind != yaml.MappingNode {
+		// A service must be a mapping. Leave anything else exactly as written
+		// and let the caller report it.
+		return n
+	}
+	return resolveAliasByCopy(n)
+}
+
+// resolveAliasByCopy is resolveServiceAlias without the mapping-only
+// restriction, for the nodes INSIDE a service.
+//
+// `environment:` and `volumes:` are aliased at least as often as a whole
+// service, and keploy writes into both. Unresolved, the two helpers below fail
+// in opposite directions and neither says anything: addServiceEnvVar's type
+// switch matches neither SequenceNode nor MappingNode for an AliasNode and falls
+// straight through, so keploy's CA and JAVA_TOOL_OPTIONS are dropped and the app
+// runs uninstrumented; addServiceListProperty appends into the alias, so the
+// TLS-cert mount never appears. Both leave a file docker compose happily accepts.
+//
+// A sequence target is allowed here because `environment: - K=V` and
+// `volumes: - a:b` are the ordinary shapes.
+func resolveAliasByCopy(n *yaml.Node) *yaml.Node {
+	if n == nil || n.Kind != yaml.AliasNode || n.Alias == nil {
+		return n
+	}
+	if n.Alias.Kind != yaml.MappingNode && n.Alias.Kind != yaml.SequenceNode {
+		// Cannot hold entries. Left exactly as the user wrote it rather than
+		// reshaping a fragment they authored; the caller reports it.
+		return n
+	}
+	clone := cloneYAMLNode(n.Alias)
+	stripAnchors(clone)
+	*n = *clone
+	return n
+}
+
+// stripAnchors clears anchor names throughout a subtree. See resolveServiceAlias
+// for why a copy must not carry them.
+func stripAnchors(n *yaml.Node) {
+	if n == nil {
+		return
+	}
+	n.Anchor = ""
+	for _, c := range n.Content {
+		stripAnchors(c)
+	}
+}
+
+// sectionForAppend returns the mapping a section's entries must actually be
+// appended to, normalising an empty section and resolving an alias.
+//
+// `volumes: *vols` is legal compose and is the same `x-*` + anchor idiom this
+// file works to preserve elsewhere, but an alias node is a REFERENCE -- it holds
+// no entries of its own, so appending to it writes into a node the encoder never
+// emits. The generated file then declared no volume while the agent service
+// mounted one, and docker compose rejected it.
+//
+// The fragment is RESOLVED BY COPY, not by reference. Appending into the
+// anchored node directly is the obvious move and it is wrong: an `x-*` fragment
+// is shared, so every other alias to it silently inherits keploy's volume.
+// Reproduced, on a file docker compose accepts:
+//
+//	x-common: &common
+//	  shared: {}
+//	volumes: *common
+//	networks: *common
+//
+// Appending in place gives the user a `keploy-tls-certs` NETWORK. Corrupting an
+// unrelated part of their file to fix our own is a bad trade, and it leaves no
+// trace. It can also produce a file that no longer loads at all: when the shared
+// fragment is a sequence aliased by a service's `volumes:` list, reshaping it to
+// a mapping makes compose reject that service.
+//
+// Copying costs the alias on this one key in the GENERATED file: `volumes:` is
+// emitted expanded rather than as `*vols`. The anchor and every other reference
+// to it are untouched, the resolved volume set is identical, and the file is
+// transient -- keploy writes it to run the app, it is not the user's source.
+//
+// One consequence worth naming, since a MISSING anchor definition is what this
+// file's other half exists to prevent: an anchor nested INSIDE the fragment is
+// now emitted twice, once in the fragment and once in the copy. That is safe
+// rather than merely tolerated -- the copy shares the same child nodes, so the
+// two definitions cannot diverge -- and the file still loads.
+func sectionForAppend(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	ensureMapping(n)
+	if n.Kind != yaml.AliasNode || n.Alias == nil {
+		return n
+	}
+	target := n.Alias
+	if target.Kind != yaml.MappingNode && !isEmptySection(target) {
+		// Resolves to something that cannot hold entries (a populated scalar or
+		// sequence). Leave the alias exactly as written -- the caller warns --
+		// rather than reshaping a fragment the user wrote.
+		return n
+	}
+	// Replace the alias with a copy of what it named.
+	//
+	// The slice is CLONED rather than shared, and that is load-bearing, not
+	// defensive: a mapping node's Content grows two entries per key, so a
+	// three-key fragment sits at len 6 / cap 8 -- exactly the two spare slots
+	// one append consumes. Sharing the slice would write keploy's entry into
+	// the user's fragment backing array without reallocating, and a second
+	// section resolved through the same fragment would then overwrite the
+	// first's entry instead of appending after it.
+	//
+	// Child NODES are still shared, which is safe: every writer here appends,
+	// and nothing mutates an existing volume entry in place (checked in OSS and
+	// in the enterprise BeforeDockerComposeSetup hook).
+	replaced := yaml.Node{Kind: yaml.MappingNode}
+	if target.Kind == yaml.MappingNode {
+		replaced.Content = append([]*yaml.Node(nil), target.Content...)
+	}
+	*n = replaced
+	return n
+}
+
+// ensureMapping turns an EMPTY section node into an empty mapping so callers can
+// append key/value pairs to it.
+//
+// A section reaches us in several empty shapes and only two used to be handled,
+// each at a different call site with a different predicate. An absent key
+// decodes to a zero node; an explicit `volumes:` with nothing under it decodes
+// to a null SCALAR; `volumes: []` decodes to an empty sequence; `volumes: ""` to
+// an empty string. Appending to any of the latter three writes into a node the
+// encoder will not emit as a mapping, so the generated compose declared nothing
+// while keploy's agent service referenced it, and docker compose refused the
+// file with "volumes must be a mapping" -- on a compose file it otherwise
+// accepts. Normalising on the target shape closes all of them at once instead of
+// enumerating spellings.
+//
+// A POPULATED non-mapping is deliberately left alone. Reshaping it would
+// silently discard what the user wrote, and docker compose's own error is a far
+// better outcome than losing their data.
+//
+// The tag is cleared because a MappingNode still carrying `!!null` emits
+// `volumes: !!null` above the entries. Both docker compose and go-yaml accept
+// that, so it is cosmetic -- but it is a stray null tag in a file operators are
+// handed to debug. Value is deliberately NOT cleared: the encoder never reads it
+// for a mapping, so clearing it would be an unobservable no-op.
+func ensureMapping(n *yaml.Node) {
+	if n == nil || n.Kind == yaml.MappingNode || !isEmptySection(n) {
+		return
+	}
+	n.Kind = yaml.MappingNode
+	n.Tag = ""
+	// Style carries the flow/quote bits of the shape being replaced, so an
+	// empty `volumes: []` would otherwise normalise into a flow-style mapping
+	// sitting in an otherwise block-style file. Valid either way; consistent
+	// reads better.
+	n.Style = 0
+	n.Content = []*yaml.Node{}
+}
+
+// isEmptySection reports whether a section node holds nothing, in any of the
+// shapes YAML can express that: an absent key (zero node), a null in any
+// spelling, an empty string, or an empty sequence.
+//
+// A node carrying content is NOT empty, and that includes shapes whose payload
+// does not live in Content: a scalar keeps its text in Value, and an alias
+// resolves elsewhere entirely. Treating those as empty would silently discard
+// what the user wrote.
+func isEmptySection(n *yaml.Node) bool {
+	switch n.Kind {
+	case 0:
+		return true
+	case yaml.ScalarNode:
+		return n.Tag == "!!null" || n.Value == ""
+	case yaml.SequenceNode:
+		return len(n.Content) == 0
+	default:
+		return false
+	}
 }
 
 func cloneYAMLNode(node *yaml.Node) *yaml.Node {
