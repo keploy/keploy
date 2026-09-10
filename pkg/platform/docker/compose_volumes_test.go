@@ -206,7 +206,6 @@ func TestAddTopLevelVolume_WarnsWhenVolumesCannotHoldTheEntry(t *testing.T) {
 		in       string
 		wantWarn bool
 	}{
-		{"alias to a populated mapping", "x-vols: &vols\n  appdata: {}\nvolumes: *vols\n", true},
 		{"populated sequence", "volumes:\n  - appdata\n", true},
 		{"populated scalar", "volumes: appdata\n", true},
 		{"explicit null (normalises fine)", "volumes:\n", false},
@@ -223,7 +222,7 @@ func TestAddTopLevelVolume_WarnsWhenVolumesCannotHoldTheEntry(t *testing.T) {
 			}
 			idc.addTopLevelVolume(&compose, "keploy-tls-certs")
 
-			warns := logs.FilterMessageSnippet("is not a mapping").Len()
+			warns := logs.FilterMessageSnippet("cannot hold a volume entry").Len()
 			if tc.wantWarn && warns == 0 {
 				t.Errorf("no warning for a `volumes:` shape that cannot hold the entry; " +
 					"the user would only see docker compose's undefined-volume error")
@@ -243,5 +242,316 @@ func TestAddTopLevelVolume_WarnsWhenVolumesCannotHoldTheEntry(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAddTopLevelVolume_ResolvesAnAliasByCopy covers `volumes: *vols`,
+// which is legal compose and the same `x-*` + anchor idiom the rest of this
+// change works to preserve.
+//
+// An alias node is a REFERENCE: it holds no entries, so appending to it writes
+// into a node the encoder never emits. The generated file then declared no
+// volume while the agent service mounted one, and docker compose rejected it
+// with "refers to undefined volume" — an error naming a service the user never
+// wrote.
+//
+// The alias is resolved BY COPY: `volumes:` receives a clone of the fragment and
+// keploy's entry is appended to that. Appending into the anchored node instead
+// would hand the entry to every other alias of it, which is what the sibling
+// test below pins.
+func TestAddTopLevelVolume_ResolvesAnAliasByCopy(t *testing.T) {
+	idc := &Impl{logger: zap.NewNop()}
+	const in = `x-vols: &vols
+  appdata: {}
+volumes: *vols
+services:
+  app:
+    image: alpine:3.21
+`
+	var compose Compose
+	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	idc.addTopLevelVolume(&compose, "keploy-tls-certs")
+
+	data, err := idc.MarshalCompose(&compose)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var reloaded map[string]interface{}
+	if err := yaml.Unmarshal(data, &reloaded); err != nil {
+		t.Fatalf("generated compose does not load: %v\n%s", err, data)
+	}
+	vols, ok := reloaded["volumes"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("volumes is %T, not a mapping:\n%s", reloaded["volumes"], data)
+	}
+	if _, ok := vols["keploy-tls-certs"]; !ok {
+		t.Errorf("the volume was not declared; the agent service would reference an "+
+			"undefined volume:\n%s", data)
+	}
+	// The user's own volume must survive...
+	if _, ok := vols["appdata"]; !ok {
+		t.Errorf("the user's own volume was lost: %v", vols)
+	}
+	// ...and the anchored fragment must be UNCHANGED. Appending into it instead
+	// of copying would hand keploy's volume to every other alias of it.
+	frag, ok := reloaded["x-vols"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("x-vols is %T, not the mapping the user wrote:\n%s", reloaded["x-vols"], data)
+	}
+	if _, leaked := frag["keploy-tls-certs"]; leaked {
+		t.Errorf("keploy's volume was written into the user's shared `x-vols` "+
+			"fragment; every other alias of it inherits the entry:\n%s", data)
+	}
+	if len(frag) != 1 {
+		t.Errorf("the user's fragment gained entries: %v", frag)
+	}
+}
+
+// TestAddTopLevelVolume_AliasIsIdempotent pins that following the alias does not
+// break the duplicate check — appending twice through a reference must still
+// produce one entry, or the generated file carries a duplicate mapping key and
+// will not load at all.
+func TestAddTopLevelVolume_AliasIsIdempotent(t *testing.T) {
+	idc := &Impl{logger: zap.NewNop()}
+	const in = "x-vols: &vols\n  appdata: {}\nvolumes: *vols\n"
+	var compose Compose
+	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	idc.addTopLevelVolume(&compose, "keploy-tls-certs")
+	idc.addTopLevelVolume(&compose, "keploy-tls-certs")
+
+	data, err := idc.MarshalCompose(&compose)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var reloaded map[string]interface{}
+	if err := yaml.Unmarshal(data, &reloaded); err != nil {
+		t.Fatalf("duplicate key made the document unloadable: %v\n%s", err, data)
+	}
+	vols, _ := reloaded["volumes"].(map[string]interface{})
+	if len(vols) != 2 {
+		t.Errorf("volumes has %d entries, want 2 (appdata + keploy-tls-certs): %v", len(vols), vols)
+	}
+}
+
+// TestAddTopLevelVolume_AliasToNonMappingIsLeftAlone pins the guard on following
+// an alias.
+//
+// Following it blindly would append into whatever the anchor happens to be. If
+// that is a scalar the entries vanish exactly as they did before this change —
+// but now silently and without the warning, because the code believes it found a
+// container. Worse, it would be writing into the user's own fragment. An alias is
+// followed only when it resolves to something that can actually hold entries.
+func TestAddTopLevelVolume_AliasToNonMappingIsLeftAlone(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	idc := &Impl{logger: zap.New(core)}
+
+	// A populated sequence. Under copy-resolution either shape discriminates —
+	// dropping the guard leaves `volumes:` an empty mapping and never touches
+	// the fragment — so what this pins is the WARNING, plus the fragment being
+	// left exactly as written rather than reshaped to suit us.
+	const in = `x-thing: &thing
+  - just-a-string
+volumes: *thing
+services:
+  app:
+    image: alpine:3.21
+`
+	var compose Compose
+	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	idc.addTopLevelVolume(&compose, "keploy-tls-certs")
+
+	if logs.FilterMessageSnippet("cannot hold a volume entry").Len() == 0 {
+		t.Error("no warning for an alias resolving to a scalar — the volume cannot " +
+			"be declared there, and silence is what made this class of failure hard " +
+			"to diagnose in the first place")
+	}
+
+	data, err := idc.MarshalCompose(&compose)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var reloaded map[string]interface{}
+	if err := yaml.Unmarshal(data, &reloaded); err != nil {
+		t.Fatalf("generated compose does not load: %v\n%s", err, data)
+	}
+	// The user's fragment must be untouched: appending into it corrupts a value
+	// they wrote, and unlike a scalar a sequence's contents really are emitted.
+	frag, ok := reloaded["x-thing"].([]interface{})
+	if !ok {
+		t.Fatalf("x-thing is %T, not the sequence the user wrote:\n%s", reloaded["x-thing"], data)
+	}
+	if len(frag) != 1 || frag[0] != "just-a-string" {
+		t.Errorf("keploy appended into the user's anchored sequence: %v\n%s", frag, data)
+	}
+}
+
+// TestAddTopLevelVolume_DoesNotCorruptAFragmentSharedElsewhere is the reason the
+// alias is resolved by COPY rather than by appending into the anchored node.
+//
+// An `x-*` fragment is shared: appending into it hands keploy's volume to every
+// other reference. The shape below is the sharp case — the same fragment names
+// the volume set AND a service's labels — so mutating it in place gives the app
+// a `keploy-tls-certs` LABEL. Corrupting an unrelated part of the user's file to
+// fix our own is a worse outcome than the bug, and it leaves no trace.
+func TestAddTopLevelVolume_DoesNotCorruptAFragmentSharedElsewhere(t *testing.T) {
+	idc := &Impl{logger: zap.NewNop()}
+	const in = `x-common: &common
+  foo: bar
+volumes: *common
+services:
+  app:
+    image: alpine:3.21
+    labels: *common
+`
+	var compose Compose
+	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	idc.addTopLevelVolume(&compose, "keploy-tls-certs")
+
+	data, err := idc.MarshalCompose(&compose)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var reloaded map[string]interface{}
+	if err := yaml.Unmarshal(data, &reloaded); err != nil {
+		t.Fatalf("generated compose does not load: %v\n%s", err, data)
+	}
+
+	// keploy's volume is declared...
+	vols, _ := reloaded["volumes"].(map[string]interface{})
+	if _, ok := vols["keploy-tls-certs"]; !ok {
+		t.Errorf("the volume was not declared:\n%s", data)
+	}
+	// ...and has NOT leaked into the shared fragment or the service's labels.
+	frag, _ := reloaded["x-common"].(map[string]interface{})
+	if _, leaked := frag["keploy-tls-certs"]; leaked {
+		t.Errorf("keploy's volume leaked into the shared `x-common` fragment:\n%s", data)
+	}
+	svcs, _ := reloaded["services"].(map[string]interface{})
+	app, _ := svcs["app"].(map[string]interface{})
+	labels, _ := app["labels"].(map[string]interface{})
+	if _, leaked := labels["keploy-tls-certs"]; leaked {
+		t.Errorf("keploy's volume became a LABEL on the user's service — the shared "+
+			"fragment was mutated in place:\n%s", data)
+	}
+	if len(labels) != 1 {
+		t.Errorf("the service's labels changed: %v", labels)
+	}
+}
+
+// TestAddTopLevelVolume_ResolvedCopiesAreIndependent pins that the clone in
+// sectionForAppend is load-bearing rather than defensive.
+//
+// A mapping node's Content holds two entries per key, so a THREE-key fragment
+// sits at len 6 / cap 8 — exactly the two spare slots one append consumes. Share
+// the slice instead of cloning it and the append writes into the fragment's
+// backing array without reallocating; a second section resolved through the same
+// fragment then OVERWRITES the first's entry instead of appending after it.
+//
+// Three keys is not incidental: one- and two-key fragments have zero spare
+// capacity, so Go reallocates and the bug cannot be observed.
+func TestAddTopLevelVolume_ResolvedCopiesAreIndependent(t *testing.T) {
+	const in = `x-shared: &shared
+  a: {}
+  b: {}
+  c: {}
+volumes: *shared
+networks: *shared
+`
+	var compose Compose
+	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Resolve BOTH sections through the same fragment and append to each, which
+	// is what extending this to networks would do.
+	vols := sectionForAppend(&compose.Volumes)
+	nets := sectionForAppend(&compose.Networks)
+	vols.Content = append(vols.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-tls-certs"},
+		&yaml.Node{Kind: yaml.MappingNode})
+	nets.Content = append(nets.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-net"},
+		&yaml.Node{Kind: yaml.MappingNode})
+
+	idc := &Impl{logger: zap.NewNop()}
+	data, err := idc.MarshalCompose(&compose)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var reloaded map[string]interface{}
+	if err := yaml.Unmarshal(data, &reloaded); err != nil {
+		t.Fatalf("reload: %v\n%s", err, data)
+	}
+
+	gotVols, _ := reloaded["volumes"].(map[string]interface{})
+	if _, ok := gotVols["keploy-tls-certs"]; !ok {
+		t.Errorf("volumes lost its own entry — a second section resolved through the "+
+			"same fragment overwrote it through a shared backing array: %v\n%s",
+			gotVols, data)
+	}
+	if _, wrong := gotVols["keploy-net"]; wrong {
+		t.Errorf("volumes gained the networks entry: %v", gotVols)
+	}
+	gotNets, _ := reloaded["networks"].(map[string]interface{})
+	if _, ok := gotNets["keploy-net"]; !ok {
+		t.Errorf("networks lost its own entry: %v", gotNets)
+	}
+	// And the user's fragment is untouched by either.
+	frag, _ := reloaded["x-shared"].(map[string]interface{})
+	if len(frag) != 3 {
+		t.Errorf("the shared fragment gained entries: %v", frag)
+	}
+}
+
+// TestAddTopLevelVolume_AliasToAnEmptyFragment pins the isEmptySection arm of
+// sectionForAppend, which nothing else reaches.
+//
+// `x-vols: &vols` with nothing under it is a null scalar, so an alias to it is
+// not a mapping — declining there would regress this shape straight back to the
+// bug. The fragment itself must NOT be reshaped: rewriting a user's `&vols` into
+// a mapping is how the earlier, abandoned approach broke a service whose own
+// volumes list aliased the same fragment.
+func TestAddTopLevelVolume_AliasToAnEmptyFragment(t *testing.T) {
+	idc := &Impl{logger: zap.NewNop()}
+	const in = `x-vols: &vols
+volumes: *vols
+services:
+  app:
+    image: alpine:3.21
+`
+	var compose Compose
+	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	idc.addTopLevelVolume(&compose, "keploy-tls-certs")
+
+	data, err := idc.MarshalCompose(&compose)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var reloaded map[string]interface{}
+	if err := yaml.Unmarshal(data, &reloaded); err != nil {
+		t.Fatalf("generated compose does not load: %v\n%s", err, data)
+	}
+	vols, ok := reloaded["volumes"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("volumes is %T, not a mapping — an alias to an empty fragment was "+
+			"declined, leaving the volume undeclared:\n%s", reloaded["volumes"], data)
+	}
+	if _, ok := vols["keploy-tls-certs"]; !ok {
+		t.Errorf("the volume was not declared: %v\n%s", vols, data)
+	}
+	// The user's fragment stays exactly as written.
+	if v, present := reloaded["x-vols"]; !present || v != nil {
+		t.Errorf("the empty anchored fragment was reshaped to %#v; it must be left "+
+			"as the user wrote it:\n%s", v, data)
 	}
 }
