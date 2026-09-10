@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/go-retry.sh"
 # E2E validation for keploy's TLS capture features.
 #
 # Runs the sample-tls-app under keploy with $KEPLOY_FLAGS — either
@@ -281,7 +282,7 @@ echo "127.0.0.1 ${QUOTE_HOST} ${ECHO_HOST}" | sudo tee -a /etc/hosts >/dev/null
 # The upstream fixture ships with the sample app (ci/tls-upstream); build
 # and run it from the checked-out app repo. Pre-build so $! is the server
 # PID itself (not a `go run` wrapper), which the teardown kill relies on.
-go build -o tls-upstream ./ci/tls-upstream
+go_retry build -o tls-upstream ./ci/tls-upstream
 ./tls-upstream .ci/certs/upstream.crt .ci/certs/upstream.key 127.0.0.1 "$UPSTREAM_PORT" \
   > tls-upstream.log 2>&1 &
 UPSTREAM_PID=$!
@@ -317,7 +318,7 @@ export POSTGRES_DSN="postgres://app:ci_pg_pw@localhost:5433/app?sslmode=verify-c
 export QUOTE_URL="https://${QUOTE_HOST}:${UPSTREAM_PORT}/zen"
 export ECHO_URL="https://${ECHO_HOST}:${UPSTREAM_PORT}/anything"
 
-go build -o sample-tls-app .
+go_retry build -o sample-tls-app .
 
 # shellcheck disable=SC2086
 sudo -E env PATH="$PATH" MYSQL_DSN="$MYSQL_DSN" POSTGRES_DSN="$POSTGRES_DSN" \

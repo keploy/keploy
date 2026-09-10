@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # This script tests the grpc-secret sample application with Keploy's sanitize functionality.
 # It records gRPC requests with secrets in headers and body, sanitizes them, and validates test results.
@@ -20,7 +21,7 @@ command -v go >/dev/null 2>&1 || { echo "go not found"; exit 1; }
 echo "Installing grpcurl..."
 if ! command -v grpcurl &> /dev/null; then
     echo "grpcurl not found, installing..."
-    go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+    go_retry install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
     export PATH="$PATH:$HOME/go/bin"
 fi
 command -v grpcurl >/dev/null 2>&1 || { echo "grpcurl installation failed"; exit 1; }
@@ -315,7 +316,7 @@ rm -rf ./keploy*
 "$RECORD_BIN" config --generate
 sleep 3
 
-go build -o grpc-secret .
+go_retry build -o grpc-secret .
 sleep 4
 
 echo "✅ Built grpc-secret binary"
