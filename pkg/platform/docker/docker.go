@@ -1154,10 +1154,7 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 	}
 
 	// Ensure services section exists
-	if compose.Services.Content == nil {
-		compose.Services.Kind = yaml.MappingNode
-		compose.Services.Content = make([]*yaml.Node, 0)
-	}
+	ensureMapping(&compose.Services)
 
 	// Add the keploy-agent service to the compose file
 	compose.Services.Content = append(compose.Services.Content,
@@ -1466,9 +1463,22 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 
 // Helper to ensure top-level volumes exists
 func (idc *Impl) addTopLevelVolume(compose *Compose, volumeName string) {
-	if compose.Volumes.Kind == 0 {
-		compose.Volumes.Kind = yaml.MappingNode
-		compose.Volumes.Content = []*yaml.Node{}
+	ensureMapping(&compose.Volumes)
+	if compose.Volumes.Kind != yaml.MappingNode {
+		// Left deliberately un-reshaped by ensureMapping because it holds
+		// something. The append below cannot land, so the generated compose
+		// will declare no volume while the agent service mounts one, and
+		// docker compose will reject it with "refers to undefined volume".
+		// That error names the agent, not the user's `volumes:` line, so say
+		// here what actually has to change.
+		//
+		// `volumes: *alias` is the shape worth calling out: it is legal
+		// compose, and it is the same x-* + anchor idiom this file works hard
+		// to preserve elsewhere.
+		idc.logger.Warn("top-level `volumes:` is not a mapping, so keploy cannot declare "+
+			"its volume there; docker compose will reject the generated file",
+			zap.String("volume", volumeName),
+			zap.Int("yamlKind", int(compose.Volumes.Kind)))
 	}
 
 	// Check if volume exists
@@ -1483,6 +1493,64 @@ func (idc *Impl) addTopLevelVolume(compose *Compose, volumeName string) {
 		&yaml.Node{Kind: yaml.ScalarNode, Value: volumeName},
 		&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{}}, // {}
 	)
+}
+
+// ensureMapping turns an EMPTY section node into an empty mapping so callers can
+// append key/value pairs to it.
+//
+// A section reaches us in several empty shapes and only two used to be handled,
+// each at a different call site with a different predicate. An absent key
+// decodes to a zero node; an explicit `volumes:` with nothing under it decodes
+// to a null SCALAR; `volumes: []` decodes to an empty sequence; `volumes: ""` to
+// an empty string. Appending to any of the latter three writes into a node the
+// encoder will not emit as a mapping, so the generated compose declared nothing
+// while keploy's agent service referenced it, and docker compose refused the
+// file with "volumes must be a mapping" -- on a compose file it otherwise
+// accepts. Normalising on the target shape closes all of them at once instead of
+// enumerating spellings.
+//
+// A POPULATED non-mapping is deliberately left alone. Reshaping it would
+// silently discard what the user wrote, and docker compose's own error is a far
+// better outcome than losing their data.
+//
+// The tag is cleared because a MappingNode still carrying `!!null` emits
+// `volumes: !!null` above the entries. Both docker compose and go-yaml accept
+// that, so it is cosmetic -- but it is a stray null tag in a file operators are
+// handed to debug. Value is deliberately NOT cleared: the encoder never reads it
+// for a mapping, so clearing it would be an unobservable no-op.
+func ensureMapping(n *yaml.Node) {
+	if n == nil || n.Kind == yaml.MappingNode || !isEmptySection(n) {
+		return
+	}
+	n.Kind = yaml.MappingNode
+	n.Tag = ""
+	// Style carries the flow/quote bits of the shape being replaced, so an
+	// empty `volumes: []` would otherwise normalise into a flow-style mapping
+	// sitting in an otherwise block-style file. Valid either way; consistent
+	// reads better.
+	n.Style = 0
+	n.Content = []*yaml.Node{}
+}
+
+// isEmptySection reports whether a section node holds nothing, in any of the
+// shapes YAML can express that: an absent key (zero node), a null in any
+// spelling, an empty string, or an empty sequence.
+//
+// A node carrying content is NOT empty, and that includes shapes whose payload
+// does not live in Content: a scalar keeps its text in Value, and an alias
+// resolves elsewhere entirely. Treating those as empty would silently discard
+// what the user wrote.
+func isEmptySection(n *yaml.Node) bool {
+	switch n.Kind {
+	case 0:
+		return true
+	case yaml.ScalarNode:
+		return n.Tag == "!!null" || n.Value == ""
+	case yaml.SequenceNode:
+		return len(n.Content) == 0
+	default:
+		return false
+	}
 }
 
 func cloneYAMLNode(node *yaml.Node) *yaml.Node {
