@@ -238,20 +238,11 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 
 	if transferEncodingHeader != "" &&
 		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-		for !bytes.HasSuffix(*finalReq, chunkedTerminator) {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			chunk, err := stream.ReadChunk()
-			if err != nil {
-				return err
-			}
-			if len(chunk.Bytes) == 0 {
-				return io.EOF
-			}
-			*finalReq = append(*finalReq, chunk.Bytes...)
+		headerEnd := bytes.Index(*finalReq, []byte("\r\n\r\n"))
+		if headerEnd < 0 {
+			return fmt.Errorf("header terminator missing")
 		}
-		return nil
+		return h.consumeChunkedBody(ctx, stream, finalReq, headerEnd+4, nil)
 	}
 
 	// No body framing: the request is headers-only (e.g. GET / HTTP/1.1
@@ -269,8 +260,8 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 //   - Pull more chunks until response headers are complete.
 //   - Parse Content-Length / Transfer-Encoding from headers.
 //   - If Content-Length, read until the declared body length is met.
-//   - If Transfer-Encoding chunked, read until the last-chunk marker
-//     "0\r\n\r\n" appears as a suffix (the fix in SAP bug #4110).
+//   - If Transfer-Encoding chunked, walk the chunk framing to its true end
+//     (see consumeChunkedBody / chunkedFramer).
 //
 // Returns (lastWrittenAt, err). err may be io.EOF for the legitimate
 // "server closed after sending a full response" case; the caller
@@ -367,27 +358,16 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 
 	if transferEncodingHeader != "" &&
 		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-		// Chunked: read until we see the last-chunk terminator as a
-		// suffix of finalResp. pUtil terminator detection (see chunk.go
-		// chunkedTerminator) uses HasSuffix so a body chunk that shares
-		// a TLS record with the terminator still exits cleanly.
-		for !bytes.HasSuffix(*finalResp, chunkedTerminator) {
-			if err := ctx.Err(); err != nil {
-				return lastWr, err
-			}
-			chunk, err := stream.ReadChunk()
-			if err != nil {
-				return lastWr, err
-			}
-			if !chunk.WrittenAt.IsZero() {
-				lastWr = chunk.WrittenAt
-			}
-			if len(chunk.Bytes) == 0 {
-				return lastWr, io.EOF
-			}
-			*finalResp = append(*finalResp, chunk.Bytes...)
+		headerEnd := bytes.Index(*finalResp, []byte("\r\n\r\n"))
+		if headerEnd < 0 {
+			return lastWr, fmt.Errorf("header terminator missing")
 		}
-		return lastWr, nil
+		err := h.consumeChunkedBody(ctx, stream, finalResp, headerEnd+4, func(c fakeconn.Chunk) {
+			if !c.WrittenAt.IsZero() {
+				lastWr = c.WrittenAt
+			}
+		})
+		return lastWr, err
 	}
 
 	// Neither Content-Length nor chunked: read until EOF (RFC 7230
@@ -703,4 +683,210 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		return nil, nil
 	}
 	return mock, nil
+}
+
+// consumeChunkedBody reads from stream until the RFC 9112 section 7.1 chunked
+// body that begins at bodyStart in *msg is completely framed, appending every
+// chunk it reads to *msg. onChunk, when non-nil, is called for each chunk read
+// so a caller that anchors timestamps to chunk metadata can record them.
+//
+// On return *msg ends exactly at the last byte of the chunked body, so the
+// caller can hand it to http.ReadResponse / http.ReadRequest unchanged.
+func (h *HTTP) consumeChunkedBody(
+	ctx context.Context,
+	stream *fakeconn.FakeConn,
+	msg *[]byte,
+	bodyStart int,
+	onChunk func(fakeconn.Chunk),
+) error {
+	f := newChunkedFramer(bodyStart)
+	for {
+		done, err := f.advance(*msg)
+		if err != nil {
+			return err
+		}
+		if done {
+			// Overshoot: one tee'd chunk carried the tail of this message
+			// and the head of the next one. Framing knows exactly where the
+			// split is; the recorder loop does not yet carry those bytes into
+			// the next exchange, so say so rather than lose them silently.
+			if end := f.End(); end < len(*msg) {
+				h.Logger.Warn("V2 HTTP record: bytes arrived past the end of a chunked body",
+					zap.Int("overshoot_bytes", len(*msg)-end),
+					zap.String("impact", "these bytes are the head of the next exchange on this connection; it will not frame and will not be recorded"))
+				*msg = (*msg)[:end]
+			}
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		chunk, err := stream.ReadChunk()
+		if err != nil {
+			return err
+		}
+		if onChunk != nil {
+			onChunk(chunk)
+		}
+		if len(chunk.Bytes) == 0 {
+			return io.EOF
+		}
+		*msg = append(*msg, chunk.Bytes...)
+	}
+}
+
+// Chunked framing, RFC 9112 section 7.1. The recorder has to know exactly
+// where a chunked body ends, because on a keep-alive connection the next byte
+// is the first byte of the next exchange.
+//
+// Searching the accumulated buffer for the last-chunk marker "0\r\n\r\n"
+// cannot do that, and is wrong in both directions:
+//
+//   - It misses a real end. The last chunk may carry a chunk extension
+//     ("0;pad=x\r\n\r\n"), and between the last chunk and the final CRLF sits
+//     the trailer section — arbitrary header lines ("0\r\nGrpc-Status: 5\r\n\r\n").
+//     Neither ends in the marker, so the read loop never stops and consumes
+//     every later exchange on the connection as this body.
+//   - It finds an end that is not there. A data chunk whose payload ends in
+//     "0\r\n" is followed by the framing CRLF, so the wire genuinely reads
+//     "...0\r\n\r\n" in mid-body; if a tee'd chunk boundary falls there, the
+//     marker IS the buffer's suffix and the body is cut short.
+//
+// chunkedFramer walks the framing instead: chunk-size line, that many data
+// bytes, CRLF, repeat until a zero-size chunk, then trailer lines up to the
+// terminating empty line. It keeps its cursor across calls so each byte is
+// examined once — rescanning the buffer per arriving chunk would be quadratic
+// on a large streamed body.
+const (
+	// maxChunkLineLen bounds a chunk-size or trailer line so a peer that
+	// never sends the LF cannot make the recorder buffer without bound.
+	// Same value Go's own chunked reader uses.
+	maxChunkLineLen = 4096
+	// maxChunkedTrailerBytes bounds the whole trailer section, which is
+	// otherwise an unbounded run of header lines.
+	maxChunkedTrailerBytes = 16 << 10
+)
+
+type chunkedFramerState uint8
+
+const (
+	chunkExpectSize chunkedFramerState = iota
+	chunkExpectData
+	chunkExpectDataCRLF
+	chunkExpectTrailer
+	chunkComplete
+)
+
+type chunkedFramer struct {
+	state        chunkedFramerState
+	pos          int // cursor into the accumulated message buffer
+	remaining    int // data bytes still owed by the chunk being read
+	trailerBytes int
+}
+
+// newChunkedFramer starts a framer at bodyStart, the offset of the first byte
+// after the header section's CRLFCRLF.
+func newChunkedFramer(bodyStart int) *chunkedFramer { return &chunkedFramer{pos: bodyStart} }
+
+// advance consumes as much of buf as the framing allows.
+//
+// done=true means the trailer section's terminating CRLF has been consumed and
+// End() is the offset one past the body. done=false with a nil error means the
+// framing is well formed so far but incomplete: read more, append to buf, call
+// again.
+//
+// A non-nil error means these bytes are not valid chunked framing. It is
+// returned at once rather than read through, so garbled framing costs one
+// connection's capture and never a hung parser.
+func (f *chunkedFramer) advance(buf []byte) (bool, error) {
+	for {
+		switch f.state {
+		case chunkComplete:
+			return true, nil
+
+		case chunkExpectSize:
+			line, next, ok, err := chunkLine(buf, f.pos)
+			if err != nil || !ok {
+				return false, err
+			}
+			if i := bytes.IndexByte(line, ';'); i >= 0 {
+				line = line[:i] // chunk extension: "size;name=value"
+			}
+			line = bytes.TrimRight(line, " \t")
+			if len(line) == 0 {
+				return false, errors.New("chunked framing: empty chunk-size line")
+			}
+			// bitSize 31: a single chunk larger than 2 GiB is not real
+			// traffic, and accepting one would overflow int on a 32-bit build.
+			size, err := strconv.ParseUint(string(line), 16, 31)
+			if err != nil {
+				return false, fmt.Errorf("chunked framing: bad chunk size %q: %w", line, err)
+			}
+			f.pos = next
+			if size == 0 {
+				f.state = chunkExpectTrailer
+				continue
+			}
+			f.remaining = int(size)
+			f.state = chunkExpectData
+
+		case chunkExpectData:
+			n := len(buf) - f.pos
+			if n > f.remaining {
+				n = f.remaining
+			}
+			f.pos += n
+			f.remaining -= n
+			if f.remaining > 0 {
+				return false, nil
+			}
+			f.state = chunkExpectDataCRLF
+
+		case chunkExpectDataCRLF:
+			if len(buf)-f.pos < 2 {
+				return false, nil
+			}
+			if buf[f.pos] != '\r' || buf[f.pos+1] != '\n' {
+				return false, errors.New("chunked framing: chunk data not followed by CRLF")
+			}
+			f.pos += 2
+			f.state = chunkExpectSize
+
+		case chunkExpectTrailer:
+			line, next, ok, err := chunkLine(buf, f.pos)
+			if err != nil || !ok {
+				return false, err
+			}
+			f.trailerBytes += next - f.pos
+			f.pos = next
+			if len(line) == 0 {
+				f.state = chunkComplete
+				return true, nil
+			}
+			if f.trailerBytes > maxChunkedTrailerBytes {
+				return false, fmt.Errorf("chunked framing: trailer section exceeds %d bytes", maxChunkedTrailerBytes)
+			}
+		}
+	}
+}
+
+// End is the offset one past the chunked body, valid once advance has reported
+// done. Bytes at or after it belong to the next message on the connection.
+func (f *chunkedFramer) End() int { return f.pos }
+
+// chunkLine returns the LF-terminated line at buf[pos:] with its trailing CR
+// stripped, plus the offset just past the LF. ok=false with a nil error means
+// the line has not fully arrived yet.
+func chunkLine(buf []byte, pos int) (line []byte, next int, ok bool, err error) {
+	i := bytes.IndexByte(buf[pos:], '\n')
+	if i < 0 {
+		if len(buf)-pos > maxChunkLineLen {
+			return nil, 0, false, fmt.Errorf("chunked framing: no LF within %d bytes", maxChunkLineLen)
+		}
+		return nil, 0, false, nil
+	}
+	if i > maxChunkLineLen {
+		return nil, 0, false, fmt.Errorf("chunked framing: line exceeds %d bytes", maxChunkLineLen)
+	}
+	return bytes.TrimSuffix(buf[pos:pos+i], []byte("\r")), pos + i + 1, true, nil
 }
