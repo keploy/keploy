@@ -4,7 +4,9 @@ package mockdb
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/gob"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,11 +80,23 @@ func (ys *MockYaml) useGobFormat() bool {
 }
 
 type MockYaml struct {
-	MockPath  string
-	MockName  string
-	Logger    *zap.Logger
-	idCounter int64
-	Format    yaml.Format
+	MockPath string
+	MockName string
+	Logger   *zap.Logger
+	Format   yaml.Format
+
+	// nameMu guards the mock-name minting state below. A single atomic counter
+	// used to be enough because every mock in a run drew from one sequence;
+	// numbering is now per owner, which needs a map.
+	nameMu sync.Mutex
+	// nextByOwner is the next ordinal to hand out, keyed by name PREFIX --
+	// unownedPrefix for captures made outside any scope (the whole of
+	// `keploy record`), and the owner's hash otherwise.
+	nextByOwner map[string]int64
+	// hashToOwner is every owner string this session has minted a name for,
+	// keyed by its hash. It exists to turn a truncated-sha256 collision from a
+	// silent data loss into a hard error -- see mintName.
+	hashToOwner map[string]string
 
 	// MockFormat is the per-instance record-time format (yaml vs gob),
 	// orthogonal to Format (the yaml/json storage encoding). Empty means
@@ -166,11 +180,10 @@ func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
 
 func NewWithFormat(Logger *zap.Logger, mockPath string, mockName string, format yaml.Format) *MockYaml {
 	return &MockYaml{
-		MockPath:  mockPath,
-		MockName:  mockName,
-		Logger:    Logger,
-		idCounter: -1,
-		Format:    format,
+		MockPath: mockPath,
+		MockName: mockName,
+		Logger:   Logger,
+		Format:   format,
 	}
 }
 
@@ -853,7 +866,11 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
-	mock.Name = fmt.Sprint("mock-", ys.getNextID())
+	name, err := ys.mintName(mock.Owner)
+	if err != nil {
+		return err
+	}
+	mock.Name = name
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
@@ -1666,8 +1683,64 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	return unfiltered, nil
 }
 
-func (ys *MockYaml) getNextID() int64 {
-	return atomic.AddInt64(&ys.idCounter, 1)
+// unownedPrefix is the name prefix for a capture that belongs to no owner --
+// every `keploy record` mock, and any `keploy mock record` capture made outside
+// a declared scope. Its sequence is the original one, so those sets are named
+// mock-0, mock-1, ... exactly as before.
+const unownedPrefix = "mock"
+
+// ownerHashLen is how much of the owner's sha256 goes into the name. 12 hex
+// characters is 48 bits; a set would need on the order of 2^24 (~17 million)
+// distinct owners before a birthday collision became likely, against a realistic
+// ceiling in the thousands. It is short enough to keep a name readable and long
+// enough that the check in mintName should never fire -- but that check is what
+// makes the length a safety property rather than a bet.
+const ownerHashLen = 12
+
+func ownerHash(owner string) string {
+	sum := sha256.Sum256([]byte(owner))
+	return hex.EncodeToString(sum[:])[:ownerHashLen]
+}
+
+// mintName issues the next name for a capture belonging to owner.
+//
+// Identity is (owner, n): n counts WITHIN the owner, so a name only moves when
+// that owner's own recording changes. The whole point is that adding, removing
+// or reordering OTHER owners cannot renumber this one -- which is exactly what
+// an index into the run does today.
+//
+// An empty owner takes the original path, byte for byte: "mock-" + a single
+// run-wide sequence. `keploy record` and `keploy test` -- integration testing,
+// a different product sharing this storage layer -- never set Owner, so they are
+// entirely unaffected.
+//
+// The collision check is not decoration. Nine call sites key on a mock name, one
+// of which deletes mocks from disk; two owners sharing a name would silently
+// merge their sequences and lose data. Every owner string is in hand at mint
+// time, so the probabilistic bound on a truncated hash can be replaced with a
+// deterministic check.
+func (ys *MockYaml) mintName(owner string) (string, error) {
+	ys.nameMu.Lock()
+	defer ys.nameMu.Unlock()
+
+	prefix := unownedPrefix
+	if owner != "" {
+		prefix = ownerHash(owner)
+		if prev, ok := ys.hashToOwner[prefix]; ok && prev != owner {
+			return "", fmt.Errorf("mockdb: refusing to mint a mock name: owners %q and %q both hash to %q, so their recordings would share a name and silently overwrite each other; rename one of the test scopes, or raise ownerHashLen", prev, owner, prefix)
+		}
+		if ys.hashToOwner == nil {
+			ys.hashToOwner = make(map[string]string)
+		}
+		ys.hashToOwner[prefix] = owner
+	}
+
+	if ys.nextByOwner == nil {
+		ys.nextByOwner = make(map[string]int64)
+	}
+	n := ys.nextByOwner[prefix]
+	ys.nextByOwner[prefix] = n + 1
+	return fmt.Sprintf("%s-%d", prefix, n), nil
 }
 
 func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.HTTPDoc, error) {
@@ -1756,12 +1829,23 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	return nil
 }
 
+// GetCurrMockID reports the last unowned index issued (-1 before the first).
+// Deleted in the following commit -- it has no production caller and an int64
+// cannot express a per-owner map -- and kept here only so this commit builds.
 func (ys *MockYaml) GetCurrMockID() int64 {
-	return atomic.LoadInt64(&ys.idCounter)
+	ys.nameMu.Lock()
+	defer ys.nameMu.Unlock()
+	return ys.nextByOwner[unownedPrefix] - 1
 }
 
+// ResetCounterID starts a fresh recording session: every sequence restarts at 0.
+// The signature is unchanged from when there was one counter -- callers and test
+// stubs are unaffected -- but the body now clears the whole per-owner map.
 func (ys *MockYaml) ResetCounterID() {
-	atomic.StoreInt64(&ys.idCounter, -1)
+	ys.nameMu.Lock()
+	defer ys.nameMu.Unlock()
+	ys.nextByOwner = nil
+	ys.hashToOwner = nil
 }
 
 // SetCounterID seeds the mock-name counter so the NEXT InsertMock names its
@@ -1771,5 +1855,10 @@ func (ys *MockYaml) ResetCounterID() {
 // ResetCounterID (seed -1 → first mock is mock-0); appending seeds from the
 // set's highest existing index instead.
 func (ys *MockYaml) SetCounterID(id int64) {
-	atomic.StoreInt64(&ys.idCounter, id)
+	ys.nameMu.Lock()
+	defer ys.nameMu.Unlock()
+	if ys.nextByOwner == nil {
+		ys.nextByOwner = make(map[string]int64)
+	}
+	ys.nextByOwner[unownedPrefix] = id + 1
 }
