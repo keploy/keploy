@@ -1354,17 +1354,21 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 		serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
 		serviceName := serviceNameNode.Value
 
-		// Check if this is the target app service
-		var isTargetService bool
-		for j := 0; j < len(serviceContentNode.Content)-1; j++ {
-			if serviceContentNode.Content[j].Kind == yaml.ScalarNode &&
-				serviceContentNode.Content[j].Value == "container_name" &&
-				serviceContentNode.Content[j+1].Kind == yaml.ScalarNode &&
-				serviceContentNode.Content[j+1].Value == appContainerName {
-				isTargetService = true
-				break
-			}
-		}
+		// Check if this is the target app service.
+		//
+		// Read through an alias and through `<<`. Requiring the value to be a
+		// ScalarNode is what made `container_name: *appname` miss: the match
+		// failed, the whole block below was skipped, and the service was left
+		// entirely unwired -- no `pid:`, no `network_mode:`, no `depends_on:`, no
+		// CA variables. keploy then records NOTHING, on a compose file docker
+		// accepts and which findServiceNodeAndName had already matched.
+		//
+		// The old scan also stepped by ONE rather than by two, so a service with
+		// the literal string "container_name" in VALUE position followed by a key
+		// equal to the app's name matched it -- and keploy wired that service
+		// instead of the app. Stepping by key/value pairs closes that too.
+		cn := serviceKeyThroughMerge(serviceContentNode, "container_name")
+		isTargetService := cn != nil && cn.Value == appContainerName
 
 		// If no explicit container_name, check service name
 		if !isTargetService && serviceName == appContainerName {

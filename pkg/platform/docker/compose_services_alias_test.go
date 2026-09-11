@@ -617,3 +617,123 @@ services:
 		t.Errorf("the user's own env var was lost: %v", env)
 	}
 }
+
+// TestServiceAlias_AliasedContainerNameIsWired is the regression test for the
+// loudest-silent failure in this family: keploy records nothing at all.
+//
+// `container_name: *appname` is legal compose, and findServiceNodeAndName
+// already matched it — but modifyAppServiceForKeploy's own scan required the
+// value to be a ScalarNode, so an alias missed and the entire wiring block was
+// skipped. No `pid:`, no `network_mode:`, no `depends_on:`, no CA variables: the
+// app runs completely uninstrumented and the recording comes back empty, with
+// nothing in the logs pointing at the compose file.
+//
+// The same scan stepped by ONE rather than by two, so it also matched
+// "container_name" sitting in VALUE position — wiring the wrong service. Both
+// shapes are in the table below.
+func TestServiceAlias_AliasedContainerNameIsWired(t *testing.T) {
+	for _, tc := range []struct{ name, in string }{
+		{"alias", `x-name: &appname myapp
+x-other: &othername notmyapp
+services:
+  decoy:
+    image: alpine:3.21
+    container_name: *othername
+  svc:
+    image: alpine:3.21
+    container_name: *appname
+    ports:
+      - "8080:8080"
+`},
+		// A companion that already passed before the fix, kept so the two shapes
+		// stay together. It does NOT pin the flatten ordering: serviceKeyThroughMerge
+		// reads through `<<` itself, so this passes with the flatten removed.
+		{"merge key", `x-naming: &naming
+  container_name: myapp
+services:
+  svc:
+    image: alpine:3.21
+    <<: *naming
+    ports:
+      - "8080:8080"
+`},
+		// The one combination neither this file nor compose_merge_key_test.go
+		// exercised: inherited through `<<` AND aliased on the far side.
+		{"merge key naming an aliased container_name", `x-name: &appname myapp
+x-naming: &naming
+  container_name: *appname
+services:
+  svc:
+    image: alpine:3.21
+    <<: *naming
+    ports:
+      - "8080:8080"
+`},
+		// The OTHER bug the same two lines fix. The old scan stepped by ONE, so
+		// it matched the literal string "container_name" in VALUE position when
+		// the next node happened to be the app's name — and keploy then wired
+		// this service and left the real app untouched.
+		{"container_name in value position", `services:
+  decoy:
+    image: alpine:3.21
+    command: container_name
+    myapp: whatever
+  svc:
+    image: alpine:3.21
+    container_name: myapp
+    ports:
+      - "8080:8080"
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idc := &Impl{logger: zap.NewNop(), conf: &config.Config{}}
+			var compose Compose
+			if err := yaml.Unmarshal([]byte(tc.in), &compose); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			_, ports, _, found := idc.findContainerInServices(&compose, "myapp")
+			if !found {
+				t.Fatalf("the gate did not find the service")
+			}
+			opts := buildAgentOpts()
+			opts.AppPorts = ports
+			if err := idc.ModifyComposeForAgent(&compose, opts, "myapp"); err != nil {
+				t.Fatalf("ModifyComposeForAgent: %v", err)
+			}
+			data, err := idc.MarshalCompose(&compose)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var out map[string]interface{}
+			if err := yaml.Unmarshal(data, &out); err != nil {
+				t.Fatalf("generated compose does not load: %v\n%s", err, data)
+			}
+			svcs, _ := out["services"].(map[string]interface{})
+			svc, _ := svcs["svc"].(map[string]interface{})
+			if svc == nil {
+				t.Fatalf("service missing: %v", svcs)
+			}
+			if svc["network_mode"] != "service:keploy-agent" {
+				t.Errorf("network_mode=%v: the app never joins the agent's netns, so "+
+					"nothing is intercepted and the recording is empty", svc["network_mode"])
+			}
+			if svc["pid"] != "service:keploy-agent" {
+				t.Errorf("pid=%v", svc["pid"])
+			}
+			if svc["depends_on"] == nil {
+				t.Errorf("the app does not wait for keploy-agent to be healthy")
+			}
+			if svc["environment"] == nil {
+				t.Errorf("keploy's CA variables were not added")
+			}
+			// A service that merely HAS a container_name must not be adopted:
+			// without comparing the value, keploy wires whichever service it
+			// reaches first and the real app is left alone.
+			if decoy, _ := svcs["decoy"].(map[string]interface{}); decoy != nil {
+				if decoy["network_mode"] != nil || decoy["pid"] != nil {
+					t.Errorf("keploy wired the wrong service: %v", decoy)
+				}
+			}
+		})
+	}
+}
