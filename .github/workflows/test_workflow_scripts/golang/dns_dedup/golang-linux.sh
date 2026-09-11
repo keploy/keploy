@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # E2E test for DNS mock deduplication.
 #
@@ -113,8 +114,8 @@ sudo rm -f /tmp/keploy-logs.txt
 
 section "Build App"
 echo "Building app..."
-go mod tidy
-go build -o dns-dedup
+go_retry mod tidy
+go_retry build -o dns-dedup
 endsec
 
 # Generate keploy config with noise for DNS-dependent fields.

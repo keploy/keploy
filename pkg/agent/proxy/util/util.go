@@ -4,7 +4,6 @@ package util
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -37,11 +36,20 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 // NextStepDialDestination is the shared remediation hint attached
 // to every "failed to dial the conn to destination server" error.
-// The proxy's destination dial is a single attempt with no retry,
-// so the real fix is always on the test-harness side (sequence
-// the dependency start, raise --delay, or add a readiness probe).
+//
+// It is attached regardless of WHY the dial failed — a timeout, ENETUNREACH,
+// EACCES and a cancelled context all get it — so it must not assert a cause.
+// The previous wording sent readers to --delay and readiness probes, which
+// cost a real investigation when the actual cause was an IPv4-only dependency
+// behind a dual-stack name: that looks exactly like a dependency that has not
+// started yet. So name the address family as a possibility, conditionally, and
+// leave the timing advice as the other possibility rather than the answer.
+// The counterpart retry is SUPPRESSED for a Fabricated target, and PassThrough
+// (the two sites below) is the only site attaching this hint where a fabricated
+// address can arrive — so the wording must not promise a retry those callers
+// never get.
 // Kept as a const so all sites update together.
-const NextStepDialDestination = "confirm the app's upstream dependency is listening on this address before traffic starts (adjust --delay, add a readiness probe to the test harness, or pre-start the dependency); the dial is a single attempt and will not retry"
+const NextStepDialDestination = "check which address FAMILY the dependency binds — a container published port is IPv4-only by default, and a loopback destination may be retried on the other family (not when the capture layer had to fabricate the address), so check both — and confirm the dependency is up before traffic starts (sequence its start, raise --delay, or add a readiness probe)"
 
 // ErrRecordingPausedDueToMemoryPressure tells record-mode parsers to stop
 // decoding and fall back to transparent passthrough while the agent is under
@@ -387,7 +395,13 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 	// Handle errors other than EOF
 	if err != nil && err != io.EOF {
 		utils.LogError(logger, err, "failed to read HTTP headers")
-		return nil, readErr
+		// Wrap, do not replace: utils.LogError swallows context.Canceled so the
+		// agent does not shout about connections it tore down itself, and that
+		// guard only works while the cancellation is still visible. Returning a
+		// bare readErr here erased it, so the next LogError up the stack
+		// reported a routine shutdown at ERROR — which the node lanes fail a
+		// recording on, turning a clean stop into a red run.
+		return nil, fmt.Errorf("%w: %w", readErr, err)
 	}
 
 	// Check if the initial buffer already contains complete headers
@@ -417,7 +431,8 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 					break // EOF reached, but nothing more to read
 				}
 				utils.LogError(logger, err, "error while reading HTTP headers")
-				return nil, readErr
+				// Wrap, not replace — see the note on the first read above.
+				return nil, fmt.Errorf("%w: %w", readErr, err)
 			}
 
 			// Append the new data to the buffer
@@ -444,7 +459,13 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 	if err != nil && err != io.EOF {
 		utils.LogError(logger, err, "failed to read the request message in proxy")
-		return nil, readErr
+		// Wrap, do not replace: utils.LogError swallows context.Canceled so the
+		// agent does not shout about connections it tore down itself, and that
+		// guard only works while the cancellation is still visible. Returning a
+		// bare readErr here erased it, so the next LogError up the stack
+		// reported a routine shutdown at ERROR — which the node lanes fail a
+		// recording on, turning a clean stop into a red run.
+		return nil, fmt.Errorf("%w: %w", readErr, err)
 	}
 
 	return initialBuf, nil
@@ -683,7 +704,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	if dstCfg.TLSCfg != nil {
 		logger.Debug("trying to establish a TLS connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 
-		destConn, err = tls.Dial("tcp", dstCfg.Addr, dstCfg.TLSCfg)
+		destConn, err = DialDestinationTLS(ctx, logger, "tcp",
+			DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated}, dstCfg.TLSCfg)
 		if err != nil {
 			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", NextStepDialDestination))
 			return nil, err
@@ -691,7 +713,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	} else {
 		logger.Debug("trying to establish a connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-		destConn, err = net.Dial("tcp", dstCfg.Addr)
+		destConn, err = DialDestination(ctx, logger, "tcp",
+			DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated})
 		if err != nil {
 			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", NextStepDialDestination))
 			return nil, err

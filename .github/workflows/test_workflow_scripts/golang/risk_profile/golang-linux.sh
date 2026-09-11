@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # This script automates the testing of the risk profile identification feature.
 # It records test cases, validates the initial failure report, then tests the
@@ -371,7 +372,7 @@ git checkout origin/risk-profile
 echo "Cleaning up previous runs..."
 rm -rf keploy/ my-app *.log
 echo "Building the Go application..."
-go build -o my-app
+go_retry build -o my-app
 endsec
 
 section "Record Test Cases"
@@ -415,7 +416,7 @@ fi
 section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
 git checkout origin/risk-profile-v2
-go build -o my-app
+go_retry build -o my-app
 $REPLAY_BIN test -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee test.log || true
 check_for_errors "test.log"
 check_report_for_risk_profiles

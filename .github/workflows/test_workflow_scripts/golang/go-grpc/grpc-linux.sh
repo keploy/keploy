@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # This script tests the go-grpc sample application in two modes:
 # 'incoming': Tests the gRPC server by recording its incoming gRPC calls.
@@ -31,8 +32,8 @@ echo "Building gRPC server and client binaries..."
 if grep -q '"localhost:50051"' client/client.go; then
     sed -i 's/"localhost:50051"/"127.0.0.1:50051"/' client/client.go
 fi
-go build -o grpc-server .
-go build -o grpc-client ./client
+go_retry build -o grpc-server .
+go_retry build -o grpc-client ./client
 chmod +x ./grpc-server ./grpc-client
 
 # --- Helper Functions ---

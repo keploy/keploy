@@ -68,7 +68,10 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 	dialCtx, dialCancel := context.WithTimeout(ctx, opportunisticDialTimeout)
 	defer dialCancel()
 	var dialer net.Dialer
-	dstConn, err := dialer.DialContext(dialCtx, "tcp", dstAddr)
+	dstConn, err := util.DialDestinationWith(dialCtx, p.logger, util.DialTarget{Addr: dstAddr},
+		func(ctx context.Context, a string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp", a)
+		})
 	if err != nil {
 		return fmt.Errorf("dial upstream %s: %w", dstAddr, err)
 	}

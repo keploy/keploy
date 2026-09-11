@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # E2E for the mock-mismatch report. Reuses the http-pokeapi sample (it makes
 # mockable outgoing HTTP calls), records it, then MUTATES the recorded mocks so
@@ -36,25 +37,7 @@ if [ -f "./keploy.yml" ]; then
 fi
 rm -rf keploy/
 
-build_go_app() {
-  local attempt=1
-  local max_attempts=4
-  local sleep_sec=5
-  while [ "$attempt" -le "$max_attempts" ]; do
-    if GOPROXY="proxy.golang.org,direct" go build -o http-pokeapi; then
-      return 0
-    fi
-    if [ "$attempt" -ge "$max_attempts" ]; then
-      echo "::error::go build for http-pokeapi failed after ${max_attempts} attempts"
-      return 1
-    fi
-    echo "go build attempt ${attempt} failed; retrying in ${sleep_sec}s…"
-    sleep "$sleep_sec"
-    sleep_sec=$((sleep_sec * 2))
-    attempt=$((attempt + 1))
-  done
-}
-build_go_app
+go_retry build -o http-pokeapi
 echo "go binary built"
 
 sudo "$RECORD_BIN" config --generate
