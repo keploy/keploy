@@ -24,6 +24,8 @@ import (
 // already deterministic per sub-test.
 type stubMappingDB struct {
 	mappings      map[string][]models.MockEntry
+	startup       []models.MockEntry
+	startupErr    error
 	hasMeaningful bool
 	err           error
 	calledWithSet string
@@ -34,6 +36,10 @@ func (s *stubMappingDB) Get(_ context.Context, testSetID string) (map[string][]m
 	s.callCount++
 	s.calledWithSet = testSetID
 	return s.mappings, s.hasMeaningful, s.err
+}
+
+func (s *stubMappingDB) GetStartup(_ context.Context, _ string) ([]models.MockEntry, error) {
+	return s.startup, s.startupErr
 }
 
 // TestLoadMappingsForSet_MissingFile pins the tolerance for an absent
@@ -52,7 +58,7 @@ func TestLoadMappingsForSet_MissingFile(t *testing.T) {
 		}
 		r := &Runner{mappingDB: stub}
 
-		mappings, mocksThatHaveMappings, mocksWeNeed, err := r.loadMappingsForSet(context.Background(), "set-without-mappings")
+		mappings, mocksThatHaveMappings, mocksWeNeed, _, err := r.loadMappingsForSet(context.Background(), "set-without-mappings")
 
 		if err != nil {
 			t.Fatalf("expected nil error when mappings absent, got %v", err)
@@ -94,7 +100,7 @@ func TestLoadMappingsForSet_MissingFile(t *testing.T) {
 		}
 		r := &Runner{mappingDB: stub}
 
-		mappings, mocksThatHaveMappings, mocksWeNeed, err := r.loadMappingsForSet(context.Background(), "set-with-mappings")
+		mappings, mocksThatHaveMappings, mocksWeNeed, _, err := r.loadMappingsForSet(context.Background(), "set-with-mappings")
 		if err != nil {
 			t.Fatalf("expected nil error on success, got %v", err)
 		}
@@ -129,7 +135,7 @@ func TestLoadMappingsForSet_MissingFile(t *testing.T) {
 		}
 		r := &Runner{mappingDB: stub}
 
-		mappings, mthm, mwn, err := r.loadMappingsForSet(context.Background(), "set-broken")
+		mappings, mthm, mwn, _, err := r.loadMappingsForSet(context.Background(), "set-broken")
 		if err == nil {
 			t.Fatalf("expected non-nil error when mappingDB.Get returns err, got nil")
 		}
@@ -148,7 +154,7 @@ func TestLoadMappingsForSet_MissingFile(t *testing.T) {
 		// that guard a nil-pointer panic would silently take down the
 		// runner; better to surface the configuration error.
 		r := &Runner{mappingDB: nil}
-		_, _, _, err := r.loadMappingsForSet(context.Background(), "anything")
+		_, _, _, _, err := r.loadMappingsForSet(context.Background(), "anything")
 		if err == nil {
 			t.Fatalf("expected error when mappingDB is nil, got nil")
 		}

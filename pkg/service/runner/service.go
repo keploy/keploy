@@ -93,4 +93,13 @@ type MockDB interface {
 // MappingDB provides test-case → mock-name mapping.
 type MappingDB interface {
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
+	// GetStartup returns the test-set-scoped startup mocks — boot traffic
+	// (handshakes, pool warm-up, config fetches) that belongs to no single test
+	// and so never appears in Get's per-test map. Required here for the same
+	// reason as in pkg/service/replay: this path also loads mocks strictly BY
+	// NAME (sendPerTestParams -> MockFilterParams.MockMapping ->
+	// disk.LoadByNames), so a startup mock missing from the per-test list is
+	// absent from the pool for every test. Returns nil, nil when the file or
+	// the section is absent.
+	GetStartup(ctx context.Context, testSetID string) ([]models.MockEntry, error)
 }
