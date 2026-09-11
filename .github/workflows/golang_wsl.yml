@@ -89,10 +89,25 @@ jobs:
             echo "debugfs is already mounted"
           fi
           # Verify the mount
-          mount | grep debugfs || echo "debugfs not found in mount output"  
+          mount | grep debugfs || echo "debugfs not found in mount output"
+
+      - name: Install WSL packages
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          # GitHub-hosted runners live in Azure, and archive.ubuntu.com is served
+          # from outside it -- measured at 196 kB/s from this lane, which is slow
+          # enough that `timeout 600` kills apt mid-download (exit 124) with no
+          # hint as to why. azure.archive.ubuntu.com is the in-region mirror.
+          sudo sed -i \
+            -e 's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
+            -e 's|http://security.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
+            /etc/apt/sources.list
+          # Once, not four times. golang-go alone pulls ~154 MB of gcc, and every
+          # repeat also re-fetched the ~47 MB of package lists.
           sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y
           sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y golang-go curl git ca-certificates jq
- 
+
       - name: Prepare binaries for WSL
         shell: bash
         run: |
@@ -115,20 +130,10 @@ jobs:
             | xargs -0 -I{} sed -i 's/\r$//' "{}"
           chmod -R a+x "$WS/.github/workflows/test_workflow_scripts"
 
-      - name: Install dependencies in WSL
-        shell: wsl-bash {0}
-        run: |
-          set -euo pipefail
-          sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y
-          sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y golang-go curl git ca-certificates
-
-          
       - name: Prepare CA tools in WSL
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
-          sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y
-          sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y ca-certificates jq
           # Run Debian CA refresh (ok if no custom certs yet)
           sudo update-ca-certificates || true
           # Provide a no-op for RHEL's tool to avoid exit 127 if Keploy probes it
@@ -148,7 +153,6 @@ jobs:
           export RECORD_BIN="$WS/.wsl-bin/keploy_record"
           export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"
           chmod +x "$RECORD_BIN" "$REPLAY_BIN" || true
-          sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y golang-go curl git ca-certificates
           cd "$WS/samples-go/${{ matrix.app.path }}"
           # Source the existing Linux bash script under WSL
           source "$WS/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh"
