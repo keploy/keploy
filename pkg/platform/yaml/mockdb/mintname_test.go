@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -183,5 +184,75 @@ func TestUnownedAndOwnedCoexistInOneSession(t *testing.T) {
 	}
 	if mk.Name != "mock-0" {
 		t.Fatalf("an unowned mock must be mock-0 regardless of owned mocks in the session, got %q", mk.Name)
+	}
+}
+
+// `keploy mock replay --on-miss record` appends to a set that is already on
+// disk, in a process whose counters are empty. Without seeding, every appended
+// mock reuses a recorded name; with a single int64 seed, only one of the
+// sequences could be continued. Each must continue independently.
+func TestSeedCountersContinuesEverySequenceIndependently(t *testing.T) {
+	alpha, beta := ownerHash("alpha"), ownerHash("beta")
+	onDisk := []*models.Mock{
+		{Name: "mock-0"},
+		{Name: "mock-1"},
+		{Name: alpha + "-0", Owner: "alpha"},
+		{Name: alpha + "-1", Owner: "alpha"},
+		{Name: alpha + "-2", Owner: "alpha"},
+		{Name: beta + "-0", Owner: "beta"},
+		nil,
+		{Name: "not-a-minted-name"},
+	}
+
+	ys := New(zap.NewNop(), t.TempDir(), "")
+	ys.SeedCounters(onDisk)
+	equalNames(t, mintAll(t, ys, "", "alpha", "beta", "alpha"),
+		[]string{"mock-2", alpha + "-3", beta + "-1", alpha + "-4"},
+		"each sequence must continue past what is on disk")
+}
+
+// Seeding also claims each prefix for the owner that wrote it, so the collision
+// check still holds across an append.
+func TestSeedCountersClaimsPrefixesForTheirOwners(t *testing.T) {
+	ys := New(zap.NewNop(), t.TempDir(), "")
+	ys.SeedCounters([]*models.Mock{{Name: ownerHash("alpha") + "-0", Owner: "alpha"}})
+
+	ys.nameMu.Lock()
+	got := ys.hashToOwner[ownerHash("alpha")]
+	ys.nameMu.Unlock()
+	if got != "alpha" {
+		t.Fatalf("seeding must claim the prefix for its owner, got %q", got)
+	}
+}
+
+// An out-of-order or sparse set still seeds from the highest ordinal present.
+func TestSeedCountersUsesTheHighestOrdinal(t *testing.T) {
+	ys := New(zap.NewNop(), t.TempDir(), "")
+	ys.SeedCounters([]*models.Mock{{Name: "mock-9"}, {Name: "mock-3"}, {Name: "mock-7"}})
+	equalNames(t, mintAll(t, ys, ""), []string{"mock-10"}, "seed from the highest, not the last")
+}
+
+func TestSplitMockName(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		n      int64
+		ok     bool
+	}{
+		{"mock-0", "mock", 0, true},
+		{"mock-123", "mock", 123, true},
+		{"3f2a1b9c4d5e-7", "3f2a1b9c4d5e", 7, true},
+		{"mock-", "", 0, false},
+		{"mock", "", 0, false},
+		{"-4", "", 0, false},
+		{"mock-x", "", 0, false},
+		{"mock-99999999999999999999", "", 0, false},
+		{"", "", 0, false},
+	} {
+		prefix, n, ok := splitMockName(tc.name)
+		if ok != tc.ok || prefix != tc.prefix || n != tc.n {
+			t.Errorf("splitMockName(%q) = (%q, %d, %v), want (%q, %d, %v)",
+				tc.name, prefix, n, ok, tc.prefix, tc.n, tc.ok)
+		}
 	}
 }

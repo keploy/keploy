@@ -14,6 +14,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1829,15 +1831,6 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	return nil
 }
 
-// GetCurrMockID reports the last unowned index issued (-1 before the first).
-// Deleted in the following commit -- it has no production caller and an int64
-// cannot express a per-owner map -- and kept here only so this commit builds.
-func (ys *MockYaml) GetCurrMockID() int64 {
-	ys.nameMu.Lock()
-	defer ys.nameMu.Unlock()
-	return ys.nextByOwner[unownedPrefix] - 1
-}
-
 // ResetCounterID starts a fresh recording session: every sequence restarts at 0.
 // The signature is unchanged from when there was one counter -- callers and test
 // stubs are unaffected -- but the body now clears the whole per-owner map.
@@ -1848,17 +1841,56 @@ func (ys *MockYaml) ResetCounterID() {
 	ys.hashToOwner = nil
 }
 
-// SetCounterID seeds the mock-name counter so the NEXT InsertMock names its
-// mock "mock-<id+1>". Used when APPENDING to an existing set (the `keploy mock
-// replay --on-miss record` incremental-refresh path) so newly-captured mocks
-// don't reuse names already present on disk. Recording a fresh set uses
-// ResetCounterID (seed -1 → first mock is mock-0); appending seeds from the
-// set's highest existing index instead.
-func (ys *MockYaml) SetCounterID(id int64) {
+// SeedCounters primes the name sequences from a set already on disk so the next
+// InsertMock continues PAST it instead of colliding with it. Used when APPENDING
+// (`keploy mock replay --on-miss record`); a fresh recording calls ResetCounterID
+// instead and starts every sequence at 0.
+//
+// It replaces the previous SetCounterID(int64), which could only seed one
+// sequence: with numbering per owner there is no single "the" counter, and an
+// int64 cannot say "continue owner A at 4 and owner B at 11". Seeding from the
+// NAMES rather than from the owners is deliberate -- a name on disk is what a new
+// mint must not collide with, whether or not its owner is still known.
+func (ys *MockYaml) SeedCounters(existing []*models.Mock) {
 	ys.nameMu.Lock()
 	defer ys.nameMu.Unlock()
 	if ys.nextByOwner == nil {
 		ys.nextByOwner = make(map[string]int64)
 	}
-	ys.nextByOwner[unownedPrefix] = id + 1
+	for _, mk := range existing {
+		if mk == nil {
+			continue
+		}
+		prefix, n, ok := splitMockName(mk.Name)
+		if !ok {
+			continue
+		}
+		if n+1 > ys.nextByOwner[prefix] {
+			ys.nextByOwner[prefix] = n + 1
+		}
+		// Keep the collision check meaningful across an append: a prefix already
+		// on disk is claimed by the owner that wrote it.
+		if mk.Owner != "" && prefix == ownerHash(mk.Owner) {
+			if ys.hashToOwner == nil {
+				ys.hashToOwner = make(map[string]string)
+			}
+			ys.hashToOwner[prefix] = mk.Owner
+		}
+	}
+}
+
+// splitMockName splits a minted name "<prefix>-<n>" into its namespace and
+// ordinal. prefix is unownedPrefix for a legacy / unowned mock ("mock-7") and an
+// owner hash otherwise ("3f2a1b9c4d5e-7"). Returns ok=false for anything this
+// package did not mint, which is then ignored for seeding purposes.
+func splitMockName(name string) (string, int64, bool) {
+	i := strings.LastIndexByte(name, '-')
+	if i <= 0 || i == len(name)-1 {
+		return "", 0, false
+	}
+	n, err := strconv.ParseInt(name[i+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return name[:i], n, true
 }

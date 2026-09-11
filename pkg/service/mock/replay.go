@@ -3,8 +3,6 @@ package mock
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -205,12 +203,13 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 	if len(captured) == 0 {
 		return
 	}
-	// Seed the name counter to the set's highest existing mock-N so appended
-	// mocks get fresh names (InsertMock always renames to mock-<counter+1>);
-	// without this the replay-side counter starts at 0 and appended mocks reuse
-	// mock-0, mock-1, … colliding with the recorded set (consumed-mock tracking
-	// and mappings both key on name).
-	m.mockDB.SetCounterID(m.highestMockIndex(ctx, name))
+	// Prime the name sequences from what is already on disk, so appended mocks
+	// get fresh names (InsertMock always renames); without this the replay-side
+	// counters start at 0 and every appended mock reuses a recorded name,
+	// colliding with the set (consumed-mock tracking and mappings both key on
+	// name). Per owner, since a name's ordinal counts within its owner -- one
+	// int64 could only ever have seeded one of the sequences.
+	m.mockDB.SeedCounters(m.existingMocks(ctx, name))
 	appended := 0
 	for _, mk := range captured {
 		if mk == nil {
@@ -232,29 +231,21 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 	}
 }
 
-// highestMockIndex returns the largest N across the set's existing "mock-N"
-// names, or -1 when the set is empty / has no mock-N names. Seeding the counter
-// to this value makes the next InsertMock name its mock "mock-<N+1>".
-func (m *mockService) highestMockIndex(ctx context.Context, name string) int64 {
+// existingMocks loads every mock already recorded in the set, across both pools.
+// Handed to MockDB.SeedCounters so an append continues each name sequence past
+// what is on disk.
+//
+// This replaces highestMockIndex, which parsed the "mock-" prefix here and
+// returned a single highest N. That shape cannot survive owner-scoped names:
+// there is no longer one sequence to be highest in, and the parsing belongs next
+// to the mint that defines the format, not in the CLI. Errors are ignored for
+// the same reason they were before -- an unreadable set means no seed, and the
+// append is best-effort.
+func (m *mockService) existingMocks(ctx context.Context, name string) []*models.Mock {
 	all := map[string]bool{}
 	filtered, _ := m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all)
 	unfiltered, _ := m.mockDB.GetUnFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all)
-	highest := int64(-1)
-	consider := func(mocks []*models.Mock) {
-		for _, mk := range mocks {
-			if mk == nil {
-				continue
-			}
-			if n, ok := strings.CutPrefix(mk.Name, "mock-"); ok {
-				if idx, err := strconv.ParseInt(n, 10, 64); err == nil && idx > highest {
-					highest = idx
-				}
-			}
-		}
-	}
-	consider(filtered)
-	consider(unfiltered)
-	return highest
+	return append(filtered, unfiltered...)
 }
 
 // pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)

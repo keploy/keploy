@@ -459,7 +459,6 @@ func (d *recMockDB) InsertMock(_ context.Context, m *models.Mock, _ string) erro
 	return nil
 }
 func (d *recMockDB) DeleteMocksForSet(context.Context, string) error { return nil }
-func (d *recMockDB) GetCurrMockID() int64                            { return 0 }
 func (d *recMockDB) ResetCounterID()                                 {}
 
 type recMappingDB struct {

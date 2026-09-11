@@ -98,9 +98,9 @@ type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	ResetCounterID()
-	// SetCounterID seeds the mock-name counter so the next InsertMock names its
-	// mock "mock-<id+1>" — used to append without reusing existing names.
-	SetCounterID(id int64)
+	// SeedCounters primes the name sequences from mocks already on disk so an
+	// append does not reuse a name. Per owner, because numbering is per owner.
+	SeedCounters(existing []*models.Mock)
 }
 
 // MappingDB persists and reads the per-test mock mapping for a set. Optional:
