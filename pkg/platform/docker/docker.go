@@ -514,17 +514,15 @@ func (idc *Impl) findContainerInServices(compose *Compose, containerName string)
 		serviceName := serviceNameNode.Value
 
 		// Check for explicit container_name using the same pattern as existing functions
-		var containerNameMatch bool
-		for j := 0; j < len(serviceContentNode.Content)-1; j++ {
-			if serviceContentNode.Content[j].Kind == yaml.ScalarNode && serviceContentNode.Content[j].Value == "container_name" &&
-				aliasTarget(serviceContentNode.Content[j+1]).Value == containerName {
-				containerNameMatch = true
-				break
-			}
-		}
+		cn := serviceKeyThroughMerge(serviceContentNode, "container_name")
+		containerNameMatch := cn != nil && cn.Value == containerName
 
 		// If explicit container_name matches or service name matches, extract networks and ports
 		if containerNameMatch || serviceName == containerName {
+			// `ports:` and `networks:` are routinely put in a shared `x-*`
+			// fragment. Read off the unmerged node they come back empty, and the
+			// app is published on nothing and joins the wrong network.
+			idc.flattenMergeKeys(serviceContentNode)
 			networks := idc.extractServiceNetworks(serviceContentNode, serviceName)
 			ports := idc.extractServicePorts(serviceContentNode)
 			return networks, ports, serviceName, true
@@ -1205,8 +1203,8 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 		}
 		svc := compose.Services.Content[i+1]
 		for j := 0; j+1 < len(svc.Content); j += 2 {
-			if svc.Content[j].Value == "container_name" &&
-				aliasTarget(svc.Content[j+1]).Value == "keploy-agent" {
+			if cn := serviceKeyThroughMerge(svc, "container_name"); cn != nil &&
+				cn.Value == "keploy-agent" {
 				return fmt.Errorf("service %q already uses container_name "+
 					"\"keploy-agent\"; rename it so keploy can add its own",
 					compose.Services.Content[i].Value)
@@ -1253,16 +1251,14 @@ func (idc *Impl) findServiceNodeAndName(compose *Compose, appIdentifier string) 
 			return serviceContentNode, serviceName, nil
 		}
 
-		// Check 2: Does the container_name match?
-		for j := 0; j < len(serviceContentNode.Content)-1; j += 2 {
-			if serviceContentNode.Content[j].Value == "container_name" {
-				// `container_name: *n` is legal; matching on the alias node's own
-				// Value compares against the anchor NAME, so the lookup misses and
-				// keploy aborts with "failed to find target service".
-				if aliasTarget(serviceContentNode.Content[j+1]).Value == appIdentifier {
-					return serviceContentNode, serviceName, nil
-				}
-			}
+		// Check 2: Does the container_name match? Read through an alias and
+		// through `<<`: on the alias node's own Value the comparison is against
+		// the anchor NAME, and an inherited container_name is not in Content at
+		// all -- either way the lookup misses and keploy aborts with "failed to
+		// find target service" on a file docker compose accepts.
+		if cn := serviceKeyThroughMerge(serviceContentNode, "container_name"); cn != nil &&
+			cn.Value == appIdentifier {
+			return serviceContentNode, serviceName, nil
 		}
 	}
 	return nil, "", fmt.Errorf("service not found")
@@ -1283,6 +1279,14 @@ func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOption
 	// sections keploy appends to need the same treatment, one node deep: it adds
 	// a key to `services:` and a volume to `volumes:`, and an anchored section
 	// shared with, say, `networks: *v` would carry those into it.
+	// Before detaching: materialise anything the service inherits through `<<`,
+	// so the writers below see real keys and detach sees the final subtree.
+	if n := idc.flattenMergeKeys(targetServiceNode); n > 0 {
+		idc.logger.Debug("materialised keys the app service inherits through a "+
+			"YAML merge key, so keploy's edits apply to them",
+			zap.Int("keys", n), zap.String("service", serviceName))
+	}
+
 	roots := compose.documentRoots()
 	owned := map[*yaml.Node]bool{}
 	collectNodes(targetServiceNode, owned)
@@ -1670,6 +1674,208 @@ func (idc *Impl) addTopLevelVolume(compose *Compose, volumeName string) {
 		&yaml.Node{Kind: yaml.ScalarNode, Value: volumeName},
 		&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{}}, // {}
 	)
+}
+
+// flattenMergeKeys materialises `<<:` into explicit keys on a service node, so
+// the rest of this file can treat it as an ordinary mapping.
+//
+// keploy's writers all scan Content for a literal key name, and a key inherited
+// through a merge is not there -- it lives in the fragment `<<` names. Three
+// separate things went wrong as a result, on a file docker compose accepts:
+//
+//   - `removeServiceProperty(app, "networks")` removed nothing, so the generated
+//     file carried the inherited `networks:` alongside the `network_mode:` keploy
+//     adds, and compose rejects that pair as mutually exclusive
+//   - `getOrCreateEnvNode` did not find the inherited `environment:`, so keploy
+//     appended a NEW one -- an explicit key overrides a merged key, so every
+//     variable the user had inherited was silently gone
+//   - the gate read no `ports:`, so keploy-agent published nothing on the app's
+//     behalf and the app was unreachable from the host
+//
+// Reading through the merge instead of materialising it would fix only the third:
+// a key that is inherited cannot be DELETED, which is what keploy needs to do to
+// `networks` and `ports`. YAML has no way to unset a merged key.
+//
+// Key and value are deep-cloned rather than referenced, for the same reason
+// detachSubtree copies: keploy edits what it takes, and the fragment belongs to
+// the user.
+//
+// A clone can carry an anchor the fragment defined, which would be a second
+// definition of that name. This does NOT strip it, because ModifyComposeForAgent
+// runs detachSubtree over the same subtree immediately afterwards and that
+// clears every anchor in it -- which is the reason flattening comes first there,
+// and a test pins that order.
+//
+// The other caller, the read gate, does NOT detach, so a service it flattens can
+// carry a duplicate anchor until the rewrite runs. That is fine only because
+// nothing writes a compose file off the gate alone; a caller that did would have
+// to detach itself.
+//
+// Precedence follows the YAML merge spec: a key the node states explicitly wins
+// over any merged one, and within `<<: [*a, *b]` the earlier entry wins. Merges
+// nested inside a merged fragment are followed too.
+//
+// Idempotent: it removes the `<<` key it consumed, so a second call does nothing.
+func (idc *Impl) flattenMergeKeys(n *yaml.Node) int {
+	// The Kind check states the contract rather than defending a known failure:
+	// no test distinguishes it, because the scan below finds no `<<` key on a
+	// scalar or a sequence and returns early anyway. It stays so that a future
+	// change to the scan cannot start rewriting Content on a node that does not
+	// hold key/value pairs.
+	if n == nil || n.Kind != yaml.MappingNode {
+		return 0
+	}
+
+	// Rebuilt without the `<<` entries: each is being replaced by what it stood
+	// for, and leaving one would re-merge the fragment over keploy's edits when
+	// compose loads the generated file.
+	present := map[string]bool{}
+	var mergeValues []*yaml.Node
+	kept := n.Content[:0]
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if isMergeKey(n.Content[i]) {
+			// EVERY merge key is consumed, not just the first.
+			//
+			// A mapping cannot legally define `<<` twice, and docker compose
+			// rejects such a file -- but decoding into a yaml.Node does not,
+			// which is how one reaches keploy at all. Consuming only the first
+			// would leave the keys the second brings in invisible to keploy's
+			// writers, which is exactly the bug this function exists to fix, just
+			// in a rarer file.
+			//
+			// Earlier wins between them, by analogy with `<<: [*a, *b]`. The spec
+			// states no rule here because the shape is invalid, and go-yaml's own
+			// decoder would do the opposite if it accepted it -- so this is a
+			// choice, not a standard being followed.
+			sources, usable := mergeSources(n.Content[i+1])
+			if !usable {
+				// go-yaml rejects this with "map merge requires map or sequence
+				// of maps as the value", so docker compose does too. Consuming it
+				// would delete the key and hand back a file that loads, hiding an
+				// error the user needs to see -- keep it, and say why.
+				idc.logger.Warn("a `<<:` merge key does not name a mapping, so keploy "+
+					"cannot apply what it inherits; docker compose will reject this "+
+					"file for the same reason",
+					zap.String("mergeShape", yamlKindName(n.Content[i+1].Kind)),
+					zap.String("resolvesTo", yamlKindName(resolvedKind(n.Content[i+1]))))
+				kept = append(kept, n.Content[i], n.Content[i+1])
+				continue
+			}
+			mergeValues = append(mergeValues, sources...)
+			continue
+		}
+		present[n.Content[i].Value] = true
+		kept = append(kept, n.Content[i], n.Content[i+1])
+	}
+	if len(mergeValues) == 0 {
+		return 0
+	}
+	n.Content = kept
+
+	added := 0
+	for _, src := range mergeValues {
+		for i := 0; i+1 < len(src.Content); i += 2 {
+			key := src.Content[i].Value
+			if key == "<<" || present[key] {
+				continue
+			}
+			present[key] = true
+			n.Content = append(n.Content,
+				cloneYAMLNode(src.Content[i]), cloneYAMLNode(src.Content[i+1]))
+			added++
+		}
+	}
+	return added
+}
+
+// mergeSources returns the mappings a `<<` value names, in precedence order.
+//
+// `<<: *a` is one mapping; `<<: [*a, *b]` is several, and the YAML spec gives
+// the EARLIER entry precedence -- the opposite of what "later overrides" reads
+// like, and the reason the caller records keys as it goes.
+//
+// A fragment may merge in turn, so its own `<<` is followed here rather than by
+// recursing into flattenMergeKeys, which would edit a node the user owns.
+func mergeSources(v *yaml.Node) ([]*yaml.Node, bool) {
+	var out []*yaml.Node
+	usable := true
+	var add func(*yaml.Node, int)
+	add = func(n *yaml.Node, depth int) {
+		if n == nil || depth > 16 {
+			usable = false
+			return
+		}
+		switch n.Kind {
+		case yaml.AliasNode:
+			add(n.Alias, depth+1)
+		case yaml.SequenceNode:
+			for _, e := range n.Content {
+				add(e, depth+1)
+			}
+		case yaml.MappingNode:
+			out = append(out, n)
+			// A fragment may merge in turn. Every `<<` inside one is followed,
+			// for the same reason the top level consumes every one: a key reached
+			// only through the second would otherwise stay invisible.
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				if isMergeKey(n.Content[i]) {
+					add(n.Content[i+1], depth+1)
+				}
+			}
+		default:
+			// A null, a scalar, or anything else that cannot be merged.
+			usable = false
+		}
+	}
+	add(v, 0)
+	return out, usable
+}
+
+// serviceKeyThroughMerge finds a key on a service, following `<<` but modifying
+// nothing.
+//
+// The scans that SELECT the app service run before keploy has decided to touch
+// the file, and they cannot flatten first: flattening is keyed on having already
+// found the service. An inherited `container_name` was therefore invisible to
+// selection, and keploy aborted outright with "failed to find target service" on
+// a compose file docker accepts -- the one member of this bug class that fails
+// loudly rather than silently.
+func serviceKeyThroughMerge(service *yaml.Node, key string) *yaml.Node {
+	if service == nil || service.Kind != yaml.MappingNode {
+		return nil
+	}
+	var merges []*yaml.Node
+	for i := 0; i+1 < len(service.Content); i += 2 {
+		if isMergeKey(service.Content[i]) {
+			merges = append(merges, service.Content[i+1])
+			continue
+		}
+		// An explicit key wins over anything inherited.
+		if service.Content[i].Value == key {
+			return aliasTarget(service.Content[i+1])
+		}
+	}
+	for _, m := range merges {
+		sources, _ := mergeSources(m)
+		for _, src := range sources {
+			for i := 0; i+1 < len(src.Content); i += 2 {
+				if src.Content[i].Value == key {
+					return aliasTarget(src.Content[i+1])
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// isMergeKey reports whether a key node is the YAML merge key rather than a
+// string that happens to read like one.
+//
+// `<<: *a` carries the `!!merge` tag; `"<<": *a` is a plain `!!str` that go-yaml
+// keeps as an ordinary key. Matching on Value alone would silently delete that
+// key -- bizarre input, but deleting a user's data over it is not defensible.
+func isMergeKey(key *yaml.Node) bool {
+	return key.Value == "<<" && key.Tag == "!!merge"
 }
 
 // detachSubtree makes every node in a subtree safe for keploy to edit in place,
