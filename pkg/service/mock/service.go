@@ -106,7 +106,12 @@ type MockDB interface {
 // MappingDB persists and reads the per-test mock mapping for a set. Optional:
 // nil disables per-test scoping (suite-level record/replay).
 type MappingDB interface {
-	UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
+	// UpsertBatchReplacing writes each owner's mock list WHOLE. mock mode emits
+	// an owner exactly once per run, so a union could only resurrect names a
+	// previous recording gave to different captures. (Integration record uses
+	// UpsertBatch, which unions, because its agent emits a test's mocks as a
+	// delta -- see mapdb.)
+	UpsertBatchReplacing(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
 	// Delete removes the set's mapping file. Called at the start of a re-record
 	// so the rewrite is a replacement, not a union with the previous run.

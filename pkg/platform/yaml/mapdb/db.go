@@ -148,6 +148,31 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // "no_mocks" for the affected tests. Batching keeps the cost linear so the
 // stream is never the bottleneck.
 func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error {
+	return db.upsertBatch(ctx, testSetID, byTest, false)
+}
+
+// UpsertBatchReplacing is UpsertBatch except that a test already present on disk
+// has its mock list REPLACED rather than unioned.
+//
+// The two callers need opposite things, and the difference is in how each one
+// produces its input. The integration recorder (`keploy record`) receives a
+// test's mocks from the agent as a DELTA and may see several for the same test,
+// so unioning is the only way it accumulates a complete list. `keploy mock
+// record` writes each owner exactly once, from the whole run, so a union there
+// can only ever add back entries from a PREVIOUS recording of that same test --
+// names that this run has reissued to different captures.
+//
+// Whole-owner replacement is the other half of the (owner, n) identity: numbering
+// a mock within its owner is what makes the names stable, and replacing an
+// owner's list atomically is what stops a stale list from surviving alongside
+// them. Every tool that ships this identity pairs the two -- Jest snapshots,
+// pytest-recording, nock. MappingDb.Insert already replaces per test, so the
+// shape is not new here.
+func (db *MappingDb) UpsertBatchReplacing(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error {
+	return db.upsertBatch(ctx, testSetID, byTest, true)
+}
+
+func (db *MappingDb) upsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry, replace bool) error {
 	if len(byTest) == 0 {
 		return nil
 	}
@@ -206,7 +231,11 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	newIDs := make([]string, 0, len(byTest))
 	for testID := range byTest {
 		if i, ok := at[testID]; ok {
-			mapping.TestCases[i].Mocks = mergeMockEntries(mapping.TestCases[i].Mocks, byTest[testID])
+			if replace {
+				mapping.TestCases[i].Mocks = byTest[testID]
+			} else {
+				mapping.TestCases[i].Mocks = mergeMockEntries(mapping.TestCases[i].Mocks, byTest[testID])
+			}
 			continue
 		}
 		newIDs = append(newIDs, testID)

@@ -217,7 +217,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			} else if len(windows) > 0 {
 				byTest := mapOwners(m.logger, windows, recorded)
 				if len(byTest) > 0 {
-					if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
+					if err := m.mappingDB.UpsertBatchReplacing(persistCtx, name, byTest); err != nil {
 						m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
 					} else {
 						m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
