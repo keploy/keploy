@@ -252,6 +252,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		// Read directly; see utils.NoViperBindAnnotation.
+		_ = cmd.Flags().SetAnnotation("pass-through-ports", utils.NoViperBindAnnotation, []string{"true"})
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().MarkDeprecated("app-id", "DEPRICATED : was used for unique name for the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
@@ -341,6 +343,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		_ = cmd.Flags().MarkHidden("mock-mode")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		// Read directly; see utils.NoViperBindAnnotation.
+		_ = cmd.Flags().SetAnnotation("pass-through-ports", utils.NoViperBindAnnotation, []string{"true"})
 		// --ca-java-home is the manual override for the app-aware Java
 		// truststore install. When the auto-detector in
 		// pkg/agent/proxy/tls/java_detect.go cannot resolve the app's JDK
@@ -2001,6 +2005,8 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy to intercept outgoing calls")
 	cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server")
 	cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Destination ports to leave untouched (never mocked)")
+	// Read directly; see utils.NoViperBindAnnotation.
+	_ = cmd.Flags().SetAnnotation("pass-through-ports", utils.NoViperBindAnnotation, []string{"true"})
 	cmd.Flags().Bool("local", c.cfg.Mock.Local, "Use the local file-backed mock store even when a cloud registry is configured")
 
 	switch cmd.Name() {
@@ -2009,6 +2015,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
+		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Match outgoing request bodies by VALUE, not just by key presence: a mock is rejected when any request-body field outside test.globalNoise.requestbody drifted. Off by default; turning it on will surface request drift that was previously served the stale recorded response")
 		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
 	}
 	return nil
@@ -2123,6 +2130,17 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			return errors.New("failed to get the strict flag")
 		}
 		c.cfg.Mock.Strict = strict
+
+		// Changed()-guarded so an unset flag doesn't clobber
+		// test.schemaNoiseStrict from keploy.yml with the flag's default.
+		if cmd.Flags().Changed("schema-noise-strict") {
+			schemaNoiseStrict, err := cmd.Flags().GetBool("schema-noise-strict")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the schema-noise-strict flag")
+				return errors.New("failed to get the schema-noise-strict flag")
+			}
+			c.cfg.Test.SchemaNoiseStrict = schemaNoiseStrict
+		}
 
 		if cmd.Flags().Changed("delay") {
 			d, err := cmd.Flags().GetUint64("delay")

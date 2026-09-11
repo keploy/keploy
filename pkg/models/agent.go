@@ -50,6 +50,50 @@ type ScopeWindow struct {
 	PID uint32 `json:"pid,omitempty"`
 }
 
+// ScopeAck is the body of POST /agent/scope/begin. Status is retained verbatim
+// for callers written against the original `{"status":"ok"}` contract; the
+// remaining fields report whether the call actually took effect, so a test
+// runner can assert it in one line instead of reading the agent's debug log.
+//
+// Scoped is true only when the served mock pool was genuinely narrowed to this
+// scope (replay). It is therefore false for every record-mode call — recording
+// serves nothing — and Reason names which case it was.
+type ScopeAck struct {
+	Status string `json:"status"`
+	Scoped bool   `json:"scoped"`
+	// Mocks is how many recordings mappings.yaml attributes to THIS scope --
+	// the count of mapped names, not the number of mocks the agent went on to
+	// stage (the served pool also carries recordings no test owns, as overflow).
+	// It is the useful number for a runner: it knows how many dependency calls
+	// its test makes, so a short count is how a truncated mapping shows up --
+	// most often a second scope/begin at record with no end between, which
+	// resets the window and orphans everything captured before it.
+	Mocks  int    `json:"mocks"`
+	Reason string `json:"reason"`
+}
+
+// Reason values for ScopeAck. Stable tokens — test runners branch on them.
+const (
+	// Replay, narrowed. Scoped=true.
+	ScopeReasonPoolRestricted = "pool_restricted" // pid==0, single global pool
+	ScopeReasonWorkerScoped   = "worker_scoped"   // pid>0, this worker's view only
+
+	// Replay, NOT narrowed. Scoped=false — the whole set is being served.
+	ScopeReasonNoMappingTable = "no_mapping_table" // no mappings.yaml, so no scope table was installed
+	ScopeReasonUnmappedScope  = "unmapped_scope"   // table installed, this name absent from it
+	ScopeReasonEmptyMapping   = "empty_mapping"    // name present but mapped to zero mocks
+
+	// Record. Nothing is served, so Scoped is always false.
+	ScopeReasonRecordWindowOpened = "record_window_opened"
+	// ScopeReasonRecordAlreadyOpen: a second begin for a scope that was never
+	// ended. The window start is reset, so anything captured before this call
+	// is attributed to no test and disappears from mappings.yaml.
+	ScopeReasonRecordAlreadyOpen = "record_scope_already_open"
+
+	ScopeReasonEmptyName   = "empty_name"  // no name supplied; the call is a no-op
+	ScopeReasonUnsupported = "unsupported" // this agent build has no scope support
+)
+
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.

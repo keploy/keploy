@@ -77,6 +77,25 @@ func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, er
 			out = append(out, m)
 			continue
 		}
+		// Rule-1 mocks — CORS preflights, MySQL connection-alive commands —
+		// are reusable by nature: the recorded response is a property of the
+		// endpoint, not of the test that happened to trigger it.
+		// correlateScopes buckets a capture into a test's mapping by request
+		// TIMESTAMP alone, so one lands in whichever test's window it fired
+		// in and every other worker would lose it. For a preflight that is
+		// starvation the browser reports as net::ERR_FAILED.
+		//
+		// Keyed off the derivation reason (models.Mock.IsSharedAcrossTests),
+		// NOT off Lifetime: rules 4 and 5 make most of the pool
+		// session-lifetime for reasons that say nothing about reusability,
+		// and exempting those would make worker isolation a no-op. This grants
+		// read VISIBILITY only — the matcher routes session mocks to
+		// UpdateUnFilteredMock, never DeleteFilteredMock, so a worker still
+		// cannot consume another worker's mock.
+		if m.IsSharedAcrossTests() {
+			out = append(out, m)
+			continue
+		}
 		if _, mapped := s.universe[m.Name]; !mapped {
 			out = append(out, m) // shared / unmapped mock — visible to everyone
 		}
