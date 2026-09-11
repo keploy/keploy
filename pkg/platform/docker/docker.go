@@ -1188,27 +1188,38 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 	// A user service by that name is unusual but legal, and appending beside it
 	// produced a generated file that does not parse at all -- `mapping key
 	// "keploy-agent" already defined` -- reading as a keploy bug rather than the
-	// name collision it is. The container_name variant is worse than a duplicate
-	// key: findServiceNodeAndName matches on container_name too, so keploy would
-	// treat the USER's service as its agent and move the app's dns onto it, and
-	// compose rejects the file with `container name "keploy-agent" is already in
-	// use`.
+	// name collision it is.
+	//
+	// The container_name variant is worse, and not for the reason it looks like.
+	// "keploy-agent" is keploy's internal SERVICE KEY, not the agent's container
+	// name: opts.KeployContainer is a randomised `keploy-v3-<rand>` on every
+	// docker run, so there is no container-name clash and docker accepts the file
+	// happily. What breaks is the lookup -- findServiceNodeAndName("keploy-agent")
+	// matches on container_name too, and reaches the USER's service first. keploy
+	// then MOVES the app's `dns` onto that unrelated service, overwriting whatever
+	// dns it declared, while the agent that actually owns the network namespace
+	// gets none. Nothing errors; the recording is simply wrong.
 	//
 	// Checked before GenerateKeployAgentService so a doomed run does not first
 	// fire the enterprise compose hook.
-	for i := 0; i+1 < len(compose.Services.Content); i += 2 {
-		if compose.Services.Content[i].Value == "keploy-agent" {
+	for _, e := range effectiveServiceEntries(&compose.Services) {
+		// The key can be an alias too (`*k:` where `&k` is "keploy-agent"), in
+		// which case its own Value is the anchor name.
+		if aliasTarget(e.key).Value == "keploy-agent" {
 			return fmt.Errorf("the compose file already defines a service named " +
 				"\"keploy-agent\"; rename it so keploy can add its own")
 		}
-		svc := compose.Services.Content[i+1]
-		for j := 0; j+1 < len(svc.Content); j += 2 {
-			if cn := serviceKeyThroughMerge(svc, "container_name"); cn != nil &&
-				cn.Value == "keploy-agent" {
-				return fmt.Errorf("service %q already uses container_name "+
-					"\"keploy-agent\"; rename it so keploy can add its own",
-					compose.Services.Content[i].Value)
-			}
+		// `services: {x: *frag}` gives an AliasNode, whose Content is nil -- so
+		// the scan that used to sit here, wrapped in a loop over that empty
+		// Content, never ran and the guard was skipped entirely. It is reachable
+		// whenever the colliding service appears AFTER the app: the lookups that
+		// resolve aliases in place stop at the app, so nothing has expanded this
+		// one yet.
+		if cn := serviceKeyThroughMerge(aliasTarget(e.value), "container_name"); cn != nil &&
+			cn.Value == "keploy-agent" {
+			return fmt.Errorf("service %q already uses container_name "+
+				"\"keploy-agent\"; rename it so keploy can add its own",
+				aliasTarget(e.key).Value)
 		}
 	}
 
@@ -1833,6 +1844,63 @@ func mergeSources(v *yaml.Node) ([]*yaml.Node, bool) {
 	}
 	add(v, 0)
 	return out, usable
+}
+
+// serviceEntry is one key/value pair from the `services:` mapping.
+type serviceEntry struct{ key, value *yaml.Node }
+
+// effectiveServiceEntries lists every service the compose file declares,
+// including any inherited through a merge key ON THE SERVICES MAPPING ITSELF:
+//
+//	x-extra: &extra
+//	  legacy: {container_name: keploy-agent}
+//	services:
+//	  <<: *extra
+//	  app: {...}
+//
+// A scan that walks only the mapping's own Content sees the key `<<` and nothing
+// else, so `legacy` is invisible to it -- and the collision guard that exists to
+// catch exactly that name walks straight past.
+//
+// Explicit entries come first and win, matching YAML merge precedence, so a
+// caller that stops at the first match behaves the way the document reads.
+// Nothing here mutates: this runs before keploy has decided the file is usable.
+func effectiveServiceEntries(services *yaml.Node) []serviceEntry {
+	// No alias resolve here: the only caller checks `services:` is a mapping
+	// first, and resolveServiceAlias has already run on it. The Kind check states
+	// the contract for any future caller -- no test distinguishes it.
+	if services == nil || services.Kind != yaml.MappingNode {
+		return nil
+	}
+	var out []serviceEntry
+	var merges []*yaml.Node
+	seen := map[string]bool{}
+	for i := 0; i+1 < len(services.Content); i += 2 {
+		if isMergeKey(services.Content[i]) {
+			merges = append(merges, services.Content[i+1])
+			// Skipped rather than emitted: `<<` is not a service. Emitting it is
+			// inert for today's only caller, which compares names, but this
+			// function reads as "the services in this file" and a caller that
+			// iterated it would act on a service that does not exist.
+			continue
+		}
+		out = append(out, serviceEntry{services.Content[i], services.Content[i+1]})
+		seen[aliasTarget(services.Content[i]).Value] = true
+	}
+	for _, m := range merges {
+		sources, _ := mergeSources(m)
+		for _, src := range sources {
+			for i := 0; i+1 < len(src.Content); i += 2 {
+				name := aliasTarget(src.Content[i]).Value
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				out = append(out, serviceEntry{src.Content[i], src.Content[i+1]})
+			}
+		}
+	}
+	return out
 }
 
 // serviceKeyThroughMerge finds a key on a service, following `<<` but modifying

@@ -737,3 +737,194 @@ services:
 		})
 	}
 }
+
+// TestAddKeployAgent_RefusesACollisionReachedThroughAnAlias covers the shape
+// that walked straight past the guard.
+//
+// `services: {x: *frag}` is an AliasNode, whose Content is nil — and the scan
+// used to sit inside a loop over that Content, so it never executed and the
+// check was skipped.
+//
+// What that costs is NOT a rejected file. "keploy-agent" is keploy's internal
+// service KEY; the agent's actual container_name is a randomised
+// `keploy-v3-<rand>`, so docker sees no clash and accepts the output. The damage
+// is silent: findServiceNodeAndName("keploy-agent") matches on container_name
+// and reaches the user's service first, so the app's `dns` is MOVED onto that
+// unrelated service — overwriting its own — while the agent that owns the
+// network namespace gets none. See TestAgentCollision_TheDamageItPrevents.
+//
+// These subtests call AddKeployAgentToCompose directly, so nothing has resolved
+// anything and either ordering reproduces the bug. Ordering is load-bearing only
+// through the full pipeline, which the pipeline subtest below covers.
+func TestAddKeployAgent_RefusesACollisionReachedThroughAnAlias(t *testing.T) {
+	for _, tc := range []struct{ name, in string }{
+		{"fragment claims the name", `x-frag: &frag
+  image: alpine:3.21
+  container_name: keploy-agent
+services:
+  app:
+    image: alpine:3.21
+  x: *frag
+`},
+		{"fragment inherits the name through a merge key", `x-naming: &naming
+  container_name: keploy-agent
+x-frag: &frag
+  image: alpine:3.21
+  <<: *naming
+services:
+  app:
+    image: alpine:3.21
+  x: *frag
+`},
+		// Not a regression test for THIS fix — the service is a real mapping, so
+		// the old loop ran and the value-side resolve from the previous commit
+		// already handled it. Kept for guard-path coverage of that mechanism.
+		{"container_name is itself an alias", `x-name: &agentname keploy-agent
+services:
+  app:
+    image: alpine:3.21
+  x:
+    image: alpine:3.21
+    container_name: *agentname
+`},
+		// The services MAPPING itself inherits the colliding service through a
+		// merge key, so a scan over its own Content sees only the key `<<`.
+		{"service inherited through a services-level merge key", `x-extra: &extra
+  legacy:
+    image: alpine:3.21
+    container_name: keploy-agent
+services:
+  <<: *extra
+  app:
+    image: alpine:3.21
+`},
+		// Same, colliding on the service KEY rather than container_name. Missing
+		// it is worse: keploy appends its own explicit `keploy-agent:` key, which
+		// wins over the merge, so the user's service silently disappears.
+		{"service KEY inherited through a services-level merge key", `x-extra: &extra
+  keploy-agent:
+    image: alpine:3.21
+services:
+  <<: *extra
+  app:
+    image: alpine:3.21
+`},
+		// The service key is itself an alias, so its own Value is the anchor name.
+		{"service key is an alias", `x-k: &k keploy-agent
+services:
+  app:
+    image: alpine:3.21
+  *k :
+    image: alpine:3.21
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idc := &Impl{logger: zap.NewNop(), conf: &config.Config{}}
+			var compose Compose
+			if err := yaml.Unmarshal([]byte(tc.in), &compose); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			err := idc.AddKeployAgentToCompose(&compose, buildAgentOpts())
+			if err == nil {
+				data, _ := idc.MarshalCompose(&compose)
+				t.Fatalf("the collision was not refused; keploy added a second "+
+					"service claiming container_name \"keploy-agent\" and docker "+
+					"will reject the file:\n%s", data)
+			}
+			// Either guard is a correct refusal here; they report different
+			// collisions (service key vs container_name) and word it differently.
+			// What matters is that the message names the clashing name and says
+			// what to do, rather than leaving the user with keploy's silent
+			// dns mis-wiring.
+			if !strings.Contains(err.Error(), "keploy-agent") ||
+				!strings.Contains(err.Error(), "rename") {
+				t.Errorf("the error does not name the problem: %v", err)
+			}
+		})
+	}
+}
+
+// TestAgentCollision_TheDamageItPrevents pins what the guard is actually for,
+// because the obvious answer is wrong.
+//
+// "keploy-agent" is keploy's internal service KEY. The agent's container_name is
+// opts.KeployContainer, a randomised `keploy-v3-<rand>` on every docker run — so
+// a user service named keploy-agent produces NO container-name clash and docker
+// accepts the generated file without complaint.
+//
+// The damage is in keploy's own lookup. findServiceNodeAndName("keploy-agent")
+// matches on container_name too and reaches the user's service first, so the
+// app's `dns` is MOVED onto an unrelated service — overwriting the dns that
+// service declared for itself — while the agent that owns the network namespace
+// gets none. A recording made this way is quietly wrong rather than absent.
+//
+// Driven through the full pipeline, which is also the only place the ordering
+// matters: the lookups that resolve service aliases in place stop as soon as
+// they find the app, so a colliding service declared AFTER it is still an
+// unexpanded alias when the guard runs.
+func TestAgentCollision_TheDamageItPrevents(t *testing.T) {
+	const in = `x-frag: &frag
+  image: alpine:3.21
+  container_name: keploy-agent
+  dns:
+    - 1.1.1.1
+services:
+  app:
+    image: alpine:3.21
+    dns:
+      - 8.8.8.8
+  x: *frag
+`
+	idc := &Impl{logger: zap.NewNop(), conf: &config.Config{}}
+	var compose Compose
+	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Production-shaped: the agent's container_name is randomised, so there is
+	// no docker-level clash to save us.
+	opts := buildAgentOpts()
+	opts.KeployContainer = "keploy-v3-abc123"
+
+	// The gate runs first in production and resolves aliases as it goes — but it
+	// stops at the app, so `x` is untouched when the guard runs.
+	_, ports, _, _ := idc.findContainerInServices(&compose, "app")
+	opts.AppPorts = ports
+
+	err := idc.ModifyComposeForAgent(&compose, opts, "app")
+	if err == nil {
+		data, _ := idc.MarshalCompose(&compose)
+		t.Fatalf("the collision was accepted; the app's dns is now on an unrelated "+
+			"service and the agent has none:\n%s", data)
+	}
+	if !strings.Contains(err.Error(), "keploy-agent") {
+		t.Errorf("the error does not name the collision: %v", err)
+	}
+}
+
+// TestAddKeployAgent_ExplicitServiceOverridesAMergedCollision is the guard
+// against the guard over-firing. YAML merge precedence gives an explicitly
+// declared key priority over an inherited one, so a `legacy:` service written
+// out in full replaces the `legacy:` the fragment supplies — collision and all.
+// Refusing here would block a file that is perfectly fine.
+func TestAddKeployAgent_ExplicitServiceOverridesAMergedCollision(t *testing.T) {
+	idc := &Impl{logger: zap.NewNop(), conf: &config.Config{}}
+	var compose Compose
+	if err := yaml.Unmarshal([]byte(`x-extra: &extra
+  legacy:
+    image: alpine:3.21
+    container_name: keploy-agent
+services:
+  <<: *extra
+  legacy:
+    image: alpine:3.21
+    container_name: something-else
+  app:
+    image: alpine:3.21
+`), &compose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := idc.AddKeployAgentToCompose(&compose, buildAgentOpts()); err != nil {
+		t.Errorf("refused a file whose explicit service overrides the merged "+
+			"collision: %v", err)
+	}
+}
