@@ -511,8 +511,8 @@ networks: *shared
 	}
 }
 
-// TestAddTopLevelVolume_AliasToAnEmptyFragment pins the isEmptySection arm of
-// sectionForAppend, which nothing else reaches.
+// TestAddTopLevelVolume_AliasToAnEmptyFragment pins what happens to an alias
+// naming a fragment that holds nothing.
 //
 // `x-vols: &vols` with nothing under it is a null scalar, so an alias to it is
 // not a mapping — declining there would regress this shape straight back to the
