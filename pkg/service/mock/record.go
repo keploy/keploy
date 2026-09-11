@@ -95,6 +95,14 @@ func (m *mockService) Record(ctx context.Context) error {
 	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
 		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
 	}
+	// The mapping file is NOT removed by DeleteMocksForSet: it survives on disk
+	// and ResetCounterID below reissues the same mock-N names, so a surviving
+	// mapping would attribute this run's mocks to the previous run's tests.
+	if m.mappingDB != nil {
+		if err := m.mappingDB.Delete(persistCtx, name); err != nil {
+			m.logger.Warn("failed to clear the previous per-test mock mappings; stale test entries may survive this re-record", zap.String("mock-set", name), zap.Error(err))
+		}
+	}
 	m.mockDB.ResetCounterID()
 
 	// 3. Arm the record proxy and stream captured mocks.
