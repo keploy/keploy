@@ -50,6 +50,9 @@ type NetworkTrafficDoc struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
+	// Owner is the per-test scope that owned this capture (models.Mock.Owner).
+	// omitempty, so a set recorded without scopes is byte-identical to before.
+	Owner string `json:"owner,omitempty" yaml:"owner,omitempty"`
 }
 
 // DocNoise is the unified on-disk representation of a mock's noise, written under

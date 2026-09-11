@@ -60,6 +60,7 @@ type NetworkTrafficDocJSON struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty"`
 	Curl         string              `json:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId,omitempty"`
+	Owner        string              `json:"owner,omitempty"`
 }
 
 // DocToJSON converts a NetworkTrafficDoc to its JSON-friendly representation
@@ -85,6 +86,7 @@ func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 		LastUpdated:  doc.LastUpdated,
 		Curl:         doc.Curl,
 		ConnectionID: doc.ConnectionID,
+		Owner:        doc.Owner,
 	}, nil
 }
 
@@ -150,6 +152,7 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 		LastUpdated:  jsonDoc.LastUpdated,
 		Curl:         jsonDoc.Curl,
 		ConnectionID: jsonDoc.ConnectionID,
+		Owner:        jsonDoc.Owner,
 	}
 
 	// Convert json.RawMessage to a generic interface, then encode into yaml.Node
