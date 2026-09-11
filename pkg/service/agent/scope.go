@@ -151,6 +151,72 @@ func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 	return nil
 }
 
+// resolveOwner names the per-test scope that owns a capture made by worker `pid`
+// at request time `ts`. This is the record-time half of the mock identity
+// (owner, n): it runs while the scopes are still live, so a capture is stamped
+// with its owner as it leaves the agent rather than being bucketed by timestamp
+// after the fact.
+//
+// The rule is deliberately the SAME one the CLI's post-run correlateScopes uses
+// (pkg/service/mock/record.go) so the two can be cross-checked against each
+// other: the innermost -- latest-started -- window containing ts wins, and a
+// window recorded by this exact worker is preferred over one from another
+// worker, so overlapping parallel windows never steal each other's captures.
+//
+// The one thing it can see that correlateScopes cannot is a window that is
+// still OPEN: a.workerOpen holds a start with no end yet, and is treated as
+// extending to +infinity. That is the common case here -- the mock is usually
+// emitted while its own test is still running.
+//
+// Returns "" when no window contains ts (a boot-time handshake before the first
+// scope, a runner that declares no scopes at all, or a capture whose kind never
+// stamps ReqTimestampMock). "" is the unowned namespace and keeps the legacy
+// mock-N naming, so every un-scoped recording is unaffected.
+func (a *Agent) resolveOwner(pid uint32, ts time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+
+	// sameWorkerOnly restricts the scan to windows this worker opened. Scope
+	// names are non-empty (BeginScope rejects ""), so "" is a safe sentinel.
+	scan := func(sameWorkerOnly bool) string {
+		best := ""
+		var bestStart time.Time
+		for _, w := range a.scopeWindows {
+			if sameWorkerOnly && w.PID != pid {
+				continue
+			}
+			if ts.Before(w.Start) || ts.After(w.End) {
+				continue
+			}
+			if best == "" || w.Start.After(bestStart) {
+				best, bestStart = w.Name, w.Start
+			}
+		}
+		for k, start := range a.workerOpen {
+			if sameWorkerOnly && k.pid != pid {
+				continue
+			}
+			if ts.Before(start) {
+				continue
+			}
+			if best == "" || start.After(bestStart) {
+				best, bestStart = k.name, start
+			}
+		}
+		return best
+	}
+
+	if pid != 0 {
+		if owner := scan(true); owner != "" {
+			return owner
+		}
+	}
+	return scan(false)
+}
+
 // GetScopeWindows returns the per-test windows collected this record session,
 // consumed by the CLI to build mappings.yaml.
 func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error) {

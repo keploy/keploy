@@ -159,7 +159,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 			}
 			mockCount++
-			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID})
+			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, owner: mk.Owner})
 		}
 	}()
 
@@ -215,7 +215,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			if werr != nil {
 				m.logger.Debug("failed to read per-test scope windows; recording suite-level", zap.Error(werr))
 			} else if len(windows) > 0 {
-				byTest := correlateScopes(windows, recorded)
+				byTest := mapOwners(m.logger, windows, recorded)
 				if len(byTest) > 0 {
 					if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
 						m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
@@ -250,6 +250,11 @@ type capturedMock struct {
 	name string
 	ts   time.Time
 	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	// owner is the scope the AGENT stamped on this capture as it was emitted
+	// (models.Mock.Owner), resolved against the scope map while that scope was
+	// still live. Empty when no scope contained the call, or when the agent
+	// predates the stamp -- both fall back to the timestamp correlation below.
+	owner string
 }
 
 // correlateScopes buckets each recorded mock into the per-test scope window its
@@ -266,15 +271,30 @@ type capturedMock struct {
 // self-reported PID differs from the kernel PID, falls back to the timestamp
 // scan — which is exact for sequential record and best-effort under overlap.
 func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[string][]models.MockEntry {
-	// Sort windows by start so overlapping scopes resolve to the innermost
-	// (latest-started) window deterministically.
-	sort.SliceStable(windows, func(i, j int) bool { return windows[i].Start.Before(windows[j].Start) })
+	sortScopeWindows(windows)
 	byTest := make(map[string][]models.MockEntry)
+	for _, mk := range mocks {
+		if name := scopeNameFor(windows, mk); name != "" {
+			byTest[name] = append(byTest[name], models.MockEntry{Name: mk.name})
+		}
+	}
+	return byTest
+}
+
+// sortScopeWindows orders windows by start so overlapping scopes resolve to the
+// innermost (latest-started) one deterministically. scopeNameFor requires it.
+func sortScopeWindows(windows []models.ScopeWindow) {
+	sort.SliceStable(windows, func(i, j int) bool { return windows[i].Start.Before(windows[j].Start) })
+}
+
+// scopeNameFor returns the test that owns mk by timestamp, or "" for none.
+// windows must already be sorted (sortScopeWindows).
+func scopeNameFor(windows []models.ScopeWindow, mk capturedMock) string {
 	// containingWindow returns the innermost (latest-started) window that contains
 	// the mock's timestamp. When sameWorkerOnly is set (the mock carries a PID),
 	// only windows recorded by that exact worker are considered — so overlapping
 	// windows from OTHER parallel workers never steal the mock.
-	containingWindow := func(mk capturedMock, sameWorkerOnly bool) int {
+	containingWindow := func(sameWorkerOnly bool) int {
 		best := -1
 		for i, w := range windows {
 			if sameWorkerOnly && w.PID != mk.pid {
@@ -289,23 +309,76 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 		}
 		return best
 	}
+	best := -1
+	if mk.pid != 0 {
+		// Exact, parallel-safe: attribute to the same worker's window.
+		best = containingWindow(true)
+	}
+	if best == -1 {
+		// No same-worker window (PID-less mock/windows, or the call came from
+		// a child process): fall back to a pure timestamp scan — correct when
+		// windows don't overlap, i.e. sequential record.
+		best = containingWindow(false)
+	}
+	if best == -1 {
+		return ""
+	}
+	return windows[best].Name
+}
+
+// mapOwners builds mappings.yaml from the owner the AGENT stamped on each
+// capture, falling back to the timestamp correlation above where there is no
+// stamp.
+//
+// The stamp is preferred because it is resolved at emit time, against scopes
+// that are still open, by the process that owns them. correlateScopes runs
+// after the fact over CLOSED windows only and has to infer the same thing from
+// a timestamp — the two agree in the ordinary case, and where they do not the
+// agent saw the live state and the correlation is guessing.
+//
+// It also has to be the stamp, not the correlation, once names are minted per
+// owner: a mock named for owner A but mapped to test B would be a mapping the
+// name itself contradicts.
+//
+// Disagreements are surfaced rather than swallowed — one WARN per mock, since
+// each one is a mock a replay may serve to the wrong test.
+func mapOwners(logger *zap.Logger, windows []models.ScopeWindow, mocks []capturedMock) map[string][]models.MockEntry {
+	stamped := 0
 	for _, mk := range mocks {
-		best := -1
-		if mk.pid != 0 {
-			// Exact, parallel-safe: attribute to the same worker's window.
-			best = containingWindow(mk, true)
+		if mk.owner != "" {
+			stamped++
 		}
-		if best == -1 {
-			// No same-worker window (PID-less mock/windows, or the call came from
-			// a child process): fall back to a pure timestamp scan — correct when
-			// windows don't overlap, i.e. sequential record.
-			best = containingWindow(mk, false)
+	}
+	if stamped == 0 {
+		// Nothing carries a stamp: an agent that predates it, or a run whose
+		// captures all fell outside every scope. Correlate the whole set.
+		return correlateScopes(windows, mocks)
+	}
+
+	sortScopeWindows(windows)
+	byTest := make(map[string][]models.MockEntry)
+	disagreed := 0
+	for _, mk := range mocks {
+		correlated := scopeNameFor(windows, mk)
+		owner := mk.owner
+		if owner == "" {
+			owner = correlated
+		} else if correlated != "" && correlated != owner {
+			disagreed++
+			logger.Warn("the agent's capture-time owner and the CLI's timestamp correlation disagree about which test owns a mock; trusting the agent",
+				zap.String("mock", mk.name),
+				zap.String("agent_owner", owner),
+				zap.String("correlated_owner", correlated))
 		}
-		if best == -1 {
+		if owner == "" {
 			continue
 		}
-		byTest[windows[best].Name] = append(byTest[windows[best].Name], models.MockEntry{Name: mk.name})
+		byTest[owner] = append(byTest[owner], models.MockEntry{Name: mk.name})
 	}
+	logger.Debug("built per-test mock mappings",
+		zap.Int("mocks", len(mocks)),
+		zap.Int("stamped_by_agent", stamped),
+		zap.Int("disagreements", disagreed))
 	return byTest
 }
 

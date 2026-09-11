@@ -493,7 +493,47 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	// control frame it can't divert.
 	syncMock.Get().SetRevokeCapable(opts.SupportsDroppedRevoke)
 
-	return m, nil
+	// Stamp each capture with the scope that owns it, on its way out. This is
+	// the single channel every captured mock crosses, and the agent is the only
+	// process that holds the live scope map -- a.workerOpen still has the
+	// CURRENT test's window open when its own mock is emitted, which the CLI's
+	// after-the-fact correlation cannot see.
+	//
+	// The relay is deliberately unbuffered. The proxy's own drop-on-full budget
+	// lives in m (outgoingMockChanCap, a derived 64 MiB), and a second buffered
+	// hop would silently double the memory that budget was computed for; an
+	// unbuffered hand-off keeps exactly one extra mock in flight and leaves
+	// back-pressure identical to reading m directly.
+	//
+	// Both directions select on ctx so the goroutine cannot outlive the request:
+	// the /outgoing handler returns on client disconnect without draining, and a
+	// blocked send here would pin the relay (and the whole session) forever in a
+	// long-lived agent that serves several recordings.
+	owned := make(chan *models.Mock)
+	go func() {
+		defer utils.Recover(a.logger)
+		defer close(owned)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case mk, ok := <-m:
+				if !ok {
+					return
+				}
+				if mk != nil {
+					mk.Owner = a.resolveOwner(mk.SourcePID, mk.Spec.ReqTimestampMock)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case owned <- mk:
+				}
+			}
+		}
+	}()
+
+	return owned, nil
 }
 
 func (a *Agent) GetMapping(ctx context.Context) (<-chan models.TestMockMapping, error) {
