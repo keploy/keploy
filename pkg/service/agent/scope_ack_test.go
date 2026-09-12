@@ -56,7 +56,7 @@ func TestBeginScopeAckReplayNotScoped(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := testModeAgent(t, tc.table)
-			ack, err := a.BeginScope(ctx, tc.scope, 0)
+			ack, err := a.BeginScope(ctx, tc.scope, 0, 0)
 			require.NoError(t, err)
 			require.False(t, ack.Scoped, "the whole pool is still armed — %s", tc.why)
 			require.Equal(t, tc.reason, ack.Reason)
@@ -73,7 +73,7 @@ func TestBeginScopeAckReplayScoped(t *testing.T) {
 
 	t.Run("worker scoped", func(t *testing.T) {
 		a, _ := replayAgent(t, []string{"m1", "m2"}, map[string][]string{"alpha": {"m1", "m2"}})
-		ack, err := a.BeginScope(ctx, "alpha", 7)
+		ack, err := a.BeginScope(ctx, "alpha", 7, 0)
 		require.NoError(t, err)
 		require.True(t, ack.Scoped)
 		require.Equal(t, models.ScopeReasonWorkerScoped, ack.Reason)
@@ -82,7 +82,7 @@ func TestBeginScopeAckReplayScoped(t *testing.T) {
 
 	t.Run("global pool restricted", func(t *testing.T) {
 		a, _ := replayAgent(t, []string{"m1", "m2"}, map[string][]string{"alpha": {"m1"}})
-		ack, err := a.BeginScope(ctx, "alpha", 0)
+		ack, err := a.BeginScope(ctx, "alpha", 0, 0)
 		require.NoError(t, err)
 		require.True(t, ack.Scoped)
 		require.Equal(t, models.ScopeReasonPoolRestricted, ack.Reason)
@@ -97,19 +97,19 @@ func TestBeginScopeAckRecord(t *testing.T) {
 	ctx := context.Background()
 	a := newRecordAgent()
 
-	ack, err := a.BeginScope(ctx, "alpha", 0)
+	ack, err := a.BeginScope(ctx, "alpha", 0, 0)
 	require.NoError(t, err)
 	require.False(t, ack.Scoped)
 	require.Equal(t, models.ScopeReasonRecordWindowOpened, ack.Reason)
 
-	ack, err = a.BeginScope(ctx, "alpha", 0) // no EndScope in between
+	ack, err = a.BeginScope(ctx, "alpha", 0, 0) // no EndScope in between
 	require.NoError(t, err)
 	require.Equal(t, models.ScopeReasonRecordAlreadyOpen, ack.Reason)
 }
 
 func TestBeginScopeAckEmptyName(t *testing.T) {
 	a := newRecordAgent()
-	ack, err := a.BeginScope(context.Background(), "", 0)
+	ack, err := a.BeginScope(context.Background(), "", 0, 0)
 	require.NoError(t, err)
 	require.False(t, ack.Scoped)
 	require.Equal(t, models.ScopeReasonEmptyName, ack.Reason)

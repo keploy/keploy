@@ -92,11 +92,11 @@ func TestResolveOwnerThroughBeginEndScope(t *testing.T) {
 	a := newRecordAgent()
 	ctx := t.Context()
 
-	_, err := a.BeginScope(ctx, "suite", 0)
+	_, err := a.BeginScope(ctx, "suite", 0, 0)
 	require.NoError(t, err)
 	duringSuite := time.Now()
 
-	_, err = a.BeginScope(ctx, "test-1", 0)
+	_, err = a.BeginScope(ctx, "test-1", 0, 0)
 	require.NoError(t, err)
 	duringTest := time.Now()
 	require.Equal(t, "test-1", a.resolveOwner(0, duringTest),
