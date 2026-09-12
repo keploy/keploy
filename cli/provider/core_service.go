@@ -81,6 +81,64 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 
 }
 
+// resolveDockerNames settles which container and network keploy will act on,
+// and reports the outcome at a severity that matches it.
+//
+// A parse that produced nothing must never overwrite a value the user gave
+// through --container-name/--network-name or keploy.yml. It used to: the
+// assignment was unconditional, so a command keploy could not parse left the
+// container name empty, and everything downstream - the name-conflict
+// pre-clean, teardown, and app-log capture - then operated on "" and silently
+// did nothing.
+//
+// A parse that DID produce a value wins over the flag, because for docker-run
+// and docker-start the command is ground truth: docker names the container
+// from the command, so instrumenting anything else would target a container
+// that was never created. The parse is usually right rather than provably
+// right - it reads the leftmost --name, which a container's own arguments can
+// still shadow - so a disagreement is warned about rather than silently
+// applied.
+//
+// Severity is decided AFTER applying, against what was actually resolved.
+// ParseDockerCmd reports a missing --network as an error even when the
+// container parsed perfectly, which is the ordinary default-bridge shape; if
+// the level were chosen before applying, every such run would print an ERROR
+// naming the container it had in fact just resolved. Several e2e lanes fail
+// the build on any ERROR line.
+func resolveDockerNames(logger *zap.Logger, c *config.Config, cont, net string, err error) {
+	if cont != "" {
+		if c.ContainerName != "" && c.ContainerName != cont {
+			logger.Warn("given app container differs from the one named in the docker command; using the command's",
+				zap.String("given", c.ContainerName), zap.String("parsed", cont))
+		}
+		c.ContainerName = cont
+	}
+
+	if net != "" {
+		if c.NetworkName != "" && c.NetworkName != net {
+			logger.Warn("given docker network differs from the one named in the docker command; using the command's",
+				zap.String("given", c.NetworkName), zap.String("parsed", net))
+		}
+		c.NetworkName = net
+	}
+
+	if err == nil {
+		return
+	}
+
+	switch {
+	case c.ContainerName == "":
+		utils.LogError(logger, err, "failed to resolve the app container from the docker command", zap.String("cmd", c.Command))
+	case cont == "":
+		logger.Warn("could not read a container name out of the docker command; using the one that was provided",
+			zap.String("containerName", c.ContainerName), zap.Error(err))
+	default:
+		// The container resolved and only the network did not. Nothing reads
+		// the network name today, so this is not worth the user's attention.
+		logger.Debug("docker command parsed without a network name", zap.String("containerName", c.ContainerName), zap.Error(err))
+	}
+}
+
 func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
 
 	app.HookImpl = app.NewHooks(logger)
@@ -100,18 +158,7 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 		if utils.CmdType(c.CommandType) != utils.DockerCompose {
 			cont, net, err := docker.ParseDockerCmd(c.Command, utils.CmdType(c.CommandType), client)
 			logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", c.Command))
-			if err != nil {
-				utils.LogError(logger, err, "failed to parse container name from given docker command", zap.String("cmd", c.Command))
-			}
-			if c.ContainerName != "" && c.ContainerName != cont {
-				logger.Debug(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v), taking parsed value", c.ContainerName, cont))
-			}
-			c.ContainerName = cont
-
-			if c.NetworkName != "" && c.NetworkName != net {
-				logger.Debug(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v), taking parsed value", c.NetworkName, net))
-			}
-			c.NetworkName = net
+			resolveDockerNames(logger, c, cont, net, err)
 
 			logger.Debug("Using container and network", zap.String("container", c.ContainerName), zap.String("network", c.NetworkName))
 		}
