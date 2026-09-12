@@ -78,6 +78,11 @@ func (p *Proxy) captureDNSUpstream() {
 		return
 	}
 
+	// Keep the search list: it is what makes a redundant expansion
+	// recognisable without a round trip. Captured even when every
+	// nameserver is filtered out below, since the two are independent.
+	p.dnsSearch = append([]string(nil), config.Search...)
+
 	// resolv.conf has no port syntax per RFC — config.Port is populated
 	// from an "options" line or defaults to "53". We compare by string
 	// to avoid parsing surprises (leading zeros, etc.).
@@ -109,7 +114,8 @@ func (p *Proxy) captureDNSUpstream() {
 	p.dnsUpstreamPort = nsPort
 	p.logger.Debug("captured upstream DNS resolvers for forward-on-miss",
 		zap.Strings("servers", p.dnsUpstreamServers),
-		zap.String("port", p.dnsUpstreamPort))
+		zap.String("port", p.dnsUpstreamPort),
+		zap.Strings("search", p.dnsSearch))
 }
 
 // hasDNSUpstream reports whether the forwarder has any real upstream

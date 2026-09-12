@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
@@ -158,7 +159,7 @@ section "Start dependencies (MySQL + config-service stub)"
 # only awaited (wait_for_mysql) just before the app boots under keploy.
 docker_compose_pull_retry
 docker compose up -d
-( cd config-stub && go build -o /tmp/acp-config-stub . )
+( cd config-stub && go_retry build -o /tmp/acp-config-stub . )
 env ${STUB_ENV} /tmp/acp-config-stub > config-stub.log 2>&1 &
 CONFIG_STUB_PID=$!
 endsec

@@ -2,13 +2,13 @@ package cli
 
 import (
 	"context"
-	"os"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
 	toolsSvc "go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -24,7 +24,7 @@ func Update(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Example: "keploy update",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(os.Stdout, disableAnsi)
+			provider.PrintLogo(log.PrimarySink(), disableAnsi)
 			svc, err := serviceFactory.GetService(ctx, "update")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))

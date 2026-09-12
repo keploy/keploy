@@ -2700,13 +2700,23 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 }
 
 // DefaultAgentReadyTimeout is how long keploy waits for the in-docker
-// keploy-agent to report ready before giving up. It is sized to the agent
-// container's OWN healthcheck budget (start_period 10s + interval 5s × retries
-// 60 ≈ 310s, see pkg/platform/docker): under heavy CI docker-daemon contention
-// the agent container can take ~2 minutes just to start — observed in CI as a
-// `docker run` of an already-local image taking 126s before the agent process
-// ran. A shorter CLI wait gives up while the agent's own healthcheck still
-// considers it starting, tearing down a bring-up that would have succeeded.
+// keploy-agent's HTTP endpoint to become reachable before giving up. This
+// bounds container BOOT only — the AgentHealthTicker gate that runs before
+// StoreMocks — not the compose ready-file healthcheck, which has its own
+// generous, env-tunable start_period floor (see agentHealthcheckStartPeriod in
+// pkg/platform/docker). Under heavy CI docker-daemon contention the agent
+// container can take ~2 minutes just to start — observed in CI as a `docker
+// run` of an already-local image taking 126s before the agent process ran. A
+// shorter CLI wait gives up while the container is still booting, tearing down
+// a bring-up that would have succeeded.
+//
+// ErrAgentNotReady is returned by an agent Setup whose agent never reported
+// healthy within AgentReadyTimeout. It is a distinct sentinel so callers can
+// retry a fresh bring-up on this — a nondeterministic container-runtime stall,
+// observed intermittently on macOS Docker Desktop — WITHOUT retrying
+// deterministic failures like missing kernel privileges or a bad config.
+var ErrAgentNotReady = errors.New("keploy-agent did not become ready in time")
+
 const DefaultAgentReadyTimeout = 330 * time.Second
 
 // AgentReadyTimeout returns how long to wait for the keploy-agent to become
@@ -2721,6 +2731,40 @@ func AgentReadyTimeout() time.Duration {
 		}
 	}
 	return DefaultAgentReadyTimeout
+}
+
+// agentSetupAttempts bounds how many times a stalled agent bring-up is retried
+// with a fresh agent before giving up. Three attempts takes a ~37%-per-attempt
+// intermittent stall (observed on macOS Docker Desktop) to ~5% while adding no
+// delay to the overwhelmingly common first-try success.
+const agentSetupAttempts = 3
+
+// RetryAgentSetup runs an agent Setup and retries it, up to agentSetupAttempts,
+// ONLY when it fails with ErrAgentNotReady. Each retry is a full fresh bring-up
+// (Setup re-draws ports and regenerates the agent container), which is what
+// clears a nondeterministic container-runtime stall. Deterministic failures
+// (missing privileges, bad config) do not match the sentinel and return at
+// once, and a cancelled context stops the loop immediately. The test assertions
+// downstream still run exactly once, against a healthy agent — this retries the
+// agent infrastructure, never a test.
+func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx context.Context, attempt int) error) error {
+	var err error
+	for attempt := 1; attempt <= agentSetupAttempts; attempt++ {
+		err = setup(ctx, attempt)
+		if err == nil || ctx.Err() != nil || !errors.Is(err, ErrAgentNotReady) {
+			return err
+		}
+		if attempt < agentSetupAttempts {
+			logger.Warn("keploy-agent bring-up stalled; retrying with a fresh agent",
+				zap.Int("attempt", attempt), zap.Int("of", agentSetupAttempts), zap.Error(err))
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return err
 }
 
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
@@ -2906,18 +2950,70 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 	return filteredMocks
 }
 
-func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
-	filteredMocks, unfilteredMocks := filterByMapping(ctx, logger, m, mocksPresentInMapping)
+// FilterConfigMocksMapping tags the reusable (config/session/connection) pool
+// with its mapping membership and returns it in RECORDED order.
+//
+// Mapping membership is not a chronological signal and must not reorder this
+// pool. Its members are reusable tier — none is owned by a single test — so
+// membership only records which tests happened to consume a mock, and says
+// nothing about when it was recorded. Partitioning on it and concatenating
+// (mapped first, then unmapped) puts every consumed entry ahead of every
+// unconsumed one, inverting chronology whenever the two interleave: a pool
+// recorded rev1,rev2,rev3,rev4 with rev3,rev4 consumed came back as
+// rev3,rev4,rev1,rev2.
+//
+// That matters because downstream reads this pool as a SEQUENCE, not a set. The
+// slice order becomes TestModeInfo.SortOrder in MockManager.setUnFilteredMocks,
+// which keys the RB-tree that GetUnFilteredMocksByKind walks in order — so a
+// replayer that walks a recorded revision sequence (a cluster-config poll, a
+// bootstrap handshake) is handed it backwards.
+//
+// The tagging is done IN PLACE over m rather than by partitioning, so entries
+// with equal ReqTimestampMock keep their recorded order under the stable sort.
+// Partition-then-sort left ties in mapped-first order — the very inversion this
+// removes — and ties are not rare: a protocol encoder that drains several frames
+// from one TCP read stamps them all with that chunk's timestamp (see
+// mysql/recorder/record_v2.go, where ReqTimestampMock is the ReadAt of the chunk
+// that delivered the command bytes), which is exactly what a coalesced bootstrap
+// burst looks like. In a legacy pool carrying no timestamps at all the whole
+// slice is one tie, so the sort does nothing and the partition alone decided the
+// order — that is where the inversion was total, not absent.
+//
+// This deliberately does NOT try to reproduce FilterConfigMocksTierAware's
+// output. That path additionally applies window semantics the mapping path has
+// no equivalent of — it hoists a mock with a missing timestamp into its filtered
+// pool and drops one whose response predates its request — so the two agree only
+// on a pool where neither rule fires. The property claimed here is narrower and
+// is the one that matters: mapping membership is not a chronological signal, so
+// it must not reorder this pool.
+func FilterConfigMocksMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+	mapping := make(map[string]bool, len(mocksPresentInMapping))
+	for _, name := range mocksPresentInMapping {
+		mapping[name] = true
+	}
 
-	sort.SliceStable(filteredMocks, func(i, j int) bool {
-		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	isNonKeploy := false
+	pool := make([]*models.Mock, 0, len(m))
+	for _, mock := range m {
+		if mock == nil {
+			continue
+		}
+		p := mock.DeepCopy()
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+		p.TestModeInfo.IsFiltered = mapping[p.Name]
+		pool = append(pool, p)
+	}
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
+
+	sort.SliceStable(pool, func(i, j int) bool {
+		return pool[i].Spec.ReqTimestampMock.Before(pool[j].Spec.ReqTimestampMock)
 	})
 
-	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
-		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
-	})
-
-	return append(filteredMocks, unfilteredMocks...)
+	return pool
 }
 
 // strictWindowEnvOverride holds the result of one-time env-var parsing

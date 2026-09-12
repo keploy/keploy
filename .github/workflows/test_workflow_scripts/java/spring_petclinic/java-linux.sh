@@ -819,13 +819,26 @@ fi
 echo "Using reports from: $RUN_DIR"
 
 all_passed=true
+# found_any, because the glob falls through to `continue` when RUN_DIR holds no
+# yaml reports at all. This branch is the only gate that can fail it: the
+# REPLAY_RC check below downgrades a non-zero replay to a ::warning::, so with
+# an empty RUN_DIR the lane printed "All tests passed" and exited 0 having
+# scanned nothing. Eight sibling report loops in this tree already ship this
+# guard.
+found_any=false
 for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
   [[ -f "$rpt" ]] || continue
+  found_any=true
   status=$(awk '/^status:/{print $2; exit}' "$rpt")
   echo "Test status for $(basename "$rpt"): ${status:-<missing>}"
   [[ "$status" == "PASSED" ]] || all_passed=false
 done
 endsec
+
+if [[ "$found_any" != "true" ]]; then
+  echo "::error::No test-set report files found in $RUN_DIR"
+  exit 1
+fi
 
 if [[ "$all_passed" != "true" ]]; then
   echo "::error::Some tests failed or replay exited non-zero"

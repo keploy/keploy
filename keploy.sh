@@ -456,10 +456,23 @@ installKeploy (){
                 echo "Unsupported architecture: $ARCH"
                 return
             fi
-        elif [[ "$OS_NAME" == MINGW32_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
-        elif [[ "$OS_NAME" == MINGW64_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
+        elif [[ "$OS_NAME" == MINGW32_NT* ]] || [[ "$OS_NAME" == MINGW64_NT* ]] || [[ "$OS_NAME" == MSYS_NT* ]] || [[ "$OS_NAME" == CYGWIN_NT* ]]; then
+            # This is the OSS build, which intercepts with eBPF and therefore has
+            # no native Windows backend -- DefaultNativeCommandSupported in
+            # cli/provider/hooks.go accepts linux only, so `keploy record -c ...`
+            # is refused here. Native Windows (userspace, no Administrator) ships
+            # in the Community build, so point there rather than only at WSL2.
+            echo "The OSS build has no native Windows support (it intercepts with eBPF, which is Linux only)."
+            echo ""
+            echo "For native Windows -- no WSL, no Docker, no Administrator -- install the Community build:"
+            echo "  https://keploy.io/docs/installation/windows-installation/"
+            echo ""
+            echo "To stay on the OSS build, run Keploy under WSL2:"
+            echo "  https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10"
+            echo ""
+            echo "The OSS build also supports running your application in Docker on every"
+            echo "platform. Download keploy_windows_amd64 from the releases page first:"
+            echo "  https://github.com/keploy/keploy/releases"
         else
             echo "Unknown OS, install Linux to run Keploy"
         fi

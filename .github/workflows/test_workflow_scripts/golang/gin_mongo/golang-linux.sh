@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
@@ -61,7 +62,7 @@ sed -i 's/ports: 0/ports: 27017/' "$config_file"
 rm -rf keploy/
 
 # Build the binary.
-go build -cover -coverpkg=./... -o ginApp
+go_retry build -cover -coverpkg=./... -o ginApp
 
 stop_recording(){
     local kp_pid="${1:-}"

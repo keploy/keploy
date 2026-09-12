@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -37,7 +39,7 @@ func TestFetchServerGreeting_RefusesFabricatedAddr(t *testing.T) {
 	opts := models.OutgoingOptions{
 		DstCfg: &models.ConditionalDstCfg{Addr: ln.Addr().String(), Port: 3306, AddrFabricated: true},
 	}
-	buf, err := fetchServerGreeting(context.Background(), opts)
+	buf, err := fetchServerGreeting(context.Background(), zap.NewNop(), opts)
 	if err == nil {
 		t.Fatal("fetchServerGreeting must refuse a fabricated destination")
 	}
@@ -78,7 +80,7 @@ func TestFetchServerGreeting_ReadsRealGreeting(t *testing.T) {
 	opts := models.OutgoingOptions{
 		DstCfg: &models.ConditionalDstCfg{Addr: ln.Addr().String(), Port: 3306},
 	}
-	buf, err := fetchServerGreeting(context.Background(), opts)
+	buf, err := fetchServerGreeting(context.Background(), zap.NewNop(), opts)
 	if err != nil {
 		t.Fatalf("fetchServerGreeting: %v", err)
 	}

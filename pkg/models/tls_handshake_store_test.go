@@ -696,3 +696,31 @@ func TestIdentityRecordsExpireEventually(t *testing.T) {
 			"would stay dead for the agent's lifetime")
 	}
 }
+
+// tlsHandshakeMaxQueuePerKey must actually bound a key's queue. The trim used
+// to be computed into a local and then discarded by appending to the untrimmed
+// slice, so the cap never applied and a key with a producer but no matching
+// consumer grew without bound.
+func TestTLSHandshakeStore_PushBoundsQueuePerKey(t *testing.T) {
+	store := NewTLSHandshakeStore()
+	const key = "port:3306"
+
+	for i := 0; i < tlsHandshakeMaxQueuePerKey+50; i++ {
+		store.Push(key, TLSHandshakeEntry{RespPackets: [][]byte{{byte(i)}}})
+	}
+
+	drained := 0
+	for {
+		if _, ok := store.PopWait(key, 0); !ok {
+			break
+		}
+		drained++
+		if drained > tlsHandshakeMaxQueuePerKey*4 {
+			t.Fatalf("queue never drained; it is unbounded (drained %d)", drained)
+		}
+	}
+	if drained > tlsHandshakeMaxQueuePerKey {
+		t.Fatalf("queue held %d entries, want at most tlsHandshakeMaxQueuePerKey=%d",
+			drained, tlsHandshakeMaxQueuePerKey)
+	}
+}

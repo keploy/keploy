@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/go-retry.sh"
 set -euo pipefail
 # -------------------------------
 # Allowlisted deprecated deps
@@ -12,7 +13,11 @@ ALLOWLIST=(
 direct_deps=$(go mod edit -json | jq -r '.Require[] | select(.Indirect == null) | .Path')
 
 # List all modules with their update / deprecation status
-output=$(go list -m -u all)
+# Proxy-only retry: `go list -m -u all` asks about EVERY module in the graph,
+# so a stream error here kills the lint job the same way it kills a sample
+# lane — but GO_RETRY_DIRECT_FROM is pushed past max attempts because going
+# direct would git ls-remote hundreds of upstream repositories.
+output=$(GO_RETRY_DIRECT_FROM=99 go_retry list -m -u all)
 
 found_deprecated=false
 
