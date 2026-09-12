@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
@@ -27,17 +28,17 @@ func Templatize(ctx context.Context, logger *zap.Logger, _ *config.Config, servi
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
-				return nil
+				return fmt.Errorf("service doesn't satisfy tools service interface")
 			}
 			if err := tools.Templatize(ctx); err != nil {
 				utils.LogError(logger, err, "failed to templatize test cases")
-				return nil
+				return err
 			}
 			return nil
 		},
