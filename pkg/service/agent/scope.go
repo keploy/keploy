@@ -148,6 +148,10 @@ func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 		return a.UpdateMockParams(ctx, models.MockFilterParams{
 			AfterTime:  models.BaseTime,
 			BeforeTime: time.Now(),
+			// Same reason as BeginScope: this restore rebuilds the pool from the
+			// pristine store, so without the flag it hands the next test every
+			// mock this session has already served.
+			AgentOwnsConsumed: true,
 		})
 	}
 
