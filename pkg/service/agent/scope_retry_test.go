@@ -25,13 +25,17 @@ type retryProxyStub struct {
 	calls []string
 }
 
-func (s *retryProxyStub) TotalConsumedMocks(context.Context) (map[string]models.MockState, error) {
+// GetPersistentConsumed is coreAgent.ConsumedStateReader -- upstream's
+// never-drained ledger (#4534). BeginScope does not read it directly; it sets
+// MockFilterParams.AgentOwnsConsumed and the agent reads it while re-staging,
+// which is why "total" still lands between the reset and setmocks.
+func (s *retryProxyStub) GetPersistentConsumed() map[string]models.MockState {
 	s.calls = append(s.calls, "total")
 	out := make(map[string]models.MockState, len(s.consumed))
 	for k, v := range s.consumed {
 		out[k] = v
 	}
-	return out, nil
+	return out
 }
 
 func (s *retryProxyStub) ResetConsumedMocks(_ context.Context, names []string) (int, error) {
