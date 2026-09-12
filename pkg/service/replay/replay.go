@@ -30,6 +30,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
+	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -3519,11 +3520,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
 		utils.RemoveDoubleQuotes(utils.TemplatizedValues) // Write the templatized values to the yaml.
 		if len(utils.TemplatizedValues) > 0 {
-			err = r.testSetConf.Write(ctx, testSetID, &models.TestSet{
-				PreScript:  conf.PreScript,
-				PostScript: conf.PostScript,
-				Template:   utils.TemplatizedValues,
-			})
+			// Through the helper, NOT a struct literal. Write replaces
+			// the whole document, so a literal deletes every field it
+			// forgets — this one erased `metadata:` and `appCommand:`
+			// both, and the loss was invisible because a test-set
+			// without either is the ordinary case.
+			err = testset.WriteTemplatedConfig(ctx, r.testSetConf, testSetID, utils.TemplatizedValues)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
 			}
@@ -4129,28 +4131,21 @@ func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.
 	return r.testSetConf.Read(ctx, testSet)
 }
 
-// UpdateTestSetTemplate writes the updated template values to the test-set's config.
-// It preserves existing pre/post scripts, secret and metadata fields.
+// UpdateTestSetTemplate writes the updated template values to the
+// test-set's config, preserving EVERY other field. It used to name the
+// fields it kept — pre/post scripts, secret, metadata — and silently
+// dropped appCommand, which is the failure mode that carrying fields by
+// hand always has.
 func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error {
 	if len(template) == 0 { // nothing to persist
 		return nil
 	}
-	existing, err := r.testSetConf.Read(ctx, testSetID)
-	if err != nil {
-		// If file missing we still attempt to write minimal config.
-		r.logger.Debug("failed reading existing test-set config while updating template; will create new", zap.String("testSetID", testSetID), zap.Error(err))
-	}
-	ts := &models.TestSet{}
-	if existing != nil {
-		ts.PreScript = existing.PreScript
-		ts.PostScript = existing.PostScript
-		ts.Secret = existing.Secret
-		ts.Metadata = existing.Metadata
-	} else {
-		ts.Metadata = map[string]interface{}{}
-	}
-	ts.Template = template
-	if err := r.testSetConf.Write(ctx, testSetID, ts); err != nil {
+	// THE THIRD templatizing write, through the same helper as the other
+	// two. It carried PreScript, PostScript, Secret and Metadata forward
+	// by hand and silently dropped AppCommand — the field-by-field
+	// carry-forward failing in exactly the way that made the helper
+	// necessary. (Secret was pointless to copy: Db.Write strips it.)
+	if err := testset.WriteTemplatedConfig(ctx, r.testSetConf, testSetID, template); err != nil {
 		utils.LogError(r.logger, err, "failed to write updated template map", zap.String("testSetID", testSetID))
 		return err
 	}
