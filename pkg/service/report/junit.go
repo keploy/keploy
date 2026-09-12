@@ -291,8 +291,17 @@ func depFailureLines(deps []models.DepResult) []string {
 			if key == "" {
 				key = models.DepKeyPresence
 			}
-			parts = append(parts, fmt.Sprintf("dependency %s [%s] %s: expected %q, got %q",
-				d.Name, d.Type, key, m.Expected, m.Actual))
+			// "dependency" is the sync path's noun and is what every
+			// pre-consumer report says; an effects[i] row is an assertion
+			// about what the worker PRODUCED, not about a call it made, so
+			// calling it a dependency would misdescribe it. Dispatched on the
+			// row prefix, never on the test's Kind.
+			noun := "dependency"
+			if models.IsEffectRow(d) {
+				noun = "effect"
+			}
+			parts = append(parts, fmt.Sprintf("%s %s [%s] %s: expected %q, got %q",
+				noun, d.Name, d.Type, key, m.Expected, m.Actual))
 		}
 	}
 	return parts

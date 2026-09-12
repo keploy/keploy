@@ -62,6 +62,21 @@ type TestCase struct {
 	Assertions    map[AssertionType]interface{} `json:"assertion" bson:"assertion"`
 	HasBinaryFile bool                          `json:"has_binary_file" bson:"has_binary_file"`
 	AppPort       uint16                        `json:"app_port" bson:"app_port"`
+	// ConsumerSpec is the whole payload of a Kind: Consumer test case: the
+	// recorded trigger, the effects the worker produced while handling it,
+	// and the completion rule. NIL FOR EVERY OTHER KIND, which is the point:
+	// this is the only field consumer support adds to TestCase, it is a
+	// nullable pointer, and with omitempty on all three tag sets an HTTP or
+	// gRPC test case serializes byte-identically to a pre-consumer build.
+	//
+	// yaml:"-" because the persisted YAML form of a test case is a
+	// NetworkTrafficDoc whose polymorphic `spec:` node is built by
+	// testdb.EncodeTestcase; TestCase itself is never the storage shape, and
+	// a yaml projection here would be a second, divergent copy.
+	//
+	// See pkg/models/consumer.go for the model and
+	// keploy-consumer-design-v2.md §2 for the on-disk example.
+	ConsumerSpec *ConsumerSpec `json:"consumer_spec,omitempty" bson:"consumer_spec,omitempty" yaml:"-"`
 	// SourcePod is a transient, never-persisted routing tag: the name of the
 	// pod whose traffic produced this test case. Reentrancy seam for the
 	// enterprise DaemonSet agent's per-pod attribution — it stamps this from

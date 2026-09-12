@@ -1,0 +1,60 @@
+{
+  "version": "api.keploy.io/v1beta1",
+  "kind": "Consumer",
+  "name": "test-7",
+  "spec": {
+    "metadata": {
+      "description": "order confirmation worker"
+    },
+    "protocol": "kafka",
+    "trigger": {
+      "protocol": "kafka",
+      "op": "fetch",
+      "target": "orders",
+      "key": "o-4c1",
+      "headers": {
+        "traceparent": "00-4bf9a1d2e3f4-01"
+      },
+      "body": "{\"orderId\":\"o-4c1\",\"items\":[{\"sku\":\"SKU-9\",\"qty\":3}]}",
+      "bodyType": "JSON",
+      "decoded": "confident",
+      "coords": {
+        "offset": "1840",
+        "partition": "0",
+        "timestamp": "1755861852401"
+      },
+      "records": 1
+    },
+    "effects": [
+      {
+        "protocol": "kafka",
+        "op": "produce",
+        "target": "order-events",
+        "key": "o-4c1",
+        "body": "{\"orderId\":\"o-4c1\",\"status\":\"CONFIRMED\",\"total\":41.97}",
+        "bodyType": "JSON",
+        "decoded": "confident",
+        "coords": {
+          "partition": "0"
+        },
+        "assert": "full",
+        "records": 1
+      }
+    ],
+    "orderBy": "partition",
+    "sideEffects": 1,
+    "completion": {
+      "expectEffects": 1,
+      "graceMs": 250,
+      "timeoutMs": 5000
+    },
+    "created": 1755861852,
+    "reqTimestampMock": "2026-08-22T10:04:12.401Z",
+    "resTimestampMock": "2026-08-22T10:04:12.456Z",
+    "assertions": {
+      "noise": {
+        "effects.0.body.processedAt": []
+      }
+    }
+  }
+}

@@ -650,6 +650,90 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 	return nil
 }
 
+// The three consumer-instrumentation methods. They are what
+// replay.ConsumerInstrumentation's type assertion finds for the NATIVE,
+// in-process agent, and what the /agent/consumer/* routes call for the remote
+// one. All three reach the SAME delivery gate the protocol parsers were handed
+// on their contexts — arming here is precisely what opens the window they
+// deliver through — via a capability type-assertion on a.Proxy, so the
+// coreAgent.Proxy interface stays unchanged and a third-party proxy keeps
+// compiling.
+//
+// A proxy without the capability refuses rather than degrades: it cannot
+// deliver the recorded message at all, so the worker would produce nothing and
+// the test would report "the worker stopped producing" — blaming the
+// application for a missing capability in keploy.
+
+// consumerGateHolder is the capability pkg/agent/proxy.Proxy implements. It is
+// declared here rather than exported from that package so this file does not
+// depend on the proxy's concrete type.
+type consumerGateHolder interface {
+	ArmConsumerTrigger(ctx context.Context, arm models.ConsumerArm) error
+	AwaitConsumerEffects(ctx context.Context, testID string) (*models.ConsumerResult, error)
+	ResetConsumerGate(ctx context.Context, testSetID string) (int, error)
+}
+
+func (a *Agent) consumerGate() (consumerGateHolder, error) {
+	holder, ok := a.Proxy.(consumerGateHolder)
+	if !ok {
+		return nil, fmt.Errorf("%s: this agent's proxy cannot open a consumer delivery window", models.CategoryConsumerUnsupportedAgent)
+	}
+	return holder, nil
+}
+
+// ArmConsumerTrigger opens the delivery window for one consumer test and hands
+// its recorded trigger to the application.
+func (a *Agent) ArmConsumerTrigger(ctx context.Context, arm models.ConsumerArm) error {
+	holder, err := a.consumerGate()
+	if err != nil {
+		return err
+	}
+	return holder.ArmConsumerTrigger(ctx, arm)
+}
+
+// AwaitConsumerEffects blocks until the armed test's window closes and returns
+// everything observed inside it.
+func (a *Agent) AwaitConsumerEffects(ctx context.Context, testID string) (*models.ConsumerResult, error) {
+	holder, err := a.consumerGate()
+	if err != nil {
+		return nil, err
+	}
+	return holder.AwaitConsumerEffects(ctx, testID)
+}
+
+// ResetConsumerGate returns the delivery gate to its default-closed boot phase
+// at a test-set boundary, and reports any effect left unattributed by it.
+func (a *Agent) ResetConsumerGate(ctx context.Context, testSetID string) (int, error) {
+	holder, err := a.consumerGate()
+	if err != nil {
+		// A proxy with no gate has nothing to reset, and nothing was
+		// left over by a gate that does not exist.
+		return 0, nil
+	}
+	return holder.ResetConsumerGate(ctx, testSetID)
+}
+
+// consumerRecordingReporter is the record-side capability pkg/agent/proxy.Proxy
+// implements: the reconciliation of the last closed recording session.
+type consumerRecordingReporter interface {
+	ConsumerRecordingReport() models.ConsumerRecordingReport
+}
+
+// ConsumerRecordingReport returns the last closed consumer recording session's
+// reconciliation, so `keploy record` can FAIL a degraded recording rather than
+// exit 0 with a suite that is silently shorter than what the user watched
+// being recorded (design §3 R6).
+//
+// A proxy without the capability answers an empty report, which every caller
+// reads as "nothing to say" — the same silence an HTTP-only recording gets.
+func (a *Agent) ConsumerRecordingReport() models.ConsumerRecordingReport {
+	reporter, ok := a.Proxy.(consumerRecordingReporter)
+	if !ok {
+		return models.ConsumerRecordingReport{}
+	}
+	return reporter.ConsumerRecordingReport()
+}
+
 // collectAsyncMocks returns the async subset (Mock.IsAsync, i.e. Spec.Async != nil).
 func collectAsyncMocks(mocks []*models.Mock) []*models.Mock {
 	var out []*models.Mock
