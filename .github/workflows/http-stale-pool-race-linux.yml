@@ -4,16 +4,9 @@ name: HTTP Stale-Pool Race Regression (Linux)
 # drops + downstream 503/UC under bursty traffic with idle gaps longer
 # than the backend's keep-alive (gunicorn 2s default).
 #
-# The matrix runs the same bursty-load test against two keploy
-# binaries:
-#   - record_with_build  → uses the PR's binary. MUST pass.
-#   - record_with_latest → uses the published `latest`. Demonstrates
-#                          the bug on releases that pre-date the fix
-#                          (~25-50% drop rate). Marked
-#                          continue-on-error so it documents the bug
-#                          without blocking PR merges; flip to a hard
-#                          gate once a release containing the fix is
-#                          published as `latest`.
+# The workflow now gates only the PR binary. The older latest-release
+# bug-demonstration leg was useful while published releases still predated the
+# fix, but current releases include it and that leg no longer adds signal.
 on:
   workflow_call:
     inputs:
@@ -42,13 +35,6 @@ jobs:
             # leg fails, either the fix regressed or the burst
             # parameters drift from what reproduces the race.
             continue_on_error: false
-          - job: record_with_latest
-            record_src: latest
-            # The published `latest` is expected to fail this test
-            # until a release containing the fix ships. Marked
-            # continue-on-error so the failure is visible but does
-            # not block the PR.
-            continue_on_error: true
     name: stale-pool-race (${{ matrix.config.job }})
     timeout-minutes: 15
     continue-on-error: ${{ matrix.config.continue_on_error }}
