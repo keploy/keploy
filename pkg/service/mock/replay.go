@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/replay"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -52,14 +54,24 @@ func (m *mockService) Replay(ctx context.Context) error {
 	}()
 
 	// 1. Instrument in mock (test) mode — no ingress port relocation.
+	// --pass-through-ports lands in BypassRules (config.SetByPassPorts, driven by
+	// cli/provider/cmd.go). The proxy-level rules were already forwarded via
+	// OutgoingOptions.Rules below, but the KERNEL-level bypass is a separate
+	// channel and mock mode never populated it -- so a bypassed port was still
+	// pulled through the proxy and recorded. Integration record/test have always
+	// set this (service/record/record.go, service/replay/replay.go); mock mode
+	// was the only path that did not.
+	passPortsUint := config.GetByPassPorts(m.config)
+
 	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
-		Container:   m.config.ContainerName,
-		CommandType: m.config.CommandType,
-		DockerDelay: m.config.BuildDelay,
-		BuildDelay:  m.config.BuildDelay,
-		Mode:        models.MODE_TEST,
-		MockMode:    true,
-		ConfigPath:  m.config.ConfigPath,
+		Container:        m.config.ContainerName,
+		CommandType:      m.config.CommandType,
+		DockerDelay:      m.config.BuildDelay,
+		BuildDelay:       m.config.BuildDelay,
+		Mode:             models.MODE_TEST,
+		MockMode:         true,
+		ConfigPath:       m.config.ConfigPath,
+		PassThroughPorts: passPortsUint,
 	}); err != nil {
 		if ctx.Err() != nil {
 			return nil
@@ -69,12 +81,34 @@ func (m *mockService) Replay(ctx context.Context) error {
 	}
 
 	// 2. Put the proxy in mock-serving mode with the miss policy.
+	//
+	// Opting into strict enforcement is what makes a changed request VALUE
+	// miss: the default request-body check is PerformBodyMatch -> bodyMatch,
+	// which compares top-level key presence only, so a payload that keeps its
+	// shape and changes a value is served the stale recorded response.
+	//
+	// NoiseConfig is forwarded only alongside it. It also feeds header noise,
+	// so passing it unconditionally would loosen matching for anyone with an
+	// existing test.globalNoise block; gating it keeps the default literal
+	// byte-for-byte the zero-valued one this call has always used.
+	//
+	// SchemaNoiseDetection is deliberately NOT forwarded. Its rule is
+	// "changed && !alreadyKnownNoise -> noise" on a single observation, and
+	// MergeLearned is monotonic, so running the learner on the very PR that
+	// broke something amnesties that field permanently. A learner pointed at a
+	// gate defeats the gate.
+	var mockNoiseConfig map[string]map[string][]string
+	if m.config.Test.SchemaNoiseStrict {
+		mockNoiseConfig = replay.PrepareMockNoiseConfig(m.config.Test.GlobalNoise.Global, m.config.Test.GlobalNoise.Testsets, name)
+	}
 	if err := m.instrumentation.MockOutgoing(ctx, models.OutgoingOptions{
 		Rules:                     m.config.BypassRules,
 		MongoPassword:             m.config.Test.MongoPassword,
 		SQLDelay:                  time.Duration(m.config.Test.Delay) * time.Second,
 		Mocking:                   true,
 		OnMiss:                    policy,
+		NoiseConfig:               mockNoiseConfig,
+		SchemaNoiseStrict:         m.config.Test.SchemaNoiseStrict,
 		MysqlPorts:                m.config.MysqlPorts,
 		DisableMysqlAutoDetect:    m.config.DisableMysqlAutoDetect,
 		DisableMysqlEndpointDrift: m.config.DisableMysqlEndpointDrift,

@@ -108,6 +108,16 @@ jobs:
       - name: Running Unit Tests
         run: go test ./...
 
+      # RegisterClient copies the pass-through port list into a fixed-size
+      # kernel array, and the only honest assertion is on what that array ends
+      # up holding -- which needs a real BPF map, which needs CAP_BPF. The step
+      # above runs unprivileged, so those tests skip there and the package
+      # still reports ok. A skip that reads as a pass is the exact defect this
+      # package guards against, so run them once with the capability and set
+      # KEPLOY_TEST_BPF_REQUIRED to make an unavailable map fatal instead.
+      - name: Running BPF-backed hook tests (privileged)
+        run: sudo -E env "PATH=$PATH" KEPLOY_TEST_BPF_REQUIRED=1 go test -count=1 ./pkg/agent/hooks/linux/
+
       # The mock-manager's concurrency guards — the tier-key/HitCount race and
       # the hitMu/treesMu lock order — are only meaningful under -race: without
       # it their tests pass on a build that races, so they read as coverage

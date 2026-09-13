@@ -437,20 +437,35 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	if stub != nil {
 		name = stub.Name
 	}
-	if stub == nil || stub.Spec.HTTPResp == nil {
-		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
+	// Resolve the response BEFORE the nil guard, never after. A recorded body
+	// of at least responseSpillMinBytes is parked on the agent's per-test disk
+	// store with Spec.HTTPResp deliberately set to nil (proxy.DiskMocks.Add),
+	// and this is the only thing that fetches it back — guarding first rejected
+	// every spilled mock as "no response to serialize".
+	//
+	// The resolved response is held LOCALLY and never written back onto the
+	// mock. stub is a pooled pointer shared with every other connection
+	// goroutine, and updateMock dereferences it whole by value while this runs;
+	// see (*models.Mock).HydratedHTTPResp. A response that is nil for any other
+	// reason still resolves to nil, which is why the guard below stays.
+	var resp *models.HTTPResp
+	if stub != nil {
+		var herr error
+		if resp, herr = stub.HydratedHTTPResp(); herr != nil {
+			return nil, herr
+		}
 	}
-	if err := stub.HydrateResponse(); err != nil {
-		return nil, err
+	if resp == nil {
+		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
 	}
 	protoMajor, protoMinor := 1, 1
 	if stub.Spec.HTTPReq != nil {
 		protoMajor, protoMinor = stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor
 	}
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
-		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
-	body := stub.Spec.HTTPResp.Body
-	header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+		resp.StatusCode, http.StatusText(resp.StatusCode))
+	body := resp.Body
+	header := pkg.ToHTTPHeader(resp.Header)
 	var respBody string
 	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
 		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))

@@ -88,13 +88,18 @@ func (l Lifetime) String() string {
 //     its Metadata["type"] tag.
 //
 // Precedence (applied top-to-bottom; first match wins):
-//  1. Kind == MySQL AND first request is a connection-alive command
-//     with an input-independent response (COM_PING, COM_STATISTICS,
-//     COM_DEBUG, COM_RESET_CONNECTION) → LifetimeSession. Applied
-//     BEFORE the tag switch so an explicitly-tagged "mocks" mock from
-//     the recorder is still promoted to session when semantically
-//     reusable — this is how HikariCP startup COM_PING mocks survive
-//     strict-window pre-filtering.
+//  1. Protocol-specific overrides, applied BEFORE the tag switch so an
+//     explicitly-tagged per-test mock from a recorder is still promoted
+//     to session when its response is semantically input-independent
+//     — both cases below resolve to LifetimeSession. (a) Kind == MySQL
+//     AND first request is a connection-alive command (COM_PING,
+//     COM_STATISTICS, COM_DEBUG, COM_RESET_CONNECTION): this is how
+//     HikariCP startup COM_PING mocks tagged "mocks" survive
+//     strict-window pre-filtering. (b) Kind == HTTP AND the recorded
+//     request is a browser CORS preflight (method OPTIONS + an
+//     Access-Control-Request-Method header), so the HTTP recorder's
+//     per-test "HTTP_CLIENT" tag cannot make a preflight consumable or
+//     test-scoped; see httpIsCORSPreflight.
 //  2. Spec.Metadata["type"] == "config"       → LifetimeSession
 //  3. Spec.Metadata["type"] == "connection"   → LifetimeConnection
 //     (requires non-empty connID; falls back to Session if missing).
@@ -145,10 +150,54 @@ func (m *Mock) DeriveLifetime() {
 	// know is input-independent. COM_QUERY / COM_INIT_DB /
 	// COM_CHANGE_USER / COM_SET_OPTION all depend on input and must
 	// stay per-test.
-	if m.Kind == MySQL && mysqlIsSessionReusableCommand(m) {
+	if m.IsSharedAcrossTests() {
 		m.TestModeInfo.Lifetime = LifetimeSession
 		return
 	}
+
+	// Rule 1(b): same tier as the MySQL override above, for HTTP. A CORS
+	// preflight is input-independent in exactly the sense COM_PING is:
+	// the browser sends `OPTIONS <path>` with
+	// Access-Control-Request-Method/-Headers and no body, and the server
+	// answers with the allow-policy for that endpoint. The reply is a
+	// property of the endpoint, not of the test that happened to trigger
+	// it, so it is legitimately reusable across tests and across
+	// connections.
+	//
+	// Why the override is needed: the HTTP recorder tags
+	// every capture Spec.Metadata["type"] = "HTTP_CLIENT", and HTTP is
+	// deliberately excluded from rule 5's lax promotion (see
+	// kindsWithLaxTaggedSessionPromotion) so HTTP data mocks stay per-test
+	// and are consumed on match. Preflights inherited that classification:
+	// consumed on first match AND visible only inside the owning test's
+	// mock pool. In the recording that surfaced this, only 3 of 6
+	// tests own any of the 8 recorded OPTIONS mocks, so the other 3 replay
+	// as "no matching mock found for OPTIONS /query" and every preflighted
+	// request in them fails the browser's CORS check with
+	// net::ERR_FAILED.
+	//
+	// What session lifetime buys. It exempts the mock from consumption on
+	// match, from window filtering, and from the mapping-based narrowing
+	// that `scope/begin` applies when the runner reports no worker PID —
+	// FilterConfigMocksMapping returns the whole session pool while
+	// FilterTcsMocksMapping returns only in-mapping mocks (pkg/util.go).
+	//
+	// That covers the pid == 0 path only. When a runner DOES report a PID,
+	// scope/begin installs the per-worker filter instead, and that filter
+	// matches on mock NAMES: correlateScopes buckets a capture into a test's
+	// mapping by request timestamp alone, so a preflight lands in whichever
+	// test's window it fired in and every other worker would lose it. The
+	// gate is ScopeReq.Pid > 0, not a worker count — a SINGLE-worker runner
+	// that reports its pid takes the same path.
+	//
+	// That is why the override is expressed as IsSharedAcrossTests rather
+	// than written inline here: scopedMockDb.keep consults the same
+	// predicate, so both paths agree on which mocks are reusable. Add a
+	// third rule-1 override and the scoping filter honours it with no second
+	// edit.
+	// Rule 1(b) is folded into the IsSharedAcrossTests call above, which
+	// covers both protocol overrides; the comment block here documents why the
+	// HTTP arm exists.
 	tag := ""
 	if m.Spec.Metadata != nil {
 		tag = m.Spec.Metadata["type"]
@@ -218,7 +267,10 @@ func (m *Mock) DeriveLifetime() {
 	// kind-based session fallback for any non-canonical tag when
 	// the kind is in the implicit-session list. Strict mode takes
 	// the narrow path above and returns before reaching here.
-	if !laxKindFallbackDisabled() && kindsWithImplicitSessionLifetime(m.Kind) {
+	//
+	// HTTP is deliberately excluded from this promotion — see
+	// kindsWithLaxTaggedSessionPromotion.
+	if !laxKindFallbackDisabled() && kindsWithLaxTaggedSessionPromotion(m.Kind) {
 		m.TestModeInfo.Lifetime = LifetimeSession
 		return
 	}
@@ -228,9 +280,11 @@ func (m *Mock) DeriveLifetime() {
 // laxKindFallbackDisabled reports whether strict mode is forcing the
 // DeriveLifetime kind-fallback to stay narrow (tag=="" only). When
 // this returns false (no KEPLOY_STRICT_MOCK_WINDOW env override set),
-// any non-canonical tag on a kind in kindsWithImplicitSessionLifetime
+// any non-canonical tag on a kind in kindsWithLaxTaggedSessionPromotion
 // also falls through to session — preserving pre-Phase-2 byte-for-
-// byte behaviour for older recordings.
+// byte behaviour for older recordings. Note that list is NOT the same as
+// kindsWithImplicitSessionLifetime, which rule 4 (untagged) still uses:
+// HTTP is in the untagged list but deliberately not in this one.
 //
 // Scope: this env-only gate controls ONE specific behaviour — the
 // lax-mode promotion of explicitly-tagged non-canonical mocks (e.g.
@@ -330,12 +384,19 @@ func LegacyKindFallbackFires() uint64 {
 // added here. Their recorders already stamp type=config / mocks /
 // connection at record time, so DeriveLifetime's tag-based switch
 // routes them correctly without a kind-fallback. Listing them here
-// would additionally fire the lax-mode promotion below for their
-// explicitly-tagged "mocks" captures and wrongly route those to
+// would additionally have fired the lax-mode promotion for their
+// explicitly-tagged "mocks" captures and wrongly routed those to
 // the session pool — which breaks the per-test consumption the
 // matcher depends on (observed in the kafka-ecommerce e2e as
 // dataMocksConsumed=0 when tagged Kafka Produce mocks were force-
 // promoted to session).
+//
+// That promotion now consults kindsWithLaxTaggedSessionPromotion, a
+// separate and narrower list, so membership here no longer implies it.
+// HTTP is the reason the two lists diverge: it belongs here (its
+// untagged mocks are legitimately session) but not there (its tagged
+// captures must be consumed, or a repeated request replays the first
+// recording forever — the same dataMocksConsumed=0 symptom above).
 //
 // The LegacyKindFallbackFires counter still tracks uses for
 // observability, but non-zero fires are EXPECTED for HTTP/Generic
@@ -343,6 +404,33 @@ func LegacyKindFallbackFires() uint64 {
 func kindsWithImplicitSessionLifetime(k Kind) bool {
 	switch k {
 	case HTTP, HTTP2, MySQL, Postgres, PostgresV2, GENERIC, DNS:
+		return true
+	}
+	return false
+}
+
+// kindsWithLaxTaggedSessionPromotion returns true for Kinds whose
+// EXPLICITLY-TAGGED, non-canonical mocks are still promoted to session
+// lifetime under lax mode. It gates rule 5 only; rule 4 (the tag==""
+// fallback) keeps using kindsWithImplicitSessionLifetime, so untagged
+// legacy recordings of every listed kind replay byte-for-byte.
+//
+// HTTP is excluded. Its recorder stamps LifetimePerTest at emit time
+// (integrations/http/http.go:296, recordv2.go:548) and the published
+// contract (docs/explanation/mock-lifetimes.md:109) says HTTP_CLIENT is
+// per-test — so promoting a tagged HTTP_CLIENT capture to session
+// contradicts both. The promotion made every HTTP data mock reusable,
+// which meant the matcher never consumed one and a re-issued request
+// replayed the FIRST recording forever. Same failure, same reasoning as
+// 8339fe55 removing REDIS from the sibling list ("breaks the per-test
+// consumption the matcher depends on").
+//
+// MySQL/Postgres/Generic/DNS keep the promotion: it is what the fuzzer
+// and ORM-style workloads named in the rule-5 comment above depend on,
+// and their per-test captures are tagged "mocks".
+func kindsWithLaxTaggedSessionPromotion(k Kind) bool {
+	switch k {
+	case HTTP2, MySQL, Postgres, PostgresV2, GENERIC, DNS:
 		return true
 	}
 	return false
@@ -390,6 +478,108 @@ func IsMySQLSessionReusableCommandType(cmdType string) bool {
 	switch cmdType {
 	case "COM_PING", "COM_STATISTICS", "COM_DEBUG", "COM_RESET_CONNECTION":
 		return true
+	}
+	return false
+}
+
+// IsSharedAcrossTests reports whether DeriveLifetime's rule-1 protocol
+// overrides classify this mock as semantically reusable: its recorded response
+// is a property of the ENDPOINT, not of whichever test happened to trigger it.
+// A MySQL connection-alive command and a browser CORS preflight both qualify —
+// the answer does not depend on the caller.
+//
+// Deliberately NARROWER than Lifetime == LifetimeSession, and that gap is the
+// whole point. Most session mocks are session because of the tiering
+// fallbacks — rule 4 (untagged legacy recordings) and rule 5 (the lax-mode
+// promotion by kind) — which say nothing about reusability; under the default
+// lax mode that is the entire MySQL/Postgres/Generic/DNS data plane. Per-worker
+// scoping (pkg/agent/proxy/scoped_mockdb.go) must keep hiding those from other
+// workers, so it consults this predicate instead of Lifetime.
+//
+// Keep this the single definition of "rule 1 fired": DeriveLifetime calls it
+// too, so a future override added here is honoured by the scoping filter
+// automatically rather than needing a second edit someone will miss.
+func (m *Mock) IsSharedAcrossTests() bool {
+	if m == nil {
+		return false
+	}
+	switch {
+	case m.Kind == MySQL && mysqlIsSessionReusableCommand(m):
+		return true
+	case m.Kind == HTTP && httpIsCORSPreflight(m):
+		return true
+	}
+	return false
+}
+
+// httpIsCORSPreflight reports whether an HTTP mock captured a browser
+// CORS preflight, whose response is input-independent and therefore safe
+// to route into the session pool regardless of the recorder's per-test
+// "HTTP_CLIENT" tag. Mirrors mysqlIsSessionReusableCommand: the Kind
+// check stays at the DeriveLifetime call site, the shape check lives
+// here.
+//
+// Only Kind == HTTP is wired up. HTTP2 is deliberately excluded because
+// keploy's h2 parser serves gRPC traffic, where browser preflights do not
+// appear — so there is no recording to validate an h2 rule against.
+//
+// Wiring it up would be mechanical, not structural: HTTP2Req carries the
+// same (Method, map[string]string) shape, and IsCORSPreflightRequest is
+// already case-insensitive, so h2's lowercase header keys (RFC 7540
+// section 8.1.2) need no second code path — it is one extra call site.
+//
+// One caveat if it is ever added: HTTP2 remains listed in
+// kindsWithLaxTaggedSessionPromotion, so a tagged h2 capture is already
+// promoted to LifetimeSession under lax mode. But that promotion is gated
+// on lax; under KEPLOY_STRICT_MOCK_WINDOW=1 an h2 preflight WOULD exhibit
+// the same starvation. So "h2 never had this problem" is only true in
+// the default mode.
+func httpIsCORSPreflight(m *Mock) bool {
+	if m == nil || m.Spec.HTTPReq == nil {
+		return false
+	}
+	return IsCORSPreflightRequest(m.Spec.HTTPReq.Method, m.Spec.HTTPReq.Header)
+}
+
+// IsCORSPreflightRequest reports whether a recorded HTTP request is a
+// browser CORS preflight: method OPTIONS *and* an
+// Access-Control-Request-Method header. It is the single source of truth
+// shared by DeriveLifetime's rule 1(b) and any recorder/matcher that later
+// needs the same classification, mirroring
+// IsMySQLSessionReusableCommandType.
+//
+// The header is required on purpose. Per the Fetch standard a browser
+// always sends Access-Control-Request-Method on a preflight, so requiring
+// it costs nothing on real recordings (every OPTIONS mock in the four
+// recordings used to diagnose this carry it) while excluding a
+// bare OPTIONS that is a genuine data endpoint — WebDAV capability
+// discovery, or an API that serves OPTIONS as a real response whose body
+// varies per caller. Those must stay per-test and be consumed on match;
+// promoting one to session would replay the first recording forever. The
+// tradeoff is deliberately directional: a false negative merely leaves
+// today's behaviour in place, a false positive breaks per-test
+// consumption.
+//
+// The method compare is exact: RFC 9110 section 9.1 defines HTTP methods as
+// case-sensitive, so "options" is not a valid method and must not be treated
+// as a preflight. The header NAME lookup is case-insensitive, because field
+// names are case-insensitive per RFC 9110 section 5.1 — proxy-recorded mocks
+// go through pkg.ToYamlHTTPHeader(http.Header) so their keys are canonical,
+// but mocks arriving as raw JSON/YAML (cloud sync, hand-written fixtures)
+// carry whatever casing the producer emitted.
+//
+// The header's VALUE must be non-empty. A preflight always names the method
+// it is asking about; an empty value is a malformed request, not a preflight,
+// and promoting it would be a false positive of exactly the kind the
+// directional argument above says to avoid.
+func IsCORSPreflightRequest(method Method, header map[string]string) bool {
+	if string(method) != "OPTIONS" {
+		return false
+	}
+	for k, v := range header {
+		if strings.EqualFold(k, "Access-Control-Request-Method") {
+			return strings.TrimSpace(v) != ""
+		}
 	}
 	return false
 }

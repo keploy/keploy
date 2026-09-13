@@ -623,22 +623,38 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 		clientInfo.Mode = uint32(0)
 	}
 
-	ports := agent.GetPortToSendToKernel(ctx, rules)
-
-	if agent.ExtraPassThroughPortsHook != nil {
-		ports = append(ports, agent.ExtraPassThroughPortsHook()...)
-	}
-
 	// Mock mode: the wrapped test runner calls the agent's own HTTP server
 	// (the /agent/scope/* API) at localhost:<AgentPort>. That process is inside
 	// the intercepted PID tree, so without bypassing this port the runner's
 	// scope calls would be redirected into the proxy instead of reaching the
 	// agent. Kernel-level bypass the agent's own control port.
+	//
+	// It claims its slot FIRST, ahead of the user's ports, because the array
+	// below is fixed at len(clientInfo.PassThroughPorts) and truncates. Appended
+	// last, a user who passes that many --pass-through-ports would drop the very
+	// bypass the runner needs, and mock mode would fail outright rather than
+	// merely over-record.
+	var ports []uint
 	if opts.MockMode && opts.AgentPort != 0 {
 		ports = append(ports, uint(opts.AgentPort))
 	}
 
-	for i := 0; i < 10; i++ {
+	ports = append(ports, agent.GetPortToSendToKernel(ctx, rules)...)
+
+	if agent.ExtraPassThroughPortsHook != nil {
+		ports = append(ports, agent.ExtraPassThroughPortsHook()...)
+	}
+
+	// The kernel array is fixed-size and the copy below truncates, so say so
+	// rather than ignoring part of an explicit flag in silence.
+	if len(ports) > len(clientInfo.PassThroughPorts) {
+		h.logger.Warn("more pass-through ports than the kernel bypass list can hold; the extra ports will still be intercepted and recorded",
+			zap.Int("given", len(ports)),
+			zap.Int("capacity", len(clientInfo.PassThroughPorts)),
+			zap.Any("dropped", ports[len(clientInfo.PassThroughPorts):]))
+	}
+
+	for i := range clientInfo.PassThroughPorts {
 		if len(ports) <= i {
 			clientInfo.PassThroughPorts[i] = -1
 			continue

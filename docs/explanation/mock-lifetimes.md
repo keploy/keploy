@@ -107,10 +107,14 @@ than being consumed per-test, since consumption would break the
 paired execute).
 
 Any other tag — including `mocks`, `HTTP_CLIENT`, or none at all —
-routes to per-test. Recorders pick human-readable labels for
-debugging; only the two reserved values above change routing.
+routes to per-test, unless one of the overrides below applies.
+Recorders pick human-readable labels for debugging; only the two
+reserved values above change routing on the tag switch itself.
 
-Two tag-independent overrides run BEFORE the tag switch:
+Three overrides can change that routing. The first two are genuinely
+tag-independent and run BEFORE the tag switch, so they win over any tag.
+The third runs AFTER it and is tag-*conditional* — it fires only when the
+tag is empty:
 
 1. **MySQL session-reusable commands** (`COM_PING`, `COM_STATISTICS`,
    `COM_DEBUG`, `COM_RESET_CONNECTION`) — promoted to session
@@ -118,7 +122,29 @@ Two tag-independent overrides run BEFORE the tag switch:
    are typically recorded at app startup (HikariCP pool warm-up, JDBC
    connection validation) BEFORE any test window begins, so leaving
    them per-test would have the strict-window pre-filter drop them.
-2. **Untagged legacy-kind fallback** — recordings captured before the
+2. **HTTP CORS preflights** — an `OPTIONS` request carrying an
+   `Access-Control-Request-Method` header is promoted to session
+   regardless of tag. The response is the endpoint's allow-policy, so it
+   is a property of the endpoint rather than of whichever test happened
+   to trigger it. Browsers also cache preflights, so they are recorded
+   far more sparsely than replay demands them: in one 6-test recording
+   only 3 tests owned any of the 8 captured preflights. Leaving them
+   per-test made them consumed on first match AND visible only inside
+   the owning test's pool, so every preflighted request in the other
+   tests failed with `net::ERR_FAILED`. A bare `OPTIONS` with no
+   `Access-Control-Request-Method` is NOT promoted — it may be a real
+   data endpoint, and promoting one would make it replay its first
+   recording forever. This exempts the mock from consumption, window
+   filtering, and mapping-based scope narrowing; per-PID worker scoping
+   is covered separately, because `scopedMockDb.keep` matches on mock
+   NAME and a preflight is attributed to whichever test's window it
+   happened to fire in. Both paths therefore consult one predicate,
+   `(*Mock).IsSharedAcrossTests`, which is narrower than
+   `Lifetime == LifetimeSession` on purpose: rules 2 and 3 below make
+   most of the pool session-lifetime for reasons unrelated to
+   reusability, and exempting those from worker scoping would make the
+   isolation a no-op.
+3. **Untagged legacy-kind fallback** — recordings captured before the
    tag convention rely on a kind-based inference inside
    `DeriveLifetime` that routes untagged (empty-string `type`) HTTP /
    HTTP2 / MySQL / Redis / Postgres / PostgresV2 / Generic / DNS
