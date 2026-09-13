@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 #
 # Schema-based request-body noise detection — end-to-end CI test using the real
 # samples-go/mux-elasticsearch app.
@@ -52,15 +53,7 @@ trap cleanup EXIT
 # Build app + wait for Elasticsearch
 # ---------------------------------------------------------------------------
 step "Building mux-elasticsearch"
-build_go_app() {
-  local attempt=1
-  while [ "$attempt" -le 4 ]; do
-    if GOPROXY="proxy.golang.org,direct" go build -o "$APP_BIN" .; then return 0; fi
-    echo "go build attempt ${attempt} failed; retrying…"; sleep $((attempt * 5)); attempt=$((attempt + 1))
-  done
-  echo "::error::go build for $APP_BIN failed"; return 1
-}
-build_go_app || exit 1
+go_retry build -o "$APP_BIN" . || exit 1
 
 step "Waiting for Elasticsearch at $ELASTICSEARCH_URL"
 for i in $(seq 1 30); do

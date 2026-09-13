@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,15 +95,6 @@ func trackOrphanWhileActive(stop <-chan struct{}, sess orphanWindowOpener, lastF
 			}
 		}
 	}
-}
-
-// newRelayDisabled reports whether the new supervisor+relay architecture
-// is disabled via environment. Set KEPLOY_NEW_RELAY to 0/false/off/no to
-// force the legacy path even for parsers that implement IntegrationsV2.
-// Any other value (or unset) enables the new path.
-func newRelayDisabled() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("KEPLOY_NEW_RELAY")))
-	return v == "0" || v == "false" || v == "off" || v == "no"
 }
 
 // recordViaSupervisor runs a V2-capable parser's RecordOutgoing inside
@@ -222,10 +211,6 @@ func (p *Proxy) recordViaSupervisor(
 	// each parser stays free to add the method independently and we
 	// don't have to touch every IntegrationsV2 implementation in this
 	// change.
-	var preDispatchPause bool
-	if pp, ok := parser.(interface{ WantsPreDispatchPause() bool }); ok {
-		preDispatchPause = pp.WantsPreDispatchPause()
-	}
 
 	// Opt-in gap resync. See [parserCanResyncAfterGap].
 	canResyncAfterGap := parserCanResyncAfterGap(parser)
@@ -273,7 +258,7 @@ func (p *Proxy) recordViaSupervisor(
 	// the connection.
 	defer close(trackerStop)
 
-	r := relay.New(relay.Config{
+	relayCfg := relay.Config{
 		Logger: logger,
 		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
 		// captured once per connection: the relay calls the returned fn with
@@ -313,12 +298,26 @@ func (p *Proxy) recordViaSupervisor(
 		PerConnCap:         p.recordBufferCap,
 		TeeChanBuf:         p.recordBufferQueueSize,
 		ConsumerStallGrace: p.recordBufferStallGrace,
-		PreDispatchPause:   preDispatchPause,
+		HalfCloseGrace:     p.recordBufferHalfCloseGrace,
+		// PreDispatchPause and HoldClientWrites are set by
+		// applyClientBrakes below, together with the session's
+		// ClientWritesHeld — they are one decision and must not drift.
+
 		// Default false — see relay.Config.ParserCanResyncAfterGap for why
 		// "cannot resync" is the safe default for everything that has not
 		// explicitly claimed otherwise.
 		ParserCanResyncAfterGap: canResyncAfterGap,
-	}, srcConn, dstConn)
+	}
+
+	// One call sets the relay's client-direction brake AND the parser's
+	// view of it. They are set together because they cannot be allowed
+	// to drift: the relay holding bytes the parser does not know are
+	// held wedges the connection, and the parser trying to release a
+	// hold the relay never armed blocks on an ack nobody sends. Wiring
+	// them at two sites is what let the hold ship switched off.
+	applyClientBrakes(&relayCfg, svSess, parser, logger, parserType)
+
+	r := relay.New(relayCfg, srcConn, dstConn)
 
 	svSess.ClientStream = r.ClientStream()
 	svSess.DestStream = r.DestStream()
@@ -334,6 +333,18 @@ func (p *Proxy) recordViaSupervisor(
 	go func() { relayDone <- r.Run(relayCtx) }()
 
 	sv.SessionOnAbort = func() {
+		// PauseTees also ends any client write hold, flushing what it
+		// held. That matters here more than the tee pausing does: this
+		// runs when the parser has been retired — hung, panicked, over
+		// its memory cap, cancelled — and the dispatcher's answer to
+		// all of those is to leave the relay forwarding raw bytes so
+		// user traffic survives (invariant I1 below, and the Warn the
+		// caller emits promising exactly that). A hold that outlives
+		// its parser blackholes the client direction for the rest of
+		// the connection, and no cap rescues it, because a client
+		// blocked waiting for a reply to the request we are sitting on
+		// never sends the bytes a cap would count.
+		//
 		// Pause the tees FIRST so every subsequent chunk drops
 		// cheaply via the pause fast-path (atomic-bool check) instead
 		// of falling through to the channel-full DropChannelFull
@@ -416,7 +427,7 @@ func (p *Proxy) recordViaSupervisor(
 				zap.String("parser", string(parserType)),
 				zap.String("status", result.Status.String()),
 				zap.String("clientConnID", svSess.ClientConnID),
-				zap.String("next_step", "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection, so tests recorded against it are dropped rather than shipped unreplayable. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_NEW_RELAY=off to force the legacy path for this parser, or KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely"),
+				zap.String("next_step", "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection, so tests recorded against it are dropped rather than shipped unreplayable. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"),
 			)
 		}
 		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close",
@@ -725,6 +736,79 @@ func (p *Proxy) waitForConnDrain(ctx context.Context) {
 // Asserted against the named [integrations.GapResyncCapable] rather than an
 // anonymous interface so the contract has one documented home; the assertion
 // still keeps non-implementers compiling.
+// applyClientBrakes resolves the client-direction brakes for a parser
+// and writes BOTH consequences: the relay's config, which decides
+// whether bytes are actually held, and the supervisor session's
+// ClientWritesHeld, which is how the parser learns a hold is in force.
+//
+// The two live in one function because splitting them is precisely how
+// this feature shipped inert. "I asked for a hold" and "a hold is in
+// force" are different claims and the parser needs the second: ending a
+// hold costs an ack round-trip, and on a path with no relay to answer
+// it — an observe-only proxyless capture — a parser that assumed one
+// would block forever. Setting one without the other is a wedge in
+// whichever direction it drifts, so neither is reachable alone.
+func applyClientBrakes(
+	cfg *relay.Config,
+	sess *supervisor.Session,
+	parser integrations.Integrations,
+	logger *zap.Logger,
+	parserType integrations.IntegrationType,
+) {
+	hold, preDispatch := parserClientBrakes(parser, logger, parserType)
+	if cfg != nil {
+		cfg.HoldClientWrites = hold
+		cfg.PreDispatchPause = preDispatch
+	}
+	if sess != nil {
+		sess.ClientWritesHeld = hold
+	}
+}
+
+// parserClientBrakes resolves the two client-direction brakes a parser
+// may ask the relay for: a client write hold
+// ([relay.Config.HoldClientWrites]) and a pre-dispatch pause
+// ([relay.Config.PreDispatchPause]).
+//
+// Extracted for the same reason shouldRecordViaSupervisor was: written
+// inline, the rule is untestable, and an inline probe that is simply
+// never called compiles, passes every test, and silently leaves the
+// feature switched off. That is not hypothetical — this is the second
+// brake to be wired here, and the first review of the hold caught
+// exactly that: the parser declared WantsClientWriteHold, the session
+// field existed, the relay implemented the hold, and the one line
+// connecting them was missing. Every test still passed, because they
+// all built relay.Config themselves.
+//
+// Both probes are duck-typed rather than added to IntegrationsV2 so a
+// parser can opt in without every other implementation being touched.
+//
+// The two are mutually exclusive, and the hold wins. Pre-dispatch
+// routes the client's first chunk through the pause stash, which
+// bypasses the hold's byte accounting entirely, and its resume handler
+// acks OK while leaving the hold armed — the parser would believe the
+// connection resumed while every client byte was still being swallowed.
+// relay.Run refuses the combination too; this is the earlier, louder
+// half, where the parser can still be named.
+func parserClientBrakes(parser integrations.Integrations, logger *zap.Logger, parserType integrations.IntegrationType) (holdClientWrites, preDispatchPause bool) {
+	if hp, ok := parser.(interface{ WantsClientWriteHold() bool }); ok {
+		holdClientWrites = hp.WantsClientWriteHold()
+	}
+	if pp, ok := parser.(interface{ WantsPreDispatchPause() bool }); ok {
+		preDispatchPause = pp.WantsPreDispatchPause()
+	}
+	if holdClientWrites && preDispatchPause {
+		if logger != nil {
+			logger.Error("parser asked for both a client write hold and a pre-dispatch pause; using the hold",
+				zap.String("parser", string(parserType)),
+				zap.String("next_step", "implement WantsClientWriteHold or WantsPreDispatchPause, not both — the hold subsumes pre-dispatch for the client direction"),
+			)
+		}
+		preDispatchPause = false
+	}
+	return holdClientWrites, preDispatchPause
+}
+
 func parserCanResyncAfterGap(parser integrations.Integrations) bool {
 	gr, ok := parser.(integrations.GapResyncCapable)
 	return ok && gr.CanResyncAfterGap()

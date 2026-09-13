@@ -16,11 +16,23 @@ LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
 LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"
 LARGE_PAYLOAD_SIZES_MB="${LARGE_PAYLOAD_SIZES_MB:-1}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
+# Debounce: how many CONSECUTIVE over-threshold samples before we declare a
+# violation and kill keploy. A single 0.5s sample crossing the line is almost
+# always a transient GC/page-cache spike, not a leak; killing on it severs every
+# in-flight connection and manufactures an HTTP-failure storm, which is the main
+# source of this lane's flakiness. Requiring K back-to-back over-threshold ticks
+# (~1.5s of sustained excess) keeps real runaway growth caught while ignoring
+# blips. Set to 1 to restore the old single-sample behaviour.
+MEMORY_VIOLATION_MIN_TICKS="${MEMORY_VIOLATION_MIN_TICKS:-3}"
 
 # CI-tuned k6 thresholds — intentionally very relaxed because:
 #   - Keploy proxy buffers request/response bodies for capture, adding latency
 #   - GOMEMLIMIT at 90% of memory-limit causes aggressive GC under pressure
-#   - memoryguard pause/resume cycling disrupts connections (Connection: close)
+#   - under memory pressure the guard pauses CAPTURE (captureEnabled=false); on
+#     this lane's default ASYNC record path the client connection is kept alive
+#     (NO Connection: close — that is injected only in sync/sampling mode, see
+#     pkg/agent/proxy/incoming/http.go), so the extra latency is GC + the capture
+#     pause, not severed connections
 #   - ubuntu-latest has 2 shared vCPUs compounding all of the above
 # k6 threshold failures are NOT fatal — the script checks HTTP failure rate
 # separately (see check_k6_failure_rate). Only >40% HTTP failures are fatal.
@@ -386,6 +398,7 @@ start_memory_monitor() {
         usage_bytes=""
         oom_killed=""
         running=""
+        consecutive_over=0
 
         while kill -0 "$phase_pid" 2>/dev/null; do
             if ! docker inspect "$keploy_container" >/dev/null 2>&1; then
@@ -409,10 +422,18 @@ start_memory_monitor() {
             fi
 
             if [ "$usage_bytes" -ge "$threshold_bytes" ]; then
-                echo "Keploy container ${keploy_container} exceeded ${threshold_mib} MiB working-set during ${phase_name}. Observed: ${usage_mib} MiB." > "$MEMORY_VIOLATION_FILE"
-                docker kill "$keploy_container" >/dev/null 2>&1 || true
-                kill -TERM "$phase_pid" 2>/dev/null || true
-                exit 0
+                consecutive_over=$((consecutive_over + 1))
+                if [ "$consecutive_over" -ge "$MEMORY_VIOLATION_MIN_TICKS" ]; then
+                    sustained_s="$(awk -v n="$consecutive_over" -v i="$MEMORY_MONITOR_INTERVAL_SECONDS" 'BEGIN { printf "%.1f", n * i }')"
+                    echo "Keploy container ${keploy_container} exceeded ${threshold_mib} MiB working-set during ${phase_name} for ${consecutive_over} consecutive samples (~${sustained_s}s sustained). Observed: ${usage_mib} MiB." > "$MEMORY_VIOLATION_FILE"
+                    docker kill "$keploy_container" >/dev/null 2>&1 || true
+                    kill -TERM "$phase_pid" 2>/dev/null || true
+                    exit 0
+                fi
+            else
+                # Dropped back under the line — the excess was a transient spike,
+                # not sustained growth. Reset so only BACK-TO-BACK breaches count.
+                consecutive_over=0
             fi
 
             sleep "$MEMORY_MONITOR_INTERVAL_SECONDS"

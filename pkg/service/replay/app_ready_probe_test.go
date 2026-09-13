@@ -27,7 +27,7 @@ func TestWaitForAppReady_ProbeAddrGate_ReadyAddr(t *testing.T) {
 	cfg.Test.AppReadyProbeAddr = ln.Addr().String()
 
 	start := time.Now()
-	if !waitForAppReady(context.Background(), zap.NewNop(), cfg) {
+	if !waitForAppReady(context.Background(), zap.NewNop(), cfg, httpProbeTarget{}) {
 		t.Fatal("waitForAppReady returned false for a listening probe address")
 	}
 	// pkg.WaitForPort probes once before its 1s ticker, so an already-listening
@@ -55,7 +55,7 @@ func TestWaitForAppReady_ProbeAddrGate_DeadAddrProceeds(t *testing.T) {
 	cfg.Test.HealthPollTimeout = 1 * time.Second // tiny ceiling for the test
 
 	start := time.Now()
-	if !waitForAppReady(context.Background(), zap.NewNop(), cfg) {
+	if !waitForAppReady(context.Background(), zap.NewNop(), cfg, httpProbeTarget{}) {
 		t.Fatal("waitForAppReady should proceed (return true) after the ceiling on a dead probe address")
 	}
 	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
@@ -79,7 +79,7 @@ func TestWaitForAppReady_ProbeAddrGate_CtxCancel(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	if waitForAppReady(ctx, zap.NewNop(), cfg) {
+	if waitForAppReady(ctx, zap.NewNop(), cfg, httpProbeTarget{}) {
 		t.Fatal("waitForAppReady should return false when ctx is cancelled mid-probe")
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
@@ -95,7 +95,7 @@ func TestWaitForAppReady_ProbeAddrGate_InvalidAddrProceeds(t *testing.T) {
 	cfg.Test.AppReadyProbeAddr = "not-a-host-port" // no colon → SplitHostPort errors
 
 	start := time.Now()
-	if !waitForAppReady(context.Background(), zap.NewNop(), cfg) {
+	if !waitForAppReady(context.Background(), zap.NewNop(), cfg, httpProbeTarget{}) {
 		t.Fatal("waitForAppReady should proceed (return true) on a malformed probe address")
 	}
 	if elapsed := time.Since(start); elapsed > 1*time.Second {
@@ -119,7 +119,7 @@ func TestWaitForAppReady_ProbeAddrGate_EmptyHostShorthand(t *testing.T) {
 	cfg.Test.AppReadyProbeAddr = ":" + port // empty host → localhost
 
 	start := time.Now()
-	if !waitForAppReady(context.Background(), zap.NewNop(), cfg) {
+	if !waitForAppReady(context.Background(), zap.NewNop(), cfg, httpProbeTarget{}) {
 		t.Fatal("waitForAppReady should treat \":<port>\" as localhost and pass for a listening port")
 	}
 	// The leading dial in pkg.WaitForPort makes an already-ready port return

@@ -4,6 +4,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
+	"sort"
 )
 
 // EncodeMapping encodes a mapping structure into a YAML document
@@ -57,13 +58,21 @@ func CreateMappingStructure(testSetID string, testMockMappings map[string][]mode
 		TestSetID: testSetID,
 	}
 
-	// Convert the map to the structured format
-	for testName, mockEntries := range testMockMappings {
-		test := models.MappedTestCase{
+	// Sorted, because Go randomises map iteration and mappings.yaml is a recorded
+	// artifact that gets diffed, reviewed and committed. Without this every
+	// rewrite reshuffles `tests:` and produces a large diff with no content
+	// change. UpsertBatch already sorts its appends for the same reason.
+	testNames := make([]string, 0, len(testMockMappings))
+	for testName := range testMockMappings {
+		testNames = append(testNames, testName)
+	}
+	sort.Strings(testNames)
+
+	for _, testName := range testNames {
+		mapping.TestCases = append(mapping.TestCases, models.MappedTestCase{
 			ID:    testName,
-			Mocks: mockEntries,
-		}
-		mapping.TestCases = append(mapping.TestCases, test)
+			Mocks: testMockMappings[testName],
+		})
 	}
 
 	return mapping

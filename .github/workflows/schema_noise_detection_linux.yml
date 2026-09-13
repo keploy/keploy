@@ -72,7 +72,11 @@ jobs:
 
       - name: Build keploy from this branch
         run: |
-          go build -tags=viper_bind_struct -o /usr/local/bin/keploy .
+          # keploy's own module graph is far larger than the sample's, and this
+          # runs first in the same job — leaving it bare would keep the exposure
+          # the sample-side wrap removes.
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry build -tags=viper_bind_struct -o /usr/local/bin/keploy .
           keploy --version || true
 
       - name: Checkout the samples-go repository

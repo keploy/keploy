@@ -204,6 +204,29 @@ type tee struct {
 	// [tee.dropCount] for diagnostics and tests.
 	drops atomic.Uint64
 
+	// accepted is the running total of PAYLOAD BYTES this tee has
+	// accepted, i.e. the absolute length of the byte stream the
+	// consuming FakeConn will see. Incremented only on a successful
+	// push, so a dropped chunk does not advance it.
+	//
+	// [tee.abandon] does skew it: chunks counted here are thrown away
+	// undelivered, so accepted can end up permanently ahead of what the
+	// FakeConn received. That is safe in the only way that matters —
+	// abandon returns from drain, whose deferred close of out closes the
+	// FakeConn's channel, so a discard watermark left stranded above the
+	// delivered total ends in io.EOF rather than a stall, and no byte
+	// ABOVE the watermark can be lost to it (everything delivered is
+	// below it by construction).
+	//
+	// It exists so the relay can name a position in the parser's stream
+	// — "the parser must not see anything below offset N" — when it
+	// consumes bytes it has already teed (see
+	// fakeconn.FakeConn.DiscardBefore). A count of "chunks pending
+	// somewhere in the pipeline" could not express that: the pipeline
+	// spans a queue, a goroutine, a channel and a buffer, and the
+	// answer has to hold across all four without quiescing any of them.
+	accepted atomic.Int64
+
 	// closedFlag mirrors closed for a lock-free fast path in push.
 	closedFlag atomic.Bool
 	// closeOnce guards the single shutdown.
@@ -255,6 +278,12 @@ func (t *tee) readCh() <-chan fakeconn.Chunk { return t.out }
 // dropCount returns the number of chunks dropped since construction.
 // Safe to call concurrently.
 func (t *tee) dropCount() uint64 { return t.drops.Load() }
+
+// acceptedBytes returns how many payload bytes this tee has accepted —
+// the absolute length of the stream its FakeConn will deliver. See the
+// [tee.accepted] field comment for why the relay needs a stream
+// position rather than a pending-chunk count.
+func (t *tee) acceptedBytes() int64 { return t.accepted.Load() }
 
 // setPaused toggles delivery. When paused, push immediately drops with
 // reason [DropPaused] without consuming capacity.
@@ -327,6 +356,11 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 	}
 	t.q = append(t.q, c)
 	t.qBytes += n
+	// Counted under mu, with the append that makes the chunk visible.
+	// Outside the lock there is a window where a chunk is queued but
+	// uncounted, and a reader of acceptedBytes that lands in it would
+	// name a stream position short of what the FakeConn will deliver.
+	t.accepted.Add(n)
 	t.mu.Unlock()
 
 	// Doorbell. Non-blocking: a pending token already tells drain there is
