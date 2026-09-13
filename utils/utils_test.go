@@ -271,3 +271,28 @@ func TestEphemeralPortRangeReportsUnknownWhenUnreadable(t *testing.T) {
 			lo, hi, known, defaultEphemeralLo, defaultEphemeralHi)
 	}
 }
+
+func TestNetworkNameFromDockerRun(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{"space form", "docker run --name app --network keploy-network img", "keploy-network"},
+		{"equals form", "docker run --name=app --network=keploy-network img", "keploy-network"},
+		{"net alias, space form", "docker run --net keploy-network img", "keploy-network"},
+		{"net alias, equals form", "docker run --net=keploy-network img", "keploy-network"},
+		{"no network", "docker run --name app img", ""},
+		// An empty "--flag=" must not be taken as the value and stop the scan.
+		{"empty equals then a real flag", "docker run --net= --network mynet img", "mynet"},
+		{"flag with no value", "docker run --network", ""},
+		{"empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NetworkNameFromDockerRun(tc.cmd); got != tc.want {
+				t.Fatalf("NetworkNameFromDockerRun(%q) = %q, want %q", tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
