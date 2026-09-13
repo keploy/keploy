@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
@@ -63,16 +64,25 @@ func MockRecord(ctx context.Context, logger *zap.Logger, serviceFactory ServiceF
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, "mock-record")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
-				return nil
+				// Return the error, don't swallow it: main's exitCodeForCmdErr
+				// turns a non-nil error into exit 1. Returning nil here reported
+				// SUCCESS to the shell and to CI after a hard setup failure — so
+				// `keploy mock record ... --name nope` printed four ERROR lines and
+				// still exited 0. The wrapped runner's own exit code is a
+				// separate channel (utils.ErrCode via propagateExit) and is
+				// untouched by this.
+				return err
 			}
 			m, ok := svc.(mockSvc.Service)
 			if !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy mock service interface")
-				return nil
+				err := fmt.Errorf("service doesn't satisfy mock service interface")
+				utils.LogError(logger, nil, err.Error())
+				return err
 			}
 			// Ensure background goroutines (agent monitor, proxy streams) are
 			// torn down when Record returns, unless the user already interrupted.
@@ -84,9 +94,16 @@ func MockRecord(ctx context.Context, logger *zap.Logger, serviceFactory ServiceF
 				}
 			}()
 			if err := m.Record(ctx); err != nil {
-				if ctx.Err() != context.Canceled {
-					utils.LogError(logger, err, "failed to record mocks")
+				// A user interrupt is not a failure.
+				if ctx.Err() == context.Canceled {
+					return nil
 				}
+				utils.LogError(logger, err, "failed to record mocks")
+				// Record() returns nil after a merely-failing test command (it calls
+				// propagateExit and lets utils.ErrCode mirror the runner), so a
+				// non-nil error here is always a real Keploy failure and must not
+				// exit 0.
+				return err
 			}
 			return nil
 		},
@@ -103,16 +120,25 @@ func MockReplay(ctx context.Context, logger *zap.Logger, serviceFactory ServiceF
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, "mock-replay")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
-				return nil
+				// Return the error, don't swallow it: main's exitCodeForCmdErr
+				// turns a non-nil error into exit 1. Returning nil here reported
+				// SUCCESS to the shell and to CI after a hard setup failure — so
+				// `keploy mock replay ... --name nope` printed four ERROR lines and
+				// still exited 0. The wrapped runner's own exit code is a
+				// separate channel (utils.ErrCode via propagateExit) and is
+				// untouched by this.
+				return err
 			}
 			m, ok := svc.(mockSvc.Service)
 			if !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy mock service interface")
-				return nil
+				err := fmt.Errorf("service doesn't satisfy mock service interface")
+				utils.LogError(logger, nil, err.Error())
+				return err
 			}
 			defer func() {
 				select {
@@ -122,9 +148,16 @@ func MockReplay(ctx context.Context, logger *zap.Logger, serviceFactory ServiceF
 				}
 			}()
 			if err := m.Replay(ctx); err != nil {
-				if ctx.Err() != context.Canceled {
-					utils.LogError(logger, err, "failed to replay mocks")
+				// A user interrupt is not a failure.
+				if ctx.Err() == context.Canceled {
+					return nil
 				}
+				utils.LogError(logger, err, "failed to replay mocks")
+				// Replay() returns nil after a merely-failing test command (it calls
+				// propagateExit and lets utils.ErrCode mirror the runner), so a
+				// non-nil error here is always a real Keploy failure and must not
+				// exit 0.
+				return err
 			}
 			return nil
 		},

@@ -31,9 +31,17 @@ import (
 // Scope of the isolation: this filters VISIBILITY (which per-test mocks a call
 // can see), over the one shared pool. Per-test mocks are per-test-named in
 // mappings.yaml, so worker allowlists are disjoint in practice and consumption
-// (DeleteFilteredMock) does not collide. Session/startup/connection mocks are
-// shared and pass through unfiltered — a worker still sees shared auth/handshake
-// recordings. It assumes the agent and the workers share a PID namespace, which
+// (DeleteFilteredMock) does not collide.
+//
+// The STARTUP tier is filtered too, and that is not obvious: it sounds like a
+// shared bootstrap tier, but SetMocksWithWindow puts the whole per-test slice
+// into it during BaseTime staging — and in `keploy mock replay`, the one mode
+// where worker scoping exists, the pool is staged once at BaseTime and never
+// re-partitioned, so the startup tier IS the whole pool. Leaving it unfiltered
+// let a worker read, and DELETE, another worker's mocks. The file used to say
+// startup passed through unfiltered while also filtering GetSessionMocks, which
+// is defined as startup ∪ session — so the same mock was filtered through one
+// accessor and leaked through the other. It assumes the agent and the workers share a PID namespace, which
 // is the case for the normal `keploy mock <cmd>` wrap.
 
 // scopedMockDb wraps the process-wide MockMemDb with a per-worker allowlist,
@@ -98,6 +106,67 @@ func (s *scopedMockDb) GetUnFilteredMocks() ([]*models.Mock, error) {
 
 func (s *scopedMockDb) GetSessionScopedMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetSessionScopedMocks())
+}
+
+// The wrapper embeds the integrations.MockMemDb INTERFACE, so only that
+// interface's method set is promoted. Everything a parser reaches for by type
+// assertion — the revision counters and the by-kind readers — lives on
+// *MockManager and is silently erased by the wrap, turning every kind-aware
+// parser into its legacy branch for scoped workers only. Redis says so in its
+// own fallback ("there is no legacy startup accessor"), and in `keploy mock
+// replay` — the only mode where scoping exists — the startup tier is the whole
+// pool, so that branch reads nothing.
+//
+// Forward them explicitly. The by-kind readers go through keep() for the same
+// reason the plain ones do; the revision counters carry no mock data and pass
+// straight through.
+
+func (s *scopedMockDb) Revision() uint64 {
+	if r, ok := s.MockMemDb.(interface{ Revision() uint64 }); ok {
+		return r.Revision()
+	}
+	return 0
+}
+
+func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
+	if r, ok := s.MockMemDb.(interface {
+		RevisionByKind(models.Kind) uint64
+	}); ok {
+		return r.RevisionByKind(kind)
+	}
+	return 0
+}
+
+func (s *scopedMockDb) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	if bk, ok := s.MockMemDb.(interface {
+		GetFilteredMocksByKind(models.Kind) ([]*models.Mock, error)
+	}); ok {
+		return s.keep(bk.GetFilteredMocksByKind(kind))
+	}
+	return s.keep(s.MockMemDb.GetFilteredMocks())
+}
+
+func (s *scopedMockDb) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	if bk, ok := s.MockMemDb.(interface {
+		GetUnFilteredMocksByKind(models.Kind) ([]*models.Mock, error)
+	}); ok {
+		return s.keep(bk.GetUnFilteredMocksByKind(kind))
+	}
+	return s.keep(s.MockMemDb.GetUnFilteredMocks())
+}
+
+func (s *scopedMockDb) GetStartupMocks() ([]*models.Mock, error) {
+	return s.keep(s.MockMemDb.GetStartupMocks())
+}
+
+func (s *scopedMockDb) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	type byKind interface {
+		GetStartupMocksByKind(models.Kind) ([]*models.Mock, error)
+	}
+	if bk, ok := s.MockMemDb.(byKind); ok {
+		return s.keep(bk.GetStartupMocksByKind(kind))
+	}
+	return s.keep(s.MockMemDb.GetStartupMocks())
 }
 
 // SetWorkerScope registers (or replaces) the per-test mock allowlist for a

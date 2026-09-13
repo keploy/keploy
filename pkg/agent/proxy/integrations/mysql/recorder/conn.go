@@ -185,6 +185,13 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 				logger.Debug("Also pushed to port-only fallback key",
 					zap.String("portKey", portKey))
 			}
+			// Record this greeting as the destination's last-resort fallback for
+			// a sibling connection whose own raw leg was dropped. Keyed by the
+			// resolved destination so it can only be reused for the SAME server.
+			// Note it is NOT skipped for a synthesized address: HandshakeLastKey
+			// combines the address with the app/session scope, so a placeholder
+			// bucket is still per-scope (see its doc).
+			hsStore.RememberLast(models.HandshakeLastKey(opts.PassThroughScope, opts.DstCfg), hsEntry)
 			// Signal that the pre-TLS config mock should NOT be recorded here;
 			// the post-TLS path will produce a single combined config mock.
 			res.skipConfigMock = true
@@ -838,7 +845,7 @@ func handlePlainPassword(ctx context.Context, logger *zap.Logger, clientConn, de
 // In this mode, the SSL/GoTLS uprobes provide decrypted plaintext starting
 // from HandshakeResponse41 (the full auth after TLS handshake). The server
 // greeting was captured by the ringbuf path and stored in TLSHandshakeStore.
-func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
+func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (err error) {
 	// 1. Pop the server greeting from TLSHandshakeStore.
 	dstPort := uint16(0)
 	if opts.DstCfg != nil {
@@ -853,16 +860,97 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		zap.String("key", storeKey),
 		zap.String("connKey", opts.ConnKey),
 		zap.Uint16("dstPort", dstPort))
+	portOnlyKey := models.HandshakeStoreKey("", dstPort)
+	// fromShared: the entry came off the port-only FIFO, which is shared by every
+	// post-TLS stream to this port. An empty ConnKey collapses storeKey onto that
+	// same key, so the FIRST pop can read the shared queue too — classify by the
+	// key, not by which pop succeeded.
 	entry, ok := hsStore.PopWait(storeKey, 5*time.Second)
+	fromShared := ok && storeKey == portOnlyKey
 	// If conn-specific key missed, try the port-only fallback key.
 	// The proxy and uprobe see different TCP connections with different
 	// ephemeral ports, so conn-specific keys may not match.
 	if !ok && opts.ConnKey != "" {
-		portKey := models.HandshakeStoreKey("", dstPort)
 		logger.Debug("Conn-specific key missed, trying port-only fallback",
-			zap.String("portKey", portKey))
-		entry, ok = hsStore.PopWait(portKey, 2*time.Second)
+			zap.String("portKey", portOnlyKey))
+		entry, ok = hsStore.PopWait(portOnlyKey, 2*time.Second)
+		fromShared = ok
 	}
+	// Popping the shared FIFO is destructive: if this stream fails before
+	// recording anything, the greeting it consumed is gone and the connection
+	// that pushed it is starved, losing its whole command phase silently. Put an
+	// unused entry back. ReqTimestamp is stripped for the same reason the cached
+	// fallback below strips it — to the next consumer this is a BORROWED entry
+	// from another connection, and config mocks are identified and ordered by
+	// ReqTimestampMock. Mirrors handlePostTLSHandshakeV2 on the V2 path.
+	// Cleared at the greeting-decode failures below: an undecodable entry is
+	// garbage, and Push re-stamps its expiry, so recycling it would make it
+	// immortal and trip every later stream to this port.
+	restoreShared := true
+	if fromShared {
+		sharedEntry := entry
+		sharedEntry.ReqTimestamp = time.Time{}
+		defer func() {
+			if !restoreShared || err == nil {
+				return
+			}
+			hsStore.Push(portOnlyKey, sharedEntry)
+			logger.Debug("post-TLS MySQL: returned an unused shared greeting to the port FIFO",
+				zap.Uint16("dstPort", dstPort), zap.Error(err))
+		}()
+	}
+	// Both consumable keys missed. Before dialling the server, consult the
+	// last-greeting cache — the same fallback the V2 path uses, and the reason
+	// handleInitialHandshake seeds it above. Without this read that seeding is a
+	// write with no reader, and a POOLED connection (reused long after its
+	// handshake, so its own entry was already consumed) loses its whole command
+	// phase here exactly as it did on V2.
+	//
+	// Address-keyed only. The V2 path additionally bridges legs that disagree
+	// about the address via a port key, but that key names no server and is only
+	// safe with the identity latch that RememberLastForPort applies; this path
+	// writes no port key, so there is nothing here that could answer unsafely.
+	if !ok || len(entry.RespPackets) == 0 {
+		if lastKey := models.HandshakeLastKey(opts.PassThroughScope, opts.DstCfg); lastKey != "" {
+			if c, found := hsStore.Last(lastKey); found && len(c.RespPackets) > 0 {
+				logger.Debug("Post-TLS MySQL: own handshake entry gone; reusing the last greeting recorded for this destination",
+					zap.String("lastKey", lastKey))
+				// Reuse the PACKETS, not the timing. The store's own contract
+				// says so (TLSHandshakeStore.Last: "reuse the server-stable
+				// parts ... but not per-connection metadata such as the request
+				// timestamp"), and this was the only in-tree violator: both
+				// config-mock emitters below pass entry.ReqTimestamp straight to
+				// recordMock, so adopting a borrowed one backdates this mock by
+				// up to lastGreetingTTL (30 min).
+				//
+				// That matters twice over. recordMock stamps a "config" mock as
+				// LifetimeSession, so it skips the per-test window entirely —
+				// but pkg/util.go still sorts the session pool by
+				// ReqTimestampMock, and treedb.sameMock IDENTIFIES a mock by
+				// Name+Kind+ReqTimestampMock. Every pooled connection borrowing
+				// the same cached entry would emit mutually indistinguishable
+				// config mocks, and the guard that stops UpdateUnFilteredMock
+				// touching the wrong entry silently abstains.
+				//
+				// The V2 path draws the same line (record_v2.go, staleEntry).
+				c.ReqTimestamp = models.CapturedReqTime(ctx)
+				entry, ok = c, true
+			}
+		}
+	}
+
+	// A zero ReqTimestamp is worse than a stale one: pkg/util.go routes any
+	// mock with a zero request OR response timestamp into filteredMocks with
+	// IsFiltered=true and stops there — ABOVE the lifetime-first routing — so
+	// a LifetimeSession config mock lands in the per-test pool. That happens
+	// whenever both PopWaits and the cache miss and the greeting comes from
+	// the direct fetch below, which never sets a timestamp. V2 handles the
+	// same case by re-sampling; normalise here so neither emitter can ship a
+	// zero.
+	if entry.ReqTimestamp.IsZero() {
+		entry.ReqTimestamp = models.CapturedReqTime(ctx)
+	}
+
 	var serverGreetingBuf []byte
 	if ok && len(entry.RespPackets) > 0 {
 		serverGreetingBuf = entry.RespPackets[0]
@@ -877,7 +965,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 			zap.String("connKey", opts.ConnKey),
 			zap.Uint16("dstPort", dstPort))
 		var err error
-		serverGreetingBuf, err = fetchServerGreeting(ctx, opts)
+		serverGreetingBuf, err = fetchServerGreeting(ctx, logger, opts)
 		if err != nil {
 			return fmt.Errorf("no server greeting in TLSHandshakeStore for key %s and direct fetch failed: %w", storeKey, err)
 		}
@@ -886,10 +974,17 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	// 2. Decode the server greeting to initialize decode context.
 	greetingPkt, err := wire.DecodePayload(ctx, logger, serverGreetingBuf, clientConn, decodeCtx)
 	if err != nil {
+		restoreShared = false
 		return fmt.Errorf("failed to decode stored server greeting for post-TLS: %w", err)
 	}
 	pluginName, err := wire.GetPluginName(greetingPkt.Message)
 	if err != nil {
+		// Decodable but not a handshake (GetPluginName accepts only HandshakeV10
+		// / AuthSwitchRequest). This runs BEFORE the HandshakeV10 assertion
+		// below, so without clearing the flag here such an entry would be
+		// recycled — and Push re-stamps its expiry, making it immortal and
+		// tripping every later stream to this port.
+		restoreShared = false
 		return fmt.Errorf("failed to get plugin name from stored server greeting: %w", err)
 	}
 	decodeCtx.PluginName = pluginName
@@ -898,6 +993,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	// Store the server greeting for the clientConn (needed by DecodePayload for command phase).
 	sg, ok := greetingPkt.Message.(*mysql.HandshakeV10Packet)
 	if !ok {
+		restoreShared = false
 		return fmt.Errorf("stored server greeting is not HandshakeV10Packet")
 	}
 	decodeCtx.ServerGreetings.Store(clientConn, sg)
@@ -954,6 +1050,12 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// Produce a synthetic config mock from pre-TLS data so test mode
 		// can match the SSLRequest + HandshakeResponse41 during replay.
 		if ok && len(entry.ReqPackets) > 0 {
+			// Spent: a mock is about to be built from this greeting. Past this
+			// point the entry must NOT go back — handleClientQueries below
+			// returns non-nil at ordinary teardown (ctx.Done), so the error
+			// alone cannot distinguish "never used" from "used and then the
+			// connection ended".
+			restoreShared = false
 			if err := recordSyntheticConfigMock(ctx, logger, clientConn, mocks, decodeCtx, greetingPkt, entry, opts); err != nil {
 				logger.Debug("best-effort synthetic config mock generation failed for seq=0 path; continuing with command-phase capture", zap.Error(err))
 			}
@@ -1066,6 +1168,8 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	if len(requests) > 0 && requests[0].Header != nil {
 		reqOp = requests[0].Header.Type // Use SSLRequest type if present
 	}
+	// Spent, for the same reason as the synthetic-config path above.
+	restoreShared = false
 	recordMock(ctx, requests, responses, "config",
 		reqOp, authRes.responseOperation,
 		mocks, entry.ReqTimestamp, models.CapturedRespTime(ctx), opts)
@@ -1202,7 +1306,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 // initial HandshakeV10 greeting packet. This is used as a fallback when the
 // pre-TLS handshake was not captured by the proxy (e.g. the connection was
 // established before interception started).
-func fetchServerGreeting(ctx context.Context, opts models.OutgoingOptions) ([]byte, error) {
+func fetchServerGreeting(ctx context.Context, logger *zap.Logger, opts models.OutgoingOptions) ([]byte, error) {
 	addr := ""
 	if opts.DstCfg != nil {
 		addr = opts.DstCfg.Addr
@@ -1210,12 +1314,26 @@ func fetchServerGreeting(ctx context.Context, opts models.OutgoingOptions) ([]by
 	if addr == "" {
 		return nil, fmt.Errorf("no destination address available to fetch server greeting")
 	}
+	// Never dial an address the capture layer fabricated. When the proxyless
+	// SSL-uprobe path cannot resolve a decrypted stream's real destination it
+	// substitutes a loopback stand-in (and content matching later forces the
+	// well-known port), yielding e.g. "127.0.0.1:3306" — an address this
+	// connection never talked to. Dialing it either fails instantly
+	// (ECONNREFUSED, aborting the capture) or, worse, fetches a greeting from
+	// an unrelated local server. Fail here so callers fall through to their
+	// stash/cache fallbacks or abort cleanly.
+	if opts.DstCfg != nil && opts.DstCfg.AddrFabricated {
+		return nil, fmt.Errorf("destination address %s is a capture-layer stand-in (real destination unresolved), refusing to dial it to fetch the server greeting", addr)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	conn, err := pUtils.DialDestinationWith(ctx, logger, pUtils.DialTarget{Addr: addr},
+		func(ctx context.Context, a string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp", a)
+		})
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}

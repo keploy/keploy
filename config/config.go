@@ -260,7 +260,8 @@ type UpstreamTLS struct {
 // giving up on the chunks still queued for it.
 //
 // Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN, KEPLOY_RECORD_QUEUE_SIZE and
-// KEPLOY_RECORD_CONSUMER_STALL_GRACE override the yaml/flag values when set.
+// KEPLOY_RECORD_CONSUMER_STALL_GRACE and KEPLOY_RECORD_HALF_CLOSE_GRACE
+// override the yaml/flag values when set.
 type RecordBuffer struct {
 	// MaxMemoryPerConnection caps the bytes the recorder may hold
 	// in the per-connection queue while the parser catches up.
@@ -294,6 +295,18 @@ type RecordBuffer struct {
 	// you see drops with reason "consumer_gone"; lower it to cap how long
 	// a connection with a genuinely dead parser lingers at teardown.
 	ConsumerStallGrace time.Duration `json:"consumerStallGrace" yaml:"consumerStallGrace" mapstructure:"consumerStallGrace"`
+
+	// HalfCloseGrace bounds how long the recorder keeps copying the
+	// surviving direction after one side has half-closed (sent FIN while
+	// still able to receive). Maps to relay.Config.HalfCloseGrace. Zero
+	// resolves to the relay's built-in default (10s); NEGATIVE disables
+	// half-close entirely, restoring the pre-#4538 behaviour of tearing
+	// both directions down on the first EOF.
+	//
+	// It bounds IDLE time, not total time — every forwarded chunk
+	// re-arms it — so it only has to cover the gap before a peer starts
+	// answering, never the length of the answer.
+	HalfCloseGrace time.Duration `json:"halfCloseGrace" yaml:"halfCloseGrace" mapstructure:"halfCloseGrace"`
 }
 
 // MockCmd configures the `keploy mock record|replay` flow — using Keploy as a
@@ -346,14 +359,55 @@ type Normalize struct {
 	EditedBy      string          `json:"-" yaml:"-" mapstructure:"-"`
 }
 
+// DefaultHealthPollTimeout is the ceiling for every pre-test app-readiness gate
+// when test.healthPollTimeout is unset or non-positive.
+//
+// It lives here, not beside the gate, because the yaml default in
+// config/default.go and the code fallback are two sources of truth for the same
+// number and nothing else makes them agree — the same reasoning as
+// relay.DefaultConsumerStallGrace. config/default_test.go asserts the parsed
+// yaml against this constant, so changing one without the other fails a test
+// instead of silently shipping a keploy.yml that disagrees with the code.
+//
+// Three minutes, not one. The bound is paid ONLY by an app that is not yet
+// serving: a ready app satisfies the gate on its first probe, so raising it costs
+// a healthy run nothing. A cold application start on a loaded shared runner —
+// the condition the gate exists for — was measured at 17-28s for the process and
+// ~55s from spawn to first serve, against a previous 60s ceiling that therefore
+// expired and fired tests into a not-yet-listening app. Timing out only warns and
+// proceeds, so an over-generous ceiling can never fail a run that would otherwise
+// pass; an under-generous one can.
+const DefaultHealthPollTimeout = 3 * time.Minute
+
 type Test struct {
-	SelectedTests               map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	GlobalNoise                 Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
-	ReplaceWith                 ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
-	Delay                       uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
-	HealthURL                   string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
-	HealthPollTimeout           time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
-	AppReadyProbeAddr           string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
+	SelectedTests     map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	GlobalNoise       Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
+	ReplaceWith       ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
+	Delay             uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
+	HealthURL         string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
+	HealthPollTimeout time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
+	HealthPath        string              `json:"healthPath" yaml:"healthPath" mapstructure:"healthPath"`                      // optional request path probed on the app's OWN auto-detected address (docker/compose published port, or appReadyProbeAddr) before the first test. Unlike healthUrl it needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready — a health endpoint returning 503 has still proved the app is answering. Empty uses a keploy-reserved probe path.
+	HealthScheme      string              `json:"healthScheme" yaml:"healthScheme" mapstructure:"healthScheme"`                // optional override for the readiness probe scheme ("http" or "https"). Empty (the default) uses the scheme the recorded tests actually dial; only consulted when the app is probed over HTTP, and ignored entirely when healthUrl is set.
+	AppReadyProbeAddr string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
+
+	// DisableAppReadyProbe turns off the app-readiness probing that
+	// runs before the first test fires — the docker/compose
+	// published-port gates, AppReadyProbeAddr, and the resolved
+	// test-target fallback. --health-url is unaffected: that is an
+	// explicit operator request, not an inferred probe.
+	//
+	// It exists for embedders that drive replay as a library in an
+	// environment where a connect-then-close probe is DESTRUCTIVE.
+	// keploy/k8s-proxy is the motivating case: on its cluster-mode path
+	// the app is reached through a kubectl port-forward, and probing it
+	// can make kubelet's SPDY relay tear the session down ("lost
+	// connection to pod"), killing the app and agent forwards together.
+	//
+	// Leaving a gate input unset is NOT a reliable way to express this:
+	// such a caller still sets Test.Host (it rewrites recorded request
+	// URLs), and the resolved-test-target fallback will reach for that
+	// address and probe it. Intent has to be stated, not inferred.
+	DisableAppReadyProbe        bool                `json:"disableAppReadyProbe" yaml:"disableAppReadyProbe" mapstructure:"disableAppReadyProbe"`
 	Host                        string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                        uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort                    uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
@@ -387,10 +441,37 @@ type Test struct {
 	SchemaNoiseDetection        bool                `json:"schemaNoiseDetection" yaml:"schemaNoiseDetection" mapstructure:"schemaNoiseDetection"`                                          // detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching; available to any parser implementing the shared schema-noise adapter
 	SchemaNoiseStrict           bool                `json:"schemaNoiseStrict" yaml:"schemaNoiseStrict" mapstructure:"schemaNoiseStrict"`                                                   // replay-path enforcement: for a mock that already carries learned req_body_noise, match strictly — every request-body field must match except the learned-noise paths, so a non-noise drift fails the match. Left false on the auto-replay path so it can still learn noise leniently. Available to any parser implementing the shared schema-noise adapter.
 	StrictFailure               bool                `json:"strictFailure" yaml:"strictFailure" mapstructure:"strictFailure"`                                                               // when true, a response-failing test (testPass=false) is marked FAILED even if the consumed mock set diverged from the recorded mapping. Default false preserves the historical demotion: response failures with mock-set mismatch are marked OBSOLETE so the user can re-record without seeing the response diff as a hard failure. Set true to surface every response divergence as a real test failure for CI gating; the per-test OBSOLETE label is replaced by FAILED but the mappingDiff (expected vs actual mocks, missing calls) is still written to the report for diagnostics.
+	AssertDependencies          bool                `json:"assertDependencies" yaml:"assertDependencies" mapstructure:"assertDependencies"`                                                // when true, a per-test dependency the recording says this test exercised (a mapped, non-reusable-tier mock) that goes UNCONSUMED during replay fails the test: FAILED status, failed test set, non-zero exit. DEFAULT FALSE ON PURPOSE — today such a test is silently demoted to OBSOLETE without failing the test set, so defaulting this true would flip every existing suite red on upgrade. See keploy-consumer-design-v2.md §5 false-pass row 0 ("worker stops producing -> expected mock unconsumed -> OBSOLETE, exit 0, verified_green") and §7 slice 4. Independent of strictFailure: that flag only promotes a test whose RESPONSE also failed, so it cannot catch the response-matched-but-dependency-vanished case this flag exists for. Regardless of this flag the DepResult rows are always written and always rendered, so the missing dependency is visible in the report / JUnit / --format json either way, and they are the same size either way — this flag changes the verdict only, never what is persisted. CAVEAT on what "unconsumed" can prove: the per-test consumed-mock set is drained the moment the response comes back, so an outgoing call the app makes AFTER writing its response (audit write, analytics POST, cache set, async token refresh) is attributed to the NEXT test and reads as missing here. The signal is "not observed during this test's window", not "never made". PRECONDITIONS — the signal it keys off (an armed per-test mock mapping) is not computed unless ALL hold: instrument mode (`keploy test -c "<cmd>"`, not --base-path / remote-agent), mapping enabled (NOT test.disableMapping), and the test set has a usable mappings.yaml (re-record, or run once with --update-test-mapping, for test sets recorded before mappings existed). ELIGIBILITY — even with all of those, only PER-TEST tier mocks are asserted. Session/connection-tier mocks are excluded (recorded once at app boot, shared across every test, so a per-test presence assertion on them fails healthy tests at random) and so is DNS (non-deterministic resolution order). models.Mock.DeriveLifetime classifies an UNTAGGED HTTP / HTTP2 / Postgres / MySQL / Generic mock as session-tier, so a recording whose mocks carry no per-test tier tag has NOTHING eligible: every test is reported dependencies_checked=false (NOT CHECKED — not "checked and clean") and this flag cannot fail anything, with one WARN per test set naming that reason. SCOPE — streaming (SSE/chunked) test cases are exempt whatever the preconditions say: RunTestSet defers them to a second pass that populates no DepResult and never resolves a dependency verdict, so this flag cannot fail a streaming test. When a precondition fails, or a test set defers streaming test cases, the replayer logs one WARN per test set naming the reason, rather than reporting a green run for an assertion that never executed. COVERAGE TODAY, recorded here so it is a decision rather than a support-thread discovery: DeriveLifetime's kind fallback (rule 4) catches the untagged case and its lax-mode promotion (rule 5) catches EVERY non-canonical tag for the same kind list, so under default settings there is no tag value that makes an HTTP / HTTP2 / MySQL / Postgres / PostgresV2 / Generic mock per-test tier — measured across all 42 kind x tag combinations. Since only per-test tier is eligible, this flag cannot fail a test in an HTTP, MySQL, Postgres or Generic suite; it reaches the checked branch only for Mongo / Redis / gRPC-style recordings, or when KEPLOY_STRICT_MOCK_WINDOW is set to an enabling value (a disk-load-time env gate that StrictMockWindow below deliberately does NOT control — see the Scope note on laxKindFallbackDisabled in pkg/models/lifetime.go). For every other suite the flag is inert by construction and its only signal is the one WARN per test set. Widening that is a FOLLOW-UP and needs one of: the tier taggers emitting a canonical per-test tag for HTTP/Postgres/MySQL, or the lax kind fallback being disabled for newly-recorded test sets. Until one of those lands, release notes for this flag must say which recordings it actually covers.
 	StrictMockWindow            bool                `json:"strictMockWindow" yaml:"strictMockWindow" mapstructure:"strictMockWindow"`                                                      // Strict containment: per-test (LifetimePerTest) mocks whose request timestamp falls outside the outer test window are DROPPED rather than promoted to the cross-test unfiltered pool, which eliminates cross-test mock bleed. Default TRUE now that every stateful-protocol recorder classifies mocks finely enough (session vs per-test for connection-alive commands, per-connection data mocks) that legitimate cross-test sharing is encoded as session/connection lifetime rather than implicit out-of-window reuse. Opt out by setting this to false in keploy.yaml, or export KEPLOY_STRICT_MOCK_WINDOW=0 at process start — the env var wins over config.
 	KeepAppAlive                bool                `json:"keepAppAlive" yaml:"keepAppAlive" mapstructure:"keepAppAlive"`                                                                  // Start the user app ONCE on the outer errgroup at Start() time instead of restarting it per test-set. Skips the per-test-set RunApplication spawn + NotifyGracefulShutdown (reuses the existing serveTest gating) and skips the --delay wait on every test-set after the first (the app is already warm after the boundary). Matches the production globality autoreplay shape where a single user-app process serves every test-set back-to-back; required for cross-test-set bugs that need a long-lived TCP connection (asyncpg pool, JDBC HikariCP pool, etc.) to surface — see keploy/integrations#203 for the session-tier staleness case. Works for every cmdType that manages a user application (docker-compose, docker-run, docker-start, native); cmdType == Empty (no -c) short-circuits the one-shot spawn since there's nothing to manage. Default FALSE preserves the historical per-test-set restart behaviour.
 	ConnectionPoolIdleRetention time.Duration       `json:"connectionPoolIdleRetention,omitempty" yaml:"connectionPoolIdleRetention,omitempty" mapstructure:"connectionPoolIdleRetention"` // How long a per-connID connection-scoped mock pool survives without activity before the idle sweeper reclaims it. Default 5m — enough for HikariCP-style pooled connections bridging test boundaries without activity. Extend for long-running integration tests that may idle a connection between requests for more than 5 minutes; shorter values make the sweeper more aggressive at cost of potentially reclaiming active connections. Zero / negative reverts to the default.
 	CmdUsed                     string              `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
+}
+
+// Report output formats for `keploy report --format`.
+//
+// ReportFormatJUnit and ReportFormatJSON are MACHINE formats: their stdout is
+// a single document a tool parses (XML / NDJSON). Anything else keploy would
+// otherwise print to stdout — the ANSI logo, the version line, zap records —
+// has to move to stderr for those two, which is why they are named constants
+// shared by the CLI (which decides that before the flag is validated) and by
+// the report service (which decides what to emit).
+const (
+	ReportFormatText  = "text"
+	ReportFormatJUnit = "junit"
+	ReportFormatJSON  = "json"
+)
+
+// IsMachineReportFormat reports whether a --format value makes stdout a
+// machine-readable document. The value is lower-cased and trimmed by the
+// flag validator before it reaches config; callers that read the raw flag
+// normalise it themselves.
+func IsMachineReportFormat(format string) bool {
+	switch format {
+	case ReportFormatJUnit, ReportFormatJSON:
+		return true
+	}
+	return false
 }
 
 type Report struct {
@@ -399,7 +480,29 @@ type Report struct {
 	ReportPath       string              `json:"reportPath" yaml:"reportPath" mapstructure:"reportPath"`
 	Summary          bool                `json:"summary" yaml:"summary" mapstructure:"summary"`
 	TestCaseIDs      []string            `json:"testCaseIDs" yaml:"testCaseIDs" mapstructure:"testCaseIDs"`
-	Format           string              `json:"format" yaml:"format" mapstructure:"format"`
+	// Format is `keploy report --format`: "text" (default), "junit" or
+	// "json" (NDJSON).
+	//
+	// BEHAVIOUR CHANGE, slice 4 (keploy-consumer-design-v2.md §7): this key is
+	// HONOURED as of this release. Before it, ValidateFlags overwrote whatever
+	// PreProcessFlags had loaded with an unconditional
+	// cmd.Flags().GetString("format"), so the yaml / mapstructure key was
+	// silently dead and a config saying `report: {format: junit}` still
+	// produced a text report. A user who set it expecting it to work now gets
+	// what they asked for, which is a stdout change on upgrade with no flag
+	// passed. Configs written by `keploy config --generate` carry
+	// `format: ""`, which still resolves to text.
+	//
+	// An explicitly passed --format always wins over this value; see
+	// cli/provider.resolvedReportFormat.
+	//
+	// An INVALID value here is a WARN and a fall back to text, not an error:
+	// the key was dead until this release, so anyone who set it wrong got no
+	// feedback, and turning that into a hard exit 1 would break a command that
+	// used to work with an error naming a flag the user never passed. An
+	// invalid value passed on --format IS an error — the user asked for
+	// something keploy cannot produce.
+	Format string `json:"format" yaml:"format" mapstructure:"format"`
 }
 
 type Globalnoise struct {

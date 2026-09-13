@@ -254,6 +254,16 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 	return tcChan, nil
 }
 
+// mockHandoffBuffer sizes the decoder -> consumer hand-off. Deep enough that a
+// slow InsertMock cannot park the decoder behind a mock it has already read off
+// the wire.
+const mockHandoffBuffer = 1024
+
+// mockHandoffGrace bounds how long the decoder waits for the consumer to take a
+// mock before giving up on it. Only reachable if the consumer has stopped
+// draining entirely; a busy one drains in milliseconds.
+const mockHandoffGrace = 30 * time.Second
+
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 
 	a.logger.Debug("Connecting to outgoing mocks stream...")
@@ -281,7 +291,12 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
-	mockChan := make(chan *models.Mock)
+	// Buffered. An unbuffered channel parks the decoder for as long as the
+	// consumer spends inside InsertMock - and the first insert does mkdir +
+	// create + YAML encode + flush, which is exactly when the last mock of a
+	// recording arrives. A decoded mock waiting there was the widest of the
+	// three places a trailing mock could be lost.
+	mockChan := make(chan *models.Mock, mockHandoffBuffer)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -311,12 +326,30 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				break
 			}
 
+			// Offer the mock rather than racing the context for it.
+			//
+			// This used to be `select { case <-ctx.Done(): return nil; case
+			// mockChan <- &mock }`, which threw away a mock already decoded
+			// into our own address space the moment the capture context was
+			// cancelled - silently, with agent-side accounting still reporting
+			// success. Cancellation is the wrong thing to consult here: the
+			// consumer persists on an uncancellable context, so it can always
+			// accept, and the only reason it might not have yet is that it is
+			// busy writing the previous mock.
+			//
+			// So always try to deliver, bounded so a genuinely dead consumer
+			// cannot hang the stream. Anything still dropped is data loss and
+			// is logged as an error, because the alternative - a mock set
+			// indistinguishable from one where the call never happened - is
+			// what made this class of bug take an investigation to find.
 			select {
-			case <-ctx.Done():
-				// If the context is done, exit the loop
-				return nil
 			case mockChan <- &mock:
 				// Send the decoded mock to the channel
+			case <-time.After(mockHandoffGrace):
+				utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
+					zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
+					zap.Duration("waited", mockHandoffGrace))
+				return nil
 			}
 		}
 		return nil
@@ -940,6 +973,10 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 		// Helper check to ensure the binary running inside docker has the required capabilities
 		if err := utils.CheckRequiredPermissions(); err != nil {
 			a.logger.Error("Failed to start Keploy Agent", zap.Error(err))
+			// Distinct exit code: a caller must be able to tell "Keploy needs
+			// kernel privileges" from "your tests failed", both of which used to
+			// be a bare 1. See utils/exitcodes.go.
+			utils.SetExitCodeOnce(utils.ExitPrivilegeRequired)
 			return err
 		}
 		// Start the agent in Docker container using errgroup
@@ -1072,6 +1109,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 	if opts.RecordBufferConsumerStallGrace > 0 {
 		args = append(args, "--consumer-stall-grace", opts.RecordBufferConsumerStallGrace.String())
+	}
+	// != 0, not > 0: a NEGATIVE half-close grace disables half-close and
+	// must reach the agent.
+	if opts.RecordBufferHalfCloseGrace != 0 {
+		args = append(args, "--half-close-grace", opts.RecordBufferHalfCloseGrace.String())
 	}
 	a.logger.Debug("Starting native agent with args", zap.Strings("args", args))
 
@@ -1281,6 +1323,28 @@ func (a *AgentClient) stopAgent() {
 	}
 }
 
+// logAgentContainerDiagnostics dumps the agent container's own logs and state
+// when it never became ready. Without it a readiness timeout is a black box:
+// the CLI prints the whole wait window of silence and then a generic error,
+// with no way to tell a docker-run/container-start stall from an in-agent hang
+// (eBPF load, OOM, panic). Best-effort and bounded — never blocks teardown.
+func (a *AgentClient) logAgentContainerDiagnostics(container string) {
+	if strings.TrimSpace(container) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logs, _ := exec.CommandContext(ctx, "docker", "logs", "--tail", "200", container).CombinedOutput()
+	state, _ := exec.CommandContext(ctx, "docker", "inspect", "-f",
+		"status={{.State.Status}} exitCode={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} error={{.State.Error}}",
+		container).CombinedOutput()
+	a.logger.Warn("keploy-agent did not become ready; captured agent container diagnostics",
+		zap.String("container", container),
+		zap.String("state", strings.TrimSpace(string(state))),
+		zap.String("agent_logs", strings.TrimSpace(string(logs))))
+}
+
 // monitorAgent monitors the agent process and handles cleanup
 func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.Context) {
 	select {
@@ -1309,13 +1373,15 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	// Check and allocate available ports for proxy and DNS
-	proxyPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort) // check if the proxy port provided by user is unused
+	// Exclude the ports already handed out in this setup: none of them is bound
+	// yet, so a later draw could otherwise legitimately return one of them.
+	proxyPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, agentPort) // check if the proxy port provided by user is unused
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to ensure available ports for proxy")
 		return err
 	}
 
-	dnsPort, err := utils.EnsureAvailablePorts(a.conf.DNSPort) // check if the dns port provided by user is unused
+	dnsPort, err := utils.EnsureAvailablePorts(a.conf.DNSPort, agentPort, proxyPort) // check if the dns port provided by user is unused
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to ensure available ports for DNS")
 		return err
@@ -1390,7 +1456,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		// well over a minute just to start (observed: a local-image `docker run`
 		// taking 126s), so a 60s wait gave up prematurely and tore down a
 		// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
-		agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
+		readyTimeout := pkg.AgentReadyTimeout()
+		if opts.AgentReadyTimeout > 0 {
+			readyTimeout = opts.AgentReadyTimeout
+		}
+		agentCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -1401,7 +1471,18 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// Parent context cancelled (user pressed Ctrl+C)
 			return ctx.Err()
 		case <-agentCtx.Done():
-			return fmt.Errorf("keploy-agent did not become ready in time")
+			// The agent never reported healthy. The cleanup defer below is not in
+			// scope yet, so without this the wedged agent container and its
+			// goroutine leak — and any retry inherits the mess. Dump the container's
+			// own logs first: the CLI otherwise shows the full readiness window of
+			// silence followed by a bare error, with nothing to root-cause from.
+			if isDockerCmd {
+				a.logAgentContainerDiagnostics(opts.KeployContainer)
+			}
+			a.stopAgent()
+			// Sentinel so the caller can retry a fresh bring-up on this specific,
+			// nondeterministic stall without retrying deterministic failures.
+			return fmt.Errorf("%w", pkg.ErrAgentNotReady)
 		case <-agentReadyCh:
 		}
 	}

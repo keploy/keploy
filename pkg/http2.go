@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -656,6 +659,23 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		md[k] = []string{v}
 	}
 
+	// Bound the whole call, because the drain below is now a loop.
+	//
+	// A single RecvMsg was self-limiting. Draining to io.EOF is not: a bidi
+	// stream the server holds open — server reflection is exactly that shape
+	// — never reaches EOF, so without a deadline one bad test case blocks
+	// until the entire test-run context dies, taking the rest of the test set
+	// with it and attributing the hang to nothing in particular.
+	//
+	// APITimeout is the same knob the HTTP replay path uses. Zero means the
+	// caller did not set one, so fall back rather than leaving it unbounded.
+	timeout := time.Duration(cfg.APITimeout) * time.Second
+	if timeout <= 0 {
+		timeout = defaultGrpcCallTimeout
+	}
+	ctx, cancelCall := context.WithTimeout(ctx, timeout)
+	defer cancelCall()
+
 	// Create context with metadata
 	callCtx := metadata.NewOutgoingContext(ctx, md)
 
@@ -669,24 +689,31 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		return nil, fmt.Errorf("failed to create stream: %w", err)
 	}
 
-	// Convert the request body to raw message format
-	// For gRPC client with passthrough codec, we only need the protobuf bytes, not the full gRPC frame
-	var requestPayload []byte
-	if grpcReq.Body.DecodedData != "" {
-		// Parse the protoscope format back to bytes
-		scanner := protoscope.NewScanner(grpcReq.Body.DecodedData)
-		var err error
-		requestPayload, err = scanner.Exec()
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse request payload: %w", err)
+	// Send every recorded request message, in order.
+	//
+	// A client-streaming or bidi call records N messages; sending only the
+	// first replays a different request from the one that was captured, and
+	// the server's response to it is not the response that was recorded.
+	//
+	// AllMessages() always yields at least one element, including for a
+	// zero-value body — the health check records message_length 0 with empty
+	// decoded_data and expects exactly one empty message. An empty payload
+	// here is a real message, not the absence of one.
+	reqMsgs := grpcReq.AllMessages()
+	for i, m := range reqMsgs {
+		var requestPayload []byte
+		if m.DecodedData != "" {
+			// Parse the protoscope format back to bytes
+			scanner := protoscope.NewScanner(m.DecodedData)
+			var err error
+			requestPayload, err = scanner.Exec()
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse request payload (message %d of %d): %w", i, len(reqMsgs), err)
+			}
 		}
-	}
-
-	requestMsg := &rawMessage{data: requestPayload}
-
-	// Send the request
-	if err := stream.SendMsg(requestMsg); err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
+		if err := stream.SendMsg(&rawMessage{data: requestPayload}); err != nil {
+			return nil, fmt.Errorf("failed to send request (message %d of %d): %w", i, len(reqMsgs), err)
+		}
 	}
 
 	// Close the send side of the stream
@@ -700,13 +727,54 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		return nil, fmt.Errorf("failed to get response headers: %w", err)
 	}
 
-	// Read the response message
-	responseMsg := &rawMessage{}
-	if err := stream.RecvMsg(responseMsg); err != nil && err != io.EOF {
-		return nil, fmt.Errorf("failed to receive response: %w", err)
+	// Drain the response stream to io.EOF.
+	//
+	// A single RecvMsg captures the first message of a server-streaming or
+	// bidi response and abandons the rest, which also tears the connection
+	// down early — so the app handler aborts and any dependency calls behind
+	// messages 2..N never run.
+	//
+	// TRAILERS MUST BE READ AFTER THE DRAIN, NOT AFTER THE FIRST MESSAGE.
+	// grpc-go only populates Trailer() once RecvMsg has returned a non-nil
+	// error. Reading it earlier returns an empty map, the grpc-status fixup
+	// below then fabricates "0", and a stream that died partway replays as a
+	// clean success — the worst possible outcome, because it looks correct.
+	var respMsgs []models.GrpcLengthPrefixedMessage
+	var drainErr error
+	for {
+		responseMsg := &rawMessage{}
+		err := stream.RecvMsg(responseMsg)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			// Not fatal: this error IS the RPC's outcome and belongs in the
+			// mock. Stop draining and record it below, rather than discarding
+			// a partial stream and the reason it ended.
+			drainErr = err
+			logger.Debug("gRPC response stream ended with an error; recording what arrived",
+				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.Error(err))
+			break
+		}
+		respMsgs = append(respMsgs, createLengthPrefixedMessage(responseMsg.data))
+	}
+	if len(respMsgs) == 0 {
+		// A response carrying only trailers is legitimate (an error status, or
+		// a client-streaming call the server rejects). Keep one empty message
+		// so the recorded shape matches what a single RecvMsg used to produce.
+		//
+		// GrpcResp can now express "zero messages" honestly via NoMessages, and
+		// this site deliberately does NOT use it. This is the ingress SIMULATE
+		// path: the value built here is the ACTUAL response, compared field by
+		// field against a mock recorded earlier. Every such mock predates the
+		// flag and carries one empty message for this shape, so emitting zero
+		// here would report a body.message_count mismatch (0 vs 1) on
+		// recordings that are perfectly fine. The honest zero belongs on the
+		// EGRESS record path, where both sides move together.
+		respMsgs = append(respMsgs, createLengthPrefixedMessage(nil))
 	}
 
-	// Get trailers
+	// Now that the stream is finished, the trailers are real.
 	trailers := stream.Trailer()
 
 	// Construct the response
@@ -715,7 +783,6 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			PseudoHeaders:   make(map[string]string),
 			OrdinaryHeaders: make(map[string]string),
 		},
-		Body: createLengthPrefixedMessage(responseMsg.data),
 		Trailers: models.GrpcHeaders{
 			PseudoHeaders:   make(map[string]string),
 			OrdinaryHeaders: make(map[string]string),
@@ -753,6 +820,24 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		}
 	}
 
+	// The real status comes from the terminal RecvMsg error, NOT from the
+	// trailer map.
+	//
+	// grpc-go consumes grpc-status and grpc-message off the wire and turns
+	// them into the error RecvMsg returns; Trailer() carries only the
+	// application's own custom trailers. So a stream that ended INTERNAL has
+	// no grpc-status key at all, and the default below would fabricate "0" —
+	// replaying a failed RPC as a clean pass. Reading the status off the
+	// error is what makes a mid-stream failure visible.
+	if drainErr != nil {
+		if st, ok := status.FromError(drainErr); ok {
+			grpcResp.Trailers.OrdinaryHeaders["grpc-status"] = strconv.Itoa(int(st.Code()))
+			if msg := st.Message(); msg != "" {
+				grpcResp.Trailers.OrdinaryHeaders["grpc-message"] = msg
+			}
+		}
+	}
+
 	// Ensure mandatory gRPC status is present
 	if _, ok := grpcResp.Trailers.OrdinaryHeaders["grpc-status"]; !ok {
 		grpcResp.Trailers.OrdinaryHeaders["grpc-status"] = "0"
@@ -761,11 +846,33 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		grpcResp.Trailers.OrdinaryHeaders["grpc-message"] = ""
 	}
 
-	logger.Info("successfully completed gRPC simulation", zap.String("method", path))
+	grpcResp.SetMessages(respMsgs)
+
+	logger.Info("successfully completed gRPC simulation",
+		zap.String("method", path), zap.Int("response_messages", len(respMsgs)))
 	return grpcResp, nil
 }
 
-// CreateLengthPrefixedMessageFromPayload creates a GrpcLengthPrefixedMessage from raw payload data
+// defaultGrpcCallTimeout bounds a replayed gRPC call when the caller supplies
+// no APITimeout. It exists so the response drain can never hang a test set on
+// a stream the server holds open; it is not a latency target.
+const defaultGrpcCallTimeout = 30 * time.Second
+
+// CreateLengthPrefixedMessageFromPayload creates a GrpcLengthPrefixedMessage
+// from the FIRST length-prefixed message in data.
+//
+// It honours the declared length rather than protoscoping everything after
+// byte 5. Those are the same thing for a well-formed single message, where
+// 5+length == len(data), and different for a stream: decoding past the
+// declared end swallows the NEXT message's 5-byte header as if it were
+// protobuf payload, producing a DecodedData that disagrees with the
+// MessageLength beside it. Prefer SplitLengthPrefixedMessages when the input
+// may carry more than one message.
+//
+// A declared length longer than the data available means the capture was
+// truncated. The bytes present are still decoded — callers that must not
+// serve a partial body detect it by comparing MessageLength against the
+// re-encoded length — but nothing is invented to fill the gap.
 func CreateLengthPrefixedMessageFromPayload(data []byte) models.GrpcLengthPrefixedMessage {
 	msg := models.GrpcLengthPrefixedMessage{}
 
@@ -780,13 +887,84 @@ func CreateLengthPrefixedMessageFromPayload(data []byte) models.GrpcLengthPrefix
 	// The next 4 bytes are message length.
 	msg.MessageLength = binary.BigEndian.Uint32(data[1:5])
 
+	end := 5 + int(msg.MessageLength)
+	if end > len(data) || end < 5 {
+		// Truncated capture, or a length so large it overflowed the add.
+		end = len(data)
+	}
+
 	// The payload could be empty. We only parse it if it is present.
-	if len(data) > 5 {
+	if end > 5 {
 		// Use protoscope to decode the message.
-		msg.DecodedData = protoscope.Write(data[5:], protoscope.WriterOptions{})
+		msg.DecodedData = protoscope.Write(data[5:end], protoscope.WriterOptions{})
 	}
 
 	return msg
+}
+
+// ErrTrailingGrpcBytes reports that a length-prefixed chain did not consume
+// its input exactly — the last message's declared length ran past the end of
+// the buffer, or stopped short of it with fewer than 5 bytes left over.
+var ErrTrailingGrpcBytes = errors.New("grpc: length-prefixed chain does not consume its buffer exactly")
+
+// SplitLengthPrefixedMessages walks a contiguous stream of length-prefixed
+// gRPC messages and returns them in wire order.
+//
+// THIS IS THE ONLY CORRECT WAY TO FIND MESSAGE BOUNDARIES, and the reason is
+// worth stating because the obvious alternative is wrong. HTTP/2 DATA frame
+// boundaries are NOT message boundaries: one message may span several frames,
+// several messages may share one frame, and where the splits fall depends on
+// MTU, flow-control windows and write batching. Recording one entry per frame
+// would make the same RPC produce a different mock on every run and would
+// replay a message split across two frames as two corrupt ones. Boundaries
+// come from the 5-byte prefix and nowhere else.
+//
+// The walk is STRICT: the chain must consume the buffer exactly. A partial
+// trailing message means the capture was cut off, and inventing a message
+// from the remainder would record a body that cannot reproduce. Callers get
+// ErrTrailingGrpcBytes and the messages decoded so far, so they can decide
+// whether to skip the mock or record the prefix.
+//
+// An empty buffer yields no messages and no error — that is a legitimate
+// direction (a client-streaming call whose response carries only trailers).
+func SplitLengthPrefixedMessages(data []byte) ([]models.GrpcLengthPrefixedMessage, error) {
+	var msgs []models.GrpcLengthPrefixedMessage
+	for off := 0; off < len(data); {
+		if len(data)-off < 5 {
+			return msgs, fmt.Errorf("%w: %d trailing byte(s) after %d message(s), too few for a 5-byte prefix",
+				ErrTrailingGrpcBytes, len(data)-off, len(msgs))
+		}
+		length := binary.BigEndian.Uint32(data[off+1 : off+5])
+		end := off + 5 + int(length)
+		if end < off+5 || end > len(data) {
+			return msgs, fmt.Errorf("%w: message %d declares %d bytes but only %d remain",
+				ErrTrailingGrpcBytes, len(msgs), length, len(data)-off-5)
+		}
+		msg := models.GrpcLengthPrefixedMessage{
+			CompressionFlag: uint(data[off]),
+			MessageLength:   length,
+		}
+		if length > 0 {
+			msg.DecodedData = protoscope.Write(data[off+5:end], protoscope.WriterOptions{})
+		}
+		msgs = append(msgs, msg)
+		off = end
+	}
+	return msgs, nil
+}
+
+// CreatePayloadFromLengthPrefixedMessages re-encodes a whole direction back
+// into the contiguous wire form SplitLengthPrefixedMessages accepts.
+func CreatePayloadFromLengthPrefixedMessages(msgs []models.GrpcLengthPrefixedMessage) ([]byte, error) {
+	var out []byte
+	for i, m := range msgs {
+		b, err := CreatePayloadFromLengthPrefixedMessage(m)
+		if err != nil {
+			return nil, fmt.Errorf("message %d of %d: %w", i, len(msgs), err)
+		}
+		out = append(out, b...)
+	}
+	return out, nil
 }
 
 // CreatePayloadFromLengthPrefixedMessage converts a GrpcLengthPrefixedMessage to raw payload bytes

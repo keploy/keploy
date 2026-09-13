@@ -723,6 +723,14 @@ jobs:
   run_mock_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/mock_linux.yml
+  run_mysql_tls_greeting_stitch_linux:
+    # Regression guard for the proxyless MySQL-over-TLS capture shortfall: the
+    # last-greeting fallback (resolvePreTLSGreeting -> cachedGreeting) was dead
+    # code on the V2 path because only the legacy handleInitialHandshake ever
+    # seeded it, so a pooled connection whose own greeting had been consumed
+    # lost its whole command phase. Includes a mutation guard that fails the
+    # build if the regression tests stop actually exercising the fix.
+    uses: ./.github/workflows/mysql-tls-greeting-stitch-linux.yml
   run_http_stale_pool_race_linux:
     # Regression guard for issue #4165 (upstream-pool half-close race
     # in handleHttp1ZeroCopy). Bursty client + gunicorn --keep-alive 2

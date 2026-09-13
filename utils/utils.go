@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"debug/elf"
 	"encoding/binary"
@@ -12,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -1178,16 +1180,115 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	return childPIDs, nil
 }
 
-// GetAvailablePort finds and returns an available port on the system
+// ephemeralPortRange reports the kernel's local port range and whether it could
+// actually be determined.
+//
+// known=false means "this platform's range is unknown to us", NOT "assume
+// Linux". Guessing is worse than not acting: macOS and Windows both default to
+// 49152-65535, so assuming the Linux 32768-60999 would make GetAvailablePort
+// allocate from 61000-65534 — entirely INSIDE the real ephemeral range on those
+// platforms — while shrinking the pool from 16384 to 4535 and making collisions
+// materially more likely than plain :0.
+func ephemeralPortRange() (lo, hi uint32, known bool) {
+	return ephemeralPortRangeFrom(os.ReadFile)
+}
+
+// ephemeralPortRangeFrom takes the file reader as a parameter so the
+// unknown-platform path is testable. On Linux the read always succeeds, which
+// would otherwise leave that branch dead code no test can reach — and it is the
+// branch that decides whether the allocator acts at all.
+func ephemeralPortRangeFrom(readFile func(string) ([]byte, error)) (lo, hi uint32, known bool) {
+	b, err := readFile("/proc/sys/net/ipv4/ip_local_port_range")
+	if err != nil {
+		return 0, 0, false
+	}
+	return parseEphemeralPortRange(string(b))
+}
+
+// Linux's documented default, used when ip_local_port_range exists but its
+// contents are malformed.
+const (
+	defaultEphemeralLo uint32 = 32768
+	defaultEphemeralHi uint32 = 60999
+)
+
+// parseEphemeralPortRange parses the two-field content of ip_local_port_range.
+// Split out from the file read so its fallbacks are testable: on a normal Linux
+// box the read always succeeds, which would leave every fallback branch dead
+// code no test could reach.
+func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
+	f := strings.Fields(content)
+	if len(f) != 2 {
+		return defaultEphemeralLo, defaultEphemeralHi, true
+	}
+	l, err1 := strconv.ParseUint(f[0], 10, 32)
+	h, err2 := strconv.ParseUint(f[1], 10, 32)
+	if err1 != nil || err2 != nil || l == 0 || h < l || h > 65535 {
+		return defaultEphemeralLo, defaultEphemeralHi, true
+	}
+	return uint32(l), uint32(h), true
+}
+
+// GetAvailablePort finds and returns an available port on the system.
+//
+// It deliberately avoids the kernel's local port range, because that range is
+// where EVERY bind(0) allocator on the machine draws from — including a second
+// keploy process doing exactly this, and Docker's dynamic host-port publisher.
+// The probe listener must be CLOSED before the number can be handed to whoever
+// will actually bind it, so anything drawing from the same range can take it in
+// between, and the eventual holder is a LIVE process that never releases it —
+// which is why the agent's bind retry cannot recover and the run dies with
+// "keploy-agent did not become ready in time".
+//
+// Measured on Linux 6.12 with the default range 32768-60999: 3000/3000
+// bind(":0") allocations landed inside it, none above. (Outbound connections
+// are NOT the thief — the kernel partitions the two, handing bind(0) odd ports
+// and connect() even ones: 1500/1500 vs 1000/1000 in the same measurement. The
+// port that failed in CI, 34467, is odd, i.e. it came from a bind(0)-class
+// allocator, not from an outbound socket.)
+//
+// So candidates come from ABOVE the range's high-water mark. This NARROWS the
+// window rather than closing it — nothing short of passing the listener itself
+// closes it — but the port no longer competes with every other bind(0) on the
+// host.
 func GetAvailablePort() (uint32, error) {
-	// Use port 0 to let the OS assign an available port
+	if _, ephemeralHi, known := ephemeralPortRange(); known && ephemeralHi < 65535 {
+		lo := ephemeralHi + 1
+		span := 65536 - lo // inclusive of 65535
+		// A random start, not a scan from the bottom. Scanning upward returns
+		// the LOWEST free port every time, so two keploy processes started
+		// moments apart — the ordinary CI pattern — are handed an identical
+		// number, each having verified it free; whichever binds second loses.
+		start := lo
+		if n, err := rand.Int(rand.Reader, big.NewInt(int64(span))); err == nil {
+			start = lo + uint32(n.Int64())
+		}
+		for i := uint32(0); i < span; i++ {
+			port := lo + ((start - lo + i) % span)
+			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+			if err != nil {
+				continue
+			}
+			// A failed Close leaves this process holding the port for its
+			// lifetime, so the candidate is unusable AND leaked — return the
+			// error rather than continuing and leaking one fd per candidate.
+			if err := ln.Close(); err != nil {
+				return 0, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+			}
+			return port, nil
+		}
+	}
+
+	// Either the platform's ephemeral range is unknown, or every port above it
+	// is taken, or the range reaches 65535 leaving no space. Fall back to the
+	// OS assignment rather than failing: a port that may race is strictly
+	// better than no port at all, and this is the historical behaviour.
 	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		return 0, fmt.Errorf("failed to find available port: %w", err)
 	}
 	defer listener.Close()
 
-	// Extract the port from the listener's address
 	addr := listener.Addr().(*net.TCPAddr)
 	return uint32(addr.Port), nil
 }
@@ -1205,17 +1306,39 @@ func isPortAvailable(port uint32) bool {
 // EnsureAvailablePorts checks if the proxy and DNS ports are available.
 // If they are available, it returns them unchanged.
 // If not, it allocates new available ports for them.
-func EnsureAvailablePorts(port uint32) (uint32, error) {
-	var newPort uint32
-	var err error
-	if isPortAvailable(port) {
+//
+// exclude lists ports already handed out in this same setup. Nothing binds
+// them yet — the agent, proxy and DNS ports are all allocated before any of
+// them is used — so without this the second and third draws can legitimately
+// return a port the first already claimed, and two subsystems then race for
+// it. Narrowing allocation to above the ephemeral range makes the pool smaller
+// and that coincidence correspondingly more likely, so the exclusion is not
+// optional bookkeeping.
+func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
+	taken := make(map[uint32]struct{}, len(exclude))
+	for _, p := range exclude {
+		taken[p] = struct{}{}
+	}
+	if _, clash := taken[port]; !clash && isPortAvailable(port) {
 		return port, nil
 	}
-	newPort, err = GetAvailablePort()
-	if err != nil {
-		return 0, fmt.Errorf("failed to allocate new proxy port: %w", err)
+	var newPort uint32
+	var err error
+	// Bounded: a handful of draws is plenty to miss a set this small, and a
+	// bound means an exhausted pool surfaces as an error rather than a hang.
+	for i := 0; i < 16; i++ {
+		newPort, err = GetAvailablePort()
+		if err != nil {
+			break
+		}
+		if _, clash := taken[newPort]; !clash {
+			return newPort, nil
+		}
 	}
-	return newPort, nil
+	if err == nil {
+		return 0, fmt.Errorf("failed to allocate a port distinct from %v", exclude)
+	}
+	return 0, fmt.Errorf("failed to allocate new port: %w", err)
 }
 
 func EnsureRmBeforeName(cmd string) string {
@@ -1238,21 +1361,41 @@ func EnsureRmBeforeName(cmd string) string {
 	return strings.Join(parts, " ")
 }
 
-// ContainerNameFromDockerRun extracts the value of the --name flag from a
-// `docker run` command, supporting both "--name foo" and "--name=foo". It
-// returns "" when no --name is present. Used to free a leftover container name
-// before a re-run when the --container-name flag wasn't supplied.
-func ContainerNameFromDockerRun(cmd string) string {
+// dockerLongFlagValue returns the value of the first occurrence of any of
+// names in cmd, accepting both "--flag value" and "--flag=value". Docker
+// accepts either spelling for every long flag, so a parser that understands
+// only one of them silently reads nothing from perfectly valid commands.
+func dockerLongFlagValue(cmd string, names ...string) string {
 	parts := strings.Fields(cmd)
 	for i, part := range parts {
-		if part == "--name" && i+1 < len(parts) {
-			return parts[i+1]
-		}
-		if name, ok := strings.CutPrefix(part, "--name="); ok {
-			return name
+		for _, name := range names {
+			if part == name && i+1 < len(parts) {
+				return parts[i+1]
+			}
+			// An empty "--flag=" is not a value: keep scanning, so it cannot
+			// swallow a real occurrence later in the command.
+			if value, ok := strings.CutPrefix(part, name+"="); ok && value != "" {
+				return value
+			}
 		}
 	}
 	return ""
+}
+
+// ContainerNameFromDockerRun extracts the value of the --name flag from a
+// `docker run` command, supporting both "--name foo" and "--name=foo". It
+// returns "" when no --name is present. Used to free a leftover container name
+// before a re-run when the --container-name flag wasn't supplied, and to
+// resolve the container keploy must instrument.
+func ContainerNameFromDockerRun(cmd string) string {
+	return dockerLongFlagValue(cmd, "--name")
+}
+
+// NetworkNameFromDockerRun extracts the value of --network or --net from a
+// `docker run` command, in either spelling. It returns "" when neither is
+// present.
+func NetworkNameFromDockerRun(cmd string) string {
+	return dockerLongFlagValue(cmd, "--network", "--net")
 }
 
 func isGoBinary(logger *zap.Logger, filePath string) bool {

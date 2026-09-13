@@ -44,6 +44,8 @@
 
 set -Eeuo pipefail
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+
 MYSQL_PORT=3307
 # The port the application is pointed at for the SECOND replay, to simulate an
 # environment whose database endpoint differs from the one that was recorded.
@@ -245,6 +247,7 @@ sudo rm -rf keploy/ keploy.yml
 relocate_mysql_port
 
 section "Start MySQL"
+docker_compose_pull_retry
 docker compose up -d
 wait_for_mysql
 endsec

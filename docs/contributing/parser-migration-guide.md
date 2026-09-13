@@ -284,10 +284,12 @@ Three parsers are migrated on PR #4113 — use them as templates:
 
 ## Rollout knobs
 
-- `KEPLOY_NEW_RELAY=off` forces every parser (including yours) back
-  to the legacy path. Use during incidents.
-- `KEPLOY_DISABLE_PARSING=1` disables parser dispatch entirely; every
-  connection goes to raw passthrough.
+- `KEPLOY_NEW_RELAY` — **REMOVED.** It used to force every parser back
+  to the legacy path. A value left in the environment is ignored (and
+  logged once at startup), so it is no longer an incident lever.
+- `KEPLOY_DISABLE_PARSING=1` / `SIGUSR1` disables parser dispatch
+  entirely; every connection goes to raw passthrough. This is the
+  incident lever.
 
 ## When in doubt
 

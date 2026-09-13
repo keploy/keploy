@@ -327,8 +327,8 @@ func TestResolveCommandType_NativeAcceptsAnyCommand(t *testing.T) {
 
 // Substring matching let "./run-docker.sh" past the docker-run guard — a
 // wrapper by any reading, and the naming convention a docker wrapper script
-// actually uses. Past the guard it fails much worse: ParseDockerCmd wipes the
-// user's --container-name and modifyDockerRun dies on the token count.
+// actually uses. Past the guard it fails much worse: ParseDockerCmd finds no
+// container name to work with and modifyDockerRun dies on the token count.
 func TestMentionsDockerBinary(t *testing.T) {
 	yes := []string{
 		"docker compose up",

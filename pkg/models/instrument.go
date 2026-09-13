@@ -227,6 +227,18 @@ type ConditionalDstCfg struct {
 	Addr   string // Destination Addr (ip:port)
 	Port   uint
 	TLSCfg *tls.Config
+	// AddrFabricated marks Addr/Port as a stand-in the capture layer
+	// synthesized because it could not resolve the connection's REAL
+	// destination (e.g. the proxyless SSL-uprobe path substitutes
+	// 127.0.0.1:0 when the pid→dest cache is ambiguous, and content
+	// matching later forces the well-known port, yielding
+	// "127.0.0.1:3306"). Such an address is good enough for parser
+	// selection and mock metadata (grouping), but it does NOT point at
+	// the server this connection actually talked to — consumers MUST
+	// NOT dial it (the MySQL recorder's fetchServerGreeting fallback
+	// would otherwise connect to an unrelated local server, or fail
+	// instantly with ECONNREFUSED and abort the capture).
+	AddrFabricated bool
 }
 
 type IncomingOptions struct {
@@ -300,8 +312,14 @@ type SetupOptions struct {
 	// config.Record.RecordBuffer.ConsumerStallGrace. See
 	// RecordBufferMaxMemoryPerConn for the propagation rationale.
 	RecordBufferConsumerStallGrace time.Duration
-	ExtraArgs                      []string
-	EnableSampling                 int
+
+	// RecordBufferHalfCloseGrace mirrors
+	// config.RecordBuffer.HalfCloseGrace. Zero means "unset, use the
+	// relay default"; NEGATIVE means "disable half-close", so the value
+	// must be forwarded on != 0 rather than > 0.
+	RecordBufferHalfCloseGrace time.Duration
+	ExtraArgs                  []string
+	EnableSampling             int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF
@@ -328,6 +346,12 @@ type SetupOptions struct {
 	// environment variables to disk. When non-nil, SetupCompose uses this content
 	// directly instead of reading from a file path extracted from the command.
 	InMemoryCompose []byte
+	// AgentReadyTimeout, when > 0, overrides pkg.AgentReadyTimeout() for this
+	// bring-up. A retry after a stalled agent sets a shorter window than the
+	// generous first-attempt slow-start budget: a fresh agent reports healthy in
+	// a second or two, so a wedged retry should be cut short rather than re-wait
+	// minutes.
+	AgentReadyTimeout time.Duration
 }
 
 type RunOptions struct {

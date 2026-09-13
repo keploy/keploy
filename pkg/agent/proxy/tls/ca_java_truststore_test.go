@@ -2,11 +2,13 @@ package tls
 
 import (
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -159,5 +161,66 @@ func TestGenerateTrustStore_SkipsNonCertSequence(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "keploy-root") {
 		t.Fatalf("real cert missing from store:\n%s", out)
+	}
+}
+
+// TestJavaTrustStorePathIsPerUser pins the property that makes this survivable
+// on a shared machine.
+//
+// The path used to be a single shared filename in os.TempDir(). That directory
+// is world-writable with the sticky bit, so the first run to create the file
+// owns it permanently: one `sudo keploy`, or any rootful-docker run, left a
+// root-owned JKS and every later run as the normal user died with
+//
+//	failed to build the Java truststore: ... permission denied
+//
+// with Java interception silently broken until someone removed it by hand. This
+// test fails on a machine that still has such a leftover ONLY if the code has
+// regressed to the shared name — which is the point: it must pass regardless of
+// what is already sitting in /tmp.
+func TestJavaTrustStorePathIsPerUser(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	// setupJavaTrustStoreEnv ends in os.Setenv, which outlives this test and
+	// leaks a JAVA_TOOL_OPTIONS pointing at a truststore inside t.TempDir() —
+	// a path that no longer exists once the test finishes. Every later test in
+	// the binary, and every subprocess they spawn, would inherit it. t.Setenv
+	// registers the restore.
+	t.Setenv(EnvJavaToolOptions, "")
+
+	// os.TempDir honours TMPDIR only on unix; on Windows it reads TMP/TEMP, so
+	// the redirect above would not take effect and this test would assert
+	// against the real temp dir.
+	if runtime.GOOS == "windows" {
+		t.Skip("os.TempDir does not honour TMPDIR on Windows; the per-user property is " +
+			"already provided there by a per-user temp dir")
+	}
+
+	logger := zap.NewNop()
+	if err := setupJavaTrustStoreEnv(logger); err != nil {
+		t.Fatalf("setupJavaTrustStoreEnv: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jks []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jks") {
+			jks = append(jks, e.Name())
+		}
+	}
+	if len(jks) == 0 {
+		t.Fatal("no truststore was written")
+	}
+	want := fmt.Sprintf("-%d.jks", os.Geteuid())
+	for _, name := range jks {
+		if !strings.HasSuffix(name, want) {
+			t.Errorf("truststore %q is not keyed by uid (want a name ending %q).\n\n"+
+				"A shared name in a world-writable sticky temp dir is owned forever by "+
+				"whoever creates it first, so a single run under sudo permanently breaks "+
+				"Java interception for that machine's normal user.", name, want)
+		}
 	}
 }

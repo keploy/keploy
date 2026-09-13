@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # E2E test for CONNECT tunnel support.
 # Verifies that Keploy can record and replay HTTP requests that the app
@@ -125,7 +126,7 @@ if ! (echo > /dev/tcp/127.0.0.1/3128) >/dev/null 2>&1; then
 fi
 
 # ── Build the app ──
-go build -o connect-tunnel
+go_retry build -o connect-tunnel
 echo "Go binary built."
 
 # ── Generate keploy config with noise rules ──
