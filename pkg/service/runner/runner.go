@@ -383,8 +383,8 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.MongoPassword = r.config.Test.MongoPassword
 		outOpts.SQLDelay = time.Duration(r.config.Test.Delay) * time.Second
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
-		outOpts.SchemaNoiseDetection = r.config.Test.SchemaNoiseDetection
-		outOpts.SchemaNoiseStrict = r.config.Test.SchemaNoiseStrict
+		outOpts.MockNoiseDetection = r.config.Test.NoiseDetection()
+		outOpts.MockNoiseStrict = r.config.Test.NoiseStrict()
 		outOpts.MysqlPorts = r.config.MysqlPorts
 		outOpts.DisableMysqlAutoDetect = r.config.DisableMysqlAutoDetect
 		outOpts.DisableMysqlEndpointDrift = r.config.DisableMysqlEndpointDrift

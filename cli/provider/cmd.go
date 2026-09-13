@@ -458,6 +458,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
+		cmd.Flags().Bool("mock-noise-detection", c.cfg.Test.MockNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared mock-noise adapter")
+		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter")
 		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared schema-noise adapter")
 		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared schema-noise adapter. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
 		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping (default behaviour demotes such cases to OBSOLETE). The per-test mappingDiff block is still written for diagnostics.")
@@ -547,6 +549,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"disableMapping":            "disable-mapping",
 		"compareAll":                "compare-all",
 		"schemaMatch":               "schema-match",
+		"mockNoiseDetection":        "mock-noise-detection",
+		"mockNoiseStrict":           "mock-noise-strict",
 		"schemaNoiseDetection":      "schema-noise-detection",
 		"schemaNoiseStrict":         "schema-noise-strict",
 		"updateTestMapping":         "update-test-mapping",
@@ -1547,12 +1551,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
+			// Both spellings are read and OR-ed. --schema-noise-* is the
+			// deprecated name kept working for existing scripts and CI jobs;
+			// --mock-noise-* is canonical. Neither can express "explicitly
+			// off" as distinct from "unset", so OR-ing loses nothing and means
+			// a user who passes either one gets the behaviour they asked for.
 			c.cfg.Test.SchemaNoiseDetection, err = cmd.Flags().GetBool("schema-noise-detection")
 			if err != nil {
 				errMsg := "failed to read the --schema-noise-detection flag; check the flag name with --help and confirm this command supports it"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
+			mockNoiseDetection, err := cmd.Flags().GetBool("mock-noise-detection")
+			if err != nil {
+				errMsg := "failed to read the --mock-noise-detection flag; check the flag name with --help and confirm this command supports it"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Test.MockNoiseDetection = mockNoiseDetection
 
 			// Only let the flag override when it was explicitly passed or
 			// the config file doesn't set the key — otherwise the flag's
@@ -1566,6 +1582,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 			}
+			if cmd.Flags().Changed("mock-noise-strict") || !viper.IsSet("test.mockNoiseStrict") {
+				c.cfg.Test.MockNoiseStrict, err = cmd.Flags().GetBool("mock-noise-strict")
+				if err != nil {
+					errMsg := "failed to read the --mock-noise-strict flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+			// Reconcile once, here, so every later reader sees one answer
+			// regardless of which spelling the user or their keploy.yml used.
+			c.cfg.Test.NormalizeMockNoise()
 
 			// enforce that the test-sets are provided when --must-pass is set to true
 			// to prevent accidental deletion of failed testcases in testsets which was due to application changes
