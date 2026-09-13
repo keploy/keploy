@@ -337,5 +337,15 @@ func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 	a.scopeMu.Lock()
 	loaded := a.loadedMocks
 	a.scopeMu.Unlock()
-	return models.MockStats{Loaded: loaded}, nil
+	stats := models.MockStats{Loaded: loaded}
+	// Consumed was never populated, so every reader saw a literal 0 while the
+	// end-of-run summary reported the real figure. That silently disarmed the
+	// fixture's strict-scope gate in BOTH directions: `after > before` is 0 > 0,
+	// and MockStats has no omitempty so the "count unknowable" branch could not
+	// fire either. GetPersistentConsumed is the cumulative, NON-draining ledger
+	// -- reading it here leaves the summary's drain untouched.
+	if reader, ok := a.Proxy.(coreAgent.ConsumedStateReader); ok {
+		stats.Consumed = len(reader.GetPersistentConsumed())
+	}
+	return stats, nil
 }

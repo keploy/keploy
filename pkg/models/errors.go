@@ -192,8 +192,16 @@ type MockMismatchReport struct {
 	// absent from the compared set still has a real cascade stop, and
 	// overwriting the phase with the verdict destroys that triage fact.
 	DestinationScope string
-	CandidateCount   int             // protocol mocks considered before giving up
-	FieldDiffs       []MockFieldDiff // field-level diffs vs the closest mock, noise-vocabulary paths
+	// ReqIdentity is a short, protocol-supplied fingerprint of WHICH logical
+	// call this was, for misses whose method+path identify nothing on their own.
+	// A GraphQL suite multiplexes every query through one `POST /query`, so the
+	// summary "POST /query" cannot distinguish a background notification poll
+	// from a genuinely new call a code change introduced — and that is exactly
+	// the judgement a developer has to make when triaging a miss. Bounded and
+	// value-free: identity keys only, never the whole body.
+	ReqIdentity    string
+	CandidateCount int             // protocol mocks considered before giving up
+	FieldDiffs     []MockFieldDiff // field-level diffs vs the closest mock, noise-vocabulary paths
 	// ClosestMockReq / ReceivedReq are the FULL rendered requests for the CLI
 	// side-by-side diff (left = recorded mock, right = live request). They are
 	// the human-facing complement to FieldDiffs (machine-readable): the

@@ -4127,6 +4127,14 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 		if r.DestinationScope != models.DestinationScopeUnknown {
 			fields = append(fields, zap.String("destination_scope", r.DestinationScope))
 		}
+		// Which logical call missed. Emitted only when the protocol could
+		// establish it: on a multiplexed endpoint (one GraphQL POST /query for
+		// every operation) "actual" names the transport, not the call, so
+		// triage cannot tell a background poll from a new call a code change
+		// introduced. Absent means "not established", never "nothing there".
+		if r.ReqIdentity != "" {
+			fields = append(fields, zap.String("req_identity", r.ReqIdentity))
+		}
 		p.logger.Warn("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {
 		p.logger.Warn("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
