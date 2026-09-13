@@ -1361,21 +1361,41 @@ func EnsureRmBeforeName(cmd string) string {
 	return strings.Join(parts, " ")
 }
 
-// ContainerNameFromDockerRun extracts the value of the --name flag from a
-// `docker run` command, supporting both "--name foo" and "--name=foo". It
-// returns "" when no --name is present. Used to free a leftover container name
-// before a re-run when the --container-name flag wasn't supplied.
-func ContainerNameFromDockerRun(cmd string) string {
+// dockerLongFlagValue returns the value of the first occurrence of any of
+// names in cmd, accepting both "--flag value" and "--flag=value". Docker
+// accepts either spelling for every long flag, so a parser that understands
+// only one of them silently reads nothing from perfectly valid commands.
+func dockerLongFlagValue(cmd string, names ...string) string {
 	parts := strings.Fields(cmd)
 	for i, part := range parts {
-		if part == "--name" && i+1 < len(parts) {
-			return parts[i+1]
-		}
-		if name, ok := strings.CutPrefix(part, "--name="); ok {
-			return name
+		for _, name := range names {
+			if part == name && i+1 < len(parts) {
+				return parts[i+1]
+			}
+			// An empty "--flag=" is not a value: keep scanning, so it cannot
+			// swallow a real occurrence later in the command.
+			if value, ok := strings.CutPrefix(part, name+"="); ok && value != "" {
+				return value
+			}
 		}
 	}
 	return ""
+}
+
+// ContainerNameFromDockerRun extracts the value of the --name flag from a
+// `docker run` command, supporting both "--name foo" and "--name=foo". It
+// returns "" when no --name is present. Used to free a leftover container name
+// before a re-run when the --container-name flag wasn't supplied, and to
+// resolve the container keploy must instrument.
+func ContainerNameFromDockerRun(cmd string) string {
+	return dockerLongFlagValue(cmd, "--name")
+}
+
+// NetworkNameFromDockerRun extracts the value of --network or --net from a
+// `docker run` command, in either spelling. It returns "" when neither is
+// present.
+func NetworkNameFromDockerRun(cmd string) string {
+	return dockerLongFlagValue(cmd, "--network", "--net")
 }
 
 func isGoBinary(logger *zap.Logger, filePath string) bool {

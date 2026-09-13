@@ -970,7 +970,18 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		passPortsUint32[i] = uint32(port)
 	}
 
-	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose})
+	setupOpts := models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose}
+	// Retry only a stalled agent bring-up (pkg.ErrAgentNotReady) with a fresh
+	// agent; a healthy agent is set up once and the test set runs against it.
+	err := pkg.RetryAgentSetup(ctx, r.logger, func(c context.Context, attempt int) error {
+		o := setupOpts
+		if attempt > 1 {
+			// The first attempt keeps the full slow-start budget; a retry's fresh
+			// agent is ready in a second or two, so cut a wedged retry short.
+			o.AgentReadyTimeout = 120 * time.Second
+		}
+		return r.instrumentation.Setup(c, r.config.Command, o)
+	})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -1158,6 +1169,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Check if mappings are present and decide filtering strategy
 	var expectedTestMockMappings map[string][]models.MockEntry
 	var useMappingBased bool
+	// startupMockNames: the test-set's boot traffic. Merged into every test's
+	// expected-name list because the mapping-based loader takes names only.
+	var startupMockNames []string
 	var isMappingEnabled bool
 	isMappingEnabled = !r.config.DisableMapping
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
@@ -1294,10 +1308,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 		mocksThatHaveMappings := make(map[string]bool)
 
 		mocksWeNeed := make(map[string]bool)
+
+		// Startup mocks are needed by EVERY test, so they go into both maps.
+		// mocksThatHaveMappings alone would be wrong: GetFilteredMocks prunes on
+		// `isMappedToSpecificTest && !isNeededForCurrentRun`, so a name present
+		// only in the first map is dropped whenever a subset of tests is run.
+		for _, n := range startupMockNames {
+			mocksThatHaveMappings[n] = true
+			mocksWeNeed[n] = true
+		}
 
 		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
 			// Populate the Registry
@@ -1316,8 +1339,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 				}
 			} else {
-				// If running all tests, we need all mapped mocks
-				mocksWeNeed = mocksThatHaveMappings
+				// Running all tests: every mapped mock is needed. Copy rather
+				// than alias — mocksWeNeed was already seeded with the startup
+				// names above, and `mocksWeNeed = mocksThatHaveMappings` would
+				// alias both variables to one map (harmless today, but it makes
+				// the two maps impossible to diverge later).
+				for n := range mocksThatHaveMappings {
+					mocksWeNeed[n] = true
+				}
 			}
 		}
 		// Get all mocks for mapping-based filtering
@@ -1402,10 +1431,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if cmdType != utils.DockerCompose {
 
-		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 		mocksThatHaveMappings := make(map[string]bool)
 
 		mocksWeNeed := make(map[string]bool)
+
+		// Startup mocks are needed by EVERY test, so they go into both maps.
+		// mocksThatHaveMappings alone would be wrong: GetFilteredMocks prunes on
+		// `isMappedToSpecificTest && !isNeededForCurrentRun`, so a name present
+		// only in the first map is dropped whenever a subset of tests is run.
+		for _, n := range startupMockNames {
+			mocksThatHaveMappings[n] = true
+			mocksWeNeed[n] = true
+		}
 
 		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
 			// Populate the Registry
@@ -1424,8 +1462,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 				}
 			} else {
-				// If running all tests, we need all mapped mocks
-				mocksWeNeed = mocksThatHaveMappings
+				// Running all tests: every mapped mock is needed. Copy rather
+				// than alias — mocksWeNeed was already seeded with the startup
+				// names above, and `mocksWeNeed = mocksThatHaveMappings` would
+				// alias both variables to one map (harmless today, but it makes
+				// the two maps impossible to diverge later).
+				for n := range mocksThatHaveMappings {
+					mocksWeNeed[n] = true
+				}
 			}
 		}
 		// Get all mocks for mapping-based filtering
@@ -1640,6 +1684,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		passingTotalConsumedMocks[m.Name] = m
 	}
 
+	// Record the boot-time traffic as the test-set's STARTUP section.
+	//
+	// These are, by definition, the mocks consumed before the first test fired
+	// — driver handshakes, auth, connection-pool warm-up. They belong to no
+	// single test case, so upsertActualTestMockMapping's per-test window filter
+	// can never attribute them (its own comment calls them "session-level
+	// traffic that should not be per-test") and until now they were simply
+	// absent from mappings.yaml.
+	//
+	// That absence is invisible on the timestamp path, which reloads them via
+	// disk.LoadBefore(firstWindowStart), but fatal on the mapping path, which
+	// loads strictly by name. Writing them here is what lets the reader hand
+	// them back for every test.
+	setStartupMocks(actualTestMockMappings, consumedMocks)
+
 	// Snapshot the post-setup consumed-mock baseline. These are the
 	// reusable/session mocks (driver handshake, auth, connection pool
 	// warm-up) consumed during application bootstrap, before any test
@@ -1664,18 +1723,39 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	for k, v := range totalConsumedMocks {
 		allConsumedAcrossCycles[k] = v
 	}
-	// Build a lookup of mock name -> summary and protocol from the mock registry (once per test set).
-	type mockInfo struct {
-		summary  string
-		protocol string
-	}
-	mockLookup := map[string]mockInfo{}
+	// Build a lookup of mock name -> summary, protocol and target from the mock
+	// registry (once per test set). `target` is added for the DepResult writer:
+	// neither models.MockEntry (the mapping side) nor models.MockState (the
+	// consumed side) carries a destination, so the only place a human-meaningful
+	// target exists is the loaded *models.Mock. Can legitimately stay empty —
+	// r.mockDB may be nil and GetUnFilteredMocks errors are swallowed here — so
+	// every consumer must degrade gracefully rather than assume a hit.
+	mockLookup := map[string]mockDisplayInfo{}
+
+	// Test-set-scoped dependency-assertion bookkeeping.
+	//
+	// depMissingTests collects the tests that lost a recorded outgoing call so
+	// ONE Warn can be emitted per test set at the end, instead of one per test
+	// on every run. Keyed by name, and recordUnexercised DELETES on a clean
+	// cycle as well as inserting on a dirty one, so a RetryPassing cycle can
+	// neither double-count a test nor leave a stale entry for one that
+	// recovered — the summary always describes the same cycle the persisted
+	// report does. The value is the test's status, so the summary can separate
+	// the tests whose response still matched (the silent-green population)
+	// from the ones that were demoted.
+	//
+	// depAssertionInertWarned makes the "you asked for --assert-dependencies
+	// but it cannot run here" warning fire once per test set rather than once
+	// per test.
+	depMissingTests := map[string]models.TestStatus{}
+	depAssertionInertWarned := false
 	if r.mockDB != nil {
 		if allMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now(), nil, nil); err == nil {
 			for _, mock := range allMocks {
-				mockLookup[mock.Name] = mockInfo{
+				mockLookup[mock.Name] = mockDisplayInfo{
 					summary:  models.MockSummaryFromSpec(mock),
 					protocol: string(mock.Kind),
+					target:   mockTargetFromSpec(mock),
 				}
 			}
 		}
@@ -1684,11 +1764,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Separate replay into regular and streaming buckets. Regular tests can use the
 	// iterative replay path from main, while streaming tests are replayed sequentially
 	// afterwards so long-lived connections do not block the normal flow.
-	type streamingTest struct {
-		testCase      *models.TestCase
-		expectedMocks []string
-	}
-
 	var activeTestCases []*models.TestCase
 	var streamingTests []streamingTest
 	for _, testCase := range testCases {
@@ -1715,15 +1790,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
-			tcCopy := *testCase
-			expectedMockNames := make([]string, len(expectedTestMockMappings[testCase.Name]))
-			for i, m := range expectedTestMockMappings[testCase.Name] {
-				expectedMockNames[i] = m.Name
-			}
-			streamingTests = append(streamingTests, streamingTest{
-				testCase:      &tcCopy,
-				expectedMocks: expectedMockNames,
-			})
+			streamingTests = append(streamingTests, newStreamingTest(testCase, expectedTestMockMappings))
 			r.logger.Debug("deferring streaming test case",
 				zap.String("testcase", testCase.Name),
 				zap.String("testset", testSetID))
@@ -1854,10 +1921,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				respTime = testCase.GrpcResp.Timestamp
 			}
 
-			expectedNames := make([]string, len(expectedTestMockMappings[testCase.Name]))
-			for i, m := range expectedTestMockMappings[testCase.Name] {
-				expectedNames[i] = m.Name
-			}
+			// Per-test names PLUS the test-set's startup names. On this path the
+			// agent calls disk.LoadByNames(MockMapping) and loads nothing else,
+			// so omitting startup names leaves the app's boot mocks (handshake,
+			// auth, pool warm-up) out of the pool for every test — the gap the
+			// startup section exists to close. The timestamp path needs no
+			// equivalent: it reloads them via disk.LoadBefore(firstWindowStart).
+			expectedNames := models.MergeStartupMockNames(expectedTestMockMappings[testCase.Name], startupMockNames)
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased, time.Time{})
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
@@ -1985,17 +2055,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// mapping but are excluded here: they are not deterministically
 			// attributed to a single test's window, so including them would
 			// falsely demote tests to OBSOLETE.
-			filteredExpectedNames := make([]string, 0, len(expectedMocks))
-			for _, m := range expectedMocks {
-				isDNS := strings.EqualFold(m.Kind, string(models.DNS))
-				if !isDNS {
-					if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
-						isDNS = true
-					}
-				}
-				if isDNS || reusableMockNames[m.Name] {
-					continue
-				}
+			//
+			// eligibleExpectedEntries is the SHARED filter — literally the
+			// same call buildDepResults makes. Both the verdict signal
+			// (mockSetMismatch, via filteredExpectedNames) and the honesty
+			// signal (noEligibleDeps, below) are derived from its result, so
+			// they cannot drift from the rows the writer emits. It used to be
+			// written out inline here and again in the writer; see the
+			// function's doc comment for what a one-sided widening of those
+			// two copies did to the report.
+			eligibleExpected := eligibleExpectedEntries(expectedMocks, mockKindByName, reusableMockNames)
+			filteredExpectedNames := make([]string, 0, len(eligibleExpected))
+			for _, m := range eligibleExpected {
 				filteredExpectedNames = append(filteredExpectedNames, m.Name)
 			}
 
@@ -2007,21 +2078,81 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				filteredMockNames = append(filteredMockNames, m.Name)
 			}
 
+			// depAssertionValid: the ONE predicate under which an
+			// expected-vs-consumed comparison is a valid per-test assertion.
+			// It gates the verdict signal (mockSetMismatch) AND the DepResult
+			// rows that explain it, so the two cannot diverge.
+			//
+			// Every conjunct is load-bearing:
+			//   - r.instrument: SendMockFilterParamsToAgent returns early when
+			//     it is false, so the per-test mapping is NEVER ARMED and the
+			//     agent serves from the whole pool. "Which mock got consumed
+			//     for this request" is then decided across all tests, so the
+			//     comparison is not attributable to one test at all.
+			//   - useMappingBased && isMappingEnabled: without them
+			//     determineMockingStrategy hands back defaultMappings and there
+			//     is no per-test expectation to compare against.
+			//   - hasExpectedMocks: nothing recorded for this test.
+			//   - instrumentConsumedFetchErr == nil: the fetch failed and
+			//     consumedMocks was cleared to nil above, which would
+			//     deterministically compute mockSetMismatch=true (empty subset
+			//     of any non-empty expected set) and falsely mark the test
+			//     OBSOLETE — and, on the rows side, report every dependency as
+			//     missing — because of an unrelated transport error.
+			depAssertionValid := r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks && instrumentConsumedFetchErr == nil
+
 			mockSetMismatch := false
-			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks && instrumentConsumedFetchErr == nil {
+			if depAssertionValid {
 				// Compare only per-test mocks (DNS + reusable/startup tiers
 				// excluded above) since those are the only mocks
-				// deterministically tied to a single test. Also gate on a
-				// successful per-test GetConsumedMocks — when the fetch failed,
-				// consumedMocks was cleared to nil above, which would
-				// deterministically compute mockSetMismatch=true (empty subset
-				// of any non-empty expected set) and falsely mark the test
-				// OBSOLETE due to an unrelated transport error rather than a
-				// real mock-pool divergence.
+				// deterministically tied to a single test.
 				mockSetMismatch = !isMockSubset(filteredMockNames, filteredExpectedNames)
 			}
+			// noEligibleDeps: the recording DOES map dependencies to this
+			// test and the filter above removed every one of them, so
+			// buildDepResults has nothing to assert and reports NOT-CHECKED
+			// (see its eligibility guard). That is the ordinary outcome for a
+			// recording whose mocks carry no per-test tier tag — untagged
+			// HTTP/Postgres/MySQL egress is classified session-tier by
+			// models.Mock.DeriveLifetime — so without a warning the user gets
+			// a report full of `dependencies_checked: false` and no statement
+			// of why.
+			//
+			// Computed from the SAME two lists the assertion itself uses
+			// (expectedMocks, filteredExpectedNames), so the warning cannot
+			// claim something buildDepResults disagrees with.
+			noEligibleDeps := len(expectedMocks) > 0 && len(filteredExpectedNames) == 0
 
-			emitFailureLogs := !mockSetMismatch
+			// One WARN per test set when the knob was asked for but cannot be
+			// honoured. Without it --assert-dependencies in CI against a
+			// legacy (unmapped) test set, with test.disableMapping set, or
+			// against a recording with no per-test-tier dependency at all,
+			// produces a green run and no indication the assertion never ran
+			// — the same silent-green class the slice exists to close.
+			//
+			// Called per TEST CASE (the latch keeps it one line per test set)
+			// because noEligibleDeps is a property of this test's own mapped
+			// entries, not of the test set.
+			//
+			// deferredStreaming is false here: this loop only ever sees the
+			// non-streaming bucket. The streaming tests were split out above
+			// and get their own latched call in Phase 2.
+			//
+			// instrumentConsumedFetchErr != nil is passed as its OWN reason
+			// rather than being left to fall through to noEligibleDeps. A
+			// failed fetch nils consumedMocks, which is a transport error the
+			// operator can act on; blaming the recording's tier for it sent
+			// them to re-tag a recording that was never the problem, and a
+			// fetch failure on a test set WITH eligible dependencies used to
+			// produce no warning at all.
+			r.warnDependencyAssertionInert(testSetID, useMappingBased, isMappingEnabled, instrumentConsumedFetchErr != nil, false, noEligibleDeps, &depAssertionInertWarned)
+
+			// A mock-set mismatch normally means "re-record", so the response
+			// diff is suppressed as noise. With --assert-dependencies the test
+			// is about to be marked FAILED instead of demoted to OBSOLETE, so
+			// suppressing its diffs would hand the user a red test with no
+			// explanation. Knob off (the default) is byte-identical to before.
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.config.Test.AssertDependencies)
 
 			switch testCase.Kind {
 			case models.HTTP:
@@ -2105,57 +2236,101 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.Strings("mockNames", mockNames),
 				zap.Any("mocks", consumedMocks))
 
-			// strictMockReject: under SchemaNoiseStrict, an expected mock that
-			// went unconsumed means strict req-body matching REJECTED it — a
-			// non-noise request field drifted. The app's response can still
-			// match (e.g. a deterministic dependency), so the response check
-			// alone won't catch it; treat it as a real test failure.
-			strictMockReject := false
-			if mockSetMismatch {
-				switch {
-				case testPass && r.config.Test.SchemaNoiseStrict:
-					r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
-						zap.String("testcase", testCase.Name),
-						zap.String("testset", testSetID),
-						zap.Strings("expectedMocks", filteredExpectedNames),
-						zap.Strings("actualMocks", filteredMockNames))
-					testPass = false
-					strictMockReject = true
-					r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, filteredExpectedNames, filteredMockNames)
-				case testPass:
-					r.logger.Debug("mock mapping mismatch ignored because testcase passed",
-						zap.String("testcase", testCase.Name),
-						zap.String("testset", testSetID),
-						zap.Strings("expectedMocks", filteredExpectedNames),
-						zap.Strings("actualMocks", filteredMockNames))
-				default:
-					r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete. Re-record the test case or run with --update-test-mapping to regenerate mappings",
-						zap.String("testcase", testCase.Name),
-						zap.String("testset", testSetID),
-						zap.Strings("expectedMocks", filteredExpectedNames),
-						zap.Strings("actualMocks", filteredMockNames))
-					r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, filteredExpectedNames, filteredMockNames)
-				}
+			// THE PER-TEST VERDICT, in one call.
+			//
+			// resolveTestOutcome takes the PRE-PROMOTION response result and
+			// returns everything that follows from it: the persisted status,
+			// whether the test set goes red, whether the mismatch is recorded
+			// for the end-of-run report, and which log line explains it.
+			//
+			// It is a seam on purpose. The promotions used to be inline
+			// `case testPass && <knob>:` arms of a switch inside this
+			// 3000-line function, and a reviewer demonstrated that replacing
+			// the --assert-dependencies arm with `testPass && false` left the
+			// entire five-package suite green — i.e. the knob's only reason to
+			// exist was unguarded. Every arm is now a table row in
+			// TestResolveTestOutcome.
+			//
+			// The three knobs it weighs:
+			//   - SchemaNoiseStrict: an expected mock was REJECTED because a
+			//     non-noise request-body field drifted.
+			//   - AssertDependencies: an expected per-test mock was not
+			//     observed during this test's window, i.e. the app stopped
+			//     making an outgoing call the recording says it makes. The
+			//     response can still match — a deterministic dependency, a
+			//     cached value, a swallowed error — so the response check
+			//     alone cannot catch it, and today the test is silently
+			//     demoted to OBSOLETE with the run still exiting 0
+			//     (keploy-consumer-design-v2.md §5, false-pass row 0).
+			//     DEFAULT OFF: every existing suite with a drifting mock pool
+			//     would flip red on upgrade otherwise. The DepResult rows are
+			//     written and rendered either way, so with the knob off the
+			//     missing dependency is still visible in the report / JUnit /
+			//     --format json — only the verdict differs.
+			//   - StrictFailure: the pre-existing veto of the OBSOLETE
+			//     demotion for a response-failing test.
+			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.SchemaNoiseStrict, r.config.Test.AssertDependencies, r.config.Test.StrictFailure)
+			switch outcome.Log {
+			case mismatchLogSchemaNoiseReject:
+				r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("expectedMocks", filteredExpectedNames),
+					zap.Strings("actualMocks", filteredMockNames))
+			case mismatchLogDependencyReject:
+				r.logger.Error("assert-dependencies: an expected per-test dependency was not observed during this test's window; failing testcase even though the response matched",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("expectedMocks", filteredExpectedNames),
+					zap.Strings("actualMocks", filteredMockNames))
+			case mismatchLogIgnoredResponseMatched:
+				r.logger.Debug("mock mapping mismatch ignored because testcase passed",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("expectedMocks", filteredExpectedNames),
+					zap.Strings("actualMocks", filteredMockNames))
+			case mismatchLogVetoedFailure:
+				r.logger.Error("mock mapping mismatch detected; marking testcase as FAILED",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.String("reason", outcome.VetoFlags),
+					zap.Strings("expectedMocks", filteredExpectedNames),
+					zap.Strings("actualMocks", filteredMockNames))
+			case mismatchLogObsolete:
+				r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete. Re-record the test case or run with --update-test-mapping to regenerate mappings",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("expectedMocks", filteredExpectedNames),
+					zap.Strings("actualMocks", filteredMockNames))
+			case mismatchLogNone:
 			}
+			if outcome.RecordMismatch {
+				r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, filteredExpectedNames, filteredMockNames)
+			}
+			// Fold the promotions back into testPass so the "result" line and
+			// every later reader see the resolved verdict, exactly as they did
+			// when the flips were inline.
+			testPass = outcome.Status == models.TestStatusPassed
 
 			if !testPass {
 				r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
 			} else {
 				r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(testPass)))
 			}
-			if testPass {
-				testStatus = models.TestStatusPassed
+			testStatus = outcome.Status
+			switch testStatus {
+			case models.TestStatusPassed:
 				currentSuccess++
 				nextTestsToRun = append(nextTestsToRun, testCase)
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !strictMockReject && !r.config.Test.StrictFailure {
-				testStatus = models.TestStatusObsolete
+			case models.TestStatusObsolete:
 				currentObsolete++
-			} else {
-				testStatus = models.TestStatusFailed
+			default:
 				currentFailures++
+			}
+			if outcome.FailsTestSet {
 				testSetStatus = models.TestSetStatusFailed
 			}
 
@@ -2310,8 +2485,73 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// See buildExpectedMockInfos / buildActualMockInfos at the
 					// bottom of this file for DNS-filter + perTestConsumed-known
 					// semantics. Both extracted as helpers for unit testability.
-					expectedMockInfos := buildExpectedMockInfos(expectedMocks, mockKindByName)
-					actualMockInfos := buildActualMockInfos(perTestConsumed, perTestConsumedKnown)
+					// Startup names are dropped from BOTH sides, matching the
+					// runner path (checkMockMismatches) and the existing DNS
+					// carve-out. They belong to the test SET, so neither their
+					// presence nor their absence in one test is a mismatch: a step
+					// that re-handshakes would otherwise report an unexpected
+					// consumption, and one that did not would report a phantom
+					// missing expectation for any name that appears in both
+					// sections. Report-only — MockMismatches does not drive the
+					// pass/fail or obsolescence verdict.
+					expectedMockInfos := dropStartupMockInfos(buildExpectedMockInfos(expectedMocks, mockKindByName), startupMockNames)
+					actualMockInfos := dropStartupMockInfos(buildActualMockInfos(perTestConsumed, perTestConsumedKnown), startupMockNames)
+
+					// FIRST WRITER of models.Result.DepResult
+					// (keploy-consumer-design-v2.md §2, §7 slice 4). Written
+					// for EVERY test that reaches here — passed, failed or
+					// obsolete — so a missing dependency is visible in the
+					// report, JUnit and --format json regardless of the
+					// verdict.
+					//
+					// Gated on the SAME depAssertionValid predicate as
+					// mockSetMismatch: the rows are only a valid per-test
+					// assertion when the per-test mock mapping was actually
+					// ARMED on the agent, which is instrument mode only. Under
+					// that predicate perTestConsumed == consumedMocks and
+					// perTestConsumedKnown is implied, so the rows and the
+					// verdict signal are computed from identical inputs.
+					//
+					// The dependencies that WERE observed collapse into a
+					// plain count (Result.DepsConsumed) in every mode:
+					// persistence is decoupled from the verdict knob on
+					// purpose, so turning the CI gate on cannot multiply the
+					// size of every report it writes. Result.DepsChecked is
+					// written unconditionally under the predicate, which is
+					// what makes "the assertion ran and found nothing"
+					// expressible on disk and distinguishable from "the
+					// assertion never ran" — for two short keys instead of the
+					// ~224-byte aggregate row an earlier revision persisted per
+					// test, on every report, to encode the same one bit.
+					//
+					// Rebuilt on every RetryPassing cycle: the last cycle's
+					// rows land in finalTestCaseResults, overwriting earlier
+					// ones, so no stale row survives a mock rewind.
+					//
+					// This is a read-only projection of bookkeeping the replay
+					// loop already computes — no new capture path, and mock
+					// matching / serving is untouched.
+					depAssert := buildDepResults(expectedMocks, perTestConsumed, depAssertionValid && perTestConsumedKnown, reusableMockNames, mockKindByName, mockLookup)
+					missingDepNames, depLevel := attachDepResults(testCaseResult, testStatus, depAssert, r.config.Test.AssertDependencies)
+					recordUnexercised(depMissingTests, testCase.Name, testStatus, depLevel)
+					switch depLevel {
+					case depLogError:
+						r.logger.Error("dependency assertion failed: an expected dependency was not observed during this test's window",
+							zap.String("testcase", testCase.Name),
+							zap.String("testset", testSetID),
+							zap.Strings("missingDependencies", missingDepNames))
+					case depLogDebug:
+						// Per-test Debug only: an expected-but-unobserved mock
+						// is the routine condition the OBSOLETE demotion exists
+						// to tolerate, so a Warn here would add hundreds of new
+						// lines per run to any suite with a drifting mock pool.
+						// The test-set summary below carries the signal instead.
+						r.logger.Debug("expected dependencies were not observed during this test's window (reported only; set test.assertDependencies / --assert-dependencies to fail on this)",
+							zap.String("testcase", testCase.Name),
+							zap.String("testset", testSetID),
+							zap.Strings("missingDependencies", missingDepNames))
+					case depLogNone:
+					}
 
 					// TestResult.MockMismatches: populated for tests going
 					// through this (non-streaming) replay path — regardless of
@@ -2415,6 +2655,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("testset", testSetID),
 			zap.Int("count", len(streamingTests)))
 
+		// The streaming half of the inert-knob warning, sharing Phase 1's
+		// latch so a test set still emits at most ONE of these however many
+		// streaming tests it deferred.
+		//
+		// This pass writes no DepResult and never calls resolveTestOutcome (see
+		// the NOTE further down), so --assert-dependencies cannot promote
+		// anything here. Without this call a CI run that points the flag at a
+		// set of SSE/chunked tests exits 0 for an assertion that never
+		// executed — the flag would be silently inert, which is exactly the
+		// failure mode the flag exists to remove. deferredStreaming is true
+		// unconditionally: reaching this block means len(streamingTests) > 0.
+		// noEligibleDeps is false here and must stay false: this pass has no
+		// per-test filtered expectation list to compute it from, and the
+		// deferral is the accurate thing to say about these test cases.
+		// consumedFetchFailed is false for the same reason — this pass fetches
+		// no per-test consumed set, so it has no fetch outcome to report.
+		r.warnDependencyAssertionInert(testSetID, useMappingBased, isMappingEnabled, false, true, false, &depAssertionInertWarned)
+
 		for i, deferred := range streamingTests {
 			tc := deferred.testCase
 
@@ -2451,7 +2709,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Mock Window: Calculate the effective mock filter window for streaming
 			// using the request timestamp to the response timestamp plus a timeout buffer.
 			streamReqTime, streamRespTime := effectiveStreamMockWindow(tc, r.config.Test.APITimeout)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, deferred.expectedMocks, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased, time.Time{})
+			// Merge startup names at the SEND site, not where expectedMocks was
+			// built: the same slice is reused below for isMockSubsetWithConfig,
+			// and only the agent's loader needs the wider list.
+			//
+			// The hazard of widening it at the build site is a FALSE PASS, not a
+			// false mismatch. isMockSubsetWithConfig iterates CONSUMED and flags
+			// anything absent from the expected set, so a larger expected set can
+			// only ever report fewer mismatches. A per-test-lifetime mock that
+			// happened to be consumed at boot lands in `startup:`, and adding it
+			// to expected would have that unexpected consumption tolerated — a
+			// test that should go OBSOLETE would pass instead.
+			streamExpected := models.MergeStartupMockNames(expectedTestMockMappings[tc.Name], startupMockNames)
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased, time.Time{})
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
@@ -2531,6 +2801,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
 				mockSetMismatch = !isMockSubsetWithConfig(consumedMocks, expectedMocks)
 			}
+			// NOTE: models.Result.DepResult is deliberately NOT populated on
+			// the deferred streaming path, for the same reason MockMismatches
+			// is not (see models.TestResult.MockMismatches). deferred.expected
+			// Mocks is an un-tier-filtered name slice built before the run, so
+			// reusable/startup-tier mocks would show up as per-test
+			// dependencies and go "missing" at random. Consumers must treat an
+			// absent DepResult as "not available for this run mode", never as
+			// "this test had no dependencies".
 			emitFailureLogs := !mockSetMismatch
 
 			if !ok {
@@ -2798,6 +3076,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		allConsumedAcrossCycles[k] = v
 	}
 
+	// ONE summary line per test set for dependencies that were recorded but
+	// not observed, in the default (knob off) mode. Per-test this is logged
+	// at Debug: it is the routine condition the OBSOLETE demotion tolerates,
+	// and a Warn per test would add hundreds of lines per run to any suite
+	// with a drifting mock pool — a CLI-output regression for users who never
+	// opted into the assertion. The count and a sample still surface here.
+	r.warnUnexercisedDependencies(testSetID, depMissingTests)
+
 	timeTaken := time.Since(startTime)
 
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
@@ -3032,13 +3318,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			shouldWriteMappings = true
 		}
 	}
+
+	// See backfillStartupSection: writes a STARTUP-ONLY document so the
+	// operator's per-test mappings are never rewritten by a subset run.
+	if !shouldWriteMappings {
+		r.backfillStartupSection(ctx, testSetID, actualTestMockMappings)
+	}
+
 	if shouldWriteMappings {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
+			// startupMocks is reported at INFO, not DEBUG, on purpose: it is the
+			// only signal that the startup section was actually captured. Every
+			// other trace of it (mapdb.GetStartup, determineMockingStrategy) is
+			// DEBUG, and CI lanes do not run the replay at debug level — so
+			// without this a run that silently recorded ZERO startup mocks looks
+			// identical to one that recorded them correctly, and the whole
+			// feature is unobservable from a green pipeline.
 			r.logger.Info("Successfully saved test-mock mappings",
 				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings.TestCases)))
+				zap.Int("numTests", len(actualTestMockMappings.TestCases)),
+				zap.Int("startupMocks", len(actualTestMockMappings.Startup)))
 		}
 	}
 
@@ -4437,18 +4738,40 @@ func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName
 	}
 }
 
-func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID string, isMappingEnabled bool) (bool, map[string][]models.MockEntry) {
+// The third return is the test-set's startup mock names — boot traffic that
+// belongs to no test case. On the mapping-based path the agent loads strictly
+// by name (Agent.loadPerTestMocks -> disk.LoadByNames), so these must be merged
+// into every per-test name list or the app's boot mocks are absent from the
+// pool. The timestamp path does not need them: it reloads the same mocks via
+// disk.LoadBefore(firstWindowStart).
+//
+// Returned even when the mapping is not "meaningful", so a caller that falls
+// back to timestamp filtering still sees them; harmless there, since that path
+// ignores names entirely.
+func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID string, isMappingEnabled bool) (bool, map[string][]models.MockEntry, []string) {
 	// Default to timestamp-based strategy with empty mappings.
 	defaultMappings := make(map[string][]models.MockEntry)
 
 	if r.mappingDB == nil {
 		r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
-		return false, defaultMappings
+		return false, defaultMappings, nil
 	}
 
 	if !isMappingEnabled {
 		// The calling function already logs this, so we don't log it again here.
-		return false, defaultMappings
+		return false, defaultMappings, nil
+	}
+
+	// Startup mocks are read independently of the per-test mappings: they are
+	// absent from `tests:` by design, so Get() cannot surface them. A read
+	// failure here is not fatal — it costs the startup names, not the run.
+	var startupNames []string
+	if startup, serr := r.mappingDB.GetStartup(ctx, testSetID); serr != nil {
+		r.logger.Debug("Failed to read startup mocks from mappings; continuing without them",
+			zap.String("testSetID", testSetID),
+			zap.Error(serr))
+	} else {
+		startupNames = (&models.Mapping{Startup: startup}).StartupMockNames()
 	}
 
 	// Try to get mappings from the database.
@@ -4457,21 +4780,28 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 		r.logger.Debug("Failed to get mappings, falling back to timestamp-based filtering",
 			zap.String("testSetID", testSetID),
 			zap.Error(err))
-		return false, defaultMappings
+		return false, defaultMappings, startupNames
 	}
 
 	if hasMeaningfulMappings {
 		// Meaningful mappings were found, so use the mapping-based strategy.
 		r.logger.Debug("Using mapping-based mock filtering strategy",
 			zap.String("testSetID", testSetID),
-			zap.Int("totalMappings", len(expectedTestMockMappings)))
-		return true, expectedTestMockMappings
+			zap.Int("totalMappings", len(expectedTestMockMappings)),
+			zap.Int("startupMocks", len(startupNames)))
+		return true, expectedTestMockMappings, startupNames
 	}
 
 	// No meaningful mappings were found, so fall back to the timestamp-based strategy.
+	//
+	// NOTE: a test set whose ONLY outgoing traffic is startup traffic still
+	// lands here — hasMeaningfulMappings counts per-test entries only. That is
+	// deliberate: mapping-based selection exists to pick mocks PER TEST, and
+	// with no per-test entry there is nothing to select. Such a set keeps the
+	// timestamp path, which loads startup mocks via LoadBefore anyway.
 	r.logger.Debug("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
 		zap.String("testSetID", testSetID))
-	return false, defaultMappings
+	return false, defaultMappings, startupNames
 }
 
 // isMockSubset checks if all expected mocks are present in the actual mocks list
@@ -4617,4 +4947,97 @@ func buildActualMockInfos(consumed []models.MockState, known bool) []models.Mock
 		out = append(out, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
 	}
 	return out
+}
+
+// backfillStartupSection adds the startup section to mappings.yaml when the
+// replay captured one and the file on disk has none.
+//
+// Needed because the section is otherwise unreachable in the default flow:
+// `keploy record` writes mappings.yaml through UpsertBatch (no startup
+// capture), so by the time `keploy test` runs the file EXISTS, the
+// create-if-absent branch above is skipped, UpdateTestMapping defaults to
+// false, and the Startup slice built earlier is computed and discarded.
+//
+// ⚠ Written as a STARTUP-ONLY document, deliberately NOT by flipping
+// shouldWriteMappings. That flag routes through StoreMappings ->
+// mapdb.Insert, and Insert REPLACES per-test entries
+// (`finalMappings[t.ID] = t.Mocks`) for every test in the document. On a
+// subset run — `keploy test --tests test-A` — actualTestMockMappings holds
+// only test-A, populated from THIS run's consumption, so the operator's
+// curated list for test-A would be overwritten with whatever this run
+// happened to consume. A short-circuited or partly-failed run writes a
+// strict subset as authoritative, and the next mapping-based run fails that
+// test with no_mocks. That is exactly the contract the create-if-not-present
+// gate exists to protect ("once a file exists, leave it alone; to force a
+// refresh, pass --update-test-mapping").
+//
+// With TestCases empty, Insert's seed-from-existing loop carries every
+// on-disk entry through untouched and only the section is added.
+//
+// Fires at most once per test set (gated on the section being genuinely
+// absent), so it cannot churn the file. A read failure costs the section,
+// not the run.
+//
+// Extracted from RunTestSet so the gate is unit-testable: it is the exact
+// decision that made the whole feature unreachable in the default flow, and the
+// first fix for it clobbered per-test mappings.
+func (r *Replayer) backfillStartupSection(ctx context.Context, testSetID string, actual *models.Mapping) {
+	if r.mappingDB == nil || actual == nil || len(actual.Startup) == 0 {
+		return
+	}
+
+	onDisk, err := r.mappingDB.GetStartup(ctx, testSetID)
+	if err != nil {
+		r.logger.Debug("Skipping startup-section backfill — could not read the existing section",
+			zap.String("testSetID", testSetID),
+			zap.Error(err))
+		return
+	}
+	if len(onDisk) > 0 {
+		return
+	}
+
+	startupOnly := &models.Mapping{
+		Version:   actual.Version,
+		Kind:      actual.Kind,
+		TestSetID: testSetID,
+		Startup:   actual.Startup,
+	}
+	if err := r.mappingDB.Insert(ctx, startupOnly); err != nil {
+		r.logger.Error("Error adding the startup section to mappings.yaml", zap.Error(err))
+		return
+	}
+	r.logger.Info("Added the startup section to mappings.yaml",
+		zap.String("testSetID", testSetID),
+		zap.Int("startupMocks", len(actual.Startup)))
+}
+
+// streamingTest is a test case deferred to the sequential streaming phase.
+//
+// Package-scoped rather than local to RunTestSet so newStreamingTest is
+// testable: the field below carries an invariant that is easy to break by
+// "simplifying".
+type streamingTest struct {
+	testCase *models.TestCase
+	// expectedMocks is PER-TEST ONLY, deliberately.
+	//
+	// It feeds isMockSubsetWithConfig, which compares this against what the test
+	// consumed. The agent's list is built separately at the send site and DOES
+	// include the test-set's startup names — merging them here instead would be a
+	// false pass: a per-test-lifetime mock consumed at boot lands in `startup:`,
+	// and having it in the expected set would tolerate that unexpected
+	// consumption, letting a test that should go OBSOLETE pass.
+	expectedMocks []string
+}
+
+// newStreamingTest builds the deferred entry for a streaming test case. It
+// copies the test case because the caller's loop variable is reused.
+func newStreamingTest(testCase *models.TestCase, mappings map[string][]models.MockEntry) streamingTest {
+	tcCopy := *testCase
+	entries := mappings[testCase.Name]
+	names := make([]string, len(entries))
+	for i, m := range entries {
+		names[i] = m.Name
+	}
+	return streamingTest{testCase: &tcCopy, expectedMocks: names}
 }

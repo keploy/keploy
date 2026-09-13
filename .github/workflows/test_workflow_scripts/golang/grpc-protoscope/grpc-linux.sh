@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # This script tests the grpc-protoscope sample application.
 # Keploy wraps the server to record incoming gRPC calls.
@@ -19,8 +20,8 @@ command -v go >/dev/null 2>&1 || { echo "go not found"; exit 1; }
 
 # --- Build Application ---
 echo "Building gRPC server and client binaries..."
-go build -o grpc-server ./server
-go build -o grpc-client ./client
+go_retry build -o grpc-server ./server
+go_retry build -o grpc-client ./client
 chmod +x ./grpc-server ./grpc-client
 
 # --- Helper Functions ---

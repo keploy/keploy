@@ -138,14 +138,26 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 // helper used by both file and DB paths
 func (r *Report) printTests(ctx context.Context, tests []models.TestResult) error {
 	for _, t := range tests {
-		if t.Status == models.TestStatusFailed {
+		// FAILED/OBSOLETE keep the full diff. A test that merely lost a
+		// dependency keeps its one-line status notice below and gains one
+		// extra line, rather than being dressed up as a failure.
+		if shouldRenderDiff(t) && !rendersDepNoticeOnly(t) {
 			if err := r.printSingleTestReport(ctx, t); err != nil {
 				return fmt.Errorf("failed to print single test report in printTests: %w", err)
 			}
 			continue
 		}
-		// Passed — minimize output and avoid pretty printer
-		fmt.Fprintf(r.out, "Testcase %q (%s) PASSED ✅ (%s)\n", t.TestCaseID, t.Name, t.TimeTaken)
+		// Not rendering a diff — minimize output and avoid pretty printer.
+		// The status is PRINTED, not assumed: this branch takes every
+		// non-FAILED status, so hardcoding "PASSED ✅" made
+		// `keploy report --test-case <obsolete>` announce a pass for a test
+		// that was demoted, and the dependency notice below then printed
+		// directly under a line asserting it passed.
+		fmt.Fprintf(r.out, "Testcase %q (%s) %s (%s)\n", t.TestCaseID, t.Name, testStatusLabel(t.Status), t.TimeTaken)
+		// ... but a PASSED test can still have stopped making a recorded
+		// outgoing call. That is the silent-green case; it gets one line here
+		// whether or not --assert-dependencies was passed.
+		fmt.Fprint(r.out, models.FormatDepNotice(t.Result.DepResult))
 		fmt.Fprintln(r.out, "\n--------------------------------------------------------------------")
 	}
 	err := r.out.Flush()
@@ -153,6 +165,27 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		return fmt.Errorf("failed while flushing in printTests: %w", err)
 	}
 	return nil
+}
+
+// testStatusLabel renders a status for the one-line, no-diff form of
+// `keploy report`.
+//
+// PASSED keeps its exact historical bytes ("PASSED ✅"), which is what makes
+// this change invisible for every report whose tests all passed; the other
+// statuses stop borrowing it.
+func testStatusLabel(status models.TestStatus) string {
+	switch status {
+	case models.TestStatusPassed:
+		return "PASSED ✅"
+	case models.TestStatusFailed:
+		return "FAILED ❌"
+	case models.TestStatusObsolete:
+		return "OBSOLETE ⚠️"
+	case models.TestStatusIgnored:
+		return "IGNORED ⏭️"
+	}
+	// An unknown status is still better named than mislabelled as a pass.
+	return string(status)
 }
 
 // printSummary prints the grand summary + per test-set table.
@@ -174,7 +207,7 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		failed += rep.Failure
 		obsolete += rep.Obsolete
 
-		// Count risk levels and categories for failed tests
+		// Count risk levels for failed tests that carry one.
 		for _, test := range rep.Tests {
 			if test.Status == models.TestStatusFailed && test.FailureInfo.Risk != "" {
 				switch test.FailureInfo.Risk {
@@ -185,9 +218,36 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 				case models.Low:
 					lowRisk++
 				}
+			}
 
+			// Category counting, widened by exactly as much as this slice
+			// needs and no more.
+			//
+			// FAILED is counted INDEPENDENTLY of the risk level. Risk is set
+			// by the response matcher; a test promoted to FAILED by
+			// --assert-dependencies has a matching response and therefore no
+			// risk at all, so the historical `Risk != ""` gate meant
+			// DEPENDENCY_MISSING — the one category this slice adds — could
+			// never reach the summary block that advertises it.
+			//
+			// OBSOLETE contributes ONLY DependencyMissing. An OBSOLETE test
+			// has never been counted here, and counting its other categories
+			// would silently change the numbers under a heading called FAILURE
+			// CATEGORIES for reports written long before this slice: a report
+			// with one FAILED and one OBSOLETE test both carrying
+			// SCHEMA_BROKEN would print "SCHEMA_BROKEN: 2" next to "Total test
+			// failed: 1". That is unreviewed breadth on a surface CI users
+			// scrape, and none of it is needed to surface a lost dependency.
+			switch test.Status {
+			case models.TestStatusFailed:
 				for _, category := range test.FailureInfo.Category {
 					categoryCounts[category]++
+				}
+			case models.TestStatusObsolete:
+				for _, category := range test.FailureInfo.Category {
+					if category == models.DependencyMissing {
+						categoryCounts[category]++
+					}
 				}
 			}
 		}
@@ -223,14 +283,53 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		fmt.Fprintf(r.out, "\tTotal test obsolete: %d\n", obsolete)
 	}
 
+	// Dependencies that the recording says a test exercises but that the test
+	// never made during replay. Reported for EVERY status, because the case
+	// worth surfacing is the one where the response still matched and the test
+	// is green — CI is otherwise silent about it.
+	if depTotal, depPassed := depNoticeCounts(reports); depTotal > 0 {
+		fmt.Fprintf(r.out, "\tDependencies not exercised: %d test(s)\n", depTotal)
+		if depPassed > 0 {
+			// "not observed during the test's own window" rather than "never
+			// made": consumed mocks are drained when the response comes back,
+			// so an outgoing call the app makes AFTER writing its response is
+			// attributed to the next test. The data supports the weaker claim.
+			fmt.Fprintf(r.out, "\t\t%d of them PASSED — the response matched, but a recorded outgoing call was not observed during the test's own window.\n", depPassed)
+			fmt.Fprintln(r.out, "\t\tRun `keploy test --assert-dependencies` to fail on this.")
+		}
+	}
+
 	// Add risk level statistics
 	if failed > 0 {
 		fmt.Fprintln(r.out, "\n\tFAILURE RISK DISTRIBUTION:")
 		fmt.Fprintf(r.out, "\t\tHigh Risk: %d\n", highRisk)
 		fmt.Fprintf(r.out, "\t\tMedium Risk: %d\n", mediumRisk)
 		fmt.Fprintf(r.out, "\t\tLow Risk: %d\n", lowRisk)
+	}
 
-		// Add failure category statistics
+	// The block still appears whenever a test FAILED, exactly as it always
+	// has. The ONE new trigger is a dependency finding on a run with no
+	// failures at all — an OBSOLETE test labelled DEPENDENCY_MISSING, which
+	// carries a real category with no failure and no risk behind it and would
+	// otherwise be invisible in `--summary`.
+	//
+	// Deliberately NOT `len(categoryCounts) > 0`: that also printed a
+	// brand-new three-line block on zero-failure runs of UNCHANGED pre-slice-4
+	// reports, which is collateral this slice does not need.
+	//
+	// The counting loop above is not byte-identical for every pre-slice-4
+	// report, and that part is deliberate. It used to be nested inside
+	// `if Risk != ""`, and CreateFailedTestResult produces exactly the shape
+	// that trips over: replay.go copies Category only when Risk != models.None,
+	// then appends AppConnectionError unconditionally, leaving Risk empty. So a
+	// report from a run where the app never answered rendered "No specific
+	// categories identified" while carrying APP_CONNECTION_ERROR, and now
+	// renders "APP_CONNECTION_ERROR: 1". That is a pre-existing bug this slice
+	// fixes on the way past, not a side effect of the DEPENDENCY_MISSING
+	// plumbing — it is pinned by
+	// TestPrintSummary_CountsDependenciesAndCategories's "a FAILED test with a
+	// category and NO risk level is now counted" row so it stays deliberate.
+	if failed > 0 || categoryCounts[models.DependencyMissing] > 0 {
 		fmt.Fprintln(r.out, "\n\tFAILURE CATEGORIES:")
 		if len(categoryCounts) == 0 {
 			fmt.Fprintln(r.out, "\t\tNo specific categories identified")
@@ -352,8 +451,12 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 	}
 
 	if r.config.Report.ReportPath != "" {
-		if r.config.Report.Format == "junit" {
-			return fmt.Errorf("--format junit is not supported with --report-path; use the database-backed report path instead")
+		// Both machine formats project a whole RUN (they carry test_run_id /
+		// per-suite aggregates); --report-path addresses a single test-set
+		// file with no run identity, so the combination is rejected rather
+		// than silently emitting a run-shaped document about one file.
+		if config.IsMachineReportFormat(r.config.Report.Format) {
+			return fmt.Errorf("--format %s is not supported with --report-path; use the database-backed report path instead", r.config.Report.Format)
 		}
 		// File mode (single test-set file)
 		return r.generateReportFromFile(ctx, r.config.Report.ReportPath)
@@ -383,7 +486,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		}
 	}
 
-	if r.config.Report.Format == "junit" {
+	if r.config.Report.Format == config.ReportFormatJUnit {
 		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
 		if err != nil {
 			return fmt.Errorf("failed to collect reports for JUnit output: %w", err)
@@ -396,6 +499,25 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 			}
 		}
 		return r.generateJUnit(reports)
+	}
+
+	// --format json (NDJSON, one object per test result). Deliberately placed
+	// BEFORE the global --json branch below: --json dumps the whole report map
+	// as one blob, which is a different (and much less agent-friendly)
+	// document. When both are given, the explicit --format wins.
+	if r.config.Report.Format == config.ReportFormatJSON {
+		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
+		if err != nil {
+			return fmt.Errorf("failed to collect reports for ndjson output: %w", err)
+		}
+		if len(r.config.Report.TestCaseIDs) > 0 {
+			for name, rep := range reports {
+				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
+				rep.Total = len(rep.Tests)
+				reports[name] = rep
+			}
+		}
+		return r.generateNDJSON(latestRunID, reports)
 	}
 
 	if r.config.JSONOutput {
@@ -427,7 +549,13 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 				reports[name] = rep
 			}
 		}
-		return utils.NewJSONWriter(true).Write(reports)
+		// Through r.out, like every other branch: writing straight to
+		// os.Stdout races the buffered writer the rest of this service uses
+		// and makes the output unassertable in a test.
+		if err := utils.NewJSONWriterOut(r.out, true).Write(reports); err != nil {
+			return err
+		}
+		return r.out.Flush()
 	}
 
 	if r.config.Report.Summary {
@@ -674,18 +802,79 @@ func (r *Report) collectFailedTests(ctx context.Context, runID string, testSetID
 	return failedTests, nil
 }
 
-// extractFailedTestsFromResults filters out only the failed tests from results
+// extractFailedTestsFromResults filters out the tests worth rendering per-test
+// detail for: FAILED tests (historical behaviour, unchanged) plus ANY test —
+// whatever its status — carrying a MISSING dependency assertion.
+//
+// The dependency arm is deliberately STATUS-INDEPENDENT. The flagship
+// silent-green case this slice exists to expose is a test whose response still
+// matches while a recorded outgoing call vanished, and the replayer leaves
+// exactly that test PASSED (replay.go's `case testPass:` arm ignores the mock
+// mismatch when the response matched). Admitting only FAILED, or only
+// OBSOLETE, left that regression invisible in text and in JUnit unless the
+// user opted into --assert-dependencies — which would make VISIBILITY depend
+// on a verdict knob. It does not: the knob decides whether it becomes a
+// failure, never whether it is shown.
+//
+// Backward compatible by construction: DepResult had zero writers before this
+// slice, so no report written before it can contain a Normal==false dependency
+// row, and every such report is admitted exactly as before.
 func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []models.TestResult {
 	var failedTests []models.TestResult
 	for _, result := range tests {
-		if result.Status == models.TestStatusFailed {
+		if shouldRenderDiff(result) {
 			failedTests = append(failedTests, result)
 		}
 	}
 	return failedTests
 }
 
-func (r *Report) printFailedTestReports(ctx context.Context, failedTests []models.TestResult) error {
+// shouldRenderDiff reports whether a test result is admitted to the per-test
+// detail renderer at all.
+func shouldRenderDiff(result models.TestResult) bool {
+	return result.Status == models.TestStatusFailed || result.Result.HasMissingDeps()
+}
+
+// rendersDepNoticeOnly reports whether an admitted result is summarised in the
+// compact dependency block instead of getting the full diff apparatus.
+//
+// ONLY A GENUINELY FAILED TEST GETS THE APPARATUS. A test that did not fail
+// has no response diff to show: printing the header, "CHANGES IN STATUS AND
+// HEADERS" and "CHANGES WITHIN THE RESPONSE BODY" around a PASSED test would
+// be actively misleading, and an OBSOLETE test is in the same position —
+// OBSOLETE is only reachable when the mock set diverged, which under this
+// build guarantees a MISSING row, so admitting OBSOLETE to the full renderer
+// meant 100% of obsolete tests grew a failure block where before this slice
+// they rendered nothing at all in `keploy report`. The brief asked for a
+// compact notice; this is that, for every non-FAILED status.
+func rendersDepNoticeOnly(result models.TestResult) bool {
+	return result.Status != models.TestStatusFailed
+}
+
+// partitionDepNotices splits the admitted results into the ones that get the
+// full diff apparatus and the ones that are folded into the compact
+// dependency block.
+func partitionDepNotices(tests []models.TestResult) (diffs, notices []models.TestResult) {
+	for _, t := range tests {
+		if rendersDepNoticeOnly(t) {
+			notices = append(notices, t)
+			continue
+		}
+		diffs = append(diffs, t)
+	}
+	return diffs, notices
+}
+
+// printFailedTestReports renders the per-test detail for the admitted results.
+//
+// The admitted set is split first: only genuinely FAILED tests get the diff
+// apparatus, and every other status folds into ONE bounded, deduplicated
+// dependency block at the end (renderDepNoticeSummary). Rendering a block per
+// notice-only test instead turned a 16-line all-green report into 1,217 lines
+// on a 300-test suite that had lost one shared dependency.
+func (r *Report) printFailedTestReports(ctx context.Context, admitted []models.TestResult) error {
+	failedTests, notices := partitionDepNotices(admitted)
+
 	if r.config.Report.ShowFullBody {
 
 		workers := max(runtime.GOMAXPROCS(0), 2)
@@ -725,6 +914,9 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 				return fmt.Errorf("failed to write test report to output: %w", err)
 			}
 		}
+		if err := r.writeDepNoticeSummary(notices, admitted); err != nil {
+			return err
+		}
 		err := r.out.Flush()
 		if err != nil {
 			return fmt.Errorf("failed while flushing in printFailedTestReports (full body mode): %w", err)
@@ -761,6 +953,9 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 			return fmt.Errorf("failed to write test report to output: %w", err)
 		}
 	}
+	if err := r.writeDepNoticeSummary(notices, admitted); err != nil {
+		return err
+	}
 	err := r.out.Flush()
 	if err != nil {
 		return fmt.Errorf("failed while flushing in printFailedTestReports: %w", err)
@@ -768,9 +963,22 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 	return nil
 }
 
+// writeDepNoticeSummary appends the compact dependency block, if any.
+func (r *Report) writeDepNoticeSummary(notices, admitted []models.TestResult) error {
+	block := renderDepNoticeSummary(notices, admitted)
+	if block == "" {
+		return nil
+	}
+	if _, err := r.out.WriteString(block); err != nil {
+		return fmt.Errorf("failed to write dependency notice summary: %w", err)
+	}
+	return nil
+}
+
 // renderSingleFailedTest writes the failed test report into sb (non-full-body mode).
 func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, test models.TestResult) error {
-	// Header with risk level and categories
+	// Header with risk level and categories. Unconditionally "failed":
+	// partitionDepNotices keeps every non-FAILED status out of this renderer.
 	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
 
 	// Add risk level if available and not NONE
@@ -854,6 +1062,12 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 		sb.WriteString("\n\n")
 
 	}
+	// Dependency assertions, AFTER the response diffs. --full puts them here
+	// too (the diff printer buffers and only flushes on Render), so the block
+	// sits in the same place in both modes instead of moving depending on
+	// whether --full was passed.
+	renderDepResults(sb, test)
+
 	sb.WriteString("\n--------------------------------------------------------------------\n")
 	return nil
 }
@@ -937,6 +1151,52 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 	sb.WriteString("\n")
 }
 
+// renderDepResults writes the per-test dependency-assertion block
+// (models.Result.DepResult) next to the response diffs, in the same
+// expected-vs-actual language: one line per failed DepMetaResult, and a
+// compact "consumed (presence only)" line for rows that held.
+//
+// GATED ON SOMETHING ACTUALLY BEING MISSING, not merely on the rows existing.
+// The writer emits rows only for dependencies that went missing, so the two
+// conditions coincide today — but a row set from any other producer must not
+// summon an "all dependencies consumed" section under every FAILED test, which
+// tells a human nothing they can act on. The proof that the assertion ran
+// stays where a machine reads it (Result.DepsChecked / the NDJSON
+// `dependencies_checked`); the human sees a block only when a dependency is
+// missing, which is the case worth their attention.
+//
+// So text output is byte-identical to pre-slice-4 for every test that lost
+// nothing. The formatter itself lives in pkg/models so the compact renderer
+// and --full cannot drift apart.
+func renderDepResults(sb *strings.Builder, test models.TestResult) {
+	if !test.Result.HasMissingDeps() {
+		return
+	}
+	sb.WriteString(models.FormatDepResults(test.Result.DepResult))
+}
+
+// depNoticeCounts counts, across a whole run, the tests that lost a recorded
+// dependency and how many of those still PASSED. The passed count is the one
+// that matters: those are the tests a green CI run currently says nothing
+// about.
+func depNoticeCounts(reports map[string]*models.TestReport) (total, passed int) {
+	for _, rep := range reports {
+		if rep == nil {
+			continue
+		}
+		for _, t := range rep.Tests {
+			if !t.Result.HasMissingDeps() {
+				continue
+			}
+			total++
+			if t.Status == models.TestStatusPassed {
+				passed++
+			}
+		}
+	}
+	return total, passed
+}
+
 // writerAdapter lets us reuse a bufio.Writer on top of strings.Builder.
 type writerAdapter struct{ sb *strings.Builder }
 
@@ -994,10 +1254,19 @@ func (r *Report) renderSingleFullBodyFailedTest(ctx context.Context, sb *strings
 		return fmt.Errorf("failed to add body diffs: %w", err)
 	}
 
+	// Render() is what actually flushes the buffered status/header/body diffs
+	// into sb, so the dependency block has to be written AFTER it. Writing it
+	// before put the block above every response diff in --full mode while the
+	// compact renderer put it below them — same data, two positions.
 	if err := logDiffs.Render(); err != nil {
 		r.logger.Error("failed to render the diffs", zap.Error(err))
 		return fmt.Errorf("failed to render diffs: %w", err)
 	}
+
+	// Dependency assertions sit after the body diffs, using the same
+	// expected/actual vocabulary. No-op when the test carries no rows.
+	renderDepResults(sb, test)
+
 	sb.WriteString("\n--------------------------------------------------------------------\n")
 	return nil
 }
