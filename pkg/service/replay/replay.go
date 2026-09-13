@@ -3738,9 +3738,27 @@ func qualifiesForHTTPResponseSchemaAdditionPass(result *models.Result) bool {
 		return false
 	}
 
+	// The category set alone is not enough: the body assessment files "new
+	// fields plus changed values" under SchemaAdded as well (at Medium risk),
+	// and the Content-Length branch never looked at risk. A value change that
+	// shipped alongside a new field was therefore auto-passed (#4578).
+	if !isAdditiveOnlyAssessment(result.FailureInfo.Assessment) {
+		return false
+	}
+
 	return (result.FailureInfo.Risk == models.Low &&
 		hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded)) ||
 		hasOnlySchemaAdditionAndContentLengthDiff(result)
+}
+
+// isAdditiveOnlyAssessment reports whether a body diff consists solely of new
+// fields, with no existing field removed, retyped or given a different value.
+func isAdditiveOnlyAssessment(assessment *models.FailureAssessment) bool {
+	return assessment != nil &&
+		len(assessment.AddedFields) > 0 &&
+		len(assessment.RemovedFields) == 0 &&
+		len(assessment.TypeChanges) == 0 &&
+		len(assessment.ValueChanges) == 0
 }
 
 func hasOnlyFailureCategories(categories []models.FailureCategory, allowed ...models.FailureCategory) bool {
