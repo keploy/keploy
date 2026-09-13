@@ -2011,6 +2011,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 
 	switch cmd.Name() {
 	case "record":
+		cmd.Flags().Bool("partial", c.cfg.Mock.Partial, "Re-record only the tests the wrapped runner exercises, replacing those whole and keeping every other test's existing recording. Without it a re-record replaces the entire set.")
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
@@ -2101,6 +2102,14 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 
 	switch cmd.Name() {
 	case "record":
+		if cmd.Flags().Changed("partial") {
+			partial, err := cmd.Flags().GetBool("partial")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the partial flag")
+				return errors.New("failed to get the partial flag")
+			}
+			c.cfg.Mock.Partial = partial
+		}
 		if cmd.Flags().Changed("record-timer") {
 			d, err := cmd.Flags().GetDuration("record-timer")
 			if err != nil {

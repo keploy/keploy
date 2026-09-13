@@ -93,6 +93,7 @@ func (r *recordingMockDB) InsertMock(_ context.Context, m *models.Mock, _ string
 }
 func (r *recordingMockDB) DeleteMocksForSet(context.Context, string) error { return nil }
 func (r *recordingMockDB) ResetCounterID()                                 {}
+func (r *recordingMockDB) SetPartialRecord(bool)                           {}
 func (r *recordingMockDB) inserted() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -100,6 +100,18 @@ type MockYaml struct {
 	// silent data loss into a hard error -- see mintName.
 	hashToOwner map[string]string
 
+	// partialRecord makes a re-record replace only the owners it actually
+	// captures, leaving every other owner's file untouched. The first write to
+	// an owner's file in this run truncates it, so that owner is REPLACED whole
+	// rather than appended to; owners this run never sees keep their previous
+	// recording. Without it a re-record of one test has to wipe the set, which
+	// is what made partial re-record impossible.
+	partialRecord bool
+	// truncatedThisRun tracks which owner files this run has already reset, so
+	// the truncate happens once per file and the rest of that owner's captures
+	// append normally.
+	truncatedThisRun map[string]bool
+
 	// MockFormat is the per-instance record-time format (yaml vs gob),
 	// orthogonal to Format (the yaml/json storage encoding). Empty means
 	// "use the package-global default" (configuredMockFormat), preserving
@@ -867,6 +879,43 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	return nil
 }
 
+// SetPartialRecord switches this recorder into replace-only-what-you-capture
+// mode. See the partialRecord field.
+func (ys *MockYaml) SetPartialRecord(on bool) {
+	ys.nameMu.Lock()
+	defer ys.nameMu.Unlock()
+	ys.partialRecord = on
+	ys.truncatedThisRun = nil
+}
+
+// resetOwnerFileOnce removes an owner's file the first time this run writes to
+// it, so the owner is replaced whole instead of accumulating a second copy of
+// its mocks on top of the previous recording.
+func (ys *MockYaml) resetOwnerFileOnce(mockPath, mockFileName string) error {
+	ys.nameMu.Lock()
+	if !ys.partialRecord {
+		ys.nameMu.Unlock()
+		return nil
+	}
+	key := filepath.Join(mockPath, mockFileName)
+	if ys.truncatedThisRun[key] {
+		ys.nameMu.Unlock()
+		return nil
+	}
+	if ys.truncatedThisRun == nil {
+		ys.truncatedThisRun = map[string]bool{}
+	}
+	ys.truncatedThisRun[key] = true
+	ys.nameMu.Unlock()
+
+	for _, ext := range []string{yaml.FormatYAML.FileExtension(), yaml.FormatJSON.FileExtension(), "gob"} {
+		if err := os.Remove(key + "." + ext); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
 	name, err := ys.mintName(mock.Owner)
 	if err != nil {
@@ -876,7 +925,13 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
-		mockFileName = "mocks"
+		// One file per owner. Replacing one test's recording is then a whole-file
+		// write, so a re-record never has to edit around the other tests sharing
+		// the file -- which is what forced `mock record` to wipe the set.
+		mockFileName = ownerFileName(mock.Owner)
+	}
+	if err := ys.resetOwnerFileOnce(mockPath, mockFileName); err != nil {
+		return err
 	}
 	// gob is the binary record-time format (async writer, ~28% CPU win
 	// over yaml). When selected it is mutually exclusive with yaml/json,
@@ -1406,12 +1461,14 @@ func readGobMocks(path string) ([]*models.Mock, error) {
 }
 
 func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
+	return ys.forEachMockFile(testSetID, func(mockFileName string) ([]*models.Mock, error) {
+		return ys.getFilteredMocksFile(ctx, testSetID, mockFileName, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
+	})
+}
+
+func (ys *MockYaml) getFilteredMocksFile(ctx context.Context, testSetID string, mockFileName string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
 
 	var tcsMocks = make([]*models.Mock, 0)
-	mockFileName := "mocks"
-	if ys.MockName != "" {
-		mockFileName = ys.MockName
-	}
 
 	path := filepath.Join(ys.MockPath, testSetID)
 	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
@@ -1569,13 +1626,14 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 }
 
 func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
+	return ys.forEachMockFile(testSetID, func(mockName string) ([]*models.Mock, error) {
+		return ys.getUnFilteredMocksFile(ctx, testSetID, mockName, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
+	})
+}
+
+func (ys *MockYaml) getUnFilteredMocksFile(ctx context.Context, testSetID string, mockName string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
 
 	var configMocks = make([]*models.Mock, 0)
-
-	mockName := "mocks"
-	if ys.MockName != "" {
-		mockName = ys.MockName
-	}
 
 	path := filepath.Join(ys.MockPath, testSetID)
 	lock := getMockFileLock(mockFileLockKey(path, mockName, ys.Format))
@@ -1802,18 +1860,33 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
 
-	// Delete all three mock-file variants for this test set:
-	//   - mocks.yaml / mocks.json (text formats — either may be present
-	//     depending on StorageFormat at record time, and a stale yaml
-	//     must not shadow a fresh json rerecord, or vice versa).
-	//   - mocks.gob (binary format — GetFilteredMocks prefers it when
-	//     present, so leaving it around defeats a yaml/json refresh).
-	// Missing files are tolerated; only permission/ownership errors
-	// surface here.
-	candidates := []string{
-		filepath.Join(path, mockFileName+"."+yaml.FormatYAML.FileExtension()),
-		filepath.Join(path, mockFileName+"."+yaml.FormatJSON.FileExtension()),
-		filepath.Join(path, mockFileName+".gob"),
+	// A set is now N files (one per owner, plus the unowned mocks file), each of
+	// which may exist in any of three formats:
+	//   - .yaml / .json (text — either may be present depending on StorageFormat
+	//     at record time, and a stale yaml must not shadow a fresh json
+	//     rerecord, or vice versa).
+	//   - .gob (binary — GetFilteredMocks prefers it when present, so leaving
+	//     one around defeats a yaml/json refresh).
+	// Enumerating what is actually on disk, rather than deriving names from the
+	// owners we happen to know about, is what makes the clear total: an owner
+	// that the next recording will not produce still has its file removed.
+	// Missing files are tolerated; only permission/ownership errors surface here.
+	bases := []string{mockFileName}
+	if ys.MockName == "" {
+		if onDisk, err := mockFileBases(path); err != nil {
+			return err
+		} else if len(onDisk) > 0 {
+			bases = onDisk
+		}
+	}
+
+	var candidates []string
+	for _, base := range bases {
+		candidates = append(candidates,
+			filepath.Join(path, base+"."+yaml.FormatYAML.FileExtension()),
+			filepath.Join(path, base+"."+yaml.FormatJSON.FileExtension()),
+			filepath.Join(path, base+".gob"),
+		)
 	}
 	for _, candidate := range candidates {
 		validated, err := yaml.ValidatePath(candidate)

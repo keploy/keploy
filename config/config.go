@@ -335,6 +335,11 @@ type MockCmd struct {
 	// RecordTimer optionally bounds a record session (e.g. "30s"); the wrapped
 	// runner exiting on its own ends recording first in almost all cases.
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	// Partial re-records only the tests the wrapped runner actually exercises,
+	// replacing those owners whole and leaving every other owner's recording on
+	// disk. Without it a re-record drops the previous set entirely, so fixing
+	// one test's mocks meant re-recording the whole suite.
+	Partial bool `json:"partial" yaml:"partial" mapstructure:"partial"`
 }
 
 type Contract struct {

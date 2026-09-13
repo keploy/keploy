@@ -90,17 +90,28 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	// 2. Overwrite the named set in place: drop the previous mocks so the
-	//    re-record is a clean rewrite, not an append.
-	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
-		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
-	}
-	// The mapping file is NOT removed by DeleteMocksForSet: it survives on disk
-	// and ResetCounterID below reissues the same mock-N names, so a surviving
-	// mapping would attribute this run's mocks to the previous run's tests.
-	if m.mappingDB != nil {
-		if err := m.mappingDB.Delete(persistCtx, name); err != nil {
-			m.logger.Warn("failed to clear the previous per-test mock mappings; stale test entries may survive this re-record", zap.String("mock-set", name), zap.Error(err))
+	// 2. Overwrite the named set. A full re-record drops the previous mocks so
+	//    the result is a clean rewrite; --partial keeps them and replaces only
+	//    the owners this run actually captures.
+	//
+	//    The full path MUST keep wiping: an owner deleted from the suite would
+	//    otherwise keep its recording forever, and the next replay would serve
+	//    a test that no longer exists.
+	m.mockDB.SetPartialRecord(m.config.Mock.Partial)
+	if m.config.Mock.Partial {
+		m.logger.Info("partial re-record: keeping the existing set and replacing only the tests this run captures",
+			zap.String("mock-set", name))
+	} else {
+		if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
+			m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
+		}
+		// The mapping file is NOT removed by DeleteMocksForSet: it survives on disk
+		// and ResetCounterID below reissues the same mock-N names, so a surviving
+		// mapping would attribute this run's mocks to the previous run's tests.
+		if m.mappingDB != nil {
+			if err := m.mappingDB.Delete(persistCtx, name); err != nil {
+				m.logger.Warn("failed to clear the previous per-test mock mappings; stale test entries may survive this re-record", zap.String("mock-set", name), zap.Error(err))
+			}
 		}
 	}
 	m.mockDB.ResetCounterID()

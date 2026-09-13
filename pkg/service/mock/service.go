@@ -101,6 +101,9 @@ type MockDB interface {
 	// SeedCounters primes the name sequences from mocks already on disk so an
 	// append does not reuse a name. Per owner, because numbering is per owner.
 	SeedCounters(existing []*models.Mock)
+	// SetPartialRecord makes a re-record replace only the owners it captures,
+	// leaving the rest of the set on disk.
+	SetPartialRecord(on bool)
 }
 
 // MappingDB persists and reads the per-test mock mapping for a set. Optional:
