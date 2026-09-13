@@ -145,7 +145,7 @@ func (m *mockService) Replay(ctx context.Context) error {
 
 	// 4. Hand the agent the per-test table so the runner's /agent/scope/begin
 	//    calls can narrow the served pool per test (best-effort / optional).
-	m.pushScopeTable(ctx, name)
+	m.pushScopeTable(ctx, name, filtered, unfiltered)
 
 	// 5. Stage the whole pool as the initial serving window (BaseTime..now, no
 	//    mapping) — same call RunTestSet makes before the first test.
@@ -248,19 +248,69 @@ func (m *mockService) existingMocks(ctx context.Context, name string) []*models.
 	return append(filtered, unfiltered...)
 }
 
-// pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)
-// and hands the agent the name→mock-names table so per-test scoping works.
-func (m *mockService) pushScopeTable(ctx context.Context, name string) {
-	if m.mappingDB == nil {
-		return
+// deriveScopeTable builds the per-test table from the mocks themselves.
+//
+// Every mock already carries the scope that captured it, so the table is a
+// regrouping of data we are holding, not a second source of truth that can go
+// missing. A mock with NO owner is deliberately left out: absence from the
+// table is what makes it shared overflow, reachable by every test.
+//
+// Order within an owner is preserved -- the tape is replayed in the order it
+// was recorded, and the caller hands us the mocks in on-disk order.
+func deriveScopeTable(slices ...[]*models.Mock) map[string][]string {
+	table := map[string][]string{}
+	for _, slice := range slices {
+		for _, mk := range slice {
+			if mk == nil || mk.Owner == "" {
+				continue
+			}
+			table[mk.Owner] = append(table[mk.Owner], mk.Name)
+		}
 	}
+	return table
+}
+
+// pushScopeTable hands the agent the test-name→mock-names table so the runner's
+// /agent/scope/begin calls can narrow the served pool per test.
+//
+// The table is DERIVED from each mock's owner. mappings.yaml remains only as a
+// fallback for sets recorded before mocks carried an owner; it is no longer
+// transported, and a set whose mocks are owned needs no such file to be scoped.
+func (m *mockService) pushScopeTable(ctx context.Context, name string, mocks ...[]*models.Mock) {
 	pusher, ok := m.instrumentation.(ScopePusher)
 	if !ok {
 		return
 	}
+
+	source := "owner"
+	table := deriveScopeTable(mocks...)
+	if len(table) == 0 {
+		source = "mappings.yaml"
+		table = m.scopeTableFromMappings(ctx, name)
+	}
+	if len(table) == 0 {
+		return
+	}
+
+	if err := pusher.PushScopeTable(ctx, table); err != nil {
+		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
+		return
+	}
+	m.logger.Info("per-test scoping enabled",
+		zap.Int("tests", len(table)),
+		zap.String("derived_from", source),
+		zap.String("mock-set", name))
+}
+
+// scopeTableFromMappings is the pre-Owner fallback: a set recorded by a build
+// that did not stamp owners still has its mappings.yaml on disk.
+func (m *mockService) scopeTableFromMappings(ctx context.Context, name string) map[string][]string {
+	if m.mappingDB == nil {
+		return nil
+	}
 	mappings, meaningful, err := m.mappingDB.Get(ctx, name)
 	if err != nil || !meaningful || len(mappings) == 0 {
-		return
+		return nil
 	}
 	table := make(map[string][]string, len(mappings))
 	for testName, entries := range mappings {
@@ -270,11 +320,7 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) {
 		}
 		table[testName] = names
 	}
-	if err := pusher.PushScopeTable(ctx, table); err != nil {
-		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
-		return
-	}
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.String("mock-set", name))
+	return table
 }
 
 // ReplayOutcome is what a replay produced, for a wrapping build that meters or
