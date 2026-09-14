@@ -2435,10 +2435,10 @@ func TestAStoredOriginIsAlwaysASCII(t *testing.T) {
 	 * a spelling no browser emits and every exchange then reads
 	 * FOREIGN_ORIGIN with nothing to explain why.
 	 *
-	 * Written as a property because an earlier version asserted a
-	 * hand-picked list of "unconvertible" hosts — and under the browser's
-	 * own IDNA profile every one of them converts, so the test was
-	 * asserting a refusal that should not happen.
+	 * Written as a property rather than against a hand-picked list of
+	 * "unconvertible" hosts: under the browser's own IDNA profile such
+	 * lists convert cleanly, so the test would assert a refusal that
+	 * should not happen.
 	 */
 	refused := 0
 	for _, origin := range []string{
@@ -2454,8 +2454,8 @@ func TestAStoredOriginIsAlwaysASCII(t *testing.T) {
 		// MUST BE REFUSED. Without at least one of these the property
 		// below is VACUOUS: every input converts, `err == nil` always
 		// holds, and the consequent is satisfied by toASCIIHost rather
-		// than by the guard — which is exactly how an earlier version of
-		// this test passed while the guard it exists for was deleted.
+		// than by the guard — which is how such a test passes while the
+		// guard it exists for is deleted.
 		//
 		// U+FFFD is literally what a mis-decoded read produces.
 		"http://\ufffdabc.com",
@@ -2927,11 +2927,11 @@ func TestAnOriginFromAnyRealAppIsStoredAndJoinable(t *testing.T) {
 	 * other location.origin is sent. These are real apps people record,
 	 * and refusing them as malformed discarded the captureId and nonce.
 	 *
-	 * NOT AN ENUMERATION. An earlier version listed four schemes and
-	 * asserted them, which meant the rule under test was "these four are
-	 * allowed" — reintroducing a structural scheme allowlist containing
-	 * exactly those four left the whole suite green, so the next webview
-	 * scheme would have gone straight back to being destroyed. The rule
+	 * NOT AN ENUMERATION. Listing four schemes and asserting them makes
+	 * the rule under test "these four are allowed" — measured,
+	 * reintroducing a structural scheme allowlist containing exactly
+	 * those four leaves the whole suite green, so the next webview
+	 * scheme goes straight back to being destroyed. The rule
 	 * is that the SHAPE is what matters, so the cases include a scheme
 	 * nothing has ever heard of.
 	 */
@@ -3401,9 +3401,9 @@ func TestTheExportedSurfaceIsNilSafe(t *testing.T) {
 	/*
 	 * NIL-SAFETY AS A CONTRACT, pinned by ONE guard.
 	 *
-	 * An earlier version of this test claimed to pin four nil guards —
-	 * in Validate, Storable, Joinable and validateStructure — and pinned
-	 * none of them, because they MUTUALLY MASKED: normalized() on a nil
+	 * ONE, not four. Claiming to pin the nil guards in Validate,
+	 * Storable, Joinable and validateStructure pins NONE of them,
+	 * because they MUTUALLY MASK: normalized() on a nil
 	 * receiver returns nil, so Validate and Storable reached
 	 * validateStructure's guard anyway, and Joinable delegates to
 	 * Validate. Any one of the four, or any three, could be deleted with
@@ -3766,7 +3766,7 @@ func TestNoRefUSALArmEverEchoesAPassword(t *testing.T) {
 	 * the switch — so it covered the one shape that never reaches the
 	 * others. Every arm above it, and the parse-error path, formatted the
 	 * raw value: thirteen message sites, one fixed. And the likeliest
-	 * real shape, APP_ORIGINS="http://user:pass@api.internal/v1", takes
+	 * real shape, KEPLOY_APP_ORIGINS="http://user:pass@api.internal/v1", takes
 	 * the PATH arm, not the credentials arm.
 	 */
 	/*
@@ -3872,7 +3872,7 @@ func TestNoRefUSALArmEverEchoesAPassword(t *testing.T) {
 			 * something — the password, then the whole userinfo tail,
 			 * then the query. The index is derived from the list
 			 * rather than the entry, so it is always safe and always
-			 * enough to find the line in APP_ORIGINS.
+			 * enough to find the line in KEPLOY_APP_ORIGINS.
 			 */
 			if !strings.Contains(err.Error(), "appOrigins[0]") {
 				t.Errorf("the refusal does not name which entry failed: %v", err)
@@ -3893,7 +3893,7 @@ func TestNoRefUSALArmEverEchoesAPassword(t *testing.T) {
 
 func TestACredentialedOriginIsRefusedWithoutEchoingThePassword(t *testing.T) {
 	// The refusal goes into the recorder's log, and the documented way
-	// origins arrive — strings.Split(os.Getenv("APP_ORIGINS"), ",") — is
+	// origins arrive — strings.Split(os.Getenv("KEPLOY_APP_ORIGINS"), ",") — is
 	// exactly where a credentialed URL comes from. Echoing %q verbatim
 	// logged the password inside an error about there being a password.
 	a := validAnnotation()
@@ -4485,7 +4485,7 @@ tested elsewhere either has no '%' or has a complete escape after it.
 Measured: changing `<` to `<=` — a one-character edit in the redaction
 path — passes the ENTIRE package, and then panics with "index out of
 range [3] with length 3" on "a%4". That is not a hypothetical input.
-APP_ORIGINS arrives as strings.Split(os.Getenv(...), ","), so a truncated
+KEPLOY_APP_ORIGINS arrives as strings.Split(os.Getenv(...), ","), so a truncated
 env var (`https://h/?x=%4`) crashes the recorder outright.
 
 DRIVEN DIRECTLY, because the panic is in an unexported helper and this
@@ -4826,9 +4826,8 @@ func TestAnEncodedAtSignIsCaughtAtEveryDepth(t *testing.T) {
 	for name, origin := range map[string]string{
 		// Depth 2 is caught by the literal test at level 0, so it does
 		// NOT discriminate the fixpoint — only depths 3+ do. Kept as
-		// the boundary between the two mechanisms, labelled rather
-		// than counted: an earlier docstring presented all four as
-		// pinning leak #9.
+		// the boundary between the two mechanisms, and labelled rather
+		// than counted: not all four rows pin leak #9.
 		/*
 		 * THE QUERY POSITION, because the HOST position no longer
 		 * reaches the scan at all.
@@ -5228,14 +5227,11 @@ stopped holding, the scheme echo would become a leak and nothing else in
 this file would notice.
 
 So the three end-to-end rows below are a CHARACTERIZATION TEST of
-net/url. No mutation of uijoin.go kills them, and an earlier version of
-this paragraph gave the wrong reason for that: it said "all three fail
-to parse". Two do. The third, "ZQXTOK:pw@evil://api.internal/x", PARSES
-— net/url reads "zqxtok" as the scheme and puts the rest in Opaque —
-so it reaches uiJoinDisplay with a NON-EMPTY Scheme and is stopped by
-the empty-Host guard instead. The conclusion survives; the mechanism
-named for it did not. Written in the round whose whole purpose was
-correcting measured claims in this file, which is how easy this is. They were previously
+net/url. No mutation of uijoin.go kills them, and the reason is NOT that
+all three fail to parse. Two do. The third,
+"ZQXTOK:pw@evil://api.internal/x", PARSES — net/url reads "zqxtok" as
+the scheme and puts the rest in Opaque — so it reaches uiJoinDisplay
+with a NON-EMPTY Scheme and is stopped by the empty-Host guard instead. They were previously
 presented as evidence about this file's redaction. They are evidence
 about the premise that redaction rests on, which is worth pinning
 precisely because it is someone else's code and can change under us.

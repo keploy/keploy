@@ -72,4 +72,43 @@ type FrameChan struct {
 	Incoming <-chan *models.TestCase
 	Outgoing <-chan *models.Mock
 	Mappings <-chan models.TestMockMapping
+
+	// Abandon says that nothing will ever read the channels above, so the
+	// forwarders filling them must stop waiting for a reader.
+	//
+	// It exists because the forwarders OUTLIVE the decision to consume
+	// them. They run on reqCtx (WithoutCancel) and keep pulling from the
+	// agent, while Start can return between creating them and spawning the
+	// consumers -- today at exactly one point, its post-setup ctx.Err()
+	// gate, and at any error return added between the two later. That
+	// "later" is why Start uses a defer rather than a call beside the one
+	// return it has: the failure mode of forgetting is a hang, not a
+	// compile error.
+	// Each forwarder hands over the item it has already taken from the
+	// agent when ctx is cancelled, so the tail is not silently dropped; with
+	// no reader that hand-over parked FOREVER. Measured on the mapping
+	// channel it wedges on the first item, and on the other two on the
+	// second. In production that is a 30s DrainErrGroup timeout on Ctrl+C
+	// plus a goroutine held for the process lifetime, re-leaked per session
+	// in the DaemonSet embedding.
+	//
+	// Calling it converts that park into a logged drop. The tail really is
+	// lost on those paths -- nothing is left to persist it -- and saying so
+	// once is the honest outcome; hanging is not.
+	//
+	// NON-NIL ON EVERY err == nil RETURN, including the early ones where the
+	// channels come back already closed. The err != nil returns hand back a
+	// zero FrameChan whose Abandon IS nil, so a caller must check the error
+	// first -- the ordinary Go contract for a (value, error) pair.
+	//
+	// AND THAT IS NOT MERELY A CONTRACT DETAIL. Two of those error returns
+	// come AFTER the incoming forwarder has been spawned, so a nil Abandon
+	// there would leave a live forwarder that nothing could release --
+	// measured at a 30s teardown and a goroutine leaked for the process
+	// lifetime. GetTestAndMockChans therefore abandons on those paths from
+	// its own defer, before returning the error; the caller is never asked
+	// to.
+	//
+	// Idempotent, so a caller may also call it explicitly.
+	Abandon func()
 }

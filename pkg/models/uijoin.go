@@ -38,7 +38,8 @@ carries only what content alone cannot supply: which capture session this
 test-set belongs to, when it ran, and what the two planes agreed to
 canonicalise by.
 
-WHY IT IS SESSION-GRAIN. Six scalars on the test-set, not a field on every
+WHY IT IS SESSION-GRAIN. Eight fields on the test-set -- six scalars and
+two lists, countable from the json tags below -- not a field on every
 test case. Per-exchange annotation would change the on-disk test-case
 format, the upload body and the matcher's view of a request. This changes
 none of them: it rides in TestSet.Metadata, which is already a free-form
@@ -72,10 +73,7 @@ func UIJoinKnownKeySpec(spec string) bool {
 	// spec you know?" about a value read from a config file or an env
 	// var reaches it directly, and that is the caller who has
 	// whitespace. Pinned by
-	// TestKnownKeySpecToleratesPaddingForExternalCallers;
-	// an earlier version of this comment claimed a test could not pin it,
-	// which was simply wrong — the test file is in this package and the
-	// function is exported.
+	// TestKnownKeySpecToleratesPaddingForExternalCallers.
 	spec = strings.TrimSpace(spec)
 	for _, known := range UIJoinCanonicalKeySpecs {
 		if spec == known {
@@ -113,11 +111,30 @@ Every field answers a question content hashing cannot:
 	              of the same script — without it, replaying a scenario
 	              twice produces two test-sets that both "match" one
 	              browser capture
-	T0WallMs      when recording started, for skew estimation only
-	T1WallMs      when it stopped; 0 while still recording
-	IngressPorts  which ports the recorder was listening on, so an
+	T0WallMs      when capture began -- not when the recorder process
+	              started; see uiJoinT0Ms in the producer. It excludes
+	              instrumentation setup and agent bring-up always, and
+	              the app's own boot only under docker-compose: for every
+	              other command type instrumentation.Run starts the app
+	              AFTER this stamp. For skew estimation only.
+	T1WallMs      when it stopped; 0 while still recording. NOT tightened
+	              the way T0WallMs is: it is taken inside the stop defer,
+	              after the graceful-shutdown notice and the drain
+	              groups, so it carries up to 130s of teardown from those
+	              alone -- 10s of notice plus four 30s drains -- and then
+	              the per-name DeleteTests loop and two telemetry calls
+	              on top. (utils.Stop IS in that tail -- same defer, above
+	              the notice -- but costs nothing, being a bare cancel.) The same argument for
+	              tightening applies here; it has not been made yet.
+	IngressPorts  the ports ingress was OBSERVED arriving on, so an
 	              exchange on an unobserved port is NO_INGRESS_OBSERVED
-	              rather than silently unjoined
+	              rather than silently unjoined. Observed, not
+	              "listening on", and the difference is the point: a
+	              configured or bound-port list describes INTENT and can
+	              claim a port this recording never saw, which turns
+	              "nothing was listening there" into "the join is broken
+	              and nothing says why". The producer takes them from
+	              models.TestCase.AppPort for that reason.
 	AppOrigins    the origins the app under test was served from, which is
 	              what makes an exchange FOREIGN_ORIGIN instead of missing
 	CanonicalKeySpec
@@ -331,7 +348,7 @@ func (a *UIJoinAnnotation) validateStructure() error {
 		//
 		// The difference is the producer. appOrigins comes from a browser
 		// that legitimately has no usable origin; ingressPorts comes from
-		// the Go recorder, which cannot have bound zero ports and still
+		// the Go recorder, which cannot have OBSERVED zero ports and still
 		// have produced a test-set. So no correct producer emits this,
 		// which is what puts it on this side of the line.
 		return fmt.Errorf("%w: ingressPorts", ErrUIJoinIncomplete)
@@ -453,22 +470,20 @@ func uiJoinOriginIsWellFormed(index int, o string) error {
 	 * ONE DISPLAY STRING FOR EVERY MESSAGE BELOW.
 	 *
 	 * These go into the recorder's log, and the documented way origins
-	 * arrive is strings.Split(os.Getenv("APP_ORIGINS"), ","), so a
+	 * arrive is strings.Split(os.Getenv("KEPLOY_APP_ORIGINS"), ","), so a
 	 * credentialed URL is the expected shape rather than an exotic one —
-	 * `APP_ORIGINS="http://user:pass@api.internal/v1"` most of all.
+	 * `KEPLOY_APP_ORIGINS="http://user:pass@api.internal/v1"` most of all.
 	 *
 	 * Redacting at the one arm that refuses credentials fixed the one
 	 * shape that never reaches the others: every arm ABOVE it — path,
 	 * query, fragment, wildcard, DNS shape, empty port, and the parse
 	 * error — formatted the raw value and printed the password verbatim.
-	 * Thirteen sites, one fixed. Computing the display string once was
-	 * necessary and NOT sufficient, and an earlier version of this
-	 * paragraph claimed it made the leak "impossible rather than merely
-	 * fixed". It did not: the single computation was a switch with a
-	 * fall-through to the raw entry, so every arm still printed the
-	 * whole string for any origin url.Parse rejected. What makes it
-	 * impossible is that uiJoinDisplay has no branch that can return
-	 * input it has not proved safe — see its docstring.
+	 * Thirteen sites, one fixed. Computing the display string once is
+	 * necessary and NOT sufficient: a single computation that is a switch
+	 * with a fall-through to the raw entry still prints the whole string
+	 * for any origin url.Parse rejects. What makes the leak impossible is
+	 * that uiJoinDisplay has no branch that can return input it has not
+	 * proved safe — see its docstring.
 	 */
 	/*
 	 * THREE STATES, and the third one leaked.
@@ -499,10 +514,8 @@ func uiJoinOriginIsWellFormed(index int, o string) error {
 	 *
 	 * WHAT THAT IS AND IS NOT WORTH. The raw origin is not passed to
 	 * uiJoinDisplay or uiJoinNamed — they take the parsed *url.URL — and
-	 * no fmt.Errorf below references `o`. An earlier version of this
-	 * paragraph called that "structurally impossible to leak". It is
-	 * not, and the overstatement is worth correcting rather than
-	 * quietly dropping:
+	 * no fmt.Errorf below references `o`. That is NOT the same as
+	 * "structurally impossible to leak", and the difference matters:
 	 *
 	 *   - `parseErr` is a *url.Error, and url.Error.URL IS the raw
 	 *     origin. Six lines inside uiJoinDisplay can reach it without
@@ -515,10 +528,9 @@ func uiJoinOriginIsWellFormed(index int, o string) error {
 	 * fall-through, not the class. What actually holds the line is the
 	 * pair of refusals in uiJoinDisplay — no authority without a HOST,
 	 * and no authority when an at-sign survived it — and the tests that
-	 * pin them. (An earlier version said "without a parse". url.Parse
-	 * returns (nil, err), so that check was subsumed by the nil check
-	 * and no mutation of it was observable; naming it as half of the
-	 * pair credited a branch nothing could test.)
+	 * pin them. (Not "without a parse": url.Parse returns (nil, err), so
+	 * such a check is subsumed by the nil check and no mutation of it is
+	 * observable.)
 	 */
 	named := uiJoinNamed(index, u)
 	if err != nil {
@@ -557,9 +569,8 @@ func uiJoinOriginIsWellFormed(index int, o string) error {
 	 * Whether any of them can attribute an exchange is a question for
 	 * joinability, and the answer there is currently "yes, like any
 	 * other origin" — see that function, which refuses only an EMPTY
-	 * list. An earlier version of this paragraph said a backend
-	 * exchange always has an http(s) origin and that joinability
-	 * required one; both claims were invented and are gone.
+	 * list. In particular there is no rule here that a backend exchange
+	 * always has an http(s) origin, nor that joinability requires one.
 	 */
 	// Each part named separately, so a test can show which rule rejected
 	// what. Collapsed into a single condition, most of these were
@@ -678,7 +689,7 @@ func uiJoinOriginIsWellFormed(index int, o string) error {
 	case u.User != nil:
 		// REDACTED, because this string goes into the recorder's log and
 		// the stated way origins arrive is
-		// strings.Split(os.Getenv("APP_ORIGINS"), ","), which is exactly
+		// strings.Split(os.Getenv("KEPLOY_APP_ORIGINS"), ","), which is exactly
 		// where a credentialed URL comes from. Echoing %q verbatim put
 		// `http://admin:hunter2@host` — password and all — into the log
 		// of an error about there being credentials.
@@ -708,7 +719,9 @@ func uiJoinOriginIsWellFormed(index int, o string) error {
 	return nil
 }
 
-// Ingress ports are TCP ports the recorder bound, so 0 is as wrong as
+// Ingress ports are TCP ports ingress was OBSERVED arriving on -- not
+// ports the recorder bound, and the field doc above spends seven lines
+// on why that distinction is the point. Either way 0 is as wrong as
 // 70000: port 0 means "the kernel picks one" and can never be a value
 // something was observed on. An out-of-range entry is what a truncated
 // or mis-decoded read looks like — ports read back as [0 0] from a
@@ -748,13 +761,14 @@ paragraph about a different function.)
 Normalized returns the canonical form of this annotation — the exact
 value SetUIJoinAnnotation will store.
 
-EXPORTED FOR THE PRODUCER, WHICH DOES NOT EXIST YET. Nothing in this
-repo calls it — the same is true of the annotation as a whole, which has
-no writer on either side. It is part of the contract this package
-publishes, not a claim that something is using it.
+EXPORTED FOR THE PRODUCER, WHICH NOW EXISTS.
+pkg/service/record/uijoin_record.go writes the annotation at stop, via
+SetUIJoinAnnotation. `Normalized` itself is still uncalled outside
+tests — it is part of the contract this package publishes, not a claim
+that something is using it.
 
 Set deliberately does not mutate its argument, so a caller that built an
-annotation from, say, strings.Split(os.Getenv("APP_ORIGINS"), ",") keeps
+annotation from, say, strings.Split(os.Getenv("KEPLOY_APP_ORIGINS"), ",") keeps
 the padded strings in memory while the trimmed ones go to disk:
 
 	b.CaptureID = "  cap_pad  "
@@ -965,12 +979,11 @@ refuse it. Repairing it into something plausible is what must not happen.
 */
 func toASCIIHost(host string) string {
 	if isASCII(host) {
-		// A FAST PATH, and only that. An earlier comment justified it as
-		// "percent-decoding first would be wrong here", which describes
-		// nothing that happens: x/net/idna has no percent handling, and
-		// url.Parse has already rejected or decoded every host escape
-		// before this runs. ToASCII returns an ASCII host unchanged, so
-		// this skips work rather than changing an answer.
+		// A FAST PATH, and only that. It is not about percent handling:
+		// x/net/idna has none, and url.Parse has already rejected or
+		// decoded every host escape before this runs. ToASCII returns an
+		// ASCII host unchanged, so this skips work rather than changing
+		// an answer.
 		return host
 	}
 	ascii, err := uiJoinIDNA.ToASCII(host)
@@ -1173,7 +1186,7 @@ func SetUIJoinAnnotation(ts *TestSet, a *UIJoinAnnotation) error {
 	// Validate has always compared strings.TrimSpace(x) — an explicit
 	// acknowledgement that whitespace arrives, from a captureId read with
 	// a trailing newline or origins from
-	// strings.Split(os.Getenv("APP_ORIGINS"), ","). It then stored the
+	// strings.Split(os.Getenv("KEPLOY_APP_ORIGINS"), ","). It then stored the
 	// padded value verbatim, so " http://localhost:3000" validated and
 	// was written, and a joiner comparing an exchange origin against it
 	// would silently never match — the exact failure
@@ -1302,9 +1315,8 @@ Finish refuse a document the reader just read — and the consequence is
 exactly what Finish exists to prevent: Complete() stays false forever
 and the joiner declines the capture.
 
-An earlier version asserted map[string]interface{} and refused the rest,
-claiming that updating them "means re-encoding a document this build may
-not fully describe". Nothing re-encodes anything. bson.M IS
+Asserting map[string]interface{} and refusing the rest would be wrong:
+nothing here re-encodes anything. bson.M IS
 map[string]interface{} under a different name and takes the identical
 in-place assignment; map[interface{}]interface{} takes it with a string
 key; bson.D is a slice, so the matching element is replaced by index,
@@ -1411,8 +1423,7 @@ func GetUIJoinAnnotation(ts *TestSet) (*UIJoinAnnotation, error) {
 	// the one class this reader is most careful about elsewhere.
 	//
 	// Absent and explicitly-empty are both already on the wire and
-	// r.present tells them apart, so this needs no spec bump — an
-	// earlier comment here claimed it did, which was simply false.
+	// r.present tells them apart, so this needs no spec bump.
 	if _, ok := r.present("appOrigins"); !ok {
 		return nil, fmt.Errorf("%w: appOrigins", ErrUIJoinIncomplete)
 	}
@@ -1945,7 +1956,7 @@ So this asks the opposite question: what can be PROVEN safe? Only the
 authority, and only when the stdlib actually parsed one. A string that
 does not parse has no provable authority, so nothing from it is printed
 at all — the caller names the entry by its INDEX, which is what an
-operator needs to find the line in APP_ORIGINS anyway.
+operator needs to find the line in KEPLOY_APP_ORIGINS anyway.
 
 Returns "" when nothing is safe to show.
 
@@ -1995,10 +2006,10 @@ withholds.
 
 A decode that makes NO PROGRESS is different: it means every remaining
 '%' is a literal, which is the ordinary IPv6 zone id (`[fe80::1%eth0]`),
-so the loop stops and reports false. An earlier version reasoned from an
-ERROR instead of from progress, and the difference was leak #10 — an
-error says SOME '%' is not an escape and nothing about the others, while
-url.PathUnescape throws away the decode of all of them.
+so the loop stops and reports false. Reasoning from an ERROR instead of
+from progress is what produced leak #10 — an error says SOME '%' is not
+an escape and nothing about the others, while url.PathUnescape throws
+away the decode of all of them.
 */
 func uiJoinCarriesAtSign(s string) bool {
 	for i := 0; i < uiJoinUnescapeRounds; i++ {
@@ -2115,11 +2126,11 @@ func uiJoinDisplay(u *url.URL) string {
 	 * String() percent-escapes a non-ASCII host, so `http://пример.рф`
 	 * came back as `http://%D0%BF%D1%80%D0%B8%D0%BC%D0%B5%D1%80.%D1%80%D1%84`
 	 * — a spelling the operator cannot match against their own
-	 * APP_ORIGINS line by eye, and one that the rule twenty lines below
+	 * KEPLOY_APP_ORIGINS line by eye, and one that the rule twenty lines below
 	 * refuses for carrying a '%'.
 	 *
-	 * NOT "as written", which an earlier version of this line claimed.
-	 * normalizeOrigin lowercases and IDNA-converts the host before the
+	 * NOT "as written", though: normalizeOrigin lowercases and
+	 * IDNA-converts the host before the
 	 * validator runs, so on the public path u.Host holds the
 	 * CANONICALISED spelling: an operator who wrote `http://пример..рф`
 	 * is shown `http://xn--e1afmkfd..xn--p1ai`. Building by hand still
@@ -2250,14 +2261,11 @@ func uiJoinDisplay(u *url.URL) string {
 	 *     they carry no stray '%', so the decode succeeds and the
 	 *     iteration still reaches the at-sign.
 	 *
-	 * NAMED, NOT COUNTED, and an earlier version of this paragraph
-	 * counted. It said the swap "fails nine subtests" and the decode
-	 * "fails four": nine and four are `--- FAIL` LINES, which include a
-	 * parent line per test, and the first figure holds only for the
-	 * literal-check variant that keeps a "%40" clause — drop that clause
-	 * and a fourth depth row fails too. It also credited the decode swap
-	 * to the depth test, which it does not touch. A count is a
-	 * measurement of the suite as it stood on the day, and the suite is
+	 * NAMED, NOT COUNTED. A count like "fails nine subtests" is a trap
+	 * here: `--- FAIL` lines include a parent line per test, and the
+	 * figure moves with which variant of the mutation is applied. A
+	 * count is a measurement of the suite as it stood on the day, and
+	 * the suite is
 	 * edited more often than this comment; a named row is a claim the
 	 * reader can check in one command.
 	 */
@@ -2271,10 +2279,8 @@ func uiJoinDisplay(u *url.URL) string {
 	 * at-sign, never remove one. So every at-sign FOUND in RawPath is
 	 * found in Path too. RawFragment stands the same way to Fragment.
 	 *
-	 * THE TWO FIELDS DO DIVERGE, and an earlier version of this
-	 * paragraph claimed a 400k-input fuzz found "ZERO" cases where they
-	 * did. That was wrong, and a review produced a counterexample in
-	 * seconds:
+	 * THE TWO FIELDS DO DIVERGE, and a fuzz run finding no counterexample
+	 * is not evidence that they do not — here is one:
 	 *
 	 *   http://h.example.com/%2525252525252525%2f
 	 *     RawPath "/%2525252525252525%2f" -> carries = true
@@ -2344,7 +2350,7 @@ func uiJoinDisplay(u *url.URL) string {
 	return b.String()
 }
 
-// uiJoinNamed renders one APP_ORIGINS entry for a message: its index,
+// uiJoinNamed renders one KEPLOY_APP_ORIGINS entry for a message: its index,
 // plus the authority when there provably is one.
 //
 // The index is not decoration. When nothing about the entry is safe to
