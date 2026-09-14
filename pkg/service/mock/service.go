@@ -106,6 +106,7 @@ type MockDB interface {
 // MappingDB persists and reads the per-test mock mapping for a set. Optional:
 // nil disables per-test scoping (suite-level record/replay).
 type MappingDB interface {
+	DeleteMappingsForSet(ctx context.Context, testSetID string) error
 	UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
 }

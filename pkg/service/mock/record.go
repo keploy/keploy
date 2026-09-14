@@ -79,10 +79,19 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	// 2. Overwrite the named set in place: drop the previous mocks so the
-	//    re-record is a clean rewrite, not an append.
+	// 2. Overwrite the named set in place: drop the previous mocks and
+	//    mappings so the re-record is a clean rewrite, not an append.
 	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
-		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
+		stopReason = "failed to overwrite existing mock set"
+		utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name))
+		return fmt.Errorf("%s: %w", stopReason, err)
+	}
+	if m.mappingDB != nil {
+		if err := m.mappingDB.DeleteMappingsForSet(persistCtx, name); err != nil {
+			stopReason = "failed to overwrite existing mock mappings"
+			utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name))
+			return fmt.Errorf("%s: %w", stopReason, err)
+		}
 	}
 	m.mockDB.ResetCounterID()
 
