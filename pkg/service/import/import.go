@@ -354,11 +354,14 @@ func (pi *PostmanImporter) processEmptyResponse(testItem *TestData, globalVariab
 		testItem.Response = append(testItem.Response, response)
 		return nil
 	}
-	pi.logger.Error("URL is empty", zap.String("testItem", testItem.Name))
-	return fmt.Errorf("URL is empty")
+	pi.logger.Warn("Skipping test item because URL is empty", zap.String("testItem", testItem.Name))
+	return nil
 }
 
 func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, globalVariables map[string]string, testCounter *int) error {
+	if len(testItem.Response) == 0 {
+		return nil
+	}
 	for _, response := range testItem.Response {
 		testName := fmt.Sprintf("test-%d", *testCounter+1)
 
