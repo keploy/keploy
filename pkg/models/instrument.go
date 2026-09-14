@@ -247,11 +247,20 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
-	ClientNSPID     uint32
-	Container       string
-	KeployContainer string
-	DockerDelay     uint64
-	Synchronous     bool
+	ClientNSPID uint32
+	Container   string
+	// FromContainer is the already-running container to re-create under
+	// keploy's namespaces. Set only for utils.FromContainer runs.
+	FromContainer string
+	// FromContainerWasRunning records whether that container was up when
+	// keploy stopped it, so teardown knows whether to start it again. The stop
+	// happens before the agent starts - the agent publishes the app's ports and
+	// cannot bind them while the original still holds them - so it is decided
+	// there rather than in App.
+	FromContainerWasRunning bool
+	KeployContainer         string
+	DockerDelay             uint64
+	Synchronous             bool
 	// Cmd               string
 	AgentURI          string
 	IsDocker          bool

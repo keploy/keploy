@@ -566,7 +566,26 @@ func ExtractCmdTypeFromArgs(args []string) string {
 	// for it. Matching only the kebab form would let the camelCase spelling
 	// silently skip this privilege decision — and the repo's own CI scripts
 	// use camelCase aliases throughout.
-	names := []string{"--cmd-type", "--cmdType"}
+	return strings.ToLower(strings.TrimSpace(extractFlagFromArgs(args, "--cmd-type", "--cmdType")))
+}
+
+// ExtractFromContainerFromArgs pulls an explicit --from-container out of raw
+// argv, for the same reason ExtractCmdTypeFromArgs exists: the flag implies a
+// docker run, and therefore root, and that has to be known before cobra parses.
+//
+// Without this, `keploy mock record --from-container app` with no --cmd-type
+// starts unprivileged and dies later writing /proc/sys/kernel/perf_event_paranoid.
+func ExtractFromContainerFromArgs(args []string) string {
+	// NOT lowercased: this is a container name, and docker names are
+	// case-sensitive. ExtractCmdTypeFromArgs lowercases because kind names are
+	// lowercase by definition.
+	return strings.TrimSpace(extractFlagFromArgs(args, "--from-container", "--fromContainer"))
+}
+
+// extractFlagFromArgs returns the value of the last occurrence of any of the
+// given flag names in raw argv, in either `--flag value` or `--flag=value`
+// form. Returns "" when absent.
+func extractFlagFromArgs(args []string, names ...string) string {
 	// Last occurrence wins, matching how cobra resolves a repeated flag.
 	found := ""
 	for i := 0; i < len(args); i++ {
@@ -590,7 +609,7 @@ func ExtractCmdTypeFromArgs(args []string) string {
 			}
 		}
 	}
-	return strings.ToLower(strings.TrimSpace(found))
+	return found
 }
 
 // ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
@@ -660,6 +679,11 @@ const (
 	DockerRun     CmdType = "docker-run"
 	DockerStart   CmdType = "docker-start"
 	DockerCompose CmdType = "docker-compose"
+	// FromContainer takes an ALREADY RUNNING container and re-creates it under
+	// keploy's namespaces through the Docker Engine API, rather than being
+	// handed a command string to splice flags into and shell out. It is the
+	// only kind with no user command at all - see HasUserCommand.
+	FromContainer CmdType = "from-container"
 	Native        CmdType = "native"
 	Empty         CmdType = ""
 )
@@ -1507,7 +1531,17 @@ func getHomeDir() (string, error) {
 }
 
 func IsDockerCmd(kind CmdType) bool {
-	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
+	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose || kind == FromContainer)
+}
+
+// HasUserCommand reports whether this kind carries a command string that keploy
+// runs through a shell. Every kind did until FromContainer, which launches the
+// app through the Docker Engine API instead - so the checks written against
+// "there is a command here" (detach-mode scanning, name extraction, the
+// wrapped-command exec itself) have nothing to act on and must be skipped
+// rather than run against an empty string.
+func HasUserCommand(kind CmdType) bool {
+	return kind != FromContainer && kind != Empty
 }
 
 // PermissionError holds information about files/directories with permission issues
