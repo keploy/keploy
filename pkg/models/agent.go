@@ -111,6 +111,11 @@ const (
 	ScopeReasonNoMappingTable = "no_mapping_table" // no mappings.yaml, so no scope table was installed
 	ScopeReasonUnmappedScope  = "unmapped_scope"   // table installed, this name absent from it
 	ScopeReasonEmptyMapping   = "empty_mapping"    // name present but mapped to zero mocks
+	// ScopeReasonStrictNoRecording: strict scoping is on and this test has no
+	// recording of its own, so it was narrowed to nothing rather than being
+	// served the pool. Its first dependency call will miss, which is the point:
+	// another test's response is not a valid answer for this one.
+	ScopeReasonStrictNoRecording = "strict_no_recording"
 
 	// Record. Nothing is served, so Scoped is always false.
 	ScopeReasonRecordWindowOpened = "record_window_opened"
@@ -128,6 +133,11 @@ const (
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
+	// Strict makes a test with no recording serve NOTHING but the mocks no test
+	// owns, instead of leaving the whole pool armed. Opt-in: integration testing
+	// deliberately lets one test's recording answer another's request, and that
+	// must keep working.
+	Strict bool `json:"strict,omitempty"`
 }
 
 // MockStats is the body of GET /agent/mock/stats — a non-draining snapshot of

@@ -138,6 +138,8 @@ type Agent struct {
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
 	scopeTable   map[string][]string    // replay: test name -> mock names (from mappings.yaml)
+	// scopeStrict: see the strict block in BeginScope.
+	scopeStrict bool
 	// replay: union of every test's mapped mock names. A recorded mock absent
 	// from it belongs to no test, and stays visible to a scoped test as overflow.
 	mappedUniverse []string

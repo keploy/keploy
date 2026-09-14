@@ -66,6 +66,39 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid, attempt int) (
 		// yields any. The ack carries attempt with retry_reset false so the
 		// runner sees the request was understood and declined, rather than
 		// broadening the reset to mocks that are not this scope's.
+		// Strict scoping: a test with no recording of its own is narrowed to
+		// NOTHING rather than left looking at the whole pool.
+		//
+		// The default is deliberately lenient because integration testing wants
+		// it: there, a mock is a third party keeping the service alive, and one
+		// test's recording answering another's request is fine. For a browser
+		// suite it is not -- the Playwright spec asserts on the response, and
+		// test A's body is simply not a valid answer for test B. Serving it
+		// produces a PASS that means nothing, which is the failure this whole
+		// per-test scheme exists to prevent.
+		//
+		// Mocks that no test owns stay reachable: they belong to nobody, so
+		// serving them steals from no one. Everything owned -- including a
+		// `__suite__` recording -- becomes invisible, so the first real
+		// dependency call misses and --on-miss fail turns it red.
+		if a.scopeStrict && (tableSize == 0 || !ok || len(names) == 0) {
+			a.logger.Info("scope begin: strict scoping, this test has no recording; serving only unowned mocks",
+				zap.String("test", name), zap.Int("attempt", attempt))
+			if pid > 0 {
+				a.SetWorkerScope(uint32(pid), []string{})
+			} else if err := a.UpdateMockParams(ctx, models.MockFilterParams{
+				MockMapping:         []string{},
+				MockMappingUniverse: universe,
+				UseMappingBased:     true,
+				AfterTime:           models.BaseTime,
+				BeforeTime:          time.Now(),
+				AgentOwnsConsumed:   true,
+			}); err != nil {
+				return models.ScopeAck{}, err
+			}
+			return models.ScopeAck{Scoped: true, Mocks: 0, Reason: models.ScopeReasonStrictNoRecording, Attempt: attempt}, nil
+		}
+
 		switch {
 		case tableSize == 0:
 			a.logger.Debug("scope begin: NOT scoped, no per-test mapping table installed", zap.String("test", name), zap.Int("attempt", attempt))
@@ -297,9 +330,10 @@ func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error)
 
 // SetScopeTable installs the replay-time per-test name→mock-names table the CLI
 // read from mappings.yaml.
-func (a *Agent) SetScopeTable(_ context.Context, table map[string][]string) error {
+func (a *Agent) SetScopeTable(_ context.Context, table map[string][]string, strict bool) error {
 	a.scopeMu.Lock()
 	a.scopeTable = table
+	a.scopeStrict = strict
 	a.scopeMu.Unlock()
 
 	// Push the union of every test's mapped mock names to the proxy so a scoped

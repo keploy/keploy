@@ -174,6 +174,49 @@ func replayAgent(t *testing.T, mockNames []string, table map[string][]string) (*
 	}
 	a.clientMocks.Store(uint64(0), &ClientMockStorage{filtered: resident})
 
-	require.NoError(t, a.SetScopeTable(context.Background(), table))
+	require.NoError(t, a.SetScopeTable(context.Background(), table, false))
 	return a, p
+}
+
+// Strict scoping: a test with no recording of its own must be narrowed to
+// nothing, not left looking at the whole pool. Serving it another test's
+// recording produces a PASS that asserts on the wrong response -- the exact
+// false green the per-test scheme exists to prevent.
+func TestBeginScopeStrictNarrowsATestWithNoRecording(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		table map[string][]string
+		scope string
+	}{
+		{"name absent from the table", map[string][]string{"alpha": {"m-0"}}, "beta"},
+		{"name mapped to zero mocks", map[string][]string{"alpha": {}}, "alpha"},
+		{"no table installed at all", map[string][]string{}, "alpha"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p := replayAgent(t, []string{"m-0", "m-1"}, tc.table)
+			require.NoError(t, a.SetScopeTable(ctx, tc.table, true))
+
+			ack, err := a.BeginScope(ctx, tc.scope, 0, 0)
+			require.NoError(t, err)
+			require.True(t, ack.Scoped, "strict scoping narrows rather than declining")
+			require.Equal(t, models.ScopeReasonStrictNoRecording, ack.Reason)
+			require.Equal(t, 0, ack.Mocks, "a test with no recording gets no mocks of its own")
+			_ = p
+		})
+	}
+}
+
+// The default stays lenient. Integration testing relies on one test's recording
+// answering another's request, and turning that off by default would break it.
+func TestBeginScopeLenientByDefault(t *testing.T) {
+	ctx := context.Background()
+	table := map[string][]string{"alpha": {"m-0"}}
+	a, _ := replayAgent(t, []string{"m-0", "m-1"}, table)
+	require.NoError(t, a.SetScopeTable(ctx, table, false))
+
+	ack, err := a.BeginScope(ctx, "beta", 0, 0)
+	require.NoError(t, err)
+	require.False(t, ack.Scoped, "without strict scoping the whole pool stays armed")
+	require.Equal(t, models.ScopeReasonUnmappedScope, ack.Reason)
 }

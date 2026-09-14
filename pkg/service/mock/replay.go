@@ -292,12 +292,13 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string, mocks ...
 		return
 	}
 
-	if err := pusher.PushScopeTable(ctx, table); err != nil {
+	if err := pusher.PushScopeTable(ctx, table, m.config.Mock.StrictScope); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
 		return
 	}
 	m.logger.Info("per-test scoping enabled",
 		zap.Int("tests", len(table)),
+		zap.Bool("strict_scope", m.config.Mock.StrictScope),
 		zap.String("derived_from", source),
 		zap.String("mock-set", name))
 }

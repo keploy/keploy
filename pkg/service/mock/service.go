@@ -86,7 +86,7 @@ type MissCapturer interface {
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopePusher interface {
-	PushScopeTable(ctx context.Context, table map[string][]string) error
+	PushScopeTable(ctx context.Context, table map[string][]string, strict bool) error
 }
 
 // MockDB reads and writes a named mock set on disk. It is exactly the surface

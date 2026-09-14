@@ -26,7 +26,7 @@ type scopeWindowReader interface {
 	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
 }
 type scopeTableSetter interface {
-	SetScopeTable(ctx context.Context, table map[string][]string) error
+	SetScopeTable(ctx context.Context, table map[string][]string, strict bool) error
 }
 type mockStatsReader interface {
 	MockStats(ctx context.Context) (models.MockStats, error)
@@ -103,7 +103,7 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s, ok := a.svc.(scopeTableSetter); ok {
-		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
+		if err := s.SetScopeTable(r.Context(), req.Mappings, req.Strict); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

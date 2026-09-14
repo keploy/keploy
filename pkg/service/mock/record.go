@@ -400,6 +400,27 @@ func mapOwners(logger *zap.Logger, windows []models.ScopeWindow, mocks []capture
 		}
 		byTest[owner] = append(byTest[owner], models.MockEntry{Name: mk.name})
 	}
+
+	// Record an entry for every scope that OPENED, including the ones that
+	// captured nothing.
+	//
+	// Without this a test that makes no dependency calls is indistinguishable
+	// at replay from a test that was never recorded: both are simply absent
+	// from the table, and both report unmapped_scope. That ambiguity is what
+	// forces a replay to guess -- it cannot fail a renamed or newly-added test
+	// without also failing every legitimately call-free one.
+	//
+	// An empty entry says the difference out loud: "this test ran, and needed
+	// nothing". Absence then means only one thing: no recording exists.
+	for _, w := range windows {
+		if w.Name == "" {
+			continue
+		}
+		if _, seen := byTest[w.Name]; !seen {
+			byTest[w.Name] = []models.MockEntry{}
+		}
+	}
+
 	logger.Debug("built per-test mock mappings",
 		zap.Int("mocks", len(mocks)),
 		zap.Int("stamped_by_agent", stamped),
