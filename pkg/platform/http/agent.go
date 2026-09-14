@@ -268,6 +268,26 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 	a.logger.Debug("Connecting to outgoing mocks stream...")
 
+	// Mirror the mock-noise pair onto BOTH spellings before the struct is
+	// marshalled. This is the send-side twin of the normalise Proxy.Record and
+	// Proxy.Mock do on receipt, and it is the half that protects a NEW client
+	// talking to an OLD agent.
+	//
+	// OutgoingOptions carries no json tags, so it goes on the wire under Go
+	// field names. A pre-rename agent decodes only SchemaNoise*, and every
+	// producer in this repo now sets the canonical MockNoise* pair — so without
+	// this the deprecated fields marshal as false and the toggle is dead on any
+	// agent image built before the rename. Agent images are pinned separately
+	// from the CLI (k8s-proxy sets proxy.keployAgentImage; enterprise is still
+	// on an older keploy), so that skew is the normal state during rollout, not
+	// an edge case.
+	//
+	// Done here rather than at the three call sites because this is the actual
+	// wire boundary: a future producer that forgets is covered automatically.
+	// NormalizeMockNoise is idempotent and nil-safe, so pairing it with the
+	// receive-side call costs nothing.
+	opts.NormalizeMockNoise()
+
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
 	}
@@ -418,6 +438,10 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 }
 
 func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
+
+	// See GetOutgoing: mirror both spellings before the marshal so a pre-rename
+	// agent still sees the toggle.
+	opts.NormalizeMockNoise()
 
 	// make a request to the server to mock outgoing
 	requestBody := models.OutgoingReq{

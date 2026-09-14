@@ -3532,6 +3532,12 @@ func (p *Proxy) loadUpstreamTLSTrustAnchors() {
 }
 
 func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	// Reconcile the two mock-noise spellings on receipt. This is the process
+	// boundary: opts arrives over the agent API from a client that may predate
+	// the schema-noise -> mock-noise rename and therefore sets only the
+	// deprecated fields. Unknown JSON keys decode silently, so without this the
+	// toggle would simply not take effect, with nothing logged anywhere.
+	opts.NormalizeMockNoise()
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
 	// Reset DNS mock deduplication tracker for fresh recording
@@ -3570,6 +3576,12 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 }
 
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+	// Reconcile the two mock-noise spellings on receipt. This is the process
+	// boundary: opts arrives over the agent API from a client that may predate
+	// the schema-noise -> mock-noise rename and therefore sets only the
+	// deprecated fields. Unknown JSON keys decode silently, so without this the
+	// toggle would simply not take effect, with nothing logged anywhere.
+	opts.NormalizeMockNoise()
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
 	// Forget the previous recording's MySQL ports before this test set derives

@@ -1293,8 +1293,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Backdate:                  testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:               mockNoiseConfig,
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
-			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
-			SchemaNoiseStrict:         r.config.Test.SchemaNoiseStrict,
+			MockNoiseDetection:        r.config.Test.NoiseDetection(),
+			MockNoiseStrict:           r.config.Test.NoiseStrict(),
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
@@ -1534,8 +1534,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Backdate:                  testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:               mockNoiseConfig,
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
-			SchemaNoiseDetection:      r.config.Test.SchemaNoiseDetection,
-			SchemaNoiseStrict:         r.config.Test.SchemaNoiseStrict,
+			MockNoiseDetection:        r.config.Test.NoiseDetection(),
+			MockNoiseStrict:           r.config.Test.NoiseStrict(),
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
@@ -2269,7 +2269,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//     --format json — only the verdict differs.
 			//   - StrictFailure: the pre-existing veto of the OBSOLETE
 			//     demotion for a response-failing test.
-			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.SchemaNoiseStrict, r.config.Test.AssertDependencies, r.config.Test.StrictFailure)
+			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.NoiseStrict(), r.config.Test.AssertDependencies, r.config.Test.StrictFailure)
 			switch outcome.Log {
 			case mismatchLogSchemaNoiseReject:
 				r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
@@ -3247,7 +3247,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
-	} else if r.config.Test.SchemaNoiseDetection && r.instrument {
+	} else if r.config.Test.NoiseDetection() && r.instrument {
 		// --schema-noise-detection without --remove-unused-mocks: the learned
 		// req_body_noise used to ride only inside UpdateMocks (the pruning
 		// path), so detection alone learned noise and threw it away at exit.

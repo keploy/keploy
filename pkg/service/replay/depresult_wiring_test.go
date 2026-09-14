@@ -190,8 +190,14 @@ func TestRunTestSetWiring(t *testing.T) {
 		{
 			name:       "the verdict goes through the single seam, carrying the raw response result and all three knobs",
 			assignment: "outcome",
+			// NoiseStrict, not SchemaNoiseStrict: the strict knob is now read
+			// through the accessor so it answers for BOTH the canonical
+			// MockNoiseStrict and the deprecated SchemaNoiseStrict spelling.
+			// Naming the raw field here would pin the seam to one spelling and
+			// go quiet the moment a caller sets only the other one — which is
+			// the failure this guard is supposed to catch, not cause.
 			want: []string{"resolveTestOutcome", "testPass", "mockSetMismatch",
-				"SchemaNoiseStrict", "AssertDependencies", "StrictFailure"},
+				"NoiseStrict", "AssertDependencies", "StrictFailure"},
 			why: "resolveTestOutcome is where --assert-dependencies turns a PASSED-and-green test into a " +
 				"FAILED-and-red one. Passing anything other than the raw testPass and the three knobs " +
 				"silently removes a promotion.",

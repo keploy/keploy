@@ -111,10 +111,35 @@ type OutgoingOptions struct {
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
-	SchemaNoiseDetection   bool                           // when true, detect request-body field drift vs the recorded mock and record it as field-path noise (req_body_noise) on the matched mock
-	SchemaNoiseStrict      bool                           // when true (replay/enforcement path), a mock (any parser) that carries learned req_body_noise must match strictly: every request-body field must match except the learned-noise paths, so a non-noise drift rejects the mock
-	SkipTLSMITM            bool
-	ConnKey                string // connection-level key for TLSHandshakeStore correlation
+	// MockNoiseDetection / MockNoiseStrict are the canonical spelling.
+	//
+	// MockNoiseDetection: detect request-body field drift vs the recorded mock
+	// and record it as field-path noise (req_body_noise) on the matched mock.
+	//
+	// MockNoiseStrict (replay/enforcement path): a mock (any parser) that
+	// carries learned req_body_noise must match strictly — every request-body
+	// field must match except the learned-noise paths, so a non-noise drift
+	// rejects the mock.
+	MockNoiseDetection bool
+	MockNoiseStrict    bool
+
+	// SchemaNoiseDetection / SchemaNoiseStrict are the previous spelling, kept
+	// as a mirror rather than removed.
+	//
+	// Go has no field aliases, so unlike the package rename (see
+	// integrations/schemanoise) this cannot be solved with `=`. Both fields are
+	// therefore carried and NormalizeMockNoise reconciles them. An unmigrated
+	// producer — a k8s-proxy or enterprise build from before the rename, or a
+	// stored config written by one — sets only these, and its intent must
+	// survive: JSON/YAML decoding silently drops unknown keys, so a mismatch
+	// here is not an error anywhere, it is a toggle that quietly does nothing.
+	//
+	// Deprecated: set MockNoiseDetection / MockNoiseStrict. Read through
+	// NoiseDetection() / NoiseStrict(), never directly.
+	SchemaNoiseDetection bool
+	SchemaNoiseStrict    bool
+	SkipTLSMITM          bool
+	ConnKey              string // connection-level key for TLSHandshakeStore correlation
 	// PreferH2, on the REPLAY path, tells the TLS MITM to advertise h2 in ALPN
 	// (instead of the default http/1.1 downgrade) so a dual-protocol client
 	// stays on HTTP/2 and its request matches a recorded kind:Http2 mock.
