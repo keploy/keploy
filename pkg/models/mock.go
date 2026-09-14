@@ -117,6 +117,13 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
+	// Owner is the client-declared replacement unit this mock belongs to -- the
+	// per-test scope name the runner opened around the call (models.ScopeReq.Name).
+	// Unlike SourcePID this IS persisted: it is the first half of the mock's
+	// identity, the half that makes the second half (a per-owner ordinal) stable
+	// across recordings. Empty for every capture made outside a scope, and for
+	// every `keploy record` integration capture, which opens none.
+	Owner string `json:"Owner,omitempty" yaml:"owner,omitempty" bson:"Owner,omitempty"`
 	// Noise holds exact-match regex patterns for obfuscated values.
 	// During mock matching, any stored value matching a pattern in this
 	// list is skipped (treated as noise). Written by the enterprise
@@ -1002,6 +1009,7 @@ func (m *Mock) DeepCopy() *Mock {
 			IsStartup:       isStartup,
 		},
 		ConnectionID: m.ConnectionID,
+		Owner:        m.Owner,
 	}
 
 	// Carry the loader so tree copies can still hydrate their elided response.

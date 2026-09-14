@@ -56,7 +56,7 @@ func TestBeginScopeAckReplayNotScoped(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := testModeAgent(t, tc.table)
-			ack, err := a.BeginScope(ctx, tc.scope, 0)
+			ack, err := a.BeginScope(ctx, tc.scope, 0, 0)
 			require.NoError(t, err)
 			require.False(t, ack.Scoped, "the whole pool is still armed — %s", tc.why)
 			require.Equal(t, tc.reason, ack.Reason)
@@ -73,7 +73,7 @@ func TestBeginScopeAckReplayScoped(t *testing.T) {
 
 	t.Run("worker scoped", func(t *testing.T) {
 		a, _ := replayAgent(t, []string{"m1", "m2"}, map[string][]string{"alpha": {"m1", "m2"}})
-		ack, err := a.BeginScope(ctx, "alpha", 7)
+		ack, err := a.BeginScope(ctx, "alpha", 7, 0)
 		require.NoError(t, err)
 		require.True(t, ack.Scoped)
 		require.Equal(t, models.ScopeReasonWorkerScoped, ack.Reason)
@@ -82,7 +82,7 @@ func TestBeginScopeAckReplayScoped(t *testing.T) {
 
 	t.Run("global pool restricted", func(t *testing.T) {
 		a, _ := replayAgent(t, []string{"m1", "m2"}, map[string][]string{"alpha": {"m1"}})
-		ack, err := a.BeginScope(ctx, "alpha", 0)
+		ack, err := a.BeginScope(ctx, "alpha", 0, 0)
 		require.NoError(t, err)
 		require.True(t, ack.Scoped)
 		require.Equal(t, models.ScopeReasonPoolRestricted, ack.Reason)
@@ -97,19 +97,19 @@ func TestBeginScopeAckRecord(t *testing.T) {
 	ctx := context.Background()
 	a := newRecordAgent()
 
-	ack, err := a.BeginScope(ctx, "alpha", 0)
+	ack, err := a.BeginScope(ctx, "alpha", 0, 0)
 	require.NoError(t, err)
 	require.False(t, ack.Scoped)
 	require.Equal(t, models.ScopeReasonRecordWindowOpened, ack.Reason)
 
-	ack, err = a.BeginScope(ctx, "alpha", 0) // no EndScope in between
+	ack, err = a.BeginScope(ctx, "alpha", 0, 0) // no EndScope in between
 	require.NoError(t, err)
 	require.Equal(t, models.ScopeReasonRecordAlreadyOpen, ack.Reason)
 }
 
 func TestBeginScopeAckEmptyName(t *testing.T) {
 	a := newRecordAgent()
-	ack, err := a.BeginScope(context.Background(), "", 0)
+	ack, err := a.BeginScope(context.Background(), "", 0, 0)
 	require.NoError(t, err)
 	require.False(t, ack.Scoped)
 	require.Equal(t, models.ScopeReasonEmptyName, ack.Reason)
@@ -174,6 +174,82 @@ func replayAgent(t *testing.T, mockNames []string, table map[string][]string) (*
 	}
 	a.clientMocks.Store(uint64(0), &ClientMockStorage{filtered: resident})
 
-	require.NoError(t, a.SetScopeTable(context.Background(), table))
+	require.NoError(t, a.SetScopeTable(context.Background(), table, false))
 	return a, p
+}
+
+// Strict scoping: a test with no recording of its own must be narrowed to
+// nothing, not left looking at the whole pool. Serving it another test's
+// recording produces a PASS that asserts on the wrong response -- the exact
+// false green the per-test scheme exists to prevent.
+func TestBeginScopeStrictNarrowsATestWithNoRecording(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		table  map[string][]string
+		scope  string
+		reason string
+		why    string
+	}{
+		{"name absent from the table", map[string][]string{"alpha": {"m-0"}}, "beta",
+			models.ScopeReasonStrictNoRecording, "never recorded: new, renamed, or lost — someone must act"},
+		{"no table installed at all", map[string][]string{}, "alpha",
+			models.ScopeReasonStrictNoRecording, "no table means nothing was recorded"},
+		// Mapped to zero mocks is NOT the same situation and must not report the
+		// same reason: this test WAS recorded and genuinely needed nothing.
+		// Collapsing the two is what made every earlier attempt to refuse an
+		// unmapped test a false positive on the call-free ones.
+		{"name mapped to zero mocks", map[string][]string{"alpha": {}}, "alpha",
+			models.ScopeReasonEmptyMapping, "recorded and needed nothing — unremarkable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p := replayAgent(t, []string{"m-0", "m-1"}, tc.table)
+			require.NoError(t, a.SetScopeTable(ctx, tc.table, true))
+
+			ack, err := a.BeginScope(ctx, tc.scope, 0, 0)
+			require.NoError(t, err)
+			require.True(t, ack.Scoped, "strict scoping narrows rather than declining")
+			require.Equal(t, tc.reason, ack.Reason, tc.why)
+			require.Equal(t, 0, ack.Mocks, "neither case gets mocks of its own")
+			_ = p
+		})
+	}
+}
+
+// The default stays lenient. Integration testing relies on one test's recording
+// answering another's request, and turning that off by default would break it.
+func TestBeginScopeLenientByDefault(t *testing.T) {
+	ctx := context.Background()
+	table := map[string][]string{"alpha": {"m-0"}}
+	a, _ := replayAgent(t, []string{"m-0", "m-1"}, table)
+	require.NoError(t, a.SetScopeTable(ctx, table, false))
+
+	ack, err := a.BeginScope(ctx, "beta", 0, 0)
+	require.NoError(t, err)
+	require.False(t, ack.Scoped, "without strict scoping the whole pool stays armed")
+	require.Equal(t, models.ScopeReasonUnmappedScope, ack.Reason)
+}
+
+// Strict scoping on the PER-WORKER path must narrow to nothing, not clear the
+// scope. SetWorkerScope treats an empty list as "clear", which serves the whole
+// pool -- so passing one there would invert the guarantee while still acking
+// Scoped with 0 mocks. Latent while the runner reports no pid; wrong the moment
+// it does.
+func TestBeginScopeStrictPerWorkerDoesNotClearTheScope(t *testing.T) {
+	ctx := context.Background()
+	table := map[string][]string{"alpha": {"m-0"}}
+	a, p := replayAgent(t, []string{"m-0", "m-1"}, table)
+	require.NoError(t, a.SetScopeTable(ctx, table, true))
+
+	ack, err := a.BeginScope(ctx, "beta", 4242, 0)
+	require.NoError(t, err)
+	require.Equal(t, models.ScopeReasonStrictNoRecording, ack.Reason)
+
+	names, scoped := p.workers[4242]
+	require.True(t, scoped, "the worker must still HAVE a scope; clearing it serves the whole pool")
+	require.NotEmpty(t, names, "an empty list is what SetWorkerScope reads as 'clear'")
+	for _, n := range names {
+		require.NotEqual(t, "m-0", n)
+		require.NotEqual(t, "m-1", n)
+	}
 }

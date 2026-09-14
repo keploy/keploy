@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -40,53 +41,145 @@ type scopeKey struct {
 // stomping each other (Design A); pid == 0 falls back to the single global
 // scope (sequential single-worker runs, and the suite-level default).
 //
-// The returned ScopeAck says whether the pool was ACTUALLY narrowed. Several
-// paths below leave the whole suite's pool armed, and until this ack existed
-// they were indistinguishable on the wire from a correctly-isolated test.
-func (a *Agent) BeginScope(ctx context.Context, name string, pid int) (models.ScopeAck, error) {
+// attempt is the runner's attempt number (ScopeReq.Attempt): 0 for a first run,
+// 1+ for a retry. On a retry this scope's own consumption is reset before the
+// re-stage, so the retried test replays its tape from the start. Nothing else is
+// reset — see resetConsumedForScope.
+func (a *Agent) BeginScope(ctx context.Context, name string, pid, attempt int) (models.ScopeAck, error) {
 	if name == "" {
-		return models.ScopeAck{Reason: models.ScopeReasonEmptyName}, nil
+		return models.ScopeAck{Reason: models.ScopeReasonEmptyName, Attempt: attempt}, nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
 		tableSize := len(a.scopeTable)
+		universe := a.mappedUniverse
 		a.scopeMu.Unlock()
 		// No per-test mapping for this test — leave the whole pool armed. All
 		// three shapes below served the whole set silently before; they are
 		// distinguished here because a runner needs to know WHICH it hit: an
 		// absent mappings.yaml is a setup error, an absent NAME is a renamed
 		// or never-recorded test.
+		//
+		// A retry (attempt > 0) that lands here has NOTHING to reset: the reset
+		// is defined as "this scope's mock names", and none of these three cases
+		// yields any. The ack carries attempt with retry_reset false so the
+		// runner sees the request was understood and declined, rather than
+		// broadening the reset to mocks that are not this scope's.
+		// Strict scoping: a test with no recording of its own is narrowed to
+		// NOTHING rather than left looking at the whole pool.
+		//
+		// The default is deliberately lenient because integration testing wants
+		// it: there, a mock is a third party keeping the service alive, and one
+		// test's recording answering another's request is fine. For a browser
+		// suite it is not -- the Playwright spec asserts on the response, and
+		// test A's body is simply not a valid answer for test B. Serving it
+		// produces a PASS that means nothing, which is the failure this whole
+		// per-test scheme exists to prevent.
+		//
+		// Mocks that no test owns stay reachable: they belong to nobody, so
+		// serving them steals from no one. Everything owned -- including a
+		// `__suite__` recording -- becomes invisible, so the first real
+		// dependency call misses and --on-miss fail turns it red.
+		if a.scopeStrict && (tableSize == 0 || !ok || len(names) == 0) {
+			// Two very different situations narrow to the same thing but must NOT
+			// report the same thing.
+			//
+			//   mapped to zero mocks -> this test WAS recorded and needed nothing.
+			//                           Expected, unremarkable, no alarm.
+			//   absent from the table -> this test was NEVER recorded: new, renamed,
+			//                           or its recording was lost. Someone must act.
+			//
+			// Collapsing them is what forced every earlier attempt at refusing an
+			// unmapped test to be abandoned as a false positive on the call-free
+			// ones. record now writes an explicit empty entry precisely so the two
+			// can be told apart here.
+			recorded := ok && len(names) == 0
+			reason := models.ScopeReasonStrictNoRecording
+			if recorded {
+				reason = models.ScopeReasonEmptyMapping
+				a.logger.Debug("scope begin: strict scoping, this test was recorded and needed no mocks",
+					zap.String("test", name), zap.Int("attempt", attempt))
+			} else {
+				a.logger.Info("scope begin: strict scoping, this test has no recording; serving only unowned mocks",
+					zap.String("test", name), zap.Int("attempt", attempt))
+			}
+			if pid > 0 {
+				// NOT an empty slice: SetWorkerScope treats that as "clear this
+				// worker's scope", which serves the WHOLE pool -- the exact
+				// opposite of what strict scoping means, while still acking
+				// Scoped with 0 mocks. Narrow to a name no mock can have instead.
+				// Mock names are "<12-hex>-<n>" or "mock-<n>" (mockdb.mintName),
+				// so this sentinel can never collide with a real recording.
+				a.SetWorkerScope(uint32(pid), []string{strictNoRecordingSentinel})
+			} else if err := a.UpdateMockParams(ctx, models.MockFilterParams{
+				MockMapping:         []string{},
+				MockMappingUniverse: universe,
+				UseMappingBased:     true,
+				AfterTime:           models.BaseTime,
+				BeforeTime:          time.Now(),
+				AgentOwnsConsumed:   true,
+			}); err != nil {
+				return models.ScopeAck{}, err
+			}
+			return models.ScopeAck{Scoped: true, Mocks: 0, Reason: reason, Attempt: attempt}, nil
+		}
+
 		switch {
 		case tableSize == 0:
-			a.logger.Debug("scope begin: NOT scoped, no per-test mapping table installed", zap.String("test", name))
-			return models.ScopeAck{Reason: models.ScopeReasonNoMappingTable}, nil
+			a.logger.Debug("scope begin: NOT scoped, no per-test mapping table installed", zap.String("test", name), zap.Int("attempt", attempt))
+			return models.ScopeAck{Reason: models.ScopeReasonNoMappingTable, Attempt: attempt}, nil
 		case !ok:
-			a.logger.Debug("scope begin: NOT scoped, this name is absent from the mapping table", zap.String("test", name), zap.Int("mapped_tests", tableSize))
-			return models.ScopeAck{Reason: models.ScopeReasonUnmappedScope}, nil
+			a.logger.Debug("scope begin: NOT scoped, this name is absent from the mapping table", zap.String("test", name), zap.Int("mapped_tests", tableSize), zap.Int("attempt", attempt))
+			return models.ScopeAck{Reason: models.ScopeReasonUnmappedScope, Attempt: attempt}, nil
 		case len(names) == 0:
-			a.logger.Debug("scope begin: NOT scoped, this name is mapped to zero mocks", zap.String("test", name))
-			return models.ScopeAck{Reason: models.ScopeReasonEmptyMapping}, nil
+			a.logger.Debug("scope begin: NOT scoped, this name is mapped to zero mocks", zap.String("test", name), zap.Int("attempt", attempt))
+			return models.ScopeAck{Reason: models.ScopeReasonEmptyMapping, Attempt: attempt}, nil
 		}
 		if pid > 0 {
 			// Parallel-safe: narrow ONLY this worker's served view, keyed by its
 			// PID, so concurrent workers never overwrite one shared filter.
+			//
+			// A retry is NOT reset here. This path never re-stages the pool —
+			// SetWorkerScope only narrows the view over a pool that consumption
+			// mutates globally — so un-consuming the ledger would restore
+			// nothing while reporting that it had. retry_reset stays false.
+			if attempt > 0 {
+				a.logger.Debug("scope begin: retry reset skipped, worker-scoped pools are not re-staged", zap.String("test", name), zap.Int("worker", pid), zap.Int("attempt", attempt))
+			}
 			a.logger.Debug("scope begin: worker-scoped pool", zap.String("test", name), zap.Int("worker", pid), zap.Int("mocks", len(names)))
 			a.SetWorkerScope(uint32(pid), names)
-			return models.ScopeAck{Scoped: true, Mocks: len(names), Reason: models.ScopeReasonWorkerScoped}, nil
+			return models.ScopeAck{Scoped: true, Mocks: len(names), Reason: models.ScopeReasonWorkerScoped, Attempt: attempt}, nil
 		}
 		// No worker PID reported — restrict the single global pool (correct for
 		// a sequential single-worker suite, the pre-Design-A behavior).
+		ack := models.ScopeAck{Scoped: true, Mocks: len(names), Reason: models.ScopeReasonPoolRestricted, Attempt: attempt}
+		if attempt > 0 {
+			// BEFORE consumedSoFar, so the re-stage below sees the post-reset
+			// ledger and re-arms exactly this test's mocks.
+			ack.RestoredMocks, ack.RetryReset = a.resetConsumedForScope(ctx, name, names)
+		}
 		a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)))
 		if err := a.UpdateMockParams(ctx, models.MockFilterParams{
-			MockMapping:     names,
-			UseMappingBased: true,
-			AfterTime:       models.BaseTime,
-			BeforeTime:      time.Now(),
+			MockMapping: names,
+			// Mocks belonging to no test stay reachable as overflow, after this
+			// test's own. Without it a `beforeAll` recording is invisible for the
+			// whole test and a call that needs it misses with candidates: 0,
+			// while the per-worker path (SetWorkerScope above) already keeps such
+			// mocks visible. The two paths agreed on nothing here until now.
+			MockMappingUniverse: universe,
+			UseMappingBased:     true,
+			AfterTime:           models.BaseTime,
+			BeforeTime:          time.Now(),
+			// Subtract what this session already served. Upstream's persistent
+			// ledger (#4534) exists but is not consulted unless the caller asks,
+			// so without this every scope boundary re-stages a pristine pool and
+			// resurrects the whole suite's consumption.
+			AgentOwnsConsumed: true,
 		}); err != nil {
 			return models.ScopeAck{}, err
 		}
-		return models.ScopeAck{Scoped: true, Mocks: len(names), Reason: models.ScopeReasonPoolRestricted}, nil
+		return ack, nil
 	}
 
 	// Record mode: mark the window start (agent clock), keyed by worker PID so
@@ -105,11 +198,14 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) (models.Sc
 	_, alreadyOpen := a.workerOpen[k]
 	a.workerOpen[k] = time.Now()
 	a.scopeMu.Unlock()
-	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid), zap.Bool("already_open", alreadyOpen))
+	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid), zap.Bool("already_open", alreadyOpen), zap.Int("attempt", attempt))
+	// attempt is echoed but changes nothing at record: recording has no served
+	// pool to un-consume, and a retried test simply opens a second window under
+	// the same name, which correlateScopes already handles.
 	if alreadyOpen {
-		return models.ScopeAck{Reason: models.ScopeReasonRecordAlreadyOpen}, nil
+		return models.ScopeAck{Reason: models.ScopeReasonRecordAlreadyOpen, Attempt: attempt}, nil
 	}
-	return models.ScopeAck{Reason: models.ScopeReasonRecordWindowOpened}, nil
+	return models.ScopeAck{Reason: models.ScopeReasonRecordWindowOpened, Attempt: attempt}, nil
 }
 
 // EndScope closes a per-test scope. In record mode it records the [begin, now]
@@ -136,6 +232,10 @@ func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 		return a.UpdateMockParams(ctx, models.MockFilterParams{
 			AfterTime:  models.BaseTime,
 			BeforeTime: time.Now(),
+			// Same reason as BeginScope: this restore rebuilds the pool from the
+			// pristine store, so without the flag it hands the next test every
+			// mock this session has already served.
+			AgentOwnsConsumed: true,
 		})
 	}
 
@@ -151,6 +251,99 @@ func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 	return nil
 }
 
+// resolveOwner names the per-test scope that owns a capture made by worker `pid`
+// at request time `ts`. This is the record-time half of the mock identity
+// (owner, n): it runs while the scopes are still live, so a capture is stamped
+// with its owner as it leaves the agent rather than being bucketed by timestamp
+// after the fact.
+//
+// The rule is deliberately the SAME one the CLI's post-run correlateScopes uses
+// (pkg/service/mock/record.go) so the two can be cross-checked against each
+// other: the innermost -- latest-started -- window containing ts wins, and a
+// window recorded by this exact worker is preferred over one from another
+// worker, so overlapping parallel windows never steal each other's captures.
+//
+// The one thing it can see that correlateScopes cannot is a window that is
+// still OPEN: a.workerOpen holds a start with no end yet, and is treated as
+// extending to +infinity. That is the common case here -- the mock is usually
+// emitted while its own test is still running.
+//
+// Returns "" when no window contains ts (a boot-time handshake before the first
+// scope, a runner that declares no scopes at all, or a capture whose kind never
+// stamps ReqTimestampMock). "" is the unowned namespace and keeps the legacy
+// mock-N naming, so every un-scoped recording is unaffected.
+func (a *Agent) resolveOwner(pid uint32, ts time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+
+	// sameWorkerOnly restricts the scan to windows this worker opened. Scope
+	// names are non-empty (BeginScope rejects ""), so "" is a safe sentinel.
+	scan := func(sameWorkerOnly bool) string {
+		best := ""
+		var bestStart time.Time
+		for _, w := range a.scopeWindows {
+			if sameWorkerOnly && w.PID != pid {
+				continue
+			}
+			if ts.Before(w.Start) || ts.After(w.End) {
+				continue
+			}
+			if best == "" || w.Start.After(bestStart) {
+				best, bestStart = w.Name, w.Start
+			}
+		}
+		for k, start := range a.workerOpen {
+			if sameWorkerOnly && k.pid != pid {
+				continue
+			}
+			if ts.Before(start) {
+				continue
+			}
+			if best == "" || start.After(bestStart) {
+				best, bestStart = k.name, start
+			}
+		}
+		return best
+	}
+
+	if pid != 0 {
+		if owner := scan(true); owner != "" {
+			return owner
+		}
+	}
+	return scan(false)
+}
+
+// resetConsumedForScope un-consumes exactly the mocks that belong to `name`, so
+// a retried test replays its own tape from the start. It returns how many
+// entries the ledger actually dropped, and whether the reset ran at all.
+//
+// `names` is this scope's mappings.yaml entry, and that is what makes the reset
+// SCOPE-PRECISE. The cumulative ledger is global, so clearing it wholesale would
+// re-arm every mock the suite has consumed so far — the resurrection bug the
+// ledger was introduced to fix. Passing only this scope's names means the retry
+// gets its own tape back and no other test's.
+//
+// A proxy without the optional resetter reports false, so the acknowledgement
+// says the reset did not happen rather than implying it did.
+func (a *Agent) resetConsumedForScope(ctx context.Context, name string, names []string) (int, bool) {
+	r, ok := a.Proxy.(coreAgent.ConsumedMockResetter)
+	if !ok {
+		a.logger.Debug("retry reset unavailable: this proxy cannot reset consumed mocks", zap.String("test", name))
+		return 0, false
+	}
+	restored, err := r.ResetConsumedMocks(ctx, names)
+	if err != nil {
+		a.logger.Debug("failed to reset this scope's consumed mocks for a retry", zap.String("test", name), zap.Error(err))
+		return 0, false
+	}
+	a.logger.Debug("scope begin: retry, re-arming this test's own mocks", zap.String("test", name), zap.Int("scope_mocks", len(names)), zap.Int("restored", restored))
+	return restored, true
+}
+
 // GetScopeWindows returns the per-test windows collected this record session,
 // consumed by the CLI to build mappings.yaml.
 func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error) {
@@ -163,9 +356,15 @@ func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error)
 
 // SetScopeTable installs the replay-time per-test name→mock-names table the CLI
 // read from mappings.yaml.
-func (a *Agent) SetScopeTable(_ context.Context, table map[string][]string) error {
+// strictNoRecordingSentinel is a mock name that cannot exist. Under strict
+// scoping a per-worker view is narrowed to this rather than to an empty list,
+// because an empty list means "clear the scope" and would serve everything.
+const strictNoRecordingSentinel = "\x00keploy-strict-no-recording"
+
+func (a *Agent) SetScopeTable(_ context.Context, table map[string][]string, strict bool) error {
 	a.scopeMu.Lock()
 	a.scopeTable = table
+	a.scopeStrict = strict
 	a.scopeMu.Unlock()
 
 	// Push the union of every test's mapped mock names to the proxy so a scoped
@@ -182,6 +381,11 @@ func (a *Agent) SetScopeTable(_ context.Context, table map[string][]string) erro
 		}
 	}
 	a.SetMappedUniverse(universe)
+	// Cached for BeginScope's pid == 0 branch, which needs the same set to tell
+	// "another test's mock" from "belongs to no test" when it narrows the pool.
+	a.scopeMu.Lock()
+	a.mappedUniverse = universe
+	a.scopeMu.Unlock()
 	return nil
 }
 
@@ -198,5 +402,15 @@ func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 	a.scopeMu.Lock()
 	loaded := a.loadedMocks
 	a.scopeMu.Unlock()
-	return models.MockStats{Loaded: loaded}, nil
+	stats := models.MockStats{Loaded: loaded}
+	// Consumed was never populated, so every reader saw a literal 0 while the
+	// end-of-run summary reported the real figure. That silently disarmed the
+	// fixture's strict-scope gate in BOTH directions: `after > before` is 0 > 0,
+	// and MockStats has no omitempty so the "count unknowable" branch could not
+	// fire either. GetPersistentConsumed is the cumulative, NON-draining ledger
+	// -- reading it here leaves the summary's drain untouched.
+	if reader, ok := a.Proxy.(coreAgent.ConsumedStateReader); ok {
+		stats.Consumed = len(reader.GetPersistentConsumed())
+	}
+	return stats, nil
 }

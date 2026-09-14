@@ -24,9 +24,13 @@ type stubScopeSvc struct {
 	agent.Service
 	ack models.ScopeAck
 	err error
+	// gotAttempt records the attempt number the handler forwarded, so a test
+	// can assert the retry field is not silently dropped on the wire.
+	gotAttempt int
 }
 
-func (s *stubScopeSvc) BeginScope(_ context.Context, _ string, _ int) (models.ScopeAck, error) {
+func (s *stubScopeSvc) BeginScope(_ context.Context, _ string, _, attempt int) (models.ScopeAck, error) {
+	s.gotAttempt = attempt
 	return s.ack, s.err
 }
 
@@ -114,5 +118,21 @@ func TestHandleScopeBeginPropagatesError(t *testing.T) {
 	rr, _ := postScopeBegin(t, svc, `{"name":"alpha"}`)
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d, want 500", rr.Code)
+	}
+}
+
+// TestHandleScopeBeginForwardsAttempt pins the retry field end to end. The
+// Playwright fixture marks `attempt` REQUIRED whenever retries > 0: attempt 0
+// consumes the tape, so a retry that does not re-arm misses on every call. An
+// agent build that parsed the field and dropped it answered 200 anyway, which
+// is exactly the silent failure this asserts against.
+func TestHandleScopeBeginForwardsAttempt(t *testing.T) {
+	svc := &stubScopeSvc{ack: models.ScopeAck{Status: "ok", Scoped: true}}
+	rec, _ := postScopeBegin(t, svc, `{"name":"alpha","pid":0,"attempt":2}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if svc.gotAttempt != 2 {
+		t.Fatalf("attempt: got %d, want 2 -- the handler dropped the retry field", svc.gotAttempt)
 	}
 }

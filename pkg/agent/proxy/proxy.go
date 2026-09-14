@@ -3781,6 +3781,17 @@ func (p *Proxy) GetPersistentConsumed() map[string]models.MockState {
 	return m.GetPersistentConsumed()
 }
 
+// ResetConsumedMocks clears the cumulative consumption ledger for exactly the
+// named mocks, so a retried test's own recordings become servable again without
+// disturbing any other test's. See coreAgent.ConsumedMockResetter.
+func (p *Proxy) ResetConsumedMocks(_ context.Context, names []string) (int, error) {
+	m := p.getMockManager()
+	if m == nil {
+		return 0, fmt.Errorf("mock manager not found to reset consumed mocks")
+	}
+	return m.ResetConsumedMocks(names), nil
+}
+
 // testErrorAccumulator collects errors during an active test case.
 // It is goroutine-safe via an internal mutex.
 type testErrorAccumulator struct {
@@ -4115,6 +4126,14 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 		// "not established", which is the truth.
 		if r.DestinationScope != models.DestinationScopeUnknown {
 			fields = append(fields, zap.String("destination_scope", r.DestinationScope))
+		}
+		// Which logical call missed. Emitted only when the protocol could
+		// establish it: on a multiplexed endpoint (one GraphQL POST /query for
+		// every operation) "actual" names the transport, not the call, so
+		// triage cannot tell a background poll from a new call a code change
+		// introduced. Absent means "not established", never "nothing there".
+		if r.ReqIdentity != "" {
+			fields = append(fields, zap.String("req_identity", r.ReqIdentity))
 		}
 		p.logger.Warn("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {

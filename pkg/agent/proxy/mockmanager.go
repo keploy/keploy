@@ -2523,6 +2523,34 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	return nil
 }
 
+// ResetConsumedMocks un-consumes exactly the named mocks in the cumulative
+// ledger and reports how many entries it actually removed.
+//
+// Scope-precise by construction: the caller passes the mock names ONE scope
+// owns (its mappings.yaml entry), so no other scope's consumption is touched.
+// Clearing the ledger wholesale would resurrect every mock the session has
+// served so far, which is precisely the bug the ledger exists to prevent.
+//
+// Only consumedPersistent is reset. consumedList/consumedIndex — the drain the
+// CLI's end-of-run summary counts — are deliberately left alone: that summary
+// answers "how many distinct mocks did this session serve", which a re-run of
+// the same test does not change (a re-serve updates the entry in place).
+func (m *MockManager) ResetConsumedMocks(names []string) int {
+	if len(names) == 0 {
+		return 0
+	}
+	m.consumedMu.Lock()
+	defer m.consumedMu.Unlock()
+	removed := 0
+	for _, name := range names {
+		if _, ok := m.consumedPersistent[name]; ok {
+			delete(m.consumedPersistent, name)
+			removed++
+		}
+	}
+	return removed
+}
+
 // GetConsumedMocks returns and drains the list of mocks that were consumed
 // since the last call, in the order they were first intercepted from the
 // network.

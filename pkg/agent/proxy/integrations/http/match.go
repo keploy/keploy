@@ -1460,12 +1460,14 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
 			return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+				WithReqIdentity(mismatch.ExtractReqIdentity(liveBody)).
 				WithDestination(dest).
 				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build()
 		}
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
 			return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+				WithReqIdentity(mismatch.ExtractReqIdentity(liveBody)).
 				WithDestination(dest).
 				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build()
 		}
@@ -1490,6 +1492,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 
 	if candidateCount == 0 && len(schemaSurvivors) == 0 {
 		return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			WithReqIdentity(mismatch.ExtractReqIdentity(liveBody)).
 			WithDestination(dest).
 			WithPhase(models.MatchPhaseNoMocks, 0).Build()
 	}
@@ -1519,6 +1522,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	closestMock := pickClosestCandidate(request, schemaSurvivors, httpMocks)
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
 		return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			WithReqIdentity(mismatch.ExtractReqIdentity(liveBody)).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDests).
 			WithPhase(phase, candidateCount).Build()
@@ -1573,6 +1577,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	redactFieldDiffs(fieldDiffs, closestMock.Noise)
 
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		WithReqIdentity(mismatch.ExtractReqIdentity(liveBody)).
 		WithDestination(dest).
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).

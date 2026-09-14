@@ -21,6 +21,7 @@
 package mismatch
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"sort"
@@ -75,6 +76,13 @@ func NewReport(protocol, actualSummary string) *Builder {
 // HTTP Host authority, or a "host:port") so the report and its log line say
 // WHICH upstream missed — method+path alone collide across hosts when an app
 // calls several services.
+// WithReqIdentity records a short fingerprint of WHICH logical call missed.
+// See models.MockMismatchReport.ReqIdentity for why "POST /query" is not enough.
+func (b *Builder) WithReqIdentity(id string) *Builder {
+	b.report.ReqIdentity = id
+	return b
+}
+
 func (b *Builder) WithDestination(dest string) *Builder {
 	b.report.Destination = dest
 	return b
@@ -519,4 +527,40 @@ func normalizeDestination(dest string) (host string, ok bool) {
 		return "", false
 	}
 	return host, true
+}
+
+// identityKeys are request-body fields that name WHICH logical call this is,
+// as opposed to its arguments. `operationName` is GraphQL's (Apollo sends it on
+// every request); the others are the common JSON-RPC / batch-API equivalents.
+// Deliberately a fixed list: a heuristic that guessed would produce a different
+// identity for the same call on different runs, which is worse than none.
+var identityKeys = []string{"operationName", "operation", "method", "action", "type", "event"}
+
+// ExtractReqIdentity pulls identity KEYS (never values, never the whole body)
+// out of a JSON request body, so a miss on a multiplexed endpoint says which
+// call it was. Returns "" when the body is not JSON or carries no identity key
+// — an empty field is honest, a guessed one is not.
+func ExtractReqIdentity(body []byte) string {
+	const maxScan = 64 << 10 // don't parse an unbounded body on the miss path
+	if len(body) == 0 || len(body) > maxScan {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	for _, k := range identityKeys {
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		if sv, ok := v.(string); ok && sv != "" {
+			if len(sv) > 80 {
+				sv = sv[:80] + "..."
+			}
+			parts = append(parts, k+"="+sv)
+		}
+	}
+	return strings.Join(parts, " ")
 }

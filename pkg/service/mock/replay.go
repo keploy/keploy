@@ -3,8 +3,6 @@ package mock
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -147,7 +145,7 @@ func (m *mockService) Replay(ctx context.Context) error {
 
 	// 4. Hand the agent the per-test table so the runner's /agent/scope/begin
 	//    calls can narrow the served pool per test (best-effort / optional).
-	m.pushScopeTable(ctx, name)
+	m.pushScopeTable(ctx, name, filtered, unfiltered)
 
 	// 5. Stage the whole pool as the initial serving window (BaseTime..now, no
 	//    mapping) — same call RunTestSet makes before the first test.
@@ -205,12 +203,13 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 	if len(captured) == 0 {
 		return
 	}
-	// Seed the name counter to the set's highest existing mock-N so appended
-	// mocks get fresh names (InsertMock always renames to mock-<counter+1>);
-	// without this the replay-side counter starts at 0 and appended mocks reuse
-	// mock-0, mock-1, … colliding with the recorded set (consumed-mock tracking
-	// and mappings both key on name).
-	m.mockDB.SetCounterID(m.highestMockIndex(ctx, name))
+	// Prime the name sequences from what is already on disk, so appended mocks
+	// get fresh names (InsertMock always renames); without this the replay-side
+	// counters start at 0 and every appended mock reuses a recorded name,
+	// colliding with the set (consumed-mock tracking and mappings both key on
+	// name). Per owner, since a name's ordinal counts within its owner -- one
+	// int64 could only ever have seeded one of the sequences.
+	m.mockDB.SeedCounters(m.existingMocks(ctx, name))
 	appended := 0
 	for _, mk := range captured {
 		if mk == nil {
@@ -225,51 +224,103 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 	if appended > 0 {
 		m.logger.Info("appended new dependency calls to the mock set (--on-miss record)",
 			zap.Int("new", appended), zap.String("mock-set", name),
-			zap.String("next_step", "review the added mocks and commit them; the next replay serves them without the real dependency"))
-		if err := m.store.Push(ctx, name); err != nil {
-			m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
-		}
+			zap.String("next_step", "replay again to serve them from the set; run `keploy mock record` and publish when you want them shared"))
 	}
+
+	// Deliberately NOT published.
+	//
+	// --on-miss record is a local affordance: it appends whatever the runner
+	// happened to call so the next replay stops missing. Those captures carry no
+	// owner -- nothing attributes them to a test -- so publishing them would put
+	// mocks belonging to no test into the shared set, where every test can be
+	// served them as overflow. From an unreviewed branch, on a developer's
+	// laptop, into what everyone else replays against.
+	//
+	// Sharing a recording is `keploy mock record` followed by an explicit
+	// publish. That path attributes each capture to the test that made it.
 }
 
-// highestMockIndex returns the largest N across the set's existing "mock-N"
-// names, or -1 when the set is empty / has no mock-N names. Seeding the counter
-// to this value makes the next InsertMock name its mock "mock-<N+1>".
-func (m *mockService) highestMockIndex(ctx context.Context, name string) int64 {
+// existingMocks loads every mock already recorded in the set, across both pools.
+// Handed to MockDB.SeedCounters so an append continues each name sequence past
+// what is on disk.
+//
+// This replaces highestMockIndex, which parsed the "mock-" prefix here and
+// returned a single highest N. That shape cannot survive owner-scoped names:
+// there is no longer one sequence to be highest in, and the parsing belongs next
+// to the mint that defines the format, not in the CLI. Errors are ignored for
+// the same reason they were before -- an unreadable set means no seed, and the
+// append is best-effort.
+func (m *mockService) existingMocks(ctx context.Context, name string) []*models.Mock {
 	all := map[string]bool{}
 	filtered, _ := m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all)
 	unfiltered, _ := m.mockDB.GetUnFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all)
-	highest := int64(-1)
-	consider := func(mocks []*models.Mock) {
-		for _, mk := range mocks {
-			if mk == nil {
-				continue
-			}
-			if n, ok := strings.CutPrefix(mk.Name, "mock-"); ok {
-				if idx, err := strconv.ParseInt(n, 10, 64); err == nil && idx > highest {
-					highest = idx
-				}
-			}
-		}
-	}
-	consider(filtered)
-	consider(unfiltered)
-	return highest
+	return append(filtered, unfiltered...)
 }
 
-// pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)
-// and hands the agent the name→mock-names table so per-test scoping works.
-func (m *mockService) pushScopeTable(ctx context.Context, name string) {
-	if m.mappingDB == nil {
-		return
+// deriveScopeTable builds the per-test table from the mocks themselves.
+//
+// Every mock already carries the scope that captured it, so the table is a
+// regrouping of data we are holding, not a second source of truth that can go
+// missing. A mock with NO owner is deliberately left out: absence from the
+// table is what makes it shared overflow, reachable by every test.
+//
+// Order within an owner is preserved -- the tape is replayed in the order it
+// was recorded, and the caller hands us the mocks in on-disk order.
+func deriveScopeTable(slices ...[]*models.Mock) map[string][]string {
+	table := map[string][]string{}
+	for _, slice := range slices {
+		for _, mk := range slice {
+			if mk == nil || mk.Owner == "" {
+				continue
+			}
+			table[mk.Owner] = append(table[mk.Owner], mk.Name)
+		}
 	}
+	return table
+}
+
+// pushScopeTable hands the agent the test-name→mock-names table so the runner's
+// /agent/scope/begin calls can narrow the served pool per test.
+//
+// The table is DERIVED from each mock's owner. mappings.yaml remains only as a
+// fallback for sets recorded before mocks carried an owner; it is no longer
+// transported, and a set whose mocks are owned needs no such file to be scoped.
+func (m *mockService) pushScopeTable(ctx context.Context, name string, mocks ...[]*models.Mock) {
 	pusher, ok := m.instrumentation.(ScopePusher)
 	if !ok {
 		return
 	}
+
+	source := "owner"
+	table := deriveScopeTable(mocks...)
+	if len(table) == 0 {
+		source = "mappings.yaml"
+		table = m.scopeTableFromMappings(ctx, name)
+	}
+	if len(table) == 0 {
+		return
+	}
+
+	if err := pusher.PushScopeTable(ctx, table, m.config.Mock.StrictScope); err != nil {
+		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
+		return
+	}
+	m.logger.Info("per-test scoping enabled",
+		zap.Int("tests", len(table)),
+		zap.Bool("strict_scope", m.config.Mock.StrictScope),
+		zap.String("derived_from", source),
+		zap.String("mock-set", name))
+}
+
+// scopeTableFromMappings is the pre-Owner fallback: a set recorded by a build
+// that did not stamp owners still has its mappings.yaml on disk.
+func (m *mockService) scopeTableFromMappings(ctx context.Context, name string) map[string][]string {
+	if m.mappingDB == nil {
+		return nil
+	}
 	mappings, meaningful, err := m.mappingDB.Get(ctx, name)
 	if err != nil || !meaningful || len(mappings) == 0 {
-		return
+		return nil
 	}
 	table := make(map[string][]string, len(mappings))
 	for testName, entries := range mappings {
@@ -279,11 +330,7 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) {
 		}
 		table[testName] = names
 	}
-	if err := pusher.PushScopeTable(ctx, table); err != nil {
-		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
-		return
-	}
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.String("mock-set", name))
+	return table
 }
 
 // ReplayOutcome is what a replay produced, for a wrapping build that meters or

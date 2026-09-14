@@ -4,7 +4,9 @@ package mockdb
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/gob"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,11 +82,35 @@ func (ys *MockYaml) useGobFormat() bool {
 }
 
 type MockYaml struct {
-	MockPath  string
-	MockName  string
-	Logger    *zap.Logger
-	idCounter int64
-	Format    yaml.Format
+	MockPath string
+	MockName string
+	Logger   *zap.Logger
+	Format   yaml.Format
+
+	// nameMu guards the mock-name minting state below. A single atomic counter
+	// used to be enough because every mock in a run drew from one sequence;
+	// numbering is now per owner, which needs a map.
+	nameMu sync.Mutex
+	// nextByOwner is the next ordinal to hand out, keyed by name PREFIX --
+	// unownedPrefix for captures made outside any scope (the whole of
+	// `keploy record`), and the owner's hash otherwise.
+	nextByOwner map[string]int64
+	// hashToOwner is every owner string this session has minted a name for,
+	// keyed by its hash. It exists to turn a truncated-sha256 collision from a
+	// silent data loss into a hard error -- see mintName.
+	hashToOwner map[string]string
+
+	// partialRecord makes a re-record replace only the owners it actually
+	// captures, leaving every other owner's file untouched. The first write to
+	// an owner's file in this run truncates it, so that owner is REPLACED whole
+	// rather than appended to; owners this run never sees keep their previous
+	// recording. Without it a re-record of one test has to wipe the set, which
+	// is what made partial re-record impossible.
+	partialRecord bool
+	// truncatedThisRun tracks which owner files this run has already reset, so
+	// the truncate happens once per file and the rest of that owner's captures
+	// append normally.
+	truncatedThisRun map[string]bool
 
 	// MockFormat is the per-instance record-time format (yaml vs gob),
 	// orthogonal to Format (the yaml/json storage encoding). Empty means
@@ -166,11 +194,10 @@ func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
 
 func NewWithFormat(Logger *zap.Logger, mockPath string, mockName string, format yaml.Format) *MockYaml {
 	return &MockYaml{
-		MockPath:  mockPath,
-		MockName:  mockName,
-		Logger:    Logger,
-		idCounter: -1,
-		Format:    format,
+		MockPath: mockPath,
+		MockName: mockName,
+		Logger:   Logger,
+		Format:   format,
 	}
 }
 
@@ -852,12 +879,59 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	return nil
 }
 
+// SetPartialRecord switches this recorder into replace-only-what-you-capture
+// mode. See the partialRecord field.
+func (ys *MockYaml) SetPartialRecord(on bool) {
+	ys.nameMu.Lock()
+	defer ys.nameMu.Unlock()
+	ys.partialRecord = on
+	ys.truncatedThisRun = nil
+}
+
+// resetOwnerFileOnce removes an owner's file the first time this run writes to
+// it, so the owner is replaced whole instead of accumulating a second copy of
+// its mocks on top of the previous recording.
+func (ys *MockYaml) resetOwnerFileOnce(mockPath, mockFileName string) error {
+	ys.nameMu.Lock()
+	if !ys.partialRecord {
+		ys.nameMu.Unlock()
+		return nil
+	}
+	key := filepath.Join(mockPath, mockFileName)
+	if ys.truncatedThisRun[key] {
+		ys.nameMu.Unlock()
+		return nil
+	}
+	if ys.truncatedThisRun == nil {
+		ys.truncatedThisRun = map[string]bool{}
+	}
+	ys.truncatedThisRun[key] = true
+	ys.nameMu.Unlock()
+
+	for _, ext := range []string{yaml.FormatYAML.FileExtension(), yaml.FormatJSON.FileExtension(), "gob"} {
+		if err := os.Remove(key + "." + ext); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
-	mock.Name = fmt.Sprint("mock-", ys.getNextID())
+	name, err := ys.mintName(mock.Owner)
+	if err != nil {
+		return err
+	}
+	mock.Name = name
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
-		mockFileName = "mocks"
+		// One file per owner. Replacing one test's recording is then a whole-file
+		// write, so a re-record never has to edit around the other tests sharing
+		// the file -- which is what forced `mock record` to wipe the set.
+		mockFileName = ownerFileName(mock.Owner)
+	}
+	if err := ys.resetOwnerFileOnce(mockPath, mockFileName); err != nil {
+		return err
 	}
 	// gob is the binary record-time format (async writer, ~28% CPU win
 	// over yaml). When selected it is mutually exclusive with yaml/json,
@@ -1387,12 +1461,14 @@ func readGobMocks(path string) ([]*models.Mock, error) {
 }
 
 func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
+	return ys.forEachMockFile(testSetID, func(mockFileName string) ([]*models.Mock, error) {
+		return ys.getFilteredMocksFile(ctx, testSetID, mockFileName, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
+	})
+}
+
+func (ys *MockYaml) getFilteredMocksFile(ctx context.Context, testSetID string, mockFileName string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
 
 	var tcsMocks = make([]*models.Mock, 0)
-	mockFileName := "mocks"
-	if ys.MockName != "" {
-		mockFileName = ys.MockName
-	}
 
 	path := filepath.Join(ys.MockPath, testSetID)
 	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
@@ -1550,13 +1626,14 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 }
 
 func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
+	return ys.forEachMockFile(testSetID, func(mockName string) ([]*models.Mock, error) {
+		return ys.getUnFilteredMocksFile(ctx, testSetID, mockName, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
+	})
+}
+
+func (ys *MockYaml) getUnFilteredMocksFile(ctx context.Context, testSetID string, mockName string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
 
 	var configMocks = make([]*models.Mock, 0)
-
-	mockName := "mocks"
-	if ys.MockName != "" {
-		mockName = ys.MockName
-	}
 
 	path := filepath.Join(ys.MockPath, testSetID)
 	lock := getMockFileLock(mockFileLockKey(path, mockName, ys.Format))
@@ -1666,8 +1743,64 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	return unfiltered, nil
 }
 
-func (ys *MockYaml) getNextID() int64 {
-	return atomic.AddInt64(&ys.idCounter, 1)
+// unownedPrefix is the name prefix for a capture that belongs to no owner --
+// every `keploy record` mock, and any `keploy mock record` capture made outside
+// a declared scope. Its sequence is the original one, so those sets are named
+// mock-0, mock-1, ... exactly as before.
+const unownedPrefix = "mock"
+
+// ownerHashLen is how much of the owner's sha256 goes into the name. 12 hex
+// characters is 48 bits; a set would need on the order of 2^24 (~17 million)
+// distinct owners before a birthday collision became likely, against a realistic
+// ceiling in the thousands. It is short enough to keep a name readable and long
+// enough that the check in mintName should never fire -- but that check is what
+// makes the length a safety property rather than a bet.
+const ownerHashLen = 12
+
+func ownerHash(owner string) string {
+	sum := sha256.Sum256([]byte(owner))
+	return hex.EncodeToString(sum[:])[:ownerHashLen]
+}
+
+// mintName issues the next name for a capture belonging to owner.
+//
+// Identity is (owner, n): n counts WITHIN the owner, so a name only moves when
+// that owner's own recording changes. The whole point is that adding, removing
+// or reordering OTHER owners cannot renumber this one -- which is exactly what
+// an index into the run does today.
+//
+// An empty owner takes the original path, byte for byte: "mock-" + a single
+// run-wide sequence. `keploy record` and `keploy test` -- integration testing,
+// a different product sharing this storage layer -- never set Owner, so they are
+// entirely unaffected.
+//
+// The collision check is not decoration. Nine call sites key on a mock name, one
+// of which deletes mocks from disk; two owners sharing a name would silently
+// merge their sequences and lose data. Every owner string is in hand at mint
+// time, so the probabilistic bound on a truncated hash can be replaced with a
+// deterministic check.
+func (ys *MockYaml) mintName(owner string) (string, error) {
+	ys.nameMu.Lock()
+	defer ys.nameMu.Unlock()
+
+	prefix := unownedPrefix
+	if owner != "" {
+		prefix = ownerHash(owner)
+		if prev, ok := ys.hashToOwner[prefix]; ok && prev != owner {
+			return "", fmt.Errorf("mockdb: refusing to mint a mock name: owners %q and %q both hash to %q, so their recordings would share a name and silently overwrite each other; rename one of the test scopes, or raise ownerHashLen", prev, owner, prefix)
+		}
+		if ys.hashToOwner == nil {
+			ys.hashToOwner = make(map[string]string)
+		}
+		ys.hashToOwner[prefix] = owner
+	}
+
+	if ys.nextByOwner == nil {
+		ys.nextByOwner = make(map[string]int64)
+	}
+	n := ys.nextByOwner[prefix]
+	ys.nextByOwner[prefix] = n + 1
+	return fmt.Sprintf("%s-%d", prefix, n), nil
 }
 
 func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.HTTPDoc, error) {
@@ -1727,18 +1860,33 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
 
-	// Delete all three mock-file variants for this test set:
-	//   - mocks.yaml / mocks.json (text formats — either may be present
-	//     depending on StorageFormat at record time, and a stale yaml
-	//     must not shadow a fresh json rerecord, or vice versa).
-	//   - mocks.gob (binary format — GetFilteredMocks prefers it when
-	//     present, so leaving it around defeats a yaml/json refresh).
-	// Missing files are tolerated; only permission/ownership errors
-	// surface here.
-	candidates := []string{
-		filepath.Join(path, mockFileName+"."+yaml.FormatYAML.FileExtension()),
-		filepath.Join(path, mockFileName+"."+yaml.FormatJSON.FileExtension()),
-		filepath.Join(path, mockFileName+".gob"),
+	// A set is now N files (one per owner, plus the unowned mocks file), each of
+	// which may exist in any of three formats:
+	//   - .yaml / .json (text — either may be present depending on StorageFormat
+	//     at record time, and a stale yaml must not shadow a fresh json
+	//     rerecord, or vice versa).
+	//   - .gob (binary — GetFilteredMocks prefers it when present, so leaving
+	//     one around defeats a yaml/json refresh).
+	// Enumerating what is actually on disk, rather than deriving names from the
+	// owners we happen to know about, is what makes the clear total: an owner
+	// that the next recording will not produce still has its file removed.
+	// Missing files are tolerated; only permission/ownership errors surface here.
+	bases := []string{mockFileName}
+	if ys.MockName == "" {
+		if onDisk, err := mockFileBases(path); err != nil {
+			return err
+		} else if len(onDisk) > 0 {
+			bases = onDisk
+		}
+	}
+
+	var candidates []string
+	for _, base := range bases {
+		candidates = append(candidates,
+			filepath.Join(path, base+"."+yaml.FormatYAML.FileExtension()),
+			filepath.Join(path, base+"."+yaml.FormatJSON.FileExtension()),
+			filepath.Join(path, base+".gob"),
+		)
 	}
 	for _, candidate := range candidates {
 		validated, err := yaml.ValidatePath(candidate)
@@ -1756,20 +1904,66 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	return nil
 }
 
-func (ys *MockYaml) GetCurrMockID() int64 {
-	return atomic.LoadInt64(&ys.idCounter)
-}
-
+// ResetCounterID starts a fresh recording session: every sequence restarts at 0.
+// The signature is unchanged from when there was one counter -- callers and test
+// stubs are unaffected -- but the body now clears the whole per-owner map.
 func (ys *MockYaml) ResetCounterID() {
-	atomic.StoreInt64(&ys.idCounter, -1)
+	ys.nameMu.Lock()
+	defer ys.nameMu.Unlock()
+	ys.nextByOwner = nil
+	ys.hashToOwner = nil
 }
 
-// SetCounterID seeds the mock-name counter so the NEXT InsertMock names its
-// mock "mock-<id+1>". Used when APPENDING to an existing set (the `keploy mock
-// replay --on-miss record` incremental-refresh path) so newly-captured mocks
-// don't reuse names already present on disk. Recording a fresh set uses
-// ResetCounterID (seed -1 → first mock is mock-0); appending seeds from the
-// set's highest existing index instead.
-func (ys *MockYaml) SetCounterID(id int64) {
-	atomic.StoreInt64(&ys.idCounter, id)
+// SeedCounters primes the name sequences from a set already on disk so the next
+// InsertMock continues PAST it instead of colliding with it. Used when APPENDING
+// (`keploy mock replay --on-miss record`); a fresh recording calls ResetCounterID
+// instead and starts every sequence at 0.
+//
+// It replaces the previous SetCounterID(int64), which could only seed one
+// sequence: with numbering per owner there is no single "the" counter, and an
+// int64 cannot say "continue owner A at 4 and owner B at 11". Seeding from the
+// NAMES rather than from the owners is deliberate -- a name on disk is what a new
+// mint must not collide with, whether or not its owner is still known.
+func (ys *MockYaml) SeedCounters(existing []*models.Mock) {
+	ys.nameMu.Lock()
+	defer ys.nameMu.Unlock()
+	if ys.nextByOwner == nil {
+		ys.nextByOwner = make(map[string]int64)
+	}
+	for _, mk := range existing {
+		if mk == nil {
+			continue
+		}
+		prefix, n, ok := splitMockName(mk.Name)
+		if !ok {
+			continue
+		}
+		if n+1 > ys.nextByOwner[prefix] {
+			ys.nextByOwner[prefix] = n + 1
+		}
+		// Keep the collision check meaningful across an append: a prefix already
+		// on disk is claimed by the owner that wrote it.
+		if mk.Owner != "" && prefix == ownerHash(mk.Owner) {
+			if ys.hashToOwner == nil {
+				ys.hashToOwner = make(map[string]string)
+			}
+			ys.hashToOwner[prefix] = mk.Owner
+		}
+	}
+}
+
+// splitMockName splits a minted name "<prefix>-<n>" into its namespace and
+// ordinal. prefix is unownedPrefix for a legacy / unowned mock ("mock-7") and an
+// owner hash otherwise ("3f2a1b9c4d5e-7"). Returns ok=false for anything this
+// package did not mint, which is then ignored for seeding purposes.
+func splitMockName(name string) (string, int64, bool) {
+	i := strings.LastIndexByte(name, '-')
+	if i <= 0 || i == len(name)-1 {
+		return "", 0, false
+	}
+	n, err := strconv.ParseInt(name[i+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return name[:i], n, true
 }

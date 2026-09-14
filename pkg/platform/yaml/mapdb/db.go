@@ -2,6 +2,7 @@ package mapdb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 )
 
@@ -146,6 +148,31 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // "no_mocks" for the affected tests. Batching keeps the cost linear so the
 // stream is never the bottleneck.
 func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error {
+	return db.upsertBatch(ctx, testSetID, byTest, false)
+}
+
+// UpsertBatchReplacing is UpsertBatch except that a test already present on disk
+// has its mock list REPLACED rather than unioned.
+//
+// The two callers need opposite things, and the difference is in how each one
+// produces its input. The integration recorder (`keploy record`) receives a
+// test's mocks from the agent as a DELTA and may see several for the same test,
+// so unioning is the only way it accumulates a complete list. `keploy mock
+// record` writes each owner exactly once, from the whole run, so a union there
+// can only ever add back entries from a PREVIOUS recording of that same test --
+// names that this run has reissued to different captures.
+//
+// Whole-owner replacement is the other half of the (owner, n) identity: numbering
+// a mock within its owner is what makes the names stable, and replacing an
+// owner's list atomically is what stops a stale list from surviving alongside
+// them. Every tool that ships this identity pairs the two -- Jest snapshots,
+// pytest-recording, nock. MappingDb.Insert already replaces per test, so the
+// shape is not new here.
+func (db *MappingDb) UpsertBatchReplacing(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error {
+	return db.upsertBatch(ctx, testSetID, byTest, true)
+}
+
+func (db *MappingDb) upsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry, replace bool) error {
 	if len(byTest) == 0 {
 		return nil
 	}
@@ -204,7 +231,11 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	newIDs := make([]string, 0, len(byTest))
 	for testID := range byTest {
 		if i, ok := at[testID]; ok {
-			mapping.TestCases[i].Mocks = mergeMockEntries(mapping.TestCases[i].Mocks, byTest[testID])
+			if replace {
+				mapping.TestCases[i].Mocks = byTest[testID]
+			} else {
+				mapping.TestCases[i].Mocks = mergeMockEntries(mapping.TestCases[i].Mocks, byTest[testID])
+			}
 			continue
 		}
 		newIDs = append(newIDs, testID)
@@ -239,6 +270,36 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 		zap.String("testSetID", testSetID),
 		zap.Int("tests", len(byTest)))
 
+	return nil
+}
+
+// Delete removes this test-set's mapping file, in both text formats. Called at
+// the start of a re-record so the rewrite is a replacement, not a union:
+// UpsertBatch merges with what is on disk, while the recorder resets the mock
+// name counter every run (ResetCounterID), so without this a re-record leaves
+// the previous run's test entries behind pointing at mock-N names that now
+// belong to entirely different recordings. Missing files are tolerated; only
+// permission/ownership errors surface.
+func (db *MappingDb) Delete(_ context.Context, testSetID string) error {
+	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
+		return fmt.Errorf("rejecting mapping Delete: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..'): %w", testSetID, err)
+	}
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		validated, err := yaml.ValidatePath(filepath.Join(mappingPath, fileName+"."+format.FileExtension()))
+		if err != nil {
+			utils.LogError(db.logger, err, "failed to validate mapping path for delete", zap.String("at_path", mappingPath))
+			return err
+		}
+		if err := os.Remove(validated); err != nil && !os.IsNotExist(err) {
+			utils.LogError(db.logger, err, "failed to delete stale mapping file during re-record; check that the file is not read-only and that the current user owns the output directory", zap.String("path", validated))
+			return err
+		}
+	}
 	return nil
 }
 

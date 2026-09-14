@@ -138,7 +138,12 @@ type Agent struct {
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
 	scopeTable   map[string][]string    // replay: test name -> mock names (from mappings.yaml)
-	loadedMocks  int                    // replay: count of mocks stored, for /agent/mock/stats
+	// scopeStrict: see the strict block in BeginScope.
+	scopeStrict bool
+	// replay: union of every test's mapped mock names. A recorded mock absent
+	// from it belongs to no test, and stays visible to a scoped test as overflow.
+	mappedUniverse []string
+	loadedMocks    int // replay: count of mocks stored, for /agent/mock/stats
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -493,7 +498,47 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	// control frame it can't divert.
 	syncMock.Get().SetRevokeCapable(opts.SupportsDroppedRevoke)
 
-	return m, nil
+	// Stamp each capture with the scope that owns it, on its way out. This is
+	// the single channel every captured mock crosses, and the agent is the only
+	// process that holds the live scope map -- a.workerOpen still has the
+	// CURRENT test's window open when its own mock is emitted, which the CLI's
+	// after-the-fact correlation cannot see.
+	//
+	// The relay is deliberately unbuffered. The proxy's own drop-on-full budget
+	// lives in m (outgoingMockChanCap, a derived 64 MiB), and a second buffered
+	// hop would silently double the memory that budget was computed for; an
+	// unbuffered hand-off keeps exactly one extra mock in flight and leaves
+	// back-pressure identical to reading m directly.
+	//
+	// Both directions select on ctx so the goroutine cannot outlive the request:
+	// the /outgoing handler returns on client disconnect without draining, and a
+	// blocked send here would pin the relay (and the whole session) forever in a
+	// long-lived agent that serves several recordings.
+	owned := make(chan *models.Mock)
+	go func() {
+		defer utils.Recover(a.logger)
+		defer close(owned)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case mk, ok := <-m:
+				if !ok {
+					return
+				}
+				if mk != nil {
+					mk.Owner = a.resolveOwner(mk.SourcePID, mk.Spec.ReqTimestampMock)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case owned <- mk:
+				}
+			}
+		}
+	}()
+
+	return owned, nil
 }
 
 func (a *Agent) GetMapping(ctx context.Context) (<-chan models.TestMockMapping, error) {
@@ -968,6 +1013,18 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	case params.UseMappingBased && len(params.MockMapping) > 0:
 		mode = "mapping"
 		loaded, err = disk.LoadByNames(params.MockMapping)
+		// Also load the mocks that belong to NO test (absent from the mapping
+		// universe). They are the overflow tier the scoped test falls back to;
+		// without this they are not merely filtered out later, they are never
+		// read off disk at all. Appended AFTER the mapped ones so the ordering
+		// FilterTcsMocksMappingWithShared depends on is already correct here.
+		if err == nil && len(params.MockMappingUniverse) > 0 {
+			var shared []*models.Mock
+			shared, err = disk.LoadUnmapped(params.MockMappingUniverse)
+			if err == nil {
+				loaded = append(loaded, shared...)
+			}
+		}
 	// Gate on the CALLER's flag, not the agent's own config. The two are
 	// independent: params.StrictMockWindow is what the replayer resolved for
 	// this run and is what :1047 below already uses, while a.config is the
@@ -1152,7 +1209,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 
 	// Apply filtering based on parameters
 	if params.UseMappingBased && len(params.MockMapping) > 0 {
-		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
+		filteredMocks = pkg.FilterTcsMocksMappingWithShared(ctx, a.logger, originalFiltered, params.MockMapping, params.MockMappingUniverse)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
 	} else {
 		// Lax-mode promotion restoration: filterByTimeStamp moves

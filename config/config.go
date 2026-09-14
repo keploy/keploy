@@ -335,6 +335,20 @@ type MockCmd struct {
 	// RecordTimer optionally bounds a record session (e.g. "30s"); the wrapped
 	// runner exiting on its own ends recording first in almost all cases.
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	// StrictScope makes a test with no recording of its own serve NOTHING but
+	// the mocks no test owns, instead of falling back to the whole pool.
+	//
+	// Off by default on purpose. Integration testing WANTS the lenient
+	// behaviour: a mock there is a third party keeping the service alive, and
+	// one test's recording answering another's request is harmless. A browser
+	// suite asserts on the response, so the same fallback turns a test with no
+	// recording into a meaningless pass.
+	StrictScope bool `json:"strictScope" yaml:"strictScope" mapstructure:"strictScope"`
+	// Partial re-records only the tests the wrapped runner actually exercises,
+	// replacing those owners whole and leaving every other owner's recording on
+	// disk. Without it a re-record drops the previous set entirely, so fixing
+	// one test's mocks meant re-recording the whole suite.
+	Partial bool `json:"partial" yaml:"partial" mapstructure:"partial"`
 }
 
 type Contract struct {

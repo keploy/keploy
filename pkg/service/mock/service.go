@@ -86,7 +86,7 @@ type MissCapturer interface {
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopePusher interface {
-	PushScopeTable(ctx context.Context, table map[string][]string) error
+	PushScopeTable(ctx context.Context, table map[string][]string, strict bool) error
 }
 
 // MockDB reads and writes a named mock set on disk. It is exactly the surface
@@ -98,16 +98,27 @@ type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	ResetCounterID()
-	// SetCounterID seeds the mock-name counter so the next InsertMock names its
-	// mock "mock-<id+1>" — used to append without reusing existing names.
-	SetCounterID(id int64)
+	// SeedCounters primes the name sequences from mocks already on disk so an
+	// append does not reuse a name. Per owner, because numbering is per owner.
+	SeedCounters(existing []*models.Mock)
+	// SetPartialRecord makes a re-record replace only the owners it captures,
+	// leaving the rest of the set on disk.
+	SetPartialRecord(on bool)
 }
 
 // MappingDB persists and reads the per-test mock mapping for a set. Optional:
 // nil disables per-test scoping (suite-level record/replay).
 type MappingDB interface {
-	UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
+	// UpsertBatchReplacing writes each owner's mock list WHOLE. mock mode emits
+	// an owner exactly once per run, so a union could only resurrect names a
+	// previous recording gave to different captures. (Integration record uses
+	// UpsertBatch, which unions, because its agent emits a test's mocks as a
+	// delta -- see mapdb.)
+	UpsertBatchReplacing(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
+	// Delete removes the set's mapping file. Called at the start of a re-record
+	// so the rewrite is a replacement, not a union with the previous run.
+	Delete(ctx context.Context, testSetID string) error
 }
 
 // Store is the mock-set persistence backend. OSS uses FileStore (mocks live on
