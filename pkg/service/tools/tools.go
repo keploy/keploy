@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -287,6 +286,166 @@ func extractTarGzWithLimit(gzipPath, destDir string, limit int64) error {
 	return nil
 }
 
+// WriteMinimalConfig writes a keploy.yml holding only what a developer
+// DECIDED -- every setting that differs from Keploy's defaults -- topped by a
+// header saying so and naming the command that prints the rest.
+//
+// A generated config used to be the whole struct: 251 lines on a real repo,
+// of which two were the developer's. That buries the content, and it freezes
+// every default into a repository that never chose it, so a later release
+// cannot change the default for anyone who ran the generator.
+//
+// Deliberately NOT part of CreateConfig, which writes the document it is
+// given and must keep doing so: one caller (the enterprise "ignore this test"
+// resolver) reads keploy.yml into a ZERO-valued struct, edits one field and
+// writes it back, so a document that omits the defaults would come back with
+// every default replaced by a Go zero -- proxyPort 0, mocking off. Stripping
+// is a decision about a file a human will read, so it belongs where that
+// decision is made: the two places that GENERATE a config.
+//
+// cfgYAML is the config to write, or "" for "nothing has been decided yet".
+func WriteMinimalConfig(logger *zap.Logger, filePath string, cfgYAML string) error {
+	// Never THROUGH a link. os.WriteFile follows one, so a keploy.yml that is
+	// a symlink -- dangling or not -- sent the generated config to a path the
+	// user never named, outside the project, with no prompt and exit 0.
+	// Removing their link would be just as presumptuous, so say what is in
+	// the way and stop.
+	if info, lerr := os.Lstat(filePath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		// A link that resolves INSIDE the same directory is an ordinary
+		// layout (keploy.yml -> config/keploy.yml in a monorepo); refusing it
+		// took the generator away from those repositories entirely. What must
+		// not happen is writing through a link to somewhere the user did not
+		// name -- including a DANGLING one, where Stat reports "no file here"
+		// and the overwrite prompt never fires.
+		// Resolved AND absolute: "keploy.yml" and "." compare as strings
+		// otherwise, and every relative path looks like an escape.
+		target, rErr := resolveAbs(filePath)
+		dir, dErr := resolveAbs(filepath.Dir(filePath))
+		if rErr != nil || dErr != nil || !strings.HasPrefix(target, dir+string(os.PathSeparator)) {
+			return fmt.Errorf("%s is a symbolic link pointing outside %s; Keploy will not write through it -- remove the link, or generate the config elsewhere with --path",
+				filePath, filepath.Dir(filePath))
+		}
+	}
+	defaults, err := config.DefaultsYAML()
+	if err != nil {
+		utils.LogError(logger, err, "failed to read the defaults")
+		return err
+	}
+	if cfgYAML == "" {
+		cfgYAML = defaults
+	}
+	// `agent` is Keploy's to resolve per run. The defaults document does not
+	// publish it, so without this it reads as a key Keploy knows nothing
+	// about -- and 45 lines of internals survive into the developer's file.
+	cfgYAML, err = config.WithoutKey(cfgYAML, "agent")
+	if err != nil {
+		utils.LogError(logger, err, "failed to drop the agent block from the config")
+		return err
+	}
+	short, err := config.StripDefaults(cfgYAML, defaults)
+	if err != nil {
+		utils.LogError(logger, err, "failed to strip the defaults from the config")
+		return err
+	}
+	body := []byte(utils.ConfigHeader())
+	body = append(body, []byte(short)...)
+	body = append(body, []byte(placeholders(short))...)
+	body = append(body, []byte(utils.ConfigGuide)...)
+	// 0644, not 0777. keploy.yml carries `command:` -- the process Keploy
+	// executes -- so a world-writable one hands every local user a way to
+	// change what runs on the next `keploy test`.
+	if err := os.WriteFile(filePath, body, 0644); err != nil {
+		utils.LogError(logger, err, "failed to write config file",
+			zap.String("path", filePath),
+			zap.String("next_step", "verify the directory exists and the user running keploy has write permission; remove any read-only keploy.yml left over from a prior run before re-invoking `keploy config --generate`"))
+		return err
+	}
+	if err := restrictConfig(filePath); err != nil {
+		utils.LogError(logger, err, "failed to set the permission of config file")
+		return fmt.Errorf("wrote %s but could not set its permissions: %w", filePath, err)
+	}
+	utils.RestoreFileOwnership(logger, filePath)
+	return nil
+}
+
+// restrictConfig takes the group and world WRITE bits off a config file,
+// leaving everything else as the user had it.
+//
+// keploy.yml names the process Keploy executes, so a world-writable one hands
+// every local user a way to change what runs on the next `keploy test`.
+// Forcing an exact 0644 instead would WIDEN a file somebody had deliberately
+// restricted -- the config can carry mongoPassword -- so only the dangerous
+// bits come off.
+// resolveAbs follows every link in a path and makes the result absolute, so
+// two paths can be compared for containment.
+func resolveAbs(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+// RestrictConfigMode is restrictConfig, for the CLI's own defaults writer.
+func RestrictConfigMode(path string) error { return restrictConfig(path) }
+
+func restrictConfig(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	mode := info.Mode().Perm()
+	if mode&0o022 == 0 {
+		return nil
+	}
+	return os.Chmod(path, mode&^0o022)
+}
+
+// placeholders are the few settings a human actually opens this file to set,
+// commented out, for the case where they have set none of them.
+//
+// A config of nothing but what differs is right, and for a fresh repository
+// that is two lines -- both of them settings nobody should touch. The file
+// then has nothing in it to edit and no clue about what could be. Commented
+// lines are not settings: they change nothing until somebody uncomments one.
+func placeholders(short string) string {
+	// Flat keys only, and only ones the file does not already set.
+	// Uncommenting a nested block (`test:` with a child) next to a `test:`
+	// the file already has would give the document two of that key, and YAML
+	// refuses a document with a duplicated key outright -- a placeholder
+	// that can break the file it is trying to help with is worse than none.
+	offer := [][2]string{
+		{"command", `# command: ""            # the test command Keploy wraps, e.g. "npm test"`},
+		{"containerName", `# containerName: ""      # the container your tests run in, if they run in one`},
+		{"appName", `# appName: ""            # what this service is called in reports`},
+	}
+	// Settings only. Scanning the whole document let a user's own note --
+	// "# command: npm test" jotted above their config -- suppress the
+	// placeholder for a key they had not actually set.
+	set := map[string]bool{}
+	for _, line := range strings.Split(short, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if i := strings.Index(t, ":"); i > 0 {
+			set[strings.TrimSpace(t[:i])] = true
+		}
+	}
+	var lines []string
+	for _, o := range offer {
+		if !set[o[0]] {
+			lines = append(lines, o[1])
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "\n# The settings most projects set. Uncomment and fill in what you need;\n" +
+		"# everything else keeps the default (keploy config defaults prints them all).\n#\n" +
+		strings.Join(lines, "\n") + "\n"
+}
+
 func (t *Tools) CreateConfig(_ context.Context, filePath string, configData string) error {
 	var node yamlLib.Node
 	var data []byte
@@ -298,13 +457,40 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		configData, err = config.Merge(config.InternalConfig, config.GetDefaultConfig())
 		if err != nil {
 			utils.LogError(t.logger, err, "failed to create default config string")
-			return nil
+			return fmt.Errorf("failed to assemble the default config: %w", err)
 		}
 		data = []byte(configData)
 	}
 
 	if err := yamlLib.Unmarshal(data, &node); err != nil {
+		// Returned, not swallowed: the caller prints "Config file generated
+		// successfully" on a nil error, and did so for a document it had
+		// never written.
 		utils.LogError(t.logger, err, "failed to unmarshal the config")
+		return fmt.Errorf("failed to read the config document: %w", err)
+	}
+
+	// A document with no content -- all comments, or empty -- has no root
+	// mapping to marshal below. Unreachable while every generated config
+	// was a full document; now that a config holds only what a developer
+	// decided, a file of nothing but the header is the ordinary shape, and
+	// the first caller to read one back and hand it here would crash.
+	if len(node.Content) == 0 {
+		// The SAME file every other path writes -- header, body, guide,
+		// 0644. Writing the raw bytes here instead gave a comments-only
+		// config a different shape from every other one, and left it
+		// world-writable.
+		body := append([]byte(utils.GetVersionAsComment()), []byte(configData)...)
+		body = append(body, []byte(utils.ConfigGuide)...)
+		if err := os.WriteFile(filePath, body, 0644); err != nil {
+			utils.LogError(t.logger, err, "failed to write config file", zap.String("path", filePath))
+			return err
+		}
+		if err := restrictConfig(filePath); err != nil {
+			utils.LogError(t.logger, err, "failed to set the permission of config file")
+			return fmt.Errorf("wrote %s but could not set its permissions: %w", filePath, err)
+		}
+		utils.RestoreFileOwnership(t.logger, filePath)
 		return nil
 	}
 
@@ -321,13 +507,15 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 	results, err := yamlLib.Marshal(node.Content[0])
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to marshal the config")
-		return nil
+		return fmt.Errorf("failed to write the config document: %w", err)
 	}
 
 	finalOutput := append(results, []byte(utils.ConfigGuide)...)
 	finalOutput = append([]byte(utils.GetVersionAsComment()), finalOutput...)
 
-	err = os.WriteFile(filePath, finalOutput, fs.ModePerm)
+	// 0644: keploy.yml names the process Keploy executes, so a
+	// world-writable one hands every local user a way to change it.
+	err = os.WriteFile(filePath, finalOutput, 0644)
 	if err != nil {
 		// Return the error so callers (cli/config.go handler,
 		// CmdConfigurator.CreateConfigFile) don't falsely claim
@@ -342,11 +530,16 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		return err
 	}
 
-	err = os.Chmod(filePath, 0777) // Set permissions to 777
-	if err != nil {
+	// 0644, matching the write above. This used to be 0777, which undid it.
+	// Returned, not logged past: os.WriteFile leaves an existing file's mode
+	// alone, so a failed chmod means "Config file generated successfully"
+	// over a keploy.yml still at 0777 -- and keploy.yml names the process
+	// Keploy executes.
+	if err := restrictConfig(filePath); err != nil {
 		utils.LogError(t.logger, err, "failed to set the permission of config file")
-		return nil
+		return fmt.Errorf("wrote %s but could not set its permissions: %w", filePath, err)
 	}
+	utils.RestoreFileOwnership(t.logger, filePath)
 
 	return nil
 }

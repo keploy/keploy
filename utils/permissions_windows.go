@@ -50,6 +50,9 @@ func EnsureKeployFolderPermissions(_ context.Context, _ *zap.Logger, _ string) e
 	return nil
 }
 
+// RestoreFileOwnership is a no-op on Windows: there is no sudo to undo.
+func RestoreFileOwnership(_ *zap.Logger, _ string) {}
+
 // RestoreKeployFolderOwnership is a no-op on Windows.
 // Ownership restoration using chown is not applicable on Windows.
 func RestoreKeployFolderOwnership(_ *zap.Logger, _ string) {

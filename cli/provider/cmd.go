@@ -2115,7 +2115,6 @@ func bytesToMBCeil(b uint64) uint64 {
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
-	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {
@@ -2131,10 +2130,13 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg confi
 	}
 
 	configFilePath := filepath.Join(c.cfg.ConfigPath, "keploy.yml")
-	err = toolSvc.CreateConfig(ctx, configFilePath, string(configDataBytes))
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to create config file")
-		return errors.New("failed to create config file")
+	// "based on the flags that are used" -- so the file holds the flags that
+	// were used, not the defaults that were not.
+	if err := tools.WriteMinimalConfig(c.logger, configFilePath, string(configDataBytes)); err != nil {
+		// Wrapped, not replaced: a caller that cannot see EACCES or ENOSPC
+		// cannot tell the user which of them it was, and this used to throw
+		// the cause away AND stop logging it.
+		return fmt.Errorf("failed to create config file at %s: %w", configFilePath, err)
 	}
 	c.logger.Info("Generated config file based on the flags that are used")
 	return nil

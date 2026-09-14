@@ -131,16 +131,18 @@ docker_build_retry docker compose build
 rm -rf keploy/
 rm ./keploy.yml >/dev/null 2>&1 || true
 
-# Generate the keploy-config file.
-$RECORD_BIN config --generate
-
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
-if [ -f "$config_file" ]; then
-  sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
-else
-  echo "⚠️ Config file $config_file not found, skipping sed replace."
-fi
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+  globalNoise:
+      global: {"body": {"ts":[]}}
+KEPLOY_CFG
 
 container_kill() {
     pid=$(pgrep -n keploy)
@@ -283,8 +285,6 @@ if json_pass_supported; then
         do_record_iteration "$i" "--storage-format json"
     done
 fi
-
-
 
 # Shutdown services before test mode - Keploy should use mocks for dependencies
 echo "Shutting down docker compose services before test mode..."

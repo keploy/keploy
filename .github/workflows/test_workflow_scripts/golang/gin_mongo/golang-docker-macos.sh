@@ -83,12 +83,17 @@ docker run --name "$MONGO_CONTAINER" --rm \
   --net "$NETWORK_NAME" --network-alias mongoDb \
   -p "${DB_PORT}:27017" -d mongo
 
-# Generate the keploy-config file.
-$RECORD_BIN config --generate
-
-# Update the global noise to ts.
 config_file="./keploy.yml"
-sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"ts":[]}}
+KEPLOY_CFG
 
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/

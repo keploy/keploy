@@ -95,12 +95,18 @@ sed -i "s/mongoDb:27017/localhost:27017/" "src/db/connection.js"
 rm -rf keploy/
 [[ -f "./keploy.yml" ]] && rm ./keploy.yml
 
-# Generate the keploy-config file.
-sudo "$RECORD_BIN" config --generate
-
 # Update the global noise to page (ignore changes to this field)
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"page":[]}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"page":[]}}
+KEPLOY_CFG
 endsec
 
 do_record_iteration() {
@@ -294,7 +300,14 @@ if [[ -f "./keploy.yml" ]]; then
     id1=$(basename "${recorded_files[0]}" .yaml)
     id2=$(basename "${recorded_files[1]}" .yaml)
     echo "Setting selectedTests to [\"$id1\", \"$id2\"]"
-    sed -i "s/selectedTests: {}/selectedTests: {\"test-set-0\": [\"$id1\", \"$id2\"]}/" "./keploy.yml" || true
+    # selectedTests is a default too, so there was no line here to edit: the
+    # config holds only what this test set. Rewrite it with both settings.
+    cat > "./keploy.yml" <<KEPLOY_CFG
+test:
+    selectedTests: {"test-set-0": ["$id1", "$id2"]}
+    globalNoise:
+        global: {"body": {"page":[]}}
+KEPLOY_CFG
   else
     echo "::notice::fewer than 2 recorded testcases; skipping selectedTests"
   fi
