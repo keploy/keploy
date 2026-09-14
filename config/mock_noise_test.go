@@ -57,3 +57,48 @@ func TestTestNoiseAccessorsAreNilSafe(t *testing.T) {
 	}
 	c.NormalizeMockNoise()
 }
+
+// TestYamlOnlyNoiseKeysAreNotClobberedByFlagDefaults documents the ordering
+// hazard that ValidateFlags has to guard against, and pins the invariant the
+// guard exists to preserve.
+//
+// The sequence is: AddFlags registers each flag with a default read from a ZERO
+// config; PreProcessFlags then runs viper.Unmarshal, which fills the config
+// from keploy.yml; only then does ValidateFlags read the flags back. An
+// unguarded `cfg.Test.X = flags.GetBool("x")` therefore overwrites the value
+// keploy.yml supplied with the flag's stale default — the toggle silently stops
+// working while the config file still looks correct.
+//
+// ValidateFlags guards both spellings on Changed||!viper.IsSet. This test pins
+// the second half of that contract: once a value HAS been resolved, normalizing
+// must not disturb it in either direction.
+func TestYamlOnlyNoiseKeysAreNotClobberedByFlagDefaults(t *testing.T) {
+	t.Run("yaml-only canonical key survives normalize", func(t *testing.T) {
+		// What the guard leaves behind: viper filled the canonical field, the
+		// flag was not passed, so the deprecated one is still false.
+		c := Test{MockNoiseDetection: true}
+		c.NormalizeMockNoise()
+		if !c.NoiseDetection() {
+			t.Fatal("a keploy.yml-only mockNoiseDetection:true did not survive")
+		}
+	})
+
+	t.Run("yaml-only deprecated key survives normalize", func(t *testing.T) {
+		c := Test{SchemaNoiseDetection: true}
+		c.NormalizeMockNoise()
+		if !c.NoiseDetection() {
+			t.Fatal("a keploy.yml-only schemaNoiseDetection:true did not survive")
+		}
+	})
+
+	t.Run("an explicit false is not turned on by the other spelling's zero value", func(t *testing.T) {
+		// Both false is what "user said false" looks like after resolution;
+		// normalize must leave it alone rather than read the unset field as
+		// permission to enable.
+		c := Test{MockNoiseDetection: false, SchemaNoiseDetection: false}
+		c.NormalizeMockNoise()
+		if c.NoiseDetection() {
+			t.Fatal("normalize enabled detection that nothing had asked for")
+		}
+	})
+}

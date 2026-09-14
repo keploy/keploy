@@ -42,29 +42,35 @@ type JSONDiffer = mocknoise.JSONDiffer
 // New builds an Engine for an adapter with the resolved mock-noise flags.
 //
 // Deprecated: use mocknoise.New.
-var New = mocknoise.New
+func New(a Adapter, detection, strict bool) *Engine { return mocknoise.New(a, detection, strict) }
 
 // MergeLearned merges newly detected drift into a mock's existing noise.
 //
 // Deprecated: use mocknoise.MergeLearned.
-var MergeLearned = mocknoise.MergeLearned
+func MergeLearned(existing, detected map[string][]string) map[string][]string {
+	return mocknoise.MergeLearned(existing, detected)
+}
 
 // MergeKnown unions two known-noise maps.
 //
 // Deprecated: use mocknoise.MergeKnown.
-var MergeKnown = mocknoise.MergeKnown
+func MergeKnown(a, b map[string][]string) map[string][]string { return mocknoise.MergeKnown(a, b) }
 
 // StripBodyPrefix trims the leading "body." from each key.
 //
 // Deprecated: use mocknoise.StripBodyPrefix.
-var StripBodyPrefix = mocknoise.StripBodyPrefix
+func StripBodyPrefix(in map[string][]string) map[string][]string {
+	return mocknoise.StripBodyPrefix(in)
+}
 
 // AddBodyPrefix re-adds the leading "body." to each key.
 //
 // Deprecated: use mocknoise.AddBodyPrefix.
-var AddBodyPrefix = mocknoise.AddBodyPrefix
+func AddBodyPrefix(in map[string][]string) map[string][]string { return mocknoise.AddBodyPrefix(in) }
 
 // DetectJSONDrift diffs two JSON bodies and returns the drifting field paths.
 //
 // Deprecated: use mocknoise.DetectJSONDrift.
-var DetectJSONDrift = mocknoise.DetectJSONDrift
+func DetectJSONDrift(recordedBody, liveBody []byte, known map[string][]string, isRecordedNoise func(string) bool) (map[string][]string, bool) {
+	return mocknoise.DetectJSONDrift(recordedBody, liveBody, known, isRecordedNoise)
+}

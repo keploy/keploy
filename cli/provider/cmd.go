@@ -1556,19 +1556,32 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			// --mock-noise-* is canonical. Neither can express "explicitly
 			// off" as distinct from "unset", so OR-ing loses nothing and means
 			// a user who passes either one gets the behaviour they asked for.
-			c.cfg.Test.SchemaNoiseDetection, err = cmd.Flags().GetBool("schema-noise-detection")
-			if err != nil {
-				errMsg := "failed to read the --schema-noise-detection flag; check the flag name with --help and confirm this command supports it"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			//
+			// Both are guarded on Changed||!IsSet for the same reason strict
+			// below is: AddFlags captured each flag's default from a ZERO
+			// config, and viper.Unmarshal fills c.cfg from keploy.yml only
+			// afterwards. An unguarded read therefore overwrites a yaml-only
+			// value with the flag's stale default — so `test.schemaNoise-
+			// Detection: true` in keploy.yml silently stopped working. That was
+			// already true of the deprecated key before this change; fixing it
+			// here because a rename whose whole claim is "your existing
+			// keploy.yml keeps working" cannot ship with that hole open.
+			if cmd.Flags().Changed("schema-noise-detection") || !viper.IsSet("test.schemaNoiseDetection") {
+				c.cfg.Test.SchemaNoiseDetection, err = cmd.Flags().GetBool("schema-noise-detection")
+				if err != nil {
+					errMsg := "failed to read the --schema-noise-detection flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 			}
-			mockNoiseDetection, err := cmd.Flags().GetBool("mock-noise-detection")
-			if err != nil {
-				errMsg := "failed to read the --mock-noise-detection flag; check the flag name with --help and confirm this command supports it"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			if cmd.Flags().Changed("mock-noise-detection") || !viper.IsSet("test.mockNoiseDetection") {
+				c.cfg.Test.MockNoiseDetection, err = cmd.Flags().GetBool("mock-noise-detection")
+				if err != nil {
+					errMsg := "failed to read the --mock-noise-detection flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 			}
-			c.cfg.Test.MockNoiseDetection = mockNoiseDetection
 
 			// Only let the flag override when it was explicitly passed or
 			// the config file doesn't set the key — otherwise the flag's
