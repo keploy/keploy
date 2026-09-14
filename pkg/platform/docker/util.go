@@ -184,6 +184,11 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	if opts.RecordBufferConsumerStallGrace > 0 {
 		recordBufferFlags += " --consumer-stall-grace " + opts.RecordBufferConsumerStallGrace.String()
 	}
+	// != 0, not > 0: a NEGATIVE half-close grace is the documented way to
+	// disable half-close, so it has to reach the agent.
+	if opts.RecordBufferHalfCloseGrace != 0 {
+		recordBufferFlags += " --half-close-grace " + opts.RecordBufferHalfCloseGrace.String()
+	}
 
 	// Forward upstream TLS verification to the containerised agent — same
 	// argv-only propagation channel as recordBufferFlags above.
@@ -561,28 +566,20 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	return "", errors.New("failed to get alias")
 }
 
+// ParseDockerCmd returns the container and network names a docker command
+// refers to. Both flags are accepted in either spelling docker allows -
+// "--name foo" and "--name=foo", "--network"/"--net" likewise - because a
+// parser that understands only the spaced form reads nothing at all from a
+// valid command, and the caller then has no container to instrument.
 func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string, error) {
-
-	// Regular expression patterns
-	var containerNamePattern string
-	switch kind {
-	case utils.DockerStart:
-		containerNamePattern = `start\s+(?:-[^\s]+\s+)*([^\s]*)`
-	default:
-		containerNamePattern = `--name\s+([^\s]+)`
-	}
-
-	networkNamePattern := `(--network|--net)\s+([^\s]+)`
-
-	// Extract container name
-	containerNameRegex := regexp.MustCompile(containerNamePattern)
-	containerNameMatches := containerNameRegex.FindStringSubmatch(cmd)
-	if len(containerNameMatches) < 2 {
-		return "", "", fmt.Errorf("failed to parse container name")
-	}
-	containerName := containerNameMatches[1]
-
 	if kind == utils.DockerStart {
+		containerNameRegex := regexp.MustCompile(`start\s+(?:-[^\s]+\s+)*([^\s]*)`)
+		containerNameMatches := containerNameRegex.FindStringSubmatch(cmd)
+		if len(containerNameMatches) < 2 {
+			return "", "", fmt.Errorf("failed to parse container name")
+		}
+		containerName := containerNameMatches[1]
+
 		networks, err := idc.ExtractNetworksForContainer(containerName)
 		if err != nil {
 			return containerName, "", err
@@ -593,13 +590,15 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 		return containerName, "", fmt.Errorf("failed to parse network name")
 	}
 
-	// Extract network name
-	networkNameRegex := regexp.MustCompile(networkNamePattern)
-	networkNameMatches := networkNameRegex.FindStringSubmatch(cmd)
-	if len(networkNameMatches) < 3 {
+	containerName := utils.ContainerNameFromDockerRun(cmd)
+	if containerName == "" {
+		return "", "", fmt.Errorf("failed to parse container name")
+	}
+
+	networkName := utils.NetworkNameFromDockerRun(cmd)
+	if networkName == "" {
 		return containerName, "", fmt.Errorf("failed to parse network name")
 	}
-	networkName := networkNameMatches[2]
 
 	return containerName, networkName, nil
 }

@@ -45,6 +45,25 @@ type matchDiag struct {
 	phase         string         // models.MatchPhase* constant
 	candidates    int            // HTTP mocks considered
 	schemaMatched []*models.Mock // candidates alive after schema match (nil if none)
+	// pool is the FULL set match() walked for this attempt (per-test mocks in
+	// window + session mocks, filtered to HTTP) — the literal "compared set".
+	// len(pool) == candidates by construction.
+	//
+	// It exists so the destination-scope diagnostic can answer "did anything
+	// we compared even target this upstream?" on EVERY miss, including the
+	// schema-survivor paths where buildHTTPMismatchReport deliberately does
+	// not reload the pool (it diffs against the survivors instead). Without
+	// it, an out-of-scope call whose method+path happens to schema-match an
+	// application mock — the shared paths, /health, /metrics, /oauth/token,
+	// on a different host — was the ONE case the diagnostic could not see,
+	// and precisely the case where a closest-mock diff against another
+	// upstream is most confusing.
+	//
+	// Carrying the slice out costs one pointer copy on the miss path and
+	// changes nothing about matching: it is a reference to a set match() has
+	// already finished with, attached to a struct only ever built on the
+	// no-match return.
+	pool []*models.Mock
 }
 
 // match returns (matched, mock, diag, err). diag is non-nil only when
@@ -138,7 +157,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 
 		if len(schemaMatched) == 0 {
-			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(unfilteredMocks)}, nil
+			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(unfilteredMocks), pool: unfilteredMocks}, nil
 		}
 
 		h.Logger.Debug("http mock schema match results",
@@ -182,7 +201,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 				if beforeStrict > 0 {
 					phase = models.MatchPhaseStrict
 				}
-				return false, nil, &matchDiag{phase: phase, candidates: len(unfilteredMocks), schemaMatched: schemaMatched}, nil
+				return false, nil, &matchDiag{phase: phase, candidates: len(unfilteredMocks), schemaMatched: schemaMatched, pool: unfilteredMocks}, nil
 			}
 
 			if len(bodyMatched) == 1 {
@@ -209,7 +228,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			}
 			return true, bestMatch, nil, nil
 		}
-		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed}, nil
+		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed, pool: unfilteredMocks}, nil
 	}
 }
 
@@ -1434,6 +1453,24 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 			WithPhase(models.MatchPhaseNoMocks, 0).Build()
 	}
 
+	// Does anything the matcher just compared against even target this
+	// upstream? Answered from the compared set and nothing else — see
+	// comparedDestinations for why the wider "was it ever recorded?" question
+	// is not asked.
+	//
+	// diag.pool is the set match() literally walked, so it is preferred over
+	// httpMocks: on the schema-survivor path httpMocks is nil (the pool is
+	// deliberately not reloaded, the diff comes from the survivors), and on
+	// the other path httpMocks is a fresh re-read that a concurrent
+	// consumption on another connection can have shrunk since the match. Only
+	// the caller-supplied / re-read pool is used when the diag carries none —
+	// a hand-built diag in a test, or diag == nil.
+	comparedPool := httpMocks
+	if diag != nil && diag.pool != nil {
+		comparedPool = diag.pool
+	}
+	comparedDests := comparedDestinations(comparedPool, candidateCount)
+
 	// Pick the candidate to diff against. Preference order:
 	//  1. a schema-match survivor (method+path+keys already matched — the
 	//     interesting drift is in query values, headers, or the body)
@@ -1442,6 +1479,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
 		return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 			WithDestination(dest).
+			WithComparedDestinations(comparedDests).
 			WithPhase(phase, candidateCount).Build()
 	}
 
@@ -1495,6 +1533,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 		WithDestination(dest).
+		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closestMock.Name, fieldDiffs).
 		// Whole-request renders for the CLI side-by-side diff. Mock.Noise is
@@ -1510,6 +1549,67 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		b = b.WithDiff(fmt.Sprintf("closest mock %q has no field-level differences; match stopped at phase %q", closestMock.Name, phase))
 	}
 	return b.Build()
+}
+
+// comparedDestinations returns the upstream authority of every mock in the
+// pool this report was built against, or nil when the "does anything here
+// target the live upstream?" question cannot be answered from it — nil means
+// undecidable, and an undecidable check leaves today's message exactly as it
+// was (mismatch.WithComparedDestinations carries the full WHY).
+//
+// The claim it feeds is strictly LOCAL: "no mock in the compared set targets
+// this host". It is deliberately NOT the stronger "this host was never
+// recorded". That stronger claim needs global, consumption-immune knowledge
+// of the whole test set, and keploy does not have it here: HTTP per-test
+// mocks are consumed on match (updateMock -> DeleteFilteredMock) and the
+// agent then strips every consumed mock from the pool it sends for all later
+// tests (pkg/service/agent/agent.go filterOutDeleted over TotalConsumedMocks).
+// Once a host's last mock has been served it is gone from every pool while
+// having been recorded all along — so an absence read off any pool, however
+// carefully assembled, eventually accuses the application's own upstream. The
+// weaker claim costs a sentence of precision and is always true.
+//
+// nil (undecidable) when:
+//   - the pool is empty — there is nothing to have compared against. In
+//     production this is the diag-less path (a caller that supplied no
+//     matchDiag) and the mockDb-read-failed path; on the schema-survivor path
+//     the builder does NOT reload the pool, but matchDiag.pool carries the
+//     compared set out of match() so that path is decidable too;
+//   - the pool holds fewer mocks than the matcher reported comparing, so what
+//     is in hand is a subset of the compared set and "none of them" would
+//     overreach. matchDiag.pool never trips this (len(pool) == candidates by
+//     construction); it fires for a caller that hands over a partial pool —
+//     a test, or a future parser reusing this builder — and for the re-read
+//     path if a concurrent consumption shrank the pool between the match and
+//     the report. Kept as the defence for those callers, not as a live
+//     production branch.
+//   - any mock in it carries no readable destination — that mock could be the
+//     one that targeted the live call, so the set proves nothing.
+//
+// This runs only on the miss path, where a report is already being rendered,
+// so the walk never touches the matching hot path.
+func comparedDestinations(pool []*models.Mock, candidateCount int) []string {
+	if len(pool) == 0 || len(pool) < candidateCount {
+		return nil
+	}
+	// Sized for distinct UPSTREAMS, not for mocks: a recorded test set has
+	// single-digit distinct hosts behind hundreds of mocks, so len(pool)
+	// would over-allocate by two orders of magnitude on every miss.
+	const typicalDistinctHosts = 8
+	seen := make(map[string]struct{}, typicalDistinctHosts)
+	dests := make([]string, 0, typicalDistinctHosts)
+	for _, mock := range pool {
+		dest, ok := mock.RecordedDestination()
+		if !ok {
+			return nil
+		}
+		if _, dup := seen[dest]; dup {
+			continue
+		}
+		seen[dest] = struct{}{}
+		dests = append(dests, dest)
+	}
+	return dests
 }
 
 // pickClosestCandidate prefers a schema-match survivor (already same

@@ -57,7 +57,13 @@ jobs:
           sudo timeout 600 apt-get -y install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 build-essential gcc libc-dev pkg-config
 
       - name: Install dependencies
-        run: go mod download
+        run: |
+          # Same `cache: false` + unretried module download as go-test.yaml: one
+          # transient proxy error kills the job. The `go test -c` below stays
+          # unwrapped (go-retry.sh forbids wrapping `go test`) and needs no
+          # network once this step has warmed the cache.
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry mod download
 
       # Compile the tagged test binary as the runner user (build cache is
       # available here), then run it as root — mounting cgroup2 needs

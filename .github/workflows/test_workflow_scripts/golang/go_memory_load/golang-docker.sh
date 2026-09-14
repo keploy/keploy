@@ -16,6 +16,12 @@ LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
 LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"
 LARGE_PAYLOAD_SIZES_MB="${LARGE_PAYLOAD_SIZES_MB:-1}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
+# Debounce: require K CONSECUTIVE over-threshold samples before killing keploy.
+# A single 0.5s sample crossing the line is almost always a transient GC/page-
+# cache spike, not a leak; killing on it severs every in-flight connection and
+# manufactures an HTTP-failure storm (the main flakiness source). K back-to-back
+# ticks (~1.5s sustained) still catches real runaway growth. Set 1 for old behaviour.
+MEMORY_VIOLATION_MIN_TICKS="${MEMORY_VIOLATION_MIN_TICKS:-3}"
 
 # CI-tuned k6 thresholds — intentionally very relaxed because:
 #   - Keploy proxy buffers request/response bodies for capture, adding latency
@@ -294,6 +300,7 @@ start_memory_monitor() {
         usage_bytes=""
         oom_killed=""
         running=""
+        consecutive_over=0
 
         while kill -0 "$phase_pid" 2>/dev/null; do
             if ! docker inspect "$keploy_container" >/dev/null 2>&1; then
@@ -316,10 +323,16 @@ start_memory_monitor() {
             fi
 
             if [ "$usage_bytes" -ge 0 ] && [ "$usage_bytes" -ge "$threshold_bytes" ]; then
-                echo "Keploy container ${keploy_container} exceeded ${threshold_mib} MiB during ${phase_name}. Observed usage: ${usage_raw}." > "$MEMORY_VIOLATION_FILE"
-                docker kill "$keploy_container" >/dev/null 2>&1 || true
-                kill -TERM "$phase_pid" 2>/dev/null || true
-                exit 0
+                consecutive_over=$((consecutive_over + 1))
+                if [ "$consecutive_over" -ge "$MEMORY_VIOLATION_MIN_TICKS" ]; then
+                    sustained_s="$(awk -v n="$consecutive_over" -v i="$MEMORY_MONITOR_INTERVAL_SECONDS" 'BEGIN { printf "%.1f", n * i }')"
+                    echo "Keploy container ${keploy_container} exceeded ${threshold_mib} MiB during ${phase_name} for ${consecutive_over} consecutive samples (~${sustained_s}s sustained). Observed usage: ${usage_raw}." > "$MEMORY_VIOLATION_FILE"
+                    docker kill "$keploy_container" >/dev/null 2>&1 || true
+                    kill -TERM "$phase_pid" 2>/dev/null || true
+                    exit 0
+                fi
+            else
+                consecutive_over=0
             fi
 
             sleep "$MEMORY_MONITOR_INTERVAL_SECONDS"

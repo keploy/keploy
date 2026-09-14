@@ -1,10 +1,13 @@
 #!/bin/bash
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+
 source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # Start the postgres database
+docker_compose_pull_retry
 docker compose up -d
 
 # Install dependencies

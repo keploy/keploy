@@ -973,6 +973,10 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 		// Helper check to ensure the binary running inside docker has the required capabilities
 		if err := utils.CheckRequiredPermissions(); err != nil {
 			a.logger.Error("Failed to start Keploy Agent", zap.Error(err))
+			// Distinct exit code: a caller must be able to tell "Keploy needs
+			// kernel privileges" from "your tests failed", both of which used to
+			// be a bare 1. See utils/exitcodes.go.
+			utils.SetExitCodeOnce(utils.ExitPrivilegeRequired)
 			return err
 		}
 		// Start the agent in Docker container using errgroup
@@ -1105,6 +1109,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 	if opts.RecordBufferConsumerStallGrace > 0 {
 		args = append(args, "--consumer-stall-grace", opts.RecordBufferConsumerStallGrace.String())
+	}
+	// != 0, not > 0: a NEGATIVE half-close grace disables half-close and
+	// must reach the agent.
+	if opts.RecordBufferHalfCloseGrace != 0 {
+		args = append(args, "--half-close-grace", opts.RecordBufferHalfCloseGrace.String())
 	}
 	a.logger.Debug("Starting native agent with args", zap.Strings("args", args))
 
@@ -1314,6 +1323,28 @@ func (a *AgentClient) stopAgent() {
 	}
 }
 
+// logAgentContainerDiagnostics dumps the agent container's own logs and state
+// when it never became ready. Without it a readiness timeout is a black box:
+// the CLI prints the whole wait window of silence and then a generic error,
+// with no way to tell a docker-run/container-start stall from an in-agent hang
+// (eBPF load, OOM, panic). Best-effort and bounded — never blocks teardown.
+func (a *AgentClient) logAgentContainerDiagnostics(container string) {
+	if strings.TrimSpace(container) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logs, _ := exec.CommandContext(ctx, "docker", "logs", "--tail", "200", container).CombinedOutput()
+	state, _ := exec.CommandContext(ctx, "docker", "inspect", "-f",
+		"status={{.State.Status}} exitCode={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} error={{.State.Error}}",
+		container).CombinedOutput()
+	a.logger.Warn("keploy-agent did not become ready; captured agent container diagnostics",
+		zap.String("container", container),
+		zap.String("state", strings.TrimSpace(string(state))),
+		zap.String("agent_logs", strings.TrimSpace(string(logs))))
+}
+
 // monitorAgent monitors the agent process and handles cleanup
 func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.Context) {
 	select {
@@ -1342,13 +1373,15 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	// Check and allocate available ports for proxy and DNS
-	proxyPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort) // check if the proxy port provided by user is unused
+	// Exclude the ports already handed out in this setup: none of them is bound
+	// yet, so a later draw could otherwise legitimately return one of them.
+	proxyPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, agentPort) // check if the proxy port provided by user is unused
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to ensure available ports for proxy")
 		return err
 	}
 
-	dnsPort, err := utils.EnsureAvailablePorts(a.conf.DNSPort) // check if the dns port provided by user is unused
+	dnsPort, err := utils.EnsureAvailablePorts(a.conf.DNSPort, agentPort, proxyPort) // check if the dns port provided by user is unused
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to ensure available ports for DNS")
 		return err
@@ -1423,7 +1456,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		// well over a minute just to start (observed: a local-image `docker run`
 		// taking 126s), so a 60s wait gave up prematurely and tore down a
 		// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
-		agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
+		readyTimeout := pkg.AgentReadyTimeout()
+		if opts.AgentReadyTimeout > 0 {
+			readyTimeout = opts.AgentReadyTimeout
+		}
+		agentCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -1434,7 +1471,18 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// Parent context cancelled (user pressed Ctrl+C)
 			return ctx.Err()
 		case <-agentCtx.Done():
-			return fmt.Errorf("keploy-agent did not become ready in time")
+			// The agent never reported healthy. The cleanup defer below is not in
+			// scope yet, so without this the wedged agent container and its
+			// goroutine leak — and any retry inherits the mess. Dump the container's
+			// own logs first: the CLI otherwise shows the full readiness window of
+			// silence followed by a bare error, with nothing to root-cause from.
+			if isDockerCmd {
+				a.logAgentContainerDiagnostics(opts.KeployContainer)
+			}
+			a.stopAgent()
+			// Sentinel so the caller can retry a fresh bring-up on this specific,
+			// nondeterministic stall without retrying deterministic failures.
+			return fmt.Errorf("%w", pkg.ErrAgentNotReady)
 		case <-agentReadyCh:
 		}
 	}

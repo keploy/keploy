@@ -4,6 +4,7 @@
 set -Eeuo pipefail
 set -o errtrace
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
@@ -83,6 +84,7 @@ send_request() {
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 section "Start Mongo"
+docker_pull_retry mongo
 docker run --name mongoDb --rm -p 27017:27017 -d mongo
 wait_for_mongo
 endsec

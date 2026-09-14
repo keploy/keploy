@@ -1,0 +1,211 @@
+name: MySQL Replay Perf
+
+# Report-only perf gate tracking the goal "replay >= 10x faster than record".
+#
+# It records a fixed, deterministic MySQL workload (real DB), replays the
+# recorded test cases (mocked DB), and reports the ratio of the two execution
+# wall-clocks together with a CPU profile of the replay agent. The job ALWAYS
+# exits 0 on the ratio today — this is a tracking signal, not a blocker. Flip
+# PERF_GATE_BLOCKING (below) to "true" once the replayer is fast enough to hold
+# the 10x line and a shortfall should turn the build red.
+#
+# Shape mirrors keploy-performance-test.yml (triggers, concurrency, the
+# per-run PR comment table). The build job reuses prepare_and_run.yml's binary
+# + Dockerfile.runtime image steps; the perf job reuses the download-binary /
+# download-image composite actions and the samples-go harness pattern from
+# golang_docker.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Deterministic workload iterations (each issues ~8 requests)'
+        required: false
+        default: '40'
+      target_ratio:
+        description: 'Target replay-vs-record speedup (report-only)'
+        required: false
+        default: '10'
+      gate_blocking:
+        description: 'Fail the build on ratio shortfall (true/false)'
+        required: false
+        default: 'false'
+  pull_request:
+    branches: [ main ]
+    # Path-filtered to the MySQL replayer and this gate's own files so the
+    # heavy record+replay run only fires when something that can move the
+    # number changes.
+    paths:
+      - 'pkg/agent/proxy/integrations/mysql/**'
+      - '.github/workflows/mysql-replay-perf.yml'
+      - '.github/workflows/test_workflow_scripts/golang/mysql_replay_perf/**'
+
+concurrency:
+  group: mysql-replay-perf-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  # Report-only by default: a ratio shortfall is logged, never fatal. Set to
+  # "true" (here, or via the workflow_dispatch input) to make it blocking.
+  PERF_GATE_BLOCKING: ${{ github.event.inputs.gate_blocking || 'false' }}
+  PERF_TARGET_RATIO: ${{ github.event.inputs.target_ratio || '10' }}
+  PERF_ITERATIONS: ${{ github.event.inputs.iterations || '40' }}
+
+jobs:
+  # -------------------------------------------------------------------
+  # Build the keploy binary (non-race, for realistic timing) and the
+  # runtime docker image the injected keploy-agent runs as. Mirrors
+  # prepare_and_run.yml's build-and-upload + build-docker-image-amd64,
+  # minus private parsers (the MySQL parser is OSS, in-tree).
+  # -------------------------------------------------------------------
+  build:
+    # Fork guard: the perf job below can't run on forked PRs (no artifact /
+    # privileged docker), so building for one just burns minutes.
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          # go-version-file (not go-version) so the repo's go.mod drives the
+          # toolchain — see keploy-performance-test.yml for the rationale.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Keploy (non-race, linux/amd64)
+        # CGO_ENABLED=1 explicit: pg_query_go (libpg_query) links via cgo.
+        # ubuntu-latest ships gcc. Non-race so replay wall-clock reflects
+        # production speed rather than the ~2x race-runtime tax.
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p dist/keploy-linux-amd64
+          go build -tags=viper_bind_struct -o dist/keploy-linux-amd64/keploy
+          chmod +x dist/keploy-linux-amd64/keploy
+
+      - name: Upload keploy binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-no-race
+          path: dist/keploy-linux-amd64/keploy
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build runtime image (linux/amd64)
+        # Dockerfile.runtime expects the prebuilt binary under
+        # dist/keploy-linux-<arch>/keploy (already produced above).
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --file Dockerfile.runtime \
+            --output type=docker,dest=image.tar \
+            -t keploy/keploy:ci \
+            .
+
+      - name: Upload runtime image
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-linux-amd64
+          path: image.tar
+          retention-days: 7
+
+  # -------------------------------------------------------------------
+  # Record + replay the MySQL sample, measure the ratio, capture the
+  # replay agent's CPU profile, and report. NEVER fails on the ratio.
+  # -------------------------------------------------------------------
+  mysql-replay-perf:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository (harness scripts + actions)
+        uses: actions/checkout@v4
+
+      # Loads image.tar and tags it ghcr.io/keploy/keploy:v3-dev — the tag the
+      # host binary (version defaults to 3-dev) injects for the keploy-agent.
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: keploy
+        uses: ./.github/actions/download-binary
+        with:
+          src: build-no-race
+
+      - name: Checkout samples-go
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          ref: main
+          path: samples-go
+
+      - name: Run MySQL replay-vs-record perf harness
+        env:
+          KEPLOY_BIN: ${{ steps.keploy.outputs.path }}
+          PERF_ITERATIONS: ${{ env.PERF_ITERATIONS }}
+          PERF_TARGET_RATIO: ${{ env.PERF_TARGET_RATIO }}
+          PERF_GATE_BLOCKING: ${{ env.PERF_GATE_BLOCKING }}
+        run: |
+          cd samples-go/go-memory-load-mysql
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mysql_replay_perf/run.sh"
+
+      - name: Upload perf results + replay CPU profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-replay-perf-${{ github.run_number }}
+          path: |
+            samples-go/go-memory-load-mysql/perf-results/
+            samples-go/go-memory-load-mysql/record.txt
+            samples-go/go-memory-load-mysql/test.txt
+            samples-go/go-memory-load-mysql/workload.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Comment PR with perf ratio
+        if: ${{ github.event_name == 'pull_request' && always() }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'samples-go/go-memory-load-mysql/perf-results/summary.env';
+            if (!fs.existsSync(path)) {
+              console.log('No summary.env found; skipping comment.');
+              return;
+            }
+            const kv = {};
+            for (const line of fs.readFileSync(path, 'utf8').split('\n')) {
+              const m = line.match(/^([A-Z_]+)=(.*)$/);
+              if (m) kv[m[1]] = m[2];
+            }
+            const verdict = kv.MEETS_TARGET === 'yes' ? '✅ ' + kv.VERDICT : '⚠️ ' + kv.VERDICT;
+            let body = '## MySQL Replay-vs-Record Perf (report-only)\n\n';
+            body += 'Tracking goal: **replay ≥ ' + (kv.TARGET_RATIO || '10') + '× faster than record**.\n\n';
+            body += '| Record s | Replay s | Ratio | Target | Verdict |\n';
+            body += '|---------:|---------:|------:|-------:|:--------|\n';
+            body += `| ${kv.RECORD_SECONDS} | ${kv.REPLAY_SECONDS} | ${kv.RATIO}× | ${kv.TARGET_RATIO}× | ${verdict} |\n\n`;
+            body += `Recorded **${kv.RECORDED_TESTS}** test cases from ${kv.REQUESTS_OK}/${kv.REQUESTS_SENT} OK requests `;
+            body += `(${kv.ITERATIONS} iterations). The replay agent CPU profile is attached as the `;
+            body += '`mysql-replay-perf` artifact for debugging.\n\n';
+            body += '_Report-only: this comment never blocks the PR. Record = the traffic phase after app-ready ';
+            body += '(startup `--delay` excluded); Replay = first→last recorded test-case execution (startup excluded)._';
+            try {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            } catch (error) {
+              console.log('Could not post comment:', error.message);
+            }

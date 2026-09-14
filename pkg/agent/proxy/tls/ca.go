@@ -327,7 +327,21 @@ func setupJavaTrustStoreEnv(logger *zap.Logger) error {
 	// accumulate a new JKS in the temp dir every time (there is no teardown hook
 	// to remove a random-named one). The contents are the same public bundle
 	// each run, so a concurrent overwrite is harmless.
-	jksPath := filepath.Join(os.TempDir(), "keploy-java-truststore.jks")
+	//
+	// The uid in the NAME is what makes "per-user" true. It used to be a single
+	// shared filename, which is not per-user at all: os.TempDir() is shared and
+	// world-writable with the sticky bit, so the first run to create it owns it
+	// forever. One `sudo keploy` — or any rootful-docker run — left a root-owned
+	// file that every later run as the normal user failed to rewrite:
+	//
+	//	failed to build the Java truststore: failed to create jks file:
+	//	open /tmp/keploy-java-truststore.jks: permission denied
+	//
+	// and Java interception stayed broken on that machine until someone removed
+	// it by hand. Keying the name by uid means two users, or the same user with
+	// and without sudo, never contend for one inode. The store holds only public
+	// certificates, so a per-uid copy costs nothing.
+	jksPath := filepath.Join(os.TempDir(), fmt.Sprintf("keploy-java-truststore-%d.jks", os.Geteuid()))
 	if err := generateTrustStore(mergedPath, jksPath); err != nil {
 		return fmt.Errorf("failed to build the Java truststore: %w", err)
 	}

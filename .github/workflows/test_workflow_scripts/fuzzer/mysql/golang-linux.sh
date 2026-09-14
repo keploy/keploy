@@ -10,6 +10,8 @@ set -Eeuo pipefail
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
@@ -179,6 +181,7 @@ sudo chmod +x $MYSQL_FUZZER_BIN
 sudo chown -R $(whoami):$(whoami) golden
 
 # Start a MySQL instance for the recording session
+docker_pull_retry mysql:8.0
 docker run --name mysql-container \
   -e MYSQL_ROOT_PASSWORD=password \
   -p 3306:3306 --rm -d mysql:8.0
@@ -234,6 +237,7 @@ if json_pass_supported; then
     # the same blank starting state.
     section "Reset MySQL before json record pass"
     docker rm -f mysql-container || true
+    docker_pull_retry mysql:8.0
     docker run --name mysql-container \
       -e MYSQL_ROOT_PASSWORD=password \
       -p 3306:3306 --rm -d mysql:8.0

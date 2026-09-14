@@ -4,7 +4,6 @@ package util
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -37,11 +36,20 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 // NextStepDialDestination is the shared remediation hint attached
 // to every "failed to dial the conn to destination server" error.
-// The proxy's destination dial is a single attempt with no retry,
-// so the real fix is always on the test-harness side (sequence
-// the dependency start, raise --delay, or add a readiness probe).
+//
+// It is attached regardless of WHY the dial failed — a timeout, ENETUNREACH,
+// EACCES and a cancelled context all get it — so it must not assert a cause.
+// The previous wording sent readers to --delay and readiness probes, which
+// cost a real investigation when the actual cause was an IPv4-only dependency
+// behind a dual-stack name: that looks exactly like a dependency that has not
+// started yet. So name the address family as a possibility, conditionally, and
+// leave the timing advice as the other possibility rather than the answer.
+// The counterpart retry is SUPPRESSED for a Fabricated target, and PassThrough
+// (the two sites below) is the only site attaching this hint where a fabricated
+// address can arrive — so the wording must not promise a retry those callers
+// never get.
 // Kept as a const so all sites update together.
-const NextStepDialDestination = "confirm the app's upstream dependency is listening on this address before traffic starts (adjust --delay, add a readiness probe to the test harness, or pre-start the dependency); the dial is a single attempt and will not retry"
+const NextStepDialDestination = "check which address FAMILY the dependency binds — a container published port is IPv4-only by default, and a loopback destination may be retried on the other family (not when the capture layer had to fabricate the address), so check both — and confirm the dependency is up before traffic starts (sequence its start, raise --delay, or add a readiness probe)"
 
 // ErrRecordingPausedDueToMemoryPressure tells record-mode parsers to stop
 // decoding and fall back to transparent passthrough while the agent is under
@@ -63,6 +71,41 @@ type Conn struct {
 	Reader io.Reader
 	Logger *zap.Logger
 	mu     sync.Mutex
+}
+
+// CloseWriteIfPossible forwards a FIN on c when the conn supports
+// half-close, and does nothing when it does not. Doing nothing is the
+// right fallback: losing a half-close costs a protocol signal, whereas
+// closing the connection to compensate would cost the connection.
+//
+// It lives here because this package defines the wrappers that sit
+// between the proxy and every real socket, and is the only one able to
+// see through them.
+func CloseWriteIfPossible(c net.Conn) error {
+	if c == nil {
+		return nil
+	}
+	type closeWriter interface{ CloseWrite() error }
+	if cw, ok := c.(closeWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+// CloseWrite forwards a half-close to the conn underneath.
+//
+// Conn embeds net.Conn as an INTERFACE, so Go promotes only net.Conn's
+// method set and CloseWrite is not in it. This type is what
+// handleConnection hands to the V2 relay as the client-side conn, so
+// without this method the relay's half-close support is silently dead
+// in the client direction — the relay's own tests, which drive raw TCP
+// sockets, cannot see that.
+//
+// Same delegation as SafeConn.CloseWrite, for the same reason. Half-close
+// is protocol content, not termination: an EOF-delimited peer only
+// learns the request ended when the FIN arrives.
+func (c *Conn) CloseWrite() error {
+	return CloseWriteIfPossible(c.Conn)
 }
 
 func (c *Conn) Read(p []byte) (int, error) {
@@ -352,7 +395,13 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 	// Handle errors other than EOF
 	if err != nil && err != io.EOF {
 		utils.LogError(logger, err, "failed to read HTTP headers")
-		return nil, readErr
+		// Wrap, do not replace: utils.LogError swallows context.Canceled so the
+		// agent does not shout about connections it tore down itself, and that
+		// guard only works while the cancellation is still visible. Returning a
+		// bare readErr here erased it, so the next LogError up the stack
+		// reported a routine shutdown at ERROR — which the node lanes fail a
+		// recording on, turning a clean stop into a red run.
+		return nil, fmt.Errorf("%w: %w", readErr, err)
 	}
 
 	// Check if the initial buffer already contains complete headers
@@ -382,7 +431,8 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 					break // EOF reached, but nothing more to read
 				}
 				utils.LogError(logger, err, "error while reading HTTP headers")
-				return nil, readErr
+				// Wrap, not replace — see the note on the first read above.
+				return nil, fmt.Errorf("%w: %w", readErr, err)
 			}
 
 			// Append the new data to the buffer
@@ -409,7 +459,13 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 	if err != nil && err != io.EOF {
 		utils.LogError(logger, err, "failed to read the request message in proxy")
-		return nil, readErr
+		// Wrap, do not replace: utils.LogError swallows context.Canceled so the
+		// agent does not shout about connections it tore down itself, and that
+		// guard only works while the cancellation is still visible. Returning a
+		// bare readErr here erased it, so the next LogError up the stack
+		// reported a routine shutdown at ERROR — which the node lanes fail a
+		// recording on, turning a clean stop into a red run.
+		return nil, fmt.Errorf("%w: %w", readErr, err)
 	}
 
 	return initialBuf, nil
@@ -648,7 +704,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	if dstCfg.TLSCfg != nil {
 		logger.Debug("trying to establish a TLS connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 
-		destConn, err = tls.Dial("tcp", dstCfg.Addr, dstCfg.TLSCfg)
+		destConn, err = DialDestinationTLS(ctx, logger, "tcp",
+			DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated}, dstCfg.TLSCfg)
 		if err != nil {
 			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", NextStepDialDestination))
 			return nil, err
@@ -656,7 +713,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	} else {
 		logger.Debug("trying to establish a connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-		destConn, err = net.Dial("tcp", dstCfg.Addr)
+		destConn, err = DialDestination(ctx, logger, "tcp",
+			DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated})
 		if err != nil {
 			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", NextStepDialDestination))
 			return nil, err
@@ -929,7 +987,7 @@ func RecoverWithoutClose(logger *zap.Logger) {
 	if r := recover(); r != nil {
 		logger.Error("Recovered from panic in parser",
 			zap.Any("panic", r),
-			zap.String("next_step", "the supervisor (if wrapping this call) will fall through to raw passthrough so user traffic continues; file the panic with the parser owner using the Sentry issue that was just captured, or set KEPLOY_NEW_RELAY=off to force the legacy path for this parser until the root cause is fixed"),
+			zap.String("next_step", "the supervisor (if wrapping this call) will fall through to raw passthrough so user traffic continues; file the panic with the parser owner using the Sentry issue that was just captured, or set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely until the root cause is fixed"),
 		)
 		utils.HandleRecovery(logger, r, "Recovered from panic")
 		// Flush only on the panic path so the happy path (defer
@@ -972,5 +1030,186 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		}
 		utils.HandleRecovery(logger, r, "Recovered from panic")
 		sentry.Flush(time.Second * 2)
+	}
+}
+
+// RelayDrainIdle is how long a surviving copy direction may go with NO
+// progress before it is abandoned. It is an IDLE timeout, not a deadline
+// on the transfer: a survivor that is still moving bytes keeps going for
+// as long as it keeps moving them.
+//
+// That distinction is the whole point. A fixed wall clock is just a
+// slower version of abandoning the survivor — measured at 33% of a
+// 960 KiB response delivered before the cut — and this proxy sits in
+// front of real upstreams, where a response taking longer than a fixed
+// grace is entirely ordinary.
+//
+// The window is deliberately generous, and the asymmetry is why. A clean
+// EOF, a reset, or a failed write all end io.Copy on their own and are
+// noticed the instant they happen, so what this timer actually bounds is
+// only two things: a source socket that is open and SILENT, and a write
+// to the destination that has not returned yet. Both of those are
+// ordinary traffic — an upstream still computing its first byte, a
+// database mid-query, an event stream between heartbeats, a peer whose
+// receive window is momentarily full. Cutting them off costs the user
+// bytes that were about to arrive.
+//
+// Waiting costs two goroutines and two fds per held connection (~48 KiB,
+// dominated by io.Copy's two 32 KiB buffers), bounded by this window.
+// Measured at 300 concurrently draining connections that is ~14 MiB, and
+// memoryguard's pause headroom is 128 MiB, so it does not meaningfully
+// worsen the condition the fallback runs under. That trade is not close,
+// which is why an earlier 500ms window is gone: it dropped entire
+// responses to nothing more exotic than an upstream that thought for
+// 800ms before its first byte.
+//
+// The tempting alternative — a long budget for the FIRST byte and a short
+// idle tick afterwards — was considered and rejected. It fixes the
+// upstream that has not answered yet and leaves a guillotine on every gap
+// AFTER the first byte, so a response that streams with pauses longer
+// than the short tick is still truncated: server-sent events between
+// heartbeats, a long-poll, a cursor that pages a large result set. Those
+// gaps are not a degraded state, they are how the protocols work.
+//
+// Be precise about what one window buys, though: it does not REMOVE the
+// truncation case, it moves the edge from sub-second to 30s. A stream
+// whose gaps exceed 30s is still cut. The claim is only that no ordinary
+// gap is sub-second, so a single generous window has no edge anywhere
+// real traffic lives, where two windows keep one.
+const RelayDrainIdle = 30 * time.Second
+
+// countingWriter records how many bytes have reached the destination, so
+// the drain can tell "still delivering" from "stalled".
+type countingWriter struct {
+	w io.Writer
+	n atomic.Int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// copyOutcome reports WHICH copy direction ended, and how.
+//
+// The index is not bookkeeping, it is the correctness of the drain. A
+// bare error says that a direction broke but not which one, and the
+// survivor to watch is always the other one. Assuming the first result
+// must have come from the first goroutine is wrong half the time, and
+// wrong in a way that looks like it works: it watches the counter of the
+// direction that just died, which never advances again, so the drain
+// sees "stalled" on its very first tick and returns after a single idle
+// window. That is precisely the fixed wall clock this mechanism exists
+// to avoid, reintroduced for half the failure orientations — and it is
+// the more common half, because the upstream read is where a reset or a
+// TLS alert surfaces first.
+type copyOutcome struct {
+	idx int
+	err error
+}
+
+// WaitForSurvivor blocks until the surviving copy direction finishes or
+// stalls, whichever comes first.
+//
+// Receiving anything on finished means that direction's copy is over, so
+// there is nothing left to wait for. delivered reports how many bytes it
+// has handed on so far; it is polled once per window, and any change at
+// all counts as progress and buys another full window. Only a window
+// that passes with the count unmoved ends the wait.
+func WaitForSurvivor[T any](finished <-chan T, delivered func() int64, idle time.Duration) {
+	last := delivered()
+	t := time.NewTimer(idle)
+	defer t.Stop()
+	for {
+		select {
+		case <-finished:
+			return
+		case <-t.C:
+			n := delivered()
+			if n == last {
+				return // stalled
+			}
+			last = n
+			t.Reset(idle)
+		}
+	}
+}
+
+// RelayRawPassthrough relays bytes both ways between two connections and
+// returns once the exchange is over. Nothing is captured — it is the
+// memory-pressure fallback, used when a parser stops recording but the
+// user's traffic must keep flowing.
+//
+// Two rules, and the second is the one that is easy to get wrong.
+//
+// FORWARD THE FIN ONLY ON A CLEAN EOF. A FIN means "I have sent
+// everything I am going to send", so forwarding it after a truncated
+// read, a reset, or a failed write tells the peer a partial message is
+// complete — and an EOF-delimited protocol acts on it. io.Copy exits the
+// same way for all of these, so err is the only thing that separates
+// them.
+//
+// WHEN ONE DIRECTION BREAKS, LET THE OTHER KEEP GOING WHILE IT IS STILL
+// MAKING PROGRESS, and abandon it only once it stalls.
+//
+// Waiting unconditionally wedges the CALLER, and that is the cost worth
+// naming. The survivor is blocked reading a socket whose peer will never
+// be told the stream ended, and keploy cannot wake it before session
+// teardown (SafeConn's Close and all three deadline setters are no-ops).
+// It is not literally forever — the surviving peer's own close or timeout
+// releases it — but handleConnection cannot proceed until this returns.
+//
+// Note what it is NOT: the goroutines do not linger past the return.
+// handleConnection's defer closes the real srcConn/dstConn directly and
+// connCloser fires on parserCtx cancellation, so the abandoned copier
+// exits as soon as this function hands control back — measured at +0
+// goroutines immediately after return and close.
+//
+// Abandoning it at once is worse, and was this function's first bug. The
+// two directions do NOT necessarily fail together: these conns are
+// SafeConns over *tls.Conn on every TLS-intercepted path, and Go's
+// tls.Conn keeps its read and write halves' errors separate, so a
+// read-side failure leaves a fully usable write half with
+// already-decrypted bytes still to deliver. Returning at once lets the
+// caller's deferred close land on that healthy direction and shred it.
+func RelayRawPassthrough(clientConn, destConn net.Conn) {
+	relayRawPassthrough(clientConn, destConn, RelayDrainIdle)
+}
+
+// relayRawPassthrough is RelayRawPassthrough with the idle window as a
+// parameter, so tests can drive the drain without waiting out the
+// production window. Production has exactly one caller, above, and it
+// always passes RelayDrainIdle.
+func relayRawPassthrough(clientConn, destConn net.Conn, idle time.Duration) {
+	done := make(chan copyOutcome, 2)
+	// counters[i] counts what direction i has delivered to its destination.
+	// Both are built before either goroutine starts.
+	counters := [2]*countingWriter{{w: destConn}, {w: clientConn}}
+	cp := func(idx int, dst, src net.Conn) {
+		_, err := io.Copy(counters[idx], src)
+		if err == nil {
+			_ = CloseWriteIfPossible(dst)
+		}
+		done <- copyOutcome{idx: idx, err: err}
+	}
+	go cp(0, destConn, clientConn)
+	go cp(1, clientConn, destConn)
+
+	for i := 0; i < 2; i++ {
+		res := <-done
+		if res.err == nil {
+			continue
+		}
+		// Both results are already in hand — nothing is left to drain, and
+		// waiting would just hold the caller for the full idle window on
+		// the very common "one side ends cleanly, the other resets".
+		if i == 1 {
+			return
+		}
+		// Let the survivor run while it is still delivering. The survivor
+		// is the direction that did NOT just report.
+		WaitForSurvivor(done, counters[1-res.idx].n.Load, idle)
+		return
 	}
 }
