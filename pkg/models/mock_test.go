@@ -285,4 +285,3 @@ func TestPostgresV3Response_CopyIn_RoundTrip(t *testing.T) {
 		t.Fatalf("Validate(): want non-nil error on malformed response with both Rows and CopyIn, got nil")
 	}
 }
-
