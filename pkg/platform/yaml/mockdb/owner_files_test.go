@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,4 +180,71 @@ func TestMockFileBasesIgnoresNonMockFiles(t *testing.T) {
 	if len(bases) != len(want) || bases[0] != want[0] || bases[1] != want[1] {
 		t.Fatalf("bases = %v, want %v (unowned first, then owners sorted)", bases, want)
 	}
+}
+
+// Partial record: the owners this run captures are REPLACED whole, and the
+// owners it never sees keep the recording they already had.
+//
+// This is what makes fixing one test cheap. Without it `record` has to wipe the
+// set, so re-recording one test costs every other test its recording.
+func TestPartialRecordReplacesOnlyTheOwnersItCaptures(t *testing.T) {
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "")
+	a, b := "spec.ts > d > test A", "spec.ts > d > test B"
+
+	// First recording: both owners, two mocks each.
+	insertOwned(t, ys, "set-0", a, a, b, b)
+	aPath := filepath.Join(dir, "set-0", ownerHash(a)+".yaml")
+	bPath := filepath.Join(dir, "set-0", ownerHash(b)+".yaml")
+	bBefore, err := os.ReadFile(bPath)
+	if err != nil {
+		t.Fatalf("read B before: %v", err)
+	}
+	if n := countDocs(t, aPath); n != 2 {
+		t.Fatalf("A started with %d docs, want 2", n)
+	}
+
+	// A second run that captures ONLY owner A.
+	ys2 := New(zap.NewNop(), dir, "")
+	ys2.SetPartialRecord(true)
+	insertOwned(t, ys2, "set-0", a)
+
+	// A is replaced whole -- one doc, not appended to the previous two.
+	if n := countDocs(t, aPath); n != 1 {
+		t.Fatalf("A has %d docs after a partial re-record, want 1 (replaced, not appended)", n)
+	}
+	// B is untouched, byte for byte.
+	bAfter, err := os.ReadFile(bPath)
+	if err != nil {
+		t.Fatalf("read B after: %v", err)
+	}
+	if string(bBefore) != string(bAfter) {
+		t.Fatalf("owner B changed during a partial re-record that never captured it")
+	}
+}
+
+// Without the flag the writer appends, which is why a full re-record still has
+// to clear the set first.
+func TestWithoutPartialTheOwnerFileIsAppendedTo(t *testing.T) {
+	dir := t.TempDir()
+	a := "spec.ts > d > test A"
+	ys := New(zap.NewNop(), dir, "")
+	insertOwned(t, ys, "set-0", a)
+
+	ys2 := New(zap.NewNop(), dir, "")
+	insertOwned(t, ys2, "set-0", a)
+
+	aPath := filepath.Join(dir, "set-0", ownerHash(a)+".yaml")
+	if n := countDocs(t, aPath); n != 2 {
+		t.Fatalf("A has %d docs, want 2 (appended, no partial mode)", n)
+	}
+}
+
+func countDocs(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return strings.Count(string(raw), "version: api.keploy.io")
 }
