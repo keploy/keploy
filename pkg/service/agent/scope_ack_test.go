@@ -229,3 +229,27 @@ func TestBeginScopeLenientByDefault(t *testing.T) {
 	require.False(t, ack.Scoped, "without strict scoping the whole pool stays armed")
 	require.Equal(t, models.ScopeReasonUnmappedScope, ack.Reason)
 }
+
+// Strict scoping on the PER-WORKER path must narrow to nothing, not clear the
+// scope. SetWorkerScope treats an empty list as "clear", which serves the whole
+// pool -- so passing one there would invert the guarantee while still acking
+// Scoped with 0 mocks. Latent while the runner reports no pid; wrong the moment
+// it does.
+func TestBeginScopeStrictPerWorkerDoesNotClearTheScope(t *testing.T) {
+	ctx := context.Background()
+	table := map[string][]string{"alpha": {"m-0"}}
+	a, p := replayAgent(t, []string{"m-0", "m-1"}, table)
+	require.NoError(t, a.SetScopeTable(ctx, table, true))
+
+	ack, err := a.BeginScope(ctx, "beta", 4242, 0)
+	require.NoError(t, err)
+	require.Equal(t, models.ScopeReasonStrictNoRecording, ack.Reason)
+
+	names, scoped := p.workers[4242]
+	require.True(t, scoped, "the worker must still HAVE a scope; clearing it serves the whole pool")
+	require.NotEmpty(t, names, "an empty list is what SetWorkerScope reads as 'clear'")
+	for _, n := range names {
+		require.NotEqual(t, "m-0", n)
+		require.NotEqual(t, "m-1", n)
+	}
+}

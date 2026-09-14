@@ -105,7 +105,13 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid, attempt int) (
 					zap.String("test", name), zap.Int("attempt", attempt))
 			}
 			if pid > 0 {
-				a.SetWorkerScope(uint32(pid), []string{})
+				// NOT an empty slice: SetWorkerScope treats that as "clear this
+				// worker's scope", which serves the WHOLE pool -- the exact
+				// opposite of what strict scoping means, while still acking
+				// Scoped with 0 mocks. Narrow to a name no mock can have instead.
+				// Mock names are "<12-hex>-<n>" or "mock-<n>" (mockdb.mintName),
+				// so this sentinel can never collide with a real recording.
+				a.SetWorkerScope(uint32(pid), []string{strictNoRecordingSentinel})
 			} else if err := a.UpdateMockParams(ctx, models.MockFilterParams{
 				MockMapping:         []string{},
 				MockMappingUniverse: universe,
@@ -350,6 +356,11 @@ func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error)
 
 // SetScopeTable installs the replay-time per-test name→mock-names table the CLI
 // read from mappings.yaml.
+// strictNoRecordingSentinel is a mock name that cannot exist. Under strict
+// scoping a per-worker view is narrowed to this rather than to an empty list,
+// because an empty list means "clear the scope" and would serve everything.
+const strictNoRecordingSentinel = "\x00keploy-strict-no-recording"
+
 func (a *Agent) SetScopeTable(_ context.Context, table map[string][]string, strict bool) error {
 	a.scopeMu.Lock()
 	a.scopeTable = table
