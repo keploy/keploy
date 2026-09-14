@@ -243,7 +243,36 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
 
-	m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+	// Report how much of this recording belongs to NO test.
+	//
+	// This is the only signal that catches a runner whose per-test scoping has
+	// silently stopped working. A Playwright fixture covers hook traffic through
+	// an undocumented fixture mode; if that mode is ever renamed, the fixture
+	// keeps running, every test still passes, and the whole of `beforeAll` --
+	// login, page load, the bulk of the traffic -- lands here unowned instead.
+	// Unowned mocks are served to every test as shared overflow, so nothing
+	// downstream fails and the suite stays green while per-test isolation is
+	// gone. Probing the runner cannot see that; counting the result can.
+	//
+	// A non-zero count is NOT itself a fault: a runner that reports no scopes at
+	// all records everything this way, by design. It is the RATIO that matters
+	// on a suite that does report scopes.
+	unowned := 0
+	for _, mk := range recorded {
+		if mk.owner == "" {
+			unowned++
+		}
+	}
+	m.logger.Info("recorded mocks",
+		zap.Int("mocks", mockCount),
+		zap.Int("unowned", unowned),
+		zap.String("mock-set", name))
+	if unowned > 0 && unowned < mockCount {
+		m.logger.Warn("some captures belong to no test and will be served to EVERY test as shared overflow",
+			zap.Int("unowned", unowned),
+			zap.Int("mocks", mockCount),
+			zap.String("next_step", "expected for traffic outside any test (app startup). If it covers hook traffic the runner meant to scope, per-test isolation has degraded -- check that the runner still opens a scope around beforeAll/afterAll"))
+	}
 	if mockCount == 0 {
 		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
 			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
