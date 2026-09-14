@@ -171,6 +171,35 @@ type testVerdict struct {
 	// "zero" on a field whose whole job is to be a magnitude.
 	DependenciesConsumed int         `json:"dependencies_consumed"`
 	Effects              []effectRow `json:"effects"`
+	// Consumer carries the four scalars of a Kind: Consumer delivery window.
+	// Omitted entirely for every other kind, so existing NDJSON output is
+	// byte-identical. `end_reason` is the field an agent keys remedies on: it
+	// is what separates "the worker produced the wrong thing" (count_reached,
+	// with effect rows) from "we stopped looking too early" (timeout) and from
+	// "keploy never got the message to the worker" (trigger_not_delivered).
+	Consumer *consumerRun `json:"consumer,omitempty"`
+}
+
+// consumerRun is the NDJSON projection of models.ConsumerResultInfo. It is a
+// separate struct rather than the model type so the wire schema is owned here
+// and cannot be changed by an edit to a model's yaml tags.
+type consumerRun struct {
+	TriggerAccepted bool   `json:"trigger_accepted"`
+	ExpectedEffects int    `json:"expected_effects"`
+	ObservedEffects int    `json:"observed_effects"`
+	EndReason       string `json:"end_reason"`
+}
+
+func buildConsumerRun(t models.TestResult) *consumerRun {
+	if t.Consumer == nil {
+		return nil
+	}
+	return &consumerRun{
+		TriggerAccepted: t.Consumer.TriggerAccepted,
+		ExpectedEffects: t.Consumer.ExpectedEffects,
+		ObservedEffects: t.Consumer.ObservedEffects,
+		EndReason:       string(t.Consumer.EndReason),
+	}
 }
 
 // buildEffectRows flattens a test's dependency rows into the wire shape. Pure
@@ -214,6 +243,7 @@ func buildTestVerdict(runID, testSetID string, t models.TestResult) testVerdict 
 		DependenciesChecked:  t.Result.DependenciesChecked(),
 		DependenciesConsumed: t.Result.DepsConsumed,
 		Effects:              buildEffectRows(t),
+		Consumer:             buildConsumerRun(t),
 	}
 }
 

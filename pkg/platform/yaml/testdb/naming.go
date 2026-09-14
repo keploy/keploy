@@ -36,6 +36,8 @@ func BuildTestCaseSlug(tc *models.TestCase) string {
 		return slugForHTTP(tc)
 	case models.GRPC_EXPORT:
 		return slugForGRPC(tc)
+	case models.CONSUMER:
+		return slugForConsumer(tc)
 	default:
 		// The captured TestCase wasn't HTTP or gRPC (or the Kind
 		// field is empty on older recordings). Try HTTP first —
@@ -72,6 +74,40 @@ func slugForHTTP(tc *models.TestCase) string {
 	slug := sanitizeSlug(strings.Join(parts, "-"))
 	if slug == "" {
 		return fallbackTC
+	}
+	return truncateSlug(slug, maxSlugLen)
+}
+
+// slugForConsumer names a consumer test after its protocol and target, e.g.
+// "kafka-orders", which generateName turns into "kafka-orders-1".
+//
+// HONEST NOTE ON WHETHER THIS EVER RUNS. testdb.upsert calls claimName — and
+// therefore BuildTestCaseSlug — ONLY when tc.Name is empty, and the consumer
+// recorder mints its test name up front (it needs the name before the mapping
+// resolves, so the mapping and the test case agree). So on the path consumers
+// actually take, this arm is dead. It is here because BuildTestCaseSlug is
+// documented as always safe to call, because a future or third-party producer
+// may well leave the name blank, and because the default branch's HTTP-first
+// fallback would otherwise label every consumer test "test-consumer".
+//
+// Deviation from keploy-consumer-design-v2.md §9, which specified
+// "test-<protocol>-<target>-<n>": the "test-" prefix belongs to the FALLBACK
+// path (fallbackTC), not to a descriptive slug — slugForHTTP returns
+// "get-orders", not "test-get-orders" — and generateName appends the counter.
+// Adding the prefix here would produce "test-kafka-orders-1" where every other
+// kind produces "get-orders-1".
+func slugForConsumer(tc *models.TestCase) string {
+	var protocol, target string
+	if tc.ConsumerSpec != nil {
+		protocol = tc.ConsumerSpec.Protocol
+		if protocol == "" {
+			protocol = tc.ConsumerSpec.Trigger.Protocol
+		}
+		target = tc.ConsumerSpec.Trigger.Target
+	}
+	slug := sanitizeSlug(strings.Join([]string{protocol, target}, "-"))
+	if slug == "" {
+		return "consumer"
 	}
 	return truncateSlug(slug, maxSlugLen)
 }

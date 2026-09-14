@@ -848,6 +848,7 @@ func TestDependencyAssertionKnob(t *testing.T) {
 		assertDependencies bool
 		strictMockReject   bool
 		strictFailure      bool
+		nonDemotable       bool
 		wantDepAssertFail  bool
 		wantDemote         bool
 	}{
@@ -887,6 +888,16 @@ func TestDependencyAssertionKnob(t *testing.T) {
 			mockSetMismatch: false,
 			wantDemote:      false,
 		},
+		{
+			// THE CONSUMER RULE. Not a knob: no configuration exists in
+			// which grading a consumer's unconsumed effect mock as OBSOLETE
+			// (which does not fail the test set and does not change the exit
+			// code) is correct.
+			name:            "a non-demotable Kind vetoes the demotion with every knob off",
+			mockSetMismatch: true,
+			nonDemotable:    true,
+			wantDemote:      false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -894,7 +905,7 @@ func TestDependencyAssertionKnob(t *testing.T) {
 			depAssertFail := dependencyAssertionRejects(tt.mockSetMismatch, tt.assertDependencies)
 			assert.Equal(t, tt.wantDepAssertFail, depAssertFail)
 			assert.Equal(t, tt.wantDemote,
-				demoteToObsolete(tt.mockSetMismatch, tt.strictMockReject, depAssertFail, tt.strictFailure))
+				demoteToObsolete(tt.mockSetMismatch, tt.strictMockReject, depAssertFail, tt.strictFailure, tt.nonDemotable))
 		})
 	}
 }
@@ -911,6 +922,7 @@ func TestResolveTestStatus(t *testing.T) {
 		strictMockReject bool
 		depAssertFail    bool
 		strictFailure    bool
+		neverDemotable   bool
 		wantStatus       models.TestStatus
 		wantFailsSet     bool
 	}{
@@ -959,11 +971,29 @@ func TestResolveTestStatus(t *testing.T) {
 			testPass: false, mockSetMismatch: true, strictMockReject: true,
 			wantStatus: models.TestStatusFailed, wantFailsSet: true,
 		},
+		{
+			// RULE 3, THE WHOLE POINT OF neverDemotableKind. Without the veto this
+			// row is OBSOLETE + failsSet:false, which is the silent green of
+			// design §5 row 0: the worker stopped producing, the test set is
+			// not marked failed, and the run exits 0.
+			name:     "a non-demotable Kind is FAILED and reddens the set instead of being demoted",
+			testPass: false, mockSetMismatch: true, neverDemotable: true,
+			wantStatus: models.TestStatusFailed, wantFailsSet: true,
+		},
+		{
+			// Post-flip contract, mirroring the depAssertFail row above:
+			// resolveTestOutcome flips responseMatched to false before
+			// calling this, so a still-matching response here stays PASSED.
+			// The reachable case is in TestResolveTestOutcome.
+			name:     "post-flip contract: a still-matching response is PASSED even with neverDemotable set",
+			testPass: true, mockSetMismatch: true, neverDemotable: true,
+			wantStatus: models.TestStatusPassed, wantFailsSet: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			status, failsSet := resolveTestStatus(tt.testPass, tt.mockSetMismatch, tt.strictMockReject, tt.depAssertFail, tt.strictFailure)
+			status, failsSet := resolveTestStatus(tt.testPass, tt.mockSetMismatch, tt.strictMockReject, tt.depAssertFail, tt.strictFailure, tt.neverDemotable)
 			assert.Equal(t, tt.wantStatus, status)
 			assert.Equal(t, tt.wantFailsSet, failsSet)
 		})
@@ -984,6 +1014,8 @@ func TestResolveTestOutcome(t *testing.T) {
 		schemaNoiseStrict  bool
 		assertDependencies bool
 		strictFailure      bool
+		neverDemotable     bool
+		effectMockMissing  bool
 		want               testOutcome
 	}{
 		{
@@ -1092,11 +1124,89 @@ func TestResolveTestOutcome(t *testing.T) {
 				VetoFlags: "--assert-dependencies, --strict-failure", DepAssertFail: true,
 			},
 		},
+		{
+			// THE FLAGSHIP CONSUMER REGRESSION, at the seam that decides it.
+			// The worker's effects compared clean (there were none to
+			// compare) and its effect mock went unconsumed — for a consumer
+			// those two statements cannot both be true, because an effect
+			// mock nothing consumed IS an effect the worker did not produce.
+			// With no knobs at all this must be FAILED and must redden the
+			// set; the historical answer was PASSED + green.
+			name:            "response matched, effect mock unconsumed, non-demotable Kind: FAILED with no knob at all",
+			responseMatched: true, mockSetMismatch: true, neverDemotable: true, effectMockMissing: true,
+			want: testOutcome{
+				Status: models.TestStatusFailed, FailsTestSet: true,
+				RecordMismatch: true, Log: mismatchLogNonDemotableReject,
+			},
+		},
+		{
+			// And the log must NOT be one of the two that name a flag: there
+			// is no invocation to change here, so pointing the reader at one
+			// sends them to the wrong place.
+			name:            "response failed AND the effect mock was unconsumed, non-demotable Kind",
+			mockSetMismatch: true, neverDemotable: true, effectMockMissing: true,
+			want: testOutcome{
+				Status: models.TestStatusFailed, FailsTestSet: true,
+				RecordMismatch: true, Log: mismatchLogVetoedFailure,
+				VetoFlags: "this test case Kind is never demoted to obsolete",
+			},
+		},
+		{
+			name:            "a non-demotable Kind that simply passed is untouched",
+			responseMatched: true, neverDemotable: true, effectMockMissing: true,
+			want: testOutcome{
+				Status: models.TestStatusPassed, Log: mismatchLogNone,
+			},
+		},
+		{
+			// The non-demotion outranks --schema-noise-strict's log because
+			// it names the more actionable cause for this Kind; the verdict
+			// is the same either way.
+			name:            "non-demotable wins the explanation over schema-noise-strict",
+			responseMatched: true, mockSetMismatch: true, neverDemotable: true, effectMockMissing: true, schemaNoiseStrict: true,
+			want: testOutcome{
+				Status: models.TestStatusFailed, FailsTestSet: true,
+				RecordMismatch: true, Log: mismatchLogSchemaNoiseReject,
+			},
+		},
+		{
+			// THE BLOCKER THIS SPLIT EXISTS FOR. The JUDGE failed this
+			// consumer test — an effect diff, a completion timeout, a named
+			// refusal — and the mock set diverged on something that is NOT an
+			// effect mock: a cached OffsetFetch the client skipped (design §4
+			// P4's own example), or the trigger itself when a parser forgets
+			// the DeleteFilteredMock / GetConsumedMocks bookkeeping.
+			//
+			// While one boolean carried both claims, narrowing it for the
+			// promotion also narrowed this: the test was persisted OBSOLETE,
+			// did not fail the test set, and the run exited 0 — design §5's
+			// false-pass row 0 reopened on the one Kind whose stated guard is
+			// "the CONSUMER verdict is non-demotable".
+			name:            "the JUDGE failed a consumer test and the diverged mock is NOT an effect mock: still FAILED, never OBSOLETE",
+			mockSetMismatch: true, neverDemotable: true, effectMockMissing: false,
+			want: testOutcome{
+				Status: models.TestStatusFailed, FailsTestSet: true,
+				RecordMismatch: true, Log: mismatchLogVetoedFailure,
+				VetoFlags: "this test case Kind is never demoted to obsolete",
+			},
+		},
+		{
+			// THE OTHER HALF OF THE SPLIT, and the false RED it prevents. The
+			// judge PASSED this consumer test and the only unconsumed mock is
+			// coordination traffic. Promoting here would fail a clean test and
+			// tell the reader the worker stopped producing, which is not what
+			// happened. The by-Kind bit must NOT reach the promotion arm.
+			name:            "the judge passed and only coordination traffic went unconsumed: still PASSED",
+			responseMatched: true, mockSetMismatch: true, neverDemotable: true, effectMockMissing: false,
+			want: testOutcome{
+				Status: models.TestStatusPassed, Log: mismatchLogIgnoredResponseMatched,
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveTestOutcome(tt.responseMatched, tt.mockSetMismatch, tt.schemaNoiseStrict, tt.assertDependencies, tt.strictFailure)
+			got := resolveTestOutcome(tt.responseMatched, tt.mockSetMismatch, tt.schemaNoiseStrict, tt.assertDependencies, tt.strictFailure, tt.neverDemotable, tt.effectMockMissing)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -1109,8 +1219,8 @@ func TestResolveTestOutcome(t *testing.T) {
 func TestResolveTestOutcome_DefaultsAreBackwardCompatible(t *testing.T) {
 	for _, responseMatched := range []bool{false, true} {
 		for _, mismatch := range []bool{false, true} {
-			got := resolveTestOutcome(responseMatched, mismatch, false, false, false)
-			want, wantFails := resolveTestStatus(responseMatched, mismatch, false, false, false)
+			got := resolveTestOutcome(responseMatched, mismatch, false, false, false, false, false)
+			want, wantFails := resolveTestStatus(responseMatched, mismatch, false, false, false, false)
 			assert.Equal(t, want, got.Status,
 				"responseMatched=%v mismatch=%v", responseMatched, mismatch)
 			assert.Equal(t, wantFails, got.FailsTestSet,
@@ -1129,6 +1239,7 @@ func TestShouldEmitFailureLogs(t *testing.T) {
 		name               string
 		mockSetMismatch    bool
 		assertDependencies bool
+		neverDemotable     bool
 		want               bool
 	}{
 		{name: "no divergence: diffs as always", want: true},
@@ -1138,10 +1249,17 @@ func TestShouldEmitFailureLogs(t *testing.T) {
 			name:            "divergence, knob on: the test is going red, so show the diff",
 			mockSetMismatch: true, assertDependencies: true, want: true,
 		},
+		{
+			// For a consumer test the divergence IS the finding, so the
+			// historical suppression would hide the diff on exactly the
+			// regression the contract exists to catch.
+			name:            "divergence on a non-demotable Kind: never suppressed",
+			mockSetMismatch: true, neverDemotable: true, want: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, shouldEmitFailureLogs(tt.mockSetMismatch, tt.assertDependencies))
+			assert.Equal(t, tt.want, shouldEmitFailureLogs(tt.mockSetMismatch, tt.assertDependencies, tt.neverDemotable))
 		})
 	}
 }
@@ -1798,15 +1916,20 @@ func TestVetoFlagName(t *testing.T) {
 	tests := []struct {
 		depAssertFail bool
 		strictFailure bool
+		nonDemotable  bool
 		want          string
 	}{
 		{want: ""},
 		{depAssertFail: true, want: "--assert-dependencies"},
 		{strictFailure: true, want: "--strict-failure"},
 		{depAssertFail: true, strictFailure: true, want: "--assert-dependencies, --strict-failure"},
+		// A NON-FLAG REASON MUST NOT READ AS A FLAG. Whoever sees this line
+		// must not go looking for an invocation to change.
+		{nonDemotable: true, want: "this test case Kind is never demoted to obsolete"},
+		{depAssertFail: true, nonDemotable: true, want: "--assert-dependencies, this test case Kind is never demoted to obsolete"},
 	}
 	for _, tt := range tests {
-		assert.Equal(t, tt.want, vetoFlagName(tt.depAssertFail, tt.strictFailure))
+		assert.Equal(t, tt.want, vetoFlagName(tt.depAssertFail, tt.strictFailure, tt.nonDemotable))
 	}
 }
 
@@ -2022,4 +2145,351 @@ func TestNoEligibleDepsAndCheckedAreTheSameQuestion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Rule 3: a missing effect must never be demotable.
+// ---------------------------------------------------------------------------
+
+// TWO PREDICATES, TWO DIFFERENT QUESTIONS, AND THEY MUST NOT SHARE A BOOLEAN.
+//
+//	neverDemotableKind      — may a test the judge ALREADY FAILED be graded
+//	                          OBSOLETE? Keyed on Kind alone; for CONSUMER the
+//	                          answer is never.
+//	missingEffectMockPromotes — must a test the judge PASSED be promoted to
+//	                          FAILED? Only when an unconsumed mock could be
+//	                          carrying an effect claim.
+//
+// Every table above takes those as literals from its own row, so they pin the
+// algebra GIVEN the value and never the value itself — `return false` here
+// compiles, keeps every identifier the AST wiring test looks for, and silently
+// restores the demotion for consumer tests: the worker stopped producing, the
+// test set is not marked failed, and the run exits 0 reporting verified_green.
+func TestNeverDemotableKind(t *testing.T) {
+	assert.True(t, neverDemotableKind(models.CONSUMER),
+		"a consumer test the judge failed must never be graded OBSOLETE, whatever mock went unconsumed")
+	for _, k := range []models.Kind{models.HTTP, models.HTTP2, models.GRPC_EXPORT, models.Kind(""), models.Kind("SomeKindThatDoesNotExistYet")} {
+		assert.False(t, neverDemotableKind(k), "kind %q must keep the historical demotion", k)
+	}
+}
+
+// The promotion arm's predicate. The Kind is necessary and NOT sufficient:
+// mockSetMismatch fires for any unconsumed per-test mock, and a consumer test
+// legitimately maps per-test coordination mocks (design §4 P4 keeps
+// OffsetFetch per-test) that a client with a cached position simply does not
+// call. Promoting on those would fail a clean consumer test and hand the
+// reader a message about the worker's production that has nothing to do with
+// what happened.
+//
+// IT FAILS CLOSED ON AN UNCLASSIFIABLE MOCK. The lookup is best-effort — a nil
+// mockDB or a registry read error leaves it empty — and excusing a miss would
+// report the flagship "the worker stopped writing" regression as PASSED
+// because a side lookup did not load. The last three rows pin that direction.
+func TestMissingEffectMockPromotes(t *testing.T) {
+	// A Kafka-shaped mapping: the trigger, one produced effect, one
+	// coordination call of the same family, one mapped database write.
+	lookup := map[string]mockDisplayInfo{
+		"mock-trigger": {kind: models.KAFKA, role: models.RoleTrigger},
+		"mock-effect":  {kind: models.KAFKA, role: models.RoleEffect},
+		"mock-coord":   {kind: models.KAFKA},
+		"mock-write":   {kind: models.Postgres},
+	}
+	all := []string{"mock-trigger", "mock-effect", "mock-coord", "mock-write"}
+
+	tests := []struct {
+		name     string
+		kind     models.Kind
+		expected []string
+		consumed []string
+		lookup   map[string]mockDisplayInfo
+		want     bool
+	}{
+		{
+			name: "an unconsumed effect mock promotes", kind: models.CONSUMER,
+			expected: all, consumed: []string{"mock-trigger", "mock-coord", "mock-write"}, want: true,
+		},
+		{
+			name: "an unconsumed mapped write promotes too — that is spec.writes", kind: models.CONSUMER,
+			expected: all, consumed: []string{"mock-trigger", "mock-effect", "mock-coord"}, want: true,
+		},
+		{
+			// THE FALSE-RED ROW. A per-test coordination call the client
+			// skipped is exactly what the OBSOLETE demotion exists for.
+			name: "an unconsumed coordination mock does NOT promote", kind: models.CONSUMER,
+			expected: all, consumed: []string{"mock-trigger", "mock-effect", "mock-write"}, want: false,
+		},
+		{
+			// An undelivered trigger is keploy failing, not the worker. The
+			// gate names that by itself.
+			name: "an unconsumed trigger does NOT promote", kind: models.CONSUMER,
+			expected: all, consumed: []string{"mock-effect", "mock-coord", "mock-write"}, want: false,
+		},
+		{
+			name: "nothing unconsumed, nothing to promote", kind: models.CONSUMER,
+			expected: all, consumed: all, want: false,
+		},
+		{
+			// FAIL CLOSED. The registry did not load, so nothing can be
+			// POSITIVELY identified as same-family coordination traffic. The
+			// unconsumed write mock is still a write mock.
+			name:     "an EMPTY lookup promotes rather than excusing",
+			kind:     models.CONSUMER,
+			expected: []string{"mock-trigger", "mock-write"}, consumed: []string{"mock-trigger"},
+			lookup: map[string]mockDisplayInfo{},
+			want:   true,
+		},
+		{
+			// Same direction, one step less degraded: the roles are known but
+			// the Kinds are not, so "same family as the trigger" cannot be
+			// established and the mock is treated as a possible effect.
+			name:     "an entry with no Kind promotes rather than excusing",
+			kind:     models.CONSUMER,
+			expected: []string{"mock-trigger", "mock-coord"}, consumed: []string{"mock-trigger"},
+			lookup: map[string]mockDisplayInfo{"mock-trigger": {role: models.RoleTrigger}, "mock-coord": {}},
+			want:   true,
+		},
+		{
+			name:     "a recording with no role metadata at all still promotes: nothing identifies a trigger to compare against",
+			kind:     models.CONSUMER,
+			expected: []string{"mock-a", "mock-b"}, consumed: nil, want: true,
+		},
+		{name: "HTTP", kind: models.HTTP, expected: all, consumed: nil, want: false},
+		{name: "HTTP2", kind: models.HTTP2, expected: all, consumed: nil, want: false},
+		{name: "gRPC", kind: models.GRPC_EXPORT, expected: all, consumed: nil, want: false},
+		{name: "empty kind", kind: models.Kind(""), expected: all, consumed: nil, want: false},
+		{name: "unknown kind", kind: models.Kind("SomeKindThatDoesNotExistYet"), expected: all, consumed: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := lookup
+			if tt.lookup != nil {
+				l = tt.lookup
+			}
+			assert.Equal(t, tt.want, missingEffectMockPromotes(tt.kind, tt.expected, tt.consumed, l),
+				"the OBSOLETE demotion exists for a mock pool that drifted away from the recording; "+
+					"for a consumer test's EFFECT mocks the reading is inverted, because those mocks ARE its assertions")
+		})
+	}
+}
+
+// The veto is UNCONDITIONAL. There is no configuration in which grading a
+// consumer's unconsumed effect mock as OBSOLETE is correct, so no combination
+// of the other four inputs may re-enable the demotion.
+func TestDemoteToObsoleteIsAlwaysVetoedByNeverDemotable(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		for _, strictMock := range []bool{false, true} {
+			for _, depAssert := range []bool{false, true} {
+				for _, strictFail := range []bool{false, true} {
+					assert.False(t,
+						demoteToObsolete(mismatch, strictMock, depAssert, strictFail, true),
+						"mismatch=%v strictMockReject=%v depAssertFail=%v strictFailure=%v",
+						mismatch, strictMock, depAssert, strictFail)
+				}
+			}
+		}
+	}
+}
+
+// The end-to-end pin design §9 asks for, computed FROM THE KIND rather than
+// from a literal: a Consumer test whose effect mock went unconsumed must be
+// FAILED, must fail the test set (which is what makes the exit code non-zero
+// and `keploy status` red), and must NOT be OBSOLETE or IGNORED.
+//
+// The same inputs with an HTTP Kind must keep the historical answer exactly,
+// which is what makes this a safe change for every suite that passes today.
+func TestAnUnconsumedEffectMockFailsTheSetForAConsumerAndNotForHTTP(t *testing.T) {
+	// "the response compared clean, and an expected mock was never consumed"
+	// with every knob at its default.
+	const responseMatched, mockSetMismatch = true, true
+
+	// The unconsumed mock is an EFFECT mock, which is what the rule is about:
+	// the worker did not produce the message the recording says it produces.
+	lookup := map[string]mockDisplayInfo{
+		"mock-trigger": {kind: models.KAFKA, role: models.RoleTrigger},
+		"mock-effect":  {kind: models.KAFKA, role: models.RoleEffect},
+	}
+	expected := []string{"mock-trigger", "mock-effect"}
+	consumed := []string{"mock-trigger"}
+	neverDemotableConsumer := neverDemotableKind(models.CONSUMER)
+	promoteConsumer := missingEffectMockPromotes(models.CONSUMER, expected, consumed, lookup)
+	neverDemotableHTTP := neverDemotableKind(models.HTTP)
+	promoteHTTP := missingEffectMockPromotes(models.HTTP, expected, consumed, lookup)
+
+	consumerOutcome := resolveTestOutcome(responseMatched, mockSetMismatch, false, false, false, neverDemotableConsumer, promoteConsumer)
+	assert.Equal(t, models.TestStatusFailed, consumerOutcome.Status,
+		"the flagship regression must not be OBSOLETE")
+	assert.True(t, consumerOutcome.FailsTestSet,
+		"OBSOLETE does not fail the test set, and that asymmetry IS the silent-green hole")
+	assert.Equal(t, mismatchLogNonDemotableReject, consumerOutcome.Log)
+	assert.False(t, consumerOutcome.DepAssertFail,
+		"this verdict owes nothing to --assert-dependencies")
+
+	httpOutcome := resolveTestOutcome(responseMatched, mockSetMismatch, false, false, false, neverDemotableHTTP, promoteHTTP)
+	assert.Equal(t, models.TestStatusPassed, httpOutcome.Status,
+		"an HTTP suite that passes today must keep passing")
+	assert.False(t, httpOutcome.FailsTestSet)
+	assert.Equal(t, mismatchLogIgnoredResponseMatched, httpOutcome.Log)
+
+	// And the same for the response-failed half.
+	consumerFailed := resolveTestOutcome(false, mockSetMismatch, false, false, false, neverDemotableConsumer, promoteConsumer)
+	assert.Equal(t, models.TestStatusFailed, consumerFailed.Status)
+	assert.True(t, consumerFailed.FailsTestSet)
+	assert.Equal(t, mismatchLogVetoedFailure, consumerFailed.Log)
+	assert.NotContains(t, consumerFailed.VetoFlags, "--",
+		"there is no flag to name here; pointing the reader at an invocation sends them to the wrong place")
+
+	httpFailed := resolveTestOutcome(false, mockSetMismatch, false, false, false, neverDemotableHTTP, promoteHTTP)
+	assert.Equal(t, models.TestStatusObsolete, httpFailed.Status,
+		"the historical demotion is untouched for every other Kind")
+	assert.False(t, httpFailed.FailsTestSet)
+}
+
+// THE COMPOSITION THAT WAS A SILENT GREEN, spelled out end to end from the two
+// predicates the call site computes.
+//
+// The judge FAILED this consumer test — an effect diff, a completion timeout,
+// any named refusal — and the mock set diverged on a mock that is NOT an
+// effect mock: design §4 P4's own example, a cached OffsetFetch the client
+// skipped. While one boolean carried both claims the test was persisted
+// OBSOLETE, did not fail the test set, and the run exited 0, with the failure
+// logs suppressed on top of it so there was nothing in the report to notice.
+func TestAJudgeFailedConsumerTestIsNeverObsoleteWhateverWentUnconsumed(t *testing.T) {
+	lookup := map[string]mockDisplayInfo{
+		"trigger-1":     {kind: models.KAFKA, role: models.RoleTrigger},
+		"effect-1":      {kind: models.KAFKA, role: models.RoleEffect},
+		"offsetfetch-1": {kind: models.KAFKA},
+	}
+	expected := []string{"trigger-1", "effect-1", "offsetfetch-1"}
+	consumed := []string{"trigger-1", "effect-1"}
+
+	neverDemotable := neverDemotableKind(models.CONSUMER)
+	effectMockMissing := missingEffectMockPromotes(models.CONSUMER, expected, consumed, lookup)
+	if effectMockMissing {
+		t.Fatal("guard: this case is only interesting while the narrow predicate is false")
+	}
+
+	// responseMatched=false: the JUDGE said this test failed.
+	out := resolveTestOutcome(false, true, false, false, false, neverDemotable, effectMockMissing)
+	if out.Status != models.TestStatusFailed {
+		t.Fatalf("status = %q, want FAILED: a consumer test the judge failed may never be graded obsolete", out.Status)
+	}
+	if !out.FailsTestSet {
+		t.Fatal("the test set must go red; OBSOLETE not failing the set IS the silent-green hole")
+	}
+	if out.Log != mismatchLogVetoedFailure {
+		t.Fatalf("log = %v, want mismatchLogVetoedFailure", out.Log)
+	}
+	if !shouldEmitFailureLogs(true, false, neverDemotable) {
+		t.Fatal("and its explanation must not be suppressed: a red test with no categories, summary or findings is unusable")
+	}
+
+	// The same shape on an HTTP test keeps the historical demotion exactly.
+	httpOut := resolveTestOutcome(false, true, false, false, false,
+		neverDemotableKind(models.HTTP), missingEffectMockPromotes(models.HTTP, expected, consumed, lookup))
+	if httpOut.Status != models.TestStatusObsolete || httpOut.FailsTestSet {
+		t.Fatalf("HTTP must be unchanged, got status=%q failsSet=%v", httpOut.Status, httpOut.FailsTestSet)
+	}
+}
+
+// The diff must reach the user for the same case. shouldEmitFailureLogs is
+// what decides that, and for a consumer the mock-set divergence IS the
+// finding, so the historical suppression would hand back a red test with
+// nothing to look at.
+func TestFailureLogsAreNeverSuppressedForANonDemotableKind(t *testing.T) {
+	assert.True(t, shouldEmitFailureLogs(true, false, neverDemotableKind(models.CONSUMER)))
+	assert.False(t, shouldEmitFailureLogs(true, false, neverDemotableKind(models.HTTP)),
+		"the historical suppression is untouched for every other Kind")
+
+	// THE ROW THE BY-KIND BIT EXISTS FOR. The mock sets diverge only on
+	// COORDINATION traffic — no effect mock is missing — so the narrow
+	// promotion predicate is false. If shouldEmitFailureLogs were fed that
+	// narrow bit, a consumer test the judge FAILED would be reported with no
+	// categories, no summary and no findings list: a red test with nothing to
+	// look at, on exactly the Kind whose rows ARE the finding.
+	coordOnly := map[string]mockDisplayInfo{
+		"mock-trigger": {kind: models.KAFKA, role: models.RoleTrigger},
+		"mock-coord":   {kind: models.KAFKA},
+	}
+	coordExpected := []string{"mock-trigger", "mock-coord"}
+	coordConsumed := []string{"mock-trigger"}
+	assert.False(t, missingEffectMockPromotes(models.CONSUMER, coordExpected, coordConsumed, coordOnly),
+		"guard: this row is only meaningful while the narrow predicate is false")
+	assert.True(t, shouldEmitFailureLogs(true, false, neverDemotableKind(models.CONSUMER)),
+		"a consumer failure is always explained, whatever mock happened to go unconsumed")
+}
+
+// ---------------------------------------------------------------------------
+// existingEffectRows: the guard that stops the sync writer deleting the
+// judge's verdict.
+// ---------------------------------------------------------------------------
+
+func TestExistingEffectRows(t *testing.T) {
+	effect := models.DepResult{Name: "effects[0] kafka produce order-events key=o-1", Type: "kafka"}
+	effectUnexpected := models.DepResult{Name: "effects[*] kafka produce other", Type: "kafka"}
+	dep := models.DepResult{Name: "deps[0] postgres db:5432 (presence)", Type: "postgres"}
+
+	tests := []struct {
+		name string
+		in   []models.DepResult
+		want []models.DepResult
+	}{
+		{name: "nil in, nil out", in: nil, want: nil},
+		{
+			// The --retry-passing second cycle: attachDepResults runs again
+			// against a freshly built result, and a stale deps row it did not
+			// write must not accumulate.
+			name: "a sync-path row is dropped, not kept",
+			in:   []models.DepResult{dep},
+			want: nil,
+		},
+		{
+			name: "the judge's rows survive, in order",
+			in:   []models.DepResult{effect, dep, effectUnexpected},
+			want: []models.DepResult{effect, effectUnexpected},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, existingEffectRows(tt.in))
+		})
+	}
+}
+
+// attachDepResults APPENDS. Assigning would silently delete the judge's rows —
+// the entire verdict of a consumer test — while leaving every call, argument
+// and enclosing condition in RunTestSet untouched, which is precisely the
+// mutation an inspection-only review cannot see.
+func TestAttachDepResultsKeepsTheJudgesRowsAndDropsStaleSyncRows(t *testing.T) {
+	effect := models.DepResult{
+		Name: "effects[0] kafka produce order-events key=o-1", Type: "kafka",
+		Meta: []models.DepMetaResult{{Normal: false, Key: "effects.0.body.status", Expected: "CONFIRMED", Actual: "PENDING"}},
+	}
+	stale := models.DepResult{Name: "deps[0] postgres db:5432 (presence)", Type: "postgres", Meta: missingMeta()}
+	fresh := models.DepResult{Name: "deps[1] postgres db:5432 (presence)", Type: "postgres", Meta: missingMeta()}
+
+	t.Run("consumer: effects survive, stale deps do not, order is effects then deps", func(t *testing.T) {
+		tcResult := &models.TestResult{Kind: models.CONSUMER, Status: models.TestStatusFailed}
+		tcResult.Result.DepResult = []models.DepResult{effect, stale}
+
+		attachDepResults(tcResult, models.TestStatusFailed, depAssertion{
+			Checked: true, Consumed: 2, Rows: []models.DepResult{fresh},
+		}, false)
+
+		assert.Equal(t, []models.DepResult{effect, fresh}, tcResult.Result.DepResult)
+	})
+
+	t.Run("non-consumer: the output is exactly dep.Rows, nil-vs-empty included", func(t *testing.T) {
+		// BACKWARD COMPATIBILITY. `append(nil, ...)` over an empty row slice
+		// must still yield nil, or `dep_result:` stops serializing identically
+		// to a pre-change report.
+		tcResult := &models.TestResult{Kind: models.HTTP, Status: models.TestStatusPassed}
+		attachDepResults(tcResult, models.TestStatusPassed, depAssertion{Checked: true, Consumed: 5}, false)
+		assert.Nil(t, tcResult.Result.DepResult)
+
+		tcResult2 := &models.TestResult{Kind: models.HTTP, Status: models.TestStatusPassed}
+		attachDepResults(tcResult2, models.TestStatusPassed, depAssertion{
+			Checked: true, Consumed: 5, Rows: []models.DepResult{fresh},
+		}, false)
+		assert.Equal(t, []models.DepResult{fresh}, tcResult2.Result.DepResult)
+	})
 }

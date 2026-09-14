@@ -92,6 +92,68 @@ func buildGrpcSpec(tc models.TestCase) models.GrpcSpec {
 	}
 }
 
+// buildConsumerSpec assembles the ConsumerSpec that will live in a doc's Spec.
+// It is the CONSUMER counterpart of buildHTTPSchema / buildGrpcSpec, shared by
+// the YAML and the JSON encode paths so the two cannot drift.
+//
+// Unlike the HTTP path it performs NO noise detection: a consumer payload's
+// fields are the assertion, and auto-noising anything that merely looks like a
+// timestamp is exactly the silent-green failure mode this contract exists to
+// remove. Consumer noise is explicit, path-scoped and user-authored (it is
+// carried on tc.Noise and round-trips through the same NoiseAssertion key the
+// other kinds use).
+//
+// Returns an error rather than an empty spec when tc.ConsumerSpec is nil: a
+// Kind: Consumer test case with no spec has no trigger, no effects and no
+// completion rule, so writing it would produce a file that can only ever
+// replay as a vacuous pass.
+func buildConsumerSpec(tc models.TestCase) (models.ConsumerSpec, error) {
+	if tc.ConsumerSpec == nil {
+		return models.ConsumerSpec{}, errors.New("consumer test case has no ConsumerSpec")
+	}
+	spec := *tc.ConsumerSpec
+	// Protocol routes everything downstream — which Deliverer is asked to
+	// deliver the trigger, which projector decodes the payloads, how the
+	// judge groups ordered comparisons. A spec with none is unusable
+	// everywhere, so repair it from the trigger if we can and refuse if we
+	// cannot, rather than writing a file that can only ever fail later with a
+	// less specific message.
+	if spec.Protocol == "" {
+		spec.Protocol = spec.Trigger.Protocol
+	}
+	if spec.Protocol == "" {
+		return models.ConsumerSpec{}, errors.New("consumer test case has no protocol")
+	}
+	// TestCase.Created and TestCase.AppPort are the source of truth, exactly
+	// as they are for HTTPSchema and GrpcSpec. Carrying a second independent
+	// copy on the spec is what lets the two drift; this makes the spec's copy
+	// a projection instead.
+	spec.Created = tc.Created
+	spec.AppPort = tc.AppPort
+	// Rebuild Assertions from scratch so encoding is a pure function of the
+	// test case: re-encoding a decoded test case must not accumulate a
+	// second copy of the noise map.
+	assertions := map[models.AssertionType]interface{}{}
+	for k, v := range tc.Assertions {
+		if k == models.NoiseAssertion {
+			continue
+		}
+		assertions[k] = v
+	}
+	if len(tc.Noise) > 0 {
+		assertions[models.NoiseAssertion] = tc.Noise
+	}
+	if len(assertions) > 0 {
+		spec.Assertions = assertions
+	} else {
+		spec.Assertions = nil
+	}
+	if tc.Description != "" {
+		spec.Metadata = map[string]string{"description": tc.Description}
+	}
+	return spec, nil
+}
+
 // EncodeTestcaseJSON builds a NetworkTrafficDocJSON directly from a TestCase,
 // skipping the expensive yaml.Node intermediate that EncodeTestcase goes
 // through. Use this on the JSON storage path so the full
@@ -124,6 +186,20 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 		specBytes, err := json.Marshal(buildGrpcSpec(tc))
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal GrpcSpec to JSON")
+			return nil, err
+		}
+		doc.Spec = specBytes
+	case models.CONSUMER:
+		// NOTE: no Curl. A consumer test case has no HTTP request, and
+		// stamping one would ship `curl --request  --url ` on every test.
+		spec, err := buildConsumerSpec(tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to build ConsumerSpec")
+			return nil, err
+		}
+		specBytes, err := json.Marshal(spec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal ConsumerSpec to JSON")
 			return nil, err
 		}
 		doc.Spec = specBytes
@@ -179,6 +255,24 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		// Set the node as the spec
 		doc.Spec = node
 		logger.Debug("Successfully encoded gRPC test case")
+	case models.CONSUMER:
+		logger.Debug("Encoding consumer test case")
+		// NOTE: no Curl, and no noisy-field auto-detection — see
+		// buildConsumerSpec.
+		spec, err := buildConsumerSpec(tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to build ConsumerSpec")
+			return nil, err
+		}
+		var node yamlLib.Node
+		if err := node.Encode(spec); err != nil {
+			utils.LogError(logger, err, "failed to encode consumer spec to YAML node")
+			return nil, err
+		}
+		doc.Spec = node
+		logger.Debug("Successfully encoded consumer test case",
+			zap.String("protocol", spec.Protocol),
+			zap.Int("effects", len(spec.Effects)))
 	default:
 		utils.LogError(logger, nil, "failed to marshal the testcase into yaml due to invalid kind of testcase")
 		return nil, errors.New("type of testcases is invalid")
@@ -423,6 +517,25 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			}
 		}
 
+	case models.CONSUMER:
+		var consumerSpec models.ConsumerSpec
+		if err := yamlTestcase.Spec.Decode(&consumerSpec); err != nil {
+			utils.LogError(logger, err, "failed to decode consumer spec")
+			return nil, err
+		}
+		tc.Created = consumerSpec.Created
+		tc.AppPort = consumerSpec.AppPort
+		tc.Description = consumerSpec.Metadata["description"]
+		// Assertions live on the TestCase, not on the spec copy: keeping a
+		// second copy inside tc.ConsumerSpec would let the two diverge the
+		// moment anything edits noise, and re-encoding would then emit
+		// whichever one it happened to read.
+		assertions := consumerSpec.Assertions
+		consumerSpec.Assertions = nil
+		consumerSpec.Metadata = nil
+		tc.ConsumerSpec = &consumerSpec
+		expandAssertions(tc, assertions)
+
 	default:
 		utils.LogError(logger, nil, "invalid testcase kind", zap.String("kind", string(tc.Kind)))
 		return nil, errors.New("invalid testcase kind")
@@ -474,6 +587,21 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 		tc.AppPort = grpcSpec.AppPort
 		expandAssertionsJSON(tc, grpcSpec.Assertions)
 
+	case models.CONSUMER:
+		var consumerSpec models.ConsumerSpec
+		if err := json.Unmarshal(doc.Spec, &consumerSpec); err != nil {
+			utils.LogError(logger, err, "failed to decode consumer JSON spec")
+			return nil, err
+		}
+		tc.Created = consumerSpec.Created
+		tc.AppPort = consumerSpec.AppPort
+		tc.Description = consumerSpec.Metadata["description"]
+		assertions := consumerSpec.Assertions
+		consumerSpec.Assertions = nil
+		consumerSpec.Metadata = nil
+		tc.ConsumerSpec = &consumerSpec
+		expandAssertions(tc, assertions)
+
 	default:
 		utils.LogError(logger, nil, "invalid testcase kind", zap.String("kind", string(tc.Kind)))
 		return nil, errors.New("invalid testcase kind")
@@ -488,6 +616,15 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 // (because encoding/json keys are always strings) rather than
 // map[models.AssertionType]interface{}; we handle both shapes.
 func expandAssertionsJSON(tc *models.TestCase, assertions map[models.AssertionType]interface{}) {
+	expandAssertions(tc, assertions)
+}
+
+// expandAssertions is the shape-agnostic implementation. The noise assertion
+// arrives as map[models.AssertionType]interface{} from yaml.Node.Decode and as
+// map[string]interface{} from encoding/json (whose keys are always strings),
+// and both shapes are handled here — which is why the YAML consumer decode arm
+// calls it too rather than duplicating the nested walk a third time.
+func expandAssertions(tc *models.TestCase, assertions map[models.AssertionType]interface{}) {
 	for key, raw := range assertions {
 		tc.Assertions[key] = raw
 		if key != models.NoiseAssertion {

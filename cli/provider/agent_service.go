@@ -30,6 +30,12 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 	h := hooks.New(logger, cfg)
 	p := proxy.New(logger, h, cfg)
 	ip := incoming.New(logger, h, cfg)
+	// The proxy mints Kind: Consumer test cases from role-tagged mocks; the
+	// ingress manager owns the channel every test case reaches persistence
+	// through. This is the only place that holds both, so it is where they are
+	// joined. Without it the proxy's consumer recorder stays nil and every
+	// installation of it on a parser context is a no-op.
+	p.SetConsumerTestCases(ip.TCChan())
 
 	instrumentation := agent.New(logger, h, p, client, ip, cfg)
 

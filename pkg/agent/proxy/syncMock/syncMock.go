@@ -156,6 +156,31 @@ type SyncMockManager struct {
 	// buffer and are never emitted.
 	unboundWarnOnce sync.Once
 
+	// egressObserver is called once for every mock this manager KEEPS, in
+	// AddMock, before any buffer/forward decision.
+	//
+	// IT EXISTS BECAUSE THIS IS THE ONLY PLACE EVERY MOCK PASSES. dns.go,
+	// http.go, mysql, generic and supervisor.Session.EmitMock all end here, and
+	// nothing else in the tree sees all of them: the per-parser context seams
+	// only reach parsers that were written to look for them. The consumer
+	// contract's side-effect count is about a worker's calls of ANOTHER
+	// protocol family — a database INSERT made by a Kafka consumer — and the
+	// parser that emits those mocks is not, and will never be, consumer-aware.
+	// Counting them from the consumer parser's own context seam is impossible
+	// by construction; counting them here is exact.
+	//
+	// IT MUST NOT REACH BACK INTO THIS MANAGER. It runs with m.mu held, so an
+	// observer that called AddMock, ResolveRange, DedupQueue or any other
+	// method on this manager would deadlock. The only registered observer
+	// (consumer.Recorder.OnEgress) takes its own leaf mutex and calls nothing
+	// here, which is why the lock order is always m.mu -> recorder.mu and never
+	// the reverse. Keep it that way.
+	//
+	// Guarded by egressObserverMu, a dedicated leaf: never take m.mu while
+	// holding it.
+	egressObserverMu sync.RWMutex
+	egressObserver   func(*models.Mock)
+
 	// dropCount tracks send-path drops caused by outChan being full
 	// past the bounded send budget. Sampled to an Error so customers
 	// get a loud signal without the log-flood anti-pattern. Using
@@ -813,6 +838,24 @@ func (m *SyncMockManager) DroppedTCCount() int {
 	return len(m.droppedTCNames)
 }
 
+// SetEgressObserver installs (or clears, with nil) the callback AddMock runs
+// for every mock this manager keeps. See the egressObserver field for the
+// re-entrancy rule the observer must obey.
+func (m *SyncMockManager) SetEgressObserver(f func(*models.Mock)) {
+	if m == nil {
+		return
+	}
+	m.egressObserverMu.Lock()
+	m.egressObserver = f
+	m.egressObserverMu.Unlock()
+}
+
+func (m *SyncMockManager) getEgressObserver() func(*models.Mock) {
+	m.egressObserverMu.RLock()
+	defer m.egressObserverMu.RUnlock()
+	return m.egressObserver
+}
+
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	// Unification (Phase 1): resolve the live mock's Lifetime immediately
 	// on entry so the buffered mock carries a correctly-typed
@@ -840,6 +883,15 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 	// Mock is being kept — count it as successfully added.
 	m.totalAdded.Add(1)
+
+	// THE ONE PLACE EVERY KEPT MOCK PASSES. Deliberately after the
+	// memory-pressure drop above: a mock that is dropped here never reaches
+	// mappings.yaml either, and the consumer contract's side-effect count
+	// claims to count exactly what the mapping will count. Observers run with
+	// m.mu held and must not call back into this manager — see egressObserver.
+	if obs := m.getEgressObserver(); obs != nil {
+		obs(mock)
+	}
 
 	// Tag startup-window traffic. A mock is "startup" when it is captured
 	// either (a) before the first inbound request — classic app-bootstrap
@@ -1598,6 +1650,55 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			// associatedMockIDs mapping (which is purely about
 			// per-test matches). Owned by no specific test → owner "".
 			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+			continue
+		}
+
+		// TRIGGER IDENTITY EXEMPTION (consumer testing).
+		//
+		// A consumer unit's window runs from its trigger's RESPONSE
+		// time to the NEXT trigger's response time: every mainstream
+		// client issues the following poll from inside the current one,
+		// before the application has processed the record it is
+		// holding, so a window cut at the request would swallow the
+		// next trigger. The cost of that choice is that each trigger's
+		// OWN mock sits outside its own window — its request time
+		// precedes its response time — and inside the PREVIOUS unit's.
+		// Left to the timestamp match a trigger would be attributed to
+		// the previous test for the first few tests of a recording and
+		// then dropped by the stale-buffer cutoff, i.e. replay would
+		// have no bytes to deliver.
+		//
+		// So a trigger is binned by IDENTITY instead: the consumer
+		// recorder stamps the owning test's name on it, and it goes to
+		// that test whatever its timestamp says. A trigger for a unit
+		// that has not resolved yet is retained rather than matched or
+		// reaped — every unit resolves (the recorder resolves its job
+		// even when it refuses the unit, and again at teardown), so the
+		// retention is bounded by the dedup queue.
+		//
+		// INERT WITHOUT THE TAG. The key is absent from every mock any
+		// parser in this tree emits, so for every existing recording
+		// this branch is a single map lookup that falls through. The
+		// tag is stripped before the mock is forwarded, so mocks.yaml
+		// keeps exactly the shape it has today.
+		if owner := mock.Spec.Metadata[models.MetaKeyUnitTest]; owner != "" {
+			if owner != testName {
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			if !keep {
+				continue
+			}
+			if !outChanBound {
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			delete(mock.Spec.Metadata, models.MetaKeyUnitTest)
+			mock.Name = "mock-" + generateRandomString(8)
+			associatedMockIDs = append(associatedMockIDs, mock.Name)
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: testName})
 			continue
 		}
 

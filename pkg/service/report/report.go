@@ -1169,6 +1169,13 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 // nothing. The formatter itself lives in pkg/models so the compact renderer
 // and --full cannot drift apart.
 func renderDepResults(sb *strings.Builder, test models.TestResult) {
+	// The consumer window summary, when this test had one. Gated on a nil
+	// pointer that only a Kind: Consumer result ever carries, so every HTTP
+	// and gRPC report renders byte-identically to a build without it. It is
+	// written BEFORE the rows and outside the missing-deps guard because
+	// end_reason is meaningful even when every effect matched: a window that
+	// closed on its backstop was not fully observed.
+	sb.WriteString(test.Consumer.FormatConsumerRun())
 	if !test.Result.HasMissingDeps() {
 		return
 	}

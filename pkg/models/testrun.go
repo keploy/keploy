@@ -80,6 +80,21 @@ type TestResult struct {
 	// Consumers should treat an absent value as "data not available for
 	// this test / run mode", NOT "no mocks were consumed".
 	MockMismatches *MockMismatchInfo `json:"mock_mismatches,omitempty" yaml:"mock_mismatches,omitempty"`
+
+	// Consumer carries the four scalars that describe a Kind: Consumer run —
+	// did the app take the trigger, how many effects were expected, how many
+	// arrived, and why we stopped waiting. NIL FOR EVERY OTHER KIND.
+	//
+	// A pointer with omitempty on purpose: every report already on disk, and
+	// every report an HTTP/gRPC run writes, must serialize byte-identically
+	// to a pre-consumer build. TestLegacyReportRoundTripsByteIdentically and
+	// TestCleanDepsReportRoundTripsByteIdentically pin that.
+	//
+	// The per-field effect diffs are NOT here — they are DepResult rows on
+	// Result, the same place the sync path writes its dependency rows, so
+	// the text renderer, the JUnit writer and the NDJSON projection pick
+	// them up with no code change.
+	Consumer *ConsumerResultInfo `json:"consumer,omitempty" yaml:"consumer,omitempty"`
 }
 
 // FailureInfo captures structured diagnostic data about why a test case failed or became obsolete.
@@ -267,6 +282,16 @@ const (
 	// FAILED/OBSOLETE tests so a passing test never grows a failure label.
 	DependencyMissing FailureCategory = "DEPENDENCY_MISSING"
 )
+
+// The CONSUMER_* refusal categories and the EFFECT_* verdict categories are
+// declared in consumer.go, next to the model they describe. They are ordinary
+// FailureCategory values and are persisted through the same
+// TestResult.FailureInfo.Category field as everything above.
+//
+// There is deliberately no TestStatusUnsupported to go with them: that status
+// does not exist, StringToTestSetStatus errors on anything unknown, and adding
+// it would be a lock-step change across three repositories whose half-applied
+// state parses as unknown and defaults to green.
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.
 // Used by k8s-proxy to populate TestCaseFailureDetails.Reason for the platform API.

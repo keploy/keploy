@@ -93,6 +93,15 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/scope/table", a.HandleScopeTable)
 		r.Get("/mock/stats", a.HandleMockStats)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
+		// The consumer RECORDING reconciliation, read once at record
+		// teardown. A GET, because it reports rather than acts.
+		r.Get("/consumer/recording", a.ConsumerRecordingReport)
+		// The consumer delivery-window routes. /await is a LONG POLL: it
+		// holds the connection until the armed test's window closes under
+		// the completion rule or its backstop fires.
+		r.Post("/consumer/arm", a.ArmConsumerTrigger)
+		r.Post("/consumer/await", a.AwaitConsumerEffects)
+		r.Post("/consumer/reset", a.ResetConsumerGate)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		// Long-lived streaming endpoints. /pcap/traffic emits a
