@@ -106,8 +106,8 @@ func (JSONDiffer) Diff(_ *models.Mock, recorded, live []byte, known map[string][
 // Adapter. Construct one per replay with the resolved flags via New.
 type Engine struct {
 	adapter   Adapter
-	detection bool // config.Test.SchemaNoiseDetection
-	strict    bool // config.Test.SchemaNoiseStrict
+	detection bool // config.Test.MockNoiseDetection (formerly SchemaNoiseDetection)
+	strict    bool // config.Test.MockNoiseStrict (formerly SchemaNoiseStrict)
 }
 
 // New builds an Engine for an adapter with the resolved schema-noise flags
