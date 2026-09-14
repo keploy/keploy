@@ -1,6 +1,9 @@
 package models
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // The rename crosses five repositories that merge and deploy independently, so
 // every combination of "producer on one spelling, consumer on the other" has to
@@ -90,4 +93,79 @@ func TestOutgoingOptionsNoiseAccessorsAreNilSafe(t *testing.T) {
 		t.Error("nil options reported noise enabled")
 	}
 	o.NormalizeMockNoise() // must not panic
+}
+
+// TestCanonicalOnlyOptionsStillReachAPreRenameAgent is the row the original
+// compatibility matrix was missing: NEW producer -> OLD consumer.
+//
+// OutgoingOptions has no json tags, so it crosses the agent boundary under Go
+// FIELD NAMES. An agent image built before the rename decodes SchemaNoise* and
+// has never heard of MockNoise*. Every producer in this repo now sets only the
+// canonical pair, so without a mirror before the marshal the deprecated fields
+// go out as false and the toggle is silently dead on that agent — including for
+// users who passed the still-supported --schema-noise-detection, because the
+// accessor collapses both spellings into the canonical field.
+//
+// That skew is the normal state during a rollout rather than an edge case:
+// agent images are pinned separately from the CLI (k8s-proxy sets
+// proxy.keployAgentImage, enterprise carries its own keploy pin), so a new CLI
+// meets an old agent for as long as the rollout takes.
+//
+// The tests either side of this one all exercise producer and consumer at the
+// SAME version, which is why they stayed green while this direction was broken.
+func TestCanonicalOnlyOptionsStillReachAPreRenameAgent(t *testing.T) {
+	// preRenameAgentOptions is the shape an agent built before the rename
+	// decodes into — the deprecated pair and nothing else.
+	type preRenameAgentOptions struct {
+		SchemaNoiseDetection bool
+		SchemaNoiseStrict    bool
+	}
+
+	// What a producer builds today: canonical only.
+	sent := OutgoingOptions{MockNoiseDetection: true, MockNoiseStrict: true}
+
+	// The mirror the wire boundary applies (platform/http/agent.go).
+	sent.NormalizeMockNoise()
+
+	wire, err := json.Marshal(sent)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var old preRenameAgentOptions
+	if err := json.Unmarshal(wire, &old); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !old.SchemaNoiseDetection {
+		t.Error("a pre-rename agent decoded detection=false from a canonical-only producer; the toggle is dead across version skew")
+	}
+	if !old.SchemaNoiseStrict {
+		t.Error("a pre-rename agent decoded strict=false from a canonical-only producer; the toggle is dead across version skew")
+	}
+}
+
+// And the reverse direction, for completeness: an OLD producer's payload must
+// still drive a NEW agent. This one was already covered by the accessors, but
+// pinning it next to its twin keeps the matrix visibly complete.
+func TestDeprecatedOnlyWireStillDrivesANewAgent(t *testing.T) {
+	type preRenameAgentOptions struct {
+		SchemaNoiseDetection bool
+		SchemaNoiseStrict    bool
+	}
+
+	wire, err := json.Marshal(preRenameAgentOptions{SchemaNoiseDetection: true, SchemaNoiseStrict: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var received OutgoingOptions
+	if err := json.Unmarshal(wire, &received); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	received.NormalizeMockNoise() // what Proxy.Record / Proxy.Mock do
+
+	if !received.NoiseDetection() || !received.NoiseStrict() {
+		t.Errorf("a pre-rename producer's payload did not drive a new agent: %+v", received)
+	}
 }
