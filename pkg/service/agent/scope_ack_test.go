@@ -185,13 +185,22 @@ func replayAgent(t *testing.T, mockNames []string, table map[string][]string) (*
 func TestBeginScopeStrictNarrowsATestWithNoRecording(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
-		name  string
-		table map[string][]string
-		scope string
+		name   string
+		table  map[string][]string
+		scope  string
+		reason string
+		why    string
 	}{
-		{"name absent from the table", map[string][]string{"alpha": {"m-0"}}, "beta"},
-		{"name mapped to zero mocks", map[string][]string{"alpha": {}}, "alpha"},
-		{"no table installed at all", map[string][]string{}, "alpha"},
+		{"name absent from the table", map[string][]string{"alpha": {"m-0"}}, "beta",
+			models.ScopeReasonStrictNoRecording, "never recorded: new, renamed, or lost — someone must act"},
+		{"no table installed at all", map[string][]string{}, "alpha",
+			models.ScopeReasonStrictNoRecording, "no table means nothing was recorded"},
+		// Mapped to zero mocks is NOT the same situation and must not report the
+		// same reason: this test WAS recorded and genuinely needed nothing.
+		// Collapsing the two is what made every earlier attempt to refuse an
+		// unmapped test a false positive on the call-free ones.
+		{"name mapped to zero mocks", map[string][]string{"alpha": {}}, "alpha",
+			models.ScopeReasonEmptyMapping, "recorded and needed nothing — unremarkable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, p := replayAgent(t, []string{"m-0", "m-1"}, tc.table)
@@ -200,8 +209,8 @@ func TestBeginScopeStrictNarrowsATestWithNoRecording(t *testing.T) {
 			ack, err := a.BeginScope(ctx, tc.scope, 0, 0)
 			require.NoError(t, err)
 			require.True(t, ack.Scoped, "strict scoping narrows rather than declining")
-			require.Equal(t, models.ScopeReasonStrictNoRecording, ack.Reason)
-			require.Equal(t, 0, ack.Mocks, "a test with no recording gets no mocks of its own")
+			require.Equal(t, tc.reason, ack.Reason, tc.why)
+			require.Equal(t, 0, ack.Mocks, "neither case gets mocks of its own")
 			_ = p
 		})
 	}

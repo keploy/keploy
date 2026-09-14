@@ -82,8 +82,28 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid, attempt int) (
 		// `__suite__` recording -- becomes invisible, so the first real
 		// dependency call misses and --on-miss fail turns it red.
 		if a.scopeStrict && (tableSize == 0 || !ok || len(names) == 0) {
-			a.logger.Info("scope begin: strict scoping, this test has no recording; serving only unowned mocks",
-				zap.String("test", name), zap.Int("attempt", attempt))
+			// Two very different situations narrow to the same thing but must NOT
+			// report the same thing.
+			//
+			//   mapped to zero mocks -> this test WAS recorded and needed nothing.
+			//                           Expected, unremarkable, no alarm.
+			//   absent from the table -> this test was NEVER recorded: new, renamed,
+			//                           or its recording was lost. Someone must act.
+			//
+			// Collapsing them is what forced every earlier attempt at refusing an
+			// unmapped test to be abandoned as a false positive on the call-free
+			// ones. record now writes an explicit empty entry precisely so the two
+			// can be told apart here.
+			recorded := ok && len(names) == 0
+			reason := models.ScopeReasonStrictNoRecording
+			if recorded {
+				reason = models.ScopeReasonEmptyMapping
+				a.logger.Debug("scope begin: strict scoping, this test was recorded and needed no mocks",
+					zap.String("test", name), zap.Int("attempt", attempt))
+			} else {
+				a.logger.Info("scope begin: strict scoping, this test has no recording; serving only unowned mocks",
+					zap.String("test", name), zap.Int("attempt", attempt))
+			}
 			if pid > 0 {
 				a.SetWorkerScope(uint32(pid), []string{})
 			} else if err := a.UpdateMockParams(ctx, models.MockFilterParams{
@@ -96,7 +116,7 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid, attempt int) (
 			}); err != nil {
 				return models.ScopeAck{}, err
 			}
-			return models.ScopeAck{Scoped: true, Mocks: 0, Reason: models.ScopeReasonStrictNoRecording, Attempt: attempt}, nil
+			return models.ScopeAck{Scoped: true, Mocks: 0, Reason: reason, Attempt: attempt}, nil
 		}
 
 		switch {
