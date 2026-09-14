@@ -224,11 +224,20 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 	if appended > 0 {
 		m.logger.Info("appended new dependency calls to the mock set (--on-miss record)",
 			zap.Int("new", appended), zap.String("mock-set", name),
-			zap.String("next_step", "review the added mocks and commit them; the next replay serves them without the real dependency"))
-		if err := m.store.Push(ctx, name); err != nil {
-			m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
-		}
+			zap.String("next_step", "replay again to serve them from the set; run `keploy mock record` and publish when you want them shared"))
 	}
+
+	// Deliberately NOT published.
+	//
+	// --on-miss record is a local affordance: it appends whatever the runner
+	// happened to call so the next replay stops missing. Those captures carry no
+	// owner -- nothing attributes them to a test -- so publishing them would put
+	// mocks belonging to no test into the shared set, where every test can be
+	// served them as overflow. From an unreviewed branch, on a developer's
+	// laptop, into what everyone else replays against.
+	//
+	// Sharing a recording is `keploy mock record` followed by an explicit
+	// publish. That path attributes each capture to the test that made it.
 }
 
 // existingMocks loads every mock already recorded in the set, across both pools.
