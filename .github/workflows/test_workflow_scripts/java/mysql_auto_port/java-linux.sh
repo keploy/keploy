@@ -78,6 +78,9 @@ mysql_auto_detect_supported() {
   "$bin" config defaults 2>/dev/null | grep -q "disableMysqlAutoDetect" && return 0
   local probe_dir rc=1
   probe_dir=$(mktemp -d)
+  # No guard here: probe_dir is a fresh mktemp, so there is never a config in
+  # the way -- and a `[ -f keploy.yml ]` test would have asked about the
+  # REPOSITORY's, which is a different directory entirely.
   ( cd "$probe_dir" && "$bin" config --generate >/dev/null 2>&1 ) \
     && grep -q "disableMysqlAutoDetect" "$probe_dir/keploy.yml" 2>/dev/null && rc=0
   rm -rf "$probe_dir"

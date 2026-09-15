@@ -337,7 +337,12 @@ rm -f "$RECORD_LOG" "$REPLAY_LOG" "$WORKLOAD_LOG" "$PWD"/docker-*.prof
 cleanup_compose
 
 section "Generating Keploy config"
-"$KEPLOY_BIN" config --generate
+# Only when the sample does not ship one. `config --generate` used to do
+# nothing at all over an existing keploy.yml -- it asked, stdin answered EOF,
+# and it skipped and exited 0 -- so the shipped config is what these runs have
+# always used, noise rules and all. It refuses out loud now rather than
+# pretending, which is right, and this says what the run actually wants.
+[ -f keploy.yml ] || "$KEPLOY_BIN" config --generate
 
 # Measure the path REAL USERS get: mapping-based mock filtering ON (the shipped
 # default, config/default.go `disableMapping: false`). It records a mappings.yaml
