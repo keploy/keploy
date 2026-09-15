@@ -297,8 +297,12 @@ func (r *Recorder) afterRecordingComplete(ctx context.Context, testSetID string)
 	// The recorder ctx is already cancelled on the normal SIGINT stop of an
 	// interactive recording (the teardown defer above runs under a cancelled ctx).
 	// Hand the hook a context decoupled from that cancellation so a legitimate
-	// post-record pass is not skipped, while still propagating request-scoped
-	// values and any deadline set upstream. The hook remains free to honor it.
+	// post-record pass is not skipped. context.WithoutCancel keeps the
+	// request-scoped values but drops BOTH cancellation and any upstream deadline,
+	// so hookCtx never expires on its own: a consumer that needs to bound its work
+	// must impose its own deadline (e.g. context.WithTimeout). Whether this hook
+	// should instead carry a shared deadline is a contract decision to settle
+	// alongside the enterprise consumer (keploy/enterprise#2536), not here.
 	hookCtx := context.WithoutCancel(ctx)
 	if hookErr := r.hooks.AfterRecordingComplete(hookCtx, &RecordingCompleteContext{
 		TestSetID: testSetID,
@@ -759,15 +763,35 @@ func (r *Recorder) Start(ctx context.Context) error {
 			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 
-		if err := utils.DrainErrGroup(r.logger, "record", errGrp, 30*time.Second); err != nil {
+		// recordDrainedCleanly gates the end-of-recording hook below. It stays true
+		// only if this drain actually joined every persist goroutine; on the
+		// timeout path a mock/test-case writer may still be in flight (see below).
+		recordDrainedCleanly := true
+		if err, timedOut := utils.DrainErrGroupStatus(r.logger, "record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
+		} else if timedOut {
+			recordDrainedCleanly = false
 		}
 
 		// End-of-recording hook (issue #1867 Basic-Auth re-key): every test case
 		// and mock is now drained to disk, so a cross-artifact pass can correlate
 		// them. Best-effort — a failure never invalidates the recording.
+		//
+		// Gated on a CLEAN drain. DrainErrGroupStatus reports timedOut when a
+		// persist goroutine ignored cancellation and may still be appending to the
+		// test-set files (the insert goroutines write on persistCtx =
+		// WithoutCancel, so they do NOT stop on the teardown cancel). The hook's
+		// consumer rewrites a whole mock file (read → rewrite → atomic rename), so
+		// a mock appended between its read and its rename would be silently dropped
+		// into a valid-but-short file. Skipping the pass on the timeout path costs
+		// one recording's post-record work; running it risks a truncated mock set.
 		if recordingStarted && newTestSetID != "" {
-			r.afterRecordingComplete(ctx, newTestSetID)
+			if recordDrainedCleanly {
+				r.afterRecordingComplete(ctx, newTestSetID)
+			} else {
+				r.logger.Warn("skipping the end-of-recording hook: the record drain timed out, so a mock or test-case write may still be in flight; the post-record pass is skipped to avoid racing an unfinished write. The recording itself is saved.",
+					zap.String("testSetID", newTestSetID))
+			}
 		}
 
 		// Deferred-orphan revoke: delete TCs whose owned mock was capacity-dropped
