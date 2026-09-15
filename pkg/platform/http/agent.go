@@ -91,6 +91,9 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 	if err != nil {
 		return nil, fmt.Errorf("failed to get incoming: %s", err.Error())
 	}
+	if err := agentStreamStatus("get incoming", res); err != nil {
+		return nil, err
+	}
 
 	// Create a channel to stream TestCase data
 	tcChan := make(chan *models.TestCase)
@@ -310,6 +313,9 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	if err != nil {
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
+	if err := agentStreamStatus("get outgoing", res); err != nil {
+		return nil, err
+	}
 
 	// Buffered. An unbuffered channel parks the decoder for as long as the
 	// consumer spends inside InsertMock - and the first insert does mkdir +
@@ -396,6 +402,35 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 	if err != nil {
 		return nil, fmt.Errorf("failed to get mappings response: %s", err.Error())
 	}
+	// An agent predating test-mock mapping (keploy #3715, Feb 2026) has no
+	// /mappings route and answers 404. That is version skew, not a failure, and
+	// it must NOT be reported as one: this call sits inside the record errgroup
+	// (pkg/service/record/record.go), so an error here aborts the entire
+	// RECORDING. Before this status check existed the decoder goroutine simply
+	// logged "failed to decode mapping from stream" and returned nil, and
+	// recording completed without mappings — that degraded-but-working
+	// behaviour is what a missing endpoint should still produce.
+	//
+	// Same tolerance BeginTestErrorCapture, GetScopeWindows, GetScopeTable and
+	// DrainCapturedMocks already apply, and for the same reason StoreMocks
+	// carries its legacy-framing fallback: the CLI ships ahead of the agent
+	// image, so a lagging agent is the normal state during a rollout rather than
+	// an edge case. /incoming and /outgoing need no such guard — both routes
+	// predate #3016 and every agent that can serve a session has them.
+	if res.StatusCode == http.StatusNotFound {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			utils.LogError(a.logger, closeErr, "failed to close response body for getmappings")
+		}
+		a.logger.Warn("agent has no /mappings endpoint — recording without test-mock mappings",
+			zap.String("consequence", "replay falls back to timestamp-based mock filtering for this recording"),
+			zap.String("remedy", "upgrade the agent image to one built from keploy #3715 or later"))
+		noMappings := make(chan models.TestMockMapping)
+		close(noMappings)
+		return noMappings, nil
+	}
+	if err := agentStreamStatus("get mappings", res); err != nil {
+		return nil, err
+	}
 
 	mappingChan := make(chan models.TestMockMapping)
 
@@ -479,31 +514,90 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	// only the first token, which made "404 page not found\n" responses
 	// from a wrongly-prefixed AgentURI look like a "cannot unmarshal
 	// number into models.AgentResp" error and masked the real misroute.
-	rawBody, readErr := io.ReadAll(res.Body)
+	rawBody, readErr := readAgentBody(res)
 	if readErr != nil {
 		return fmt.Errorf("failed to read response body for mock outgoing: %s", readErr.Error())
 	}
 
-	var mockResp models.AgentResp
-	if err := json.Unmarshal(rawBody, &mockResp); err != nil {
-		return fmt.Errorf("failed to decode response body for mock outgoing: %s (raw body: %q, status: %d, contentType: %q, url: %s)", err.Error(), string(rawBody), res.StatusCode, res.Header.Get("Content-Type"), fmt.Sprintf("%s/mock", a.conf.Agent.AgentURI))
+	return agentRespErr("mock outgoing", res, rawBody)
+}
+
+// agentRespErr turns an agent reply into the caller's error, and is the ONE
+// place that decides what a failure looks like. The order matters: the STATUS
+// is checked before the body is decoded, because a failing agent (or an
+// intermediary, or a 404 from a mis-prefixed AgentURI) does not owe us a
+// well-formed AgentResp, and decoding first turns every one of those into a
+// "cannot unmarshal ..." message that hides the real failure.
+//
+// It returns nil only when the status is 2xx AND the agent said IsSuccess.
+func agentRespErr(op string, res *http.Response, rawBody []byte) error {
+	var resp models.AgentResp
+	decodeErr := json.Unmarshal(rawBody, &resp)
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		if msg := resp.ErrorMsg; msg != "" {
+			return fmt.Errorf("%s failed (status %d): %s", op, res.StatusCode, msg)
+		}
+		// Either an old agent (whose message never survived its own
+		// marshal) or a non-AgentResp body such as a proxy error page.
+		// The raw body is the best evidence available; bound it so a
+		// runaway page cannot be pasted whole into a log line.
+		return fmt.Errorf("%s failed (status %d, body: %q)", op, res.StatusCode, snippet(rawBody))
 	}
 
-	if mockResp.Error != nil {
-		return mockResp.Error
+	if decodeErr != nil {
+		return fmt.Errorf("failed to decode response body for %s: %s (raw body: %q, status: %d, contentType: %q)",
+			op, decodeErr.Error(), snippet(rawBody), res.StatusCode, res.Header.Get("Content-Type"))
 	}
-
-	// AgentResp.Error is an `error` interface — JSON cannot decode a
-	// string into it, so the server-side error message is always lost
-	// in the wire format. Treat IsSuccess=false (or a 4xx/5xx status)
-	// as the authoritative signal and surface the raw body so callers
-	// get a real message instead of a silent "success".
-	if !mockResp.IsSuccess || res.StatusCode >= 400 {
-		return fmt.Errorf("mock outgoing returned failure (status %d, body: %q)", res.StatusCode, string(rawBody))
+	if err := resp.Err(); err != nil {
+		return fmt.Errorf("%s failed: %w", op, err)
 	}
-
+	if !resp.IsSuccess {
+		// 2xx but the agent disowned the result. An old agent reaches
+		// here on failure too (its message was destroyed before it was
+		// sent), so quote the body rather than claiming success.
+		return fmt.Errorf("%s returned failure (status %d, body: %q)", op, res.StatusCode, snippet(rawBody))
+	}
 	return nil
+}
 
+// snippet bounds an agent body for inclusion in an error message.
+func snippet(b []byte) string {
+	const max = 4096
+	s := strings.TrimSpace(string(b))
+	if len(s) > max {
+		return s[:max] + "...(truncated)"
+	}
+	return s
+}
+
+// agentStreamStatus rejects a non-2xx reply on the long-lived streaming
+// endpoints (/incoming, /outgoing, /mappings) BEFORE a decoder is pointed at
+// the body, and closes the body when it does.
+//
+// These handlers answer failures with http.Error — a text/plain line such as
+// "failed to get outgoing: <reason>" — and the client used to hand that
+// straight to a gob/JSON decoder. The decode failed, was logged as "failed to
+// decode mock from stream", the channel was closed empty, and replay carried on
+// with ZERO mocks: a silent pass-through recorded as a normal run. The agent's
+// reason was in the body the whole time.
+func agentStreamStatus(op string, res *http.Response) error {
+	if res.StatusCode >= 200 && res.StatusCode < 300 {
+		return nil
+	}
+	// net/http guarantees a non-nil Body on a client response, so this reads
+	// and closes unconditionally. An earlier revision guarded the Close with
+	// `if res.Body != nil` AFTER already dereferencing it in the ReadAll above,
+	// which would have panicked first -- a guard that read as protection and
+	// was not.
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<16))
+	_ = res.Body.Close()
+	return fmt.Errorf("%s failed (status %d): %s", op, res.StatusCode, snippet(body))
+}
+
+// readAgentBody drains and bounds a response body for the AgentResp paths.
+func readAgentBody(res *http.Response) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(res.Body, 1<<20))
 }
 
 func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, testSetID string, tcName string) error {
@@ -834,13 +928,19 @@ func (a *AgentClient) storeMocksLegacy(ctx context.Context, filtered []*models.M
 // the streaming and legacy paths so their response handling is identical.
 func decodeStoreMocksResp(res *http.Response) error {
 	// Non-2xx? Try to decode anyway; if that fails, return status text.
+	// An OLD agent reaches the decode failure here on every error: its gob
+	// encode aborted on the `error` interface field, having already written a
+	// PARTIAL type descriptor, so the decode fails with "unexpected EOF" on a
+	// truncated value rather than on an empty body — hence the bare
+	// "storemocks http 500" this used to give. Unchanged for an old agent;
+	// a new one now carries its reason in ErrorMsg.
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		var fail models.AgentResp
 		if err := gob.NewDecoder(res.Body).Decode(&fail); err != nil {
 			return fmt.Errorf("storemocks http %d", res.StatusCode)
 		}
-		if fail.Error != nil {
-			return fail.Error
+		if msg := fail.ErrorMsg; msg != "" {
+			return fmt.Errorf("storemocks failed (status %d): %s", res.StatusCode, msg)
 		}
 		return fmt.Errorf("storemocks http %d", res.StatusCode)
 	}
@@ -849,8 +949,17 @@ func decodeStoreMocksResp(res *http.Response) error {
 	if err := gob.NewDecoder(res.Body).Decode(&mockResp); err != nil {
 		return fmt.Errorf("decode gob response for storemocks: %s", err.Error())
 	}
-	if mockResp.Error != nil {
-		return mockResp.Error
+	if err := mockResp.Err(); err != nil {
+		return fmt.Errorf("storemocks failed: %w", err)
+	}
+	// IsSuccess is checked too, so this path cannot disagree with
+	// agentRespErr about what a failure is. A 2xx carrying IsSuccess:false
+	// and no message is not produced by any agent -- respondAgent derives
+	// both from the same error, and the pre-rename agent's storemocks
+	// success wrote IsSuccess:true just the same -- so this rejects nothing
+	// real today and stops a 200-shaped failure reading as success.
+	if !mockResp.IsSuccess {
+		return fmt.Errorf("storemocks failed: agent reported failure with status %d and no message", res.StatusCode)
 	}
 	return nil
 }
@@ -884,17 +993,12 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 		}
 	}()
 
-	var mockResp models.AgentResp
-	err = json.NewDecoder(res.Body).Decode(&mockResp)
-	if err != nil {
-		return fmt.Errorf("failed to decode response body for updatemockparams: %s", err.Error())
+	rawBody, readErr := readAgentBody(res)
+	if readErr != nil {
+		return fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
 	}
 
-	if mockResp.Error != nil {
-		return mockResp.Error
-	}
-
-	return nil
+	return agentRespErr("update mock params", res, rawBody)
 }
 
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
@@ -920,10 +1024,19 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState,
 		}
 	}()
 
+	// Status BEFORE decode. The agent answers a failure with an error
+	// OBJECT, and decoding that straight into the slice produced
+	// "json: cannot unmarshal object into Go value of type
+	// []models.MockState" — the decoder's complaint about the shape,
+	// never the agent's reason.
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get consumed mocks", res, rawBody)
+	}
+
 	var consumedMocks []models.MockState
-	err = json.NewDecoder(res.Body).Decode(&consumedMocks)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode response body: %s", err.Error())
+	if err := json.NewDecoder(res.Body).Decode(&consumedMocks); err != nil {
+		return nil, fmt.Errorf("failed to decode response body for getconsumedmocks: %s", err.Error())
 	}
 
 	return consumedMocks, nil
