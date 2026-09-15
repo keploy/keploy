@@ -12,6 +12,9 @@ import (
 
 // defaultConfig is a variable to store the default configuration of the Keploy CLI. It is not a constant because enterprise need update the default configuration.
 var defaultConfig = fmt.Sprintf(`
+# path is where Keploy keeps the keploy/ directory -- your recordings, mocks
+# and reports. Empty means the directory you run in, which is also what -p
+# defaults to. Set it to move the whole keploy/ tree somewhere else.
 path: ""
 storageFormat: "yaml"
 appId: 0
@@ -179,6 +182,10 @@ contract:
   download: false
   generate: false
 inCi: false
+report:
+  # format is how "keploy report" prints a test report: "text", or "junit" for
+  # a CI system that consumes JUnit XML. --format overrides it per run.
+  format: "text"
 `, models.DefaultIncomingProxyPort)
 
 func GetDefaultConfig() string {

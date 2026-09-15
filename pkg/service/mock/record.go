@@ -63,13 +63,14 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 1. Instrument: start the agent, hooks and proxy in mock mode (no ingress
 	//    port relocation — the runner is not a server).
 	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
-		Container:   m.config.ContainerName,
-		CommandType: m.config.CommandType,
-		DockerDelay: m.config.BuildDelay,
-		BuildDelay:  m.config.BuildDelay,
-		Mode:        models.MODE_RECORD,
-		MockMode:    true,
-		ConfigPath:  m.config.ConfigPath,
+		Container:     m.config.ContainerName,
+		FromContainer: m.config.FromContainer,
+		CommandType:   m.config.CommandType,
+		DockerDelay:   m.config.BuildDelay,
+		BuildDelay:    m.config.BuildDelay,
+		Mode:          models.MODE_RECORD,
+		MockMode:      true,
+		ConfigPath:    m.config.ConfigPath,
 	}); err != nil {
 		if ctx.Err() != nil {
 			return nil
@@ -79,14 +80,36 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	// 2. Overwrite the named set in place: drop the previous mocks so the
+	// 2. Docker compose inverts this function's normal order: arming the
+	//    capture (step 4) needs a live agent, but under compose the agent is a
+	//    service inside the compose project keploy generates, so it does not
+	//    exist until the wrapped `docker compose up` runs. startComposeApp
+	//    brings the project up and waits for the agent to answer; the app
+	//    itself stays parked at the agent's healthcheck until step 5 releases
+	//    it, so nothing it does escapes the capture. Its exit is collected at
+	//    step 7 instead of being started there.
+	//
+	//    Without this the run dialled an agent that was never started, failed
+	//    to arm the capture, and ended having recorded nothing — while the app
+	//    itself never came up at all.
+	composeAppExit, err := m.startComposeApp(ctx, errGrp)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		stopReason = "failed to bring up the keploy-agent compose service"
+		utils.LogError(m.logger, err, stopReason)
+		return fmt.Errorf("%s", stopReason)
+	}
+
+	// 3. Overwrite the named set in place: drop the previous mocks so the
 	//    re-record is a clean rewrite, not an append.
 	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
 		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
 	}
 	m.mockDB.ResetCounterID()
 
-	// 3. Arm the record proxy and stream captured mocks.
+	// 4. Arm the record proxy and stream captured mocks.
 	captureCtx, stopCapture := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopCapture()
 	outgoing, err := m.instrumentation.GetOutgoing(captureCtx, models.OutgoingOptions{
@@ -144,7 +167,18 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 	}()
 
-	// 4. Optional record timer.
+	// 5. Release the compose app now that the capture is armed and draining.
+	//    This is the post-arm half of step 2 — see releaseComposeApp.
+	if err := m.releaseComposeApp(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		stopReason = "failed to release the app behind the keploy-agent healthcheck"
+		utils.LogError(m.logger, err, stopReason)
+		return fmt.Errorf("%s", stopReason)
+	}
+
+	// 6. Optional record timer.
 	if m.config.Mock.RecordTimer > 0 {
 		errGrp.Go(func() error {
 			m.logger.Info("recording will stop after " + m.config.Mock.RecordTimer.String())
@@ -157,11 +191,21 @@ func (m *mockService) Record(ctx context.Context) error {
 		})
 	}
 
-	// 5. Run the wrapped runner and block until it exits. Its exit — clean or
-	//    failing — is the NORMAL end of a mock recording, not an app crash.
-	appErr := m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+	// 7. Block until the wrapped runner exits. Its exit — clean or failing —
+	//    is the NORMAL end of a mock recording, not an app crash. Under
+	//    compose it was already started at step 2, so wait on that same exit
+	//    rather than starting it a second time.
+	//    A plain receive is the same wait the native branch does: Run returns
+	//    only once the app is fully down (its errgroup Wait is deferred), and
+	//    the sender is the goroutine running exactly that Run.
+	var appErr models.AppError
+	if composeAppExit != nil {
+		appErr = <-composeAppExit
+	} else {
+		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+	}
 
-	// 6. Drain the trailing mocks, THEN stop capturing.
+	// 8. Drain the trailing mocks, THEN stop capturing.
 	//
 	// The order is the entire point. stopCapture() cancels the context the
 	// outgoing stream is built on (http.NewRequestWithContext in
@@ -189,10 +233,12 @@ func (m *mockService) Record(ctx context.Context) error {
 		return nil
 	}
 
-	// 7. Correlate per-test scope windows into mappings.yaml (best-effort).
+	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
 	if m.mappingDB != nil {
 		if reader, ok := m.instrumentation.(ScopeReader); ok {
-			windows, werr := reader.GetScopeWindows(persistCtx)
+			scopeCtx, cancelScope := context.WithTimeout(persistCtx, agentEpilogueTimeout)
+			windows, werr := reader.GetScopeWindows(scopeCtx)
+			cancelScope()
 			if werr != nil {
 				m.logger.Debug("failed to read per-test scope windows; recording suite-level", zap.Error(werr))
 			} else if len(windows) > 0 {
@@ -208,7 +254,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 	}
 
-	// 8. Publish the set to the store (registry upload in enterprise; no-op on files).
+	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
 	if err := m.store.Push(persistCtx, name); err != nil {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
@@ -219,8 +265,8 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
 	}
 
-	// 9. Propagate the runner's exit code so a CI 're-record on merge' job fails
-	//    when the tests fail.
+	// 11. Propagate the runner's exit code so a CI 're-record on merge' job
+	//     fails when the tests fail.
 	m.propagateExit(appErr, "record")
 	return nil
 }

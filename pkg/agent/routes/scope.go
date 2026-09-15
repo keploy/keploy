@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/gob"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/render"
@@ -39,7 +40,7 @@ type capturedMockDrainer interface {
 func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 	var req models.ScopeReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid scope-begin request: %v", err), http.StatusBadRequest)
 		return
 	}
 	if s, ok := a.svc.(scopeBeginner); ok {
@@ -57,7 +58,7 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 	var req models.ScopeReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid scope-end request: %v", err), http.StatusBadRequest)
 		return
 	}
 	if s, ok := a.svc.(scopeEnder); ok {
@@ -93,7 +94,7 @@ func (a *Agent) HandleScopeWindows(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 	var req models.ScopeTableReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid scope-table request: %v", err), http.StatusBadRequest)
 		return
 	}
 	if s, ok := a.svc.(scopeTableSetter); ok {

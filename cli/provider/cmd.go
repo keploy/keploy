@@ -216,6 +216,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
+		// The overwrite consent, as a flag. Without one, the only way past
+		// the "it already exists" prompt was to answer it -- and in CI there
+		// is nobody to answer, so `config --generate` quietly wrote nothing
+		// and exited 0. Named to match `config defaults -o FILE --force`.
+		cmd.Flags().Bool("force", false, "Overwrite an existing keploy.yml without asking")
 	case "templatize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringSliceP("testsets", "t", c.cfg.Templatize.TestSets, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
@@ -515,6 +520,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"cmdType":                   "cmd-type",
 		"buildDelay":                "build-delay",
 		"containerName":             "container-name",
+		"fromContainer":             "from-container",
 		"networkName":               "network-name",
 		"passThroughPorts":          "pass-through-ports",
 		"memoryLimit":               "memory-limit",
@@ -787,6 +793,15 @@ func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configu
 		// against, so `--cmd-type Docker-Compose` is not a fatal typo.
 		explicit := strings.ToLower(strings.TrimSpace(configured))
 		switch kind := utils.CmdType(explicit); kind {
+		case utils.FromContainer:
+			// --from-container is registered on the mock subcommands only, so
+			// on record/test this value names a mode the caller has no way to
+			// supply a container for. Refuse it where it cannot work rather
+			// than resolving to a kind that fails later without saying why.
+			if cmd.Flags().Lookup("from-container") == nil {
+				return "", fmt.Errorf("--cmd-type %s is only supported by `keploy mock record` and `keploy mock replay`", utils.FromContainer)
+			}
+			return explicit, nil
 		case utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose:
 			// docker-run and docker-start need to REWRITE the command —
 			// SetupDocker splices `--pid=container:…  --network=container:…`
@@ -821,8 +836,8 @@ func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configu
 			return string(utils.FindDockerCmd(command)), nil
 		default:
 			return "", fmt.Errorf(
-				"invalid --cmd-type value %q: allowed values are %q, %q, %q, and %q",
-				configured, utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose)
+				"invalid --cmd-type value %q: allowed values are %q, %q, %q, %q, and %q",
+				configured, utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose, utils.FromContainer)
 		}
 	}
 
@@ -830,7 +845,8 @@ func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configu
 	// Only warn when it would actually have made a difference. A config that
 	// merely agrees with auto-detection is not being ignored in any way the
 	// user can observe, and warning on every such run would be noise.
-	if kind := utils.CmdType(strings.ToLower(strings.TrimSpace(configured))); utils.IsDockerCmd(kind) && kind != detected {
+	if kind := utils.CmdType(strings.ToLower(strings.TrimSpace(configured))); utils.IsDockerCmd(kind) &&
+		kind != utils.FromContainer && kind != detected {
 		logger.Warn("cmdType in the config file is not honoured; pass --cmd-type on the command line instead",
 			zap.String("cmdType", configured),
 			zap.String("using", string(detected)),
@@ -2115,7 +2131,6 @@ func bytesToMBCeil(b uint64) uint64 {
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
-	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {
@@ -2131,10 +2146,13 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg confi
 	}
 
 	configFilePath := filepath.Join(c.cfg.ConfigPath, "keploy.yml")
-	err = toolSvc.CreateConfig(ctx, configFilePath, string(configDataBytes))
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to create config file")
-		return errors.New("failed to create config file")
+	// "based on the flags that are used" -- so the file holds the flags that
+	// were used, not the defaults that were not.
+	if err := tools.WriteMinimalConfig(c.logger, configFilePath, string(configDataBytes)); err != nil {
+		// Wrapped, not replaced: a caller that cannot see EACCES or ENOSPC
+		// cannot tell the user which of them it was, and this used to throw
+		// the cause away AND stop logging it.
+		return fmt.Errorf("failed to create config file at %s: %w", configFilePath, err)
 	}
 	c.logger.Info("Generated config file based on the flags that are used")
 	return nil
@@ -2163,8 +2181,9 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	cmd.Flags().StringP("command", "c", c.cfg.Command, "Command that runs your test suite, e.g. \"pytest\" or \"go test ./...\"")
 	cmd.Flags().StringP("path", "p", ".", "Path to the local directory where the mock set is stored (keploy/<name>/)")
 	cmd.Flags().String("name", c.cfg.Mock.Name, "Name of the mock set to record into / replay from (default \"default\")")
-	cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker-run/docker-start/docker-compose)")
+	cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker-run/docker-start/docker-compose/from-container)")
 	cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container (docker/compose runs)")
+	cmd.Flags().String("from-container", c.cfg.FromContainer, "Record against an already-running container: keploy re-creates it under its own namespaces. Replaces -c")
 	cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 	cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "Time to wait for a docker container to build")
 	cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy to intercept outgoing calls")
@@ -2193,6 +2212,27 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return err
 	}
 	c.cfg.CommandType = commandType
+	// --from-container IS the command type. Nothing can detect it: detection
+	// reads the command string, and this mode has none. Refuse a contradicting
+	// --cmd-type rather than silently picking one, because the two disagree
+	// about something as load-bearing as whether a shell runs at all.
+	// Only the FLAG implies the kind, never a config-file value. The privilege
+	// decision is taken from raw argv before cobra parses anything
+	// (ShouldReexecWithSudo), so a fromContainer that exists only in keploy.yml
+	// would start the run unprivileged and die writing perf_event_paranoid -
+	// the same trap documented for cmdType above. Refusing it is the honest
+	// answer; silently honouring it is how that bug was shipped the first time.
+	if c.cfg.FromContainer != "" && !cmd.Flags().Changed("from-container") {
+		return fmt.Errorf("fromContainer in the config file is not honoured; pass --from-container on the command line instead")
+	}
+	if c.cfg.FromContainer != "" {
+		if cmd.Flags().Changed("cmd-type") && utils.CmdType(c.cfg.CommandType) != utils.FromContainer {
+			return fmt.Errorf("--from-container implies --cmd-type %s, but %q was given", utils.FromContainer, c.cfg.CommandType)
+		}
+		c.cfg.CommandType = string(utils.FromContainer)
+	} else if utils.CmdType(c.cfg.CommandType) == utils.FromContainer {
+		return fmt.Errorf("--cmd-type %s needs --from-container to name the container to record against", utils.FromContainer)
+	}
 	// Ask the same extension point `record`/`test` use (see the identical check
 	// above in validateFlags). This literal was copied here from the record path
 	// as it stood BEFORE that check became nativeCommandSupportedHere(), so it
@@ -2227,10 +2267,29 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		}
 	}
 
-	if c.cfg.Command == "" {
+	// -c and --from-container are alternatives: one names a command to run, the
+	// other an already-running container to re-create. Exactly one is required,
+	// and accepting both would leave it ambiguous which one actually ran.
+	// Decided on what the USER passed, not on the resolved config: `keploy
+	// record` writes the command back into keploy.yml, so in any project that
+	// has recorded once viper has already populated cfg.Command - and reading
+	// that as "you passed -c" would make --from-container permanently
+	// unusable there, with an error about two flags the user only passed one of.
+	passedCommand := cmd.Flags().Changed("command")
+	passedFromContainer := cmd.Flags().Changed("from-container")
+	if passedFromContainer && !passedCommand {
+		// The flag wins over a stale command in the config file.
+		c.cfg.Command = ""
+	}
+	switch {
+	case passedCommand && passedFromContainer:
+		utils.LogError(c.logger, nil, "both -c and --from-container were given")
+		return errors.New("-c and --from-container are alternatives: pass one, not both")
+	case c.cfg.Command == "" && c.cfg.FromContainer == "":
 		utils.LogError(c.logger, nil, "missing required -c flag or command in config file")
 		c.logger.Info(`Example usage: keploy mock record -c "pytest"`)
-		return errors.New("command is required for keploy mock")
+		c.logger.Info(`          or: keploy mock record --from-container my-app`)
+		return errors.New("either a command (-c) or --from-container is required for keploy mock")
 	}
 
 	// Pass-through ports.

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -350,6 +351,59 @@ func EnsureKeployFolderPermissions(ctx context.Context, logger *zap.Logger, kepl
 	// Fix permissions on the entire keploy folder
 	// sudo -v will cache credentials, which will be used by subsequent sudo -n commands
 	return FixKeployFolderPermissions(ctx, logger, keployPath, permErrors)
+}
+
+// RestoreFileOwnership gives one file back to the user who invoked sudo.
+//
+// A file created while running as root belongs to root. keploy.yml is written
+// 0644 -- readable by everyone, writable by its owner -- so without this the
+// developer cannot edit the config the command just generated FOR them, and on
+// Linux Keploy re-execs itself under sudo for docker mode without being asked.
+func RestoreFileOwnership(logger *zap.Logger, path string) {
+	sudoUser := os.Getenv("SUDO_USER")
+	if sudoUser == "" {
+		return
+	}
+	uid, gid := os.Getenv("SUDO_UID"), os.Getenv("SUDO_GID")
+	if uid == "" || gid == "" {
+		return
+	}
+	u, uErr := strconv.Atoi(uid)
+	g, gErr := strconv.Atoi(gid)
+	if uErr != nil || gErr != nil {
+		return
+	}
+	if err := os.Chown(path, u, g); err != nil {
+		logger.Debug("could not give the generated file back to the invoking user",
+			zap.String("path", path), zap.String("user", sudoUser), zap.Error(err))
+	}
+}
+
+// RestoreFileOwnershipOf is RestoreFileOwnership on an OPEN descriptor.
+//
+// os.Chown follows links, so giving a file back by name re-resolves the path
+// after the write -- and a link swapped in there hands the invoking user
+// whatever it points at. Running as root, which is when this function does
+// anything at all, that is an arbitrary file's ownership. A descriptor cannot
+// be redirected. `path` is only for the log line.
+func RestoreFileOwnershipOf(logger *zap.Logger, f *os.File, path string) {
+	sudoUser := os.Getenv("SUDO_USER")
+	if sudoUser == "" {
+		return
+	}
+	uid, gid := os.Getenv("SUDO_UID"), os.Getenv("SUDO_GID")
+	if uid == "" || gid == "" {
+		return
+	}
+	u, uErr := strconv.Atoi(uid)
+	g, gErr := strconv.Atoi(gid)
+	if uErr != nil || gErr != nil {
+		return
+	}
+	if err := f.Chown(u, g); err != nil {
+		logger.Debug("could not give the generated file back to the invoking user",
+			zap.String("path", path), zap.String("user", sudoUser), zap.Error(err))
+	}
 }
 
 // RestoreKeployFolderOwnership restores ownership of the keploy folder to the original user
