@@ -154,8 +154,16 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 		}
 		c.Agent.IsDocker = true
 
-		//parse docker command only in case of docker start or docker run commands
-		if utils.CmdType(c.CommandType) != utils.DockerCompose {
+		// Parse the docker command only for the kinds that HAVE one. Compose
+		// carries its container in the project rather than the command line,
+		// and --from-container was given the container by name — running the
+		// parser over an empty command there would log an ERROR about failing
+		// to resolve what the flag already settled.
+		if utils.CmdType(c.CommandType) == utils.FromContainer {
+			if c.FromContainer != "" {
+				c.ContainerName = c.FromContainer
+			}
+		} else if utils.CmdType(c.CommandType) != utils.DockerCompose {
 			cont, net, err := docker.ParseDockerCmd(c.Command, utils.CmdType(c.CommandType), client)
 			logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", c.Command))
 			resolveDockerNames(logger, c, cont, net, err)
