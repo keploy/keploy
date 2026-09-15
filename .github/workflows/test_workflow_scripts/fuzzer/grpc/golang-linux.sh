@@ -41,13 +41,17 @@ command -v curl >/dev/null 2>&1 || { echo "curl not found"; exit 1; }
 
 # Generate keploy config and add duration_ms noise to avoid timing diffs
 rm -f ./keploy.yml keploy
-"$RECORD_BIN" config --generate
 config_file="./keploy.yml"
-if [ -f "$config_file" ]; then
-  sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' "$config_file"
-else
-  echo "⚠️ Config file $config_file not found, skipping sed replace."
-fi
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+  globalNoise:
+      global: {"body": {"duration_ms":[]}}
+KEPLOY_CFG
 
 # shellcheck disable=SC1091
 if [ -f "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh" ]; then
@@ -134,7 +138,6 @@ ensure_success_phrase() {
  exit 1
 }
 
-
 if [ "$MODE" = "incoming" ]; then
  echo "🧪 Testing with incoming requests"
 
@@ -146,7 +149,6 @@ if [ "$MODE" = "incoming" ]; then
   fi
  
  sleep 10
-
 
  # Start client HTTP driver
  "$FUZZER_CLIENT_BIN" --http :18080 2>&1 | tee client_incoming.txt &
@@ -176,8 +178,6 @@ if [ "$MODE" = "incoming" ]; then
 
  echo "Stopping keploy record and server"
 
-
-
   REC_PID=$(pgrep keploy | sort -n | head -1)
   echo "$REC_PID Keploy PID"
   echo "Killing keploy"
@@ -192,20 +192,16 @@ if [ "$MODE" = "incoming" ]; then
 
  echo "Waiting for processes to settle"
 
-
  check_for_errors record_incoming.txt
  check_for_errors client_incoming.txt
 
-
  echo "Replaying incoming requests"
-
 
  # Replay
  "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" --api-timeout=200 --skip-coverage=true 2>&1 | tee test_incoming.txt
  echo "checking for errors"
  check_for_errors test_incoming.txt
  check_test_report
-
 
  # ✅ For INCOMING mode: no success-phrase check. Instead, verify Keploy reports PASSED.
  RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
@@ -214,7 +210,6 @@ if [ "$MODE" = "incoming" ]; then
    exit 1
  fi
  echo "Using reports from: $RUN_DIR"
-
 
  all_passed=true
  found_any=false
@@ -226,12 +221,10 @@ if [ "$MODE" = "incoming" ]; then
    [[ "$status" == "PASSED" ]] || all_passed=false
  done
 
-
  if ! $found_any; then
    echo "::error::No test-set report files found in $RUN_DIR"
    exit 1
  fi
-
 
  if ! $all_passed; then
    echo "::error::One or more test sets failed in $RUN_DIR"
@@ -282,11 +275,9 @@ if [ "$MODE" = "incoming" ]; then
 elif [ "$MODE" = "outgoing" ]; then
  echo "🧪 Testing with outgoing requests"
 
-
  # Start server (no keploy here)
  "$FUZZER_SERVER_BIN" &> server_outgoing.txt &
  sleep 5
-
 
  # Record the client (it makes outgoing RPCs)
  "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing.txt &
@@ -311,7 +302,6 @@ elif [ "$MODE" = "outgoing" ]; then
      "max_diffs": 5
    }'
 
-
  sleep 10
 
  echo "using the new commnad to stop keploy"
@@ -328,7 +318,6 @@ elif [ "$MODE" = "outgoing" ]; then
 
  check_for_errors server_outgoing.txt
  check_for_errors record_outgoing.txt
-
 
  # Replay the client (relying on mocks)
  "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" --skip-coverage=true 2>&1 | tee test_outgoing.txt

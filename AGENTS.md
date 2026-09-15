@@ -121,7 +121,8 @@ committed fixtures.
 | `keploy normalize`           | `pkg/service/tools`              | Accepts newly-observed responses into the golden test cases                      |
 | `keploy sanitize`            | `pkg/service/tools`              | Scrubs secrets using `custom_gitleaks_rules.toml` + built-in rules               |
 | `keploy templatize`          | `pkg/service/tools`              | Replaces dynamic values with templates in test sets                              |
-| `keploy config --generate`   | `cli/config.go`                  | Writes a default `keploy.yml`                                                    |
+| `keploy config --generate`   | `cli/config.go`                  | Writes `keploy.yml` with only the settings that DIFFER from the defaults          |
+| `keploy config defaults`     | `cli/config.go`                  | Prints every setting and its default (`-o FILE` saves them)                      |
 | `keploy contract ...`        | `pkg/service/contract`           | OpenAPI contract generation / testing                                            |
 | `keploy diff <r1> <r2>`      | `pkg/service/diff`               | Diff two test runs                                                               |
 | `keploy report`              | `pkg/service/report`             | Summarize a previous test run                                                    |
@@ -273,7 +274,12 @@ All of them:
 
 1. `source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh` — writes a fake `~/.keploy/installation-id.yaml` so telemetry init doesn't prompt.
 2. Clean `keploy/` and `keploy.yml` from any prior run.
-3. `$RECORD_BIN config --generate` and optionally `sed` noise rules into `keploy.yml` (e.g. `global: {"body": {"updated_at":[]}}`).
+3. Write the `keploy.yml` the test needs with a heredoc -- do NOT `sed` a
+   generated one. `keploy config --generate` writes only the settings that
+   DIFFER from Keploy's defaults, so a `sed` looking for a default value
+   (`global: {}`, `selectedTests: {}`) matches nothing and silently patches
+   nothing. `keploy config defaults` prints the full set if you need to look
+   one up.
 4. Bring up any dependency containers (MySQL, Postgres, Mongo, Redis) and wait for readiness.
 5. Build the sample app (`go build`, `mvn package`, `npm ci`, `pip install`, …).
 6. Define `send_request()` — waits for app health, drives traffic, sleeps, kills keploy by PID (`pgrep keploy`).
