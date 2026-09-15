@@ -281,6 +281,34 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, 
 	}
 }
 
+// afterRecordingComplete invokes the end-of-recording hook (issue #1867). It is
+// best-effort: the recording is already saved, so neither an error NOR a panic
+// from the hook may propagate — a panic here would otherwise unwind the teardown
+// defer and skip the deferred-orphan-revoke that runs right after this call. The
+// hook does data-driven work (the Basic-Auth re-key), so a panic is plausible;
+// recover, log, and let teardown continue.
+func (r *Recorder) afterRecordingComplete(ctx context.Context, testSetID string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			r.logger.Error("AfterRecordingComplete hook panicked; recording is saved but the post-record pass did not finish. Check your RecordHooks implementation.",
+				zap.Any("panic", rec), zap.String("testSetID", testSetID))
+		}
+	}()
+	// The recorder ctx is already cancelled on the normal SIGINT stop of an
+	// interactive recording (the teardown defer above runs under a cancelled ctx).
+	// Hand the hook a context decoupled from that cancellation so a legitimate
+	// post-record pass is not skipped, while still propagating request-scoped
+	// values and any deadline set upstream. The hook remains free to honor it.
+	hookCtx := context.WithoutCancel(ctx)
+	if hookErr := r.hooks.AfterRecordingComplete(hookCtx, &RecordingCompleteContext{
+		TestSetID: testSetID,
+		Path:      r.config.Path,
+	}); hookErr != nil {
+		r.logger.Error("AfterRecordingComplete hook failed; recording is saved but a post-record pass may be incomplete. Check your RecordHooks implementation.",
+			zap.Error(hookErr), zap.String("testSetID", testSetID))
+	}
+}
+
 // SetRecordHooks replaces the current hooks. Mirrors SetTestHooks on the Replayer.
 func (r *Recorder) SetRecordHooks(hooks RecordHooks) {
 	if hooks != nil {
@@ -733,6 +761,13 @@ func (r *Recorder) Start(ctx context.Context) error {
 
 		if err := utils.DrainErrGroup(r.logger, "record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
+		}
+
+		// End-of-recording hook (issue #1867 Basic-Auth re-key): every test case
+		// and mock is now drained to disk, so a cross-artifact pass can correlate
+		// them. Best-effort — a failure never invalidates the recording.
+		if recordingStarted && newTestSetID != "" {
+			r.afterRecordingComplete(ctx, newTestSetID)
 		}
 
 		// Deferred-orphan revoke: delete TCs whose owned mock was capacity-dropped
