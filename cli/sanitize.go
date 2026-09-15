@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
@@ -26,19 +27,19 @@ func Sanitize(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var sanitizeService toolsSvc.Service
 			var ok bool
 			if sanitizeService, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
-				return nil
+				return fmt.Errorf("service doesn't satisfy tools service interface")
 			}
 
 			err = sanitizeService.Sanitize(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to sanitize test cases")
-				return nil
+				return err
 			}
 
 			return nil
