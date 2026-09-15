@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -305,26 +306,18 @@ func extractTarGzWithLimit(gzipPath, destDir string, limit int64) error {
 //
 // cfgYAML is the config to write, or "" for "nothing has been decided yet".
 func WriteMinimalConfig(logger *zap.Logger, filePath string, cfgYAML string) error {
-	// Never THROUGH a link. os.WriteFile follows one, so a keploy.yml that is
-	// a symlink -- dangling or not -- sent the generated config to a path the
-	// user never named, outside the project, with no prompt and exit 0.
-	// Removing their link would be just as presumptuous, so say what is in
-	// the way and stop.
-	if info, lerr := os.Lstat(filePath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
-		// A link that resolves INSIDE the same directory is an ordinary
-		// layout (keploy.yml -> config/keploy.yml in a monorepo); refusing it
-		// took the generator away from those repositories entirely. What must
-		// not happen is writing through a link to somewhere the user did not
-		// name -- including a DANGLING one, where Stat reports "no file here"
-		// and the overwrite prompt never fires.
-		// Resolved AND absolute: "keploy.yml" and "." compare as strings
-		// otherwise, and every relative path looks like an escape.
-		target, rErr := resolveAbs(filePath)
-		dir, dErr := resolveAbs(filepath.Dir(filePath))
-		if rErr != nil || dErr != nil || !strings.HasPrefix(target, dir+string(os.PathSeparator)) {
-			return fmt.Errorf("%s is a symbolic link pointing outside %s; Keploy will not write through it -- remove the link, or generate the config elsewhere with --path",
-				filePath, filepath.Dir(filePath))
-		}
+	// Never through a link to somewhere the user did not name. os.WriteFile
+	// follows one, so a keploy.yml that is a symlink -- dangling or not --
+	// sent the generated config outside the project with no prompt and exit
+	// 0. A link resolving INSIDE the directory is an ordinary monorepo
+	// layout and is honoured; anything else is refused by name.
+	//
+	// The write then goes to the RESOLVED path, not through the link: the
+	// path that was checked has to be the path that is opened, or the check
+	// is describing a different file from the one that gets written.
+	filePath, err := ResolveConfigTarget(filePath)
+	if err != nil {
+		return err
 	}
 	defaults, err := config.DefaultsYAML()
 	if err != nil {
@@ -354,17 +347,45 @@ func WriteMinimalConfig(logger *zap.Logger, filePath string, cfgYAML string) err
 	// 0644, not 0777. keploy.yml carries `command:` -- the process Keploy
 	// executes -- so a world-writable one hands every local user a way to
 	// change what runs on the next `keploy test`.
-	if err := os.WriteFile(filePath, body, 0644); err != nil {
+	//
+	// O_NOFOLLOW, because the path was checked a moment ago and os.WriteFile
+	// follows whatever is there NOW. When the file does not exist yet --
+	// which is the ordinary first run -- a link planted between the check and
+	// the write sends the config wherever it points: measured at roughly one
+	// attempt in six against a process doing nothing more exotic than
+	// `ln -sf` in a loop. filePath here is already fully resolved, so it can
+	// never legitimately BE a link, and refusing to follow one costs nothing.
+	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, 0644)
+	if err != nil {
 		utils.LogError(logger, err, "failed to write config file",
 			zap.String("path", filePath),
 			zap.String("next_step", "verify the directory exists and the user running keploy has write permission; remove any read-only keploy.yml left over from a prior run before re-invoking `keploy config --generate`"))
 		return err
 	}
-	if err := restrictConfig(filePath); err != nil {
+	if _, werr := f.Write(body); werr != nil {
+		_ = f.Close()
+		utils.LogError(logger, werr, "failed to write config file", zap.String("path", filePath))
+		return werr
+	}
+	// Mode and ownership on the OPEN FILE, before it is closed.
+	//
+	// Doing them by name afterwards re-resolves the path, and os.Stat,
+	// os.Chmod and os.Chown all follow links: the same `ln -sf` race the open
+	// itself refuses, landing a moment later, made Keploy chmod and chown a
+	// file OUTSIDE the directory. Under `sudo keploy config --generate` --
+	// the documented way to run Keploy on Linux -- that chown hands a
+	// root-owned file to the unprivileged invoking user. The descriptor
+	// cannot be redirected, so nothing can be substituted for it.
+	if err := restrictConfigFile(f); err != nil {
+		_ = f.Close()
 		utils.LogError(logger, err, "failed to set the permission of config file")
 		return fmt.Errorf("wrote %s but could not set its permissions: %w", filePath, err)
 	}
-	utils.RestoreFileOwnership(logger, filePath)
+	utils.RestoreFileOwnershipOf(logger, f, filePath)
+	if cerr := f.Close(); cerr != nil {
+		utils.LogError(logger, cerr, "failed to write config file", zap.String("path", filePath))
+		return cerr
+	}
 	return nil
 }
 
@@ -386,6 +407,164 @@ func resolveAbs(p string) (string, error) {
 	return filepath.EvalSymlinks(abs)
 }
 
+// withinDir walks up at most this far. filepath.Dir reaches the root and stays
+// there, so the walk terminates on its own; this only bounds a pathological
+// one, and is far past any real project depth.
+const maxDirDepth = 4096
+
+// ResolveConfigTarget answers the only question that matters before writing a
+// config: which file would this actually land on, and is it inside the
+// directory the user named?
+//
+// It returns that real path, or refuses. Callers write to what it returns --
+// never through the original path -- so the file that was checked is the file
+// that is opened.
+//
+// What it decides is where the PATH leads. A hard link, or a directory bind-
+// mounted into the project, is a second name for a file that genuinely is
+// inside: no amount of path resolution can see past that, and writing to it
+// writes to the other name too. The guarantee is "this path does not lead out
+// of the directory you named", not "nothing outside it can be reached".
+//
+// Every component that EXISTS is resolved by filepath.EvalSymlinks, and only
+// a final name that does not exist yet is ever joined on. That division is the
+// whole correctness argument. filepath.Join and filepath.Abs clean ".."
+// LEXICALLY, before the component in front of it has been resolved, while the
+// kernel resolves the link first and then takes ".." of the REAL parent -- so
+// a target spelled "a/sub/../b.yml", where a/sub is a link out of the
+// project, was computed as being inside it and written to anyway.
+// EvalSymlinks gets this right, because it strips ".." from the already
+// resolved prefix; the job here is to let it, and to stop cleaning paths by
+// hand.
+func ResolveConfigTarget(filePath string) (string, error) {
+	abs, err := filepath.Abs(filePath)
+	if err != nil {
+		return "", err
+	}
+	// The directory the user named, by identity. It has to exist -- nothing
+	// can be written into it otherwise -- so this resolution is exact.
+	dirReal, err := resolveAbs(filepath.Dir(abs))
+	if err != nil {
+		return "", fmt.Errorf("%s cannot be resolved: %w", filepath.Dir(filePath), err)
+	}
+	dirInfo, err := os.Stat(dirReal)
+	if err != nil {
+		return "", err
+	}
+
+	target, err := resolveLeaf(filepath.Join(dirReal, filepath.Base(abs)))
+	if err != nil {
+		// Only say "symbolic link" when there is one. A directory that is
+		// really a file, or one this user cannot read, failed here too and
+		// was reported as a link problem with no link anywhere in the path --
+		// and the message displaced the one that says to check the directory
+		// and its permissions.
+		if st, lerr := os.Lstat(abs); lerr == nil && st.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("%s is a symbolic link whose target could not be resolved: %w", filePath, err)
+		}
+		return "", fmt.Errorf("%s cannot be resolved: %w; verify the directory exists and the user running keploy can read it", filePath, err)
+	}
+	if !withinDir(filepath.Dir(target), dirInfo) {
+		return "", fmt.Errorf("%s is a symbolic link pointing outside %s; Keploy will not write through it -- remove the link, or generate the config elsewhere with --path",
+			filePath, filepath.Dir(filePath))
+	}
+	return target, nil
+}
+
+// resolveLeaf follows a chain of links to the file a write would land on. The
+// last hop is allowed not to exist yet -- a keploy.yml committed as a link
+// points at the file the generator has not written BY DEFINITION -- but every
+// directory along the way must, or no write could land there either.
+func resolveLeaf(p string) (string, error) {
+	cur := p
+	// The kernel's own ceiling is in this range; a cycle otherwise spins here
+	// for ever.
+	for i := 0; i < 40; i++ {
+		dest, err := os.Readlink(cur)
+		if err != nil {
+			// Not a link. Either it exists -- resolve it exactly -- or it is
+			// the missing leaf, and only its name may be joined on.
+			if real, rerr := filepath.EvalSymlinks(cur); rerr == nil {
+				return real, nil
+			} else if !errors.Is(rerr, fs.ErrNotExist) {
+				return "", rerr
+			}
+			parentRaw, leaf := splitLast(cur)
+			if leaf == "" || leaf == "." || leaf == ".." {
+				return "", fmt.Errorf("%s does not name a file", p)
+			}
+			parent, perr := filepath.EvalSymlinks(parentRaw)
+			if perr != nil {
+				return "", perr
+			}
+			return filepath.Join(parent, leaf), nil
+		}
+		if !filepath.IsAbs(dest) {
+			// The directory the LINK sits in, resolved first, then the target
+			// appended WITHOUT cleaning: filepath.Join would collapse a ".."
+			// against the unresolved spelling. The next turn of this loop
+			// hands the uncleaned path back to the OS, which walks it the way
+			// the kernel will.
+			parentRaw, _ := splitLast(cur)
+			parent, perr := filepath.EvalSymlinks(parentRaw)
+			if perr != nil {
+				return "", perr
+			}
+			dest = parent + string(os.PathSeparator) + dest
+		}
+		cur = dest
+	}
+	return "", fmt.Errorf("too many levels of symbolic links under %s", p)
+}
+
+// splitLast cuts the last component off a path WITHOUT cleaning it.
+// filepath.Dir cleans, which turns ".../a/sub/.." into ".../a" before `sub`
+// has been resolved -- the very mistake this file now exists to avoid.
+func splitLast(p string) (dir, last string) {
+	// "C:" is drive-RELATIVE on Windows -- it means the current directory on
+	// that drive, not its root -- so the volume has to stay attached to the
+	// separator. On Unix VolumeName is always empty and this is a no-op.
+	vol := filepath.VolumeName(p)
+	rest := p[len(vol):]
+	i := strings.LastIndex(rest, string(os.PathSeparator))
+	if i < 0 {
+		if vol == "" {
+			return ".", rest
+		}
+		return vol + ".", rest
+	}
+	if i == 0 {
+		return vol + string(os.PathSeparator), rest[1:]
+	}
+	return vol + rest[:i], rest[i+1:]
+}
+
+// withinDir reports whether `child` is `dir` or sits under it, by IDENTITY.
+//
+// A string prefix is both too strict and too loose: on a case-insensitive
+// volume two spellings of one directory compare unequal (a link squarely
+// inside was refused with a message saying it pointed outside), and any
+// spelling difference at all defeats it. os.SameFile compares the inode, so
+// how the path was typed stops mattering.
+func withinDir(child string, dir os.FileInfo) bool {
+	cur := child
+	for i := 0; i < maxDirDepth; i++ {
+		info, err := os.Stat(cur)
+		if err != nil {
+			return false
+		}
+		if os.SameFile(info, dir) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
+	return false
+}
+
 // RestrictConfigMode is restrictConfig, for the CLI's own defaults writer.
 func RestrictConfigMode(path string) error { return restrictConfig(path) }
 
@@ -394,11 +573,24 @@ func restrictConfig(path string) error {
 	if err != nil {
 		return err
 	}
-	mode := info.Mode().Perm()
+	return narrowMode(info.Mode().Perm(), func(m os.FileMode) error { return os.Chmod(path, m) })
+}
+
+// restrictConfigFile is restrictConfig on an open descriptor, so no link can
+// be swapped in between deciding the mode and applying it.
+func restrictConfigFile(f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	return narrowMode(info.Mode().Perm(), f.Chmod)
+}
+
+func narrowMode(mode os.FileMode, chmod func(os.FileMode) error) error {
 	if mode&0o022 == 0 {
 		return nil
 	}
-	return os.Chmod(path, mode&^0o022)
+	return chmod(mode &^ 0o022)
 }
 
 // placeholders are the few settings a human actually opens this file to set,

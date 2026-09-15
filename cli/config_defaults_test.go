@@ -223,7 +223,12 @@ func TestConfigDefaults_UnwritableOutputIsAnError(t *testing.T) {
 type stubConfigurator struct{ path string }
 
 func (s *stubConfigurator) AddFlags(cmd *cobra.Command) error {
+	// The same flags cli/provider registers for `config`. A stub that is
+	// missing one does not simplify the test, it tests a command that does
+	// not exist -- and the RunE now refuses outright when a flag it needs is
+	// not registered, rather than quietly reading it as false.
 	cmd.Flags().Bool("generate", false, "")
+	cmd.Flags().Bool("force", false, "")
 	cmd.Flags().StringP("path", "p", ".", "")
 	if s.path != "" {
 		return cmd.Flags().Set("path", s.path)
@@ -295,14 +300,25 @@ func TestConfigGenerate_DoesNotWriteThroughADanglingSymlink(t *testing.T) {
 	// the command never asked, and wrote through the link to a path the user
 	// never named. The -o flag of `config defaults` was fixed for exactly
 	// this; the more dangerous caller was left alone.
-	dir := t.TempDir()
-	target := filepath.Join(dir, "somewhere-else.yml")
+	//
+	// OUTSIDE the directory, which is what makes it dangerous. A dangling
+	// link pointing INSIDE is the committed-monorepo layout and is written
+	// through on purpose -- see the case below, and
+	// TestWriteMinimalConfig_DanglingLinkInsideIsWrittenThrough.
+	outer := t.TempDir()
+	dir := filepath.Join(outer, "project")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(outer, "somewhere-else.yml")
 	if err := os.Symlink(target, filepath.Join(dir, "keploy.yml")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	cfg := config.New()
-	cfg.InCi = true // non-interactive: the prompt cannot be answered in a test
-	cmd, _ := configCmd(t, cfg, dir)
+	// No --force and no terminal, deliberately: a symlink is refused for
+	// being a symlink, and must not be reported as "there is nobody here to
+	// confirm overwriting it" -- an answer that sends the user to a flag
+	// which would refuse for the same real reason anyway.
+	cmd, _ := configCmd(t, config.New(), dir)
 	cmd.SetArgs([]string{"--generate", "--path", dir})
 	// The ERROR as well as the absence: swallowing it would print "Config
 	// file generated successfully" over a file that was never written, and
@@ -314,6 +330,28 @@ func TestConfigGenerate_DoesNotWriteThroughADanglingSymlink(t *testing.T) {
 	}
 	if _, err := os.Stat(target); err == nil {
 		t.Fatal("config --generate wrote through a dangling symlink to a file the user never named")
+	}
+}
+
+// ...and the layout that link style exists for: a keploy.yml committed as a
+// link to the file the generator has not written yet. Refusing it took the
+// generator away from those repositories, and the refusal said the link
+// pointed outside the directory when it pointed squarely inside it.
+func TestConfigGenerate_WritesThroughADanglingLinkInsideTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("config", "keploy.yml"), filepath.Join(dir, "keploy.yml")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cmd, _ := configCmd(t, config.New(), dir)
+	cmd.SetArgs([]string{"--generate", "--path", dir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("a committed link to a not-yet-generated config was refused: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config", "keploy.yml")); err != nil {
+		t.Fatalf("nothing was written through the link: %v", err)
 	}
 }
 

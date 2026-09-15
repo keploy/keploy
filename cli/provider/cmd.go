@@ -216,6 +216,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
+		// The overwrite consent, as a flag. Without one, the only way past
+		// the "it already exists" prompt was to answer it -- and in CI there
+		// is nobody to answer, so `config --generate` quietly wrote nothing
+		// and exited 0. Named to match `config defaults -o FILE --force`.
+		cmd.Flags().Bool("force", false, "Overwrite an existing keploy.yml without asking")
 	case "templatize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringSliceP("testsets", "t", c.cfg.Templatize.TestSets, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")

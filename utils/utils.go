@@ -363,9 +363,21 @@ var ConfigGuide = `
 # Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configration file.
 `
 
+// ErrNoAnswer is returned when there was nobody to answer the question: stdin
+// reached EOF without a line. It is NOT the same as a "no", and a caller that
+// conflates them reports a decision nobody made -- which is how `keploy config
+// --generate` came to write nothing in CI and exit 0. Callers that only need a
+// safe default may still treat it as false; callers about to skip work on the
+// strength of the answer must not.
+//
+// A TTY check is not a substitute: CI runners that allocate a pty (docker -t,
+// Jenkins, GitLab) look interactive and still deliver EOF.
+var ErrNoAnswer = errors.New("no answer: stdin ended without one")
+
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
-// confirmations. If the input is not recognized or interrupted, exit gracefully as "no".
+// confirmations. An unrecognized answer or a Ctrl+C is a graceful "no"; an
+// EOF is ErrNoAnswer, because nobody declined -- nobody was there.
 func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -376,11 +388,18 @@ func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 
 	go func() {
 		response, err := reader.ReadString('\n')
-		if err != nil {
+		// ReadString hands back what it read AND io.EOF when the input ends
+		// without a newline -- which is what `printf yes | keploy ...` and a
+		// heredoc with no final newline both look like. Discarding the line
+		// and reporting only the error turned a plain "yes" into "there was
+		// nobody to answer": first a silent wrong "no", and then, once EOF
+		// became ErrNoAnswer, a refusal asserting that nobody had replied to
+		// a question somebody had just answered.
+		if err != nil && !(errors.Is(err, io.EOF) && strings.TrimSpace(response) != "") {
 			errCh <- err
-		} else {
-			respCh <- response
+			return
 		}
+		respCh <- response
 	}()
 
 	select {
@@ -388,12 +407,12 @@ func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 		// Cobra caught SIGINT (Ctrl+C) and cancelled its root context
 		return false, nil
 	case err := <-errCh:
-		// A closed / non-TTY stdin (io.EOF) is not a failure: there is simply
-		// nobody to answer. Decline, exactly as the ctx.Done() branch above
-		// does for Ctrl+C, so non-interactive callers get the safe default
-		// instead of a hard error.
+		// A closed / non-TTY stdin (io.EOF) is not a failure and not a
+		// decline: there is simply nobody to answer. Say which it was, so a
+		// caller can refuse out loud instead of recording a decision that was
+		// never made.
 		if errors.Is(err, io.EOF) {
-			return false, nil
+			return false, ErrNoAnswer
 		}
 		return false, err
 	case response := <-respCh:

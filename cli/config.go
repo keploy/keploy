@@ -30,6 +30,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 		SilenceUsage: true,
 		Example: `  keploy config --generate                  # write keploy.yml with only what differs from the defaults
   keploy config --generate --path ./svc     # ...somewhere else
+  keploy config --generate --force          # ...over one that already exists
   keploy config defaults                    # print every setting and its default
   keploy config defaults -o defaults.yml    # save them all, to read or edit`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
@@ -54,8 +55,52 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 					where = flagPath
 				}
 				filePath := filepath.Join(where, "keploy.yml")
-				if !cfg.InCi && utils.CheckFileExists(filePath) {
+				force, ferr := cmd.Flags().GetBool("force")
+				if ferr != nil {
+					// Not silently "not forced": a flag that has been renamed
+					// or lost its registration would quietly start refusing
+					// every regenerate, and the message would blame the file.
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", ferr)
+					return ferr
+				}
+				// WHICH file is about to be replaced -- resolved the same way
+				// the writer resolves it, so consent is asked about the file
+				// that will actually be opened. Asking about the path as
+				// typed is how a keploy.yml that is a link to the
+				// developer's hand-written config was overwritten without a
+				// word: the link was treated as "not a file anyone wants
+				// kept", while the writer followed it and replaced what was
+				// on the other end.
+				target, terr := toolsSvc.ResolveConfigTarget(filePath)
+				if terr != nil {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", terr)
+					return terr
+				}
+				// Consent to overwrite, and the three ways it can be settled.
+				//
+				// The gate used to read cfg.InCi, which is the SAME dead
+				// config.Config the --path fix above documents: root.go
+				// allocates one and ValidateFlags writes into the other, so
+				// InCi is permanently false -- and `config` never registered
+				// --in-ci anyway, so there was no way to set it. In CI the
+				// prompt was therefore always asked, stdin answered EOF,
+				// AskForConfirmation declined, and the command logged
+				// "Skipping" and exited 0. A pipeline step that regenerates
+				// the config recorded a success for having done nothing.
+				//
+				// So: --force settles it outright; a human's "no" is a real
+				// answer and a real success; and an EOF -- nobody there to
+				// ask -- REFUSES out loud and names the flag that would have
+				// let it through. Silence is the one answer it must not give.
+				// EOF is the signal, not a TTY check: CI runners that
+				// allocate a pty look interactive and still answer EOF.
+				if !force && utils.CheckFileExists(target) {
 					override, err := utils.AskForConfirmation(ctx, "Config file already exists. Do you want to override it?")
+					if errors.Is(err, utils.ErrNoAnswer) {
+						err = fmt.Errorf("%s already exists and there was nobody to confirm overwriting it; re-run with --force", target)
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
+						return err
+					}
 					if err != nil {
 						utils.LogError(logger, err, "failed to ask for confirmation")
 						return err
@@ -77,7 +122,12 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				}
 				// Only what a developer decided reaches the file; the rest
 				// is a default, and `keploy config defaults` prints it.
-				if err := toolsSvc.WriteMinimalConfig(logger, filePath, ""); err != nil {
+				// The RESOLVED path, not the one typed. Handing the writer
+				// filePath made it resolve a second time, so the file the
+				// user was asked about was not guaranteed to be the file
+				// written -- and it doubled the window a link planted between
+				// the two could slip through.
+				if err := toolsSvc.WriteMinimalConfig(logger, target, ""); err != nil {
 					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
 					return err
 				}

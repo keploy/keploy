@@ -4,6 +4,7 @@ package utils
 
 import (
 	"context"
+	"os"
 
 	"go.uber.org/zap"
 )
@@ -52,6 +53,10 @@ func EnsureKeployFolderPermissions(_ context.Context, _ *zap.Logger, _ string) e
 
 // RestoreFileOwnership is a no-op on Windows: there is no sudo to undo.
 func RestoreFileOwnership(_ *zap.Logger, _ string) {}
+
+// RestoreFileOwnershipOf is the descriptor form. Windows has no SUDO_USER and
+// no Chown, so there is nothing to give back.
+func RestoreFileOwnershipOf(_ *zap.Logger, _ *os.File, _ string) {}
 
 // RestoreKeployFolderOwnership is a no-op on Windows.
 // Ownership restoration using chown is not applicable on Windows.

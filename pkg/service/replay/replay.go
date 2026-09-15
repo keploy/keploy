@@ -275,9 +275,44 @@ func (r *Replayer) GetTestHooks() TestHooks {
 	return r.hookImpl
 }
 
-func (r *Replayer) Start(ctx context.Context) error {
+func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	r.logger.Debug("Starting Keploy replay... Please wait.")
+
+	// The exit code, recorded on EVERY way out of this function.
+	//
+	// There are nine returns and exactly one of them used to record the run:
+	// the ordinary end of the loop. A user abort returned nil; a cancelled
+	// context returned the context's error; and a run that never got as far
+	// as the loop -- no test sets recorded, the report store unreadable, the
+	// agent not coming up -- returned an error that goes nowhere, because
+	// `keploy test` swallows Start's error and hands cobra a nil (cli/test.go)
+	// so that a failure already reported is not printed a second time with a
+	// usage dump. utils.ErrCode is therefore the ONLY thing left that can make
+	// the process exit non-zero, and none of those paths set it: a suite
+	// already red and then interrupted, and a CI job whose tests were never
+	// recorded, both exited 0.
+	//
+	// Registered at the TOP and driven off the named return, so it covers the
+	// returns that happen before there is any verdict to speak of, and so the
+	// next early return added here cannot forget it.
+	testRunResult := true
+	defer func() {
+		r.completeTestReportMu.RLock()
+		failed := r.totalTestFailed
+		r.completeTestReportMu.RUnlock()
+		// A cancelled ROOT context is not a failure -- cancelled is not
+		// failed, and under a signal the error Start returns is usually the
+		// cancellation itself. What a Ctrl+C must not do is erase a failure
+		// already reached, and testRunResult and failed carry that. A
+		// DEADLINE on some sub-context is a different thing and still counts:
+		// only the root being cancelled is a user saying stop.
+		runErr := err
+		if ctx.Err() != nil {
+			runErr = nil
+		}
+		armRunExitCode(runErr, testRunResult, failed)
+	}()
 
 	// parentCtx is the context as passed into Start — canceled only by a
 	// real user interrupt (SIGINT via utils.NewCtx). The errgroup-derived
@@ -548,7 +583,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	var testSetResult bool
-	testRunResult := true
 	abortTestRun := false
 	r.afterTestRunCalled = false
 	var flakyTestSets []string
@@ -706,6 +740,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 				testSetResult = false
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusUserAbort:
+				// A Ctrl+C does not un-fail the tests that already ran; the
+				// defer at the top of Start records them.
+				//
+				// It stays a nil return, so a run interrupted with nothing
+				// wrong yet still exits 0 -- cancelled is not failed, and
+				// that is the contract the rest of the CLI is built on (the
+				// enterprise binary reads its own `interrupted` reason for
+				// the same distinction). What is fixed here is only that a
+				// FAILURE already reached is no longer erased by the signal.
 				return nil
 			case models.TestSetStatusFailed:
 				testSetResult = false
@@ -927,8 +970,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// return non-zero error code so that pipeline processes
 	// know that there is a failure in tests
+	//
+	// SetExitCodeOnce, not a bare assignment: a plain `utils.ErrCode =
+	// errCode` also writes ZERO, so a green run wiped a code something else
+	// had already armed -- a wrapped runner's own status, or one of Keploy's
+	// (utils/exitcodes.go). Arming is one-way here; the defer at the top of
+	// Start covers every other way out.
 	errCode, runErr := replayRunOutcome(testRunResult, keepAliveAppErr.Load())
-	utils.ErrCode = errCode
+	if errCode != 0 {
+		utils.SetExitCodeOnce(errCode)
+	}
 	return runErr
 }
 
@@ -957,6 +1008,41 @@ func replayRunOutcome(testRunResult bool, keepAliveAppErr *models.AppError) (int
 		return 1, nil
 	}
 	return 0, nil
+}
+
+// armRunExitCode records a failing run in the process exit code.
+//
+// Both ways out of Start use it -- the ordinary end of the loop and a user
+// abort -- so the two cannot drift. They did: the abort path returned with no
+// code at all, throwing away the verdict of every test set that had already
+// run.
+//
+// THREE signals, because none of them covers the others.
+//
+// runErr is how the early returns -- before any test set has a verdict -- say
+// the run did not happen: no tests recorded, the report store unreadable, the
+// agent never healthy. `keploy test` throws that error away on purpose, so
+// without this it reached nothing at all.
+//
+// testRunResult is the verdict of the test sets that reached one -- but it is
+// folded in AFTER the per-set switch, so on every early return it is missing
+// the set that was running. A one-set suite, the common shape, looked green
+// however many of its tests had already failed.
+//
+// failedTests is the running count RunTestSet keeps as each test is judged,
+// including for the set that was interrupted. It says nothing about a set
+// that failed for a reason other than a test -- an app that never came up,
+// no tests to run -- which is what testRunResult is for.
+//
+// A code already armed is left alone. It is more specific than this one:
+// a wrapped runner's own status, or one of Keploy's (utils/exitcodes.go).
+// That is a deliberate change from the unconditional `utils.ErrCode = 1` this
+// replaces: nothing arms a code before Start finishes today, so no reachable
+// behaviour differs, and when something does its code is the better answer.
+func armRunExitCode(runErr error, testRunResult bool, failedTests int) {
+	if runErr != nil || !testRunResult || failedTests > 0 {
+		utils.SetExitCodeOnce(1)
+	}
 }
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {

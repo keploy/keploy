@@ -379,6 +379,33 @@ func RestoreFileOwnership(logger *zap.Logger, path string) {
 	}
 }
 
+// RestoreFileOwnershipOf is RestoreFileOwnership on an OPEN descriptor.
+//
+// os.Chown follows links, so giving a file back by name re-resolves the path
+// after the write -- and a link swapped in there hands the invoking user
+// whatever it points at. Running as root, which is when this function does
+// anything at all, that is an arbitrary file's ownership. A descriptor cannot
+// be redirected. `path` is only for the log line.
+func RestoreFileOwnershipOf(logger *zap.Logger, f *os.File, path string) {
+	sudoUser := os.Getenv("SUDO_USER")
+	if sudoUser == "" {
+		return
+	}
+	uid, gid := os.Getenv("SUDO_UID"), os.Getenv("SUDO_GID")
+	if uid == "" || gid == "" {
+		return
+	}
+	u, uErr := strconv.Atoi(uid)
+	g, gErr := strconv.Atoi(gid)
+	if uErr != nil || gErr != nil {
+		return
+	}
+	if err := f.Chown(u, g); err != nil {
+		logger.Debug("could not give the generated file back to the invoking user",
+			zap.String("path", path), zap.String("user", sudoUser), zap.Error(err))
+	}
+}
+
 // RestoreKeployFolderOwnership restores ownership of the keploy folder to the original user
 // after running with sudo. This is called at the end of Docker mode execution.
 // If SUDO_USER is set, it means we're running under sudo and should restore ownership.
