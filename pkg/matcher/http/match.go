@@ -135,8 +135,18 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
 
+	// bodyActuallyCompared distinguishes "the body was compared and passed" from
+	// "the body comparison never ran". `pass` starts true and SEVERAL paths below
+	// leave it that way without looking at a single byte: a non-JSON body with
+	// compareAll off, the skipBody sentinel, a wildcard noise entry, and the >1MB
+	// BodySkipped path whose actual body is deliberately cleared. Only a body that
+	// was really compared says anything about the bytes, and only that can justify
+	// forgiving a digest computed FROM those bytes.
+	bodyActuallyCompared := false
+
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
 	if !skipBody && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
+		bodyActuallyCompared = true
 		//validate the stored json
 		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
@@ -160,8 +170,11 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if !compareAll && bodyType != models.JSON {
 			logger.Debug("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
 			// Mark body as passing when compareAll is false and body is not JSON
-		} else if !skipBody && tc.HTTPResp.Body != actualResponse.Body {
-			pass = false
+		} else if !skipBody {
+			bodyActuallyCompared = true
+			if tc.HTTPResp.Body != actualResponse.Body {
+				pass = false
+			}
 		}
 	}
 
@@ -236,6 +249,73 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						zap.String("expected", strings.Join(res.HeadersResult[i].Expected.Value, ",")),
 						zap.String("actual", strings.Join(res.HeadersResult[i].Actual.Value, ",")))
 					res.HeadersResult[i].Normal = true
+				}
+			}
+		}
+
+		// Same idea as Content-Length above, for headers that are a DIGEST of the
+		// body rather than its length.
+		//
+		// When the body comparison passed only BECAUSE a field was noised, the
+		// bytes still differ — so ETag / Content-MD5 / Digest, which the server
+		// computes from those bytes, differ too. Asserting them byte-for-byte
+		// silently re-imposes the exact equality the noise deliberately waived:
+		// noise on a body field is defeated by a header nobody configured. That is
+		// the residual node-jwt failure — a JWT whose `iat` lands either side of a
+		// second boundary changes the body, and the ETag with it.
+		//
+		// Deliberately NARROWER than the Content-Length rule: it also requires the
+		// raw bodies to actually DIFFER. If the bytes are identical and the digest
+		// is not, the server is minting a non-deterministic ETag, which is a real
+		// defect and must still fail. And this is not the same as adding "etag" to
+		// models.IsVolatileResponseHeader — that would ignore it unconditionally,
+		// including when the body failed. Here, if the body fails, everything
+		// still fails.
+		// Gated on the same opt-in as the volatile-header block above. Leaving it
+		// ungated would forgive ETag/Digest for a user who explicitly passed
+		// --disableAutoHeaderNoise, and for the enterprise and k8s-proxy callers
+		// that invoke Match with no MatchOption at all -- a silent behaviour change
+		// in another repo, which is the exact thing MatchOption exists to prevent.
+		//
+		// Each remaining clause is load-bearing; I verified by differential sweep
+		// that dropping any one changes real verdicts:
+		//
+		//   bodyActuallyCompared  -- `pass` starts true, so BodyResult[0].Normal is
+		//     ALSO true on every path that never compared a body (non-JSON with
+		//     compareAll off, skipBody, wildcard noise, the >1MB BodySkipped path
+		//     whose actual body is cleared). Without this, a totally different HTML
+		//     body with NO noise configured would have its ETag forgiven -- and for
+		//     a non-JSON response that digest is the ONLY remaining signal that the
+		//     representation changed.
+		//   BodyResult[0].Normal  -- if the body failed, everything still fails.
+		//   raw bytes differ      -- identical bytes with a differing digest means a
+		//     non-deterministic ETag, which is a real defect and must still fail.
+		if mo.autoHeaderNoise && bodyActuallyCompared &&
+			res.BodyResult[0].Normal && tc.HTTPResp.Body != actualResponse.Body {
+			for i := range res.HeadersResult {
+				hr := &res.HeadersResult[i]
+				// Presence is still asserted, exactly as the block above does it: a
+				// server that STOPS emitting an ETag, or starts emitting a Digest it
+				// never did, is a real change. CompareHeaders reports those with a
+				// nil Value on the absent side.
+				if hr.Normal || hr.Expected.Value == nil || hr.Actual.Value == nil {
+					continue
+				}
+				name := hr.Expected.Key
+				if name == "" {
+					name = hr.Actual.Key
+				}
+				// An explicit user pattern outranks this, same as above. If the user
+				// wrote a regex for this header they narrowed it deliberately and
+				// CompareHeaders already judged the replayed value against it;
+				// overriding that would silently discard their constraint.
+				if patterns, constrained := matcherUtils.SubstringKeyMatch(name, headerNoise); constrained && len(patterns) > 0 {
+					continue
+				}
+				if isBodyDigestHeader(strings.ToLower(name)) {
+					logger.Debug("ignoring a body-digest header whose body passed only via noise",
+						zap.String("header", name))
+					hr.Normal = true
 				}
 			}
 		}
@@ -758,4 +838,20 @@ func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error
 		return m, err
 	}
 	return m, nil
+}
+
+// isBodyDigestHeader reports whether a response header's value is computed by
+// the server FROM the response body, so that a body which passed only via noise
+// necessarily changes it too.
+//
+// Restricted to headers that are a digest of the body and nothing else.
+// Content-Length is handled separately above, and headers that merely relate to
+// the body (Content-Type, Content-Encoding) are NOT here: those are independent
+// of the bytes and a change in one is a real change.
+func isBodyDigestHeader(lowerName string) bool {
+	switch lowerName {
+	case "etag", "content-md5", "digest", "content-digest", "repr-digest":
+		return true
+	}
+	return false
 }
