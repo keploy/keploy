@@ -80,27 +80,45 @@ func TestPersistMappingsChoosesRefreshIntent(t *testing.T) {
 }
 
 // The file already exists and no refresh was asked for: the per-test entries
-// this run observed must not be published at all.
-func TestPersistMappingsSkipsWriteWhenFileExists(t *testing.T) {
-	db := &intentRecordingMappingDB{exists: true}
-	replayerWith(db, false).persistMappings(context.Background(), "set", withOneTest())
+// this run observed must not be published — but the startup section still has
+// to be backfilled. Asserting that positive side-effect rather than an absence
+// is what separates "correctly skipped the per-test write" from "never ran":
+// a persistMappings whose body is deleted passes an absence check.
+func TestPersistMappingsBackfillsStartupWithoutPublishingTests(t *testing.T) {
+	m := withOneTest()
+	m.Startup = []models.MockEntry{{Name: "boot-0", Kind: "Postgres"}}
 
-	for _, m := range db.inserted {
-		if len(m.TestCases) != 0 {
-			t.Fatalf("published per-test entries without a refresh: %+v", m.TestCases)
-		}
+	db := &intentRecordingMappingDB{exists: true}
+	replayerWith(db, false).persistMappings(context.Background(), "set", m)
+
+	if len(db.inserted) != 1 {
+		t.Fatalf("expected exactly the startup-only backfill write, got %d", len(db.inserted))
+	}
+	if len(db.inserted[0].TestCases) != 0 {
+		t.Fatalf("published per-test entries without a refresh: %+v", db.inserted[0].TestCases)
+	}
+	if db.replaced[0] {
+		t.Fatal("the backfill must go in as a report, not a refresh")
 	}
 }
 
-// An Exists error is treated as "exists" so a failed check cannot clobber a
-// mapping that is really there.
+// A failed existence check is treated as "exists" so it cannot clobber a
+// mapping that is really there — and, as above, the startup backfill still
+// runs, which is what makes this assert behaviour rather than silence.
 func TestPersistMappingsTreatsExistsErrorAsExists(t *testing.T) {
-	db := &intentRecordingMappingDB{existsErr: errors.New("stat failed")}
-	replayerWith(db, false).persistMappings(context.Background(), "set", withOneTest())
+	m := withOneTest()
+	m.Startup = []models.MockEntry{{Name: "boot-0", Kind: "Postgres"}}
 
-	for _, m := range db.inserted {
-		if len(m.TestCases) != 0 {
-			t.Fatalf("wrote per-test entries after a failed existence check: %+v", m.TestCases)
-		}
+	db := &intentRecordingMappingDB{existsErr: errors.New("stat failed")}
+	replayerWith(db, false).persistMappings(context.Background(), "set", m)
+
+	if len(db.inserted) != 1 {
+		t.Fatalf("expected exactly the startup-only backfill write, got %d", len(db.inserted))
+	}
+	if len(db.inserted[0].TestCases) != 0 {
+		t.Fatalf("wrote per-test entries after a failed existence check: %+v", db.inserted[0].TestCases)
+	}
+	if db.replaced[0] {
+		t.Fatal("the backfill must go in as a report, not a refresh")
 	}
 }

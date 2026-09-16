@@ -4967,6 +4967,9 @@ func buildActualMockInfos(consumed []models.MockState, known bool) []models.Mock
 	return out
 }
 
+// persistMappings decides whether this run may write mappings.yaml, and with
+// what intent, then dispatches.
+//
 // Test-mode mapping write semantics:
 //
 //	UpdateTestMapping=true  → always write/merge mappings.yaml
@@ -5007,9 +5010,6 @@ func buildActualMockInfos(consumed []models.MockState, known bool) []models.Mock
 // the mappings the feature relies on. UpdateTestMapping=true
 // still writes an empty file when explicitly requested — that
 // matches the operator intent of "force a refresh".
-//
-// persistMappings decides whether this run may write mappings.yaml, and with
-// what intent, then dispatches.
 //
 // Extracted from RunTestSet so the decision is unit-testable: the choice of
 // `replace` is the one argument in this path where a wrong value silently
