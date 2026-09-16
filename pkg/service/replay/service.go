@@ -60,7 +60,7 @@ type Service interface {
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
 
-	StoreMappings(ctx context.Context, mapping *models.Mapping) error
+	StoreMappings(ctx context.Context, mapping *models.Mapping, replace bool) error
 
 	// CompareHTTPResp compares HTTP responses and returns match result with detailed diffs
 	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result)
@@ -167,7 +167,7 @@ type InstrumentState struct {
 }
 
 type MappingDB interface {
-	Insert(ctx context.Context, mapping *models.Mapping) error
+	Insert(ctx context.Context, mapping *models.Mapping, replace bool) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
 	// GetStartup returns the test-set-scoped startup mocks — boot traffic
 	// (handshakes, pool warm-up, config fetches) that belongs to no single

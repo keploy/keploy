@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -32,7 +33,28 @@ func NewWithFormat(logger *zap.Logger, path string, mapFileName string, format y
 	}
 }
 
-func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error {
+// Insert writes a mapping document, creating the file if absent.
+//
+// replace decides what happens to a test that already has entries on disk:
+//
+//   - replace=false — union the incoming entries onto them. A replay run
+//     reports the mocks it happened to consume, and that is not necessarily
+//     the complete set: a subset run (`--tests test-A`), a short-circuited
+//     run, or a run degraded by an earlier mock miss all observe less than
+//     the test really needs. Letting any such run write its list as
+//     authoritative truncates the pool, and since every later run does the
+//     same the pool can only ever shrink — a test then replays against a
+//     short pool or an empty one, which surfaces as no_mocks.
+//
+//   - replace=true — overwrite them. This is the operator asking for a
+//     refresh (`--update-test-mapping`), which is the only way to shrink or
+//     correct a mapping; union alone would make a wrong mapping permanent.
+//
+// Callers must pass the operator's intent rather than defaulting, because a
+// stale entry is not free: the per-test list is the allow-list the agent
+// enforces (MockFilterParams.MockMapping), so an entry that no longer
+// belongs makes a foreign mock servable to that test.
+func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping, replace bool) error {
 	testSetID := mapping.TestSetID
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
@@ -72,18 +94,11 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		existingStartup = existingConfig.Startup
 	}
 
-	// Union, never replace — the same rule UpsertBatch follows, and for the
-	// same reason (see mergeMockEntries). A test's mapping arrives in more
-	// than one emission: the agent reports a test's mocks when its window
-	// resolves and reports more later for mocks it retroactively bins into
-	// that window. Replacing on the second emission drops everything the
-	// first recorded, and the test then replays against a short pool or an
-	// empty one, which surfaces as a no_mocks failure.
-	//
-	// Insert is the path cloud/auto replay writes through, so the loss is
-	// not recoverable by re-running: each run replaced the previous list
-	// rather than adding to it, and the pool could only ever shrink.
 	for _, t := range mapping.TestCases {
+		if replace {
+			finalMappings[t.ID] = slices.Clone(t.Mocks)
+			continue
+		}
 		finalMappings[t.ID] = mergeMockEntries(finalMappings[t.ID], t.Mocks)
 	}
 
@@ -158,7 +173,9 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 // which is a no_mocks failure. Union, never replace.
 func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry {
 	if len(existing) == 0 {
-		return incoming
+		// Clone rather than alias: the caller keeps using mapping.TestCases[i].Mocks
+		// after this returns, and a second write path now reaches here too.
+		return slices.Clone(incoming)
 	}
 	seen := make(map[string]struct{}, len(existing))
 	for _, e := range existing {

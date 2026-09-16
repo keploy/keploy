@@ -3412,7 +3412,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if shouldWriteMappings {
-		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
+		if err := r.StoreMappings(ctx, actualTestMockMappings, r.config.Test.UpdateTestMapping); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
 			// startupMocks is reported at INFO, not DEBUG, on purpose: it is the
@@ -4512,9 +4512,15 @@ func (r *Replayer) applyTestSetOrder(testSets []string) []string {
 	return reordered
 }
 
-func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
+// StoreMappings persists the test-mock mappings for a run.
+//
+// replace is the operator's explicit refresh intent (--update-test-mapping),
+// NOT "this run wrote a file". A run that merely reports what it consumed
+// unions, so it cannot truncate a curated mapping; a refresh overwrites, so a
+// wrong mapping stays repairable. See mapdb.Insert.
+func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping, replace bool) error {
 	// Save test-mock mappings to YAML file
-	err := r.mappingDB.Insert(ctx, mapping)
+	err := r.mappingDB.Insert(ctx, mapping, replace)
 	return err
 }
 
@@ -5045,17 +5051,20 @@ func buildActualMockInfos(consumed []models.MockState, known bool) []models.Mock
 // false, and the Startup slice built earlier is computed and discarded.
 //
 // ⚠ Written as a STARTUP-ONLY document, deliberately NOT by flipping
-// shouldWriteMappings. That flag routes through StoreMappings ->
-// mapdb.Insert, and Insert REPLACES per-test entries
-// (`finalMappings[t.ID] = t.Mocks`) for every test in the document. On a
+// shouldWriteMappings. Insert no longer replaces per-test entries
+// unconditionally — it unions unless the caller passes the operator's
+// explicit refresh intent — so a subset run can no longer truncate a
+// curated list. The startup-only shape is still the right one here for a
+// second reason: flipping shouldWriteMappings would make a run that merely
+// needs a startup section also publish its per-test consumption, widening
+// every pool it touched with whatever this run happened to observe. On a
 // subset run — `keploy test --tests test-A` — actualTestMockMappings holds
-// only test-A, populated from THIS run's consumption, so the operator's
-// curated list for test-A would be overwritten with whatever this run
-// happened to consume. A short-circuited or partly-failed run writes a
-// strict subset as authoritative, and the next mapping-based run fails that
-// test with no_mocks. That is exactly the contract the create-if-not-present
-// gate exists to protect ("once a file exists, leave it alone; to force a
-// refresh, pass --update-test-mapping").
+// only test-A, and a partly-failed run reports a strict subset. Publishing
+// either as a per-test list is noise at best and, because the list is the
+// allow-list the agent enforces, a foreign mock made servable at worst. That
+// is the contract the create-if-not-present gate exists to protect ("once a
+// file exists, leave it alone; to force a refresh, pass
+// --update-test-mapping").
 //
 // With TestCases empty, Insert's seed-from-existing loop carries every
 // on-disk entry through untouched and only the section is added.
@@ -5089,7 +5098,7 @@ func (r *Replayer) backfillStartupSection(ctx context.Context, testSetID string,
 		TestSetID: testSetID,
 		Startup:   actual.Startup,
 	}
-	if err := r.mappingDB.Insert(ctx, startupOnly); err != nil {
+	if err := r.mappingDB.Insert(ctx, startupOnly, false); err != nil {
 		r.logger.Error("Error adding the startup section to mappings.yaml", zap.Error(err))
 		return
 	}
