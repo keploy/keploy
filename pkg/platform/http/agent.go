@@ -25,6 +25,10 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/errdefs"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	ptls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -56,8 +60,16 @@ type AgentClient struct {
 	// --from-container only. The user's own container is stopped for the
 	// duration of the session, so SOMETHING has to start it again on every way
 	// out. restoreOnce makes that safe to call from each of them.
-	fromContainer            string
-	fromContainerWasRunning  bool
+	fromContainer           string
+	fromContainerWasRunning bool
+	// Everything needed to put the user's container back as it was. Captured
+	// before it is stopped, because the container does not survive the session
+	// intact: Docker drops its network endpoint while it sits stopped and the
+	// agent holds the same network under the app's own alias, and a container
+	// with no endpoint can neither publish its ports nor resolve a service
+	// name. Re-attaching in place does not stick, so repairing it means
+	// re-creating it - which needs all of this.
+	fromContainerSpec        *sourceContainerSpec
 	restoreFromContainerOnce sync.Once
 }
 
@@ -1617,6 +1629,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// anything else happens. This is why the stop lives here and not in
 			// App.Setup, which runs after the agent is already up.
 			opts.FromContainerWasRunning, err = a.releaseSourceContainer(ctx, opts.FromContainer)
+			// Registered before the error is acted on, because the stop has
+			// already been issued by the time this returns one: the only thing
+			// that can put the container back is gated on these fields.
+			a.fromContainer = opts.FromContainer
+			a.fromContainerWasRunning = opts.FromContainerWasRunning
 			if err != nil {
 				return fmt.Errorf("failed to stop %q: %w", opts.FromContainer, err)
 			}
@@ -1631,8 +1648,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// here never touch - a Ctrl+C during the readiness wait returns
 			// ctx.Err() and an unhealthy agent returns ErrAgentNotReady, both
 			// with the local still nil.
-			a.fromContainer = opts.FromContainer
-			a.fromContainerWasRunning = opts.FromContainerWasRunning
 			defer func() {
 				if err := recover(); err != nil {
 					a.RestoreFromContainer()
@@ -2370,9 +2385,10 @@ func (a *AgentClient) releaseSourceContainer(ctx context.Context, name string) (
 	if err != nil {
 		return false, err
 	}
-	if inspect.State == nil || !inspect.State.Running {
+	if inspect.ContainerJSONBase == nil || inspect.State == nil || !inspect.State.Running {
 		return false, nil
 	}
+	a.fromContainerSpec = specFromInspect(inspect)
 	a.logger.Info("stopping your container so keploy can run a copy of it under its own namespaces",
 		zap.String("container", name))
 	stopCtx, cancel := context.WithTimeout(ctx, fromContainerStopBudget)
@@ -2383,34 +2399,547 @@ func (a *AgentClient) releaseSourceContainer(ctx context.Context, name string) (
 	return true, nil
 }
 
-// restoreSourceContainer starts the user's container again after a
-// --from-container bring-up failed before App took ownership of it.
+// sourceContainerSpec is the user's container as it was before keploy touched
+// it: enough to build it again, including the compose labels that keep
+// `docker compose` recognising it as its own.
+type sourceContainerSpec struct {
+	name       string
+	config     *container.Config
+	hostConfig *container.HostConfig
+	networks   map[string]*network.EndpointSettings
+	// imageID pins the image by digest. Config.Image is a TAG, and a tag can
+	// stop resolving between the capture and the re-create - rebuilt, retagged,
+	// pruned - while the id it resolved to is still on the machine.
+	imageID string
+	// mounts is the only place anonymous volume NAMES appear. Without it a
+	// re-create hands the app brand new empty volumes and orphans its data.
+	mounts []mount.Mount
+	// platform matters on a machine whose default differs from the container's,
+	// which is every Apple Silicon host running an amd64 image.
+	platform *ocispec.Platform
+	// id is what says the container answering to this name later is the same
+	// one keploy stopped. Names get reused; a rebuild is destructive.
+	id string
+}
+
+// backupSuffix marks the container while its replacement is built. The user's
+// container is renamed aside rather than removed, so a failed re-create can put
+// it back instead of leaving them with nothing.
 //
-// Best-effort and deliberately on a background context: it runs from a deferred
-// failure path, where the context that failed is usually already cancelled.
+// The name carries a timestamp because it has to be free: a backup stranded by
+// an earlier failed run would otherwise take the one name this can use and
+// block the repair for good.
+const backupSuffix = "-keploy-restore-backup"
+
+func backupNameFor(name string) string {
+	return fmt.Sprintf("%s%s-%d", name, backupSuffix, time.Now().UnixNano())
+}
+
+// recreateBudget is the destructive sequence's OWN budget, never inherited.
+// The restore loop can spend most of its budget waiting for the agent to
+// release the app's ports, and a stop/create/start sequence that runs out of
+// time halfway is how a container gets lost.
+//
+// A variable so a test can exhaust it: what a rollback does once the budget has
+// run out is the whole reason it has a context of its own.
+var recreateBudget = 45 * time.Second
+
+// rollbackBudget is separate again, because a rollback exists to run after
+// something has already overrun: reusing the budget that just expired means the
+// daemon refuses every call and the container stays under a name the user never
+// chose.
+const rollbackBudget = 30 * time.Second
+
+func specFromInspect(inspect container.InspectResponse) *sourceContainerSpec {
+	if inspect.ContainerJSONBase == nil || inspect.Config == nil || inspect.HostConfig == nil {
+		return nil
+	}
+	spec := &sourceContainerSpec{
+		name:       strings.TrimPrefix(inspect.Name, "/"),
+		id:         inspect.ID,
+		config:     inspect.Config,
+		hostConfig: inspect.HostConfig,
+		imageID:    inspect.Image,
+		mounts:     app.MountsFrom(inspect, inspect.HostConfig.Mounts),
+	}
+	if inspect.NetworkSettings != nil {
+		spec.networks = inspect.NetworkSettings.Networks
+	}
+	if inspect.ImageManifestDescriptor != nil {
+		spec.platform = inspect.ImageManifestDescriptor.Platform
+	}
+	return spec
+}
+
+// primaryNetwork is the network the container is created on, so it is never
+// briefly attached to nothing. It returns the key into the endpoint map, which
+// NetworkMode is not always spelled as.
+//
+// NetworkMode reads "default" for a container on the default bridge, and can be
+// a network ID for one started with `--network <id>`. Either way it matches no
+// key in the map, leaving the primary endpoint's aliases behind - and the
+// aliases are how the rest of the project reaches this container by name.
+func primaryNetwork(hostConfig *container.HostConfig, networks map[string]*network.EndpointSettings) string {
+	mode := string(hostConfig.NetworkMode)
+	if _, ok := networks[mode]; ok {
+		return mode
+	}
+	for name, endpoint := range networks {
+		if endpoint != nil && endpoint.NetworkID == mode {
+			return name
+		}
+	}
+	if mode == "default" {
+		return "bridge"
+	}
+	return mode
+}
+
+// startWithinBudget starts a container, retrying until ctx is done. Every
+// failure worth retrying here is something letting go of a resource: the agent
+// releasing the app's published ports as it exits, or a network settling.
+func (a *AgentClient) startWithinBudget(ctx context.Context, id string) error {
+	for {
+		err := a.dockerClient.ContainerStart(ctx, id, container.StartOptions{})
+		if err == nil {
+			return nil
+		}
+		// A container that is not there will not appear, and a configuration
+		// the daemon refuses will be refused again.
+		if errdefs.IsNotFound(err) || errdefs.IsInvalidParameter(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// endpointFor keeps what the user declared and drops the identity of the
+// endpoint Docker discarded.
+//
+// The aliases are how the rest of the project reaches this container by name.
+// IPAMConfig, DriverOpts and GwPriority are declared too: GwPriority decides
+// which network carries the default route on a multi-network container, and the
+// daemon migrates per-endpoint sysctls into DriverOpts and then refuses the
+// top-level spelling, so that key has to be replayed where it was found.
+//
+// The endpoint id and assigned address belong to the dead endpoint and Docker
+// issues fresh ones. MacAddress is left behind with them: it is only an input
+// before the container runs, and reads back as whatever the daemon generated -
+// on a bridge that is derived from the assigned IP, so replaying it as a
+// request can pin a second interface to a MAC another container now holds.
+func endpointFor(settings *network.EndpointSettings) *network.EndpointSettings {
+	if settings == nil {
+		return &network.EndpointSettings{}
+	}
+	return &network.EndpointSettings{
+		Aliases:    settings.Aliases,
+		IPAMConfig: settings.IPAMConfig,
+		DriverOpts: settings.DriverOpts,
+		GwPriority: settings.GwPriority,
+	}
+}
+
+// restoreSourceContainer puts the user's container back after a
+// --from-container session.
+//
+// A plain start is tried first and then VERIFIED, because it is enough whenever
+// the container came through with its network intact. When it has not, the
+// container is rebuilt from the spec captured before it was stopped.
+//
+// Rebuilding is not the first choice - it is the only one that works. A
+// container that lost its network endpoint cannot be repaired in place: a
+// reconnect on the stopped container reports success and is gone again after
+// the start, and ports are published onto an endpoint, so no start or restart
+// will ever bind them. `docker compose up -d` fixes it precisely because it
+// re-creates.
 func (a *AgentClient) restoreSourceContainer(name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), fromContainerRestoreBudget)
 	defer cancel()
 
-	// The agent container publishes the app's ports on its behalf and holds
-	// them until it is gone, so an immediate start loses the bind with "port is
-	// already allocated". This is the mirror of the stop having to precede the
-	// agent: the start has to follow its teardown, and teardown is not
-	// something this function can wait on directly. Retry instead - the bind
-	// frees as soon as the agent exits.
+	// --from-container takes an id just as happily as a name, and a rebuilt
+	// container has a new one. Addressing it by name from here means the
+	// verification after a rebuild is not looking up the id that was removed.
+	if a.fromContainerSpec != nil && a.fromContainerSpec.name != "" {
+		name = a.fromContainerSpec.name
+	}
+
 	var lastErr error
+	recreated := false
+	explained := false
+	inspectFailed := false
 	for {
 		lastErr = a.dockerClient.ContainerStart(ctx, name, container.StartOptions{})
-		if lastErr == nil {
-			a.logger.Info("started your container again", zap.String("container", name))
-			return
+
+		// A container that is GONE cannot be started, so waiting for it to
+		// start is waiting for nothing. --rm is the ordinary way to get here:
+		// AutoRemove fires on any exit, including the stop that began the
+		// session, so the rebuild is the only thing that returns it at all.
+		if lastErr != nil && errdefs.IsNotFound(lastErr) {
+			switch {
+			case recreated || a.fromContainerSpec == nil:
+				utils.LogError(a.logger, lastErr, "your container no longer exists and keploy cannot rebuild it",
+					zap.String("container", name),
+					zap.String("next_step", "start it again: docker compose up -d, or docker run it as before"))
+				return
+			default:
+				recreated = true
+				a.logger.Info("your container was removed when it stopped; rebuilding it as it was",
+					zap.String("container", name))
+				if err := a.recreateSourceContainer(); err != nil {
+					utils.LogError(a.logger, err, "could not rebuild your container",
+						zap.String("container", name))
+					return
+				}
+				continue
+			}
 		}
+
+		if lastErr == nil {
+			problems, running, err := a.restoreShortfall(ctx, name)
+			switch {
+			case err != nil && !inspectFailed:
+				// One failed call is not an answer about the container, and
+				// every other transient in this loop is retried.
+				inspectFailed = true
+				a.logger.Debug("could not check on your container; trying once more",
+					zap.String("container", name), zap.Error(err))
+			case !running && err == nil:
+				// restoreShortfall has already reported the exit. Retrying
+				// would only start it again to no effect.
+				return
+			case err != nil:
+				a.logger.Warn("started your container again but could not verify its network and ports",
+					zap.String("container", name), zap.Error(err))
+				return
+			case len(problems) == 0:
+				a.logger.Info("started your container again", zap.String("container", name))
+				return
+			case recreated || a.fromContainerSpec == nil:
+				// Rebuilding was the repair, or there is no spec to rebuild
+				// from. Either way another pass cannot help, and looping would
+				// only stall teardown on a context Ctrl+C cannot reach.
+				a.logger.Warn("your container is running but not fully back",
+					zap.String("container", name), zap.Strings("problems", problems),
+					zap.String("next_step", "recreate it: docker compose up -d --force-recreate, or docker run it again"))
+				return
+			default:
+				recreated = true
+				a.logger.Info("your container came back without its network; rebuilding it as it was",
+					zap.String("container", name), zap.Strings("problems", problems))
+				if err := a.recreateSourceContainer(); err != nil {
+					utils.LogError(a.logger, err, "could not rebuild your container",
+						zap.String("container", name))
+					return
+				}
+				// Round again to verify. The rebuild has already started it,
+				// so its start is a no-op, while falling through to the wait
+				// below would sleep for nothing and report a start error that
+				// does not exist.
+				continue
+			}
+		}
+
+		if lastErr != nil && !explained {
+			// Otherwise this is a silent minute and a half at the end of a run.
+			// The usual cause is the agent still holding the published ports,
+			// which resolves itself as it exits.
+			explained = true
+			a.logger.Info("waiting to start your container again",
+				zap.String("container", name), zap.Error(lastErr))
+		}
+
 		select {
 		case <-ctx.Done():
-			a.logger.Error("could not start your container again after the session; start it by hand",
-				zap.String("container", name), zap.Error(lastErr))
+			utils.LogError(a.logger, lastErr, "could not restore your container's network and ports",
+				zap.String("container", name),
+				zap.String("next_step", "recreate it: docker compose up -d --force-recreate, or docker run it again"))
 			return
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// recreateSourceContainer rebuilds the user's container from the captured spec,
+// under its own name.
+//
+// The original is RENAMED ASIDE rather than removed, and only deleted once its
+// replacement is running. Removing first means every failure in between -
+// an image tag that no longer resolves, a config the daemon refuses, a deadline
+// running out - leaves the user with no container at all and the only copy of
+// its spec inside a process that is exiting. On any failure the original is put
+// back under its own name and restarted, which leaves the user with a container
+// that is running but unreachable - the same state the failed session left, and
+// one they can still recover by hand.
+func (a *AgentClient) recreateSourceContainer() error {
+	spec := a.fromContainerSpec
+	if spec == nil {
+		return errors.New("no captured spec for the source container")
+	}
+
+	// Its own budget, never the caller's remainder.
+	ctx, cancel := context.WithTimeout(context.Background(), recreateBudget)
+	defer cancel()
+
+	backup := ""
+	restoreBackup := func(cause error) error {
+		if backup == "" {
+			return cause
+		}
+		// Its own context: every path that reaches here may have exhausted the
+		// recreate budget, and a rollback on a dead context fails instantly and
+		// leaves the container under a name the user never chose.
+		ctx, cancel := context.WithTimeout(context.Background(), rollbackBudget)
+		defer cancel()
+		if err := a.dockerClient.ContainerRename(ctx, backup, spec.name); err != nil {
+			// The container is not lost, but it is neither where the user left
+			// it nor running, so the message has to carry both steps back.
+			if startErr := a.dockerClient.ContainerStart(ctx, backup, container.StartOptions{}); startErr != nil {
+				a.logger.Debug("could not start the container under its temporary name",
+					zap.String("container", backup), zap.Error(startErr))
+			}
+			utils.LogError(a.logger, err, "your container still exists, under a temporary name",
+				zap.String("container", backup), zap.String("expected_name", spec.name),
+				zap.String("next_step", fmt.Sprintf("docker rename %s %s && docker start %s", backup, spec.name, spec.name)))
+			return cause
+		}
+		if err := a.dockerClient.ContainerStart(ctx, spec.name, container.StartOptions{}); err != nil {
+			a.logger.Warn("put your container back but could not start it",
+				zap.String("container", spec.name), zap.Error(err),
+				zap.String("next_step", "docker start "+spec.name))
+		}
+		return cause
+	}
+
+	// A container started with --rm is already gone: AutoRemove fires on any
+	// exit, including the stop that began the session. There is nothing to set
+	// aside, and rebuilding is the only way the user gets it back at all.
+	//
+	// Only a NOT-FOUND means that. Any other inspect failure is a daemon
+	// problem, and reading it as "gone" would go on to create over a container
+	// that is still there.
+	inspect, inspectErr := a.dockerClient.ContainerInspect(ctx, spec.name)
+	switch {
+	case inspectErr != nil && !errdefs.IsNotFound(inspectErr):
+		return fmt.Errorf("could not check on %s before rebuilding it: %w", spec.name, inspectErr)
+	case inspectErr == nil:
+		// The name is all this has to go on otherwise, and a name can be taken
+		// by something else: a compose run in another terminal after keploy
+		// stopped the container, or a fresh container reusing a name --rm
+		// freed. Rebuilding then means force-removing a container keploy never
+		// captured and replacing it with a stale spec.
+		if spec.id != "" && inspect.ContainerJSONBase != nil && inspect.ID != spec.id {
+			return fmt.Errorf("%s is a different container than the one keploy stopped (%s); leaving it alone",
+				spec.name, inspect.ID)
+		}
+		backup = backupNameFor(spec.name)
+		if err := a.dockerClient.ContainerRename(ctx, spec.name, backup); err != nil {
+			return fmt.Errorf("could not set %s aside to rebuild it: %w", spec.name, err)
+		}
+		// The original is RUNNING at this point - the restore loop started it
+		// and the shortfall check confirmed it - and renaming does not stop it.
+		// Creating the replacement now would start a second container on the
+		// same volumes and the same host ports. It gets its own stop signal and
+		// grace period, because this is the user's app shutting down rather
+		// than a fault.
+		//
+		// On its own deadline, not a slice of the rebuild's: a container with a
+		// long stop grace period would otherwise spend the whole budget here
+		// and leave the create to fail on an expired context.
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), fromContainerStopBudget)
+		err := a.dockerClient.ContainerStop(stopCtx, backup, container.StopOptions{})
+		cancelStop()
+		if err != nil {
+			// Aborting rather than pressing on. The broken container publishes
+			// nothing, so nothing would refuse the replacement's ports either -
+			// two containers would end up on the same volumes, and the
+			// force-remove afterwards would SIGKILL one of them.
+			return restoreBackup(fmt.Errorf("could not stop %s before rebuilding it: %w", spec.name, err))
+		}
+	}
+
+	config := *spec.config
+	hostConfig := *spec.hostConfig
+	// Deprecated in favour of the per-endpoint field, and read back as whatever
+	// the daemon generated, so replaying it requests a MAC that was never asked
+	// for. Dropped for the same reason endpointFor drops its copy.
+	config.MacAddress = ""
+	// Mounts are authoritative; the create is refused if the same target
+	// arrives twice through Binds or the image's VOLUME set.
+	hostConfig.Mounts = spec.mounts
+	hostConfig.Binds = nil
+	hostConfig.VolumesFrom = nil
+	config.Volumes = nil
+	// Inspect rebuilds Links as `/child:/parent/alias` rather than what was
+	// asked for, so feeding it back produces an alias containing a slash and
+	// the daemon refuses the create. Dropped rather than guessed at: a legacy
+	// --link is recoverable by hand, a deleted container is not.
+	if len(hostConfig.Links) > 0 {
+		a.logger.Warn("your container used legacy --link, which cannot be reproduced exactly; rebuilding without it",
+			zap.String("container", spec.name), zap.Strings("links", hostConfig.Links))
+		hostConfig.Links = nil
+	}
+
+	endpoints := map[string]*network.EndpointSettings{}
+	primary := primaryNetwork(spec.hostConfig, spec.networks)
+	if settings, ok := spec.networks[primary]; ok {
+		endpoints[primary] = endpointFor(settings)
+	}
+
+	created, err := a.dockerClient.ContainerCreate(ctx, &config, &hostConfig,
+		&network.NetworkingConfig{EndpointsConfig: endpoints}, spec.platform, spec.name)
+	if err != nil && errdefs.IsNotFound(err) && spec.imageID != "" && config.Image != spec.imageID {
+		// The tag stopped resolving between the capture and now. The id it
+		// resolved to is still on the machine.
+		a.logger.Warn("could not rebuild from the image tag; using the image it was running",
+			zap.String("container", spec.name), zap.String("tag", config.Image),
+			zap.String("image", spec.imageID), zap.Error(err))
+		config.Image = spec.imageID
+		created, err = a.dockerClient.ContainerCreate(ctx, &config, &hostConfig,
+			&network.NetworkingConfig{EndpointsConfig: endpoints}, spec.platform, spec.name)
+	}
+	if err != nil {
+		return restoreBackup(fmt.Errorf("could not rebuild %s: %w", spec.name, err))
+	}
+
+	secondary := make([]string, 0, len(spec.networks))
+	for netName := range spec.networks {
+		if netName != primary {
+			secondary = append(secondary, netName)
+		}
+	}
+	sort.Strings(secondary)
+	for _, netName := range secondary {
+		if err := a.dockerClient.NetworkConnect(ctx, netName, created.ID, endpointFor(spec.networks[netName])); err != nil {
+			a.logger.Warn("could not put your container back on one of its networks",
+				zap.String("container", spec.name), zap.String("network", netName), zap.Error(err))
+		}
+	}
+
+	// Retried for as long as the budget allows, not attempted once. The agent
+	// container publishes the app's ports on its behalf and is stopped
+	// asynchronously, so a rebuild that reaches this point promptly can find
+	// 9410 still bound - and rolling back over a transient bind would abandon
+	// a repair that has already stopped the user's container.
+	err = a.startWithinBudget(ctx, created.ID)
+	if err != nil {
+		// The rebuilt container exists; only the start failed. It has to go
+		// before the original can have its name back. Its own context, for the
+		// same reason the rollback has one.
+		rmCtx, cancelRm := context.WithTimeout(context.Background(), rollbackBudget)
+		defer cancelRm()
+		if rmErr := a.dockerClient.ContainerRemove(rmCtx, created.ID, container.RemoveOptions{Force: true}); rmErr != nil {
+			// Not a detail: keploy's container is holding the name the user's
+			// container is about to be renamed back to, so that rename fails
+			// too and nothing else says where the name went.
+			utils.LogError(a.logger, rmErr, "could not remove the container keploy built; it is holding your container's name",
+				zap.String("container", spec.name))
+		}
+		return restoreBackup(fmt.Errorf("could not start the rebuilt %s: %w", spec.name, err))
+	}
+
+	if backup != "" {
+		// A fresh deadline for the same reason the rollback has one: by here the
+		// rebuild's budget has paid for an inspect, a rename, a stop, a create,
+		// the network connects and a start.
+		rmCtx, cancelRm := context.WithTimeout(context.Background(), rollbackBudget)
+		defer cancelRm()
+		// RemoveVolumes stays off: the replacement mounts those same volumes by
+		// name, and this copy is only the shell the data used to hang off.
+		if err := a.dockerClient.ContainerRemove(rmCtx, backup, container.RemoveOptions{Force: true}); err != nil {
+			// Harmless but visible: a stopped duplicate under a temporary name.
+			a.logger.Warn("rebuilt your container but could not remove the old copy; remove it by hand",
+				zap.String("container", backup), zap.Error(err))
+		}
+	}
+	return nil
+}
+
+// restoreShortfall reports what is still wrong with a restored container: the
+// networks it should be on but is not, and the ports it declares but has not
+// published. Empty means it really is back.
+func (a *AgentClient) restoreShortfall(ctx context.Context, name string) (problems []string, running bool, err error) {
+	inspect, err := a.dockerClient.ContainerInspect(ctx, name)
+	if err != nil {
+		return nil, false, err
+	}
+	if inspect.ContainerJSONBase == nil {
+		return nil, false, errors.New("docker returned an inspect with no container in it")
+	}
+
+	// A container that is not RUNNING looks exactly like the bug: no endpoint
+	// id, no published ports. Judging it here would rebuild a container that
+	// was never broken - including one that crashes on boot precisely because
+	// its dependency moved during the session, which is the case this is
+	// supposed to help with.
+	if inspect.State == nil || !inspect.State.Running {
+		exit := 0
+		if inspect.State != nil {
+			exit = inspect.State.ExitCode
+		}
+		a.logger.Warn("your container started and then exited; keploy has left it alone",
+			zap.String("container", name), zap.Int("exit_code", exit))
+		return nil, false, nil
+	}
+
+	attached := map[string]bool{}
+	if inspect.NetworkSettings != nil {
+		for netName, endpoint := range inspect.NetworkSettings.Networks {
+			// A dropped endpoint is still LISTED with nothing in it, so the
+			// endpoint id is what says whether it is really attached.
+			if endpoint != nil && endpoint.EndpointID != "" {
+				attached[netName] = true
+			}
+		}
+	}
+	var missingNets []string
+	if a.fromContainerSpec != nil {
+		for netName := range a.fromContainerSpec.networks {
+			if !attached[netName] {
+				missingNets = append(missingNets, netName)
+			}
+		}
+	}
+	sort.Strings(missingNets)
+	if len(missingNets) > 0 {
+		problems = append(problems, "not on "+strings.Join(missingNets, ", "))
+	}
+
+	// host and none ignore port bindings by design, so a container declaring
+	// both would report a shortfall it can never clear - and be rebuilt for
+	// nothing, repeatedly.
+	if inspect.HostConfig != nil && !inspect.HostConfig.NetworkMode.IsHost() && !inspect.HostConfig.NetworkMode.IsNone() {
+		bound := 0
+		if inspect.NetworkSettings != nil {
+			for _, bindings := range inspect.NetworkSettings.Ports {
+				bound += len(bindings)
+			}
+		}
+
+		var unpublished []string
+		for port, bindings := range inspect.HostConfig.PortBindings {
+			if len(bindings) == 0 {
+				continue
+			}
+			if inspect.NetworkSettings == nil || len(inspect.NetworkSettings.Ports[port]) == 0 {
+				unpublished = append(unpublished, string(port))
+			}
+		}
+		sort.Strings(unpublished)
+		if len(unpublished) > 0 {
+			problems = append(problems, "not publishing "+strings.Join(unpublished, ", "))
+		}
+
+		// `docker run -P` declares nothing in PortBindings - the daemon assigns
+		// a host port per exposed port - so there is no binding to compare and
+		// the loss would go unnoticed.
+		if inspect.HostConfig.PublishAllPorts && len(inspect.Config.ExposedPorts) > 0 && bound == 0 {
+			problems = append(problems, "not publishing any of its exposed ports")
+		}
+	}
+
+	return problems, true, nil
 }

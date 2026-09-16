@@ -726,6 +726,13 @@ jobs:
   run_mock_compose_linux:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/mock_compose_linux.yml
+  run_mock_fromcontainer_linux:
+    # Guards that a session gives the user's container back. The failure it
+    # exists for is daemon behaviour - stopping the app while the agent holds
+    # its network drops the container's endpoint, and published ports live on
+    # the endpoint - which a fake in a unit test can only model.
+    needs: [build-and-upload, upload-latest, build-docker-image-amd64]
+    uses: ./.github/workflows/mock_fromcontainer_linux.yml
   run_mysql_tls_greeting_stitch_linux:
     # Regression guard for the proxyless MySQL-over-TLS capture shortfall: the
     # last-greeting fallback (resolvePreTLSGreeting -> cachedGreeting) was dead

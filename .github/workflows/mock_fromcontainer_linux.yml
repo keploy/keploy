@@ -1,0 +1,63 @@
+name: Mock Mode Regression (From Container, Linux)
+# End-to-end guard for `keploy mock record --from-container` — the one command
+# type where keploy takes over a container the user is ALREADY running, and so
+# the only one that has to give it back.
+#
+# Giving it back needs a real daemon to guard. Stopping the container while the
+# agent holds the same network under the app's own alias makes docker drop the
+# container's network endpoint, and published ports live on the endpoint, so it
+# returns attached to nothing and bound to nothing. Neither `start` nor
+# `restart` repairs it and a reconnect on the stopped container silently
+# vanishes, so keploy re-creates it from a spec captured before the stop. Every
+# claim in that sentence is daemon behaviour that a fake in a unit test can only
+# model, which is what this lane is for.
+#
+# Separate from mock_linux.yml because this lane needs the agent image loaded
+# into the local daemon, and the job that builds it skips on fork PRs. Folding
+# it in would take the native mock lane down with it there.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
+
+jobs:
+  mock_fromcontainer_linux:
+    # Fork PRs are already excluded by the caller, whose needs include the
+    # fork-guarded job that builds the agent image this lane loads.
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: mock-mode (from_container)
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      # A source build reports version 3-dev, and ghcr.io/keploy/keploy:v3-dev
+      # is not published — without loading the PR's own image there is no agent
+      # to start the container under.
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run mock-mode from-container e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-fromcontainer-linux.sh"
