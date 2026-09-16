@@ -3824,8 +3824,30 @@ func qualifiesForHTTPResponseSchemaAdditionPass(result *models.Result) bool {
 		return false
 	}
 
-	return (result.FailureInfo.Risk == models.Low &&
-		hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded)) ||
+	// Risk is the only signal that separates "the response gained fields" from
+	// "the response gained fields AND an existing value moved". AssessJSON grades
+	// the first Low and the second Medium, both under category SchemaAdded — so
+	// the category set alone cannot tell them apart and the Risk gate has to
+	// apply to every shape below, not just the first.
+	//
+	// It previously guarded only the plain SchemaAdded branch. The
+	// Content-Length branch ran unguarded, and since adding a field to a JSON
+	// body always changes Content-Length, that branch answered first for
+	// essentially every additive diff — which made the Low gate unreachable and
+	// auto-passed Medium-risk value changes. See #4578.
+	// Read the BODY's risk, not FailureInfo.Risk. The latter is the max across
+	// status/header/body (pkg/matcher/http/match.go), and HeaderChanged is only
+	// ever appended inside a block that unconditionally maxes in Medium — so a
+	// Content-Length diff alone forces the aggregate to Medium and would reject
+	// the very case this pass exists for. FailureInfo.Assessment holds the
+	// AssessJSON grade verbatim: Low = only new fields, Medium = new fields plus
+	// value changes on existing fields.
+	assessment := result.FailureInfo.Assessment
+	if assessment == nil || assessment.Risk != models.Low {
+		return false
+	}
+
+	return hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded) ||
 		hasOnlySchemaAdditionAndContentLengthDiff(result)
 }
 
