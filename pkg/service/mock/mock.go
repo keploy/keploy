@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -17,6 +18,12 @@ import (
 
 // mockService implements Service for the `keploy mock record|replay` flow.
 type mockService struct {
+	// servedAnnounced remembers which mocks have already been reported as
+	// served, so the poll loop and the end-of-run flush cannot announce the
+	// same mock twice. Guarded because the two run on different goroutines.
+	servedAnnouncedMu sync.Mutex
+	servedAnnounced   map[string]struct{}
+
 	logger          *zap.Logger
 	instrumentation Instrumentation
 	mockDB          MockDB

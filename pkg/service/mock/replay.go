@@ -157,6 +157,15 @@ func (m *mockService) Replay(ctx context.Context) error {
 		return err
 	}
 
+	// 7a. With --emit-mock-events, report each mock as it is first served so a
+	//     client can show mocked egress live. Off by default; see MockCmd.
+	if m.config.Mock.EmitMockEvents {
+		errGrp.Go(func() error {
+			m.emitServedMockEvents(ctx)
+			return nil
+		})
+	}
+
 	// 8. Block until the wrapped runner exits. Under compose it was already
 	//    started at step 2, so wait on that same exit rather than starting it
 	//    a second time.
@@ -335,6 +344,19 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int) (missed int
 	outcomeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
 	defer cancel()
 	consumed, consumedErr := m.instrumentation.GetConsumedMocks(outcomeCtx)
+	if consumedErr == nil && m.config.Mock.EmitMockEvents {
+		// Flush the tail. The poll loop stops when the runner exits, so
+		// anything served in the last poll interval would be counted in the
+		// summary below and never announced - leaving a client showing fewer
+		// served mocks than keploy's own total, which is the exact
+		// inconsistency these events exist to remove. This costs no extra
+		// round trip: the read has already happened.
+		tail := make(map[string]models.MockState, len(consumed))
+		for _, state := range consumed {
+			tail[state.Name] = state
+		}
+		m.announceServed(tail)
+	}
 	if consumedErr != nil {
 		m.logger.Debug("failed to read consumed mocks", zap.Error(consumedErr))
 	}
@@ -397,4 +419,95 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int) (missed int
 		}
 	}
 	return len(misses), missesErr == nil
+}
+
+// servedMockPoller is an optional extension of Instrumentation, asserted rather
+// than added to the interface so existing implementations (and test fakes) keep
+// compiling without it — the same discipline ConsumedStateReader uses.
+type servedMockPoller interface {
+	GetServedMocks(ctx context.Context) (map[string]models.MockState, error)
+}
+
+// servedMockPollInterval is a UI cadence, not a measurement cadence. The state
+// it reads is cumulative, so a slow poll delays a line but can never lose one.
+const servedMockPollInterval = 500 * time.Millisecond
+
+// emitServedMockEvents logs one line per mock the moment it is first seen to
+// have been served, so a client driving keploy can show which dependency calls
+// were answered from the set while the run is still in flight.
+//
+// It polls the agent's never-drained served map rather than consuming events:
+//   - polling GetConsumedMocks instead would drain the state reportOutcome and
+//     --strict are computed from, silently shrinking both;
+//   - because the map is cumulative, a client that starts late or misses a tick
+//     still converges on the truth instead of losing an event forever.
+//
+// Failures are logged at debug and the loop continues: the agent is not up for
+// the whole window, and a progress feed must never be the thing that fails a run.
+func (m *mockService) emitServedMockEvents(ctx context.Context) {
+	poller, ok := m.instrumentation.(servedMockPoller)
+	if !ok {
+		// Warn, not Debug: the user asked for these events and is otherwise
+		// told nothing about why none arrive.
+		m.logger.Warn("--emit-mock-events was requested but this build cannot report served mocks",
+			zap.String("next_step", "no events will be emitted; the rest of the replay is unaffected"))
+		return
+	}
+
+	ticker := time.NewTicker(servedMockPollInterval)
+	defer ticker.Stop()
+
+	warnedOnce := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Bounded per poll: a hung (as opposed to dead) agent would
+			// otherwise block on a client with no timeout, and because a
+			// Ticker coalesces, the feed would stay dead for the whole run.
+			pollCtx, cancel := context.WithTimeout(ctx, 2*servedMockPollInterval)
+			served, err := poller.GetServedMocks(pollCtx)
+			cancel()
+			if err != nil {
+				if !warnedOnce {
+					warnedOnce = true
+					// Once at Warn, then quiet: the likeliest cause is an agent
+					// older than this binary, which has no /mock/served route.
+					m.logger.Warn("cannot read served mocks; --emit-mock-events will emit nothing",
+						zap.Error(err),
+						zap.String("next_step", "check the keploy agent is the same version as this binary"))
+					continue
+				}
+				m.logger.Debug("failed to read served mocks", zap.Error(err))
+				continue
+			}
+			m.announceServed(served)
+		}
+	}
+}
+
+// announceServed logs one line per mock not already reported, and is safe to
+// call from both the poll loop and the end-of-run flush.
+func (m *mockService) announceServed(served map[string]models.MockState) {
+	m.servedAnnouncedMu.Lock()
+	defer m.servedAnnouncedMu.Unlock()
+	if m.servedAnnounced == nil {
+		m.servedAnnounced = make(map[string]struct{})
+	}
+	for name, state := range served {
+		if _, seen := m.servedAnnounced[name]; seen {
+			continue
+		}
+		m.servedAnnounced[name] = struct{}{}
+		m.logger.Info("mock served",
+			zap.String("name", name),
+			zap.String("kind", string(state.Kind)),
+			zap.String("type", state.Type),
+			zap.String("lifetime", state.Lifetime.String()),
+			// Named for what it is: the timestamp the call had when it was
+			// RECORDED, not when it was served. A client rendering a live feed
+			// would otherwise read it as "when this happened".
+			zap.String("recordedReqTimestamp", state.ReqTimestampMock))
+	}
 }

@@ -93,6 +93,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/scope/table", a.HandleScopeTable)
 		r.Get("/mock/stats", a.HandleMockStats)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
+		// Pollable, non-draining view of which mocks have been served. Distinct
+		// from /consumedmocks, which drains and is read once at end of run.
+		r.Get("/mock/served", a.HandleServedMocks)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		// Long-lived streaming endpoints. /pcap/traffic emits a

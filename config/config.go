@@ -339,6 +339,16 @@ type MockCmd struct {
 	// RecordTimer optionally bounds a record session (e.g. "30s"); the wrapped
 	// runner exiting on its own ends recording first in almost all cases.
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	// EmitMockEvents logs one line per mock as it is first served, so a client
+	// driving keploy (an IDE, a desktop API client) can show which dependency
+	// calls came from disk while the run is still going. Off by default: the
+	// lines are for a machine reading stdout, and a human watching a terminal
+	// does not want one per database round-trip.
+	//
+	// It exists because there was previously NO per-mock signal at replay time
+	// at any log level — only aggregate counts — so every client had to infer
+	// "served" from something else and present a guess as a measurement.
+	EmitMockEvents bool `json:"emitMockEvents" yaml:"emitMockEvents" mapstructure:"emitMockEvents"`
 }
 
 type Contract struct {

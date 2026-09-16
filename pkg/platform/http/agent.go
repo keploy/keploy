@@ -1050,6 +1050,47 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState,
 	return consumedMocks, nil
 }
 
+// GetServedMocks returns the mocks served so far this session, keyed by name.
+//
+// Unlike GetConsumedMocks this is safe to call repeatedly while the run is in
+// flight: the agent answers from its never-drained map, so polling it does not
+// consume the state that the end-of-run outcome report and --strict depend on.
+func (a *AgentClient) GetServedMocks(ctx context.Context) (map[string]models.MockState, error) {
+	url := fmt.Sprintf("%s/mock/served", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %s", err.Error())
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request for served mocks: %s", err.Error())
+	}
+
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for getservedmocks")
+		}
+	}()
+
+	// Status before decode, for the reason spelled out in GetConsumedMocks: a
+	// failure arrives as an error object and decoding it into the map would
+	// report the decoder's confusion instead of the agent's reason.
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get served mocks", res, rawBody)
+	}
+
+	served := map[string]models.MockState{}
+	if err := json.NewDecoder(res.Body).Decode(&served); err != nil {
+		return nil, fmt.Errorf("failed to decode response body for getservedmocks: %s", err.Error())
+	}
+
+	return served, nil
+}
+
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppError {
 	app, err := a.getApp()
 	if err != nil {
