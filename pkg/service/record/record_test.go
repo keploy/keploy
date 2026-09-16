@@ -254,7 +254,7 @@ type countingMapDb struct {
 	perCall []int
 }
 
-func (c *countingMapDb) Insert(context.Context, *models.Mapping) error { return nil }
+func (c *countingMapDb) Insert(context.Context, *models.Mapping, bool) error { return nil }
 func (c *countingMapDb) Upsert(ctx context.Context, testSetID, testID string, e []models.MockEntry) error {
 	return c.UpsertBatch(ctx, testSetID, map[string][]models.MockEntry{testID: e})
 }
@@ -467,7 +467,7 @@ type recMappingDB struct {
 	batches []map[string][]models.MockEntry
 }
 
-func (d *recMappingDB) Insert(context.Context, *models.Mapping) error                    { return nil }
+func (d *recMappingDB) Insert(context.Context, *models.Mapping, bool) error              { return nil }
 func (d *recMappingDB) Upsert(context.Context, string, string, []models.MockEntry) error { return nil }
 func (d *recMappingDB) UpsertBatch(_ context.Context, _ string, byTest map[string][]models.MockEntry) error {
 	d.mu.Lock()
