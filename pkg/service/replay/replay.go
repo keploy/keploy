@@ -3835,7 +3835,15 @@ func qualifiesForHTTPResponseSchemaAdditionPass(result *models.Result) bool {
 	// body always changes Content-Length, that branch answered first for
 	// essentially every additive diff — which made the Low gate unreachable and
 	// auto-passed Medium-risk value changes. See #4578.
-	if result.FailureInfo.Risk != models.Low {
+	// Read the BODY's risk, not FailureInfo.Risk. The latter is the max across
+	// status/header/body (pkg/matcher/http/match.go), and HeaderChanged is only
+	// ever appended inside a block that unconditionally maxes in Medium — so a
+	// Content-Length diff alone forces the aggregate to Medium and would reject
+	// the very case this pass exists for. FailureInfo.Assessment holds the
+	// AssessJSON grade verbatim: Low = only new fields, Medium = new fields plus
+	// value changes on existing fields.
+	assessment := result.FailureInfo.Assessment
+	if assessment == nil || assessment.Risk != models.Low {
 		return false
 	}
 
