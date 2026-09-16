@@ -118,15 +118,26 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://127.0.0.1:942
 fi
 
 # Markers in both volumes, to prove a rebuild remounts the SAME storage.
-sudo docker exec "$APP" sh -c 'echo named > /data/marker; echo anon > /anon/marker'
+sudo docker exec "$APP" sh -c 'echo named > /data/marker; echo anon > /anon/marker' || {
+  echo "FAIL: could not write the volume markers, so nothing below would mean anything"
+  exit 1
+}
 ANON_VOL_BEFORE="$(sudo docker inspect -f '{{range .Mounts}}{{if eq .Destination "/anon"}}{{.Name}}{{end}}{{end}}' "$APP")"
+# Asserted non-empty, or the before/after comparison below passes on two blanks.
+[ -n "$ANON_VOL_BEFORE" ] || {
+  echo "FAIL: the fixture has no anonymous volume, so the swap it guards cannot be detected"
+  exit 1
+}
 
 echo "--- recording ---"
 "$RECORD_BIN" mock record --from-container "$APP" --name fc --path . --local --disable-ansi > record.log 2>&1 &
 REC_PID=$!
+# keploy re-execs itself under sudo for --from-container, so the process this
+# waits on and signals is root-owned: an unprivileged kill is refused, not
+# delivered, and the session would never be told to stop.
 for _ in $(seq 1 150); do
-  grep -aq "your app is running under keploy" record.log && break
-  kill -0 "$REC_PID" 2>/dev/null || break
+  sudo grep -aq "your app is running under keploy" record.log && break
+  sudo kill -0 "$REC_PID" 2>/dev/null || break
   sleep 1
 done
 
@@ -140,8 +151,8 @@ CODE_DURING="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.
 [ "$CODE_DURING" = "200" ] || fail "the app did not answer through the agent during recording (got ${CODE_DURING:-none})"
 
 echo "--- stopping the session, then asserting WITHOUT any reset ---"
-kill -INT "$REC_PID" 2>/dev/null
-for _ in $(seq 1 150); do kill -0 "$REC_PID" 2>/dev/null || break; sleep 1; done
+sudo kill -INT "$REC_PID" 2>/dev/null
+for _ in $(seq 1 150); do sudo kill -0 "$REC_PID" 2>/dev/null || break; sleep 1; done
 # Restoring is a teardown step, so give it a moment after the process is gone.
 sleep 10
 
@@ -183,12 +194,27 @@ REPLICAS="$(sudo docker ps -aq --filter "name=^${APP}-keploy\$" | wc -l | tr -d 
 
 # And the recording itself has to have captured something, or the lane would
 # pass on a session that did nothing.
-DOCS="$(grep -hc '^kind:' keploy/fc/mocks.yaml 2>/dev/null || echo 0)"
-[ "${DOCS:-0}" -gt 0 ] || fail "recorded no mocks, so this proves nothing about a real session"
+DOCS="$(sudo grep -hc '^kind:' keploy/fc/mocks.yaml 2>/dev/null)"
+DOCS="${DOCS:-0}"
+[ "$DOCS" -gt 0 ] || fail "recorded no mocks, so this proves nothing about a real session"
+
+# What keploy actually did, on success as well as failure. Whether the endpoint
+# was dropped at all is a property of the daemon and differs between platforms,
+# so a lane that only prints on failure cannot say which half it exercised: the
+# contract (the container came back intact) or the repair that restores it.
+echo "--- how the container came back ---"
+sudo sed 's/\x1b\[[0-9;]*m//g' record.log |
+  grep -aE "your container|waiting to start|not publishing|not on |stopping your container so keploy" |
+  sed 's/^.*\(INFO\|WARN\|ERROR\)[[:space:]]*/\1 /' | tail -6
+if sudo grep -aq "rebuilding it as it was" record.log; then
+  echo "  (the rebuild ran: this platform dropped the endpoint)"
+else
+  echo "  (no rebuild needed: this platform kept the endpoint, so only the restore contract was exercised)"
+fi
 
 if [ "$FAIL" -ne 0 ]; then
   echo "--- keploy log ---"
-  sed 's/\x1b\[[0-9;]*m//g' record.log | tail -60
+  sudo sed 's/\x1b\[[0-9;]*m//g' record.log | tail -60
   echo "--- app container ---"
   sudo docker inspect "$APP" --format '{{json .NetworkSettings}}' 2>/dev/null | head -c 2000
   echo

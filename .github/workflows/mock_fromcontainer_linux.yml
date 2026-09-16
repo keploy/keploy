@@ -3,14 +3,17 @@ name: Mock Mode Regression (From Container, Linux)
 # type where keploy takes over a container the user is ALREADY running, and so
 # the only one that has to give it back.
 #
-# Giving it back needs a real daemon to guard. Stopping the container while the
-# agent holds the same network under the app's own alias makes docker drop the
-# container's network endpoint, and published ports live on the endpoint, so it
-# returns attached to nothing and bound to nothing. Neither `start` nor
-# `restart` repairs it and a reconnect on the stopped container silently
-# vanishes, so keploy re-creates it from a spec captured before the stop. Every
-# claim in that sentence is daemon behaviour that a fake in a unit test can only
-# model, which is what this lane is for.
+# Giving it back needs a real daemon to guard: the container has to come back
+# running, on its networks, publishing the ports it was publishing, still
+# holding its data, and still recognised by compose as its own service. A fake
+# in a unit test can assert the calls keploy makes, but only a daemon can say
+# whether the container that results is the one the user had.
+#
+# Whether the REPAIR runs is a property of the platform, not of keploy: the
+# endpoint is dropped when the agent holds the same network under the app's own
+# alias, and that does not happen everywhere. The lane says which half it
+# exercised rather than implying it covered both — see the summary it prints
+# after the assertions.
 #
 # Separate from mock_linux.yml because this lane needs the agent image loaded
 # into the local daemon, and the job that builds it skips on fork PRs. Folding
