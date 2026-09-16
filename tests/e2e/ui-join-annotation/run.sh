@@ -297,6 +297,24 @@ READY_FLOOR_MS=$((READY_MS - 1000))
 #   t1 >= the SIGINT we sent - 1s   (the stop defer runs after it)
 # Together these force the span to cover [agent-ready, SIGINT], which is
 # the recording, without this file asserting how long a recording takes.
+# THE DRAIN MUST ACTUALLY COMPLETE, and this is the only place that can
+# tell. main's end-of-recording hook (AfterRecordingComplete, issue
+# #1867) is GATED on a clean drain: DrainErrGroupStatus reports timedOut
+# when a persist goroutine ignored cancellation, and the recorder then
+# logs "skipping the end-of-recording hook" and does not run it.
+#
+# The frame-stream handover this repo added exists to make that drain
+# finish on the SIGINT path instead of burning the full 30s budget. So
+# the two changes meet here: if the handover regresses, the drain times
+# out, and the hook silently stops running on every Ctrl+C recording --
+# no test fails, the recording still saves, and the post-record pass
+# just quietly does not happen. That is the failure this line catches.
+if grep -q "skipping the end-of-recording hook" "$WORK/join/rec.log" 2>/dev/null; then
+  echo "--- recorder log ---" >&2
+  grep -n "drain\|skipping the end-of-recording hook" "$WORK/join/rec.log" >&2 || true
+  fail "the record drain timed out on the SIGINT path, so the end-of-recording hook was skipped; the frame-stream handover is not draining cleanly"
+fi
+
 SIGINT_MS=$(cat "$WORK/join/sigint_ms" 2>/dev/null || true)
 [ -n "$SIGINT_MS" ] || fail "no SIGINT stamp was recorded; the span oracle cannot run"
 READY_CEIL_MS=$((READY_MS + 1000))
