@@ -51,3 +51,43 @@ func TestDrainErrGroupTimesOutOnHang(t *testing.T) {
 	}
 	close(block) // unblock the leaked goroutine so the test process stays clean
 }
+
+// TestDrainErrGroupStatusCleanNotTimedOut verifies the signal the record
+// teardown gates its post-record hook on: when every goroutine returns before
+// the timeout, timedOut is false even when g.Wait() surfaces an error (the group
+// still finished — nothing is left writing).
+func TestDrainErrGroupStatusCleanNotTimedOut(t *testing.T) {
+	var g errgroup.Group
+	want := errors.New("boom")
+	g.Go(func() error { return want })
+
+	got, timedOut := DrainErrGroupStatus(zap.NewNop(), "test", &g, time.Second)
+	if !errors.Is(got, want) {
+		t.Fatalf("DrainErrGroupStatus err = %v, want %v", got, want)
+	}
+	if timedOut {
+		t.Fatal("DrainErrGroupStatus timedOut = true on a group that finished; the post-record hook would be wrongly skipped")
+	}
+}
+
+// TestDrainErrGroupStatusTimeoutReportsTimedOut is the guard for the B1 fix: a
+// goroutine that ignores cancellation must make timedOut true (so the caller
+// knows a writer may still be in flight) while err stays nil (a timeout never
+// fails teardown).
+func TestDrainErrGroupStatusTimeoutReportsTimedOut(t *testing.T) {
+	var g errgroup.Group
+	block := make(chan struct{})
+	g.Go(func() error {
+		<-block // never observes cancellation
+		return nil
+	})
+
+	got, timedOut := DrainErrGroupStatus(zap.NewNop(), "test", &g, 50*time.Millisecond)
+	if got != nil {
+		t.Fatalf("DrainErrGroupStatus err = %v, want nil on timeout", got)
+	}
+	if !timedOut {
+		t.Fatal("DrainErrGroupStatus timedOut = false on a hung group; the post-record hook would run while a mock write is still in flight")
+	}
+	close(block) // unblock the leaked goroutine so the test process stays clean
+}
