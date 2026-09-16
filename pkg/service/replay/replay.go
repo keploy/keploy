@@ -3353,81 +3353,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// Test-mode mapping write semantics:
-	//
-	//   UpdateTestMapping=true  → always write/merge mappings.yaml
-	//                             (operator-driven update).
-	//   UpdateTestMapping=false → create-if-not-present: write only
-	//                             when mappings.yaml is absent for
-	//                             this test-set AND we have at least
-	//                             one populated test→mocks entry.
-	//                             Once a file exists, we leave it
-	//                             alone — repeat test runs don't
-	//                             churn it.
-	//
-	// Rationale: mappings.yaml is the artifact k8s-proxy autoreplay
-	// (and other final-candidate analyses) consults to find which
-	// mocks each test consumed. Operators who never set the flag
-	// still need a usable file the first time test mode runs; gating
-	// strictly on UpdateTestMapping leaves them without one. The
-	// create-if-not-present default closes that gap without changing
-	// behaviour for existing users who already have a mappings.yaml
-	// they don't want overwritten — they can keep flag=false and the
-	// existing file is preserved. To force a refresh, flag=true.
-	//
-	// Independence from DisableMapping: the two flags express
-	// orthogonal concerns. DisableMapping picks the replay-time mock
-	// FILTERING strategy (timestamp-vs-index); the mapping WRITE is
-	// a separate side-effect that records consumption. We don't gate
-	// the write on the filter strategy.
-	//
-	// The non-emptiness guard on the create-if-not-present branch
-	// matters because actualTestMockMappings is populated by
-	// upsertActualTestMockMapping calls that depend on consumedMocks,
-	// which is fetched from r.hookImpl.GetConsumedMocks INSIDE
-	// `if r.instrument` blocks (lines 1453, 1884). In non-instrument
-	// modes (e.g. k8s-proxy autoreplay) consumedMocks stays empty,
-	// so without this guard the first run would create an empty
-	// mappings.yaml and every subsequent run would skip the create
-	// branch (file exists), leaving autoreplay permanently without
-	// the mappings the feature relies on. UpdateTestMapping=true
-	// still writes an empty file when explicitly requested — that
-	// matches the operator intent of "force a refresh".
-	shouldWriteMappings := r.config.Test.UpdateTestMapping
-	if !shouldWriteMappings && r.mappingDB != nil && len(actualTestMockMappings.TestCases) > 0 {
-		exists, existsErr := r.mappingDB.Exists(ctx, testSetID)
-		if existsErr != nil {
-			r.logger.Debug("Skipping create-if-not-present mappings.yaml write — file-existence check failed; treating as 'exists' to avoid clobbering",
-				zap.String("testSetID", testSetID),
-				zap.Error(existsErr))
-		} else if !exists {
-			shouldWriteMappings = true
-		}
-	}
-
-	// See backfillStartupSection: writes a STARTUP-ONLY document so the
-	// operator's per-test mappings are never rewritten by a subset run.
-	if !shouldWriteMappings {
-		r.backfillStartupSection(ctx, testSetID, actualTestMockMappings)
-	}
-
-	if shouldWriteMappings {
-		if err := r.StoreMappings(ctx, actualTestMockMappings, r.config.Test.UpdateTestMapping); err != nil {
-			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
-		} else {
-			// startupMocks is reported at INFO, not DEBUG, on purpose: it is the
-			// only signal that the startup section was actually captured. Every
-			// other trace of it (mapdb.GetStartup, determineMockingStrategy) is
-			// DEBUG, and CI lanes do not run the replay at debug level — so
-			// without this a run that silently recorded ZERO startup mocks looks
-			// identical to one that recorded them correctly, and the whole
-			// feature is unobservable from a green pipeline.
-			r.logger.Info("Successfully saved test-mock mappings",
-				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings.TestCases)),
-				zap.Int("startupMocks", len(actualTestMockMappings.Startup)))
-		}
-	}
+	r.persistMappings(ctx, testSetID, actualTestMockMappings)
 
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
@@ -5039,6 +4965,94 @@ func buildActualMockInfos(consumed []models.MockState, known bool) []models.Mock
 		out = append(out, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
 	}
 	return out
+}
+
+// Test-mode mapping write semantics:
+//
+//	UpdateTestMapping=true  → always write/merge mappings.yaml
+//	                          (operator-driven update).
+//	UpdateTestMapping=false → create-if-not-present: write only
+//	                          when mappings.yaml is absent for
+//	                          this test-set AND we have at least
+//	                          one populated test→mocks entry.
+//	                          Once a file exists, we leave it
+//	                          alone — repeat test runs don't
+//	                          churn it.
+//
+// Rationale: mappings.yaml is the artifact k8s-proxy autoreplay
+// (and other final-candidate analyses) consults to find which
+// mocks each test consumed. Operators who never set the flag
+// still need a usable file the first time test mode runs; gating
+// strictly on UpdateTestMapping leaves them without one. The
+// create-if-not-present default closes that gap without changing
+// behaviour for existing users who already have a mappings.yaml
+// they don't want overwritten — they can keep flag=false and the
+// existing file is preserved. To force a refresh, flag=true.
+//
+// Independence from DisableMapping: the two flags express
+// orthogonal concerns. DisableMapping picks the replay-time mock
+// FILTERING strategy (timestamp-vs-index); the mapping WRITE is
+// a separate side-effect that records consumption. We don't gate
+// the write on the filter strategy.
+//
+// The non-emptiness guard on the create-if-not-present branch
+// matters because actualTestMockMappings is populated by
+// upsertActualTestMockMapping calls that depend on consumedMocks,
+// which is fetched from r.hookImpl.GetConsumedMocks INSIDE
+// `if r.instrument` blocks (lines 1453, 1884). In non-instrument
+// modes (e.g. k8s-proxy autoreplay) consumedMocks stays empty,
+// so without this guard the first run would create an empty
+// mappings.yaml and every subsequent run would skip the create
+// branch (file exists), leaving autoreplay permanently without
+// the mappings the feature relies on. UpdateTestMapping=true
+// still writes an empty file when explicitly requested — that
+// matches the operator intent of "force a refresh".
+//
+// persistMappings decides whether this run may write mappings.yaml, and with
+// what intent, then dispatches.
+//
+// Extracted from RunTestSet so the decision is unit-testable: the choice of
+// `replace` is the one argument in this path where a wrong value silently
+// restores the truncation bug — every first-run write becomes an overwrite,
+// and a single subset or partly-failed run can wipe a curated per-test list.
+// Inline in the loop it was reachable only through a full test-set run, so a
+// test could assert the plumbing but never the decision.
+func (r *Replayer) persistMappings(ctx context.Context, testSetID string, actualTestMockMappings *models.Mapping) {
+	shouldWriteMappings := r.config.Test.UpdateTestMapping
+	if !shouldWriteMappings && r.mappingDB != nil && len(actualTestMockMappings.TestCases) > 0 {
+		exists, existsErr := r.mappingDB.Exists(ctx, testSetID)
+		if existsErr != nil {
+			r.logger.Debug("Skipping create-if-not-present mappings.yaml write — file-existence check failed; treating as 'exists' to avoid clobbering",
+				zap.String("testSetID", testSetID),
+				zap.Error(existsErr))
+		} else if !exists {
+			shouldWriteMappings = true
+		}
+	}
+
+	// See backfillStartupSection: writes a STARTUP-ONLY document so the
+	// operator's per-test mappings are never rewritten by a subset run.
+	if !shouldWriteMappings {
+		r.backfillStartupSection(ctx, testSetID, actualTestMockMappings)
+	}
+
+	if shouldWriteMappings {
+		if err := r.StoreMappings(ctx, actualTestMockMappings, r.config.Test.UpdateTestMapping); err != nil {
+			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
+		} else {
+			// startupMocks is reported at INFO, not DEBUG, on purpose: it is the
+			// only signal that the startup section was actually captured. Every
+			// other trace of it (mapdb.GetStartup, determineMockingStrategy) is
+			// DEBUG, and CI lanes do not run the replay at debug level — so
+			// without this a run that silently recorded ZERO startup mocks looks
+			// identical to one that recorded them correctly, and the whole
+			// feature is unobservable from a green pipeline.
+			r.logger.Info("Successfully saved test-mock mappings",
+				zap.String("testSetID", testSetID),
+				zap.Int("numTests", len(actualTestMockMappings.TestCases)),
+				zap.Int("startupMocks", len(actualTestMockMappings.Startup)))
+		}
+	}
 }
 
 // backfillStartupSection adds the startup section to mappings.yaml when the
