@@ -72,8 +72,19 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		existingStartup = existingConfig.Startup
 	}
 
+	// Union, never replace — the same rule UpsertBatch follows, and for the
+	// same reason (see mergeMockEntries). A test's mapping arrives in more
+	// than one emission: the agent reports a test's mocks when its window
+	// resolves and reports more later for mocks it retroactively bins into
+	// that window. Replacing on the second emission drops everything the
+	// first recorded, and the test then replays against a short pool or an
+	// empty one, which surfaces as a no_mocks failure.
+	//
+	// Insert is the path cloud/auto replay writes through, so the loss is
+	// not recoverable by re-running: each run replaced the previous list
+	// rather than adding to it, and the pool could only ever shrink.
 	for _, t := range mapping.TestCases {
-		finalMappings[t.ID] = t.Mocks
+		finalMappings[t.ID] = mergeMockEntries(finalMappings[t.ID], t.Mocks)
 	}
 
 	newMapping := CreateMappingStructure(testSetID, finalMappings, db.logger)
