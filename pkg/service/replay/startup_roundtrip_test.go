@@ -40,7 +40,7 @@ func TestStartupSectionSurvivesWriteThenRead(t *testing.T) {
 		t.Fatalf("setStartupMocks did not capture: %+v", mapping.Startup)
 	}
 
-	if err := db.Insert(ctx, mapping); err != nil {
+	if err := db.Insert(ctx, mapping, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
