@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -49,18 +50,19 @@ func Diff(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var diffService diffSvc.Service
 			var ok bool
 			if diffService, ok = svc.(diffSvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy diff service interface")
-				return nil
+				err := errors.New("service doesn't satisfy diff service interface")
+				utils.LogError(logger, err, "service doesn't satisfy diff service interface")
+				return err
 			}
 
 			if err := diffService.Compare(ctx, run1, run2, testSets); err != nil {
 				utils.LogError(logger, err, "failed to compare test runs")
-				return nil
+				return err
 			}
 			return nil
 		},
