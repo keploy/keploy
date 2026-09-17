@@ -482,3 +482,38 @@ func TestCoerceToString(t *testing.T) {
 		})
 	}
 }
+
+// TestDecodeBinaryRow_TruncatedPacket guards the bounds-check fix in
+// DecodeBinaryRow. Before the fix, a packet shorter than the header + OK
+// byte, or too short for the computed null-bitmap length, sliced past the
+// end of data and panicked the connection handler instead of returning a
+// decode error - exactly the "malformed or unexpected network data" panic
+// described for the MySQL parser boundary.
+func TestDecodeBinaryRow_TruncatedPacket(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+	columns := []*mysql.ColumnDefinition41{{Type: byte(mysql.FieldTypeLong), Name: "id"}}
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty packet", data: []byte{}},
+		{name: "shorter than header+OK byte", data: []byte{0x01, 0x02}},
+		{name: "header+OK byte only, no null bitmap", data: []byte{0x01, 0x00, 0x00, 0x01, 0x00}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("DecodeBinaryRow panicked on %q: %v", tt.name, r)
+				}
+			}()
+			_, _, err := DecodeBinaryRow(ctx, logger, tt.data, columns)
+			if err == nil {
+				t.Fatalf("expected a decode error for %q, got nil", tt.name)
+			}
+		})
+	}
+}
