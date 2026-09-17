@@ -3680,13 +3680,17 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 
 	if emitFailureLogs {
 		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, r.autoHeaderNoiseOpt())
-		if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
-			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
-			return true, result
-		}
 		if pass {
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return pass, result
+		}
+		// Skipped outright under auto-replay rather than left to the helper:
+		// this quiet pre-match exists only so the auto-pass gets its shot
+		// before failure logs are emitted, and calling the helper here as well
+		// as below would log the skip twice for the same test case.
+		if !r.config.Test.AutoReplay && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+			return true, result
 		}
 	}
 
@@ -3782,6 +3786,20 @@ func normalizeHTTPRespForReport(tc *models.TestCase, actualResponse *models.HTTP
 }
 
 func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, noiseConfig map[string]map[string][]string, result *models.Result) bool {
+	// Auto-replay never auto-passes an additive change. The pass is for a NEWER
+	// build that legitimately grew a response field; auto-replay runs the binary
+	// it just recorded, so it cannot have grown one. An addition here is
+	// nondeterminism or a mock served from the wrong window, and waving it
+	// through hides exactly the class of defect auto-replay exists to catch. Let
+	// it fall through to the normal verdict so the caller grades it instead.
+	if r.config.Test.AutoReplay {
+		if qualifiesForHTTPResponseSchemaAdditionPass(result) {
+			r.logger.Info("skipping additive response-schema auto-pass during auto-replay",
+				zap.String("testcase", tc.Name),
+				zap.String("testset", testSetID))
+		}
+		return false
+	}
 	if !qualifiesForHTTPResponseSchemaAdditionPass(result) {
 		return false
 	}

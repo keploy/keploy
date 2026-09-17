@@ -442,6 +442,19 @@ type Test struct {
 	SchemaMatch            bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
 	UpdateTestMapping      bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
 	DisableAutoHeaderNoise bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"` // skip auto-noise for flaky headers (e.g. AWS SigV4)
+	// AutoReplay marks the run as auto-replay: the pass that replays a test set
+	// immediately after recording it, against the SAME application build.
+	//
+	// Deliberately a mode flag, not a single behaviour switch: auto-replay's
+	// premise (app and recording are the same binary) invalidates a whole class
+	// of leniency, and the k8s-proxy side already grades its failures by a
+	// separate auto-replay rule. Today it disables the additive
+	// response-schema auto-pass — that pass exists for the CI shape, where the
+	// app is a NEWER build and a backward-compatible field addition is real API
+	// evolution. Auto-replay cannot have grown a field, so an addition there is
+	// nondeterminism. Left false so the CLI and cloud replay keep today's
+	// behaviour; only the auto-replay caller opts in.
+	AutoReplay bool `json:"autoReplay" yaml:"autoReplay" mapstructure:"autoReplay"`
 	// MockNoiseDetection / MockNoiseStrict are the canonical spelling; the
 	// SchemaNoise* pair below is the previous one, kept so an existing
 	// keploy.yml keeps working. NormalizeMockNoise reconciles them — read via
