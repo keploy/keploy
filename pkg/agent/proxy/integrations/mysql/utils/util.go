@@ -385,6 +385,15 @@ func ParseBinaryDate(b []byte) (interface{}, int, error) {
 		// Non-NULL zero DATE (length byte present, payload length=0)
 		return ZeroDateString, 1, nil
 	}
+	// DATE valid length in MySQL binary row: 4. Rejecting anything else here
+	// stops a garbage length byte from being trusted as the bytes-consumed
+	// count the caller advances its read offset by.
+	if length != 4 {
+		return nil, 0, fmt.Errorf("invalid DATE length %d (expected 0|4) - likely misaligned buffer", length)
+	}
+	if len(b) < 5 {
+		return nil, 0, fmt.Errorf("unexpected end of buffer while reading DATE value, len(b)=%d, expected at least 5", len(b))
+	}
 	year := binary.LittleEndian.Uint16(b[1:3])
 	month := b[3]
 	day := b[4]
@@ -461,6 +470,16 @@ func ParseBinaryTime(b []byte) (interface{}, int, error) {
 		// Non-NULL zero TIME
 		return ZeroTimeString, 1, nil
 	}
+	// TIME valid lengths in MySQL binary row: 8 (no microseconds) or 12
+	// (with microseconds). Rejecting anything else here stops a garbage
+	// length byte from being trusted as the bytes-consumed count the
+	// caller advances its read offset by.
+	if length != 8 && length != 12 {
+		return nil, 0, fmt.Errorf("invalid TIME length %d (expected 0|8|12) - likely misaligned buffer", length)
+	}
+	if len(b) < 9 {
+		return nil, 0, fmt.Errorf("unexpected end of buffer while reading TIME value, len(b)=%d, expected at least 9", len(b))
+	}
 	isNegative := b[1] == 1
 	days := binary.LittleEndian.Uint32(b[2:6])
 	hours := b[6]
@@ -468,6 +487,9 @@ func ParseBinaryTime(b []byte) (interface{}, int, error) {
 	seconds := b[8]
 	var microseconds uint32
 	if length > 8 {
+		if len(b) < 13 {
+			return nil, 0, fmt.Errorf("unexpected end of buffer while reading TIME microseconds, len(b)=%d, expected at least 13", len(b))
+		}
 		microseconds = binary.LittleEndian.Uint32(b[9:13])
 	}
 	timeString := fmt.Sprintf("%d %02d:%02d:%02d.%06d", days, hours, minutes, seconds, microseconds)

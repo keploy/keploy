@@ -8,6 +8,41 @@ import (
 	"go.uber.org/zap"
 )
 
+// TestDecodeTextRow_TruncatedPacket guards the bounds-check fix in
+// DecodeTextRow. Before the fix, a packet shorter than the 4-byte header,
+// or one that ran out of bytes mid-row, indexed past the end of data and
+// panicked the connection handler instead of returning a decode error -
+// exactly the "malformed or unexpected network data" panic described for
+// the MySQL parser boundary.
+func TestDecodeTextRow_TruncatedPacket(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+	columns := []*mysql.ColumnDefinition41{{Type: byte(mysql.FieldTypeVarString), Name: "id"}}
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty packet", data: []byte{}},
+		{name: "shorter than header", data: []byte{0x01, 0x02}},
+		{name: "header only, no row data", data: []byte{0x01, 0x00, 0x00, 0x01}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("DecodeTextRow panicked on %q: %v", tt.name, r)
+				}
+			}()
+			_, _, err := DecodeTextRow(ctx, logger, tt.data, columns)
+			if err == nil {
+				t.Fatalf("expected a decode error for %q, got nil", tt.name)
+			}
+		})
+	}
+}
+
 // TestEncodeTextRow_FewerValuesThanColumns guards the bounds-check fix at
 // textRowPacket.go:60. Before the fix, a TextRow whose Values slice was
 // shorter than the column list panicked the agent goroutine with
