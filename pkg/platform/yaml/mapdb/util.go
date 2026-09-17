@@ -40,6 +40,15 @@ func GetMappings(mapping *models.Mapping, logger *zap.Logger) map[string][]model
 	testMockMappings := make(map[string][]models.MockEntry)
 
 	for _, test := range mapping.TestCases {
+		// An entry keyed "" holds mocks the recorder could not attribute to a
+		// test. It is not a per-test mapping — no test is named "" — and
+		// surfacing it here would both be dead weight and, when it is the ONLY
+		// non-empty entry, make Get report hasMeaningfulMappings and switch
+		// replay to by-name loading for a set whose mocks are all unreachable.
+		// GetStartup returns these instead, which every test loads.
+		if test.ID == "" {
+			continue
+		}
 		testMockMappings[test.ID] = test.Mocks
 	}
 

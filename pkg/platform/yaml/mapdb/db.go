@@ -72,7 +72,15 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		existingStartup = existingConfig.Startup
 	}
 
+	// Unattributed mocks are rescued into the startup section rather than
+	// written as a test entry keyed "" — see the note in UpsertBatch. They are
+	// real traffic the app made, so they are routed, never dropped.
+	var unattributed []models.MockEntry
 	for _, t := range mapping.TestCases {
+		if t.ID == "" {
+			unattributed = mergeMockEntries(unattributed, t.Mocks)
+			continue
+		}
 		finalMappings[t.ID] = t.Mocks
 	}
 
@@ -106,6 +114,11 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		newMapping.Startup = mapping.Startup
 	case len(existingStartup) > 0:
 		newMapping.Startup = existingStartup
+	}
+	// Union, never replace: the rescued entries are additive to whatever the
+	// caller supplied or the file already carries.
+	if len(unattributed) > 0 {
+		newMapping.Startup = mergeMockEntries(newMapping.Startup, unattributed)
 	}
 
 	encodedData, err := EncodeMappingF(newMapping, db.logger, effFormat)
@@ -220,6 +233,34 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 			Kind:      models.MappingKind,
 			TestSetID: testSetID,
 			TestCases: []models.MappedTestCase{},
+		}
+	}
+
+	// Mocks the recorder could not attribute to a test arrive under an EMPTY
+	// test name, and must not become a test entry. Nothing is ever named "", so
+	// at replay — which loads strictly BY NAME (MockFilterParams.MockMapping ->
+	// DiskMocks.LoadByNames) — such an entry is reachable by no test at all.
+	//
+	// Measured on a staging api-server recording: 448 of 549 mapped mocks sat
+	// under "", including EVERY mock for the RBAC `groups` collection. At replay
+	// each permission lookup answered "no matching mock for find on groups", the
+	// app denied access, and the tests whose recording expected a denial still
+	// PASSED — a denial is exactly what they assert. That is why this stayed
+	// invisible: the defect only surfaces on the cases expecting real data.
+	//
+	// The startup section is where they belong. It is the documented home for
+	// mocks belonging to no single test, and both replay and runner merge it
+	// into EVERY test's pool (Mapping.StartupMockNames), so routing them there
+	// makes an unattributed mock available rather than unreachable.
+	if unattributed := byTest[""]; len(unattributed) > 0 {
+		mapping.Startup = mergeMockEntries(mapping.Startup, unattributed)
+		delete(byTest, "")
+		if len(byTest) == 0 {
+			// Every mapping in this batch was unattributed; the per-test loop
+			// below would no-op, but the startup section still has to be written.
+			db.logger.Debug("batch carried only unattributed mocks; routed to the startup section",
+				zap.String("testSetID", testSetID),
+				zap.Int("mocks", len(unattributed)))
 		}
 	}
 
@@ -353,12 +394,27 @@ func (db *MappingDb) GetStartup(ctx context.Context, testSetID string) ([]models
 	if err != nil {
 		return nil, err
 	}
-	if !present || mapping == nil || len(mapping.Startup) == 0 {
+	if !present || mapping == nil {
 		return nil, nil
 	}
 
-	out := make([]models.MockEntry, 0, len(mapping.Startup))
-	for _, e := range mapping.Startup {
+	// REPAIR FOR ALREADY-RECORDED SETS. Mappings written before unattributed
+	// mocks were routed here carry them as a test entry keyed "" — reachable by
+	// no test, because replay loads strictly by name. Surfacing them through the
+	// startup section makes an existing recording replayable without a
+	// re-record; the write paths no longer produce this shape.
+	section := mapping.Startup
+	for _, t := range mapping.TestCases {
+		if t.ID == "" && len(t.Mocks) > 0 {
+			section = mergeMockEntries(section, t.Mocks)
+		}
+	}
+	if len(section) == 0 {
+		return nil, nil
+	}
+
+	out := make([]models.MockEntry, 0, len(section))
+	for _, e := range section {
 		if e.Name == "" {
 			continue
 		}
