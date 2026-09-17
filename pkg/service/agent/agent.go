@@ -1240,6 +1240,26 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	return nil
 }
 
+// ServedMocks reports the mocks served so far this session, keyed by mock name.
+//
+// It reads the proxy's never-drained persistent consumption map, NOT
+// GetConsumedMocks: that one drains, so polling it mid-run would steal entries
+// from the end-of-run outcome report and silently shrink both the consumed
+// summary and the --strict verdict.
+//
+// Returns an empty map (not an error) when the proxy cannot expose the map, for
+// the same reason ConsumedStateReader is an optional extension — a third-party
+// Proxy without it must keep working, and a caller polling for progress should
+// degrade to "nothing to show" rather than fail the run.
+func (a *Agent) ServedMocks(_ context.Context) (map[string]models.MockState, error) {
+	reader, ok := a.Proxy.(coreAgent.ConsumedStateReader)
+	if !ok {
+		a.logger.Debug("proxy has no ConsumedStateReader; no served-mock state to report")
+		return map[string]models.MockState{}, nil
+	}
+	return reader.GetPersistentConsumed(), nil
+}
+
 // filterOutDeleted filters out deleted mocks based on totalConsumedMocks
 func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[string]models.MockState) []*models.Mock {
 	filtered := make([]*models.Mock, 0, len(mocks))

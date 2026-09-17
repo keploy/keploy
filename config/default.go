@@ -171,6 +171,11 @@ mock:
   strict: false
   local: false
   recordTimer: 0s
+  # Log one line per mock the first time it is served, so a client driving
+  # keploy can show which dependency calls were answered from the set while the
+  # run is still going. Off by default: the lines are for a machine reading the
+  # output, not a human watching a terminal.
+  emitMockEvents: false
 contract:
   driven: "consumer"
   mappings:

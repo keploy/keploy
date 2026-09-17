@@ -2197,6 +2197,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
+		cmd.Flags().Bool("emit-mock-events", c.cfg.Mock.EmitMockEvents, "Log one line per mock as it is first served (stdout; stderr under --json)")
 		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
 	}
 	return nil
@@ -2351,6 +2352,20 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			return errors.New("failed to get the strict flag")
 		}
 		c.cfg.Mock.Strict = strict
+
+		// Guarded on Changed||!IsSet for the reason spelled out for
+		// schema-noise-detection above: AddFlags captured this flag's default
+		// from a ZERO config, and viper fills c.cfg from keploy.yml only
+		// afterwards, so an unguarded read would overwrite
+		// `mock.emitMockEvents: true` in keploy.yml with a stale false.
+		if cmd.Flags().Changed("emit-mock-events") || !viper.IsSet("mock.emitMockEvents") {
+			emitMockEvents, err := cmd.Flags().GetBool("emit-mock-events")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the emit-mock-events flag")
+				return errors.New("failed to get the emit-mock-events flag")
+			}
+			c.cfg.Mock.EmitMockEvents = emitMockEvents
+		}
 
 		if cmd.Flags().Changed("delay") {
 			d, err := cmd.Flags().GetUint64("delay")
