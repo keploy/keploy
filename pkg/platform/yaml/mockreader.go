@@ -149,7 +149,10 @@ func (r *MockReader) readNextYAMLDocument() ([]byte, error) {
 
 		trimmedLine := strings.TrimSpace(line)
 
-		if trimmedLine == "---" {
+		// A YAML document separator is only a separator at column 0. An
+		// indented "---" (e.g. inside a block scalar body) is content, so
+		// the comparison must not trim leading whitespace.
+		if strings.HasPrefix(line, "---") && trimmedLine == "---" {
 			if buffer.Len() == 0 {
 				continue
 			}
