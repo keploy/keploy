@@ -1466,7 +1466,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Honour any reusable retagging the mutator applied (e.g. the mongo/v2
 			// stable-metadata promotion): move retagged mocks from the per-test pool
 			// into the reusable pool so SetMocksWithWindow does not window-filter them.
-			filteredMocks, unfilteredMocks = rebalanceReusableMocks(filteredMocks, unfilteredMocks)
+			// No-op under mapping-based replay, which resolves the per-test pool by
+			// name and so never window-filters it.
+			filteredMocks, unfilteredMocks = rebalanceReusableMocks(filteredMocks, unfilteredMocks, useMappingBased)
 		}
 
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
@@ -1581,7 +1583,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			// Honour any reusable retagging the mutator applied (see the
 			// non-DockerCompose branch above for the rationale).
-			filteredMocks, unfilteredMocks = rebalanceReusableMocks(filteredMocks, unfilteredMocks)
+			filteredMocks, unfilteredMocks = rebalanceReusableMocks(filteredMocks, unfilteredMocks, useMappingBased)
 		}
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
@@ -4945,11 +4947,27 @@ func isReusableTierMock(m *models.Mock) bool {
 // its record-time window — defeating the retag. Running this immediately after
 // AfterGetMocks honours the retag by physically re-partitioning.
 //
+// mappingBased disables the move entirely: see the guard at the top of the body
+// for why mapping-driven replay must keep retagged mocks where the mapping
+// names them.
+//
 // Memory: `filtered` is compacted in place (its backing array is reused via the
 // [:0] read/write cursor); `unfiltered` grows only by the promoted count. No
 // second copy of the corpus is allocated. Relative order within each pool is
 // preserved. Safe on nil/empty inputs.
-func rebalanceReusableMocks(filtered, unfiltered []*models.Mock) ([]*models.Mock, []*models.Mock) {
+func rebalanceReusableMocks(filtered, unfiltered []*models.Mock, mappingBased bool) ([]*models.Mock, []*models.Mock) {
+	// Mapping-based replay builds the per-test pool BY NAME from the test<->mock
+	// mapping, so it never window-filters it — which is the only thing this move
+	// exists to avoid. Moving a mapped mock out of the per-test pool here is
+	// therefore pure loss: the agent's by-name index covers the per-test region
+	// only, so LoadByNames resolves nothing and the pool is EMPTY. A mongo test
+	// whose sole mapped mock was retagged then reports no_mocks before any
+	// scoring and fails, even though the recorded answer is right there in the
+	// reusable tier. Keep the retag (it still marks the mock reusable for other
+	// windows); just don't relocate it out from under the mapping that names it.
+	if mappingBased {
+		return filtered, unfiltered
+	}
 	if len(filtered) == 0 {
 		return filtered, unfiltered
 	}

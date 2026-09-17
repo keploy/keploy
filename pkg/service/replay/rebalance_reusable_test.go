@@ -46,7 +46,7 @@ func TestRebalanceReusableMocks_MovesRetaggedOnly(t *testing.T) {
 	filtered := []*models.Mock{perTest("pt-1"), configTagged("promoted"), perTest("pt-2")}
 	unfiltered := []*models.Mock{configTagged("cfg-existing")}
 
-	f, u := rebalanceReusableMocks(filtered, unfiltered)
+	f, u := rebalanceReusableMocks(filtered, unfiltered, false)
 
 	if got := names(f); !eq(got, []string{"pt-1", "pt-2"}) {
 		t.Fatalf("filtered pool = %v, want [pt-1 pt-2]", got)
@@ -60,7 +60,7 @@ func TestRebalanceReusableMocks_MovesRetaggedOnly(t *testing.T) {
 func TestRebalanceReusableMocks_NoReusableIsNoop(t *testing.T) {
 	filtered := []*models.Mock{perTest("a"), perTest("b")}
 	unfiltered := []*models.Mock{}
-	f, u := rebalanceReusableMocks(filtered, unfiltered)
+	f, u := rebalanceReusableMocks(filtered, unfiltered, false)
 	if got := names(f); !eq(got, []string{"a", "b"}) {
 		t.Fatalf("filtered pool changed unexpectedly: %v", got)
 	}
@@ -71,7 +71,7 @@ func TestRebalanceReusableMocks_NoReusableIsNoop(t *testing.T) {
 
 // Empty/nil filtered input is safe and a no-op.
 func TestRebalanceReusableMocks_EmptyInput(t *testing.T) {
-	f, u := rebalanceReusableMocks(nil, []*models.Mock{configTagged("c")})
+	f, u := rebalanceReusableMocks(nil, []*models.Mock{configTagged("c")}, false)
 	if len(f) != 0 {
 		t.Fatalf("filtered must stay empty, got %v", names(f))
 	}
@@ -84,11 +84,44 @@ func TestRebalanceReusableMocks_EmptyInput(t *testing.T) {
 // never match) and never treated as reusable.
 func TestRebalanceReusableMocks_NilEntrySafe(t *testing.T) {
 	filtered := []*models.Mock{perTest("a"), nil, configTagged("p")}
-	f, u := rebalanceReusableMocks(filtered, nil)
+	f, u := rebalanceReusableMocks(filtered, nil, false)
 	if got := names(f); !eq(got, []string{"a"}) {
 		t.Fatalf("filtered pool = %v, want [a]", got)
 	}
 	if got := names(u); !eq(got, []string{"p"}) {
 		t.Fatalf("unfiltered pool = %v, want [p]", got)
+	}
+}
+
+// Mapping-based replay resolves the per-test pool BY NAME from the test<->mock
+// mapping, so it never window-filters that pool — the only thing the move
+// guards against. Relocating a retagged mock out of it would leave
+// LoadByNames with nothing to resolve and the per-test pool EMPTY, which the
+// mongo matcher reports as no_mocks before any scoring. The retag is kept; the
+// mock must stay where the mapping that names it expects to find it.
+func TestRebalanceReusableMocks_MappingBasedKeepsRetaggedInPerTestPool(t *testing.T) {
+	filtered := []*models.Mock{perTest("pt-1"), configTagged("promoted"), perTest("pt-2")}
+	unfiltered := []*models.Mock{configTagged("cfg-existing")}
+
+	f, u := rebalanceReusableMocks(filtered, unfiltered, true)
+
+	if got := names(f); !eq(got, []string{"pt-1", "promoted", "pt-2"}) {
+		t.Fatalf("filtered pool = %v, want [pt-1 promoted pt-2] (no move in mapping mode)", got)
+	}
+	if got := names(u); !eq(got, []string{"cfg-existing"}) {
+		t.Fatalf("unfiltered pool = %v, want [cfg-existing] (nothing added)", got)
+	}
+}
+
+// The mapping-mode guard must not disturb the strict-window path: the same
+// input with mappingBased=false still moves the retagged mock.
+func TestRebalanceReusableMocks_StrictWindowStillMoves(t *testing.T) {
+	filtered := []*models.Mock{perTest("pt-1"), configTagged("promoted")}
+	f, u := rebalanceReusableMocks(filtered, nil, false)
+	if got := names(f); !eq(got, []string{"pt-1"}) {
+		t.Fatalf("filtered pool = %v, want [pt-1]", got)
+	}
+	if got := names(u); !eq(got, []string{"promoted"}) {
+		t.Fatalf("unfiltered pool = %v, want [promoted]", got)
 	}
 }
