@@ -44,7 +44,7 @@ var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 // create, and the run died waiting for an agent that could not appear.
 func resolveKind(commandType, cmd string) utils.CmdType {
 	switch kind := utils.CmdType(commandType); kind {
-	case utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose:
+	case utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose, utils.FromContainer:
 		return kind
 	}
 	return utils.FindDockerCmd(cmd)
@@ -74,17 +74,30 @@ type App struct {
 	keployContainer string
 	composeFile     string // path to the temp compose file (set during SetupCompose)
 	composeContent  []byte // in-memory compose YAML; set when InMemoryCompose is used
-	EnableTesting   bool
-	Mode            models.Mode
+	// --from-container only. sourceContainer is the user's own container, which
+	// the agent client stops for the session and starts again on teardown;
+	// replacementID is the copy keploy created and runs in its place.
+	sourceContainer string
+	replacementID   string
+	// sourceTTY mirrors the source's Config.Tty. It decides how the
+	// replacement's log stream is read: a TTY stream is raw, every other is
+	// multiplexed, and the two are not interchangeable.
+	sourceTTY     bool
+	EnableTesting bool
+	Mode          models.Mode
 }
 
 func (a *App) Setup(ctx context.Context) error {
 
-	if utils.IsDockerCmd(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
+	// isDetachMode scans the command for -d/--detach; --from-container has no
+	// command, so there is nothing to scan and nothing to refuse.
+	if utils.IsDockerCmd(a.kind) && utils.HasUserCommand(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
 		return fmt.Errorf("application could not be started in detached mode")
 	}
 
 	switch a.kind {
+	case utils.FromContainer:
+		return a.SetupFromContainer(ctx)
 	case utils.DockerRun, utils.DockerStart:
 		err := a.SetupDocker()
 		if err != nil {
@@ -1203,6 +1216,18 @@ func extractProjectFlags(cmd string) []string {
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
+	// --from-container never reaches a shell: the app is started, streamed and
+	// waited on through the Engine API, so none of the command-string handling
+	// below (name-conflict retries, detach scanning, ExecuteCommand) applies.
+	if a.kind == utils.FromContainer {
+		// The replacement is removed here on the ordinary path so the user's
+		// container gets its ports back promptly; AgentClient.RestoreFromContainer
+		// covers every path that never reaches this function, and both are
+		// idempotent.
+		defer a.RemoveReplacement()
+		return a.runFromContainer(ctx)
+	}
+
 	userCmd := a.cmd
 
 	// ComposeDown can fire on two paths within a single run() — cmdCancel below

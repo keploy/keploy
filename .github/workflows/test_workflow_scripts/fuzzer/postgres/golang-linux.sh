@@ -7,6 +7,7 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # --- Helper Functions for Logging and Error Handling ---
@@ -191,7 +192,6 @@ send_requests() {
     }'
 }
 
-
 # --- Main Execution Logic ---
 
 # Initial setup and environment logging
@@ -205,6 +205,7 @@ sudo chmod +x $POSTGRES_FUZZER_BIN
 sudo chown -R $(whoami):$(whoami) golden
 
 # Start a Postgres instance for the recording session
+docker_pull_retry postgres:latest
 docker run --name postgres-container \
   -e POSTGRES_PASSWORD=password \
   -e POSTGRES_USER=postgres \
@@ -213,8 +214,16 @@ docker run --name postgres-container \
 wait_for_postgres
 
 # Generate Keploy configuration and add noise parameter
-sudo "$RECORD_KEPLOY_BIN" config --generate
-sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' ./keploy.yml
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > ./keploy.yml <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"duration_ms":[]}}
+KEPLOY_CFG
 echo "Keploy config generated and updated."
 endsec
 

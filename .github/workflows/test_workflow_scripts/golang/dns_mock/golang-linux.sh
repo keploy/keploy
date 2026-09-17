@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 set -Eeuxo pipefail
 
@@ -89,8 +90,8 @@ sudo rm -f /tmp/keploy-logs.txt
 # Build
 section "Build App"
 echo "Building app..."
-go mod tidy
-go build -o dns-test
+go_retry mod tidy
+go_retry build -o dns-test
 endsec
 
 # Record

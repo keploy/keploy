@@ -5,6 +5,7 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 
 # Start the docker container.
 docker network create keploy-network
+docker_pull_retry mongo
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Remove any preexisting keploy tests.

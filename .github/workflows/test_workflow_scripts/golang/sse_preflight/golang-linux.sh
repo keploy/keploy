@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 echo "$RECORD_BIN"
 echo "$REPLAY_BIN"
@@ -18,12 +19,14 @@ fi
 rm -rf keploy/
 
 # Build go binaries
-go build -o sse-preflight-server ./cmd/server
-go build -o sse-preflight-client ./cmd/client
+go_retry build -o sse-preflight-server ./cmd/server
+go_retry build -o sse-preflight-client ./cmd/client
 echo "go binaries built"
 
 # Generate the keploy-config file.
-sudo "$RECORD_BIN" config --generate
+# The step above removed any config, so this always generates; the guard is
+# here so the line stays correct if that removal is ever dropped.
+[ -f keploy.yml ] || sudo "$RECORD_BIN" config --generate
 
 send_request() {
     sleep 6

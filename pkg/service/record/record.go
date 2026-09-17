@@ -52,6 +52,12 @@ const (
 	// — is what signals the tail is through. Sized well above the agent's
 	// per-mapping flush latency so a slow flush is not mistaken for completion.
 	mappingIdleGrace = 3 * time.Second
+
+	// afterRecordingHookTimeout bounds the end-of-recording hook (issue #1867) so a
+	// wedged consumer cannot hang teardown. Matches the 30s DrainErrGroup budgets in
+	// the same teardown defer. It is the hook context's only deadline (WithoutCancel
+	// drops the upstream one), and consumers are expected to honor it.
+	afterRecordingHookTimeout = 30 * time.Second
 )
 
 // stopTimer disarms t, draining its channel if it had already fired, so a later
@@ -278,6 +284,39 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, 
 		testSetConf:     testSetConf,
 		config:          config,
 		hooks:           hooks,
+	}
+}
+
+// afterRecordingComplete invokes the end-of-recording hook (issue #1867). It is
+// best-effort: the recording is already saved, so neither an error NOR a panic
+// from the hook may propagate — a panic here would otherwise unwind the teardown
+// defer and skip the deferred-orphan-revoke that runs right after this call. The
+// hook does data-driven work (the Basic-Auth re-key), so a panic is plausible;
+// recover, log, and let teardown continue.
+func (r *Recorder) afterRecordingComplete(ctx context.Context, testSetID string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			r.logger.Error("AfterRecordingComplete hook panicked; recording is saved but the post-record pass did not finish. Check your RecordHooks implementation.",
+				zap.Any("panic", rec), zap.String("testSetID", testSetID))
+		}
+	}()
+	// The recorder ctx is already cancelled on the normal SIGINT stop of an
+	// interactive recording (the teardown defer above runs under a cancelled ctx).
+	// Decouple the hook from that cancellation (context.WithoutCancel) so a
+	// legitimate post-record pass is not skipped — but re-impose a fresh bound so a
+	// wedged hook cannot hang teardown, matching the 10s NotifyGracefulShutdown and
+	// 30s drain bounds in this same defer. WithoutCancel keeps request-scoped values
+	// while dropping the upstream cancellation AND deadline, so this WithTimeout is
+	// the hook's only deadline; consumers are expected to honor it (the enterprise
+	// re-key does — keploy/enterprise#2536).
+	hookCtx, cancelHook := context.WithTimeout(context.WithoutCancel(ctx), afterRecordingHookTimeout)
+	defer cancelHook()
+	if hookErr := r.hooks.AfterRecordingComplete(hookCtx, &RecordingCompleteContext{
+		TestSetID: testSetID,
+		Path:      r.config.Path,
+	}); hookErr != nil {
+		r.logger.Error("AfterRecordingComplete hook failed; recording is saved but a post-record pass may be incomplete. Check your RecordHooks implementation.",
+			zap.Error(hookErr), zap.String("testSetID", testSetID))
 	}
 }
 
@@ -731,8 +770,35 @@ func (r *Recorder) Start(ctx context.Context) error {
 			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 
-		if err := utils.DrainErrGroup(r.logger, "record", errGrp, 30*time.Second); err != nil {
+		// recordDrainedCleanly gates the end-of-recording hook below. It stays true
+		// only if this drain actually joined every persist goroutine; on the
+		// timeout path a mock/test-case writer may still be in flight (see below).
+		recordDrainedCleanly := true
+		if err, timedOut := utils.DrainErrGroupStatus(r.logger, "record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
+		} else if timedOut {
+			recordDrainedCleanly = false
+		}
+
+		// End-of-recording hook (issue #1867 Basic-Auth re-key): every test case
+		// and mock is now drained to disk, so a cross-artifact pass can correlate
+		// them. Best-effort — a failure never invalidates the recording.
+		//
+		// Gated on a CLEAN drain. DrainErrGroupStatus reports timedOut when a
+		// persist goroutine ignored cancellation and may still be appending to the
+		// test-set files (the insert goroutines write on persistCtx =
+		// WithoutCancel, so they do NOT stop on the teardown cancel). The hook's
+		// consumer rewrites a whole mock file (read → rewrite → atomic rename), so
+		// a mock appended between its read and its rename would be silently dropped
+		// into a valid-but-short file. Skipping the pass on the timeout path costs
+		// one recording's post-record work; running it risks a truncated mock set.
+		if recordingStarted && newTestSetID != "" {
+			if recordDrainedCleanly {
+				r.afterRecordingComplete(ctx, newTestSetID)
+			} else {
+				r.logger.Warn("skipping the end-of-recording hook: the record drain timed out, so a mock or test-case write may still be in flight; the post-record pass is skipped to avoid racing an unfinished write. The recording itself is saved.",
+					zap.String("testSetID", newTestSetID))
+			}
 		}
 
 		// Deferred-orphan revoke: delete TCs whose owned mock was capacity-dropped
@@ -941,7 +1007,15 @@ func (r *Recorder) Start(ctx context.Context) error {
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, ChannelBindingShim: r.config.Record.ChannelBindingShim, UpstreamTLSVerify: r.config.Record.UpstreamTLS.Verify, UpstreamTLSCACert: r.config.Record.UpstreamTLS.CACert, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize, RecordBufferConsumerStallGrace: r.config.Record.RecordBuffer.ConsumerStallGrace})
+	setupOpts := models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, ChannelBindingShim: r.config.Record.ChannelBindingShim, UpstreamTLSVerify: r.config.Record.UpstreamTLS.Verify, UpstreamTLSCACert: r.config.Record.UpstreamTLS.CACert, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize, RecordBufferConsumerStallGrace: r.config.Record.RecordBuffer.ConsumerStallGrace, RecordBufferHalfCloseGrace: r.config.Record.RecordBuffer.HalfCloseGrace}
+	// Retry only a stalled agent bring-up (pkg.ErrAgentNotReady) with a fresh agent.
+	err = pkg.RetryAgentSetup(setupCtx, r.logger, func(c context.Context, attempt int) error {
+		o := setupOpts
+		if attempt > 1 {
+			o.AgentReadyTimeout = 120 * time.Second
+		}
+		return r.instrumentation.Setup(c, r.config.Command, o)
+	})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error

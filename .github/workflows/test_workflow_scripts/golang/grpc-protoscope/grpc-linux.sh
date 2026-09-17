@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # This script tests the grpc-protoscope sample application.
 # Keploy wraps the server to record incoming gRPC calls.
@@ -19,8 +20,8 @@ command -v go >/dev/null 2>&1 || { echo "go not found"; exit 1; }
 
 # --- Build Application ---
 echo "Building gRPC server and client binaries..."
-go build -o grpc-server ./server
-go build -o grpc-client ./client
+go_retry build -o grpc-server ./server
+go_retry build -o grpc-client ./client
 chmod +x ./grpc-server ./grpc-client
 
 # --- Helper Functions ---
@@ -121,7 +122,12 @@ kill_keploy_process() {
 # --- Main Logic ---
 
 rm -rf ./keploy*
-"$RECORD_BIN" config --generate
+# Only when the sample does not ship one. `config --generate` used to do
+# nothing at all over an existing keploy.yml -- it asked, stdin answered EOF,
+# and it skipped and exited 0 -- so the shipped config is what these runs have
+# always used, noise rules and all. It refuses out loud now rather than
+# pretending, which is right, and this says what the run actually wants.
+[ -f keploy.yml ] || "$RECORD_BIN" config --generate
 
 do_record() {
     local extra_flags="${1:-}"

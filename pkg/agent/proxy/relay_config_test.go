@@ -158,3 +158,30 @@ func TestRelayConfig_TLSUpgradeFnVerifiesOnTheSameFlag(t *testing.T) {
 		t.Fatalf("TLSUpgradeFn is built as %q, want %q — the dest-side dial must take its verify decision and its trust anchors from the same session options that drive ClientTLSFirst, and its srcConn is the only way it can recover the SNI the application sent", got, want)
 	}
 }
+
+// The half-close grace is an operator knob whose whole point is being
+// reachable without a rebuild, so the one line binding it into the relay
+// is worth pinning: delete it and the field silently reverts to the
+// relay's built-in default for everyone, including the operator who set
+// it in keploy.yml precisely because the default was wrong for them.
+//
+// Behaviour is covered elsewhere — relay/half_close_test.go proves the
+// grace bounds idle time, that a negative disables half-close, and that
+// withDefaults resolves zero. None of that can see whether this side
+// actually passes the configured value through.
+func TestRelayConfig_HalfCloseGraceIsWiredFromTheRecordBuffer(t *testing.T) {
+	t.Parallel()
+
+	fields, _ := relayConfigLiteral(t)
+
+	got, ok := fields["HalfCloseGrace"]
+	if !ok {
+		t.Fatal("relay.Config in recordViaSupervisor no longer sets HalfCloseGrace; " +
+			"record.recordBuffer.halfCloseGrace and --half-close-grace would both become " +
+			"dead config, and an operator who disabled half-close would silently keep it on")
+	}
+	if want := "p.recordBufferHalfCloseGrace"; got != want {
+		t.Fatalf("HalfCloseGrace is set from %q, want %q — anything else stops it tracking "+
+			"record.recordBuffer.halfCloseGrace", got, want)
+	}
+}

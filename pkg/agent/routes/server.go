@@ -31,10 +31,22 @@ const bindRetryBudget = 90 * time.Second
 // busy-spinning.
 const bindRetryInterval = 500 * time.Millisecond
 
-func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, router http.Handler) {
-	logger.Info("Starting Agent's HTTP server on :", zap.Int("port", port))
-
-	addr := fmt.Sprintf(":%d", port)
+// StartAgentServer binds the agent's control-plane HTTP server. It is
+// unauthenticated (see /agent/pcap/keylog, /agent/stop, /agent/storemocks),
+// so the bind address must never be reachable by anything other than the
+// local keploy CLI that owns this agent.
+//
+// In native mode the agent and CLI share a network namespace, so loopback is
+// both sufficient and necessary: binding 0.0.0.0 would let any other local
+// process reach it. In docker mode the CLI runs on the host and reaches the
+// agent through its published port, so the server must stay reachable on the
+// container's non-loopback interface for the docker proxy to forward into —
+// exposure to the host network is instead closed off at the publish step
+// (see GenerateKeployAgentService, which now publishes only to the host's
+// loopback).
+func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocker bool, router http.Handler) {
+	addr := agentBindAddr(port, isDocker)
+	logger.Info("Starting Agent's HTTP server", zap.String("addr", addr))
 	srv := &http.Server{
 		Handler: router,
 	}
@@ -62,15 +74,28 @@ func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, router 
 	// this agent's startup; then serve on the acquired listener.
 	listener, err := listenWithRetry(srvCtx, logger, addr, bindRetryBudget, bindRetryInterval)
 	if err != nil {
-		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.Error(err))
+		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.String("addr", addr), zap.Error(err))
 		return
 	}
 
 	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.Error(err))
+		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.String("addr", addr), zap.Error(err))
 		return
 	}
 	logger.Info("HTTP server stopped")
+}
+
+// agentBindAddr picks the agent control-plane server's bind address. Native
+// mode binds loopback-only since the endpoints (notably /agent/pcap/keylog,
+// which streams live TLS session keys) carry no authentication. Docker mode
+// must still bind every interface inside the container so the docker proxy
+// can forward the published port in; that publish is restricted to the
+// host's own loopback in GenerateKeployAgentService instead.
+func agentBindAddr(port int, isDocker bool) string {
+	if isDocker {
+		return fmt.Sprintf(":%d", port)
+	}
+	return fmt.Sprintf("127.0.0.1:%d", port)
 }
 
 // listenWithRetry binds a TCP listener on addr, retrying only the transient

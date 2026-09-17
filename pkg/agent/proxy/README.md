@@ -121,8 +121,10 @@ Numbered to match `PLAN.md` at the repo root.
    - Emit mocks via `sess.EmitMock`. The gate and post-record hook
      chain run automatically.
 
-4. Legacy path stays untouched. During rollout, `KEPLOY_NEW_RELAY=off`
-   forces every parser to the legacy path.
+4. The legacy branch still exists in the dispatcher for a parser that
+   does not implement `IntegrationsV2`, but nothing in tree is in that
+   state on the record path. There is no env knob that forces it: the
+   `KEPLOY_NEW_RELAY` rollback switch has been removed.
 
 Reference implementations: `integrations/http/recordv2.go`,
 `integrations/mysql/recorder/record_v2.go`,
@@ -144,8 +146,12 @@ All unit tests pass under `-race`.
 
 ## Rollout knobs
 
-- `KEPLOY_NEW_RELAY=off` / `KEPLOY_NEW_RELAY=0` — force every parser,
-  including V2-capable ones, onto the legacy path. Global V2 rollback.
+- `KEPLOY_NEW_RELAY` — **REMOVED.** It forced V2-capable parsers onto
+  the legacy path as a global rollback. Every parser on the record path
+  is now V2, and the legacy path it selected hangs EOF-delimited peers
+  (it waits for both copy directions instead of tearing the second
+  down), so the rollback traded one half-close defect for another. A
+  value left in the environment is ignored and logged once at startup.
 - `KEPLOY_DISABLE_PARSING=1` / `SIGUSR1` / admin endpoint — disable
   parsing entirely for new connections; existing connections drain.
   Routes everything to raw `globalPassThrough`. Kill switch for

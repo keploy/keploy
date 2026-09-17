@@ -669,12 +669,11 @@ func (a *Agent) wantsAsyncMocks() bool {
 }
 
 // loadAsyncIntoProxy hands the async corpus to the proxy if it supports it.
-// Engine.Load is run-once, so callers pass the COMPLETE async corpus in a
-// single call per store path — never per window.
+// Engine.Load REPLACES the corpus, so callers pass the COMPLETE async corpus
+// for the test-set in a single call per store path — never per window.
 func (a *Agent) loadAsyncIntoProxy(asyncMocks []*models.Mock) {
-	if len(asyncMocks) == 0 {
-		return
-	}
+	// No early return on an empty corpus: Load REPLACES, so a test-set holding
+	// no async mocks has to clear the previous set's rather than inherit them.
 	if loader, ok := a.Proxy.(coreAgent.AsyncMockLoader); ok {
 		loader.LoadAsyncMocks(asyncMocks)
 	}
@@ -930,6 +929,33 @@ func earliestReqTimestamp(filtered, unfiltered []*models.Mock) time.Time {
 // the old full-resident path): mapping -> named mocks; strict -> window +
 // startup band; lax -> all. Resident ineligible mocks are merged in; with no
 // disk store (legacy path) the resident slice is returned unchanged.
+
+// effectiveFirstWindowStart resolves the startup-band cutoff for this call.
+//
+// readerVal is what the proxy reports. On the FIRST window it is the zero time,
+// because SetMocksWithWindow records it later in this same call — so every
+// startup-band guard downstream is switched off for test #1, which is precisely
+// the test a slow application bootstrap lands in. Deriving the cutoff from this
+// call's own window start closes that, and uses the same predicate the manager
+// applies (a zero or BaseTime start means "no window").
+//
+// isWindowedProxy gates the derivation because it is only sound where the
+// manager adopts this same start as firstWindowStart in this call. A proxy with
+// neither the reader nor that adoption reports zero on EVERY window, so an
+// unguarded fallback would substitute the CURRENT window's start each time,
+// collapsing "req < firstWindowStart" into "req < afterTime" and preserving
+// every stale previous-test mock — the cross-test bleed strict mode exists to
+// prevent, on the one path where strict is actually live.
+func effectiveFirstWindowStart(isWindowedProxy bool, readerVal, afterTime time.Time) time.Time {
+	if !readerVal.IsZero() || !isWindowedProxy {
+		return readerVal
+	}
+	if afterTime.IsZero() || afterTime.Equal(models.BaseTime) {
+		return readerVal
+	}
+	return afterTime
+}
+
 func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMocks, params models.MockFilterParams, firstWindowStart time.Time) ([]*models.Mock, error) {
 	if disk == nil {
 		return resident, nil
@@ -942,7 +968,15 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	case params.UseMappingBased && len(params.MockMapping) > 0:
 		mode = "mapping"
 		loaded, err = disk.LoadByNames(params.MockMapping)
-	case pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
+	// Gate on the CALLER's flag, not the agent's own config. The two are
+	// independent: params.StrictMockWindow is what the replayer resolved for
+	// this run and is what :1047 below already uses, while a.config is the
+	// agent process's default. When they disagree, this switch would pick the
+	// windowed disk load while the filter that consumes its output ran lax (or
+	// the reverse) — the residency decision and the filtering decision have to
+	// come from one source. IsStrictMockWindow folds in the env override, so
+	// KEPLOY_STRICT_MOCK_WINDOW still opts out either way.
+	case pkg.IsStrictMockWindow(params.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
 		mode = "strict-window"
 		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
 		if err == nil && !firstWindowStart.IsZero() {
@@ -990,6 +1024,19 @@ func dedupByName(a, b []*models.Mock) []*models.Mock {
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+
+	// Seed the startup-init cutoff from the set's earliest RECORDED test before
+	// anything else touches the window. Without it the cutoff follows whichever
+	// test fires FIRST, so a --test-sets selection, an ignored test or the
+	// streaming deferral leaves it late and mocks belonging to a test that is
+	// never run are classified as startup-init and served as bootstrap traffic.
+	// Optional capability: a proxy that does not implement it keeps the
+	// fired-window behaviour.
+	if !params.FirstRecordedTestStart.IsZero() {
+		if seeder, ok := a.Proxy.(coreAgent.StartupCutoffSeeder); ok {
+			seeder.SeedStartupCutoff(params.FirstRecordedTestStart)
+		}
+	}
 
 	a.logger.Debug("UpdateMockParams called",
 		zap.Time("afterTime", params.AfterTime),
@@ -1050,10 +1097,33 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 
 	// firstWindowStart: earliest observed window start, so startup-init mocks
 	// (req < it) are kept, not dropped as stale.
+	//
+	// On the FIRST window the proxy has not learned it yet: SetMocksWithWindow
+	// records it (mockmanager.go:676-679) LATER in this same call, so the read
+	// here returns the zero time and every startup-band guard downstream is
+	// switched off for test #1 — loadPerTestMocks' disk.LoadBefore(...) never
+	// fires, and the startup tier stays EMPTY for the one test where a slow
+	// application bootstrap actually lands. That is why a bootstrap query issued
+	// under load misses with candidates:0 while the mock sits unread on disk.
+	//
+	// Derive it from this call's own window start instead, applying exactly the
+	// predicate mockmanager uses so the two cannot disagree: a zero or BaseTime
+	// AfterTime is "no window", anything else is a real start.
 	var firstWindowStart time.Time
 	if reader, ok := a.Proxy.(coreAgent.FirstWindowStartReader); ok {
 		firstWindowStart = reader.FirstTestWindowStart()
 	}
+	//
+	// Guarded on isWindowedProxy on purpose. This derivation is only valid where
+	// SetMocksWithWindow adopts this very same start as firstWindowStart later in
+	// this call (see MockManager.SetMocksWithWindow). A proxy implementing only
+	// the base agent.Proxy interface has neither the reader nor that adoption, so
+	// its reader value is permanently zero — without the guard the fallback would
+	// fire on EVERY window with the CURRENT window's start, collapsing
+	// "req < firstWindowStart" into "req < afterTime" and preserving every stale
+	// previous-test mock. That is exactly the cross-test bleed strict mode exists
+	// to prevent, and agentStrict is true on that path.
+	firstWindowStart = effectiveFirstWindowStart(isWindowedProxy, firstWindowStart, params.AfterTime)
 
 	// Load only what the filter will keep for this call (see loadPerTestMocks).
 	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, firstWindowStart)
@@ -1134,7 +1204,20 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
 
 	// Filter out deleted mocks if totalConsumedMocks is provided
-	if params.TotalConsumedMocks != nil {
+	if params.AgentOwnsConsumed {
+		// Agent applies filterOutDeleted from its OWN persistent consumption
+		// history — the client no longer re-sends the growing TotalConsumedMocks
+		// map. Equivalent by construction: that persistent map is the exact
+		// accumulation of the flagMockAsUsed states the client used to relay.
+		if reader, ok := a.Proxy.(coreAgent.ConsumedStateReader); ok {
+			filteredMocks = a.filterOutDeleted(filteredMocks, reader.GetPersistentConsumed())
+		} else if params.TotalConsumedMocks != nil {
+			// Proxy can't expose its persistent map — never silently skip the
+			// filter; fall back to any client-sent map.
+			a.logger.Warn("AgentOwnsConsumed set but proxy has no ConsumedStateReader; falling back to client-sent TotalConsumedMocks")
+			filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
+		}
+	} else if params.TotalConsumedMocks != nil {
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
 	}
 

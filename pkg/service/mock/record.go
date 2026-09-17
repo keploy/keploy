@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -15,11 +16,19 @@ import (
 )
 
 // mockDrainGrace bounds how long Record waits for the agent to hand over the
-// last few mocks after the wrapped runner has exited. The outgoing stream
-// closes when we cancel its context; this only guards against a mock whose
-// agent-side parse completes in the window between the runner exiting and the
-// stream tearing down.
+// last few mocks after the wrapped runner has exited.
 const mockDrainGrace = 5 * time.Second
+
+// mockDrainQuiet is how long the outgoing stream must stay silent before the
+// drain concludes the agent has handed over everything.
+//
+// The window it covers is small but real: the agent finishes parsing the last
+// dependency response, emits the mock, and it travels agent -> gob stream ->
+// CLI, while the CLI independently observes the wrapped runner exit. Measured
+// on a failing reproduction that gap ran to a median of 6.5ms and a maximum of
+// 22.8ms. 500ms is an order of magnitude of headroom on that, is paid once per
+// recording, and is bounded by mockDrainGrace above.
+const mockDrainQuiet = 500 * time.Millisecond
 
 // Record runs the wrapped test command and captures every outgoing dependency
 // call into the configured named mock set. It writes ONLY mocks (no incoming
@@ -54,13 +63,14 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 1. Instrument: start the agent, hooks and proxy in mock mode (no ingress
 	//    port relocation — the runner is not a server).
 	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
-		Container:   m.config.ContainerName,
-		CommandType: m.config.CommandType,
-		DockerDelay: m.config.BuildDelay,
-		BuildDelay:  m.config.BuildDelay,
-		Mode:        models.MODE_RECORD,
-		MockMode:    true,
-		ConfigPath:  m.config.ConfigPath,
+		Container:     m.config.ContainerName,
+		FromContainer: m.config.FromContainer,
+		CommandType:   m.config.CommandType,
+		DockerDelay:   m.config.BuildDelay,
+		BuildDelay:    m.config.BuildDelay,
+		Mode:          models.MODE_RECORD,
+		MockMode:      true,
+		ConfigPath:    m.config.ConfigPath,
 	}); err != nil {
 		if ctx.Err() != nil {
 			return nil
@@ -70,7 +80,29 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	// 2. Overwrite the named set in place: drop the previous mocks AND their
+	// 2. Docker compose inverts this function's normal order: arming the
+	//    capture (step 4) needs a live agent, but under compose the agent is a
+	//    service inside the compose project keploy generates, so it does not
+	//    exist until the wrapped `docker compose up` runs. startComposeApp
+	//    brings the project up and waits for the agent to answer; the app
+	//    itself stays parked at the agent's healthcheck until step 5 releases
+	//    it, so nothing it does escapes the capture. Its exit is collected at
+	//    step 7 instead of being started there.
+	//
+	//    Without this the run dialled an agent that was never started, failed
+	//    to arm the capture, and ended having recorded nothing — while the app
+	//    itself never came up at all.
+	composeAppExit, err := m.startComposeApp(ctx, errGrp)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		stopReason = "failed to bring up the keploy-agent compose service"
+		utils.LogError(m.logger, err, stopReason)
+		return fmt.Errorf("%s", stopReason)
+	}
+
+	// 3. Overwrite the named set in place: drop the previous mocks AND their
 	//    per-test mappings so the re-record is a clean rewrite, not an append.
 	//    mappings.yaml must be cleared alongside mocks.yaml: UpsertBatch merges
 	//    (unions) with what is on disk, so surviving entries from the previous
@@ -85,7 +117,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 	}
 
-	// 3. Arm the record proxy and stream captured mocks.
+	// 4. Arm the record proxy and stream captured mocks.
 	captureCtx, stopCapture := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopCapture()
 	outgoing, err := m.instrumentation.GetOutgoing(captureCtx, models.OutgoingOptions{
@@ -110,11 +142,16 @@ func (m *mockService) Record(ctx context.Context) error {
 	// scope-window correlation after the run can build mappings.yaml.
 	var recorded []capturedMock
 	mockCount := 0
+	// Bumped for every mock that arrives, whether or not it ends up persisted,
+	// and read by the drain below while the consumer is still running - hence
+	// atomic. mockCount stays a plain int: it is only read after consumerDone.
+	var mocksSeen atomic.Int64
 	consumerDone := make(chan struct{})
 	go func() {
 		defer utils.Recover(m.logger)
 		defer close(consumerDone)
 		for mk := range outgoing {
+			mocksSeen.Add(1)
 			mctx := &rec.MockContext{Mock: mk, TestSetID: name}
 			if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
 				m.logger.Debug("BeforeMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
@@ -138,7 +175,18 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 	}()
 
-	// 4. Optional record timer.
+	// 5. Release the compose app now that the capture is armed and draining.
+	//    This is the post-arm half of step 2 — see releaseComposeApp.
+	if err := m.releaseComposeApp(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		stopReason = "failed to release the app behind the keploy-agent healthcheck"
+		utils.LogError(m.logger, err, stopReason)
+		return fmt.Errorf("%s", stopReason)
+	}
+
+	// 6. Optional record timer.
 	if m.config.Mock.RecordTimer > 0 {
 		errGrp.Go(func() error {
 			m.logger.Info("recording will stop after " + m.config.Mock.RecordTimer.String())
@@ -151,16 +199,41 @@ func (m *mockService) Record(ctx context.Context) error {
 		})
 	}
 
-	// 5. Run the wrapped runner and block until it exits. Its exit — clean or
-	//    failing — is the NORMAL end of a mock recording, not an app crash.
-	appErr := m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+	// 7. Block until the wrapped runner exits. Its exit — clean or failing —
+	//    is the NORMAL end of a mock recording, not an app crash. Under
+	//    compose it was already started at step 2, so wait on that same exit
+	//    rather than starting it a second time.
+	//    A plain receive is the same wait the native branch does: Run returns
+	//    only once the app is fully down (its errgroup Wait is deferred), and
+	//    the sender is the goroutine running exactly that Run.
+	var appErr models.AppError
+	if composeAppExit != nil {
+		appErr = <-composeAppExit
+	} else {
+		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+	}
 
-	// 6. Stop capturing and drain the last mocks.
+	// 8. Drain the trailing mocks, THEN stop capturing.
+	//
+	// The order is the entire point. stopCapture() cancels the context the
+	// outgoing stream is built on (http.NewRequestWithContext in
+	// pkg/platform/http/agent.go), so cancelling first aborts the request, the
+	// decoder errors, the mock channel closes, and consumerDone fires in tens
+	// of microseconds. A grace period applied after that waits on an
+	// already-closed channel and does nothing at all - which is how a mock the
+	// agent had already written to the wire was still lost, silently, with the
+	// agent-side accounting reporting success.
+	//
+	// So wait for the stream to fall quiet before tearing it down. Quiescence
+	// rather than a fixed sleep: a sleep long enough to be safe would be paid
+	// in full by every recording, and one short enough not to hurt would still
+	// be a race. This returns as soon as the agent stops sending.
+	m.drainTrailingMocks(ctx, consumerDone, &mocksSeen)
 	stopCapture()
 	select {
 	case <-consumerDone:
 	case <-time.After(mockDrainGrace):
-		m.logger.Debug("timed out draining trailing mocks after runner exit")
+		m.logger.Debug("timed out waiting for the mock consumer to finish after teardown")
 	}
 
 	if ctx.Err() != nil { // user Ctrl+C
@@ -168,10 +241,12 @@ func (m *mockService) Record(ctx context.Context) error {
 		return nil
 	}
 
-	// 7. Correlate per-test scope windows into mappings.yaml (best-effort).
+	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
 	if m.mappingDB != nil {
 		if reader, ok := m.instrumentation.(ScopeReader); ok {
-			windows, werr := reader.GetScopeWindows(persistCtx)
+			scopeCtx, cancelScope := context.WithTimeout(persistCtx, agentEpilogueTimeout)
+			windows, werr := reader.GetScopeWindows(scopeCtx)
+			cancelScope()
 			if werr != nil {
 				m.logger.Debug("failed to read per-test scope windows; recording suite-level", zap.Error(werr))
 			} else if len(windows) > 0 {
@@ -187,7 +262,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 	}
 
-	// 8. Publish the set to the store (registry upload in enterprise; no-op on files).
+	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
 	if err := m.store.Push(persistCtx, name); err != nil {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
@@ -198,8 +273,8 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
 	}
 
-	// 9. Propagate the runner's exit code so a CI 're-record on merge' job fails
-	//    when the tests fail.
+	// 11. Propagate the runner's exit code so a CI 're-record on merge' job
+	//     fails when the tests fail.
 	m.propagateExit(appErr, "record")
 	return nil
 }
@@ -267,4 +342,38 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 		byTest[windows[best].Name] = append(byTest[windows[best].Name], models.MockEntry{Name: mk.name})
 	}
 	return byTest
+}
+
+// drainTrailingMocks blocks until the agent has evidently finished handing over
+// mocks: no new arrival for mockDrainQuiet, or the stream ended by itself, or
+// mockDrainGrace elapsed, or the user interrupted. It must be called BEFORE the
+// capture context is cancelled - see the call site.
+func (m *mockService) drainTrailingMocks(ctx context.Context, consumerDone <-chan struct{}, mocksSeen *atomic.Int64) {
+	deadline := time.After(mockDrainGrace)
+	quiet := time.NewTimer(mockDrainQuiet)
+	defer quiet.Stop()
+
+	last := mocksSeen.Load()
+	for {
+		select {
+		case <-consumerDone:
+			// The agent closed the stream on its own; nothing left to wait for.
+			return
+		case <-ctx.Done():
+			// Ctrl+C. Stop waiting and let the caller report what it has.
+			return
+		case <-deadline:
+			m.logger.Debug("timed out draining trailing mocks after runner exit",
+				zap.Int64("mocks_seen", mocksSeen.Load()))
+			return
+		case <-quiet.C:
+			if now := mocksSeen.Load(); now != last {
+				// Still arriving - reset and keep waiting.
+				last = now
+				quiet.Reset(mockDrainQuiet)
+				continue
+			}
+			return
+		}
+	}
 }

@@ -1056,7 +1056,15 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	// cost is bounded by the mock's own size and is acceptable vs.
 	// the alternative (encoding to bytes synchronously on every
 	// InsertMock, which would defeat the whole async-writer win).
-	job := gobWriteJob{mock: mock.DeepCopy(), testSetPath: mockPath, filename: mockFileName}
+	// Strip the runtime-only lifetime fields before they reach the encoder —
+	// gob ignores the json:"-" tags that keep them out of every other format.
+	// The reader clears them too (so existing files are repaired), but not
+	// writing them keeps the on-disk shape honest about what it means.
+	gobMock := mock.DeepCopy()
+	var zeroLifetime models.Lifetime
+	gobMock.TestModeInfo.Lifetime = zeroLifetime
+	gobMock.TestModeInfo.LifetimeDerived = false
+	job := gobWriteJob{mock: gobMock, testSetPath: mockPath, filename: mockFileName}
 	select {
 	case ys.gobQueue <- job:
 		ys.gobLifecycleMu.Unlock()
@@ -1356,6 +1364,24 @@ func readGobMocks(path string) ([]*models.Mock, error) {
 			}
 			return out, fmt.Errorf("decode gob mock: %w", err)
 		}
+		// Lifetime and LifetimeDerived are RUNTIME-ONLY (models.Mock tags them
+		// json:"-" bson:"-" and says persisting them would create a second
+		// source of truth). encoding/gob ignores struct tags, so a gob file
+		// carries whatever the recorder stamped — and DeriveLifetime then
+		// short-circuits on the reloaded flag instead of re-deriving.
+		//
+		// The effect is that the SAME recording replays into a different tier
+		// depending on the storage format: gob keeps the recorder's per-test
+		// tag, while yaml drops it and the lax kind-fallback promotes the mock
+		// to session. A call two tests depend on is then consumed by the first
+		// and missing for the second — a CPU-optimisation knob silently
+		// changing replay semantics.
+		//
+		// Clearing on READ (not just on write) also repairs the recordings
+		// already on disk.
+		var zeroLifetime models.Lifetime
+		m.TestModeInfo.Lifetime = zeroLifetime
+		m.TestModeInfo.LifetimeDerived = false
 		out = append(out, &m)
 	}
 }

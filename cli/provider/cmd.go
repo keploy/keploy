@@ -121,7 +121,7 @@ Usage:{{if .Runnable}}
   {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
 
 Aliases:
-  {{.NameAndAliases}}{{end}}{{if .HasExample}}
+  {{.NameAndAliases}}{{end}}{{if .HasAvailableSubCommands}}
 
 Available Commands:{{range .Commands}}{{if .IsAvailableCommand}}
   {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableFlags}}
@@ -168,9 +168,17 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//sets the displayment of flag-related errors
 	cmd.SilenceErrors = true
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		PrintLogo(os.Stdout, true)
-		color.Red(fmt.Sprintf("❌ error: %v", err))
-		fmt.Println()
+		// Through the logger's sink, not color.Red's own os.Stdout. This is an
+		// error path with a non-zero exit, so nothing downstream would parse
+		// the corrupted document anyway — but the stdout/stderr split is only
+		// one mechanism if every writer honours it, and a suppression list
+		// that each new console print has to remember to join is exactly how
+		// `--format json|junit` came to print the logo over its own NDJSON.
+		PrintLogo(log.PrimarySink(), true)
+		// "%s\n\n" reproduces color.Red's own trailing newline plus the
+		// fmt.Println() that used to follow it, so the rendered text is
+		// unchanged — only its destination moved.
+		fmt.Fprintf(log.PrimarySink(), "%s\n\n", color.RedString("❌ error: %v", err))
 		return err
 	})
 
@@ -208,6 +216,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
+		// The overwrite consent, as a flag. Without one, the only way past
+		// the "it already exists" prompt was to answer it -- and in CI there
+		// is nobody to answer, so `config --generate` quietly wrote nothing
+		// and exited 0. Named to match `config defaults -o FILE --force`.
+		cmd.Flags().Bool("force", false, "Overwrite an existing keploy.yml without asking")
 	case "templatize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringSliceP("testsets", "t", c.cfg.Templatize.TestSets, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
@@ -268,7 +281,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
-		cmd.Flags().String("format", "text", "Output format for test report (text or junit)")
+		cmd.Flags().String("format", "text", "Output format for test report: text (default), junit, or json. json emits NDJSON — one JSON object per test result, machine-readable, with a stable schema_version. junit and json write their document to stdout and every log line to stderr, so `keploy report --format json | jq` parses. Also settable as `report.format` in keploy.yml (this flag wins); an invalid value in the config is warned about and falls back to text, an invalid value on this flag is an error. Distinct from the global --json (whole-report blob) and from --storage-format (on-disk serialization).")
 	case "diff":
 		cmd.Flags().String("run1", "", "First test run ID to compare")
 		cmd.Flags().String("run2", "", "Second test run ID to compare")
@@ -359,9 +372,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB).")
 		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recorder-to-parser hand-off channel (default 1024).")
 		cmd.Flags().Duration("consumer-stall-grace", c.cfg.Record.RecordBuffer.ConsumerStallGrace, "How long a closing connection waits on a parser that has stopped draining before abandoning its queued chunks (default 2s).")
+		cmd.Flags().Duration("half-close-grace", c.cfg.Record.RecordBuffer.HalfCloseGrace, "How long a half-closed connection keeps copying the other direction while it is IDLE, before giving up (default 10s). Every forwarded chunk re-arms it, so a peer that is still answering is never cut off. Negative disables half-close and restores tearing both directions down on the first EOF.")
 		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
 		_ = cmd.Flags().MarkHidden("queue-size")
 		_ = cmd.Flags().MarkHidden("consumer-stall-grace")
+		_ = cmd.Flags().MarkHidden("half-close-grace")
 
 	default:
 		return errors.New("unknown command name")
@@ -398,6 +413,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB). Bump if you see per_conn_cap drops.")
 		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recorder-to-parser hand-off channel (default 1024). Does not bound recording; raise max-memory-per-conn for per_conn_cap drops.")
 		cmd.Flags().Duration("consumer-stall-grace", c.cfg.Record.RecordBuffer.ConsumerStallGrace, "How long a closing connection waits on a parser that has stopped draining before abandoning its queued chunks (default 2s). Bounds stalled time, not elapsed time, and is only consulted after close.")
+		cmd.Flags().Duration("half-close-grace", c.cfg.Record.RecordBuffer.HalfCloseGrace, "How long a half-closed connection keeps copying the other direction while it is IDLE, before giving up (default 10s). Every forwarded chunk re-arms it, so a peer that is still answering is never cut off. Negative disables half-close and restores tearing both directions down on the first EOF.")
 		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
 		_ = cmd.Flags().MarkHidden("queue-size")
 		_ = cmd.Flags().MarkHidden("consumer-stall-grace")
@@ -409,7 +425,10 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32("sse-port", c.cfg.Test.SSEPort, "Custom SSE port to replace the actual port in the SSE testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 		cmd.Flags().String("health-url", c.cfg.Test.HealthURL, "HTTP(S) URL polled before the first test is fired; first 2xx response proceeds immediately. Empty (default) preserves the fixed --delay behavior.")
-		cmd.Flags().Duration("health-poll-timeout", c.cfg.Test.HealthPollTimeout, "Ceiling for --health-url polling (e.g. 60s, 2m). If no 2xx is seen within this window, replay logs an info message and falls back to --delay.")
+		cmd.Flags().String("health-path", c.cfg.Test.HealthPath, "Request path polled on the address the recorded tests actually dial, before the first test is fired — e.g. /health. Needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready. Ignored when --health-url is set (that takes precedence). Empty (default) uses a keploy-reserved probe path.")
+		cmd.Flags().String("health-scheme", c.cfg.Test.HealthScheme, "Override the scheme for --health-path probing (http or https). Empty (default) uses the scheme the recorded tests dial. Ignored when --health-url is set.")
+		cmd.Flags().Bool("disable-app-ready-probe", c.cfg.Test.DisableAppReadyProbe, "Turn off every address-based readiness probe before the first test (the docker/compose published-port gates, --app-ready-probe-addr, and the recorded-target fallback), plus the reset-resend readiness re-gate. Use when a connect-then-close probe is destructive in your environment — notably an app reached through `kubectl port-forward`, where probing can tear the forward down. --health-url is unaffected. Replay falls back to the fixed --delay.")
+		cmd.Flags().Duration("health-poll-timeout", c.cfg.Test.HealthPollTimeout, "Ceiling for every pre-test readiness gate — --health-url, --health-path and the automatic docker/compose port gates (e.g. 60s, 3m). Only ever paid by an app that is not yet serving; a ready app satisfies the gate on the first probe. On timeout replay warns and fires anyway.")
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
@@ -444,9 +463,16 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
+		cmd.Flags().Bool("mock-noise-detection", c.cfg.Test.MockNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared mock-noise adapter")
+		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter")
 		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared schema-noise adapter")
 		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared schema-noise adapter. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
 		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping (default behaviour demotes such cases to OBSOLETE). The per-test mappingDiff block is still written for diagnostics.")
+		// Default false is deliberate: today an expected-but-unconsumed mock
+		// demotes the test to OBSOLETE without failing the test set, so
+		// defaulting this true would flip existing suites red on upgrade.
+		// See keploy-consumer-design-v2.md §5 (false-pass row 0) and §7 slice 4.
+		cmd.Flags().Bool("assert-dependencies", c.cfg.Test.AssertDependencies, "Fail a test whose recorded per-test dependency was NOT observed during that test's window (an expected, mapped, non-reusable-tier mock went unconsumed): FAILED status, failed test set, non-zero exit. Default false — such a test is demoted to OBSOLETE today and the run still exits 0. Unlike --strict-failure (which promotes only tests whose RESPONSE also failed) this catches the response-matched-but-dependency-vanished case. ELIGIBILITY: only per-test-tier mocks are asserted; untagged HTTP/Postgres/MySQL egress is session-tier and is excluded, so for such a recording nothing is eligible and every test reports dependencies_checked=false (NOT CHECKED, not clean). keploy logs one warning per test set naming the reason whenever the assertion cannot run. Full contract: the assertDependencies doc in config.")
 		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
 		// Start the user app ONCE for the whole replay run instead of
 		// restarting it per test-set. Required to surface cross-test-set
@@ -494,12 +520,14 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"cmdType":                   "cmd-type",
 		"buildDelay":                "build-delay",
 		"containerName":             "container-name",
+		"fromContainer":             "from-container",
 		"networkName":               "network-name",
 		"passThroughPorts":          "pass-through-ports",
 		"memoryLimit":               "memory-limit",
 		"maxMemoryPerConnection":    "max-memory-per-conn",
 		"queueSize":                 "queue-size",
 		"consumerStallGrace":        "consumer-stall-grace",
+		"halfCloseGrace":            "half-close-grace",
 		"appId":                     "app-id",
 		"appName":                   "app-name",
 		"generateGithubActions":     "generate-github-actions",
@@ -514,7 +542,10 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployNetwork":             "keploy-network",
 		"recordTimer":               "record-timer",
 		"healthUrl":                 "health-url",
+		"healthPath":                "health-path",
+		"healthScheme":              "health-scheme",
 		"healthPollTimeout":         "health-poll-timeout",
+		"disableAppReadyProbe":      "disable-app-ready-probe",
 		"urlMethods":                "url-methods",
 		"inCi":                      "in-ci",
 		"protoFile":                 "proto-file",
@@ -524,6 +555,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"disableMapping":            "disable-mapping",
 		"compareAll":                "compare-all",
 		"schemaMatch":               "schema-match",
+		"mockNoiseDetection":        "mock-noise-detection",
+		"mockNoiseStrict":           "mock-noise-strict",
 		"schemaNoiseDetection":      "schema-noise-detection",
 		"schemaNoiseStrict":         "schema-noise-strict",
 		"updateTestMapping":         "update-test-mapping",
@@ -760,6 +793,15 @@ func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configu
 		// against, so `--cmd-type Docker-Compose` is not a fatal typo.
 		explicit := strings.ToLower(strings.TrimSpace(configured))
 		switch kind := utils.CmdType(explicit); kind {
+		case utils.FromContainer:
+			// --from-container is registered on the mock subcommands only, so
+			// on record/test this value names a mode the caller has no way to
+			// supply a container for. Refuse it where it cannot work rather
+			// than resolving to a kind that fails later without saying why.
+			if cmd.Flags().Lookup("from-container") == nil {
+				return "", fmt.Errorf("--cmd-type %s is only supported by `keploy mock record` and `keploy mock replay`", utils.FromContainer)
+			}
+			return explicit, nil
 		case utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose:
 			// docker-run and docker-start need to REWRITE the command —
 			// SetupDocker splices `--pid=container:…  --network=container:…`
@@ -794,8 +836,8 @@ func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configu
 			return string(utils.FindDockerCmd(command)), nil
 		default:
 			return "", fmt.Errorf(
-				"invalid --cmd-type value %q: allowed values are %q, %q, %q, and %q",
-				configured, utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose)
+				"invalid --cmd-type value %q: allowed values are %q, %q, %q, %q, and %q",
+				configured, utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose, utils.FromContainer)
 		}
 	}
 
@@ -803,7 +845,8 @@ func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configu
 	// Only warn when it would actually have made a difference. A config that
 	// merely agrees with auto-detection is not being ignored in any way the
 	// user can observe, and warning on every such run would be noise.
-	if kind := utils.CmdType(strings.ToLower(strings.TrimSpace(configured))); utils.IsDockerCmd(kind) && kind != detected {
+	if kind := utils.CmdType(strings.ToLower(strings.TrimSpace(configured))); utils.IsDockerCmd(kind) &&
+		kind != utils.FromContainer && kind != detected {
 		logger.Warn("cmdType in the config file is not honoured; pass --cmd-type on the command line instead",
 			zap.String("cmdType", configured),
 			zap.String("using", string(detected)),
@@ -811,6 +854,115 @@ func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configu
 	}
 	return string(detected), nil
 }
+
+// reportFormatSource says where the effective --format value came from, so the
+// two callers can react differently to an invalid one: a value the user typed
+// is a mistake worth stopping for, a stale value in keploy.yml is not.
+type reportFormatSource int
+
+const (
+	// reportFormatFromNone: this command has no report format at all.
+	reportFormatFromNone reportFormatSource = iota
+	// reportFormatFromFlag: --format was explicitly passed.
+	reportFormatFromFlag
+	// reportFormatFromConfig: the value came from keploy.yml /
+	// KEPLOY_REPORT_FORMAT.
+	reportFormatFromConfig
+	// reportFormatFromDefault: the flag's own default.
+	reportFormatFromDefault
+)
+
+// resolvedReportFormat returns the EFFECTIVE `keploy report --format` value
+// for this invocation — normalised (lower-cased, trimmed) but deliberately NOT
+// validated — together with where it came from.
+//
+// Precedence mirrors every other keploy setting: an explicitly passed flag
+// wins, otherwise the value PreProcessFlags already resolved from keploy.yml /
+// KEPLOY_REPORT_FORMAT, otherwise the flag's own default.
+//
+// cfgFormat is the config-resolved value (c.cfg.Report.Format). It has to be
+// consulted HERE and not only in the report arm: the two decisions that keep
+// stdout clean happen at the top of ValidateFlags, so a user with
+// `report: {format: json}` in keploy.yml would otherwise get the logo, the
+// version line and every zap record on stdout ahead of their NDJSON.
+//
+// Scoped to `keploy report` by NAME as well as by flag presence. Only that
+// command's stdout is a report document, and only it registers --format in the
+// OSS tree — but cli/provider is shared with the enterprise binary, where any
+// command that later grows an unrelated --format flag whose value happens to
+// be "json" or "junit" would otherwise silently suppress its logo and push its
+// logs to stderr. The keploy.yml `report.format` key is scoped the same way:
+// for `keploy test` the answer is "" even when the config carries a format.
+func resolvedReportFormat(cmd *cobra.Command, cfgFormat string) (string, reportFormatSource) {
+	if cmd.Name() != reportCmdName || cmd.Flags().Lookup("format") == nil {
+		return "", reportFormatFromNone
+	}
+	if !cmd.Flags().Changed("format") {
+		if v := strings.ToLower(strings.TrimSpace(cfgFormat)); v != "" {
+			return v, reportFormatFromConfig
+		}
+	}
+	format, err := cmd.Flags().GetString("format")
+	if err != nil {
+		return "", reportFormatFromNone
+	}
+	source := reportFormatFromDefault
+	if cmd.Flags().Changed("format") {
+		source = reportFormatFromFlag
+	}
+	return strings.ToLower(strings.TrimSpace(format)), source
+}
+
+// validateReportFormat resolves --format and applies the SOURCE-DEPENDENT
+// failure policy.
+//
+// A value the user typed is a mistake worth stopping for: they asked for
+// something keploy cannot produce, and silently giving them a text report
+// instead is worse than an error.
+//
+// A value sitting in keploy.yml is not. `report.format` ships in every
+// generated keploy.yml and was DEAD until this release, so anyone who set it
+// wrong got no feedback that it was wrong — exactly the population that would
+// be upgraded into a hard exit 1 on a command that used to work, with an error
+// naming a flag they never passed. One WARN naming the file, then text.
+func (c *CmdConfigurator) validateReportFormat(cmd *cobra.Command) error {
+	format, source := resolvedReportFormat(cmd, c.cfg.Report.Format)
+	if format == "" {
+		format = config.ReportFormatText
+	}
+	switch format {
+	case config.ReportFormatText, config.ReportFormatJUnit, config.ReportFormatJSON:
+		c.cfg.Report.Format = format
+		return nil
+	}
+	if source == reportFormatFromConfig {
+		c.logger.Warn("ignoring invalid report.format in the keploy config file; falling back to text",
+			zap.String("value", format),
+			zap.String("allowed", "text, junit, json"))
+		c.cfg.Report.Format = config.ReportFormatText
+		return nil
+	}
+	return fmt.Errorf("invalid --format value %q: allowed values are 'text', 'junit' and 'json'", format)
+}
+
+// isMachineReadableOutput reports whether this invocation's STDOUT is a
+// machine-readable document that must not be polluted with the logo, the
+// version line or zap records.
+//
+// Two independent sources say so:
+//   - the global --json flag (already resolved into jsonOutput by the caller);
+//   - `keploy report --format json|junit`, whose stdout is NDJSON / JUnit XML.
+func isMachineReadableOutput(cmd *cobra.Command, cfgFormat string, jsonOutput bool) bool {
+	if jsonOutput {
+		return true
+	}
+	format, _ := resolvedReportFormat(cmd, cfgFormat)
+	return config.IsMachineReportFormat(format)
+}
+
+// reportCmdName is the only command whose stdout is a report document, and so
+// the only one whose --format value can make stdout machine-readable.
+const reportCmdName = "report"
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	// The --json flag isn't registered on every subcommand (record / agent
@@ -828,8 +980,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	}
 	c.cfg.JSONOutput = jsonOutput
 
-	// In JSON mode, redirect logs to stderr so they don't contaminate JSON on stdout
-	if c.cfg.JSONOutput {
+	// --format has to be read HERE, next to --json, not in the `report` arm
+	// several hundred lines below: the two decisions that keep stdout clean
+	// (redirect the logger to stderr, suppress the logo + version line)
+	// happen right now. Gating them on --json alone left
+	// `keploy report --format json|junit` writing the ANSI logo, the
+	// "version: <v>" line and every zap INFO record onto stdout ahead of the
+	// document, so `keploy report --format json 2>/dev/null | jq` could never
+	// parse. --format is still VALIDATED in the report arm; this read is
+	// deliberately permissive so an invalid value falls through to that
+	// error path rather than being rejected twice.
+	machine := isMachineReadableOutput(cmd, c.cfg.Report.Format, c.cfg.JSONOutput)
+
+	// Machine-readable stdout: send logs to stderr so they can't contaminate
+	// the document. RedirectToStderr also moves the package-level sink, so a
+	// later logger rebuild (--debug, --disable-ansi, agent mode) cannot put
+	// them back on stdout.
+	if machine {
 		logger, err := log.RedirectToStderr()
 		if err == nil {
 			*c.logger = *logger
@@ -838,8 +1005,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
-	if cmd.Name() != "agent" && !c.cfg.JSONOutput {
-		PrintLogo(os.Stdout, disableAnsi)
+	if cmd.Name() != "agent" && !machine {
+		PrintLogo(log.PrimarySink(), disableAnsi)
 	}
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
@@ -1025,22 +1192,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Report.TestCaseIDs = cleaned
 
-		format, err := cmd.Flags().GetString("format")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get the format flag")
-			return errors.New("failed to get the format flag")
+		// Resolved, not read raw: an unconditional overwrite from the flag
+		// clobbered whatever PreProcessFlags had loaded from keploy.yml, so
+		// the `report.format` yaml/mapstructure key was silently dead. Same
+		// resolver the stdout-cleanliness decision at the top of this function
+		// uses, so the two can never disagree about which format is in effect.
+		if err := c.validateReportFormat(cmd); err != nil {
+			return err
 		}
-		format = strings.ToLower(strings.TrimSpace(format))
-		if format == "" {
-			format = "text"
-		}
-		switch format {
-		case "text", "junit":
-			// valid
-		default:
-			return fmt.Errorf("invalid --format value %q: allowed values are 'text' and 'junit'", format)
-		}
-		c.cfg.Report.Format = format
 	case "diff":
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
@@ -1334,6 +1493,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if err := c.resolveRecordBufferDuration(cmd, "consumer-stall-grace", "KEPLOY_RECORD_CONSUMER_STALL_GRACE", &c.cfg.Record.RecordBuffer.ConsumerStallGrace); err != nil {
 				return err
 			}
+			if err := c.resolveRecordBufferDuration(cmd, "half-close-grace", "KEPLOY_RECORD_HALF_CLOSE_GRACE", &c.cfg.Record.RecordBuffer.HalfCloseGrace); err != nil {
+				return err
+			}
 
 			// Cross-check: a single connection's recording buffer must
 			// not exceed the docker container's memory limit. Otherwise
@@ -1405,11 +1567,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
-			c.cfg.Test.SchemaNoiseDetection, err = cmd.Flags().GetBool("schema-noise-detection")
-			if err != nil {
-				errMsg := "failed to read the --schema-noise-detection flag; check the flag name with --help and confirm this command supports it"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			// Both spellings are read and OR-ed. --schema-noise-* is the
+			// deprecated name kept working for existing scripts and CI jobs;
+			// --mock-noise-* is canonical. Neither can express "explicitly
+			// off" as distinct from "unset", so OR-ing loses nothing and means
+			// a user who passes either one gets the behaviour they asked for.
+			//
+			// Both are guarded on Changed||!IsSet for the same reason strict
+			// below is: AddFlags captured each flag's default from a ZERO
+			// config, and viper.Unmarshal fills c.cfg from keploy.yml only
+			// afterwards. An unguarded read therefore overwrites a yaml-only
+			// value with the flag's stale default — so `test.schemaNoise-
+			// Detection: true` in keploy.yml silently stopped working. That was
+			// already true of the deprecated key before this change; fixing it
+			// here because a rename whose whole claim is "your existing
+			// keploy.yml keeps working" cannot ship with that hole open.
+			if cmd.Flags().Changed("schema-noise-detection") || !viper.IsSet("test.schemaNoiseDetection") {
+				c.cfg.Test.SchemaNoiseDetection, err = cmd.Flags().GetBool("schema-noise-detection")
+				if err != nil {
+					errMsg := "failed to read the --schema-noise-detection flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+			if cmd.Flags().Changed("mock-noise-detection") || !viper.IsSet("test.mockNoiseDetection") {
+				c.cfg.Test.MockNoiseDetection, err = cmd.Flags().GetBool("mock-noise-detection")
+				if err != nil {
+					errMsg := "failed to read the --mock-noise-detection flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 			}
 
 			// Only let the flag override when it was explicitly passed or
@@ -1424,6 +1611,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 			}
+			if cmd.Flags().Changed("mock-noise-strict") || !viper.IsSet("test.mockNoiseStrict") {
+				c.cfg.Test.MockNoiseStrict, err = cmd.Flags().GetBool("mock-noise-strict")
+				if err != nil {
+					errMsg := "failed to read the --mock-noise-strict flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+			// Reconcile once, here, so every later reader sees one answer
+			// regardless of which spelling the user or their keploy.yml used.
+			c.cfg.Test.NormalizeMockNoise()
 
 			// enforce that the test-sets are provided when --must-pass is set to true
 			// to prevent accidental deletion of failed testcases in testsets which was due to application changes
@@ -1794,6 +1992,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if err := c.resolveRecordBufferDuration(cmd, "consumer-stall-grace", "KEPLOY_RECORD_CONSUMER_STALL_GRACE", &c.cfg.Record.RecordBuffer.ConsumerStallGrace); err != nil {
 			return err
 		}
+		if err := c.resolveRecordBufferDuration(cmd, "half-close-grace", "KEPLOY_RECORD_HALF_CLOSE_GRACE", &c.cfg.Record.RecordBuffer.HalfCloseGrace); err != nil {
+			return err
+		}
 
 		// Cross-check: max-memory-per-conn must not exceed the agent's
 		// memory limit. --memory-limit (Agent.MemoryLimit in MB) is what
@@ -1930,7 +2131,6 @@ func bytesToMBCeil(b uint64) uint64 {
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
-	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {
@@ -1946,10 +2146,13 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg confi
 	}
 
 	configFilePath := filepath.Join(c.cfg.ConfigPath, "keploy.yml")
-	err = toolSvc.CreateConfig(ctx, configFilePath, string(configDataBytes))
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to create config file")
-		return errors.New("failed to create config file")
+	// "based on the flags that are used" -- so the file holds the flags that
+	// were used, not the defaults that were not.
+	if err := tools.WriteMinimalConfig(c.logger, configFilePath, string(configDataBytes)); err != nil {
+		// Wrapped, not replaced: a caller that cannot see EACCES or ENOSPC
+		// cannot tell the user which of them it was, and this used to throw
+		// the cause away AND stop logging it.
+		return fmt.Errorf("failed to create config file at %s: %w", configFilePath, err)
 	}
 	c.logger.Info("Generated config file based on the flags that are used")
 	return nil
@@ -1978,8 +2181,9 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	cmd.Flags().StringP("command", "c", c.cfg.Command, "Command that runs your test suite, e.g. \"pytest\" or \"go test ./...\"")
 	cmd.Flags().StringP("path", "p", ".", "Path to the local directory where the mock set is stored (keploy/<name>/)")
 	cmd.Flags().String("name", c.cfg.Mock.Name, "Name of the mock set to record into / replay from (default \"default\")")
-	cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker-run/docker-start/docker-compose)")
+	cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker-run/docker-start/docker-compose/from-container)")
 	cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container (docker/compose runs)")
+	cmd.Flags().String("from-container", c.cfg.FromContainer, "Record against an already-running container: keploy re-creates it under its own namespaces. Replaces -c")
 	cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 	cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "Time to wait for a docker container to build")
 	cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy to intercept outgoing calls")
@@ -2008,9 +2212,38 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return err
 	}
 	c.cfg.CommandType = commandType
-	if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) &&
-		!(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
-		return fmt.Errorf("a native command is not supported on OS %s/%s for `keploy mock`; on macOS run your tests through a docker command (e.g. -c \"docker compose run tests\")", runtime.GOOS, runtime.GOARCH)
+	// --from-container IS the command type. Nothing can detect it: detection
+	// reads the command string, and this mode has none. Refuse a contradicting
+	// --cmd-type rather than silently picking one, because the two disagree
+	// about something as load-bearing as whether a shell runs at all.
+	// Only the FLAG implies the kind, never a config-file value. The privilege
+	// decision is taken from raw argv before cobra parses anything
+	// (ShouldReexecWithSudo), so a fromContainer that exists only in keploy.yml
+	// would start the run unprivileged and die writing perf_event_paranoid -
+	// the same trap documented for cmdType above. Refusing it is the honest
+	// answer; silently honouring it is how that bug was shipped the first time.
+	if c.cfg.FromContainer != "" && !cmd.Flags().Changed("from-container") {
+		return fmt.Errorf("fromContainer in the config file is not honoured; pass --from-container on the command line instead")
+	}
+	if c.cfg.FromContainer != "" {
+		if cmd.Flags().Changed("cmd-type") && utils.CmdType(c.cfg.CommandType) != utils.FromContainer {
+			return fmt.Errorf("--from-container implies --cmd-type %s, but %q was given", utils.FromContainer, c.cfg.CommandType)
+		}
+		c.cfg.CommandType = string(utils.FromContainer)
+	} else if utils.CmdType(c.cfg.CommandType) == utils.FromContainer {
+		return fmt.Errorf("--cmd-type %s needs --from-container to name the container to record against", utils.FromContainer)
+	}
+	// Ask the same extension point `record`/`test` use (see the identical check
+	// above in validateFlags). This literal was copied here from the record path
+	// as it stood BEFORE that check became nativeCommandSupportedHere(), so it
+	// never learned about the native backends a wrapping build registers —
+	// macOS (DYLD shim) and Windows. The result was that `keploy record` ran
+	// natively on darwin while `keploy mock` refused, on the same binary.
+	if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !nativeCommandSupportedHere() {
+		// Retrying cannot help — the command shape has to change — so give the
+		// caller a code that says so rather than a generic 1.
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return fmt.Errorf("a native command is not supported on OS %s/%s for `keploy mock`; run your tests through a docker command instead (e.g. -c \"docker compose run tests\")", runtime.GOOS, runtime.GOARCH)
 	}
 
 	// Resolve the keploy folder path.
@@ -2034,10 +2267,29 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		}
 	}
 
-	if c.cfg.Command == "" {
+	// -c and --from-container are alternatives: one names a command to run, the
+	// other an already-running container to re-create. Exactly one is required,
+	// and accepting both would leave it ambiguous which one actually ran.
+	// Decided on what the USER passed, not on the resolved config: `keploy
+	// record` writes the command back into keploy.yml, so in any project that
+	// has recorded once viper has already populated cfg.Command - and reading
+	// that as "you passed -c" would make --from-container permanently
+	// unusable there, with an error about two flags the user only passed one of.
+	passedCommand := cmd.Flags().Changed("command")
+	passedFromContainer := cmd.Flags().Changed("from-container")
+	if passedFromContainer && !passedCommand {
+		// The flag wins over a stale command in the config file.
+		c.cfg.Command = ""
+	}
+	switch {
+	case passedCommand && passedFromContainer:
+		utils.LogError(c.logger, nil, "both -c and --from-container were given")
+		return errors.New("-c and --from-container are alternatives: pass one, not both")
+	case c.cfg.Command == "" && c.cfg.FromContainer == "":
 		utils.LogError(c.logger, nil, "missing required -c flag or command in config file")
 		c.logger.Info(`Example usage: keploy mock record -c "pytest"`)
-		return errors.New("command is required for keploy mock")
+		c.logger.Info(`          or: keploy mock record --from-container my-app`)
+		return errors.New("either a command (-c) or --from-container is required for keploy mock")
 	}
 
 	// Pass-through ports.

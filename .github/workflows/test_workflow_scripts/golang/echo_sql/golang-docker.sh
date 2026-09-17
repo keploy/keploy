@@ -9,12 +9,18 @@ docker_build_retry docker compose build
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
 
-# Generate the keploy-config file.
-$RECORD_BIN config --generate
-
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"ts":[]}}
+KEPLOY_CFG
 
 container_kill() {
     REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
@@ -55,7 +61,6 @@ send_request(){
     container_kill
     wait
 }
-
 
 do_record_iteration() {
     local i="$1"

@@ -1,4 +1,7 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # E2E for STREAMING mock-mismatch reporting. Uses the sse-redis sample, whose
 # streaming endpoints (SSE / NDJSON / multipart / plain-text) are served from
@@ -38,6 +41,7 @@ rm -rf keploy/
 rm -f record_logs.txt test_logs.txt
 
 # Redis backing store for the sample's streaming endpoints.
+docker_compose_pull_retry
 docker compose up -d
 echo "waiting for redis..."
 for i in $(seq 1 30); do
@@ -48,28 +52,12 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-build_go_app() {
-  local attempt=1
-  local max_attempts=4
-  local sleep_sec=5
-  while [ "$attempt" -le "$max_attempts" ]; do
-    if GOPROXY="proxy.golang.org,direct" go build -o sse-redis-app; then
-      return 0
-    fi
-    if [ "$attempt" -ge "$max_attempts" ]; then
-      echo "::error::go build for sse-redis-app failed after ${max_attempts} attempts"
-      return 1
-    fi
-    echo "go build attempt ${attempt} failed; retrying in ${sleep_sec}s…"
-    sleep "$sleep_sec"
-    sleep_sec=$((sleep_sec * 2))
-    attempt=$((attempt + 1))
-  done
-}
-build_go_app
+go_retry build -o sse-redis-app
 echo "go binary built"
 
-sudo "$RECORD_BIN" config --generate
+# The step above removed any config, so this always generates; the guard is
+# here so the line stays correct if that removal is ever dropped.
+[ -f keploy.yml ] || sudo "$RECORD_BIN" config --generate
 
 send_request() {
     sleep 6

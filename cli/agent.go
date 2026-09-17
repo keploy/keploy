@@ -118,7 +118,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 						logger.Info("running as a Kubernetes DaemonSet agent; not starting the control-plane HTTP server (push architecture has no inbound HTTP consumers)")
 						return
 					}
-					routes.StartAgentServer(ctx, logger, p, router)
+					routes.StartAgentServer(ctx, logger, p, isDocker, router)
 				}
 			}()
 

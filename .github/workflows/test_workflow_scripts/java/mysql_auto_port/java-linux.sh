@@ -44,6 +44,8 @@
 
 set -Eeuo pipefail
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+
 MYSQL_PORT=3307
 # The port the application is pointed at for the SECOND replay, to simulate an
 # environment whose database endpoint differs from the one that was recorded.
@@ -64,17 +66,23 @@ die() {
 trap die ERR
 
 # mysql_auto_detect_supported: true when this binary ships automatic
-# MySQL port detection. Probed via the generated default config, which
-# only carries the disableMysqlAutoDetect key on binaries that have the
-# feature. Generated into a throwaway dir so the sample's own keploy.yml
-# is never touched.
+# MySQL port detection. Probed by asking the binary to print its DEFAULTS,
+# which list every setting it knows -- `config --generate` no longer answers
+# this question, because it now writes only the settings that DIFFER from the
+# defaults and disableMysqlAutoDetect is one of them. A binary too old for
+# `config defaults` is also too old for the feature, so its failure is the
+# right answer; the generated-config fallback keeps the cross-version cells
+# honest against binaries older than both changes.
 mysql_auto_detect_supported() {
   local bin="$1"
-  local probe_dir
+  "$bin" config defaults 2>/dev/null | grep -q "disableMysqlAutoDetect" && return 0
+  local probe_dir rc=1
   probe_dir=$(mktemp -d)
-  ( cd "$probe_dir" && "$bin" config --generate >/dev/null 2>&1 ) || { rm -rf "$probe_dir"; return 1; }
-  local rc=1
-  grep -q "disableMysqlAutoDetect" "$probe_dir/keploy.yml" 2>/dev/null && rc=0
+  # No guard here: probe_dir is a fresh mktemp, so there is never a config in
+  # the way -- and a `[ -f keploy.yml ]` test would have asked about the
+  # REPOSITORY's, which is a different directory entirely.
+  ( cd "$probe_dir" && "$bin" config --generate >/dev/null 2>&1 ) \
+    && grep -q "disableMysqlAutoDetect" "$probe_dir/keploy.yml" 2>/dev/null && rc=0
   rm -rf "$probe_dir"
   return "$rc"
 }
@@ -229,7 +237,7 @@ if ! mysql_auto_detect_supported "${RECORD_BIN:-keploy}" \
   if [[ "${REQUIRE_MYSQL_AUTO_DETECT:-}" == "true" ]]; then
     echo "::error::both binaries are built from this commit, yet the capability probe"
     echo "::error::reports no automatic MySQL port detection. Either the feature"
-    echo "::error::regressed, or 'keploy config --generate' no longer emits"
+    echo "::error::regressed, or 'keploy config defaults' no longer lists"
     echo "::error::disableMysqlAutoDetect. Not skipping — this cell must assert."
     exit 1
   fi
@@ -245,6 +253,7 @@ sudo rm -rf keploy/ keploy.yml
 relocate_mysql_port
 
 section "Start MySQL"
+docker_compose_pull_retry
 docker compose up -d
 wait_for_mysql
 endsec

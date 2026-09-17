@@ -10,6 +10,8 @@ import (
 	"net"
 	nhttp "net/http"
 	"strings"
+
+	"go.keploy.io/server/v3/pkg/neterr"
 )
 
 // UpstreamErrorMarker is a response header the recorder adds when it
@@ -71,6 +73,17 @@ func classifyUpstreamError(err error) (status int, reason, marker string) {
 	// Connection-refused / reset / host-unreachable fall into a generic 502
 	// with a more specific marker so post-hoc analysis can pivot by error
 	// class.
+	//
+	// Classified by errno first. The string forms below are Linux renderings:
+	// Windows says "connectex: No connection could be made because the target
+	// machine actively refused it" and "wsarecv: An existing connection was
+	// forcibly closed by the remote host", so a Windows reset used to fall
+	// through to the generic "upstream-error" marker and be reported as class
+	// "other". The strings stay as a backstop for errors that reach here with
+	// no errno left in the chain.
+	if neterr.IsConnRefused(err) || neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) {
+		return 502, "Bad Gateway", "keploy-recorded-upstream-unreachable: true"
+	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "connection reset") ||
@@ -101,6 +114,9 @@ func upstreamErrorClass(err error) string {
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return "eof"
+	}
+	if neterr.IsConnRefused(err) || neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) {
+		return "unreachable"
 	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "connection refused") ||
