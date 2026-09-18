@@ -41,6 +41,9 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 		t.logger.Info("Processing specified test sets", zap.Strings("testSets", testSets))
 	}
 
+	var errCount int
+	var lastErr error
+
 	for _, testSetID := range testSets {
 		// Check for context cancellation
 		select {
@@ -55,6 +58,8 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 		if err != nil {
 			t.logger.Error("Could not locate test set directory; skipping",
 				zap.String("testSetID", testSetID), zap.Error(err))
+			errCount++
+			lastErr = err
 			continue
 		}
 		t.logger.Info("Sanitizing test set",
@@ -74,8 +79,14 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 				zap.String("testSetID", testSetID),
 				zap.String("dir", testSetDir),
 				zap.Error(err))
+			errCount++
+			lastErr = err
 			continue
 		}
+	}
+
+	if errCount > 0 {
+		return fmt.Errorf("failed to sanitize %d test set(s): %w", errCount, lastErr)
 	}
 
 	t.logger.Info("Sanitize process completed")
