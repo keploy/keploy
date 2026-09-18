@@ -538,3 +538,26 @@ func TestDecodeBinaryRow_TruncatedAfterNullBitmap(t *testing.T) {
 		t.Fatal("expected a decode error for a packet truncated right after the null bitmap, got nil")
 	}
 }
+
+// TestDecodeBinaryRow_TruncatedLengthEncodedString covers the suppressed
+// review comment on the FieldTypeTiny case: a length-encoded-string column
+// (VarString, String, BLOB, JSON, NewDecimal, ...) ending in a lone
+// 0xfc/0xfd/0xfe extended-length marker with its follow-up bytes missing.
+// This routes through the same utils.ReadLengthEncodedString call as
+// DecodeTextRow, so it must be rejected rather than silently accepted with
+// the offset left unchanged.
+func TestDecodeBinaryRow_TruncatedLengthEncodedString(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+	columns := []*mysql.ColumnDefinition41{{Type: byte(mysql.FieldTypeVarString), Name: "name"}}
+
+	// header(4) + OK byte(0x00) + 1-byte null bitmap (0x00 => column not
+	// NULL), followed by a lone 0xfc extended-length marker with no
+	// follow-up bytes for the VarString value itself.
+	data := []byte{0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0xfc}
+
+	_, _, err := DecodeBinaryRow(ctx, logger, data, columns)
+	if err == nil {
+		t.Fatal("expected a decode error for a VarString column with a truncated extended-length prefix, got nil")
+	}
+}
