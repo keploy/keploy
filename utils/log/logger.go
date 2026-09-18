@@ -19,6 +19,95 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
+// primarySink is the console destination every logger-rebuilding helper
+// attaches its core to. nil means "os.Stdout, resolved at write time" — the
+// historical default — and RedirectToStderr moves it to os.Stderr.
+//
+// nil rather than a captured os.Stdout on purpose: os.Stdout is a variable,
+// and a test that swaps it for a pipe (which is how the CLI's stdout
+// cleanliness is asserted end to end) must see its replacement, not the
+// descriptor this package happened to observe at init. Same reason
+// utils.JSONWriter resolves its default sink at Write time.
+//
+// It exists because the helpers below REBUILD the core from scratch. Before
+// this, ChangeColorEncoding / ChangeLogLevel / AddMode each hardcoded
+// os.Stdout, so any of them running AFTER RedirectToStderr silently undid the
+// redirect and put log lines back on stdout — which corrupts every
+// machine-readable stdout document keploy emits (`--json`, `keploy report
+// --format junit|json`). Verified: `keploy report --format junit --json
+// --disable-ansi` printed two INFO lines above the XML because --disable-ansi
+// runs ChangeColorEncoding after the redirect.
+//
+// Guarded by a mutex rather than left as a plain var: the helpers run during
+// single-threaded CLI startup, but the race detector runs over the whole
+// binary and a package-level var written here and read from a logger rebuild
+// elsewhere is exactly the kind of thing that goes unnoticed until it does not.
+var (
+	primarySinkMu sync.Mutex
+	primarySink   *os.File
+)
+
+// setPrimarySink records the console destination for subsequent logger
+// rebuilds. Not exported: the sink must only ever move as a side effect of a
+// helper in this package that also rebuilds the logger.
+func setPrimarySink(f *os.File) {
+	primarySinkMu.Lock()
+	defer primarySinkMu.Unlock()
+	primarySink = f
+}
+
+// PrimarySink reports the console destination the logger currently writes to.
+//
+// Callers that print non-log output — the logo and the version line — write
+// through it so they stay on the same side of the stdout/stderr split as the
+// logger. Without that the mechanism is only half a mechanism: `keploy report
+// --format json` suppresses the logo outright, but any other future
+// stdout-is-a-document mode would have to remember to suppress every banner
+// individually instead of the split just holding.
+func PrimarySink() *os.File {
+	primarySinkMu.Lock()
+	defer primarySinkMu.Unlock()
+	if primarySink == nil {
+		return os.Stdout
+	}
+	return primarySink
+}
+
+// TestOnlyResetSink restores the package-level console sink and the shared
+// LogCfg to their process-start values.
+//
+// RedirectToStderr and ChangeColorEncoding mutate package state that outlives
+// a single test, so a test that drives the real CLI flag validation leaves the
+// next test in that binary running against a logger pointing at stderr with a
+// plain-console encoder. It exists so those tests can t.Cleanup themselves
+// instead of being order-dependent, and it is exported only because the
+// tests that need it (cli/provider) live in another package — an
+// export_test.go cannot reach across that boundary.
+//
+// NOT FOR PRODUCTION USE, and named so it cannot be reached for by accident.
+// Calling it from a running CLI does not rebuild the logger: the live *zap.
+// Logger keeps whatever core it was built with (including the debug file
+// sink), while the next helper that DOES rebuild — ChangeLogLevel, AddMode,
+// ChangeColorEncoding — silently reverts to stdout and to the default
+// encoder, undoing any --json / --format json redirect. Nothing in the
+// non-test tree calls it; TestNoProductionCallerResetsTheSink pins that.
+//
+// LogCfg is written under primarySinkMu here because this is the one helper
+// that can run from a *_test.go goroutine rather than from single-threaded CLI
+// startup, which is where every other writer of LogCfg (New, ChangeLogLevel,
+// ChangeColorEncoding) runs.
+func TestOnlyResetSink() {
+	primarySinkMu.Lock()
+	defer primarySinkMu.Unlock()
+	primarySink = nil
+	LogCfg = defaultLogCfg()
+}
+
+// primarySyncer is the WriteSyncer form of PrimarySink, for the core builders.
+func primarySyncer() zapcore.WriteSyncer {
+	return zapcore.AddSync(PrimarySink())
+}
+
 var LogCfg zap.Config
 
 // Redactor rewrites log entries/fields in place to strip secrets before the
@@ -200,6 +289,37 @@ func (e ansiConsoleEncoder) Clone() zapcore.Encoder {
 	}
 }
 
+// defaultLogCfg is the package's baseline zap.Config, factored out of New so
+// the rebuild helpers can fall back to it.
+func defaultLogCfg() zap.Config {
+	cfg := zap.NewDevelopmentConfig()
+	cfg.Encoding = "ansiConsole" // Use our custom encoder
+
+	// Customize the encoder config
+	cfg.EncoderConfig.EncodeTime = customTimeEncoder
+	cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	cfg.EncoderConfig.EncodeDuration = zapcore.StringDurationEncoder
+
+	cfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	cfg.DisableStacktrace = true
+	cfg.EncoderConfig.EncodeCaller = nil
+	return cfg
+}
+
+// ensureLogCfg makes the rebuild helpers safe to call before New() has run.
+//
+// They all build their core from LogCfg.Level, and the zero zap.AtomicLevel
+// holds a nil *atomic.Int32 — so a logger built from an untouched LogCfg
+// panics on its first Debug/Info call, at the call site rather than here. In
+// the real binary New() always runs first, but the helpers are reachable from
+// any entry point that has not (and from tests), and a nil-pointer panic
+// inside the logger is a spectacularly bad failure mode for a CLI.
+func ensureLogCfg() {
+	if LogCfg.Level == (zap.AtomicLevel{}) {
+		LogCfg = defaultLogCfg()
+	}
+}
+
 func New() (*zap.Logger, *os.File, error) {
 	// Register the ANSI-friendly encoder
 	_ = zap.RegisterEncoder("ansiConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
@@ -216,20 +336,9 @@ func New() (*zap.Logger, *os.File, error) {
 		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
 	}
 
-	writer := wrapWriter(zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(logFile)))
+	writer := wrapWriter(zapcore.NewMultiWriteSyncer(primarySyncer(), zapcore.AddSync(logFile)))
 
-	LogCfg = zap.NewDevelopmentConfig()
-	LogCfg.Encoding = "ansiConsole" // Use our custom encoder
-
-	// Customize the encoder config
-	LogCfg.EncoderConfig.EncodeTime = customTimeEncoder
-	LogCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	LogCfg.EncoderConfig.EncodeDuration = zapcore.StringDurationEncoder
-	LogCfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
-
-	LogCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-	LogCfg.DisableStacktrace = true
-	LogCfg.EncoderConfig.EncodeCaller = nil
+	LogCfg = defaultLogCfg()
 
 	// Build the core with our custom encoder
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
@@ -274,6 +383,7 @@ func reattachDebugFileSink(logger *zap.Logger) *zap.Logger {
 }
 
 func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
+	ensureLogCfg()
 	LogCfg.Level = zap.NewAtomicLevelAt(level)
 	if level == zap.DebugLevel {
 		LogCfg.DisableStacktrace = false
@@ -284,7 +394,7 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		wrapWriter(zapcore.AddSync(os.Stdout)),
+		wrapWriter(primarySyncer()),
 		LogCfg.Level,
 	)
 
@@ -292,14 +402,23 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	return reattachDebugFileSink(logger), nil
 }
 
-// RedirectToStderr re-creates the logger writing to stderr instead of stdout.
-// Use this when --json mode is active to prevent log lines from contaminating
-// structured JSON on stdout.
+// RedirectToStderr re-creates the logger writing to stderr instead of stdout,
+// and moves the package's shared console sink there so every subsequent
+// logger rebuild follows.
+//
+// Call this for every mode whose STDOUT is a machine-readable document: the
+// global --json flag, and `keploy report --format json|junit`. A log line on
+// stdout makes that document unparseable.
 func RedirectToStderr() (*zap.Logger, error) {
+	ensureLogCfg()
+	// Move the shared sink FIRST so every later rebuild
+	// (ChangeLogLevel / AddMode / ChangeColorEncoding) inherits stderr
+	// instead of resetting the logger back onto stdout.
+	setPrimarySink(os.Stderr)
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		wrapWriter(zapcore.AddSync(os.Stderr)),
+		wrapWriter(primarySyncer()),
 		LogCfg.Level,
 	)
 
@@ -308,6 +427,7 @@ func RedirectToStderr() (*zap.Logger, error) {
 }
 
 func AddMode(mode string) (*zap.Logger, error) {
+	ensureLogCfg()
 	cfg := LogCfg
 	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 		emoji := "\U0001F430"
@@ -318,7 +438,7 @@ func AddMode(mode string) (*zap.Logger, error) {
 	encoder := NewANSIConsoleEncoder(cfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		wrapWriter(zapcore.AddSync(os.Stdout)),
+		wrapWriter(primarySyncer()),
 		cfg.Level,
 	)
 
@@ -327,6 +447,7 @@ func AddMode(mode string) (*zap.Logger, error) {
 }
 
 func ChangeColorEncoding() (*zap.Logger, error) {
+	ensureLogCfg()
 	// For non-color mode, use the standard console encoder.
 	LogCfg.Encoding = "console"
 	LogCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
@@ -340,7 +461,7 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 	encoder := zapcore.NewConsoleEncoder(LogCfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		wrapWriter(zapcore.AddSync(os.Stdout)),
+		wrapWriter(primarySyncer()),
 		LogCfg.Level,
 	)
 	return reattachDebugFileSink(zap.New(newRedactingCore(core))), nil

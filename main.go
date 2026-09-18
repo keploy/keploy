@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
@@ -239,10 +241,53 @@ func start(ctx context.Context) {
 	}
 
 	// Restore keploy folder ownership if running under sudo (for Docker mode)
-	// This ensures the next native run doesn't hit permission issues
-	if conf.Path != "" {
+	// so the next native run does not hit permission issues.
+	//
+	// Only after a command that can WRITE there. conf.Path is non-empty only
+	// once ValidateFlags has run, which is how this used to be gated -- an
+	// incidental signal, and one that turned `sudo keploy --version` into a
+	// recursive chown of the working tree the moment the config default for
+	// path stopped being the empty string. The commands that create a keploy/
+	// directory are the ones that get the restore.
+	if conf.Path != "" && writesKeployFolder(rootCmd, os.Args[1:]) {
 		utils.RestoreKeployFolderOwnership(logger, conf.Path)
 	}
+}
+
+// writesKeployFolder reports whether the command that just ran is one that
+// can create files under conf.Path. Everything else -- version, help, config,
+// login, a command that failed before it started -- has nothing to restore,
+// and a chown -R it never earned is a destructive thing to do on the strength
+// of a guess.
+func writesKeployFolder(root *cobra.Command, args []string) bool {
+	writes := map[string]bool{
+		"record": true, "test": true, "mock": true, "normalize": true,
+		"templatize": true, "contract": true, "import": true, "export": true,
+		"sanitize": true, "diff": true,
+	}
+	// Cobra resolves it, because argv cannot be read by eye: a root flag that
+	// takes a separate value (--storage-format json) puts a non-flag word
+	// before the command, and reading the first such word called that word
+	// the command. `keploy --storage-format json record` then answered "json",
+	// the restore was skipped, and a docker-mode record under sudo left the
+	// developer's keploy/ tree root-owned.
+	if root == nil {
+		return false
+	}
+	cmd, _, err := root.Find(args)
+	if err != nil || cmd == nil {
+		return false
+	}
+	// A command that only printed its own help wrote nothing.
+	if help, hErr := cmd.Flags().GetBool("help"); hErr == nil && help {
+		return false
+	}
+	for c := cmd; c != nil; c = c.Parent() {
+		if writes[c.Name()] {
+			return true
+		}
+	}
+	return false
 }
 
 // maybeAttachDebugFileSink reads KEPLOY_DEBUG_FILE and, if set, opens that

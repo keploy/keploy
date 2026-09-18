@@ -11,14 +11,16 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
+
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -979,9 +981,15 @@ func isStaleConnError(err error) bool {
 	// not included — a slow upstream isn't a stale-pool case and
 	// replay would just re-pay the timeout while double-charging the
 	// upstream for the original.
-	if errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.EPIPE) ||
-		errors.Is(err, syscall.ECONNABORTED) {
+	//
+	// Classified through pkg/neterr rather than against syscall.E*
+	// directly: on Windows those constants are APPLICATION_ERROR-space
+	// values Winsock never returns, so the direct comparison is inert
+	// and every pooled-connection reset became a hard 502 instead of a
+	// transparent redial.
+	if neterr.IsConnReset(err) ||
+		neterr.IsBrokenPipe(err) ||
+		neterr.IsConnAborted(err) {
 		return true
 	}
 	if errors.Is(err, net.ErrClosed) {
@@ -1755,18 +1763,27 @@ func forwardRawTCP(ctx context.Context, clientConn, upConn net.Conn) {
 	}()
 
 	done := make(chan struct{}, 2)
+	// The FIN forwarding below used to assert *net.TCPConn concretely,
+	// which silently skipped every *tls.Conn and every wrapped conn —
+	// the capability is what matters here, not the concrete type.
+	//
+	// UNCONDITIONAL, unlike the record paths in integrations/. Those gate
+	// on a clean copy so a truncated request is never reported to the
+	// peer as complete — a record-FIDELITY argument, and this pump
+	// captures nothing. What it does instead is join on both copies, so
+	// the FIN is what unblocks the peer io.Copy: signalling only on a
+	// clean exit leaves a client-side error with nothing to wake the
+	// upstream side, and two goroutines plus two sockets sit there until
+	// the upstream closes on its own. On an idle WebSocket that is
+	// minutes.
 	go func() {
 		_, _ = io.Copy(upConn, clientConn)
-		if tc, ok := upConn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
+		_ = proxyutil.CloseWriteIfPossible(upConn)
 		done <- struct{}{}
 	}()
 	go func() {
 		_, _ = io.Copy(clientConn, upConn)
-		if tc, ok := clientConn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
+		_ = proxyutil.CloseWriteIfPossible(clientConn)
 		done <- struct{}{}
 	}()
 	<-done

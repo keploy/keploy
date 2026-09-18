@@ -1450,20 +1450,28 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		return false, 0
 	}
 
+	// sqlparser.IsDML parses the statement, so it is the most expensive check in
+	// this function and it is deterministic for a given query. On the per-command
+	// O(pool) match path the old code parsed each side 3-4x per candidate; compute
+	// each side ONCE and reuse. (Profiled: IsDML re-parsing is a measurable slice
+	// of replay agent CPU when the candidate pool is large.)
+	expectedIsDML := sqlparser.IsDML(expectedQuery)
+	actualIsDML := sqlparser.IsDML(actualQuery)
+
 	// check if any of them the query is dml and other is not, then there is no match.
-	if sqlparser.IsDML(expectedQuery) && !sqlparser.IsDML(actualQuery) {
+	if expectedIsDML && !actualIsDML {
 		log.Debug("expected query is dml but actual is not",
 			zap.String("expected query", expectedQuery),
 			zap.String("actual query", actualQuery))
 		return false, 0
-	} else if !sqlparser.IsDML(expectedQuery) && sqlparser.IsDML(actualQuery) {
+	} else if !expectedIsDML && actualIsDML {
 		log.Debug("actual query is dml but expected is not",
 			zap.String("expected query", expectedQuery),
 			zap.String("actual query", actualQuery))
 		return false, 0
 	}
 
-	if !(sqlparser.IsDML(expectedQuery) && sqlparser.IsDML(actualQuery)) {
+	if !(expectedIsDML && actualIsDML) {
 		// Non-DML. sqlparser.IsDML covers only INSERT/UPDATE/DELETE, so this is
 		// where every SELECT and SHOW lands, and the parse-tree tier below never
 		// sees them. Last resort: the same statement with a drifted inline

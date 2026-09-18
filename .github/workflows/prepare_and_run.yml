@@ -723,6 +723,24 @@ jobs:
   run_mock_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/mock_linux.yml
+  run_mock_compose_linux:
+    needs: [build-and-upload, upload-latest, build-docker-image-amd64]
+    uses: ./.github/workflows/mock_compose_linux.yml
+  run_mock_fromcontainer_linux:
+    # Guards that a session gives the user's container back. The failure it
+    # exists for is daemon behaviour - stopping the app while the agent holds
+    # its network drops the container's endpoint, and published ports live on
+    # the endpoint - which a fake in a unit test can only model.
+    needs: [build-and-upload, upload-latest, build-docker-image-amd64]
+    uses: ./.github/workflows/mock_fromcontainer_linux.yml
+  run_mysql_tls_greeting_stitch_linux:
+    # Regression guard for the proxyless MySQL-over-TLS capture shortfall: the
+    # last-greeting fallback (resolvePreTLSGreeting -> cachedGreeting) was dead
+    # code on the V2 path because only the legacy handleInitialHandshake ever
+    # seeded it, so a pooled connection whose own greeting had been consumed
+    # lost its whole command phase. Includes a mutation guard that fails the
+    # build if the regression tests stop actually exercising the fix.
+    uses: ./.github/workflows/mysql-tls-greeting-stitch-linux.yml
   run_http_stale_pool_race_linux:
     # Regression guard for issue #4165 (upstream-pool half-close race
     # in handleHttp1ZeroCopy). Bursty client + gunicorn --keep-alive 2
@@ -1198,6 +1216,8 @@ jobs:
       - run_python_docker
       - run_python_linux
       - run_mock_linux
+      - run_mock_compose_linux
+      - run_mock_fromcontainer_linux
       - run_http_stale_pool_race_linux
       - run_outbound_fin_stall_linux
       - run_startup_mock_capture_linux
@@ -1222,6 +1242,8 @@ jobs:
             "${{ needs.run_python_docker.result }}" \
             "${{ needs.run_python_linux.result }}" \
             "${{ needs.run_mock_linux.result }}" \
+            "${{ needs.run_mock_compose_linux.result }}" \
+            "${{ needs.run_mock_fromcontainer_linux.result }}" \
             "${{ needs.run_http_stale_pool_race_linux.result }}" \
             "${{ needs.run_outbound_fin_stall_linux.result }}" \
             "${{ needs.run_startup_mock_capture_linux.result }}" \

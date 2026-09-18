@@ -2,17 +2,28 @@ package mock
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 // mockService implements Service for the `keploy mock record|replay` flow.
 type mockService struct {
+	// servedAnnounced remembers which mocks have already been reported as
+	// served, so the poll loop and the end-of-run flush cannot announce the
+	// same mock twice. Guarded because the two run on different goroutines.
+	servedAnnouncedMu sync.Mutex
+	servedAnnounced   map[string]struct{}
+
 	logger          *zap.Logger
 	instrumentation Instrumentation
 	mockDB          MockDB
@@ -82,6 +93,142 @@ func (m *mockService) setName() string {
 		return "default"
 	}
 	return name
+}
+
+// agentEpilogueTimeout bounds every agent read made AFTER the wrapped runner
+// has exited: the consumed/missed outcome, the per-test scope windows, and the
+// captured-on-miss drain.
+//
+// Natively the agent is keploy's own sibling and is alive right through
+// teardown, so those reads always answer. Under compose the runner exiting is
+// what stops the whole project — the agent service included — so every one of
+// them is fired at an agent that is dying in that instant. The agent client
+// holds a zero-value http.Client with no timeout of its own
+// (pkg/platform/http/agent.go), and a SIGTERM'd server that still accepts but
+// never answers would hang the run: forever on the record side, whose reads sit
+// on a context.WithoutCancel that not even Ctrl+C reaches.
+//
+// These are all best-effort epilogue reads — losing one costs a summary line or
+// a mappings file, never a recorded mock — so a short bound is the right trade.
+const agentEpilogueTimeout = 10 * time.Second
+
+// composeReleaseTimeout bounds the /agent/ready POST that releases the app.
+// MakeAgentReadyForDockerCompose retries for the whole of pkg.AgentReadyTimeout
+// (5m30s) because its other callers use it as a bring-up wait. Here the agent
+// answered /agent/health seconds ago, so there is nothing left to wait out: the
+// only 503 still reachable is a latched CA-install failure, which never clears.
+// Without a bound, an agent that dies between the two calls stalls the run for
+// five and a half minutes.
+const composeReleaseTimeout = 30 * time.Second
+
+// isDockerCompose reports whether the wrapped command is a compose project.
+// Compose inverts the usual startup order — see startComposeApp.
+func (m *mockService) isDockerCompose() bool {
+	return utils.CmdType(m.config.CommandType) == utils.DockerCompose
+}
+
+// startComposeApp resolves the ordering circularity compose introduces. It
+// returns a non-nil channel — the one the project's eventual exit arrives on —
+// exactly when it returns a nil error and the command is a compose one; the
+// caller otherwise keeps the normal order and runs the app last.
+//
+// Under compose the keploy agent is itself a service in the compose project
+// keploy generates, so it does not exist until the wrapped `docker compose up`
+// runs. Yet arming the proxy needs a live agent, and natively the app is the
+// last thing started. So the project is brought up here, concurrently, and the
+// caller receives its exit off the returned channel where it would otherwise
+// have called Run.
+//
+// That would leave the app racing the proxy, which is what releaseComposeApp
+// exists to prevent: the app service is gated behind the agent service's
+// healthcheck, and that healthcheck only passes once keploy posts /agent/ready.
+// This function therefore waits only for the agent to become REACHABLE; the
+// app stays parked at its healthcheck until the caller has armed the proxy.
+func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group) (chan models.AppError, error) {
+	if !m.isDockerCompose() {
+		return nil, nil
+	}
+
+	appExit := make(chan models.AppError, 1)
+	errGrp.Go(func() error {
+		// The receiver has no other way to learn this goroutine is done, so the
+		// send has to survive a panic in Run. Two things make it do so, and
+		// both are load-bearing:
+		//
+		// The send is DEFERRED, so a panic still delivers it on the way out —
+		// an inline send after Run is simply skipped, and the receiver then
+		// blocks for good, ahead of the deferred teardown that would otherwise
+		// unstick a Ctrl+C. (utils.Recover does cancel the root context on its
+		// way through, but a bare receive has no ctx arm to notice.)
+		//
+		// And the value it sends is SEEDED with a failure, because a panic
+		// leaves it untouched: a zero AppError would reach propagateExit as
+		// "nothing to report" and exit keploy cleanly on a crashed runner.
+		exit := models.AppError{AppErrorType: models.ErrInternal, Err: errors.New("the app runner panicked")}
+		defer utils.Recover(m.logger)
+		defer func() { appExit <- exit }()
+		exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		return nil
+	})
+
+	m.logger.Info("waiting for the keploy-agent compose service to come up",
+		zap.String("agent-uri", m.config.Agent.AgentURI))
+
+	// The budget for agent container BOOT, which is exactly what this waits on
+	// — the same constant pkg/service/record/record.go gives the same wait, and
+	// tunable through KEPLOY_AGENT_READY_TIMEOUT. It is NOT the compose
+	// ready-file healthcheck's budget; that has its own, longer start_period
+	// (agentHealthcheckStartPeriod in pkg/platform/docker).
+	agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
+	defer cancel()
+	agentReadyCh := make(chan bool, 1)
+	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh, time.Second)
+
+	select {
+	case ready, ok := <-agentReadyCh:
+		if ok && ready {
+			return appExit, nil
+		}
+		// The ticker closes its channel when agentCtx expires.
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("keploy-agent did not become ready within %s", pkg.AgentReadyTimeout())
+	case appErr := <-appExit:
+		// The project died on its own — a bad compose file, a failed build, a
+		// port already taken. Report that now rather than sitting out the full
+		// agent budget waiting for an agent that is never going to start.
+		reason := string(appErr.AppErrorType)
+		if reason == "" {
+			reason = "exited"
+		}
+		return nil, fmt.Errorf("the compose project %s while keploy was waiting for the keploy-agent to come up (exit code %d)", reason, appErr.ExitCode)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// releaseComposeApp releases the app service, which has been parked at its
+// healthcheck ever since startComposeApp brought the project up.
+//
+// POST /agent/ready is not a readiness probe: it writes the file the agent
+// service's compose healthcheck reads (pkg/agent/routes/record.go), and the
+// app service depends_on that health. So it must be posted only once the proxy
+// is armed — any earlier and the app's first dependency calls go out
+// unintercepted. All three other callers post it at that same point: after the
+// recorder is installed (Recorder.Start) or after the mocks are stored and
+// staged (Replayer.RunTestSet, Runner.setupTestSet). Only Recorder.Start also
+// gates it on the command type, as this does; the two replay-side callers post
+// it for every command type, where it writes a file nothing but the generated
+// compose healthcheck ever reads.
+func (m *mockService) releaseComposeApp(ctx context.Context) error {
+	if !m.isDockerCompose() {
+		return nil
+	}
+	m.logger.Debug("marking the keploy-agent ready; the compose app service is released now")
+	releaseCtx, cancel := context.WithTimeout(ctx, composeReleaseTimeout)
+	defer cancel()
+	return m.instrumentation.MakeAgentReadyForDockerCompose(releaseCtx)
 }
 
 // notifyShutdown tells the agent the session is ending so connection errors are

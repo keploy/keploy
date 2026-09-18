@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 echo "$RECORD_BIN"
 echo "$REPLAY_BIN"
@@ -17,42 +18,24 @@ fi
 
 rm -rf keploy/
 
-# Build go binary.
-#
-# proxy.golang.org intermittently returns a TLS handshake timeout
-# when the WSL/linux runner first reaches it — seen on
-# keploy/keploy#4077 run 24631193918/job/72018929505 fetching
-# github.com/go-chi/chi@v1.5.5. `go build` has no built-in retry
-# for module download, so a single transient DNS/TLS hiccup kills
-# the whole job. Wrap with a bounded retry + GOPROXY fallback so
-# the flake no longer blocks PRs unrelated to this sample.
-build_go_app() {
-  local attempt=1
-  local max_attempts=4
-  local sleep_sec=5
-  while [ "$attempt" -le "$max_attempts" ]; do
-    if GOPROXY="proxy.golang.org,direct" go build -o http-pokeapi; then
-      return 0
-    fi
-    if [ "$attempt" -ge "$max_attempts" ]; then
-      echo "::error::go build for http-pokeapi failed after ${max_attempts} attempts"
-      return 1
-    fi
-    echo "go build attempt ${attempt} failed; retrying in ${sleep_sec}s (attempt $((attempt+1))/${max_attempts})…"
-    sleep "$sleep_sec"
-    sleep_sec=$((sleep_sec * 2))
-    attempt=$((attempt + 1))
-  done
-}
-build_go_app
+# Build go binary. The retry lives in go-retry.sh now; the flake it exists for
+# was first seen here — keploy/keploy#4077 run 24631193918/job/72018929505,
+# a TLS handshake timeout fetching github.com/go-chi/chi@v1.5.5.
+go_retry build -o http-pokeapi
 echo "go binary built"
-
-# Generate the keploy-config file.
-sudo "$RECORD_BIN" config --generate
 
 # Update the global noise to updated_at.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"updated_at":[]}}
+KEPLOY_CFG
 
 send_request() {
     local index=$1  
@@ -127,7 +110,6 @@ fi
 
 # Start the go-http app in test mode.
 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs.txt
-
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."

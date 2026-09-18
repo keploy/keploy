@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # This script automates the testing of the risk profile identification feature.
 # It records test cases, validates the initial failure report, then tests the
@@ -359,19 +360,23 @@ if [ -f "./keploy.yml" ]; then
     rm ./keploy.yml
 fi
 
-sudo $RECORD_BIN config --generate
 config_file="./keploy.yml"
-if [ -f "$config_file" ]; then
-  sed -i 's/global: {}/global: {"body": {"timestamp":[]}, "header": {"Content-Length":[]}}/' "$config_file"
-else
-  echo "⚠️ Config file $config_file not found, skipping sed replace."
-fi
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+  globalNoise:
+      global: {"body": {"timestamp":[]}, "header": {"Content-Length":[]}}
+KEPLOY_CFG
 git fetch origin
 git checkout origin/risk-profile
 echo "Cleaning up previous runs..."
 rm -rf keploy/ my-app *.log
 echo "Building the Go application..."
-go build -o my-app
+go_retry build -o my-app
 endsec
 
 section "Record Test Cases"
@@ -415,7 +420,7 @@ fi
 section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
 git checkout origin/risk-profile-v2
-go build -o my-app
+go_retry build -o my-app
 $REPLAY_BIN test -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee test.log || true
 check_for_errors "test.log"
 check_report_for_risk_profiles

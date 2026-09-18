@@ -421,14 +421,73 @@ func TestMockStore_RefusesCancelledContext(t *testing.T) {
 
 // ── End-to-end fakes for the skip-and-revoke chain ───────────────────────────
 
+/*
+WAIT UNTIL THE RECORDING IS DEMONSTRABLY UNDER WAY, rather than inferring it
+from a send that completed.
+
+A send to f.incoming / f.outgoing / f.mappings completes at the FORWARDER,
+which is one hop before the consumer and is spawned by GetTestAndMockChans --
+several hundred lines before Start spawns anything that reads it. Start then
+has a `ctx.Err()` gate to pass. So a test that sends and immediately cancels is
+racing that gate, and when it loses, Start returns context.Canceled and the
+test's own require.NoError fails. MEASURED on four tests in this file with a
+200ms sleep in front of the gate: 5/5 red, every time at the same assertion.
+
+A persisted test case is the first thing that can only happen AFTER the gate --
+the consumer that writes it is spawned past it -- so it is exactly the signal
+these tests need. Polling rather than sleeping: a sleep long enough to be safe
+on a loaded machine is a sleep paid on every green run, and one short enough
+not to be is the flake all over again.
+
+The deadline is generous because it only matters when something is genuinely
+broken; the loop exits as soon as the write lands, which is microseconds.
+*/
+func waitForPersistedTestCase(t *testing.T, db *recTestDB, name string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		db.mu.Lock()
+		var found bool
+		for _, got := range db.inserted {
+			if got == name {
+				found = true
+				break
+			}
+		}
+		db.mu.Unlock()
+		if found {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("test case %q was never persisted, so the recording never got "+
+				"past Start's post-setup gate; cancelling now would assert on a race "+
+				"rather than on the behaviour under test", name)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 type recTestDB struct {
 	mu       sync.Mutex
 	inserted []string
 	deleted  []string
+	// insertErr, when set, fails EVERY insert -- the disk-full shape.
+	// Set at construction and never mutated, so reading it without the
+	// mutex is race-free.
+	insertErr error
+	// failNames fails only the named test cases, so a recording can
+	// persist some and lose others. Same construction-time rule.
+	failNames map[string]bool
 }
 
 func (d *recTestDB) GetAllTestSetIDs(context.Context) ([]string, error) { return nil, nil }
 func (d *recTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ string, _ bool) error {
+	if d.insertErr != nil {
+		return d.insertErr
+	}
+	if d.failNames[tc.Name] {
+		return errors.New("no space left on device")
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.inserted = append(d.inserted, tc.Name)
@@ -483,22 +542,50 @@ func (d *recMappingDB) UpsertBatch(_ context.Context, _ string, byTest map[strin
 type recTelemetry struct {
 	mu    sync.Mutex
 	suite map[string]interface{}
+	/*
+	 * THE TEST COUNT, KEPT, so the package can observe it at all.
+	 *
+	 * Both telemetry calls take the recorded test count. A fake that
+	 * discards it (`_ int`, `int64`) leaves NOTHING in the package able to
+	 * see the number, which is how the ordering defect below survives. MEASURED: moving the testCountSnapshot read above
+	 * the finalize revoke block -- which makes both numbers count tests that
+	 * were revoked and deleted, i.e. overstates what was recorded -- left
+	 * the whole package green 10 runs out of 10.
+	 *
+	 * A discarded argument in a fake is a silent hole in every test that
+	 * uses it: the call is "asserted" only in the sense that it did not
+	 * panic.
+	 */
+	suiteTestCount   int
+	suiteRecorded    bool
+	sessionTestCount int64
+	sessionRecorded  bool
 }
 
-func (tl *recTelemetry) RecordedTestSuite(_ string, _ int, _ map[string]int, metadata map[string]interface{}) {
+func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]int, metadata map[string]interface{}) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	tl.suite = metadata
+	tl.suiteTestCount = testCount
+	tl.suiteRecorded = true
 }
-func (tl *recTelemetry) RecordedTestCaseMock(string)                                {}
-func (tl *recTelemetry) RecordedMocks(map[string]int)                               {}
-func (tl *recTelemetry) RecordedTestAndMocks()                                      {}
-func (tl *recTelemetry) RecordSessionCompleted(int64, int64, int64, string, string) {}
+func (tl *recTelemetry) RecordedTestCaseMock(string)  {}
+func (tl *recTelemetry) RecordedMocks(map[string]int) {}
+func (tl *recTelemetry) RecordedTestAndMocks()        {}
+func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, _ string, _ string) {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	tl.sessionTestCount = testCount
+	tl.sessionRecorded = true
+}
 
 type recTestSetConf struct{}
 
 func (recTestSetConf) Read(context.Context, string) (*models.TestSet, error) { return nil, nil }
-func (recTestSetConf) Write(context.Context, string, *models.TestSet) error  { return nil }
+func (recTestSetConf) ReadForUpdate(context.Context, string) (*models.TestSet, error) {
+	return nil, nil
+}
+func (recTestSetConf) Write(context.Context, string, *models.TestSet) error { return nil }
 
 // blockingInstr is fakeInstr whose Run blocks until ctx is done, so the test
 // controls when the session ends.
@@ -699,6 +786,12 @@ func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
 		t.Fatal("recorder never consumed the mapping")
 	}
 
+	// The recording must be demonstrably under way before it is stopped;
+	// otherwise this cancel races Start's post-setup gate and the
+	// require.NoError below asserts on that race. See
+	// waitForPersistedTestCase.
+	waitForPersistedTestCase(t, testDB, "test-1")
+
 	cancel()
 	close(f.outgoing)
 	close(f.incoming)
@@ -798,6 +891,12 @@ func TestStart_AgentRevokedTestIsNotCountedAsShortPool(t *testing.T) {
 		Spec:    models.MockSpec{Metadata: map[string]string{"revoked_tests": "test-1"}},
 	})
 
+	// The recording must be demonstrably under way before it is stopped;
+	// otherwise this cancel races Start's post-setup gate and the
+	// require.NoError below asserts on that race. See
+	// waitForPersistedTestCase.
+	waitForPersistedTestCase(t, testDB, "test-1")
+
 	cancel()
 	close(f.outgoing)
 	close(f.incoming)
@@ -817,11 +916,39 @@ func TestStart_AgentRevokedTestIsNotCountedAsShortPool(t *testing.T) {
 
 	tele.mu.Lock()
 	suite := tele.suite
+	suiteCount, suiteRecorded := tele.suiteTestCount, tele.suiteRecorded
+	sessionCount, sessionRecorded := tele.sessionTestCount, tele.sessionRecorded
 	tele.mu.Unlock()
 	require.NotNil(t, suite)
 	assert.NotContains(t, suite, "tests-short-pool",
 		"a test the AGENT revoked is still counted as shipping with a short mock pool; it was "+
 			"deleted, so the metric over-counts exactly the population it claims to exclude: %v", suite)
+
+	/*
+	 * AND THE COUNT ITSELF EXCLUDES IT.
+	 *
+	 * This recording inserted exactly one test case and the agent then
+	 * revoked it, so finalize DELETED it -- asserted above. Both telemetry
+	 * calls must therefore report ZERO tests recorded: a revoked test is not
+	 * a recorded one, and a count that includes it tells us a recording
+	 * produced work it does not have.
+	 *
+	 * This is the discriminating shape, which is why it belongs here rather
+	 * than in a test where nothing is revoked: with one insert and one
+	 * revoke, reading testCountSnapshot before the finalize revoke block
+	 * gives 1 and reading it after gives 0. Nothing distinguished them until
+	 * recTelemetry stopped discarding the argument -- MEASURED, that mutant
+	 * survived the whole package 10 runs out of 10.
+	 *
+	 * Both calls, because they take the count from the same snapshot by
+	 * different routes and each is a separate place to get it wrong.
+	 */
+	require.True(t, suiteRecorded, "no test-suite telemetry was emitted at all")
+	assert.Equal(t, 0, suiteCount,
+		"the suite telemetry counted a test the agent revoked and finalize deleted")
+	require.True(t, sessionRecorded, "no session-completed telemetry was emitted at all")
+	assert.Equal(t, int64(0), sessionCount,
+		"the session telemetry counted a test the agent revoked and finalize deleted")
 }
 
 // TestStart_HookSkippedMockIsExcludedFromMappings pins the guard that a naive
@@ -891,6 +1018,12 @@ func TestStart_HookSkippedMockIsExcludedFromMappings(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("recorder never consumed the mapping")
 	}
+
+	// The recording must be demonstrably under way before it is stopped;
+	// otherwise this cancel races Start's post-setup gate and the
+	// require.NoError below asserts on that race. See
+	// waitForPersistedTestCase.
+	waitForPersistedTestCase(t, testDB, "test-1")
 
 	cancel()
 	close(f.outgoing)
@@ -998,6 +1131,12 @@ func TestStart_FailedRevokeKeepsTheTestInTheShortPoolCount(t *testing.T) {
 		Spec: models.MockSpec{Metadata: map[string]string{"revoked_tests": "test-1"}},
 	})
 
+	// The recording must be demonstrably under way before it is stopped;
+	// otherwise this cancel races Start's post-setup gate and the
+	// require.NoError below asserts on that race. See
+	// waitForPersistedTestCase.
+	waitForPersistedTestCase(t, &testDB.recTestDB, "test-1")
+
 	cancel()
 	close(f.outgoing)
 	close(f.incoming)
@@ -1070,6 +1209,699 @@ func TestGetTestAndMockChans_ForwardsInFlightTestCaseOnShutdown(t *testing.T) {
 	_ = g.Wait()
 }
 
+/*
+gateBlockingInstr blocks inside GetOutgoing until the test releases it.
+
+That is the only way to hold GetTestAndMockChans open while the test
+arranges the state Start must survive: the INCOMING forwarder is already
+spawned by then (GetIncoming runs first), so the test can fill it and
+cancel ctx before Start ever reaches its post-setup gate.
+*/
+type gateBlockingInstr struct {
+	*fakeInstr
+	// Closed by the test to let GetOutgoing return.
+	release chan struct{}
+	// Closed by GetOutgoing when it has been entered, so the test knows
+	// the incoming forwarder is live and GetTestAndMockChans is parked.
+	entered chan struct{}
+
+	once sync.Once
+}
+
+func (g *gateBlockingInstr) GetOutgoing(ctx context.Context, o models.OutgoingOptions) (<-chan *models.Mock, error) {
+	g.once.Do(func() { close(g.entered) })
+	<-g.release
+	return g.fakeInstr.GetOutgoing(ctx, o)
+}
+
+func (g *gateBlockingInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	<-ctx.Done()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
+/*
+START MUST TELL THE FORWARDERS WHEN NO CONSUMER IS COMING.
+
+This is the PRODUCTION half of the shutdown-wedge fix, and until this test
+existed nothing covered it. GetTestAndMockChans spawns three forwarders on
+reqCtx (WithoutCancel); Start spawns their consumers three hundred lines
+later, past an `if ctx.Err() != nil` gate that returns. On that path the
+forwarders are alive with nobody reading, and each ends by handing over an
+item it has already taken from the agent -- a send that parks forever.
+
+`consumersStarted` plus `defer frames.Abandon()` is what closes it.
+MEASURED, both halves are load-bearing and both were invisible to the
+suite: setting the flag early, or deleting the defer, left
+`go test ./...` fully green while Start took 30.0s to return (the
+DrainErrGroup timeout) with a forwarder goroutine leaked for the process
+lifetime. That is the original SEV-1, restored, reporting green.
+
+THE TIMING IS THE ASSERTION, which is unusual and deliberate. The wedge
+has no other observable: the run still ends, the same data is written, and
+the error is the same. What changes is that teardown blocks for the full
+drain budget. The threshold is far below that budget and far above the
+healthy path, so it is not a benchmark -- 30s and ~3s do not overlap under
+any load this suite runs at.
+*/
+func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	instr := &gateBlockingInstr{
+		fakeInstr: f,
+		release:   make(chan struct{}),
+		entered:   make(chan struct{}),
+	}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          &recTestDB{},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	/*
+	 * RELEASED ON EVERY EXIT. Any t.Fatal below would otherwise leave
+	 * GetOutgoing parked, holding Start and its errgroup for the rest of
+	 * the binary's run -- so one failure here would take unrelated tests
+	 * with it. The same guard gatedFailTestDB uses, for the same reason.
+	 */
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(instr.release) }) }
+	defer release()
+
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	// GetTestAndMockChans is now parked inside GetOutgoing, which means
+	// GetIncoming has already returned and the incoming forwarder is live.
+	select {
+	case <-instr.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Start never reached GetOutgoing")
+	}
+
+	/*
+	 * TWO SENDS, and two is the number. incomingChan carries one slot: the
+	 * first lands in it, and the second is taken by the forwarder, which
+	 * then parks trying to place it in the full buffer. So after the
+	 * second send returns, the forwarder is holding an item it has already
+	 * taken from the agent -- exactly the state the hand-over exists for,
+	 * and exactly the state that used to park forever.
+	 */
+	for _, tc := range []*models.TestCase{
+		{Name: "t-1", Kind: models.HTTP},
+		{Name: "t-2", Kind: models.HTTP},
+	} {
+		select {
+		case f.incoming <- tc:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the incoming forwarder never took the test case")
+		}
+	}
+
+	// Ctrl+C lands while the tail is still in flight, THEN setup finishes.
+	// Start now finds ctx.Err() != nil at its gate and returns without ever
+	// spawning a consumer.
+	cancel()
+	release()
+
+	started := time.Now()
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return at all")
+	}
+	elapsed := time.Since(started)
+
+	if elapsed > 20*time.Second {
+		t.Fatalf("Start took %s to return after cancellation. The forwarders were "+
+			"never told that no consumer was coming, so one is parked on its "+
+			"shutdown hand-over and teardown is waiting out the full "+
+			"DrainErrGroup budget -- and that goroutine is leaked for the "+
+			"process lifetime, re-leaked per session in the DaemonSet "+
+			"embedding. Check that Start still defers frames.Abandon() and "+
+			"that consumersStarted is set only after every consumer is "+
+			"spawned", elapsed)
+	}
+
+	/*
+	 * AND IT DOES NOT SIT OUT THE MAPPING DRAIN EITHER.
+	 *
+	 * A SECOND, MUCH TIGHTER THRESHOLD, because the two failures it
+	 * separates look identical from outside: the check above catches a
+	 * forwarder parked forever, this one catches a forwarder that
+	 * eventually gives up. `abandoned` was wired only into the mapping
+	 * forwarder's SEND selects and not its main one, so an abandoned
+	 * drain ignored it and waited out the whole mappingIdleGrace --
+	 * MEASURED at a fixed 3.00s on every abandoned teardown, and
+	 * invisible here because 3s passes a 20s assertion comfortably.
+	 *
+	 * SAFE AGAINST LOAD, which a timing assertion usually is not:
+	 * mappingIdleGrace is a TIMER, not CPU work, so a busy machine does
+	 * not move it. The healthy path measures 0.00s against a budget of
+	 * half the grace period, so the two do not overlap under any load
+	 * this suite runs at.
+	 */
+	if elapsed > mappingIdleGrace/2 {
+		t.Fatalf("Start took %s to return, more than half of mappingIdleGrace "+
+			"(%s). Nothing is wedged -- the mapping forwarder is draining a "+
+			"stream whose output no consumer can read, and only stopping when "+
+			"the stream goes quiet. Abandon has to be in its MAIN select, not "+
+			"only in its sends", elapsed, mappingIdleGrace)
+	}
+}
+
+/*
+refusedOutgoingInstr fails GetOutgoing the way a not-yet-up agent does.
+
+`utils.IsShutdownError` matches "connection refused", so this is NOT a
+shutdown path: ctx is live and the recording is simply starting before the
+agent socket is listening.
+*/
+type refusedOutgoingInstr struct {
+	*fakeInstr
+	// Closed by Run, which Start calls immediately AFTER it sets
+	// consumersStarted -- an exact signal that the consumers are up, with
+	// no sleep.
+	running chan struct{}
+
+	once sync.Once
+}
+
+func (r *refusedOutgoingInstr) GetOutgoing(context.Context, models.OutgoingOptions) (<-chan *models.Mock, error) {
+	return nil, errors.New("dial unix /tmp/agent.sock: connect: connection refused")
+}
+
+func (r *refusedOutgoingInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	r.once.Do(func() { close(r.running) })
+	<-ctx.Done()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
+/*
+EVERY FRAME CHANNEL A CALLER RANGES OVER MUST BE CLOSEABLE.
+
+GetTestAndMockChans has two early returns that hand back a usable
+FrameChan when the agent is unreachable. The FIRST is before any
+forwarder exists; the SECOND comes after the incoming forwarder has been
+spawned, so there the forwarder closes incomingChan itself on its way out.
+Both closed `incomingChan` and `outgoingChan` and left `mappingChan`
+untouched.
+
+An unwritten, unclosed channel is indistinguishable from no channel:
+consumeMappings does `for mapping := range mappings` with no ctx escape,
+so it parked there forever. Start spawns it unconditionally, so teardown
+then waited out the entire DrainErrGroup budget before abandoning it, and
+the goroutine plus its flush ticker leaked for the process lifetime.
+
+MEASURED on this exact shape: 30.0s before the fix, ~200µs after. It is
+worth a test rather than a comment because the trigger is ordinary --
+"connection refused" is a recording started a moment too early, not a
+crash -- and because the cost is invisible in the result: Start returns
+nil either way, so the recording reports SUCCESS having captured
+nothing, only slower.
+*/
+func TestStart_AnUnreachableAgentDoesNotLeaveTheMappingConsumerParked(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	instr := &refusedOutgoingInstr{fakeInstr: f, running: make(chan struct{})}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          &recTestDB{},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	/*
+	 * WAIT FOR AN EXACT SIGNAL, not a sleep.
+	 *
+	 * Start calls instrumentation.Run immediately after setting
+	 * consumersStarted, so `running` closing means the consumers are up
+	 * and the mapping consumer is ranging. (True for the default empty
+	 * CommandType, which this test uses. Under docker-compose Run is
+	 * called much earlier, so a config change here would quietly make
+	 * this wait meaningless.)
+	 *
+	 * THIS WAIT IS LOAD-BEARING, and a comment here previously said it
+	 * was not. MEASURED with the bug present: a 300ms sleep failed 5/5,
+	 * no wait at all passed 0/5 -- because cancel() beat Start's
+	 * post-setup gate, consumersStarted stayed false, consumeMappings was
+	 * never spawned, and nothing could park. A too-short wait does not
+	 * weaken this test, it makes it VACUOUS, which on a loaded machine is
+	 * what a sleep eventually is.
+	 */
+	select {
+	case <-instr.running:
+	case <-time.After(60 * time.Second):
+		t.Fatal("Start never reached instrumentation.Run, so its consumers never started")
+	}
+	cancel()
+
+	started := time.Now()
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start never returned")
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("Start took %s to return. The mapping consumer is ranging over a "+
+			"channel that is never closed and never written, so teardown is "+
+			"waiting out the full DrainErrGroup budget and that goroutine is "+
+			"leaked for the process lifetime. Every early return in "+
+			"GetTestAndMockChans that hands back a usable FrameChan has to "+
+			"close mappingChan too", elapsed)
+	}
+}
+
+/*
+refusedIncomingInstr fails the FIRST agent call, GetIncoming.
+
+That return happens BEFORE any forwarder is spawned, so nothing can be
+wedged by it -- but it still hands the caller a FrameChan that Start
+ranges over, and every channel in it has to be closed or the consumer
+parks on it forever. It is the sibling of refusedOutgoingInstr and had no
+test at all: `close(mappingChan)`, `Mappings:` and `Abandon:` on this
+path were all live mutation survivors.
+*/
+type refusedIncomingInstr struct {
+	*fakeInstr
+	running chan struct{}
+
+	once sync.Once
+}
+
+func (r *refusedIncomingInstr) GetIncoming(context.Context, models.IncomingOptions) (<-chan *models.TestCase, error) {
+	return nil, errors.New("dial unix /tmp/agent.sock: connect: connection refused")
+}
+
+func (r *refusedIncomingInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	r.once.Do(func() { close(r.running) })
+	<-ctx.Done()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
+// The GetIncoming half of the unreachable-agent case. Same property, same
+// cost, different early return -- and this one was reached by no test, so
+// its three closes were free to disappear.
+func TestStart_AnUnreachableAgentOnTheFirstCallDoesNotParkAConsumer(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	instr := &refusedIncomingInstr{fakeInstr: f, running: make(chan struct{})}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          &recTestDB{},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	select {
+	case <-instr.running:
+	case <-time.After(60 * time.Second):
+		t.Fatal("Start never reached instrumentation.Run, so its consumers never started")
+	}
+	cancel()
+
+	started := time.Now()
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start never returned")
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("Start took %s to return. A consumer is ranging over a channel "+
+			"this early return never closed, so teardown is waiting out the "+
+			"full DrainErrGroup budget and that goroutine is leaked for the "+
+			"process lifetime", elapsed)
+	}
+}
+
+/*
+THE TAIL IS PERSISTED, NOT MERELY NOT-HUNG.
+
+Every wedge test in this file asserts TIMING -- that teardown does not
+wait out the drain budget. None of them asserts that the test case the
+forwarder was holding actually reached the store, and that gap is not
+theoretical: MEASURED, deleting `handedOff = true` from the
+GetOutgoing shutdown return drops most test cases on that path (23 of 40
+delivered against 40 of 40 pristine), and deleting
+`consumersStarted = true` drops a scheduler-dependent fraction of
+ordinary shutdown hand-overs -- with `go test ./...` fully green both
+times.
+
+(The second figure has now been stated as "roughly half", "about 6%" and
+"0.14%" by three separate measurements; see the loop-count note below for
+why no number belongs here. The first read "EVERY test case" for a
+round. Neither was measured; the second is contradicted by the loop-count
+measurement ninety lines below, which is the number the loop is sized
+from. A rate quoted in a comment is a claim like any other.)
+
+Those are the tail-loss bug this whole change exists to remove, living
+inside the fix's own control flow. A timing assertion cannot see them
+because both mutants are fast: dropping data is quicker than persisting
+it.
+*/
+func TestStart_AnUnreachableAgentStillPersistsTheTailItTook(t *testing.T) {
+	/*
+	 * LOOPED, because the loss is a RACE, not a certainty.
+	 *
+	 * With the flag dropped, `abandon()` has already fired by the time
+	 * the consumer exists, so the forwarder's select has BOTH its
+	 * ordinary send and its `<-abandoned` arm ready and the runtime picks
+	 * between them. MEASURED: a single iteration passed against the
+	 * mutant. One green run of a coin flip is not evidence, and shipping
+	 * a test that reports one is worse than shipping none.
+	 */
+	for i := 0; i < 20; i++ {
+		runUnreachableAgentTailCase(t, i)
+	}
+}
+
+func runUnreachableAgentTailCase(t *testing.T, i int) {
+	t.Helper()
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	instr := &refusedOutgoingInstr{fakeInstr: f, running: make(chan struct{})}
+	testDB := &recTestDB{}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          testDB,
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	select {
+	case <-instr.running:
+	case <-time.After(60 * time.Second):
+		t.Fatalf("iteration %d: Start never reached instrumentation.Run", i)
+	}
+
+	// The agent hands over a test case on the path where GetOutgoing
+	// failed. It was taken from the agent, so it is ours to persist.
+	select {
+	case f.incoming <- &models.TestCase{Name: "t-tail", Kind: models.HTTP}:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("iteration %d: the incoming forwarder never took the test case", i)
+	}
+
+	/*
+	 * PERSISTED, not merely not-hung. Every other wedge test here asserts
+	 * timing, and timing cannot see this: dropping the item is FASTER
+	 * than writing it.
+	 */
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		testDB.mu.Lock()
+		var found bool
+		for _, got := range testDB.inserted {
+			if got == "t-tail" {
+				found = true
+			}
+		}
+		testDB.mu.Unlock()
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("iteration %d: the test case the forwarder took from the "+
+				"agent was never persisted. It was already taken, so dropping it "+
+				"loses recorded data silently -- and it drops often enough "+
+				"that a single run proves nothing, which is why this is "+
+				"looped", i)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatalf("iteration %d: Start did not return", i)
+	}
+}
+
+/*
+AN ORDINARY Ctrl+C MUST NOT DROP THE ITEM IN HAND.
+
+The shutdown hand-over exists so the tail is not silently lost, and
+`consumersStarted = true` is what tells the forwarders a reader exists.
+Without it every hand-over races Abandon, and the loser drops recorded
+data with nothing logged.
+
+LOOPED, AND THE COUNT IS SIZED BY MUTATION rather than chosen.
+
+METHOD, so it can be redone rather than believed: delete
+`consumersStarted = true` from record.go, build with `go test -overlay`,
+and run this test to a fixed count many times. The loop is large enough
+when every run in a sample of that size kills the mutant.
+
+	4000 iterations   killed it in 16 of 16 runs
+	 400 iterations   killed it in 26 of 36 (a separate, larger sample
+	                  taken under concurrent load)
+
+Healthy cost at 4000, RE-MEASURED on the code as it stands: 0.90-0.99s
+over three runs, and 4.57s under -race. That is the price of the
+coverage.
+
+The figure quoted here before was 0.51-0.67s, and it predated the
+waitForPersistedTestCase call in the loop body below -- each iteration
+now waits for the third test case to reach the store, which costs at
+least one poll tick. A cost quoted from before the code that dominates
+it is exactly the kind of number this comment's next paragraph warns
+against, so it is re-measured rather than reasoned about. No figure is
+quoted for 400 iterations any more: the loop is 4000, so a cost for a
+size nobody runs is a number that can only go stale.
+
+NO PER-ITERATION RATE IS QUOTED HERE, deliberately. Two attempts to state
+one were wrong -- first "about half", then "near 6%", each derived from a
+sample of ten runs and each contradicted by a larger sample. The drop
+depends on the Go scheduler, the machine and the concurrent load, so it
+is not a property of the code and writing it down as one is how a loop
+gets sized from a number that does not reproduce. Re-measure before
+lowering the count; do not reason from a rate.
+
+WHY NOT A DETERMINISTIC TEST INSTEAD. There is no seam. The flag's only
+observable effect is which of two goroutines wins at teardown: on a clean
+run the deferred abandon() fires after both forwarders have finished, so
+it drops nothing and changes nothing measurable. Repetition is the honest
+instrument here.
+*/
+func TestStart_ShutdownDoesNotDropTheTestCaseInHand(t *testing.T) {
+	for i := 0; i < 4000; i++ {
+		f := &fakeInstr{
+			mappings: make(chan models.TestMockMapping),
+			incoming: make(chan *models.TestCase),
+			outgoing: make(chan *models.Mock),
+		}
+		testDB := &recTestDB{}
+		r := &Recorder{
+			logger:          zap.NewNop(),
+			testDB:          testDB,
+			mockDB:          &recMockDB{unencodable: map[string]bool{}},
+			mappingDb:       &recMappingDB{},
+			telemetry:       &recTelemetry{},
+			instrumentation: &blockingInstr{f},
+			testSetConf:     recTestSetConf{},
+			hooks:           BaseRecordHooks{},
+			config:          &config.Config{},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- r.Start(ctx) }()
+
+		// Three sends prove a consumer is draining (see the wedge table's
+		// note on why two are not enough), so the fourth is the tail.
+		for _, n := range []string{"t-1", "t-2", "t-3"} {
+			select {
+			case f.incoming <- &models.TestCase{Name: n, Kind: models.HTTP}:
+			case <-time.After(30 * time.Second):
+				cancel()
+				t.Fatalf("iteration %d: forwarder never took %s", i, n)
+			}
+		}
+		waitForPersistedTestCase(t, testDB, "t-3")
+
+		select {
+		case f.incoming <- &models.TestCase{Name: "t-tail", Kind: models.HTTP}:
+		case <-time.After(30 * time.Second):
+			cancel()
+			t.Fatalf("iteration %d: forwarder never took the tail", i)
+		}
+		cancel()
+		close(f.outgoing)
+		close(f.incoming)
+		close(f.mappings)
+
+		select {
+		case <-done:
+		case <-time.After(90 * time.Second):
+			t.Fatalf("iteration %d: Start did not return", i)
+		}
+
+		testDB.mu.Lock()
+		var found bool
+		for _, got := range testDB.inserted {
+			if got == "t-tail" {
+				found = true
+			}
+		}
+		inserted := append([]string(nil), testDB.inserted...)
+		testDB.mu.Unlock()
+		if !found {
+			t.Fatalf("iteration %d: the test case the forwarder was holding at "+
+				"shutdown was never persisted (got %v). The hand-over exists so "+
+				"the tail is not silently dropped; losing it is the bug, and a "+
+				"single green run means nothing -- see this test's header for "+
+				"why the loop is the size it is",
+				i, inserted)
+		}
+	}
+}
+
+/*
+boomOutgoingInstr fails GetOutgoing with an error that is NOT a shutdown,
+and only once the test says so.
+
+`utils.IsShutdownError` does not match this, so GetTestAndMockChans takes
+its `return FrameChan{}, err` path rather than the graceful one -- with
+the incoming forwarder already spawned and already holding an item.
+*/
+type boomOutgoingInstr struct {
+	*fakeInstr
+	release chan struct{}
+}
+
+func (b *boomOutgoingInstr) GetOutgoing(context.Context, models.OutgoingOptions) (<-chan *models.Mock, error) {
+	<-b.release
+	return nil, errors.New("boom")
+}
+
+func (b *boomOutgoingInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	<-ctx.Done()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
+/*
+AN ERROR AFTER THE FORWARDER IS SPAWNED MUST STILL RELEASE IT.
+
+GetTestAndMockChans spawns the incoming forwarder and then has two error
+returns after it -- an unreadable TLS private key, and any NON-shutdown
+failure from GetOutgoing. Both hand back a ZERO FrameChan, so `Abandon`
+is nil, and Start bails at `if err != nil` before it can register its own
+abandon defer. The forwarder is then unabandonable: it takes an item from
+the agent, parks on the hand-over, and nothing in the process can release
+it.
+
+MEASURED before the fix: Start returned in 30.028s -- the whole
+DrainErrGroup budget -- and the goroutine leaked for the process lifetime.
+That is the same SEV-1 the consumersStarted defer closes, reached through
+a door that defer cannot see, because Start never gets far enough to arm
+it. The guard is inside GetTestAndMockChans for exactly that reason.
+
+TWO SENDS, for the reason the wedge table gives: the first fills
+incomingChan's one slot, the second is taken by the forwarder, which then
+parks holding it.
+*/
+func TestGetTestAndMockChans_AnErrorAfterTheSpawnStillReleasesTheForwarder(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	instr := &boomOutgoingInstr{fakeInstr: f, release: make(chan struct{})}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          &recTestDB{},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(instr.release) }) }
+	defer release()
+
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case f.incoming <- &models.TestCase{Name: "t", Kind: models.HTTP}:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the incoming forwarder never took the test case")
+		}
+	}
+	// Only now does setup fail, so a live forwarder is holding an item.
+	release()
+
+	started := time.Now()
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return at all")
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("Start took %s to return. An error return that comes AFTER the "+
+			"incoming forwarder is spawned handed back a zero FrameChan with a "+
+			"nil Abandon, so nothing could release that forwarder and teardown "+
+			"waited out the whole DrainErrGroup budget -- with the goroutine "+
+			"leaked for the process lifetime. Every such return in "+
+			"GetTestAndMockChans has to leave handedOff false", elapsed)
+	}
+}
+
 // TestGetTestAndMockChans_ShutdownHandoffDoesNotWedgeWithoutAConsumer is the
 // safety net for the in-flight handover above.
 //
@@ -1083,8 +1915,15 @@ func TestGetTestAndMockChans_ForwardsInFlightTestCaseOnShutdown(t *testing.T) {
 // leaked for the process lifetime, which compounds in the DaemonSet embedding
 // where Start is re-entered per session.
 //
-// This drives that exact window — take an item, cancel, never consume — for
-// both the test-case and the mock forwarder.
+// This drives that exact window — take an item, say no consumer is coming,
+// cancel, never consume — for all three forwarders.
+//
+// THE TWO-ITEM CASES ARE THE POINT of the second half of this table. A single
+// item lands in the one-slot buffer on incomingChan/outgoingChan and unwinds
+// even with the bug present, which is why the original two subtests passed
+// against code that wedged: the buffer can already be full from an ordinary
+// send. mappingChan is unbuffered and wedges on the first item, and it had no
+// subtest at all.
 func TestGetTestAndMockChans_ShutdownHandoffDoesNotWedgeWithoutAConsumer(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1092,37 +1931,103 @@ func TestGetTestAndMockChans_ShutdownHandoffDoesNotWedgeWithoutAConsumer(t *test
 	}{
 		{"incoming", func(f *fakeInstr) { f.incoming <- &models.TestCase{Name: "tail", Kind: models.HTTP} }},
 		{"outgoing", func(f *fakeInstr) { f.outgoing <- &models.Mock{Name: "tail", Kind: models.HTTP} }},
+		{"mappings", func(f *fakeInstr) { f.mappings <- models.TestMockMapping{TestName: "tail"} }},
+		{"incoming twice", func(f *fakeInstr) {
+			f.incoming <- &models.TestCase{Name: "first", Kind: models.HTTP}
+			f.incoming <- &models.TestCase{Name: "tail", Kind: models.HTTP}
+		}},
+		{"outgoing twice", func(f *fakeInstr) {
+			f.outgoing <- &models.Mock{Name: "first", Kind: models.HTTP}
+			f.outgoing <- &models.Mock{Name: "tail", Kind: models.HTTP}
+		}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := &fakeInstr{
-				mappings: make(chan models.TestMockMapping),
-				incoming: make(chan *models.TestCase),
-				outgoing: make(chan *models.Mock),
-			}
-			r := &Recorder{logger: zap.NewNop(), instrumentation: f, config: &config.Config{}}
+		for _, order := range []struct {
+			label        string
+			abandonFirst bool
+		}{
+			{"abandon then cancel", true},
+			{"cancel then abandon", false},
+		} {
+			send, abandonFirst := tc.send, order.abandonFirst
+			t.Run(tc.name+", "+order.label, func(t *testing.T) {
+				f := &fakeInstr{
+					mappings: make(chan models.TestMockMapping),
+					incoming: make(chan *models.TestCase),
+					outgoing: make(chan *models.Mock),
+				}
+				r := &Recorder{logger: zap.NewNop(), instrumentation: f, config: &config.Config{}}
 
-			g, gctx := errgroup.WithContext(context.Background())
-			ctx, cancel := context.WithCancel(gctx)
-			ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+				g, gctx := errgroup.WithContext(context.Background())
+				ctx, cancel := context.WithCancel(gctx)
+				ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
-			_, err := r.GetTestAndMockChans(ctx)
-			require.NoError(t, err)
+				frames, err := r.GetTestAndMockChans(ctx)
+				require.NoError(t, err)
 
-			// The agent hands an item over; the forwarder now holds it. Nothing
-			// is reading the frame channels — this is the "Start returned early"
-			// shape.
-			tc.send(f)
-			cancel()
+				// The agent hands an item over; the forwarder now holds it. Nothing
+				// is reading the frame channels — this is the "Start returned early"
+				// shape, and Abandon is the half of it that Start's own defer
+				// supplies. Without that call the forwarders are entitled to wait
+				// forever for a consumer that is, as far as they know, still coming.
+				send(f)
+				/*
+				 * BOTH ORDERS, AND ONLY ONE OF THEM IS PRODUCTION'S.
+				 *
+				 * Start's abandon defer is registered AFTER the stop defer that
+				 * calls reqCtxCancel(), and Go runs defers LIFO, so abandon
+				 * always runs FIRST. It also fires only when consumersStarted is
+				 * false, whose single reachable return is the ctx.Err() gate. So
+				 * `abandon_then_cancel` is the production order, and
+				 * `cancel_then_abandon` names no path this binary can take.
+				 *
+				 * It is kept anyway, as a ROBUSTNESS case: a forwarder that
+				 * depends on which of two back-to-back signals it observes first
+				 * is fragile whether or not today's defer order happens to
+				 * protect it, and the arms under test are selects over exactly
+				 * those two signals. What is NOT true is the claim that used to
+				 * sit here -- that cancellation ending the run produces the
+				 * reverse order. It does not; the ordering is fixed by defer
+				 * registration, not by what ended the run.
+				 *
+				 * NEITHER ORDER IS DETERMINISTIC HERE. It is tempting to read
+				 * them as a clean partition -- abandon-then-cancel reaching only
+				 * the ordinary send, cancel-then-abandon only the hand-over --
+				 * and that is not what happens: the two calls are back to back, so
+				 * by the time a forwarder reaches its select both arms are usually
+				 * ready and the runtime picks at random. MEASURED, deleting the
+				 * outgoing hand-over arm was caught 7 times in 10, and
+				 * `abandon_then_cancel` was the catching subtest in half of those.
+				 *
+				 * So this table detects the hand-over arms PROBABILISTICALLY and
+				 * the two ordinary-send arms not at all -- deleting either leaves
+				 * the package green.
+				 *
+				 * AND NO SINGLE ARM HAS A DETERMINISTIC TEST ANYWHERE.
+				 * TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders
+				 * kills the incoming pair TOGETHER 10/10, but measured
+				 * individually it kills the inner arm 3 times in 10 and the
+				 * outer arm 0 in 10. It pins "the fix was deleted", not "each
+				 * arm is load-bearing". Said plainly because the gap is easy
+				 * to mistake for coverage.
+				 */
+				if abandonFirst {
+					frames.Abandon()
+					cancel()
+				} else {
+					cancel()
+					frames.Abandon()
+				}
 
-			done := make(chan error, 1)
-			go func() { done <- g.Wait() }()
-			select {
-			case <-done:
-			case <-time.After(10 * time.Second):
-				t.Fatal("the shutdown handover WEDGED with no consumer. In production this is a 30s " +
-					"DrainErrGroup timeout on Ctrl+C plus a goroutine held for the process lifetime, " +
-					"re-leaked on every session in the DaemonSet embedding")
-			}
-		})
+				done := make(chan error, 1)
+				go func() { done <- g.Wait() }()
+				select {
+				case <-done:
+				case <-time.After(10 * time.Second):
+					t.Fatal("the shutdown handover WEDGED with no consumer. In production this is a 30s " +
+						"DrainErrGroup timeout on Ctrl+C plus a goroutine held for the process lifetime, " +
+						"re-leaked on every session in the DaemonSet embedding")
+				}
+			})
+		}
 	}
 }

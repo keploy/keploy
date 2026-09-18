@@ -70,6 +70,7 @@ docker network create "$NETWORK_NAME"
 
 # --- Start fresh Mongo (force remove any stale one first) ---
 docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+docker_pull_retry mongo
 docker run --name "$DB_CONTAINER" --rm \
   --net "$NETWORK_NAME" --network-alias mongo \
   -p "${DB_PORT}:27017" -d mongo
@@ -80,20 +81,20 @@ rm ./keploy.yml >/dev/null 2>&1 || true
 
 docker_build_retry docker build -t $APP_IMAGE .
 
-
-# Generate the keploy-config file.
-$RECORD_BIN config --generate
-
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
-if [ -f "$config_file" ]; then
-  sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
-else
-  echo "⚠️ Config file $config_file not found, skipping sed replace."
-fi
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+  globalNoise:
+      global: {"body": {"ts":[]}}
+KEPLOY_CFG
 
 sleep 5
-
 
 send_request_and_shutdown() {
   local container_name="${1:-}"
@@ -117,7 +118,6 @@ send_request_and_shutdown() {
     -d '{"name":"Jane Smith","age":21}' http://localhost:$APP_PORT/students/12345 >/dev/null
   curl -sS http://localhost:$APP_PORT/students >/dev/null
   curl -sS -X DELETE http://localhost:$APP_PORT/students/12345 >/dev/null
-
 
 }
 
@@ -178,7 +178,6 @@ echo "Starting test mode..."
   --dns-port $DNS_PORT \
   --keploy-container "$KEPLOY_CONTAINER" \
   --generate-github-actions=false 2>&1 | tee "${test_container}.txt"
-
 
 if grep -q "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected during test (${test_container})"

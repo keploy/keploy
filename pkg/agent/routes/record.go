@@ -93,6 +93,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/scope/table", a.HandleScopeTable)
 		r.Get("/mock/stats", a.HandleMockStats)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
+		// Pollable, non-draining view of which mocks have been served. Distinct
+		// from /consumedmocks, which drains and is read once at end of run.
+		r.Get("/mock/served", a.HandleServedMocks)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		// Long-lived streaming endpoints. /pcap/traffic emits a
@@ -186,7 +189,7 @@ func (a *Agent) HandleAfterTestRun(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 	var req models.BeforeSimulateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid before-simulate request: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -201,7 +204,7 @@ func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
 	var req models.AfterSimulateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid after-simulate request: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -337,7 +340,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	var incomingReq models.IncomingReq
 	err := json.NewDecoder(r.Body).Decode(&incomingReq)
 	if err != nil {
-		http.Error(w, "Error decoding request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("failed to decode incoming request: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -345,7 +348,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"
 		a.logger.Error(stopReason, zap.Error(err))
-		http.Error(w, "Error starting incoming proxy", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("%s: %v", stopReason, err), http.StatusInternalServerError)
 		return // Important: return after handling the error
 	}
 
@@ -530,7 +533,7 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 
 	var outgoingReq models.OutgoingReq
 	if err := json.NewDecoder(r.Body).Decode(&outgoingReq); err != nil {
-		http.Error(w, "Error decoding request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("failed to decode outgoing request: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -736,7 +739,7 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 					"read-only or out of space"),
 			zap.Error(err),
 		)
-		http.Error(w, "failed to mark agent as ready", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("failed to mark agent as ready: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -753,7 +756,7 @@ func (a *Agent) HandleGracefulShutdown(w http.ResponseWriter, r *http.Request) {
 
 	if err := a.svc.SetGracefulShutdown(r.Context()); err != nil {
 		a.logger.Error("failed to set graceful shutdown flag", zap.Error(err))
-		http.Error(w, "failed to set graceful shutdown", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("failed to set graceful shutdown: %v", err), http.StatusInternalServerError)
 		return
 	}
 

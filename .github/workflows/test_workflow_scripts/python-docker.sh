@@ -5,16 +5,24 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 
 # Start mongo before starting keploy.
 docker network create keploy-network
+docker_pull_retry mongo
 docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Set up environment
 rm -rf keploy/  # Clean up old test data
 docker_build_retry docker build -t flask-app:1.0 .  # Build the Docker image
 
-# Configure keploy
-sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "./keploy.yml" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"header": {"Allow":[]}}
+KEPLOY_CFG
 sleep 5  # Allow time for configuration to apply
-
 
 container_kill() {
     # pid=$(pgrep -f "keploy record")

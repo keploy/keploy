@@ -52,6 +52,12 @@ const (
 	// — is what signals the tail is through. Sized well above the agent's
 	// per-mapping flush latency so a slow flush is not mistaken for completion.
 	mappingIdleGrace = 3 * time.Second
+
+	// afterRecordingHookTimeout bounds the end-of-recording hook (issue #1867) so a
+	// wedged consumer cannot hang teardown. Matches the 30s DrainErrGroup budgets in
+	// the same teardown defer. It is the hook context's only deadline (WithoutCancel
+	// drops the upstream one), and consumers are expected to honor it.
+	afterRecordingHookTimeout = 30 * time.Second
 )
 
 // stopTimer disarms t, draining its channel if it had already fired, so a later
@@ -278,6 +284,39 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, 
 		testSetConf:     testSetConf,
 		config:          config,
 		hooks:           hooks,
+	}
+}
+
+// afterRecordingComplete invokes the end-of-recording hook (issue #1867). It is
+// best-effort: the recording is already saved, so neither an error NOR a panic
+// from the hook may propagate — a panic here would otherwise unwind the teardown
+// defer and skip the deferred-orphan-revoke that runs right after this call. The
+// hook does data-driven work (the Basic-Auth re-key), so a panic is plausible;
+// recover, log, and let teardown continue.
+func (r *Recorder) afterRecordingComplete(ctx context.Context, testSetID string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			r.logger.Error("AfterRecordingComplete hook panicked; recording is saved but the post-record pass did not finish. Check your RecordHooks implementation.",
+				zap.Any("panic", rec), zap.String("testSetID", testSetID))
+		}
+	}()
+	// The recorder ctx is already cancelled on the normal SIGINT stop of an
+	// interactive recording (the teardown defer above runs under a cancelled ctx).
+	// Decouple the hook from that cancellation (context.WithoutCancel) so a
+	// legitimate post-record pass is not skipped — but re-impose a fresh bound so a
+	// wedged hook cannot hang teardown, matching the 10s NotifyGracefulShutdown and
+	// 30s drain bounds in this same defer. WithoutCancel keeps request-scoped values
+	// while dropping the upstream cancellation AND deadline, so this WithTimeout is
+	// the hook's only deadline; consumers are expected to honor it (the enterprise
+	// re-key does — keploy/enterprise#2536).
+	hookCtx, cancelHook := context.WithTimeout(context.WithoutCancel(ctx), afterRecordingHookTimeout)
+	defer cancelHook()
+	if hookErr := r.hooks.AfterRecordingComplete(hookCtx, &RecordingCompleteContext{
+		TestSetID: testSetID,
+		Path:      r.config.Path,
+	}); hookErr != nil {
+		r.logger.Error("AfterRecordingComplete hook failed; recording is saved but a post-record pass may be incomplete. Check your RecordHooks implementation.",
+			zap.Error(hookErr), zap.String("testSetID", testSetID))
 	}
 }
 
@@ -616,6 +655,27 @@ func (r *Recorder) Start(ctx context.Context) error {
 	// teardown still bounds the whole group with DrainErrGroup.
 	persistCtx := context.WithoutCancel(ctx)
 
+	/*
+	 * THE PORTS INGRESS WAS OBSERVED ON, for the UI join annotation.
+	 *
+	 * Declared here rather than inside the consumer loop because the
+	 * annotation is written from the stop defer below, which needs the
+	 * whole session's observations — and because the loop runs in its
+	 * own goroutine, so the collector is the thing that carries them
+	 * across. It is safe for concurrent use because it holds a mutex;
+	 * the goroutine is the reason it NEEDS to be safe, not the reason it
+	 * is.
+	 *
+	 * Costs an ordinary recording AT MOST one mutex and one map insert
+	 * per test case -- observe() consults nothing about whether a join
+	 * was requested, but it does return before the mutex when AppPort is
+	 * 0 -- plus one sorted() at stop, which takes the mutex and, on a
+	 * recording that saw ingress, allocates and sorts, and one
+	 * context.WithTimeout plus its cancel. The defer then returns
+	 * immediately because no join was requested.
+	 */
+	uiJoinObserved := newUIJoinPorts()
+
 	runAppErrGrp, _ := errgroup.WithContext(ctx)
 	runAppCtx := context.WithoutCancel(ctx)
 	runAppCtx, runAppCtxCancel := context.WithCancel(runAppCtx)
@@ -671,6 +731,29 @@ func (r *Recorder) Start(ctx context.Context) error {
 	var mockCountMapMu sync.Mutex
 	domainSet := telemetry.NewDomainSet()
 	var recordingStarted bool
+	/*
+	 * WHEN CAPTURE ACTUALLY BEGAN, which is not when Start was entered.
+	 *
+	 * This is T0WallMs for the UI join annotation, which
+	 * pkg/models/uijoin.go asks to be good enough "for skew estimation
+	 * only" -- the part of that field doc that makes startup time an
+	 * ERROR rather than a matter of taste. Deliberately not quoting the
+	 * rest of it. `sessionStart` is stamped at the
+	 * top of Start(), before instrumentation setup and agent bring-up
+	 * (AgentReadyTimeout defaults to 330s) — tens of seconds in a
+	 * docker-compose recording, where the user's app boot falls inside
+	 * that window too. (For every other command type instrumentation.Run
+	 * starts the app AFTER this stamp, so app boot is not excluded;
+	 * pkg/models/uijoin.go's field doc says so.) Handing `sessionStart`
+	 * to a skew estimate puts the whole of startup into the skew, in a
+	 * model that spends twenty-four lines refusing a float32 BECAUSE it
+	 * introduces 24 seconds of error. The recorder knows the better
+	 * value; this is it.
+	 *
+	 * `sessionStart` keeps its own job (telemetry duration, which really
+	 * is the whole session).
+	 */
+	var captureStart time.Time
 
 	// Deferred-orphan revoke bookkeeping. revokedNames collects TC names the
 	// agent signalled via Kind=RevokedTests control frames (their owned mock
@@ -731,8 +814,35 @@ func (r *Recorder) Start(ctx context.Context) error {
 			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 
-		if err := utils.DrainErrGroup(r.logger, "record", errGrp, 30*time.Second); err != nil {
+		// recordDrainedCleanly gates the end-of-recording hook below. It stays true
+		// only if this drain actually joined every persist goroutine; on the
+		// timeout path a mock/test-case writer may still be in flight (see below).
+		recordDrainedCleanly := true
+		if err, timedOut := utils.DrainErrGroupStatus(r.logger, "record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
+		} else if timedOut {
+			recordDrainedCleanly = false
+		}
+
+		// End-of-recording hook (issue #1867 Basic-Auth re-key): every test case
+		// and mock is now drained to disk, so a cross-artifact pass can correlate
+		// them. Best-effort — a failure never invalidates the recording.
+		//
+		// Gated on a CLEAN drain. DrainErrGroupStatus reports timedOut when a
+		// persist goroutine ignored cancellation and may still be appending to the
+		// test-set files (the insert goroutines write on persistCtx =
+		// WithoutCancel, so they do NOT stop on the teardown cancel). The hook's
+		// consumer rewrites a whole mock file (read → rewrite → atomic rename), so
+		// a mock appended between its read and its rename would be silently dropped
+		// into a valid-but-short file. Skipping the pass on the timeout path costs
+		// one recording's post-record work; running it risks a truncated mock set.
+		if recordingStarted && newTestSetID != "" {
+			if recordDrainedCleanly {
+				r.afterRecordingComplete(ctx, newTestSetID)
+			} else {
+				r.logger.Warn("skipping the end-of-recording hook: the record drain timed out, so a mock or test-case write may still be in flight; the post-record pass is skipped to avoid racing an unfinished write. The recording itself is saved.",
+					zap.String("testSetID", newTestSetID))
+			}
 		}
 
 		// Deferred-orphan revoke: delete TCs whose owned mock was capacity-dropped
@@ -802,6 +912,51 @@ func (r *Recorder) Start(ctx context.Context) error {
 			}
 		}
 
+		/*
+		 * testCount, READ ONCE AND UNDER THE LOCK, for every consumer in
+		 * this defer.
+		 *
+		 * There were three readers and only the annotation's was guarded
+		 * -- the two telemetry calls below took it bare. On the
+		 * DRAIN-TIMEOUT path DrainErrGroup returns without joining a
+		 * wedged consumer, so the `testCount++` in the TC-insert loop can
+		 * still be live while this defer runs: exactly the hazard the
+		 * revokedNames/insertedNames note above documents, on a plain int
+		 * instead of a map, where the race detector has nothing to trip
+		 * on until it does.
+		 *
+		 * Reading once also makes the three consumers agree. Three
+		 * separate reads of a value another goroutine may still be
+		 * incrementing can report three different totals for one
+		 * recording -- telemetry saying N, the session summary N+1, and
+		 * the annotation refusing at 0.
+		 *
+		 * THE POSITION IS WHAT MAKES IT CORRECT. It has to sit BELOW the
+		 * deferred-orphan revoke's `testCount -= deleted` and above every
+		 * reader: above the decrement, telemetry over-reports revoked
+		 * tests, and on an all-revoked recording the `testCount <= 0` arm
+		 * stops firing and writes an annotation onto a test-set with no
+		 * test cases -- the phantom that arm exists to prevent.
+		 *
+		 * PINNED by TestStart_AgentRevokedTestIsNotCountedAsShortPool,
+		 * which records one test, has the agent revoke it, and asserts
+		 * BOTH telemetry counts are 0. Measured: moving this read above
+		 * the decrement makes both report 1. It was unpinned until
+		 * recTelemetry stopped discarding the count argument -- a fake
+		 * that throws a value away makes every test using it blind to
+		 * that value.
+		 *
+		 * It is also STALER than the three bare reads it replaced, on
+		 * one path: on the drain-timeout path a still-live `testCount++`
+		 * between here and the annotation is now excluded from all
+		 * three. That is the trade -- consistency over freshness, on a
+		 * path where the count is arbitrary anyway -- and it is a cost,
+		 * not a free win.
+		 */
+		insertedMu.Lock()
+		testCountSnapshot := testCount
+		insertedMu.Unlock()
+
 		totalMocks := 0
 		if recordingStarted {
 			mockCountMapMu.Lock()
@@ -867,7 +1022,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 				suiteMeta["tests-short-pool"] = shortPoolTests
 				suiteMeta["mocks-uncorrelated"] = shortPoolMocks
 			}
-			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountSnapshot, suiteMeta)
+			r.telemetry.RecordedTestSuite(newTestSetID, testCountSnapshot, mockCountSnapshot, suiteMeta)
 			for _, c := range mockCountSnapshot {
 				totalMocks += c
 			}
@@ -883,8 +1038,117 @@ func (r *Recorder) Start(ctx context.Context) error {
 			if stopReason != "" {
 				status = "aborted"
 			}
-			r.telemetry.RecordSessionCompleted(int64(testCount), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status, stopReason)
+			r.telemetry.RecordSessionCompleted(int64(testCountSnapshot), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status, stopReason)
 		}
+		/*
+		 * THE UI JOIN ANNOTATION, written once, at stop.
+		 *
+		 * Here and not at start, for two reasons that both come from
+		 * pkg/models/uijoin.go. T1WallMs is the session's end and is not
+		 * knowable before it; and validateStructure refuses an empty
+		 * IngressPorts list, so at start — with no ingress observed yet —
+		 * there is no storable annotation to write.
+		 *
+		 * ON persistCtx, NOT ctx. This defer runs during teardown, so on
+		 * Ctrl+C `ctx` is already cancelled and the write would fail for
+		 * the one reason that has nothing to do with the data. persistCtx
+		 * is the same detached context the test-case and mock stores use,
+		 * and for the same reason.
+		 *
+		 * NOT GUARDED ON recordingStarted, deliberately. Such a guard
+		 * would be redundant rather than wrong: a session that never
+		 * began has nothing to annotate, and that is already handled one
+		 * layer down — `recordingStarted = true` is set before the
+		 * consumer goroutine that calls observe() is ever spawned, so
+		 * recordingStarted == false implies both that sorted() is nil
+		 * and that nothing was persisted.
+		 *
+		 * WHICH ARM FIRES DEPENDS ON WHY THE RUN STOPPED, and an earlier
+		 * version of this note said it was always the testCount one and
+		 * always Debug. That is no longer true and was the justification
+		 * for deleting the guard, so it is worth restating exactly. If
+		 * GetNextTestSetID failed, newTestSetID is "" and the
+		 * `testSetID == ""` arm fires -- at ERROR, because a join that
+		 * was REQUESTED and cannot be attempted must not return
+		 * silently. Only when a test-set id exists and nothing was
+		 * persisted does the testCount arm fire, at Debug.
+		 *
+		 * The guard stays deleted anyway, and on a better reason than
+		 * the one it had: what it would suppress is a truthful Error
+		 * about a join the operator asked for and did not get. It could
+		 * be deleted with the whole package green, and inverting it to
+		 * `!recordingStarted` DID turn the harness test red -- so the
+		 * direction was pinned and only the removal survived.
+		 */
+		/*
+		 * A DEADLINE, AND EXACTLY AS MUCH AS THAT BUYS.
+		 *
+		 * persistCtx is context.WithoutCancel(ctx), which strips the
+		 * deadline along with the cancellation -- that is what it is for,
+		 * so a write survives SIGINT. This call then sits after every
+		 * DrainErrGroup budget, on the path SIGINT takes, and does a
+		 * read-modify-write of config.yaml with no bound of its own.
+		 *
+		 * WHAT THE 10s ACTUALLY REACHES, traced rather than assumed:
+		 * ctxReader.Read selects on ctx.Done() between chunks, and
+		 * CreateFileF checks ctx.Err() in its not-exist branch. That is
+		 * all. ctxWriter.Write (pkg/platform/yaml/yaml.go) is a plain
+		 * retry loop that never looks at the context; MkdirAll, OpenFile,
+		 * Sync, Chmod and Rename are blocking syscalls a Go context
+		 * cannot interrupt; and warnIfDroppingFields re-reads with
+		 * context.WithoutCancel, deliberately discarding this deadline
+		 * inside the very write it is meant to bound.
+		 *
+		 * SO THIS DOES NOT MAKE TEARDOWN SAFE ON A WEDGED MOUNT. An
+		 * NFS/overlay volume in D-state still hangs here, deadline or
+		 * not, and it is not "bounded like every other operation in this
+		 * defer": the drains bound because DrainErrGroup returns WITHOUT
+		 * its goroutine, which a deadline over synchronous file I/O has
+		 * no equivalent for. Nor is it the only unbounded one -- the
+		 * per-name DeleteTests loop earlier in this defer is equally
+		 * unbounded.
+		 *
+		 * What it does buy is the slow-but-responsive disk: the read
+		 * returns DeadlineExceeded, persistUIJoinAnnotation propagates
+		 * it, and the operator gets an Error line instead of an
+		 * indefinite wait. The write is temp-file + Rename, so a
+		 * cut-off write cannot corrupt config.yaml. Losing the
+		 * annotation there is the right trade -- the recording is
+		 * already on disk.
+		 *
+		 * AND NO TEST PINS THE BOUND. Measured: removing it entirely
+		 * survives the package 10 runs out of 10 (shrinking it to 1ns is
+		 * caught, so the context is genuinely propagated -- the duration
+		 * is not). Said here rather than left to be found.
+		 */
+		annotateCtx, annotateCancel := context.WithTimeout(persistCtx, 10*time.Second)
+		r.recordUIJoinAnnotation(
+			annotateCtx,
+			newTestSetID,
+			// One argument where there were two interchangeable int64s,
+			// and T1 is stamped inside newUIJoinSpan -- see uiJoinSpan.
+			// NOT a compile-time guarantee: these two are both time.Time
+			// and swapping them still builds. It is caught by
+			// TestStart_TakesT0FromTheCaptureStartNotTheProcessStart,
+			// measured 10 kills out of 10.
+			newUIJoinSpan(captureStart, sessionStart),
+			uiJoinObserved.sorted(),
+			// The one guarded snapshot, taken at the top of this defer
+			// and shared by all three consumers -- this annotation and
+			// the two telemetry calls beside it, which read
+			// testCountSnapshot rather than the live counter for the
+			// same reason. Reading the counter once is what makes the
+			// three agree; an inline read here could race the
+			// still-live consumer on the drain-timeout path and size the
+			// annotation from a different number than the telemetry.
+			//
+			// NOT COVERED, said rather than left to be found: replacing
+			// this with a bare `testCount` read is a MEASURED survivor.
+			// The snapshot's POSITION is pinned (moving it above the
+			// revoke block is caught); the snapshot itself is not.
+			testCountSnapshot,
+		)
+		annotateCancel()
 		if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
 			s.Shutdown()
 		}
@@ -941,7 +1205,15 @@ func (r *Recorder) Start(ctx context.Context) error {
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, ChannelBindingShim: r.config.Record.ChannelBindingShim, UpstreamTLSVerify: r.config.Record.UpstreamTLS.Verify, UpstreamTLSCACert: r.config.Record.UpstreamTLS.CACert, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize, RecordBufferConsumerStallGrace: r.config.Record.RecordBuffer.ConsumerStallGrace})
+	setupOpts := models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, ChannelBindingShim: r.config.Record.ChannelBindingShim, UpstreamTLSVerify: r.config.Record.UpstreamTLS.Verify, UpstreamTLSCACert: r.config.Record.UpstreamTLS.CACert, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize, RecordBufferConsumerStallGrace: r.config.Record.RecordBuffer.ConsumerStallGrace, RecordBufferHalfCloseGrace: r.config.Record.RecordBuffer.HalfCloseGrace}
+	// Retry only a stalled agent bring-up (pkg.ErrAgentNotReady) with a fresh agent.
+	err = pkg.RetryAgentSetup(setupCtx, r.logger, func(c context.Context, attempt int) error {
+		o := setupOpts
+		if attempt > 1 {
+			o.AgentReadyTimeout = 120 * time.Second
+		}
+		return r.instrumentation.Setup(c, r.config.Command, o)
+	})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
@@ -1009,6 +1281,65 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 	recordingStarted = true
+	// Stamped HERE, beside the flag, because they mean the same thing:
+	// GetTestAndMockChans has returned, so the agent is capturing.
+	captureStart = time.Now()
+
+	/*
+	 * THE FORWARDERS NOW OUTLIVE THIS FUNCTION, so every path out of it has
+	 * to tell them whether a consumer is coming.
+	 *
+	 * GetTestAndMockChans has spawned UP TO three forwarders on reqCtx
+	 * (WithoutCancel), and they keep pulling from the agent regardless of
+	 * what happens to ctx.
+	 *
+	 * "Up to", because it has two `err == nil` returns of its own, both on
+	 * the shutdown path: the one taken when GetIncoming fails with ctx
+	 * already done has spawned NONE and closes all three channels, and
+	 * the GetOutgoing equivalent has spawned ONE (the incoming forwarder)
+	 * and sets handedOff itself. This defer is correct on all three
+	 * counts -- it abandons whatever exists -- but an earlier version of
+	 * this note said "three" flatly, which is only true of a full
+	 * success, and someone reasoning from it about the shutdown paths
+	 * would be reasoning about goroutines that were never started.
+	 *
+	 * The consumers that drain them are spawned three
+	 * hundred lines below, and between here and there is exactly ONE
+	 * return: the ctx.Err() gate on the next line. On that path the
+	 * forwarders are alive with nobody reading, and each one ends by
+	 * handing over the item it has already taken from the agent. That
+	 * hand-over used to park forever: a 30s DrainErrGroup timeout on Ctrl+C
+	 * and a goroutine held for the process lifetime, re-leaked per session
+	 * in the DaemonSet embedding. MEASURED deterministically on all three.
+	 *
+	 * A defer rather than a call beside each return, because the failure
+	 * mode of getting this wrong is a hang rather than a compile error, and
+	 * a new error return added later would reintroduce it silently. The flag
+	 * is set only once every consumer is running, so it says exactly what it
+	 * is named for: is anyone going to read these channels.
+	 */
+	consumersStarted := false
+	defer func() {
+		if consumersStarted {
+			return
+		}
+		/*
+		 * NIL-GUARDED, because a missing Abandon must degrade to the leak
+		 * this defer exists to prevent -- not to a panic in teardown.
+		 *
+		 * GetTestAndMockChans sets Abandon on every err == nil return, so
+		 * this is unreachable today, and the suite cannot reach it either
+		 * -- MEASURED: removing this nil guard AND `Abandon:` from an
+		 * early return leaves the package green. The guard is kept for
+		 * the cost of being wrong about a construction site, not because
+		 * a test defends it; saying so is more useful than a measurement
+		 * that was never taken.
+		 */
+		if frames.Abandon != nil {
+			frames.Abandon()
+		}
+	}()
+
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -1066,6 +1397,41 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("testSetID", newTestSetID),
 					zap.String("testCaseName", testCase.Name))
 			}
+			/*
+			 * OBSERVED HERE, at the one point ingress is known to have
+			 * ARRIVED -- which is BEFORE the insert, not after it.
+			 *
+			 * IngressPorts exists so the offline joiner can say
+			 * NO_INGRESS_OBSERVED for an exchange on a port nothing was
+			 * listening on, rather than failing to join with no reason.
+			 * That answer is only honest if the list records ports
+			 * ingress ACTUALLY arrived on — a configured value would
+			 * describe intent, and could claim a port this recording
+			 * never saw.
+			 *
+			 * Before the insert, deliberately: a test case that fails to
+			 * persist still tells us which port ingress came in on, and
+			 * the port list is about what the recorder observed, not
+			 * about what the store accepted.
+			 *
+			 * PINNED BOTH WAYS, BY TWO TESTS -- and it takes two.
+			 *
+			 * Moving this call into the `err == nil` branch below is the
+			 * disk-full shape, where every insert errors and the mutant
+			 * loses the join entirely:
+			 * TestAPortIsObservedEvenWhenItsTestCaseFailsToPersist fails
+			 * on it.
+			 *
+			 * Moving it after the whole if/else is only visible when the
+			 * error branch takes its `continue`, which needs ctx already
+			 * cancelled. That test runs on context.Background(), so
+			 * execution falls through past the if/else either way and the
+			 * mutant SURVIVED it 10 runs out of 10.
+			 * TestAPortIsObservedWhenTheInsertFailsDuringShutdown is the
+			 * missing half: it holds the insert open, cancels, then lets
+			 * it fail, so the `continue` really is taken.
+			 */
+			uiJoinObserved.observe(testCase.AppPort)
 			err := r.testDB.InsertTestCase(persistCtx, testCase, newTestSetID, true)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -1300,6 +1666,11 @@ func (r *Recorder) Start(ctx context.Context) error {
 			}, &shortPoolByTest)
 	})
 
+	// Every frame channel now has a reader, so the shutdown hand-over can no
+	// longer be abandoned. Nothing may return between GetTestAndMockChans and
+	// this line without the defer above firing.
+	consumersStarted = true
+
 	if r.config.CommandType != string(utils.DockerCompose) {
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
@@ -1371,24 +1742,34 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		Filters: r.config.Record.Filters,
 	}
 
-	// Create channels to receive incoming and outgoing data
-	// One slot each, and it is load-bearing rather than a tuning knob. Both
-	// forwarders below hand over an item they have ALREADY taken from the agent
-	// when ctx is cancelled, so that the tail is not silently dropped — and that
-	// send has to complete even when nothing is consuming.
+	// Create channels to receive incoming and outgoing data.
 	//
-	// Nothing consuming is a real state, not a hypothetical: Start can return at
-	// its post-setup `ctx.Err()` gate before it ever spawns the consumers, while
-	// these forwarders run on reqCtx (WithoutCancel) and keep pulling from the
-	// agent. Teardown's reqCtxCancel() then drives both into the handover, and on
-	// an unbuffered channel they would park forever — a 30s DrainErrGroup timeout
-	// on every affected Ctrl+C plus a goroutine leaked for the process lifetime,
-	// which compounds in the DaemonSet embedding where Start is re-entered per
-	// session. The handover fires at most once per forwarder, so one slot is
-	// exactly sufficient.
+	// THE ONE SLOT IS A CONVENIENCE, NOT A GUARANTEE. It is tempting to
+	// reason that the handover fires at most once per forwarder, so one slot
+	// is exactly sufficient; it does not follow. The slot can ALREADY be full
+	// from an ordinary send that no consumer has taken yet, and the handover
+	// below then parks on a full buffer exactly as it would on an unbuffered
+	// one. Measured, with nothing consuming: mappingChan (unbuffered) wedges
+	// on the first item, these two on the second.
+	//
+	// What actually stops the wedge is `abandoned` — see FrameChan.Abandon.
+	// Nothing consuming is a reachable state rather than a hypothetical:
+	// these forwarders run on reqCtx (WithoutCancel) and keep pulling from
+	// the agent, while Start can return between creating them and spawning
+	// the consumers. With the fix in place Abandon reaches them FIRST --
+	// Start registers its abandon defer after the stop defer, so LIFO runs
+	// it before reqCtxCancel(). Before the fix that cancellation was what
+	// drove all three into the handover, with nobody left to receive it.
 	incomingChan := make(chan *models.TestCase, 1)
 	outgoingChan := make(chan *models.Mock, 1)
 	mappingChan := make(chan models.TestMockMapping)
+
+	// Closed by FrameChan.Abandon. Idempotent via sync.Once because Start
+	// defers it unconditionally and the error paths below return a FrameChan
+	// that carries it too.
+	abandoned := make(chan struct{})
+	var abandonOnce sync.Once
+	abandon := func() { abandonOnce.Do(func() { close(abandoned) }) }
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -1400,10 +1781,35 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	if err != nil {
 		if ctx.Err() != nil || utils.IsShutdownError(err) {
 			r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
-			// Close channels to prevent callers from hanging when ranging over them
+			/*
+			 * ALL THREE CLOSED, and mappingChan is the one that was
+			 * missed.
+			 *
+			 * These early returns hand back a FrameChan the caller ranges
+			 * over. A channel that is never closed and never written is
+			 * the same as no channel at all: `for m := range mappings`
+			 * blocks forever with no ctx escape. Start spawns
+			 * consumeMappings unconditionally, so it parked here, and
+			 * teardown waited out the whole DrainErrGroup budget before
+			 * giving up on it.
+			 *
+			 * NOT A SHUTDOWN-ONLY PATH, which is what made it worth
+			 * fixing rather than documenting: utils.IsShutdownError
+			 * matches "connection refused", so an agent socket that is
+			 * merely not up yet lands here with ctx perfectly live.
+			 * MEASURED on that shape: Start returned in 30.0s and the
+			 * mapping consumer plus its flush ticker leaked for the
+			 * process lifetime.
+			 */
 			close(incomingChan)
 			close(outgoingChan)
-			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
+			close(mappingChan)
+			return FrameChan{
+				Incoming: incomingChan,
+				Outgoing: outgoingChan,
+				Mappings: mappingChan,
+				Abandon:  abandon,
+			}, nil
 		}
 		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
 	}
@@ -1430,17 +1836,73 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				// Hand it over anyway and then stop, mirroring the outgoing
 				// forwarder below. The consumer writes on persistCtx (detached
 				// from ctx) precisely so a shutdown-time hand-off still reaches
-				// disk, and incomingChan carries a slot for exactly this send, so
-				// it completes even if Start returned before spawning a consumer.
+				// disk.
+				//
+				// UNLESS NOBODY IS COMING. Without the `abandoned` arm this
+				// send parked forever whenever Start returned before spawning
+				// a consumer; the buffer slot does not save it, because an
+				// ordinary send may already be sitting in it.
 				select {
 				case <-ctx.Done():
-					incomingChan <- tc
+					select {
+					case incomingChan <- tc:
+					case <-abandoned:
+						r.logger.Warn("dropped an in-flight test case on shutdown: recording stopped before any consumer started, so there is nothing left to persist it",
+							zap.String("testCaseName", tc.Name),
+							zap.String("next_step", "this test case was captured but not written; re-record the test set if you need it"))
+					}
 					return ctx.Err()
 				case incomingChan <- tc:
+				case <-abandoned:
+					// Abandoned while ctx is still live: Start returned before
+					// spawning a consumer and reqCtx has not been cancelled yet.
+					// Without this arm the send parks until that cancellation
+					// arrives -- for mappings, a further 15s of mappingDrainGrace
+					// on top.
+					//
+					// NOT COVERED on the OUTER select, and that is a
+					// MEASURED survivor: deleting this arm here leaves the
+					// package green, because the inner ctx.Done arm still
+					// catches it eventually. On this select the arm is a
+					// latency guard, not a correctness one. The INNER
+					// hand-over arms below ARE pinned.
+					r.logger.Warn("dropped a test case: recording stopped before any consumer started, so there is nothing left to persist it",
+						zap.String("testCaseName", tc.Name),
+						zap.String("next_step", "this test case was captured but not written; re-record the test set if you need it"))
+					return nil
 				}
 			}
 		}
 	})
+
+	/*
+	 * FROM HERE ON A FORWARDER IS ALREADY RUNNING, so no error return may
+	 * leave without telling it.
+	 *
+	 * The incoming forwarder is spawned just above, on reqCtx
+	 * (WithoutCancel). Every `return FrameChan{}, err` below therefore
+	 * hands the caller a ZERO FrameChan -- nil Abandon -- and Start bails
+	 * at its `if err != nil` before it can register its own abandon
+	 * defer. The forwarder is then unabandonable: it takes an item, parks
+	 * on the hand-over, and nothing can release it.
+	 *
+	 * MEASURED on the non-shutdown GetOutgoing error with ctx live:
+	 * Start returned in 30.028s -- the full DrainErrGroup budget -- with
+	 * the goroutine leaked for the process lifetime. Byte-for-byte the
+	 * SEV-1 the rest of this file's guards exist to remove, behind a
+	 * different door.
+	 *
+	 * A DEFER WITH A FLAG rather than a call beside each return, for the
+	 * same reason Start uses one: there are two such returns today, the
+	 * failure mode of missing one is a hang rather than a compile error,
+	 * and a third added later would reintroduce it silently.
+	 */
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			abandon()
+		}
+	}()
 
 	// OUTGOING
 	// Create a cancelable child that we always cancel when ctx is done.
@@ -1484,10 +1946,20 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		cancel()
 		if ctx.Err() != nil || utils.IsShutdownError(err) {
 			r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
-			// Close outgoingChan to prevent callers from hanging
-			// Note: incomingChan will be closed by the goroutine started above when ctx is done
+			// Close outgoingChan to prevent callers from hanging.
+			// incomingChan is closed by the forwarder started above when
+			// ctx is done. mappingChan has no producer on this path at
+			// all -- see the note on the incoming early return for what
+			// ranging over it costs.
 			close(outgoingChan)
-			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
+			close(mappingChan)
+			handedOff = true
+			return FrameChan{
+				Incoming: incomingChan,
+				Outgoing: outgoingChan,
+				Mappings: mappingChan,
+				Abandon:  abandon,
+			}, nil
 		}
 		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
 	}
@@ -1512,9 +1984,24 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				}
 				select {
 				case <-ctx.Done():
-					outgoingChan <- m
+					// See the incoming forwarder: the `abandoned` arm is what
+					// keeps this from parking forever with no consumer.
+					select {
+					case outgoingChan <- m:
+					case <-abandoned:
+						r.logger.Warn("dropped an in-flight mock on shutdown: recording stopped before any consumer started, so there is nothing left to persist it",
+							zap.String("mockName", m.Name),
+							zap.String("next_step", "this mock was captured but not written; re-record the test set if you need it"))
+					}
 					return ctx.Err()
 				case outgoingChan <- m:
+				case <-abandoned:
+					// See the incoming forwarder -- including its note that
+					// this OUTER arm is a measured, uncovered latency guard.
+					r.logger.Warn("dropped a mock: recording stopped before any consumer started, so there is nothing left to persist it",
+						zap.String("mockName", m.Name),
+						zap.String("next_step", "this mock was captured but not written; re-record the test set if you need it"))
+					return nil
 				}
 			}
 		}
@@ -1603,6 +2090,28 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			case <-shutdownC:
 				// Shutdown began: re-loop to arm the idle timer and start draining.
 				continue
+			case <-abandoned:
+				/*
+				 * NOBODY IS COMING, so there is nothing to drain FOR.
+				 *
+				 * `abandoned` was wired only into the two SEND selects
+				 * below, never here -- so an abandoned mapping forwarder
+				 * ignored it and sat out the full mappingIdleGrace before
+				 * noticing the stream had gone quiet. MEASURED: a fixed
+				 * 3s added to every abandoned teardown, inside the
+				 * record-req drain, and 8 of the wedge table's 10
+				 * subtests paying it at 3s each.
+				 *
+				 * Returning here drops nothing a consumer could have
+				 * received: an item already taken off the stream is
+				 * handled by the hand-over below, which logs what it
+				 * drops. Items still queued on `ch` ARE dropped, and
+				 * without a log line -- where the pre-fix path logged
+				 * one. That is the right trade only because this arm is
+				 * reached when the consumers are already gone, so no
+				 * reader exists for them; it is not "nothing".
+				 */
+				return nil
 			case <-mapCtx.Done():
 				// Hard cap reached, or the stream was torn down.
 				return nil
@@ -1619,22 +2128,64 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					// unwinding — cancellation is not a licence to drop data we are
 					// holding. Both cases are ready once mapCtx is done, so the
 					// runtime picks at random and this would otherwise lose the last
-					// in-flight mapping about half the time. The consumer is still
-					// ranging (it stops only when this goroutine closes the channel
-					// on return), so the send completes. Mirrors the outgoing
+					// in-flight mapping about half the time. Mirrors the outgoing
 					// producer above.
-					mappingChan <- m
+					//
+					// THE CONSUMER ONLY RANGES IF Start GOT FAR ENOUGH TO
+					// SPAWN IT, which is not something this goroutine can
+					// assume. The channel is UNBUFFERED, so with no consumer
+					// this send wedged on the very FIRST mapping — measured.
+					/*
+					 * THIS ARM IS DEFENSIVE, AND NOT COVERED BY A TEST --
+					 * said plainly rather than left for the next reviewer
+					 * to measure.
+					 *
+					 * Reaching it needs mapCtx cancelled while `abandoned`
+					 * is still open, with an item in hand. mapCtx is
+					 * cancelled mappingDrainGrace (15s) AFTER ctx is done,
+					 * and Abandon fires the moment Start returns -- which
+					 * on the no-consumer path is immediately, at its gate.
+					 * So the outer arm below wins by about fifteen
+					 * seconds every time, and the wedge table cannot drive
+					 * this one without sleeping out that grace period for
+					 * a state the current ordering cannot produce.
+					 *
+					 * Kept because "the ordering makes it unreachable" is
+					 * a property of two other functions, not of this one,
+					 * and the cost of being wrong about that is a
+					 * permanent goroutine leak. MEASURED: deleting it
+					 * leaves the suite green.
+					 */
+					select {
+					case mappingChan <- m:
+					case <-abandoned:
+						r.logger.Warn("dropped an in-flight test-mock mapping on shutdown: recording stopped before any consumer started",
+							zap.String("testName", m.TestName),
+							zap.String("next_step", "mappings.yaml may be missing this test; re-record the test set if you need it"))
+					}
 					return ctx.Err()
 				case mappingChan <- m:
+				case <-abandoned:
+					// See the incoming forwarder. This one matters most: mapCtx
+					// is not cancelled until mappingDrainGrace (15s) after ctx
+					// is done, so without this arm an abandoned mapping
+					// forwarder holds the errgroup for that whole window before
+					// it even reaches the hand-over.
+					r.logger.Warn("dropped a test-mock mapping: recording stopped before any consumer started",
+						zap.String("testName", m.TestName),
+						zap.String("next_step", "mappings.yaml may be missing this test; re-record the test set if you need it"))
+					return nil
 				}
 			}
 		}
 	})
 
+	handedOff = true
 	return FrameChan{
 		Incoming: incomingChan,
 		Outgoing: outgoingChan,
 		Mappings: mappingChan,
+		Abandon:  abandon,
 	}, nil
 
 }

@@ -10,6 +10,8 @@ set -Eeuo pipefail
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
@@ -179,14 +181,23 @@ sudo chmod +x $MYSQL_FUZZER_BIN
 sudo chown -R $(whoami):$(whoami) golden
 
 # Start a MySQL instance for the recording session
+docker_pull_retry mysql:8.0
 docker run --name mysql-container \
   -e MYSQL_ROOT_PASSWORD=password \
   -p 3306:3306 --rm -d mysql:8.0
 wait_for_mysql
 
 # Generate Keploy configuration and add noise parameter
-sudo "$RECORD_KEPLOY_BIN" config --generate
-sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' ./keploy.yml
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > ./keploy.yml <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"duration_ms":[]}}
+KEPLOY_CFG
 echo "Keploy config generated and updated."
 endsec
 
@@ -234,6 +245,7 @@ if json_pass_supported; then
     # the same blank starting state.
     section "Reset MySQL before json record pass"
     docker rm -f mysql-container || true
+    docker_pull_retry mysql:8.0
     docker run --name mysql-container \
       -e MYSQL_ROOT_PASSWORD=password \
       -p 3306:3306 --rm -d mysql:8.0

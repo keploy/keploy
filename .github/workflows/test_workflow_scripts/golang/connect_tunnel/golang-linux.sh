@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # E2E test for CONNECT tunnel support.
 # Verifies that Keploy can record and replay HTTP requests that the app
@@ -125,16 +126,22 @@ if ! (echo > /dev/tcp/127.0.0.1/3128) >/dev/null 2>&1; then
 fi
 
 # ── Build the app ──
-go build -o connect-tunnel
+go_retry build -o connect-tunnel
 echo "Go binary built."
 
 # ── Generate keploy config with noise rules ──
-sudo "$RECORD_BIN" config --generate
 config_file="./keploy.yml"
-if [ -f "$config_file" ]; then
-    # httpbin.org returns dynamic fields — mark them as noise
-    sed -i 's/global: {}/global: {"header": {"Date":[], "Content-Length":[]}, "body": {"origin":[], "headers.X-Amzn-Trace-Id":[]}}/' "$config_file"
-fi
+  # httpbin.org returns dynamic fields — mark them as noise
+  # Keploy's config now carries only the settings that DIFFER from its
+  # defaults, so patching a default value out of the generated file with
+  # `sed` silently patched nothing: the noise rule vanished and every
+  # replay diffed on the fields it was meant to mask. Write what this
+  # test needs instead of editing what the generator happened to print.
+  cat > "$config_file" <<'KEPLOY_CFG'
+test:
+  globalNoise:
+      global: {"header": {"Date":[], "Content-Length":[]}, "body": {"origin":[], "headers.X-Amzn-Trace-Id":[]}}
+KEPLOY_CFG
 
 stop_recording() {
     local rec_pid

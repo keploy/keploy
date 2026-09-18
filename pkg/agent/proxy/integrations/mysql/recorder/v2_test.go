@@ -15,7 +15,9 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // wrapPacket prepends the 4-byte MySQL packet header (3-byte little-
@@ -568,5 +570,219 @@ func assertQueryMock(t *testing.T, m *models.Mock) {
 	}
 	if got := m.Spec.MySQLRequests[0].Header.Type; got != "COM_QUERY" {
 		t.Errorf("query mock request type = %q, want COM_QUERY (seq==0 firstCmd mis-decoded as handshake?)", got)
+	}
+}
+
+// TestEmitMockV2ReportsAWindowInvertedByMonotonicClamping pins the diagnostic.
+//
+// enforceReqMonotonic raises ReqTimestampMock to lastReq+1ns to keep the
+// matcher's ordering invariant, and does not touch ResTimestampMock. On a mock
+// that arrived well-ordered that can push req PAST res, and filterByTimeStamp
+// then drops any mock with res < req (pkg/util.go) -- so the mock is orphaned by
+// this step, not by the recorder.
+//
+// The timestamps are deliberately NOT repaired here; see the comment at the call
+// site for the two attempts that regressed go-memory-load-mongo, the second of
+// which produced recordings the RELEASED replayer could not consume. What this
+// pins is that the loss is announced rather than silent: the first instance of it
+// was found only by diffing recorded YAML by hand.
+//
+// The inverted values are the real ones from k8s-proxy pipeline 6303, mock-61.
+func TestEmitMockV2ReportsAWindowInvertedByMonotonicClamping(t *testing.T) {
+	base := time.Date(2026, 9, 3, 0, 18, 17, 0, time.UTC)
+	req := func(op string) []mysql.Request {
+		return []mysql.Request{{PacketBundle: mysql.PacketBundle{Header: &mysql.PacketInfo{Type: op}}}}
+	}
+	resp := func(op string) []mysql.Response {
+		return []mysql.Response{{PacketBundle: mysql.PacketBundle{Header: &mysql.PacketInfo{Type: op}}}}
+	}
+
+	newHarnessWithLogs := func(t *testing.T) (*v2Harness, *observer.ObservedLogs) {
+		t.Helper()
+		h := newV2Harness(t)
+		core, logs := observer.New(zapcore.DebugLevel)
+		h.sess.Logger = zap.New(core)
+		return h, logs
+	}
+	emit := func(h *v2Harness, rq, rs time.Time) *models.Mock {
+		t.Helper()
+		emitMockV2(context.Background(), h.sess, req("COM_QUERY"), resp("OK"), "mocks", "COM_QUERY", "OK", rq, rs)
+		select {
+		case m := <-h.mocks:
+			return m
+		case <-time.After(5 * time.Second):
+			t.Fatal("emitMockV2 produced no mock within 5s")
+			return nil
+		}
+	}
+
+	t.Run("an inversion this step creates is reported", func(t *testing.T) {
+		t.Parallel()
+		h, logs := newHarnessWithLogs(t)
+		// A later request FIRST, so enforceReqMonotonic has a baseline to raise
+		// to. Without it the monotonic pass returns early on the session's first
+		// mock, the branch is never reached, and this subtest would pass no
+		// matter what the branch does.
+		_ = emit(h, base.Add(900*time.Millisecond), base.Add(900*time.Millisecond))
+		// Well-ordered on arrival (req < res); only the monotonic raise inverts it.
+		m := emit(h, base.Add(700*time.Millisecond), base.Add(750*time.Millisecond))
+
+		if !m.Spec.ResTimestampMock.Before(m.Spec.ReqTimestampMock) {
+			t.Fatalf("expected the monotonic raise to invert this window (req=%v res=%v); "+
+				"the fixture no longer exercises the branch",
+				m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+		}
+		warns := logs.FilterLevelExact(zapcore.WarnLevel).All()
+		if len(warns) != 1 {
+			t.Fatalf("got %d WARN entries, want 1 — a mock that replay will silently DROP "+
+				"was orphaned with no diagnostic at all", len(warns))
+		}
+		if got := warns[0].ContextMap()["inversion"]; got == nil {
+			t.Error("the warning does not carry the inversion magnitude")
+		}
+	})
+
+	t.Run("a window that stays well-ordered is not reported", func(t *testing.T) {
+		t.Parallel()
+		h, logs := newHarnessWithLogs(t)
+		_ = emit(h, base.Add(900*time.Millisecond), base.Add(900*time.Millisecond))
+		// Raised to lastReq+1ns, which is still before this response stamp.
+		m := emit(h, base.Add(700*time.Millisecond), base.Add(950*time.Millisecond))
+		if m.Spec.ResTimestampMock.Before(m.Spec.ReqTimestampMock) {
+			t.Fatalf("fixture inverted unexpectedly: req=%v res=%v", m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+		}
+		if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != 0 {
+			t.Errorf("got %d WARN entries for a well-ordered window, want 0", n)
+		}
+	})
+
+	t.Run("timestamps are not rewritten", func(t *testing.T) {
+		t.Parallel()
+		h, _ := newHarnessWithLogs(t)
+		rq, rs := base.Add(100*time.Millisecond), base.Add(150*time.Millisecond)
+		m := emit(h, rq, rs)
+		if !m.Spec.ReqTimestampMock.Equal(rq) || !m.Spec.ResTimestampMock.Equal(rs) {
+			t.Errorf("a well-ordered window was altered: got req=%v res=%v, want req=%v res=%v",
+				m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, rq, rs)
+		}
+	})
+}
+
+// tlsClientHelloBytes is a stand-in for the record the client's TLS
+// stack writes immediately after its SSLRequest. Only the leading
+// `16 03 01` matters: read as a MySQL header it declares a payload
+// length of 66326, which is what makes the failure a hang rather than a
+// decode error.
+func tlsClientHelloBytes() []byte {
+	p := make([]byte, 120)
+	p[0], p[1], p[2] = 0x16, 0x03, 0x01
+	p[3], p[4] = 0x00, 0x73
+	return p
+}
+
+// TestRecordV2_TLSUpgrade_ClientHelloDiscardedFromParserStream is the
+// MySQL end of the client write hold's contract, and the reason the
+// hold is not finished when the ClientHello stops reaching the wire.
+//
+// The relay's forwarder is parked in Read on the client socket, so it
+// holds the SSLRequest and the ClientHello — here in ONE chunk, which is
+// what a coalesced client write produces — before this parser has been
+// scheduled to look at either. Both are teed. The parser reads exactly
+// the 36-byte SSLRequest and asks for the upgrade; the relay then
+// consumes the ClientHello for its own client-side handshake and, at the
+// pause barrier, tells the parser's stream to discard everything below
+// the position it consumed to.
+//
+// Without that last step the parser's next read returns `16 03 01 00`
+// where the post-TLS HandshakeResponse41 should be, ReadRequiredBytes
+// blocks on a 66326-byte payload, the hang watchdog retires the parser
+// and the connection falls through to passthrough with zero mocks. The
+// wire leak would be fixed and every MySQL TLS recording lost.
+func TestRecordV2_TLSUpgrade_ClientHelloDiscardedFromParserStream(t *testing.T) {
+	t.Parallel()
+	h := newV2Harness(t)
+	h.sess.ClientWritesHeld = true
+
+	base := time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC)
+
+	handshakeBuf := cannedHandshakeV10(t)
+	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), handshakeBuf[4:])
+	if err != nil {
+		t.Fatalf("decode handshake: %v", err)
+	}
+	h.pushDest(handshakeBuf, base)
+
+	sslReq := cannedSSLRequest(t, 1)
+	clientHello := tlsClientHelloBytes()
+	// One chunk, both messages: the forwarder read them together and
+	// teed what it read.
+	h.pushClient(append(append([]byte(nil), sslReq...), clientHello...), base.Add(1*time.Millisecond))
+
+	// Post-TLS traffic, exactly as the relay would deliver it once the
+	// handshake is up.
+	h.pushClient(cannedHandshakeResponse41(t, 2, true), base.Add(20*time.Millisecond))
+	h.pushDest(cannedOK(t, 3, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
+
+	dirSeen := make(chan directive.Directive, 1)
+	go func() {
+		select {
+		case d := <-h.dirs:
+			dirSeen <- d
+			// The relay's half of the contract, at the point it performs
+			// it: the barrier is up, the parser is blocked on this ack,
+			// and everything teed so far that the parser did not read is
+			// handshake material.
+			h.sess.ClientStream.DiscardBefore(int64(len(sslReq) + len(clientHello)))
+			h.acks <- directive.Ack{
+				Kind:              d.Kind,
+				OK:                true,
+				BoundaryReadAt:    base.Add(10 * time.Millisecond),
+				BoundaryWrittenAt: base.Add(15 * time.Millisecond),
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("parser never sent a directive")
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		done <- RecordV2(ctx, h.logger, h.sess)
+	}()
+
+	select {
+	case m := <-h.mocks:
+		if m.Name != "config" {
+			t.Errorf("mock name = %q, want config", m.Name)
+		}
+		if len(m.Spec.MySQLRequests) < 2 {
+			t.Errorf("TLS config mock has %d requests, want >=2 (SSLRequest + post-TLS "+
+				"HandshakeResponse41). A short count means the parser never got past the "+
+				"ClientHello left in its stream.", len(m.Spec.MySQLRequests))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the TLS config mock: the parser is blocked reading a " +
+			"packet whose header it took from the TLS ClientHello")
+	}
+
+	select {
+	case d := <-dirSeen:
+		if d.TLS == nil {
+			t.Fatalf("directive carried no TLS params: %+v", d)
+		}
+		if d.TLS.ClientFlushBytes != len(sslReq) {
+			t.Errorf("ClientFlushBytes = %d, want %d — the relay forwards exactly the "+
+				"SSLRequest upstream and keeps the ClientHello, so the count has to be the "+
+				"measured width of the packet this parser consumed",
+				d.TLS.ClientFlushBytes, len(sslReq))
+		}
+	default:
+		t.Fatal("directive never observed")
+	}
+
+	h.closeStreams()
+	if err := <-done; err != nil {
+		t.Errorf("RecordV2 returned error: %v", err)
 	}
 }

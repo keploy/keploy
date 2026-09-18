@@ -27,9 +27,24 @@ import "net"
 //   - WSAEventSelect: overrides the socket's notification mode that Go
 //     relies on.
 //
-// Since the keploy ingress forwarder is driven by the eBPF bind redirector
-// (Linux-only), Windows is not a real deployment target for this codepath.
-// Keep the stub until/unless that changes.
+// Note this is a stub for the PEEK only, not a statement that the forwarder is
+// unused on Windows. An earlier version of this comment said Windows "is not a
+// real deployment target for this codepath", which does not follow: the
+// editions that intercept natively on Windows move the application's listener
+// and forward through exactly this code. Only the interception backend lives
+// elsewhere; the proxy is here.
+//
+// What is absent on Windows is the PRE-EMPTIVE check, not stale detection as
+// such: the read-path classification in handleHttp1ZeroCopy still runs, and
+// job 97044495434 is it failing — "Failed to read upstream response and
+// request is not safely replayable ... wsarecv" on a GET with content_length 0,
+// i.e. canReplay was true and only isStaleConnError returning false sent it to
+// writeBadGateway. So with no peek to catch the dead connection first, that
+// classification is the whole of Windows' defence, and it is only as good as
+// the errno matching behind it (pkg/neterr).
+//
+// Keep the stub until a probe exists that does not fight Go's IOCP ownership
+// of the socket.
 func peekUpstreamLive(_ net.Conn) bool {
 	return true
 }

@@ -118,14 +118,15 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 // routes to recordViaSupervisor only when IsV2() returns true.
 //
 // Returning true is unconditional — the HTTP parser has no per-instance
-// configuration that could force it back to the legacy path. The rollback
-// knob is the env KEPLOY_NEW_RELAY=off handled in proxy_v2.go.
+// configuration that could force it back to the legacy path, and there is no
+// longer an env knob that can: the KEPLOY_NEW_RELAY rollback switch is gone.
 func (h *HTTP) IsV2() bool { return true }
 
 // RecordOutgoing dispatches to the V2 path when the supervisor has
 // attached a session via RecordSession.V2, and to the legacy path
-// otherwise. Keeping both paths live lets the dispatcher / rollback
-// knob (KEPLOY_NEW_RELAY) swap between them without code changes.
+// otherwise. In practice the dispatcher always attaches V2 for this parser
+// now that the KEPLOY_NEW_RELAY rollback knob is gone; the legacy branch
+// remains only for callers that construct a session without one.
 func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
 	if session != nil && session.V2 != nil {
 		return h.recordV2(ctx, session.V2)

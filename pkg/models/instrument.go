@@ -111,10 +111,35 @@ type OutgoingOptions struct {
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
-	SchemaNoiseDetection   bool                           // when true, detect request-body field drift vs the recorded mock and record it as field-path noise (req_body_noise) on the matched mock
-	SchemaNoiseStrict      bool                           // when true (replay/enforcement path), a mock (any parser) that carries learned req_body_noise must match strictly: every request-body field must match except the learned-noise paths, so a non-noise drift rejects the mock
-	SkipTLSMITM            bool
-	ConnKey                string // connection-level key for TLSHandshakeStore correlation
+	// MockNoiseDetection / MockNoiseStrict are the canonical spelling.
+	//
+	// MockNoiseDetection: detect request-body field drift vs the recorded mock
+	// and record it as field-path noise (req_body_noise) on the matched mock.
+	//
+	// MockNoiseStrict (replay/enforcement path): a mock (any parser) that
+	// carries learned req_body_noise must match strictly — every request-body
+	// field must match except the learned-noise paths, so a non-noise drift
+	// rejects the mock.
+	MockNoiseDetection bool
+	MockNoiseStrict    bool
+
+	// SchemaNoiseDetection / SchemaNoiseStrict are the previous spelling, kept
+	// as a mirror rather than removed.
+	//
+	// Go has no field aliases, so unlike the package rename (see
+	// integrations/schemanoise) this cannot be solved with `=`. Both fields are
+	// therefore carried and NormalizeMockNoise reconciles them. An unmigrated
+	// producer — a k8s-proxy or enterprise build from before the rename, or a
+	// stored config written by one — sets only these, and its intent must
+	// survive: JSON/YAML decoding silently drops unknown keys, so a mismatch
+	// here is not an error anywhere, it is a toggle that quietly does nothing.
+	//
+	// Deprecated: set MockNoiseDetection / MockNoiseStrict. Read through
+	// NoiseDetection() / NoiseStrict(), never directly.
+	SchemaNoiseDetection bool
+	SchemaNoiseStrict    bool
+	SkipTLSMITM          bool
+	ConnKey              string // connection-level key for TLSHandshakeStore correlation
 	// PreferH2, on the REPLAY path, tells the TLS MITM to advertise h2 in ALPN
 	// (instead of the default http/1.1 downgrade) so a dual-protocol client
 	// stays on HTTP/2 and its request matches a recorded kind:Http2 mock.
@@ -227,6 +252,18 @@ type ConditionalDstCfg struct {
 	Addr   string // Destination Addr (ip:port)
 	Port   uint
 	TLSCfg *tls.Config
+	// AddrFabricated marks Addr/Port as a stand-in the capture layer
+	// synthesized because it could not resolve the connection's REAL
+	// destination (e.g. the proxyless SSL-uprobe path substitutes
+	// 127.0.0.1:0 when the pid→dest cache is ambiguous, and content
+	// matching later forces the well-known port, yielding
+	// "127.0.0.1:3306"). Such an address is good enough for parser
+	// selection and mock metadata (grouping), but it does NOT point at
+	// the server this connection actually talked to — consumers MUST
+	// NOT dial it (the MySQL recorder's fetchServerGreeting fallback
+	// would otherwise connect to an unrelated local server, or fail
+	// instantly with ECONNREFUSED and abort the capture).
+	AddrFabricated bool
 }
 
 type IncomingOptions struct {
@@ -235,11 +272,20 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
-	ClientNSPID     uint32
-	Container       string
-	KeployContainer string
-	DockerDelay     uint64
-	Synchronous     bool
+	ClientNSPID uint32
+	Container   string
+	// FromContainer is the already-running container to re-create under
+	// keploy's namespaces. Set only for utils.FromContainer runs.
+	FromContainer string
+	// FromContainerWasRunning records whether that container was up when
+	// keploy stopped it, so teardown knows whether to start it again. The stop
+	// happens before the agent starts - the agent publishes the app's ports and
+	// cannot bind them while the original still holds them - so it is decided
+	// there rather than in App.
+	FromContainerWasRunning bool
+	KeployContainer         string
+	DockerDelay             uint64
+	Synchronous             bool
 	// Cmd               string
 	AgentURI          string
 	IsDocker          bool
@@ -300,8 +346,14 @@ type SetupOptions struct {
 	// config.Record.RecordBuffer.ConsumerStallGrace. See
 	// RecordBufferMaxMemoryPerConn for the propagation rationale.
 	RecordBufferConsumerStallGrace time.Duration
-	ExtraArgs                      []string
-	EnableSampling                 int
+
+	// RecordBufferHalfCloseGrace mirrors
+	// config.RecordBuffer.HalfCloseGrace. Zero means "unset, use the
+	// relay default"; NEGATIVE means "disable half-close", so the value
+	// must be forwarded on != 0 rather than > 0.
+	RecordBufferHalfCloseGrace time.Duration
+	ExtraArgs                  []string
+	EnableSampling             int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF
@@ -328,6 +380,12 @@ type SetupOptions struct {
 	// environment variables to disk. When non-nil, SetupCompose uses this content
 	// directly instead of reading from a file path extracted from the command.
 	InMemoryCompose []byte
+	// AgentReadyTimeout, when > 0, overrides pkg.AgentReadyTimeout() for this
+	// bring-up. A retry after a stalled agent sets a shorter window than the
+	// generous first-attempt slow-start budget: a fresh agent reports healthy in
+	// a second or two, so a wedged retry should be cut short rather than re-wait
+	// minutes.
+	AgentReadyTimeout time.Duration
 }
 
 type RunOptions struct {

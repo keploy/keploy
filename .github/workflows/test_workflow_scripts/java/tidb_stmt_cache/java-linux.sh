@@ -20,6 +20,8 @@
 
 set -Eeuo pipefail
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
@@ -188,6 +190,7 @@ source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 sudo rm -rf keploy/ keploy.yml
 
 section "Start TiDB"
+docker_compose_pull_retry
 docker compose up -d
 wait_for_tidb
 endsec

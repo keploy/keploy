@@ -4,6 +4,9 @@ import (
 	"os"
 	"runtime"
 	"testing"
+	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -119,4 +122,65 @@ func TestSetWorkerScopeEmptyClears(t *testing.T) {
 	_, present := p.workerScope[42]
 	p.workerScopeMu.RUnlock()
 	require.False(t, present, "empty allowlist clears the worker's scope")
+}
+
+// The wrapper embeds the MockMemDb INTERFACE, so anything a parser reaches for
+// by type assertion but that is not in that interface is silently erased by the
+// wrap. Every kind-aware parser then falls to a legacy branch — and in
+// `keploy mock replay`, the only mode where worker scoping exists, the startup
+// tier is the whole pool, so that branch reads nothing.
+func TestScopedMockDb_DoesNotEraseTheManagersCapabilities(t *testing.T) {
+	mgr := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mgr.Close()
+
+	type revSrc interface{ Revision() uint64 }
+	type revKind interface{ RevisionByKind(models.Kind) uint64 }
+	type kindAware interface {
+		GetFilteredMocksByKind(models.Kind) ([]*models.Mock, error)
+		GetUnFilteredMocksByKind(models.Kind) ([]*models.Mock, error)
+	}
+
+	var scoped interface{} = &scopedMockDb{MockMemDb: mgr}
+	if _, ok := scoped.(revSrc); !ok {
+		t.Error("Revision erased by the wrap: consumers fall back to rebuilding on every call")
+	}
+	if _, ok := scoped.(revKind); !ok {
+		t.Error("RevisionByKind erased by the wrap")
+	}
+	if _, ok := scoped.(kindAware); !ok {
+		t.Error("the by-kind readers are erased by the wrap: kind-aware parsers take their " +
+			"legacy branch, which cannot read the startup tier")
+	}
+}
+
+// The startup tier is filtered like every other read tier. It sounds shared,
+// but staging puts the whole per-test slice into it, and in `keploy mock replay`
+// it is the entire pool — so leaving it unfiltered let one worker read, and
+// consume, another worker's mocks.
+func TestScopedMockDb_StartupTierIsScopedToTheWorker(t *testing.T) {
+	mgr := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mgr.Close()
+
+	a := newMockForTest("mock-A", time.Now().Add(-time.Hour), models.LifetimePerTest)
+	b := newMockForTest("mock-B", time.Now().Add(-time.Hour), models.LifetimePerTest)
+	mgr.SetMocksWithWindow([]*models.Mock{a, b}, nil, models.BaseTime, time.Now())
+
+	universe := map[string]struct{}{"mock-A": {}, "mock-B": {}}
+	workerA := &scopedMockDb{
+		MockMemDb: mgr,
+		allow:     map[string]struct{}{"mock-A": {}},
+		universe:  universe,
+	}
+
+	startup, err := workerA.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if containsMockNamed(startup, "mock-B") {
+		t.Fatal("worker A can see worker B's mock through the startup tier; it can also " +
+			"consume it, deleting another worker's recording")
+	}
+	if !containsMockNamed(startup, "mock-A") {
+		t.Fatal("worker A cannot see its own mock")
+	}
 }

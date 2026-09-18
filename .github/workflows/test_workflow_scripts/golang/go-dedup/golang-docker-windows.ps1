@@ -336,17 +336,17 @@ Remove-KeployDirs -Candidates $candidates
 Remove-Item -LiteralPath ".\keploy.yml" -Force -ErrorAction SilentlyContinue
 Write-Host "Pre-clean complete."
 
-# --- Generate keploy.yml and add noise for timestamp endpoint ---
-Write-Host "Generating keploy config..."
-& $env:RECORD_BIN config --generate
-
+# --- Write the keploy config this test needs ---
+# Keploy's config now carries only the settings that DIFFER from its defaults,
+# so replacing a default value in the generated file matched nothing: the noise
+# rule vanished and every replay diffed on current_time.
 $configFile = ".\keploy.yml"
-if (-not (Test-Path $configFile)) { throw "Config file '$configFile' not found after generation." }
-
-# Add noise to ignore current_time in body (go-dedup /timestamp endpoint)
-(Get-Content $configFile -Raw) -replace 'global:\s*\{\s*\}', 'global: {"body": {"current_time":[]}}' |
-  Set-Content -Path $configFile -Encoding UTF8
-Write-Host "Updated global noise in keploy.yml to ignore 'current_time'."
+@'
+test:
+    globalNoise:
+        global: {"body": {"current_time":[]}}
+'@ | Set-Content -Path $configFile -Encoding UTF8
+Write-Host "Wrote keploy.yml with global noise ignoring 'current_time'."
 
 # --- Helpers for record flow ---
 function Test-RecordingComplete {
