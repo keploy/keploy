@@ -486,6 +486,62 @@ func TestParseBinaryTime_TruncatedBuffer(t *testing.T) {
 	}
 }
 
+// TestReadLengthEncodedString_TruncatedExtendedPrefix guards the fix where
+// ReadLengthEncodedString conflated a real NULL (the single byte 0xfb) with
+// a truncated extended length-encoded-integer prefix (a lone 0xfc/0xfd/0xfe
+// marker whose follow-up bytes are missing). Both used to report num < 1 and
+// return a nil error; only n distinguishes them - a real NULL or a genuine
+// empty string always consumes at least 1 byte (n >= 1), while a truncated
+// prefix consumes none (n == 0).
+func TestReadLengthEncodedString_TruncatedExtendedPrefix(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "0xfc with no follow-up bytes", data: []byte{0xfc}},
+		{name: "0xfc with one of two follow-up bytes", data: []byte{0xfc, 0x01}},
+		{name: "0xfd with follow-up bytes missing", data: []byte{0xfd, 0x01}},
+		{name: "0xfe with follow-up bytes missing", data: []byte{0xfe, 0x01, 0x02}},
+		{name: "empty buffer", data: []byte{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, n, err := ReadLengthEncodedString(tt.data)
+			if err == nil {
+				t.Fatalf("expected an error for %q, got nil (n=%d)", tt.name, n)
+			}
+		})
+	}
+}
+
+// TestReadLengthEncodedString_RealNullAndEmptyString are the cases the fix
+// above must not regress: an actual NULL marker and a genuine zero-length
+// string both consume exactly 1 byte and must still succeed.
+func TestReadLengthEncodedString_RealNullAndEmptyString(t *testing.T) {
+	value, isNull, n, err := ReadLengthEncodedString([]byte{0xfb})
+	if err != nil {
+		t.Fatalf("NULL marker: unexpected error: %v", err)
+	}
+	if !isNull || n != 1 {
+		t.Fatalf("NULL marker: got isNull=%v n=%d, want isNull=true n=1", isNull, n)
+	}
+	if len(value) != 0 {
+		t.Fatalf("NULL marker: expected empty value, got %q", value)
+	}
+
+	value, isNull, n, err = ReadLengthEncodedString([]byte{0x00})
+	if err != nil {
+		t.Fatalf("empty string: unexpected error: %v", err)
+	}
+	if isNull || n != 1 {
+		t.Fatalf("empty string: got isNull=%v n=%d, want isNull=false n=1", isNull, n)
+	}
+	if len(value) != 0 {
+		t.Fatalf("empty string: expected empty value, got %q", value)
+	}
+}
+
 func BenchmarkReadLengthEncodedInteger(b *testing.B) {
 	testCases := []struct {
 		name string

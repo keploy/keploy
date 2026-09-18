@@ -43,6 +43,28 @@ func TestDecodeTextRow_TruncatedPacket(t *testing.T) {
 	}
 }
 
+// TestDecodeTextRow_IncompleteLengthPrefix guards against a truncated
+// extended length-encoded-integer prefix (a lone 0xfc/0xfd/0xfe marker with
+// its follow-up bytes cut off). ReadLengthEncodedInteger reports that as
+// isNull=true, n=0 to signal "could not even read the length" - not a real
+// NULL, which is always the single byte 0xfb. Before the shared helper
+// treated n==0 as an error, ReadLengthEncodedString swallowed this case and
+// returned an empty value with no error, so the truncated row was accepted
+// instead of rejected.
+func TestDecodeTextRow_IncompleteLengthPrefix(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+	columns := []*mysql.ColumnDefinition41{{Type: byte(mysql.FieldTypeVarString), Name: "id"}}
+
+	// header(4) + a lone 0xfc extended-length marker with no follow-up bytes.
+	data := []byte{0x01, 0x00, 0x00, 0x01, 0xfc}
+
+	_, _, err := DecodeTextRow(ctx, logger, data, columns)
+	if err == nil {
+		t.Fatal("expected a decode error for a truncated extended length prefix, got nil")
+	}
+}
+
 // TestEncodeTextRow_FewerValuesThanColumns guards the bounds-check fix at
 // textRowPacket.go:60. Before the fix, a TextRow whose Values slice was
 // shorter than the column list panicked the agent goroutine with

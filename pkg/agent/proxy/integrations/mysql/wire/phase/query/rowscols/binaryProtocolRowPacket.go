@@ -62,6 +62,16 @@ func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*m
 			continue
 		}
 
+		// The null bitmap says this column has a value, so at least one more
+		// byte must remain. Without this, a packet truncated right after the
+		// bitmap hands readBinaryValue an empty slice; ParseBinaryDate/
+		// ParseBinaryDateTime/ParseBinaryTime treat an empty slice as "no
+		// value yet" and return (nil, 0, nil), so the truncated row would be
+		// accepted instead of rejected.
+		if offset >= len(data) {
+			return nil, offset, fmt.Errorf("malformed binary row packet: unexpected end of data at column %q", col.Name)
+		}
+
 		res, n, err := readBinaryValue(data[offset:], col)
 		if err != nil {
 			return nil, offset, err

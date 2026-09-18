@@ -280,6 +280,14 @@ func ReadUint24(b []byte) uint32 {
 func ReadLengthEncodedString(b []byte) ([]byte, bool, int, error) {
 	// Get length
 	num, isNull, n := ReadLengthEncodedInteger(b)
+	// n == 0 means ReadLengthEncodedInteger could not even read the length
+	// prefix (e.g. a 0xfc/0xfd/0xfe marker with its follow-up bytes cut off).
+	// That is a truncated buffer, not a real NULL or empty string — both of
+	// those always consume at least 1 byte — so it must not be accepted
+	// silently as a zero-length value.
+	if n == 0 {
+		return nil, false, 0, io.EOF
+	}
 	if num < 1 {
 		return b[n:n], isNull, n, nil
 	}
