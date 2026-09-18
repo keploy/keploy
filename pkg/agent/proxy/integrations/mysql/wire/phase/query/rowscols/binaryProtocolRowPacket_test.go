@@ -517,3 +517,24 @@ func TestDecodeBinaryRow_TruncatedPacket(t *testing.T) {
 		})
 	}
 }
+
+// TestDecodeBinaryRow_TruncatedAfterNullBitmap covers the case flagged in
+// review: a packet that ends immediately after the null bitmap, for a column
+// the bitmap marks as non-NULL. ParseBinaryDate/DateTime/Time treat an empty
+// slice as "nothing to parse yet" and return (nil, 0, nil), so without an
+// explicit bounds check the truncated row was silently accepted instead of
+// rejected.
+func TestDecodeBinaryRow_TruncatedAfterNullBitmap(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+	columns := []*mysql.ColumnDefinition41{{Type: byte(mysql.FieldTypeDate), Name: "date_of_birth"}}
+
+	// header(4) + OK byte(0x00) + 1-byte null bitmap (0x00 => column not NULL),
+	// with nothing after it for the DATE value itself.
+	data := []byte{0x01, 0x00, 0x00, 0x01, 0x00, 0x00}
+
+	_, _, err := DecodeBinaryRow(ctx, logger, data, columns)
+	if err == nil {
+		t.Fatal("expected a decode error for a packet truncated right after the null bitmap, got nil")
+	}
+}
