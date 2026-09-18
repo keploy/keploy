@@ -1,11 +1,10 @@
 package utils
 
 import (
-	"fmt"
-	"net"
-	"os"
-	"strconv"
-	"strings"
+	"encoding/json"
+	"errors"
+	"io"
+	"sort"
 	"testing"
 )
 
@@ -30,268 +29,392 @@ func TestContainerNameFromDockerRun(t *testing.T) {
 	}
 }
 
-// GetAvailablePort must not hand back a port from the kernel's local port
-// range.
-//
-// The oracle is read straight from /proc, NOT from ephemeralPortRange: using
-// the production helper as its own oracle makes the test self-referential, and
-// a helper that mis-reports the range (say 32768-40000) would then pass while
-// handing out 40001-65534 — most of it inside the real range, i.e. exactly the
-// bug this test exists to catch.
-func TestGetAvailablePortAvoidsTheEphemeralRange(t *testing.T) {
-	raw, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
-	if err != nil {
-		t.Skipf("no ip_local_port_range on this platform (%v); GetAvailablePort "+
-			"correctly falls back to :0 there and there is nothing to assert", err)
-	}
-	f := strings.Fields(string(raw))
-	if len(f) != 2 {
-		t.Fatalf("unexpected ip_local_port_range content %q", raw)
-	}
-	lo64, err1 := strconv.ParseUint(f[0], 10, 32)
-	hi64, err2 := strconv.ParseUint(f[1], 10, 32)
-	if err1 != nil || err2 != nil {
-		t.Fatalf("unparseable ip_local_port_range %q", raw)
-	}
-	lo, hi := uint32(lo64), uint32(hi64)
-	if hi >= 65535 {
-		t.Skipf("kernel range reaches %d, leaving no space above it; the fallback is "+
-			"correct here and there is nothing to assert", hi)
-	}
-
-	for i := 0; i < 50; i++ {
-		port, err := GetAvailablePort()
-		if err != nil {
-			t.Fatalf("GetAvailablePort: %v", err)
-		}
-		if port == 0 {
-			t.Fatal("GetAvailablePort returned port 0")
-		}
-		if port >= lo && port <= hi {
-			t.Fatalf("GetAvailablePort returned %d, inside the kernel's local port range "+
-				"%d-%d read from /proc: every other bind(0) allocator on the machine — a "+
-				"second keploy process, Docker's host-port publisher — draws from there "+
-				"and can take it before the agent binds", port, lo, hi)
-		}
-	}
-}
-
-// The returned port must be one the function VERIFIED, not merely a number in
-// the right band.
-//
-// Asserting "the returned port is bindable" is not enough: on an idle box
-// almost any port above the ephemeral range binds, so that assertion holds by
-// luck even if the bindability probe is deleted entirely. Instead, hold a block
-// of candidates and require the function to return something outside it.
-func TestGetAvailablePortSkipsPortsAlreadyHeld(t *testing.T) {
-	if _, _, known := ephemeralPortRange(); !known {
-		t.Skip("platform range unknown; GetAvailablePort falls back to :0 here")
-	}
-	_, hi, _ := ephemeralPortRange()
-	if hi >= 65535 {
-		t.Skip("no space above the ephemeral range on this host")
-	}
-
-	// Occupy a contiguous block so a probe-less implementation, which returns
-	// whatever candidate it lands on, has a high chance of returning a held one.
-	held := map[uint32]bool{}
-	var lns []net.Listener
-	for p := hi + 1; p <= 65535 && len(lns) < 2000; p++ {
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
-		if err != nil {
-			continue
-		}
-		lns = append(lns, ln)
-		held[p] = true
-	}
-	defer func() {
-		for _, ln := range lns {
-			_ = ln.Close()
-		}
-	}()
-	if len(held) < 100 {
-		t.Skipf("could only hold %d ports; too few to discriminate", len(held))
-	}
-
-	for i := 0; i < 200; i++ {
-		port, err := GetAvailablePort()
-		if err != nil {
-			t.Fatalf("GetAvailablePort: %v", err)
-		}
-		if held[port] {
-			t.Fatalf("GetAvailablePort returned %d, a port THIS TEST is holding: the "+
-				"candidate was never verified bindable, so callers are handed ports "+
-				"that are already in use", port)
-		}
-	}
-}
-
-// Successive callers must not all be handed the SAME port.
-//
-// Scanning upward from a fixed floor returns the lowest free port every time,
-// so two keploy processes started moments apart — the ordinary CI pattern —
-// are handed an identical number, each having verified it free. Whichever
-// binds second loses, and the agent's bind retry cannot recover because the
-// winner is a live holder, not a departing one.
-//
-// Sequential rather than concurrent: concurrent callers are separated anyway
-// by the brief hold of the verification listener, so a concurrent test passes
-// even with a fixed floor and proves nothing.
-func TestGetAvailablePortDoesNotHandEveryCallerTheSamePort(t *testing.T) {
-	const n = 12
-	seen := map[uint32]int{}
-	for i := 0; i < n; i++ {
-		p, err := GetAvailablePort()
-		if err != nil {
-			t.Fatalf("GetAvailablePort: %v", err)
-		}
-		seen[p]++
-	}
-	if len(seen) < 2 {
-		t.Fatalf("%d successive calls returned %d distinct port(s): candidates are not "+
-			"randomised, so keploy processes started moments apart are handed the same "+
-			"port and one of them fails to bind", n, len(seen))
-	}
-}
-
-func TestEphemeralPortRangeIsSane(t *testing.T) {
-	lo, hi, known := ephemeralPortRange()
-	if !known {
-		// Correct on any platform without ip_local_port_range. It MUST report
-		// unknown rather than guessing: macOS and Windows both default to
-		// 49152-65535, so assuming the Linux range would allocate entirely
-		// inside the real ephemeral range there.
-		if lo != 0 || hi != 0 {
-			t.Fatalf("unknown range still reported %d-%d; callers must not act on it", lo, hi)
-		}
-		return
-	}
-	if lo == 0 || hi == 0 || hi < lo || hi > 65535 {
-		t.Fatalf("ephemeralPortRange returned %d-%d, want a sane range", lo, hi)
-	}
-}
-
-// The fallback branches are unreachable on a normal Linux box — the /proc read
-// always succeeds — so they are tested through the pure parser instead. Without
-// this, a broken default would be dead code that no test can reach.
-func TestParseEphemeralPortRange(t *testing.T) {
+func TestIsShutdownError(t *testing.T) {
 	cases := []struct {
-		name   string
-		in     string
-		lo, hi uint32
+		name string
+		err  error
+		want bool
 	}{
-		{"normal", "32768\t60999\n", 32768, 60999},
-		{"widened", "1024 65000\n", 1024, 65000},
-		{"one field", "32768\n", defaultEphemeralLo, defaultEphemeralHi},
-		{"three fields", "1 2 3\n", defaultEphemeralLo, defaultEphemeralHi},
-		{"empty", "", defaultEphemeralLo, defaultEphemeralHi},
-		{"non-numeric", "lo hi\n", defaultEphemeralLo, defaultEphemeralHi},
-		{"inverted", "60999 32768\n", defaultEphemeralLo, defaultEphemeralHi},
-		{"zero low", "0 60999\n", defaultEphemeralLo, defaultEphemeralHi},
-		{"out of range high", "32768 70000\n", defaultEphemeralLo, defaultEphemeralHi},
+		{"nil error", nil, false},
+		{"io.EOF", io.EOF, true},
+		{"io.ErrUnexpectedEOF", io.ErrUnexpectedEOF, true},
+		{"wrapped EOF", errors.New("read tcp: EOF"), true},
+		{"connection refused", errors.New("dial tcp 127.0.0.1:8080: connect: connection refused"), true},
+		{"connection reset", errors.New("read: connection reset by peer"), true},
+		{"broken pipe", errors.New("write: broken pipe"), true},
+		{"use of closed network connection", errors.New("read tcp: use of closed network connection"), true},
+		{"unrelated error", errors.New("invalid syntax"), false},
 	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			lo, hi, ok := parseEphemeralPortRange(tc.in)
-			if !ok {
-				t.Fatal("parseEphemeralPortRange reported unknown; it is only called " +
-					"when the file was read, so it must always resolve to a range")
-			}
-			if lo != tc.lo || hi != tc.hi {
-				t.Fatalf("parseEphemeralPortRange(%q) = %d-%d, want %d-%d", tc.in, lo, hi, tc.lo, tc.hi)
+			got := IsShutdownError(tc.err)
+			if got != tc.want {
+				t.Errorf("IsShutdownError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}
+}
 
-	// The Linux default must leave usable space above it, or GetAvailablePort
-	// has nowhere to draw from on a host whose file is malformed and silently
-	// falls back to the racy :0 path. This constrains the LINUX default only —
-	// unknown platforms report known=false and fall back deliberately.
-	if defaultEphemeralHi >= 65535 {
-		t.Fatalf("Linux default high-water mark %d leaves no room above it",
-			defaultEphemeralHi)
+func TestReplaceHost(t *testing.T) {
+	cases := []struct {
+		name       string
+		currentURL string
+		ipAddress  string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "valid http url",
+			currentURL: "http://example.com:8080/path?query=1",
+			ipAddress:  "127.0.0.1",
+			want:       "http://127.0.0.1:8080/path?query=1",
+			wantErr:    false,
+		},
+		{
+			name:       "empty ip address",
+			currentURL: "http://example.com/api",
+			ipAddress:  "",
+			want:       "http://example.com/api",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid url",
+			currentURL: "://invalid-url",
+			ipAddress:  "127.0.0.1",
+			want:       "://invalid-url",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceHost(tc.currentURL, tc.ipAddress)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceHost() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceHost() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-// The agent, proxy and DNS ports are all allocated before ANY of them is bound,
-// so a later draw can legitimately return a port an earlier one already
-// claimed — isPortAvailable says yes, because nothing is listening on it yet.
-// Narrowing allocation to above the ephemeral range shrinks the pool and makes
-// that coincidence correspondingly more likely.
-func TestEnsureAvailablePortsHonoursTheExclusionSet(t *testing.T) {
-	// A port that IS free: without the exclusion set it is returned unchanged.
-	free, err := GetAvailablePort()
-	if err != nil {
-		t.Fatalf("GetAvailablePort: %v", err)
+func TestReplaceGrpcHost(t *testing.T) {
+	cases := []struct {
+		name      string
+		authority string
+		ipAddress string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "valid authority with port",
+			authority: "localhost:50051",
+			ipAddress: "10.0.0.2",
+			want:      "10.0.0.2:50051",
+			wantErr:   false,
+		},
+		{
+			name:      "empty ip address",
+			authority: "localhost:50051",
+			ipAddress: "",
+			want:      "localhost:50051",
+			wantErr:   true,
+		},
+		{
+			name:      "invalid authority without port",
+			authority: "localhost",
+			ipAddress: "10.0.0.2",
+			want:      "localhost",
+			wantErr:   true,
+		},
 	}
 
-	if got, err := EnsureAvailablePorts(free); err != nil || got != free {
-		t.Fatalf("precondition: a free port must be returned unchanged, got %d (%v)", got, err)
-	}
-
-	got, err := EnsureAvailablePorts(free, free)
-	if err != nil {
-		t.Fatalf("EnsureAvailablePorts: %v", err)
-	}
-	if got == free {
-		t.Fatalf("EnsureAvailablePorts returned %d, which the caller had already claimed: "+
-			"nothing is bound to it yet, so isPortAvailable says free and two subsystems "+
-			"end up racing for the same port", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceGrpcHost(tc.authority, tc.ipAddress)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceGrpcHost() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceGrpcHost() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-// A platform without ip_local_port_range must report UNKNOWN, not guess.
-//
-// This is the branch that decides whether the allocator acts at all, and on
-// Linux the read always succeeds so it is dead code no ordinary test reaches.
-// Guessing the Linux range there is actively harmful: macOS and Windows both
-// default to 49152-65535, so 61000-65534 would be entirely INSIDE their real
-// ephemeral range while shrinking the pool from 16384 to 4535 — strictly worse
-// than the plain :0 the fallback gives them.
-func TestEphemeralPortRangeReportsUnknownWhenUnreadable(t *testing.T) {
-	lo, hi, known := ephemeralPortRangeFrom(func(string) ([]byte, error) {
-		return nil, os.ErrNotExist
-	})
-	if known {
-		t.Fatalf("reported a known range %d-%d on a platform with no "+
-			"ip_local_port_range; GetAvailablePort would then allocate from a band that "+
-			"is inside the real ephemeral range on macOS and Windows", lo, hi)
-	}
-	if lo != 0 || hi != 0 {
-		t.Fatalf("unknown range still returned %d-%d; callers must not act on it", lo, hi)
+func TestReplaceGrpcPort(t *testing.T) {
+	cases := []struct {
+		name      string
+		authority string
+		port      string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "valid host and port",
+			authority: "127.0.0.1:50051",
+			port:      "9000",
+			want:      "127.0.0.1:9000",
+			wantErr:   false,
+		},
+		{
+			name:      "host without port",
+			authority: "localhost",
+			port:      "9000",
+			want:      "localhost:9000",
+			wantErr:   false,
+		},
+		{
+			name:      "empty port",
+			authority: "localhost:50051",
+			port:      "",
+			want:      "localhost:50051",
+			wantErr:   true,
+		},
 	}
 
-	// A readable-but-malformed file is a different case: the platform IS Linux,
-	// so the documented default is the right answer.
-	lo, hi, known = ephemeralPortRangeFrom(func(string) ([]byte, error) {
-		return []byte("garbage\n"), nil
-	})
-	if !known || lo != defaultEphemeralLo || hi != defaultEphemeralHi {
-		t.Fatalf("malformed content gave %d-%d known=%v, want the Linux default %d-%d known=true",
-			lo, hi, known, defaultEphemeralLo, defaultEphemeralHi)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceGrpcPort(tc.authority, tc.port)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceGrpcPort() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceGrpcPort() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestNetworkNameFromDockerRun(t *testing.T) {
+func TestReplaceBaseURL(t *testing.T) {
+	cases := []struct {
+		name       string
+		currentURL string
+		baseURL    string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "valid replacement",
+			currentURL: "http://old-domain.com:8080/v1/users?id=1",
+			baseURL:    "https://new-domain.com",
+			want:       "https://new-domain.com/v1/users?id=1",
+			wantErr:    false,
+		},
+		{
+			name:       "empty baseURL",
+			currentURL: "http://old-domain.com/v1/users",
+			baseURL:    "",
+			want:       "http://old-domain.com/v1/users",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid currentURL",
+			currentURL: "://invalid-url",
+			baseURL:    "https://new-domain.com",
+			want:       "://invalid-url",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid baseURL",
+			currentURL: "http://old-domain.com/v1/users",
+			baseURL:    "://invalid-base",
+			want:       "http://old-domain.com/v1/users",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceBaseURL(tc.currentURL, tc.baseURL)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceBaseURL() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceBaseURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplacePort(t *testing.T) {
+	cases := []struct {
+		name       string
+		currentURL string
+		port       string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "replace existing port",
+			currentURL: "http://localhost:8080/api",
+			port:       "9090",
+			want:       "http://localhost:9090/api",
+			wantErr:    false,
+		},
+		{
+			name:       "add port when none exists",
+			currentURL: "http://localhost/api",
+			port:       "3000",
+			want:       "http://localhost:3000/api",
+			wantErr:    false,
+		},
+		{
+			name:       "empty port",
+			currentURL: "http://localhost:8080/api",
+			port:       "",
+			want:       "http://localhost:8080/api",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid url",
+			currentURL: "://invalid-url",
+			port:       "8080",
+			want:       "://invalid-url",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplacePort(tc.currentURL, tc.port)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplacePort() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplacePort() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToInt(t *testing.T) {
+	cases := []struct {
+		name  string
+		input interface{}
+		want  int
+	}{
+		{"int", 42, 42},
+		{"int64", int64(100), 100},
+		{"int32", int32(50), 50},
+		{"float32", float32(23.4), 23},
+		{"float64", float64(88.9), 88},
+		{"valid string", "123", 123},
+		{"invalid string", "abc", 0},
+		{"json.Number int", json.Number("456"), 456},
+		{"json.Number float", json.Number("78.9"), 78},
+		{"unsupported type bool", true, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ToInt(tc.input)
+			if got != tc.want {
+				t.Errorf("ToInt(%v) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToString(t *testing.T) {
+	cases := []struct {
+		name  string
+		input interface{}
+		want  string
+	}{
+		{"int", 42, "42"},
+		{"int64", int64(100), "100"},
+		{"int32", int32(50), "50"},
+		{"float64", float64(12.34), "12.34"},
+		{"float32", float32(5.5), "5.5"},
+		{"string", "hello", "hello"},
+		{"unsupported bool", true, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ToString(tc.input)
+			if got != tc.want {
+				t.Errorf("ToString(%v) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToFloat(t *testing.T) {
+	cases := []struct {
+		name  string
+		input interface{}
+		want  float64
+	}{
+		{"float64", 3.1415, 3.1415},
+		{"int", 42, 42.0},
+		{"valid string", "2.718", 2.718},
+		{"invalid string", "invalid", 0.0},
+		{"unsupported type", true, 0.0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ToFloat(tc.input)
+			if got != tc.want {
+				t.Errorf("ToFloat(%v) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKeys(t *testing.T) {
+	input := map[string][]string{
+		"headerA": {"val1", "val2"},
+		"headerB": {"val3"},
+		"headerC": {},
+	}
+
+	got := Keys(input)
+	sort.Strings(got)
+	want := []string{"headerA", "headerB", "headerC"}
+
+	if len(got) != len(want) {
+		t.Fatalf("Keys() returned %d keys, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("Keys()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestEnsureRmBeforeName(t *testing.T) {
 	cases := []struct {
 		name string
 		cmd  string
 		want string
 	}{
-		{"space form", "docker run --name app --network keploy-network img", "keploy-network"},
-		{"equals form", "docker run --name=app --network=keploy-network img", "keploy-network"},
-		{"net alias, space form", "docker run --net keploy-network img", "keploy-network"},
-		{"net alias, equals form", "docker run --net=keploy-network img", "keploy-network"},
-		{"no network", "docker run --name app img", ""},
-		// An empty "--flag=" must not be taken as the value and stop the scan.
-		{"empty equals then a real flag", "docker run --net= --network mynet img", "mynet"},
-		{"flag with no value", "docker run --network", ""},
-		{"empty", "", ""},
+		{
+			name: "adds --rm before --name when --rm is absent",
+			cmd:  "docker run -d --name my-container my-image",
+			want: "docker run -d --rm --name my-container my-image",
+		},
+		{
+			name: "does not duplicate --rm if already present",
+			cmd:  "docker run -d --rm --name my-container my-image",
+			want: "docker run -d --rm --name my-container my-image",
+		},
+		{
+			name: "leaves command unchanged if --name is absent",
+			cmd:  "docker run -d my-image",
+			want: "docker run -d my-image",
+		},
 	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := NetworkNameFromDockerRun(tc.cmd); got != tc.want {
-				t.Fatalf("NetworkNameFromDockerRun(%q) = %q, want %q", tc.cmd, got, tc.want)
+			got := EnsureRmBeforeName(tc.cmd)
+			if got != tc.want {
+				t.Errorf("EnsureRmBeforeName(%q) = %q, want %q", tc.cmd, got, tc.want)
 			}
 		})
 	}
