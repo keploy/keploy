@@ -13,6 +13,13 @@ import (
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset_row.html
 
 func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mysql.ColumnDefinition41) (*mysql.TextRow, int, error) {
+	// A truncated or fuzzed packet shorter than the header would otherwise
+	// slice out of range below and panic the connection handler instead of
+	// surfacing a decode error.
+	if len(data) < 4 {
+		return nil, 0, fmt.Errorf("malformed text row packet: need at least 4 bytes for header, got %d", len(data))
+	}
+
 	offset := 0
 	row := &mysql.TextRow{
 		Header: mysql.Header{
@@ -24,6 +31,9 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 	offset += 4
 
 	for _, col := range columns {
+		if offset >= len(data) {
+			return nil, offset, fmt.Errorf("malformed text row packet: unexpected end of data at column %q", col.Name)
+		}
 		dataLength := data[offset]
 		if dataLength == 0xfb { // NULL
 			row.Values = append(row.Values, mysql.ColumnEntry{

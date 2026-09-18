@@ -413,6 +413,135 @@ func TestIsResultSetTerminator(t *testing.T) {
 	}
 }
 
+// TestParseBinaryDate_TruncatedBuffer guards the bounds-check fix for
+// ParseBinaryDate. Before the fix, a non-zero length byte with a payload
+// shorter than 4 bytes (e.g. a truncated DATE column in a malformed or
+// fuzzed row packet) indexed past the end of b and panicked instead of
+// returning a decode error.
+func TestParseBinaryDate_TruncatedBuffer(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "length byte only", data: []byte{0x04}},
+		{name: "missing day byte", data: []byte{0x04, 0x01, 0x02, 0x03}},
+		// A garbage length byte (200) must not be trusted as the
+		// bytes-consumed count: DecodeBinaryRow's row loop advances its
+		// read offset by that count on the next column, so an
+		// unvalidated value here becomes an out-of-range panic one
+		// column later rather than in this function.
+		{name: "non-canonical length byte", data: []byte{0xC8, 0x01, 0x02, 0x03, 0x04}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("ParseBinaryDate panicked on %q: %v", tt.name, r)
+				}
+			}()
+			_, _, err := ParseBinaryDate(tt.data)
+			if err == nil {
+				t.Fatalf("expected a decode error for %q, got nil", tt.name)
+			}
+		})
+	}
+}
+
+// TestParseBinaryTime_TruncatedBuffer guards the bounds-check fix for
+// ParseBinaryTime. Before the fix, a non-zero length byte with a payload
+// shorter than 8 bytes (or shorter than 12 when microseconds are present)
+// indexed past the end of b and panicked instead of returning a decode
+// error.
+func TestParseBinaryTime_TruncatedBuffer(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "length byte only", data: []byte{0x08}},
+		{name: "missing seconds byte", data: []byte{0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x02}},
+		{name: "microseconds present but truncated", data: []byte{0x0C, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04}},
+		// A garbage length byte (240) must not be trusted as the
+		// bytes-consumed count for the same reason as ParseBinaryDate
+		// above - it would otherwise surface as a panic one column
+		// later in DecodeBinaryRow's row loop. The buffer is padded to
+		// 13 bytes (>= the microseconds floor) so this case is only
+		// caught by the canonical-length check, not incidentally by
+		// the floor check above.
+		{name: "non-canonical length byte", data: []byte{0xF0, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("ParseBinaryTime panicked on %q: %v", tt.name, r)
+				}
+			}()
+			_, _, err := ParseBinaryTime(tt.data)
+			if err == nil {
+				t.Fatalf("expected a decode error for %q, got nil", tt.name)
+			}
+		})
+	}
+}
+
+// TestReadLengthEncodedString_TruncatedExtendedPrefix guards the fix where
+// ReadLengthEncodedString conflated a real NULL (the single byte 0xfb) with
+// a truncated extended length-encoded-integer prefix (a lone 0xfc/0xfd/0xfe
+// marker whose follow-up bytes are missing). Both used to report num < 1 and
+// return a nil error; only n distinguishes them - a real NULL or a genuine
+// empty string always consumes at least 1 byte (n >= 1), while a truncated
+// prefix consumes none (n == 0).
+func TestReadLengthEncodedString_TruncatedExtendedPrefix(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "0xfc with no follow-up bytes", data: []byte{0xfc}},
+		{name: "0xfc with one of two follow-up bytes", data: []byte{0xfc, 0x01}},
+		{name: "0xfd with follow-up bytes missing", data: []byte{0xfd, 0x01}},
+		{name: "0xfe with follow-up bytes missing", data: []byte{0xfe, 0x01, 0x02}},
+		{name: "empty buffer", data: []byte{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, n, err := ReadLengthEncodedString(tt.data)
+			if err == nil {
+				t.Fatalf("expected an error for %q, got nil (n=%d)", tt.name, n)
+			}
+		})
+	}
+}
+
+// TestReadLengthEncodedString_RealNullAndEmptyString are the cases the fix
+// above must not regress: an actual NULL marker and a genuine zero-length
+// string both consume exactly 1 byte and must still succeed.
+func TestReadLengthEncodedString_RealNullAndEmptyString(t *testing.T) {
+	value, isNull, n, err := ReadLengthEncodedString([]byte{0xfb})
+	if err != nil {
+		t.Fatalf("NULL marker: unexpected error: %v", err)
+	}
+	if !isNull || n != 1 {
+		t.Fatalf("NULL marker: got isNull=%v n=%d, want isNull=true n=1", isNull, n)
+	}
+	if len(value) != 0 {
+		t.Fatalf("NULL marker: expected empty value, got %q", value)
+	}
+
+	value, isNull, n, err = ReadLengthEncodedString([]byte{0x00})
+	if err != nil {
+		t.Fatalf("empty string: unexpected error: %v", err)
+	}
+	if isNull || n != 1 {
+		t.Fatalf("empty string: got isNull=%v n=%d, want isNull=false n=1", isNull, n)
+	}
+	if len(value) != 0 {
+		t.Fatalf("empty string: expected empty value, got %q", value)
+	}
+}
+
 func BenchmarkReadLengthEncodedInteger(b *testing.B) {
 	testCases := []struct {
 		name string
