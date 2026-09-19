@@ -717,15 +717,19 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 
 		case models.JsonContains:
+			data, isString := value.(string)
+			raw := []byte(data)
+			var err error
+			if !isString {
+				raw, err = jsonMarshal234(value)
+			}
 			var expectedMap map[string]interface{}
-			switch v := value.(type) {
-			case map[string]interface{}:
-				expectedMap = v
-			case string:
-				_ = jsonUnmarshal234([]byte(v), &expectedMap)
-			default:
+			if err == nil {
+				err = jsonUnmarshal234(raw, &expectedMap)
+			}
+			if err != nil || expectedMap == nil {
 				pass = false
-				logger.Error("json_contains: unexpected format", zap.Any("value", value))
+				logger.Error("json_contains: unexpected format", zap.Any("value", value), zap.Error(err))
 				continue
 			}
 			if ok, _ := matcherUtils.JsonContains(actualResponse.Body, expectedMap); !ok {
