@@ -237,7 +237,7 @@ func start(ctx context.Context) {
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
-		utils.ErrCode = exitCodeForCmdErr(err, os.Stderr)
+		utils.ErrCode = finalExitCode(err, utils.ErrCode, os.Stderr)
 	}
 
 	// Restore keploy folder ownership if running under sudo (for Docker mode)
@@ -402,6 +402,26 @@ func printEnterpriseUpgradeBanner() {
 	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+"curl --silent -O -L https://keploy.io/ent/install.sh && source install.sh"+reset)
 	fmt.Fprintln(os.Stderr, orange+bar+reset)
 	fmt.Fprintln(os.Stderr)
+}
+
+// finalExitCode is the process's exit code once the root command has
+// returned: whatever already mirrors the wrapped runner, else the error's.
+//
+// `keploy mock` promises to propagate the test runner's exit code, and it puts
+// that code in utils.ErrCode. A command that ALSO returns an error -- a runner
+// that died while keploy was still bringing the environment up -- had it
+// overwritten here with a generic 1, so the same crash exited 7 or 1 depending
+// on which of two racing paths reported it. The contract every caller relies
+// on is unchanged: an error still exits non-zero, because a mirrored code is
+// never 0.
+func finalExitCode(err error, current int, w io.Writer) int {
+	if err == nil {
+		return current
+	}
+	if current != 0 {
+		return current
+	}
+	return exitCodeForCmdErr(err, w)
 }
 
 // exitCodeForCmdErr maps an error returned by the root command onto the

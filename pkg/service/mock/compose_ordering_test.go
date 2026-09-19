@@ -402,6 +402,27 @@ func TestComposeProjectThatDiesFailsFast(t *testing.T) {
 	}
 }
 
+// A compose project that dies during agent bring-up must still mirror its exit
+// code. `keploy mock` propagates the wrapped runner's code, and this path --
+// the project crashing before the agent answered -- reported a generic failure
+// instead, so the same crash exited 7 or 1 depending on which of two racing
+// paths noticed it first.
+func TestComposeProjectThatDiesMirrorsItsExitCode(t *testing.T) {
+	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
+	instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 7})
+	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
+
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+
+	if err := svc.Record(context.Background()); err == nil {
+		t.Fatal("Record succeeded against a compose project that died")
+	}
+	if utils.ErrCode != 7 {
+		t.Fatalf("exit code %d, want the runner's 7", utils.ErrCode)
+	}
+}
+
 // Under compose the app's exit reaches Record over a channel rather than as
 // Run's return value, so a panic inside Run has to still deliver one. It does
 // not on its own: utils.Recover swallows the panic instead of re-panicking, so
