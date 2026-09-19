@@ -78,10 +78,44 @@ docker network create "$NETWORK_NAME"
 
 # Start MongoDB with a unique container name but a network alias of "mongoDb"
 # so the gin-mongo app (which hardcodes "mongoDb:27017") resolves correctly.
+# Both spellings, because the app's driver lowercases the host out of the
+# connection string before resolving it: a container NAME matches
+# case-insensitively (which is why the Linux script, whose container is
+# literally named mongoDb, needs nothing here) but an ALIAS is matched as given.
 docker_pull_retry mongo
 docker run --name "$MONGO_CONTAINER" --rm \
-  --net "$NETWORK_NAME" --network-alias mongoDb \
+  --net "$NETWORK_NAME" --network-alias mongoDb --network-alias mongodb \
   -p "${DB_PORT}:27017" -d mongo
+
+# ...and then WAIT for it, and say so when it never comes up.
+#
+# This lane fails on main with `lookup mongodb on 127.0.0.11:53: no such host`
+# from inside the app, which reads as a DNS or a keploy problem. It is neither:
+# the database is dead before the first request, so Docker's resolver has
+# nothing to answer with. The log said so only in passing --
+# "can not get logs from container which is dead or marked for removal", one
+# line, twenty seconds before the failure anyone looks at.
+#
+# So: wait for it to answer, and if it does not, stop here with its state and
+# its logs instead of recording against an app that cannot reach its database.
+echo "Waiting for MongoDB to accept connections..."
+for i in $(seq 1 30); do
+    if docker exec "$MONGO_CONTAINER" mongosh --quiet --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1; then
+        echo "MongoDB is up after $i attempt(s)."
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "::error::MongoDB never came up, so the app cannot reach its database and this run would fail for a reason that is not keploy's."
+        echo "--- docker ps -a (this job's containers) ---"
+        docker ps -a --filter "name=${MONGO_CONTAINER}" || true
+        echo "--- container logs ---"
+        docker logs "$MONGO_CONTAINER" 2>&1 | tail -40 || echo "(the container is already gone)"
+        echo "--- image platform ---"
+        docker image inspect mongo --format '{{.Os}}/{{.Architecture}}' 2>/dev/null || true
+        exit 1
+    fi
+    sleep 2
+done
 
 config_file="./keploy.yml"
 # Keploy's config now carries only the settings that DIFFER from its
