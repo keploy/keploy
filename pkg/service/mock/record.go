@@ -39,7 +39,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	name := m.setName()
 	m.logger.Info("Recording mocks for your test command",
 		zap.String("mock-set", name),
-		zap.String("command", m.config.Command))
+		zap.String("command", m.userCommand))
 
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
@@ -92,7 +92,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	//    Without this the run dialled an agent that was never started, failed
 	//    to arm the capture, and ended having recorded nothing — while the app
 	//    itself never came up at all.
-	composeAppExit, err := m.startComposeApp(ctx, errGrp)
+	composeAppExit, err := m.startComposeApp(ctx, errGrp, "record")
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil
