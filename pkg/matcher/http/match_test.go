@@ -745,3 +745,30 @@ func TestAssertionMatch_StatusCodeClass_ActualNon2xxFailsAgainst2xx_3843(t *test
 	assert.False(t, pass, "Should fail because the actual status code 500 is not in the 2xx class")
 	require.NotNil(t, result)
 }
+
+func TestAssertionMatch_JsonContains_YAMLDecodedValue(t *testing.T) {
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `{"id":1,"name":"om","address":{"city":"Pune"},"tags":["a","b"]}`,
+	}
+	for _, tt := range []struct {
+		name     string
+		expected interface{}
+		want     bool
+	}{
+		{"matching fields", map[models.AssertionType]interface{}{
+			"id":      1,
+			"name":    "om",
+			"address": map[models.AssertionType]interface{}{"city": "Pune"},
+			"tags":    []interface{}{"a", "b"},
+		}, true},
+		{"different number", map[models.AssertionType]interface{}{"id": 2}, false},
+		{"invalid JSON string", `{"id":`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := &models.TestCase{Assertions: map[models.AssertionType]interface{}{models.JsonContains: tt.expected}}
+			pass, _ := AssertionMatch(tc, actualResponse, zap.NewNop())
+			assert.Equal(t, tt.want, pass)
+		})
+	}
+}
