@@ -9,8 +9,8 @@ import "testing"
 // the panel told the user their recording had been cut short over one that had
 // just succeeded.
 func TestInterruptedIsNotSetByTheCLIsOwnTeardown(t *testing.T) {
-	t.Cleanup(func() { interrupted.Store(false) })
-	interrupted.Store(false)
+	t.Cleanup(ClearInterrupted)
+	ClearInterrupted()
 
 	ctx := NewCtx()
 	if Interrupted() {
@@ -26,7 +26,7 @@ func TestInterruptedIsNotSetByTheCLIsOwnTeardown(t *testing.T) {
 	}
 
 	// A real signal does set it.
-	interrupted.Store(true)
+	MarkInterrupted()
 	if !Interrupted() {
 		t.Fatal("a signal was not reported")
 	}
