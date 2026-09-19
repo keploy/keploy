@@ -67,6 +67,15 @@ var interrupted atomic.Bool
 // Interrupted reports whether SIGINT or SIGTERM reached this process.
 func Interrupted() bool { return interrupted.Load() }
 
+// MarkInterrupted records that a signal ended this run. The signal handler
+// below calls it; a build that installs its own handler, and a test that
+// simulates one, call it instead of cancelling a context and hoping the two
+// are read as the same thing.
+func MarkInterrupted() { interrupted.Store(true) }
+
+// ClearInterrupted is for tests, which share one process across cases.
+func ClearInterrupted() { interrupted.Store(false) }
+
 func NewCtx() context.Context {
 	// Create a context that can be canceled
 	ctx, cancel := context.WithCancel(context.Background())
@@ -81,7 +90,7 @@ func NewCtx() context.Context {
 	// Start a goroutine that will cancel the context when a signal is received
 	go func() {
 		sig := <-sigs // this received signal will be inside keploy docker container if running in docker else on the host.
-		interrupted.Store(true)
+		MarkInterrupted()
 		fmt.Printf("Signal received: %s, canceling context...\n", sig)
 
 		// App-managed graceful-shutdown drain (Kubernetes sidecar path).
