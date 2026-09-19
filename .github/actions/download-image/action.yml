@@ -55,8 +55,15 @@ runs:
       if: runner.os == 'Windows'
       shell: powershell
       run: |
+        # Statements, not an expression: `(cmd; $LASTEXITCODE -eq 0)` inside an
+        # `if (...)` is a PowerShell parse error, not a test.
         $tar = Join-Path "${{ runner.temp }}" "keploy-image\image.tar"
-        if ((Test-Path $tar) -and ((tar -tf $tar *> $null); $LASTEXITCODE -eq 0)) {
+        $complete = $false
+        if (Test-Path $tar) {
+          tar -tf $tar *> $null
+          $complete = ($LASTEXITCODE -eq 0)
+        }
+        if ($complete) {
           "complete=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           exit 0
         }
@@ -89,7 +96,12 @@ runs:
       shell: powershell
       run: |
         $tar = Join-Path "${{ runner.temp }}" "keploy-image\image.tar"
-        if ((Test-Path $tar) -and ((tar -tf $tar *> $null); $LASTEXITCODE -eq 0)) {
+        $complete = $false
+        if (Test-Path $tar) {
+          tar -tf $tar *> $null
+          $complete = ($LASTEXITCODE -eq 0)
+        }
+        if ($complete) {
           Write-Host "The second download is complete."
           exit 0
         }
