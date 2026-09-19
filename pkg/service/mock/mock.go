@@ -31,6 +31,13 @@ type mockService struct {
 	store           Store
 	hooks           record.RecordHooks // reused so enterprise obfuscation/encryption applies on record
 	config          *config.Config
+	// userCommand is the test command exactly as the user gave it. A build
+	// that instruments natively rewrites config.Command after construction --
+	// on macOS it becomes `DYLD_INSERT_LIBRARIES='/tmp/keploy-native-<pid>/…'
+	// KEPLOY_SHIM_CTRL=… <command>` -- and that launch line is not the user's
+	// command: recorded in the replay receipt it leaked a temp path, and
+	// `keploy mock status` handed it back to agents as the command to run.
+	userCommand string
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil
@@ -59,6 +66,7 @@ func New(
 		store:           store,
 		hooks:           hooks,
 		config:          cfg,
+		userCommand:     cfg.Command,
 	}
 }
 
@@ -144,7 +152,7 @@ func (m *mockService) isDockerCompose() bool {
 // healthcheck, and that healthcheck only passes once keploy posts /agent/ready.
 // This function therefore waits only for the agent to become REACHABLE; the
 // app stays parked at its healthcheck until the caller has armed the proxy.
-func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group) (chan models.AppError, error) {
+func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group, phase string) (chan models.AppError, error) {
 	if !m.isDockerCompose() {
 		return nil, nil
 	}
@@ -198,6 +206,16 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 		// The project died on its own — a bad compose file, a failed build, a
 		// port already taken. Report that now rather than sitting out the full
 		// agent budget waiting for an agent that is never going to start.
+		//
+		// Mirror its exit code on the way out. `keploy mock` promises to
+		// propagate the wrapped runner's code, and that promise was kept only
+		// when the runner got as far as step 8: a project that died during
+		// agent bring-up reached the caller as a plain error, so keploy exited
+		// a generic 1 and the runner's own code was lost. Which of the two
+		// paths a dying project takes is a race — the same crash reported two
+		// different exit codes depending on whether the agent's health poll
+		// landed first.
+		m.propagateExit(appErr, phase)
 		reason := string(appErr.AppErrorType)
 		if reason == "" {
 			reason = "exited"

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 )
 
@@ -2199,6 +2201,68 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
 		cmd.Flags().Bool("emit-mock-events", c.cfg.Mock.EmitMockEvents, "Log one line per mock as it is first served (stdout; stderr under --json)")
 		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
+		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")
+		cmd.Flags().String("coverage-report", c.cfg.Mock.CoverageReport, "Coverage report the test command writes, when it is not a default location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...)")
+	}
+	return nil
+}
+
+// readMockSetName resolves --name (default "default") and refuses a name that
+// is not one directory. The set is keploy/<name>/: "team/payments" nested it
+// where keploy/.gitignore's /*/ entries do not reach -- committing a local
+// replay receipt, test command and all -- and "../x" put it outside keploy/.
+func (c *CmdConfigurator) readMockSetName(cmd *cobra.Command) error {
+	name, err := cmd.Flags().GetString("name")
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the name flag")
+		return errors.New("failed to get the name flag")
+	}
+	if name != "" {
+		c.cfg.Mock.Name = name
+	}
+	if c.cfg.Mock.Name == "" {
+		c.cfg.Mock.Name = "default"
+	}
+	if err := pathsafe.ValidateSingleSegment(c.cfg.Mock.Name, false); err != nil {
+		return fmt.Errorf("invalid mock set --name: %w", err)
+	}
+	return nil
+}
+
+// readMockCoverageFlags resolves --min-coverage and --coverage-report against
+// keploy.yml's mock.minCoverage and mock.coverageReport.
+//
+// Both are guarded like emit-mock-events: the flag defaults were captured from
+// a zero config before viper read keploy.yml, so an unguarded read would
+// replace a committed `mock.minCoverage: 80` with 0 and silently switch the
+// team's gate off. An explicit flag still wins over the file.
+func (c *CmdConfigurator) readMockCoverageFlags(cmd *cobra.Command) error {
+	if cmd.Flags().Changed("min-coverage") || !viper.IsSet("mock.minCoverage") {
+		minCov, err := cmd.Flags().GetFloat64("min-coverage")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the min-coverage flag")
+			return errors.New("failed to get the min-coverage flag")
+		}
+		c.cfg.Mock.MinCoverage = minCov
+	}
+	// NaN passes both range checks, and every comparison with it is false:
+	// a floor of NaN would never fail anything.
+	if v := c.cfg.Mock.MinCoverage; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 100 {
+		return fmt.Errorf("invalid --min-coverage %v: it is a percentage, from 0 (off) to 100", c.cfg.Mock.MinCoverage)
+	}
+	if v := c.cfg.Mock.MinCoverage; v > 0 && v < 1 {
+		// JaCoCo and Cobertura write coverage as a ratio (0.8 for 80%).
+		c.logger.Warn("--min-coverage is a percentage: this floor is under 1%",
+			zap.Float64("min-coverage", v),
+			zap.String("next_step", fmt.Sprintf("for %v%% write %v", v*100, v*100)))
+	}
+	if cmd.Flags().Changed("coverage-report") || !viper.IsSet("mock.coverageReport") {
+		covReport, err := cmd.Flags().GetString("coverage-report")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the coverage-report flag")
+			return errors.New("failed to get the coverage-report flag")
+		}
+		c.cfg.Mock.CoverageReport = covReport
 	}
 	return nil
 }
@@ -2302,16 +2366,8 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 	config.SetByPassPorts(c.cfg, bypassPorts)
 
 	// Mock-set name.
-	name, err := cmd.Flags().GetString("name")
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to get the name flag")
-		return errors.New("failed to get the name flag")
-	}
-	if name != "" {
-		c.cfg.Mock.Name = name
-	}
-	if c.cfg.Mock.Name == "" {
-		c.cfg.Mock.Name = "default"
+	if err := c.readMockSetName(cmd); err != nil {
+		return err
 	}
 
 	local, err := cmd.Flags().GetBool("local")
@@ -2374,6 +2430,10 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 				return errors.New("failed to get the delay flag")
 			}
 			c.cfg.Test.Delay = d
+		}
+
+		if err := c.readMockCoverageFlags(cmd); err != nil {
+			return err
 		}
 	}
 

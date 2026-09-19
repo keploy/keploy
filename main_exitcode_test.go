@@ -67,3 +67,29 @@ func TestExitCodeForCmdErr(t *testing.T) {
 		})
 	}
 }
+
+// A command that mirrors the wrapped runner's exit code AND returns an error
+// keeps the runner's code: it is already non-zero, and it says more than 1.
+// The two used to race -- a compose project that crashed reported 7 or 1
+// depending on which path noticed first.
+func TestFinalExitCodeKeepsAMirroredRunnerCode(t *testing.T) {
+	var out bytes.Buffer
+	for _, tc := range []struct {
+		name    string
+		err     error
+		current int
+		want    int
+	}{
+		{"no error, nothing mirrored", nil, 0, 0},
+		{"no error, runner mirrored", nil, 7, 7},
+		{"error, nothing mirrored", errors.New("failed to bring up the compose project"), 0, 1},
+		{"error, runner mirrored", errors.New("failed to bring up the compose project"), 7, 7},
+		{"error, runner mirrored 1", errors.New("boom"), 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := finalExitCode(tc.err, tc.current, &out); got != tc.want {
+				t.Fatalf("finalExitCode(%v, %d) = %d, want %d", tc.err, tc.current, got, tc.want)
+			}
+		})
+	}
+}
