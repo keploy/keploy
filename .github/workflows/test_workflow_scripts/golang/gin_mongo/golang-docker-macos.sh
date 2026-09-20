@@ -82,7 +82,17 @@ docker network create "$NETWORK_NAME"
 # connection string before resolving it: a container NAME matches
 # case-insensitively (which is why the Linux script, whose container is
 # literally named mongoDb, needs nothing here) but an ALIAS is matched as given.
-docker_pull_retry mongo
+#
+# MongoDB 8 refuses to start on a Linux kernel >= 6.19 -- its vendored
+# TCMalloc violates the rseq ABI, so it exits 1 within ~100ms, logging
+# "MongoDB cannot start: Linux kernel versions 6.19 and newer has a known
+# incompatibility with this version of MongoDB" (SERVER-121912). Every
+# self-hosted macOS runner is past that line, and the bare `mongo` tag is
+# 8.3, so this database has been dead on arrival here; what differed between
+# lanes was only whether anything noticed. Pin 7: it predates the broken
+# allocator. Revisit when a MongoDB release ships the fixed one -- 7.0 is the
+# oldest series docker-library still publishes, so this has a shelf life.
+docker_pull_retry mongo:7
 # No --rm: when this container dies, its exit code and its logs are the only
 # account of why, and --rm deletes both the moment it exits. That is what
 # happened on the run that added the wait below -- `docker ps -a` came back
@@ -94,7 +104,7 @@ docker_pull_retry mongo
 # which reaps by `docker ps -aq` after the job whatever happened to the shell.
 docker run --name "$MONGO_CONTAINER" \
   --net "$NETWORK_NAME" --network-alias mongoDb --network-alias mongodb \
-  -p "${DB_PORT}:27017" -d mongo
+  -p "${DB_PORT}:27017" -d mongo:7
 
 # ...and then WAIT for it, and say so when it never comes up.
 #
@@ -115,11 +125,17 @@ mongo_postmortem() {
       --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{printf "%q" .State.Error}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' 2>&1 || true
     echo "--- container logs ---"
     docker logs --tail 200 "$MONGO_CONTAINER" 2>&1 | tail -40 || true
+    echo "--- readiness probe ---"
+    # Asked of the IMAGE, not the container: when the database has already
+    # exited, `docker exec` can only answer "not running", which is the one
+    # case where this question matters most. The wait probes with mongosh, so
+    # an image without it fails the wait against a healthy database.
+    docker run --rm --entrypoint sh mongo:7 -c 'command -v mongosh || echo "mongosh IS NOT IN THIS IMAGE (the wait cannot pass, whatever the database is doing)"' 2>&1 || true
     echo "--- image platform ---"
     # 2>&1, not 2>/dev/null: on an Apple Silicon runner a mongo image pulled
     # for the wrong architecture is a leading suspect, so the reason this
     # cannot be answered matters as much as the answer.
-    docker image inspect mongo --format '{{.Os}}/{{.Architecture}}' 2>&1 || true
+    docker image inspect mongo:7 --format '{{.Os}}/{{.Architecture}}' 2>&1 || true
 }
 
 echo "Waiting for MongoDB to accept connections..."
