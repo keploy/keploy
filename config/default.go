@@ -176,6 +176,14 @@ mock:
   # run is still going. Off by default: the lines are for a machine reading the
   # output, not a human watching a terminal.
   emitMockEvents: false
+  # Fail a replay whose test run covered less than this percentage of the
+  # code, read from the coverage report the test command writes (go test
+  # -coverprofile, lcov, Cobertura, JaCoCo). A run that writes no report fails
+  # the floor rather than passing it unmeasured. 0 turns it off.
+  minCoverage: 0
+  # The coverage report the test command writes, when it is not a default
+  # location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...).
+  coverageReport: ""
 contract:
   driven: "consumer"
   mappings:
