@@ -3675,6 +3675,21 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// equivalent by the golden-reference harness.
 	agentOwnsConsumed := os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED") == "1" ||
 		strings.EqualFold(os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED"), "true")
+	// --retry-passing-test rewinds the CLI's own totalConsumedMocks to a
+	// baseline at the top of every retry cycle so per-test single-use mocks
+	// consumed in cycle 1 are servable again in cycle 2 (see the rewind above
+	// this function's caller). The agent's consumedPersistent has no such
+	// rewind point: it is only ever appended to, never reset. Under
+	// AgentOwnsConsumed the agent would filter cycle 2 against everything
+	// cycle 1 consumed, failing every retried test that touches a per-test
+	// mock with match_phase=no_mocks. Until the agent gains a rewind
+	// primitive, stand the flag down whenever RetryPassing is set so the CLI's
+	// rewindable map is the one actually enforced.
+	if agentOwnsConsumed && r.config != nil && r.config.RetryPassing {
+		agentOwnsConsumed = false
+		r.logger.Debug("ignoring KEPLOY_AGENT_OWNS_CONSUMED: --retry-passing-test needs the CLI's " +
+			"rewindable consumed-mock map, which the agent's own history cannot provide")
+	}
 	consumedForAgent := totalConsumedMocks
 	if agentOwnsConsumed {
 		consumedForAgent = nil
