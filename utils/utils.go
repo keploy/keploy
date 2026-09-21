@@ -360,7 +360,7 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 var Emoji = "\U0001F430" + " Keploy:"
 var ConfigGuide = `
-# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configration file.
+# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configuration file.
 `
 
 // ErrNoAnswer is returned when there was nobody to answer the question: stdin
