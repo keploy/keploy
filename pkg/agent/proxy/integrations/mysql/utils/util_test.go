@@ -1,7 +1,9 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"testing"
 )
 
@@ -503,6 +505,12 @@ func TestReadLengthEncodedString_TruncatedExtendedPrefix(t *testing.T) {
 		{name: "0xfd with follow-up bytes missing", data: []byte{0xfd, 0x01}},
 		{name: "0xfe with follow-up bytes missing", data: []byte{0xfe, 0x01, 0x02}},
 		{name: "empty buffer", data: []byte{}},
+		// The other truncation path out of this function: the length prefix
+		// reads fine, but the string body runs past the end of the packet.
+		// Pre-existing on main and it returned the same bare io.EOF, so it is
+		// covered here alongside the new branch.
+		{name: "body declared longer than the buffer", data: []byte{0x05, 'a', 'b'}},
+		{name: "0xfc body declared longer than the buffer", data: []byte{0xfc, 0x10, 0x00, 'a'}},
 	}
 
 	for _, tt := range tests {
@@ -510,6 +518,17 @@ func TestReadLengthEncodedString_TruncatedExtendedPrefix(t *testing.T) {
 			_, _, n, err := ReadLengthEncodedString(tt.data)
 			if err == nil {
 				t.Fatalf("expected an error for %q, got nil (n=%d)", tt.name, n)
+			}
+			// Which sentinel matters, not just that one was returned.
+			// recorder/record_v2.go:110,142 treat io.EOF as a clean connection
+			// close, so returning it here would make a malformed packet look
+			// like the client hanging up: the recording would end quietly
+			// instead of falling through to passthrough with a warning.
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("expected io.ErrUnexpectedEOF for %q, got %v", tt.name, err)
+			}
+			if errors.Is(err, io.EOF) {
+				t.Fatalf("%q returned io.EOF, which upstream reads as a clean close", tt.name)
 			}
 		})
 	}
@@ -557,6 +576,30 @@ func BenchmarkReadLengthEncodedInteger(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				ReadLengthEncodedInteger(tc.data)
+			}
+		})
+	}
+}
+
+// ReadNullTerminatedString sits one function below ReadLengthEncodedString and
+// had the same bare-sentinel problem: its only caller is the handshake path
+// (wire/phase/conn/authNextFactorPacket.go), whose error reaches the record
+// loop's io.EOF check and is read there as the client closing cleanly.
+func TestReadNullTerminatedString_NoTerminator(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "no NUL byte", data: []byte{'a', 'b', 'c'}},
+		{name: "empty buffer", data: []byte{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := ReadNullTerminatedString(tt.data)
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+			}
+			if errors.Is(err, io.EOF) {
+				t.Fatalf("returned io.EOF, which the record loop reads as a clean close")
 			}
 		})
 	}
