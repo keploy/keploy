@@ -1399,7 +1399,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			})
 		}
 
-		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
+		// Kept in a variable rather than inlined so the post-bring-up
+		// re-registration repeats the exact same outgoing options. See
+		// ensureAgentHoldsStoredMocks.
+		outgoingOpts := models.OutgoingOptions{
 			Rules:                     r.config.BypassRules,
 			MongoPassword:             r.config.Test.MongoPassword,
 			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
@@ -1414,7 +1417,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
-		})
+		}
+		err = r.instrumentation.MockOutgoing(runTestSetCtx, outgoingOpts)
 		if err != nil {
 			if ctx.Err() != context.Canceled {
 				utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -1540,6 +1544,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(r.config.Test, testCases, testSetID, r.logger)) {
 			return models.TestSetStatusUserAbort, context.Canceled
+		}
+
+		// The compose bring-up retry (pkg/client/app) answers a transient
+		// dependency crash by tearing the whole stack down, the injected
+		// keploy-agent included, and re-issuing `up`; the replacement agent boots
+		// empty. Everything this session stored on the agent lived in the process
+		// that just went away, and the setup above already ran, so without a check
+		// the tests would fire against an agent holding nothing and the run would
+		// report zero executed tests (keploy#4614). Re-register with the
+		// replacement, or fail this test set loudly rather than proceeding
+		// mockless.
+		if err := r.ensureAgentHoldsStoredMocks(ctx, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
+			totalConsumedMocks, useMappingBased, testCases); err != nil {
+			return models.TestSetStatusFailed, err
 		}
 	}
 
@@ -3678,6 +3696,92 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		zap.Bool("useMappingBased", useMappingBased),
 		zap.Int("mockMappingCount", len(expectedMockMapping)))
 
+	return nil
+}
+
+// agentHoldsStoredCorpus decides whether the agent's loaded-mock count proves
+// the corpus stored for this test set is still on the agent the tests would
+// fire against. The loaded count is only ever written by StoreMocks on the
+// agent process, so any non-zero value means that process received our store;
+// zero while a non-empty corpus was stored is the replacement-agent signature
+// (the bring-up retry boots a new agent, and nothing re-stores onto it).
+func agentHoldsStoredCorpus(stored, loaded int) bool {
+	return stored == 0 || loaded > 0
+}
+
+// ensureAgentHoldsStoredMocks verifies, after the docker-compose bring-up and
+// before the first test of the set fires, that the agent still holds the mock
+// corpus the setup stored on it, and re-registers the session with a
+// replacement agent when it does not.
+//
+// Why this exists: the compose bring-up retry (pkg/client/app,
+// shouldRetryComposeUp) answers a transient dependency crash by tearing the
+// whole stack down, the injected keploy-agent included, and re-issuing `up`;
+// the replacement agent boots empty. All of the session's replay state - the
+// stored corpus, the proxy's mock manager, the mock filter params - lived in
+// the agent that just went away, and the straight-line setup above has
+// already run, so nothing re-registers it: the tests fire against an agent
+// holding nothing and the run reports zero executed tests (keploy#4614).
+//
+// The probe is the agent's non-draining /mock/stats loaded count rather than
+// GetConsumedMocks: that one drains, and polling it here would steal entries
+// the caller is about to fold into its initial-setup baseline.
+//
+// On a detected replacement the session is re-registered in the same order
+// the setup used (MockOutgoing -> StoreMocks -> SendMockFilterParamsToAgent ->
+// MakeAgentReadyForDockerCompose) and the result is confirmed via stats; when
+// the re-registration does not take, the test set fails loudly instead of
+// proceeding mockless.
+func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase) error {
+	stored := len(filteredMocks) + len(unfilteredMocks)
+	if !r.instrument || stored == 0 {
+		return nil
+	}
+
+	stats, err := r.instrumentation.GetMockStats(ctx)
+	if err != nil {
+		// The probe itself failed. A transport blip is not evidence of a
+		// replacement, so retry once before concluding anything; if the agent
+		// still does not answer, fall through to the re-registration, which
+		// fails loudly when the agent is genuinely gone.
+		stats, err = r.instrumentation.GetMockStats(ctx)
+		if err != nil {
+			r.logger.Warn("could not verify the agent's stored mocks before firing tests; attempting re-registration",
+				zap.String("testSetID", testSetID), zap.Error(err))
+		}
+	}
+	if err == nil && agentHoldsStoredCorpus(stored, stats.Loaded) {
+		return nil
+	}
+
+	r.logger.Warn("keploy-agent no longer holds this test set's stored mocks (it was replaced during the docker compose bring-up); re-registering the session's mocks with the replacement before any test fires",
+		zap.String("testSetID", testSetID), zap.Int("stored", stored), zap.Int("agentLoaded", stats.Loaded))
+
+	if err := r.instrumentation.MockOutgoing(ctx, outgoingOpts); err != nil {
+		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at MockOutgoing: %w", testSetID, err)
+	}
+	if err := r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
+		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
+	}
+	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases)); err != nil {
+		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at the filter params: %w", testSetID, err)
+	}
+	// Same soft-fail as the setup call site: a readiness-file write that fails
+	// does not stop the run (the compose healthchecks only gate app startup).
+	if err := r.instrumentation.MakeAgentReadyForDockerCompose(ctx); err != nil {
+		utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
+	}
+
+	confirmed, err := r.instrumentation.GetMockStats(ctx)
+	if err != nil {
+		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks could not be confirmed: %w", testSetID, err)
+	}
+	if !agentHoldsStoredCorpus(stored, confirmed.Loaded) {
+		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up; re-registering test set %q's mocks did not take (the agent still reports no stored mocks), refusing to fire tests against a mockless agent", testSetID)
+	}
+
+	r.logger.Info("re-registered the session's mocks with the replacement keploy-agent",
+		zap.String("testSetID", testSetID), zap.Int("mocks", stored))
 	return nil
 }
 

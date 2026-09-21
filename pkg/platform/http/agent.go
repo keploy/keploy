@@ -1103,6 +1103,48 @@ func (a *AgentClient) GetServedMocks(ctx context.Context) (map[string]models.Moc
 	return served, nil
 }
 
+// GetMockStats fetches the agent's non-draining mock-session snapshot
+// (GET /mock/stats): the number of mocks stored on this agent process, plus
+// the running consumed/missed totals. The replay setup calls it after the
+// docker-compose bring-up to verify the agent still holds what the session
+// stored before any test fires: a replacement agent (the bring-up retry
+// recreates the stack, agent included) reports a loaded count of zero.
+func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error) {
+	url := fmt.Sprintf("%s/mock/stats", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return models.MockStats{}, fmt.Errorf("failed to create request: %s", err.Error())
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return models.MockStats{}, fmt.Errorf("failed to send request for mock stats: %s", err.Error())
+	}
+
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for getmockstats")
+		}
+	}()
+
+	// Status before decode, for the same reason as GetServedMocks: a failure
+	// arrives as an error object and decoding it into the struct would report
+	// the decoder's confusion instead of the agent's reason.
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return models.MockStats{}, agentRespErr("get mock stats", res, rawBody)
+	}
+
+	var stats models.MockStats
+	if err := json.NewDecoder(res.Body).Decode(&stats); err != nil {
+		return models.MockStats{}, fmt.Errorf("failed to decode response body for getmockstats: %s", err.Error())
+	}
+
+	return stats, nil
+}
+
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppError {
 	app, err := a.getApp()
 	if err != nil {
