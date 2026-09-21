@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -45,6 +46,16 @@ type rearmInstr struct {
 	// transport error; later calls answer normally.
 	statsErrCalls int
 
+	// statsUnsupported makes every GetMockStats answer
+	// models.ErrMockStatsUnsupported — an agent older than /mock/stats, or one
+	// whose service has no reader. Distinct from a transport error: the agent
+	// is reachable and simply cannot answer this question, ever.
+	statsUnsupported bool
+
+	// afterFirstStats runs once, after the first GetMockStats answer, so a test
+	// can change how later reads behave.
+	afterFirstStats func()
+
 	statsCalls        int
 	mockOutgoingCalls int
 	storeMocksCalls   int
@@ -56,11 +67,20 @@ func (f *rearmInstr) GetMockStats(context.Context) (models.MockStats, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.statsCalls++
+	if f.statsUnsupported {
+		return models.MockStats{}, fmt.Errorf("%w: agent returned 501", models.ErrMockStatsUnsupported)
+	}
 	if f.statsErrCalls > 0 {
 		f.statsErrCalls--
 		return models.MockStats{}, errors.New("connection refused")
 	}
-	return models.MockStats{Loaded: f.loaded}, nil
+	out := models.MockStats{Loaded: f.loaded}
+	if f.afterFirstStats != nil {
+		fn := f.afterFirstStats
+		f.afterFirstStats = nil
+		fn()
+	}
+	return out, nil
 }
 
 func (f *rearmInstr) MockOutgoing(context.Context, models.OutgoingOptions) error {
@@ -238,5 +258,51 @@ func TestEnsureAgentHoldsStoredMocks_ProbeFailureFallsThroughToReRegistration(t 
 	}
 	if outgoing != 1 {
 		t.Fatalf("expected MockOutgoing once as part of the repair, got %d", outgoing)
+	}
+}
+
+// An agent that CANNOT answer /mock/stats is not an agent reporting "nothing
+// stored". Version skew — a keploy CLI newer than the agent image it is driving,
+// or an agent whose service has no stats reader — must leave the run exactly as
+// it was before this guard existed.
+//
+// Without this, the guard reads silence as a replacement, re-registers, asks the
+// same unanswerable question to confirm, and fails EVERY docker-compose test set
+// against such an agent.
+func TestEnsureAgentHoldsStoredMocks_SkipsWhenAgentCannotReportStats(t *testing.T) {
+	f := &rearmInstr{statsUnsupported: true}
+	r := newRearmReplayer(f)
+	filtered, unfiltered, consumed, cases := rearmSessionArgs()
+
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
+		t.Fatalf("an agent that cannot report stats must not fail the test set, got: %v", err)
+	}
+
+	_, outgoing, stores, updates, ready := f.counts()
+	if outgoing != 0 || stores != 0 || updates != 0 || ready != 0 {
+		t.Fatalf("nothing should be re-registered on an unanswerable probe, got outgoing=%d stores=%d updates=%d ready=%d",
+			outgoing, stores, updates, ready)
+	}
+}
+
+// The same condition discovered at the CONFIRMATION read: the repair ran, and
+// this agent simply cannot report whether it took. The session is no worse off
+// than before the guard existed, so it must not fail the set on an answer nobody
+// can give.
+func TestEnsureAgentHoldsStoredMocks_AcceptsUnconfirmableReRegistration(t *testing.T) {
+	// Answers normally once (a real replacement: loaded 0 against a stored
+	// corpus), then can no longer report at all.
+	f := &rearmInstr{loaded: 0}
+	r := newRearmReplayer(f)
+	filtered, unfiltered, consumed, cases := rearmSessionArgs()
+	f.afterFirstStats = func() { f.statsUnsupported = true }
+
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
+		t.Fatalf("an unconfirmable re-registration must not fail the test set, got: %v", err)
+	}
+
+	_, outgoing, stores, updates, _ := f.counts()
+	if outgoing != 1 || stores != 1 || updates != 1 {
+		t.Fatalf("the repair must still have run in full, got outgoing=%d stores=%d updates=%d", outgoing, stores, updates)
 	}
 }

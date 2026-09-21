@@ -1132,6 +1132,15 @@ func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error
 	// Status before decode, for the same reason as GetServedMocks: a failure
 	// arrives as an error object and decoding it into the struct would report
 	// the decoder's confusion instead of the agent's reason.
+	// An agent that CANNOT answer is not an agent that answered "nothing
+	// stored". 404 is an agent older than this route; 501 is one whose service
+	// does not implement the reader. Both are reported as a distinct, typed
+	// condition so the caller can skip its check instead of concluding the
+	// agent was replaced — otherwise ordinary version skew fails every
+	// docker-compose test set.
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return models.MockStats{}, fmt.Errorf("%w: agent returned %d", models.ErrMockStatsUnsupported, res.StatusCode)
+	}
 	if res.StatusCode != http.StatusOK {
 		rawBody, _ := readAgentBody(res)
 		return models.MockStats{}, agentRespErr("get mock stats", res, rawBody)

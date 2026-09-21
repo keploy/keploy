@@ -3746,6 +3746,17 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testSetID st
 		// fails loudly when the agent is genuinely gone.
 		stats, err = r.instrumentation.GetMockStats(ctx)
 		if err != nil {
+			// ...unless the agent cannot answer this route AT ALL: one that
+			// predates /mock/stats, or whose service has no reader. That is
+			// version skew, not a replaced agent, and it is unfalsifiable from
+			// here — re-registering would "confirm" against the same silence
+			// and fail every docker-compose test set on an older agent. Leave
+			// the run exactly as it was before this check existed.
+			if errors.Is(err, models.ErrMockStatsUnsupported) {
+				r.logger.Debug("agent cannot report mock stats; skipping the stored-mocks check for this test set",
+					zap.String("testSetID", testSetID), zap.Error(err))
+				return nil
+			}
 			r.logger.Warn("could not verify the agent's stored mocks before firing tests; attempting re-registration",
 				zap.String("testSetID", testSetID), zap.Error(err))
 		}
@@ -3774,6 +3785,14 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testSetID st
 
 	confirmed, err := r.instrumentation.GetMockStats(ctx)
 	if err != nil {
+		if errors.Is(err, models.ErrMockStatsUnsupported) {
+			// Re-registration ran; this agent simply cannot report the result.
+			// The session is no worse off than before the check existed, so do
+			// not fail the set on an answer nobody can give.
+			r.logger.Debug("agent cannot report mock stats; accepting the re-registration unconfirmed",
+				zap.String("testSetID", testSetID))
+			return nil
+		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks could not be confirmed: %w", testSetID, err)
 	}
 	if !agentHoldsStoredCorpus(stored, confirmed.Loaded) {

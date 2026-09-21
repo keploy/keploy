@@ -132,15 +132,22 @@ func (a *Agent) HandleCapturedMocks(w http.ResponseWriter, r *http.Request) {
 // HandleMockStats returns a non-draining snapshot of the mock session.
 func (a *Agent) HandleMockStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	stats := models.MockStats{}
-	if s, ok := a.svc.(mockStatsReader); ok {
-		got, err := s.MockStats(r.Context())
-		if err != nil {
-			render.Status(r, http.StatusInternalServerError)
-			render.JSON(w, r, map[string]string{"error": err.Error()})
-			return
-		}
-		stats = got
+	s, ok := a.svc.(mockStatsReader)
+	if !ok {
+		// 501, not 200 with a zero count — the same reason HandleServedMocks
+		// gives below. A caller that treats "this agent cannot report" as
+		// "nothing is stored" reads an unreportable agent as a replaced one,
+		// and a caller that FAILS on a zero count then fails every run against
+		// an agent build without the reader.
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": "this agent cannot report mock stats"})
+		return
+	}
+	stats, err := s.MockStats(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, stats)
