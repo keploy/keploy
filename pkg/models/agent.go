@@ -142,6 +142,16 @@ type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
 }
 
+// ErrMockStatsUnsupported reports that an agent cannot answer /agent/mock/stats
+// at all — it predates the route, or its service does not implement the reader.
+// It lives here, not in the HTTP client, so the replay service can recognise the
+// condition without importing the concrete client it otherwise reaches only
+// through its Instrumentation interface.
+//
+// Callers must treat it as "unknown", never as "no mocks stored": a caller that
+// conflates the two reads an unreportable agent as a replaced one.
+var ErrMockStatsUnsupported = errors.New("agent cannot report mock stats")
+
 // MockStats is the body of GET /agent/mock/stats — a non-draining snapshot of
 // the mock session for the runner or the CLI end-of-run summary.
 type MockStats struct {
