@@ -78,10 +78,99 @@ docker network create "$NETWORK_NAME"
 
 # Start MongoDB with a unique container name but a network alias of "mongoDb"
 # so the gin-mongo app (which hardcodes "mongoDb:27017") resolves correctly.
-docker_pull_retry mongo
-docker run --name "$MONGO_CONTAINER" --rm \
-  --net "$NETWORK_NAME" --network-alias mongoDb \
-  -p "${DB_PORT}:27017" -d mongo
+# Both spellings, because the app's driver lowercases the host out of the
+# connection string before resolving it: a container NAME matches
+# case-insensitively (which is why the Linux script, whose container is
+# literally named mongoDb, needs nothing here) but an ALIAS is matched as given.
+#
+# MongoDB 8 refuses to start on a Linux kernel >= 6.19 -- its vendored
+# TCMalloc violates the rseq ABI, so it exits 1 within ~100ms, logging
+# "MongoDB cannot start: Linux kernel versions 6.19 and newer has a known
+# incompatibility with this version of MongoDB" (SERVER-121912). Every
+# self-hosted macOS runner is past that line, and the bare `mongo` tag is
+# 8.3, so this database has been dead on arrival here; what differed between
+# lanes was only whether anything noticed. Pin 7: it predates the broken
+# allocator. Revisit when a MongoDB release ships the fixed one -- 7.0 is the
+# oldest series docker-library still publishes, so this has a shelf life.
+docker_pull_retry mongo:7
+# No --rm: when this container dies, its exit code and its logs are the only
+# account of why, and --rm deletes both the moment it exits. That is what
+# happened on the run that added the wait below -- `docker ps -a` came back
+# empty and `docker logs` said "No such container", so a database that died in
+# under a minute left nothing behind to read.
+#
+# What stops the corpse leaking is NOT the EXIT trap above -- a SIGKILLed
+# script never runs it -- but the workflow's own `if: always()` cleanup step,
+# which reaps by `docker ps -aq` after the job whatever happened to the shell.
+docker run --name "$MONGO_CONTAINER" \
+  --net "$NETWORK_NAME" --network-alias mongoDb --network-alias mongodb \
+  -p "${DB_PORT}:27017" -d mongo:7
+
+# ...and then WAIT for it, and say so when it never comes up.
+#
+# This lane fails on main with `lookup mongodb on 127.0.0.11:53: no such host`
+# from inside the app, which reads as a DNS or a keploy problem. It is neither:
+# the database is dead before the first request, so Docker's resolver has
+# nothing to answer with. The log said so only in passing --
+# "can not get logs from container which is dead or marked for removal", one
+# line, twenty seconds before the failure anyone looks at.
+#
+# So: wait for it to answer, and if it does not, stop here with its state and
+# its logs instead of recording against an app that cannot reach its database.
+mongo_postmortem() {
+    echo "--- docker ps -a (this job's containers) ---"
+    docker ps -a --filter "name=${MONGO_CONTAINER}" || true
+    echo "--- container state ---"
+    docker inspect "$MONGO_CONTAINER" \
+      --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{printf "%q" .State.Error}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' 2>&1 || true
+    echo "--- container logs ---"
+    docker logs --tail 200 "$MONGO_CONTAINER" 2>&1 | tail -40 || true
+    echo "--- readiness probe ---"
+    # Asked of the IMAGE, not the container: when the database has already
+    # exited, `docker exec` can only answer "not running", which is the one
+    # case where this question matters most. The wait probes with mongosh, so
+    # an image without it fails the wait against a healthy database.
+    docker run --rm --entrypoint sh mongo:7 -c 'command -v mongosh || echo "mongosh IS NOT IN THIS IMAGE (the wait cannot pass, whatever the database is doing)"' 2>&1 || true
+    echo "--- image platform ---"
+    # 2>&1, not 2>/dev/null: on an Apple Silicon runner a mongo image pulled
+    # for the wrong architecture is a leading suspect, so the reason this
+    # cannot be answered matters as much as the answer.
+    docker image inspect mongo:7 --format '{{.Os}}/{{.Architecture}}' 2>&1 || true
+}
+
+echo "Waiting for MongoDB to accept connections..."
+for i in $(seq 1 30); do
+    if docker exec "$MONGO_CONTAINER" mongosh --quiet --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1; then
+        echo "MongoDB is up after $i attempt(s)."
+        break
+    fi
+    # A container that has already exited will not start answering on the
+    # next tick. Report it now, with the reason, instead of spending the rest
+    # of the minute waiting on something that is dead.
+    #
+    # Only states that mean DEAD end the wait. Docker Desktop keeps its daemon
+    # in a VM and can fail to answer for a moment; treating "could not ask" as
+    # "the database is dead" would abort the job two seconds in and blame
+    # MongoDB for a socket hiccup the old loop simply waited out. `docker
+    # inspect` also prints a bare newline to stdout when it fails, so the
+    # status is read only when the command itself succeeded, and trimmed.
+    if state=$(docker inspect "$MONGO_CONTAINER" --format '{{.State.Status}}' 2>/dev/null); then
+        state=$(printf '%s' "$state" | tr -d '[:space:]')
+        case "$state" in
+            exited|dead|removing)
+                echo "::error::MongoDB ${state} before it ever accepted a connection, so the app cannot reach its database and this run would fail for a reason that is not keploy's."
+                mongo_postmortem
+                exit 1
+                ;;
+        esac
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "::error::MongoDB never came up, so the app cannot reach its database and this run would fail for a reason that is not keploy's."
+        mongo_postmortem
+        exit 1
+    fi
+    sleep 2
+done
 
 config_file="./keploy.yml"
 # Keploy's config now carries only the settings that DIFFER from its

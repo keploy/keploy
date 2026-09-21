@@ -349,6 +349,16 @@ type MockCmd struct {
 	// at any log level — only aggregate counts — so every client had to infer
 	// "served" from something else and present a guess as a measurement.
 	EmitMockEvents bool `json:"emitMockEvents" yaml:"emitMockEvents" mapstructure:"emitMockEvents"`
+	// MinCoverage fails a replay whose test run covered less than this
+	// percentage of the code (0 disables it). The number is the runner's own
+	// coverage report for that run -- go test -coverprofile, lcov, Cobertura
+	// or JaCoCo -- so the floor is only as real as the report: a run that
+	// writes none fails the gate rather than passing it unmeasured.
+	MinCoverage float64 `json:"minCoverage" yaml:"minCoverage" mapstructure:"minCoverage"`
+	// CoverageReport names the coverage report the test command writes, when
+	// it is not one of the runners' default locations. Relative to the
+	// directory keploy runs in.
+	CoverageReport string `json:"coverageReport" yaml:"coverageReport" mapstructure:"coverageReport"`
 }
 
 type Contract struct {
