@@ -402,6 +402,56 @@ func (m *MockManager) ResetForReplaySession() {
 	})
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
 
+	// The never-drained per-name consumption history belongs to ONE test set.
+	//
+	// Mock names are only unique within a set: mockdb numbers them from a
+	// per-store counter (`mock.Name = fmt.Sprint("mock-", ys.getNextID())`), and
+	// each set is recorded by its own run, so every set has a mock-1, a mock-2,
+	// and so on. filterOutDeleted keys purely on that name.
+	//
+	// Carried across a boundary, this map therefore drops the NEXT set's mock-1
+	// because the PREVIOUS set's unrelated mock-1 was consumed — silently, as an
+	// ordinary mock miss. It also STAMPS state: filterOutDeleted copies a
+	// surviving entry's IsFiltered/SortOrder onto the mock it matched by name,
+	// so a stale non-Deleted entry (MarkMockAsUsed writes Usage: Updated) would
+	// put the previous set's ordering on this set's same-named mock. Clearing
+	// has to be wholesale for that reason, not a sweep of Deleted entries.
+	//
+	// The client's map is re-allocated per test set (RunTestSet), which is why
+	// the client-sent path does not degrade the same way. Not a perfect
+	// contrast: that fresh map is immediately re-seeded from a GetConsumedMocks
+	// drain, and consumedList is deliberately NOT cleared here, so when the app
+	// survives a boundary the client can inherit a trailing few names too. The
+	// difference is magnitude, not kind — and this clear closes the agent-owned
+	// path's set-boundary divergence specifically. It does not claim blanket
+	// equivalence: --retry-passing-test rewinds the CLIENT's map to a baseline
+	// per retry cycle and nothing rewinds this one, which is a separate defect
+	// that must be closed before AgentOwnsConsumed is ever defaulted on.
+	//
+	// Unlike the window bits below, this genuinely belongs here rather than at
+	// the next set's staging call: it is read by UpdateMockParams, which runs
+	// BEFORE staging, so a late clear would still serve the previous set's
+	// history to the first filter of the new one.
+	//
+	// This also runs MID-SET on the agent-replacement repair path, which calls
+	// MockOutgoing again (pkg/service/replay). That is safe, but only because
+	// the repair latches agentConsumedHistoryLost BEFORE that call, so every
+	// later send carries the CLI's map and this (cleared) history is not
+	// consulted — including on a false-positive repair, where the agent is
+	// alive and its history was real. Move that latch after the MockOutgoing
+	// and this clear becomes a live-history wipe; replay's own test pins the
+	// ordering.
+	//
+	// A second, order-independent guarantee backs that up: consumedList and
+	// consumedIndex are deliberately NOT cleared here, so the client's
+	// post-bring-up GetConsumedMocks drain still recovers everything the app
+	// consumed during bootstrap, and that is what the latched sends carry.
+	m.consumedMu.Lock()
+	if m.consumedPersistent != nil {
+		m.consumedPersistent = make(map[string]models.MockState)
+	}
+	m.consumedMu.Unlock()
+
 	m.swapMu.Lock()
 	m.boundaryPending = true
 	// A parked cutoff belongs to the set that seeded it and must never outlive
