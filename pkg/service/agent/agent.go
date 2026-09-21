@@ -1219,6 +1219,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		}
 	} else if params.TotalConsumedMocks != nil {
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
+		unfilteredMocks = a.filterOutDeleted(unfilteredMocks, params.TotalConsumedMocks)
 	}
 
 	// Atomically update mocks AND the active test window when the proxy
