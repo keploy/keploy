@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -99,5 +101,30 @@ func TestAnImportedTestIsWrittenOnlyInsideTheRecording(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(out); err != nil || len(entries) != 0 {
 		t.Fatalf("the import left %v (%v) outside the recording", entries, err)
+	}
+}
+
+func TestProcessFormdataBody_FileAndExportedEntries(t *testing.T) {
+	var body []map[string]interface{}
+	err := json.Unmarshal([]byte(`[
+		{"key": "name", "value": "om", "type": "text"},
+		{"key": "avatar", "type": "file", "src": "/tmp/avatar.png"},
+		{"key": "docs", "type": "file", "src": ["a.pdf", "b.pdf"]},
+		{"key": "tags", "values": ["x", "y"]}
+	]`), &body)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	got := processFormdataBody(body)
+
+	want := []models.FormData{
+		{Key: "name", Values: []string{"om"}},
+		{Key: "avatar", Paths: []string{"/tmp/avatar.png"}},
+		{Key: "docs", Paths: []string{"a.pdf", "b.pdf"}},
+		{Key: "tags", Values: []string{"x", "y"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("processFormdataBody() = %+v, want %+v", got, want)
 	}
 }
