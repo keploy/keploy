@@ -1387,10 +1387,23 @@ func (a *App) ensureContainerNameFreeWithin(name string, budget time.Duration) {
 func (a *App) containerNameFree(name string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "name=^/"+name+"$").CombinedOutput()
+	// Output(), NOT CombinedOutput(). The verdict below is "stdout is empty",
+	// so ANY byte docker writes to stderr reads as "the name is taken" — for
+	// every name, permanently. Docker writes plenty there on a healthy exit-0
+	// run: a malformed ~/.docker/config.json, a credential-helper warning, a
+	// deprecation notice. The two consequences are both expensive:
+	//
+	//   - ensureContainerNameFree polls to the full preRunRemoveBudget (90s)
+	//     and then proceeds anyway, adding 90s to every docker-run start.
+	//   - isDockerRunNameConflict sees nameOccupied permanently true, so EVERY
+	//     exit-125 is retried dockerRunNameConflictRetries times with a 90s
+	//     removal between attempts. A genuinely broken run — a bad image, an
+	//     unsatisfiable mount — takes minutes to surface its real error, which
+	//     is exactly what the comment on that retry says must not happen.
+	out, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "name=^/"+name+"$").Output()
 	if err != nil {
 		a.logger.Debug("could not query container-name availability; treating as still-in-use",
-			zap.String("container", name), zap.Error(err), zap.String("output", string(out)))
+			zap.String("container", name), zap.Error(err), zap.String("stderr", commandStderr(err)))
 		return false
 	}
 	return len(bytes.TrimSpace(out)) == 0
