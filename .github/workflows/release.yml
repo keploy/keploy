@@ -33,9 +33,9 @@ env:
 #
 # Job graph:
 #   build-linux   (matrix amd64/arm64, native linux, plain `go build`)
-#   build-darwin  (macos-latest, native clang handles both darwin archs
-#                  via the universal macOS SDK; lipo + gon for the
-#                  universal+signed archive)
+#   build-darwin  (macos-latest, Apple-silicon runner; native clang
+#                  builds the single darwin/arm64 binary, gon signs
+#                  and notarizes it before archiving)
 #   build-windows (windows-latest, native cgo via MinGW on PATH)
 #   release       (ubuntu-latest, downloads all per-platform archives
 #                  and creates the GitHub release via `gh release create`)
@@ -46,10 +46,13 @@ env:
 # OSS does not support merging per-platform dist trees across runs (the
 # split-and-merge story is Pro-only). Producing archives by hand with
 # the same name_template goreleaser used (keploy_<os>_<arch>.tar.gz,
-# keploy_darwin_all.tar.gz, keploy_windows_amd64 as bare .exe) keeps
-# keploy.sh's download URLs stable. goreleaser.yaml stays in the repo
-# for local snapshot builds and as the canonical ldflags source of
-# truth.
+# so keploy_darwin_arm64.tar.gz for the Apple-silicon-only macOS
+# build; keploy_windows_amd64 as bare .exe) keeps keploy.sh's download
+# URLs stable — keploy.sh, `keploy update` (pkg/service/tools) and the
+# install docs each hard-code these exact asset names, so a rename
+# here breaks every existing install path. goreleaser.yaml stays in
+# the repo for local snapshot builds and as the canonical ldflags
+# source of truth.
 
 jobs:
   # ---------------------------------------------------------------
@@ -171,11 +174,12 @@ jobs:
           retention-days: 1
 
   # ---------------------------------------------------------------
-  # Darwin native build (macos-latest is Apple-silicon; Xcode's
-  # clang handles darwin/amd64 via the universal macOS SDK without a
-  # separate cross-toolchain). Produces a universal binary via lipo
-  # and signs/notarizes it with gon — same contract as the old
-  # goreleaser-on-macOS leg, just hand-rolled.
+  # Darwin native build. macOS ships as darwin/arm64 only (Apple
+  # silicon); there is no darwin/amd64 leg. macos-latest is itself an
+  # Apple-silicon runner, so this is a plain host build: Xcode's clang
+  # links the cgo binary against the SDK already on the runner, no
+  # cross-toolchain. The binary is signed/notarized with gon — same
+  # contract as the old goreleaser-on-macOS leg, just hand-rolled.
   # ---------------------------------------------------------------
   build-darwin:
     # Longer than the repo-wide 60 because this job blocks on Apple's
@@ -215,73 +219,61 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build darwin/amd64 and darwin/arm64 (native clang)
-        # CGO_ENABLED=1 with Apple clang. The macOS SDK on Apple
-        # silicon includes both arm64 and x86_64 slices, so `GOARCH=
-        # amd64 CGO_ENABLED=1 go build` links a native amd64 binary
-        # without needing osxcross. No external toolchain install.
+      - name: Build darwin/arm64 (native clang)
+        # CGO_ENABLED=1 with Apple clang. GOOS/GOARCH are the runner's
+        # own, so pg_query_go's libpg_query links against the SDK
+        # that ships with Xcode on the runner. No external toolchain
+        # install. The output path is the one gon.json's "source"
+        # names — gon signs in place, so building straight into it
+        # avoids a stage/copy-back round trip.
         env:
           CGO_ENABLED: "1"
+          GOOS: darwin
+          GOARCH: arm64
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
           SERVER_URL: https://api.keploy.io
           GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
         run: |
           set -euxo pipefail
           version="${{ steps.ver.outputs.version }}"
-          mkdir -p out/darwin-amd64 out/darwin-arm64
-          for arch in amd64 arm64; do
-            GOOS=darwin GOARCH="$arch" go build \
-              -tags=viper_bind_struct \
-              -ldflags="-s -w \
-                -X main.dsn=${SENTRY_DSN_BINARY} \
-                -X main.version=${version} \
-                -X main.apiServerURI=${SERVER_URL} \
-                -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
-              -o "out/darwin-${arch}/keploy" \
-              ./main.go
-          done
-
-      - name: Fuse darwin universal binary via lipo
-        run: |
-          set -euxo pipefail
-          mkdir -p out/darwin-all
-          lipo -create -output out/darwin-all/keploy \
-            out/darwin-amd64/keploy \
-            out/darwin-arm64/keploy
-          chmod +x out/darwin-all/keploy
-          lipo -info out/darwin-all/keploy
+          mkdir -p dist/keploy_darwin_arm64
+          go build \
+            -tags=viper_bind_struct \
+            -ldflags="-s -w \
+              -X main.dsn=${SENTRY_DSN_BINARY} \
+              -X main.version=${version} \
+              -X main.apiServerURI=${SERVER_URL} \
+              -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
+            -o dist/keploy_darwin_arm64/keploy \
+            ./main.go
+          chmod +x dist/keploy_darwin_arm64/keploy
 
       - name: Code-sign and notarize via gon
         env:
           AC_PROVIDER: ${{ secrets.APPLE_ACCOUNT_TEAM_ID }}
           AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
-        # gon.json historically points at the goreleaser universal
-        # output path; override at invocation time by copying the
-        # universal binary where gon expects it. The gon.json file
-        # must reference ./out/darwin-all/keploy OR we stage at the
-        # documented goreleaser path. Stage at the documented path
-        # so gon.json is unchanged.
+        # gon.json's "source" is ./dist/keploy_darwin_arm64/keploy, the
+        # path the build step writes to; the two files must move
+        # together. gon codesigns that binary in place, zips it for
+        # the notarization upload (keploy.zip) and blocks on Apple's
+        # verdict — hence this job's 120-minute ceiling.
         run: |
           set -euxo pipefail
-          mkdir -p dist/keploy-mac-universal_darwin_all
-          cp out/darwin-all/keploy dist/keploy-mac-universal_darwin_all/keploy
-          chmod +x dist/keploy-mac-universal_darwin_all/keploy
           gon -log-level=info -log-json ./gon.json
-          cp dist/keploy-mac-universal_darwin_all/keploy out/darwin-all/keploy
 
-      - name: Package keploy_darwin_all.tar.gz
+      - name: Package keploy_darwin_arm64.tar.gz
         run: |
           set -euxo pipefail
           mkdir -p archive
-          cp out/darwin-all/keploy archive/keploy
+          cp dist/keploy_darwin_arm64/keploy archive/keploy
           chmod +x archive/keploy
-          tar -C archive -czf keploy_darwin_all.tar.gz keploy
+          tar -C archive -czf keploy_darwin_arm64.tar.gz keploy
 
       - name: Upload darwin release archive
         uses: actions/upload-artifact@v4
         with:
-          name: release-archive-darwin-all
-          path: keploy_darwin_all.tar.gz
+          name: release-archive-darwin-arm64
+          path: keploy_darwin_arm64.tar.gz
           if-no-files-found: error
           retention-days: 1
 
@@ -427,7 +419,7 @@ jobs:
       - name: Download darwin archive
         uses: actions/download-artifact@v4
         with:
-          name: release-archive-darwin-all
+          name: release-archive-darwin-arm64
           path: release-assets
 
       - name: Download windows binary
@@ -465,7 +457,7 @@ jobs:
           assets=(
             release-assets/keploy_linux_amd64.tar.gz
             release-assets/keploy_linux_arm64.tar.gz
-            release-assets/keploy_darwin_all.tar.gz
+            release-assets/keploy_darwin_arm64.tar.gz
             release-assets/keploy_windows_amd64
           )
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then

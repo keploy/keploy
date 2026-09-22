@@ -44,7 +44,7 @@ intercept traffic on each OS:
 | **Linux** (x86_64, arm64) | ✅ Supported — uses eBPF (`pkg/agent/hooks/linux/`). Requires root.                                          | ✅ Supported                          |
 | **Windows** (amd64)       | ✅ Supported — userspace interception (`pkg/agent/hooks/winshim/`). No driver and no Administrator; pure Go plus a committed shim DLL, so a windows build needs no extra fetch step.                                     | ✅ Supported                          |
 | **Windows** (arm64)       | ❌ Falls through to the `others` stub — `Load()` / `Record()` return "not supported on non-Linux platforms". | ✅ Supported                          |
-| **macOS** (amd64, arm64)  | ❌ Same `others` stub — there is **no** native interception path on macOS.                                   | ✅ Supported (only option)            |
+| **macOS** (arm64 only — Apple Silicon) | ❌ Same `others` stub — there is **no** native interception path on macOS. The CLI binary is not built for Intel Macs; use Docker or Lima there. | ✅ Supported (only option)            |
 
 - On **macOS** you _cannot_ use keploy natively. You must:
   1. Build the keploy Docker image: `sudo docker image build -t ghcr.io/keploy/keploy:v3-dev .`

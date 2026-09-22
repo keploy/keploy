@@ -91,18 +91,9 @@ func (t *Tools) Update(ctx context.Context) error {
 	}
 
 	t.logger.Info("Updating to Version: " + latestVersion)
-	downloadURL := ""
-
-	if runtime.GOOS == "linux" {
-		if runtime.GOARCH == "amd64" {
-			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
-		} else {
-			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
-		}
-	}
-
-	if runtime.GOOS == "darwin" {
-		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
+	downloadURL, err := updateDownloadURL(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return err
 	}
 
 	err = t.downloadAndUpdate(ctx, t.logger, downloadURL)
@@ -132,6 +123,33 @@ func (t *Tools) Update(ctx context.Context) error {
 	return nil
 }
 
+// updateDownloadURL picks the latest-release archive for the running
+// platform. Asset names follow release.yml's keploy_<os>_<arch>.tar.gz.
+// macOS is published for arm64 only, so an Intel Mac gets an error rather
+// than a download that cannot run. That refusal also sets the process exit
+// code here, at the point where the platform is judged unsupported:
+// cli/update.go logs and returns nil on every Update error, so without it
+// `keploy update` on an Intel Mac would print the refusal and exit 0.
+func updateDownloadURL(goos, goarch string) (string, error) {
+	const base = "https://github.com/keploy/keploy/releases/latest/download/"
+	switch goos {
+	case "linux":
+		if goarch == "amd64" {
+			return base + "keploy_linux_amd64.tar.gz", nil
+		}
+		return base + "keploy_linux_arm64.tar.gz", nil
+	case "darwin":
+		if goarch != "arm64" {
+			// Retrying cannot help -- there is no asset for this OS/arch -- so
+			// give the caller the code that says so rather than a generic 1.
+			utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+			return "", fmt.Errorf("keploy's native macOS build is Apple Silicon (arm64) only; this Mac is %s. On an Intel Mac, run Keploy with Docker or Lima: https://keploy.io/docs/installation/macos-installation/", goarch)
+		}
+		return base + "keploy_darwin_arm64.tar.gz", nil
+	}
+	return "", nil
+}
+
 func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downloadURL string) error {
 	// Create a new request with context
 	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
@@ -150,6 +168,19 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 			utils.LogError(logger, cerr, "failed to close response body")
 		}
 	}()
+
+	// A non-200 body is NOT an archive. Unchecked, GitHub's 404 page was
+	// io.Copy'd into the .tar.gz below and only surfaced as "failed to extract
+	// tar.gz file" -- and since cli/update.go logs every Update error and
+	// returns nil to cobra, `keploy update` reported that failure and still
+	// exited 0. That is how a release missing an asset for this platform looks
+	// to every keploy already installed, so it has to be the download's own
+	// error, named, with an exit code behind it.
+	if resp.StatusCode != http.StatusOK {
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return fmt.Errorf("release asset %s is not available (HTTP %s) -- this release may not publish a binary for %s/%s",
+			downloadURL, resp.Status, runtime.GOOS, runtime.GOARCH)
+	}
 
 	// Create a temporary file to store the downloaded tar.gz
 	tmpFile, err := os.CreateTemp("", "keploy-download-*.tar.gz")

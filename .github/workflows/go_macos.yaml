@@ -21,9 +21,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build amd64
-        run: GOARCH=amd64 go build -v ./...
-
+      # macOS ships as darwin/arm64 only (Apple silicon), so this is the
+      # one macOS target to keep compiling.
       - name: Build arm64
         run: GOARCH=arm64 go build -v ./...
 
