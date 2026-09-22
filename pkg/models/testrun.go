@@ -1,7 +1,10 @@
 package models
 
 import (
+	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"strings"
 )
 
 type TestReport struct {
@@ -167,6 +170,13 @@ func MockSummaryFromSpec(mock *Mock) string {
 		if op := mock.Spec.Metadata["operation"]; op != "" {
 			return "MongoDB " + op
 		}
+		// A recorder that does not persist the operation can still get a
+		// named summary: the command name is the first field of an OP_MSG's
+		// first section document, so derive it from the message the mock
+		// already carries rather than requiring a stored duplicate of it.
+		if op := mongoOperationFromRequest(&mock.Spec.MongoRequests[0]); op != "" {
+			return "MongoDB " + op
+		}
 		return "MongoDB"
 	}
 	if len(mock.Spec.MySQLRequests) > 0 {
@@ -191,6 +201,61 @@ func MockSummaryFromSpec(mock *Mock) string {
 		return string(mock.Kind) + " " + op
 	}
 	return string(mock.Kind)
+}
+
+// mongoOperationFromRequest derives the operation a Mongo request names, the
+// same token Spec.Metadata["operation"] carries when a recorder stores one. An
+// OP_MSG names its command as the first field of its first section document,
+// and a legacy OP_QUERY as the first field of its query. Returns "" when there
+// is no message or nothing recognisable to read from it.
+func mongoOperationFromRequest(req *MongoRequest) string {
+	if req == nil || req.Message == nil {
+		return ""
+	}
+	switch msg := req.Message.(type) {
+	case *MongoOpMessage:
+		for _, section := range msg.Sections {
+			if op := firstDocumentField(section); op != "" {
+				return op
+			}
+		}
+	case *MongoOpQuery:
+		return firstDocumentField(msg.Query)
+	}
+	return ""
+}
+
+// firstDocumentField returns the first field name of a document held as a
+// string, accepting raw BSON and the JSON rendering older recorders write into
+// sections. Both carry field order from the wire, which is what makes the
+// first field the command name.
+func firstDocumentField(doc string) string {
+	if len(doc) < 7 {
+		return ""
+	}
+	if int32(len(doc)) == int32(binary.LittleEndian.Uint32([]byte(doc[:4]))) {
+		if end := strings.IndexByte(doc[5:], 0); end > 0 {
+			return doc[5 : 5+end]
+		}
+		return ""
+	}
+	dec := json.NewDecoder(strings.NewReader(doc))
+	tok, err := dec.Token()
+	if err != nil {
+		return ""
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return ""
+	}
+	key, err := dec.Token()
+	if err != nil {
+		return ""
+	}
+	name, ok := key.(string)
+	if !ok {
+		return ""
+	}
+	return name
 }
 
 func (tr *TestResult) GetKind() string {
