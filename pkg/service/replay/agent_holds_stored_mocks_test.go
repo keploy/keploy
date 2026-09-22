@@ -68,6 +68,10 @@ type rearmInstr struct {
 	statsBlock    chan struct{}
 	outgoingBlock chan struct{}
 
+	// onOutgoing runs inside MockOutgoing, so a test can observe state as it was
+	// at that moment rather than after the repair finished.
+	onOutgoing func()
+
 	statsCalls        int
 	mockOutgoingCalls int
 	storeMocksCalls   int
@@ -116,6 +120,9 @@ func (f *rearmInstr) MockOutgoing(ctx context.Context, _ models.OutgoingOptions)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+	if f.onOutgoing != nil {
+		f.onOutgoing()
 	}
 	return f.mockOutgoing()
 }
@@ -590,5 +597,33 @@ func TestConsumedHistoryRebuildSticksAfterARepair(t *testing.T) {
 	}
 	if len(p.TotalConsumedMocks) != 1 {
 		t.Fatalf("later calls sent %d consumed entries; want the CLI's history (1)", len(p.TotalConsumedMocks))
+	}
+}
+
+// The agent clears its own per-name consumption history whenever MockOutgoing
+// resets the mock manager (pkg/agent/proxy, the test-set boundary clear). The
+// repair calls MockOutgoing MID-SET, so on a FALSE POSITIVE — both probes failed
+// but the agent is alive and its history is real — that clear wipes live state.
+//
+// It is safe only because the latch is armed BEFORE that call, so every later
+// send carries the CLI's map instead. Reorder those two and the wipe becomes
+// silent data loss, which is what this pins.
+func TestRepairLatchesBeforeItResetsTheAgentsMockManager(t *testing.T) {
+	f := &rearmInstr{loaded: 0, storeTakesEffect: true}
+	r := newRearmReplayer(f)
+
+	var latchedAtOutgoing bool
+	f.onOutgoing = func() { latchedAtOutgoing = r.agentConsumedHistoryLost.Load() }
+
+	filtered, unfiltered, consumed, cases := rearmSessionArgs()
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
+		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
+		t.Fatalf("repair failed: %v", err)
+	}
+
+	if !latchedAtOutgoing {
+		t.Fatal("MockOutgoing ran before the latch was armed; that call resets the agent's mock manager " +
+			"and clears its consumption history, so on a false-positive repair a live agent would lose " +
+			"real history with nothing sending the CLI's map in its place")
 	}
 }
