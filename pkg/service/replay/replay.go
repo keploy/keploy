@@ -278,8 +278,51 @@ func (r *Replayer) rewindConsumedForRetryCycle(total, baseline, allAcrossCycles 
 	for k, v := range baseline {
 		rewound[k] = v
 	}
-	r.agentConsumedHistoryStale.Store(true)
+	r.agentHistoryStaleForSet.Store(true)
 	return rewound
+}
+
+// agentConsumedHistoryUnusable reports whether the agent's own consumption
+// history can still be trusted for this send. Either cause disqualifies it.
+func (r *Replayer) agentConsumedHistoryUnusable() bool {
+	return r.agentHistoryIncompleteForRun.Load() || r.agentHistoryStaleForSet.Load()
+}
+
+// mockOutgoingForTestSet issues the per-test-set MockOutgoing and, only once
+// the agent has ANSWERED it, drops the retry-rewind staleness.
+//
+// MockOutgoing is a synchronous call, and a nil error means the agent's handler
+// ran to completion. That handler reaches Proxy.Mock, which either installs a
+// brand-new MockManager (the first Mock of an agent process — its
+// consumedPersistent starts empty) or calls ResetForReplaySession on the
+// existing one, which wipes it. Either way the map the agent filters from
+// under KEPLOY_AGENT_OWNS_CONSUMED is empty on return, so the history a rewind
+// made stale is provably gone and the next set starts with both sides empty.
+// pkg/agent/proxy pins that Mock really does this; it is one deletable line.
+//
+// The invariant is cross-process and not negotiated: a nil error proves the
+// agent we CONTACTED reset, not that it is new enough to do so. An agent image
+// older than the per-name clear has that bug independently of this flag — it is
+// #4620, fixed agent-side — but be aware this stops masking it after a rewind.
+//
+// The ordering IS the safety argument, and it is asymmetric. Clearing late
+// only keeps paying the marshaling this flag exists to avoid. Clearing early
+// hands the new set's pool to an agent still holding the previous set's
+// history — and mock names are unique only WITHIN a set, so the old mock-1
+// (Usage: Deleted) would drop this set's unrelated mock-1 and stamp its
+// IsFiltered/SortOrder onto it. That is a wrong test result, and it is exactly
+// the defect #4621 fixed, re-introduced from the CLI side. Never hoist this
+// above the call.
+//
+// Deliberately not used by the mid-set repair in ensureAgentHoldsStoredMocks:
+// that MockOutgoing is a repair, not a set boundary, and its own latch must
+// stay set across it.
+func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, opts models.OutgoingOptions) error {
+	if err := r.instrumentation.MockOutgoing(ctx, opts); err != nil {
+		return err
+	}
+	r.agentHistoryStaleForSet.Store(false)
+	return nil
 }
 
 // cycleIncomplete reports that a retry cycle ended before every test it
@@ -343,18 +386,36 @@ type Replayer struct {
 	testRunID          string               // current test run ID (used by RunTestSet)
 	afterTestRunCalled bool                 // guards duplicate AfterTestRun calls
 	hookImpl           TestHooks
-	// agentConsumedHistoryStale latches when the agent's OWN consumption history
-	// stops being authoritative for this run, after which every filter-params
-	// send carries the CLI's map instead (KEPLOY_AGENT_OWNS_CONSUMED is ignored).
+	// The agent's own consumption history stops being authoritative for two
+	// different reasons with two different lifetimes, so they are two latches.
+	// Either one makes a filter-params send carry the CLI's map instead
+	// (KEPLOY_AGENT_OWNS_CONSUMED is ignored for that send).
 	//
-	// Two causes, same consequence:
-	//   - a replacement agent was re-registered: everything consumed before it
-	//     started is missing from its history;
-	//   - a --retry-passing-test cycle rewound the CLI's map to its baseline so
-	//     single-use mocks are servable again. Nothing rewinds the agent's, so
-	//     the retry would filter against the previous cycle and fail with
-	//     match_phase=no_mocks — the exact failure that rewind exists to prevent.
-	agentConsumedHistoryStale atomic.Bool
+	// agentHistoryIncompleteForRun: a replacement agent was re-registered
+	// mid-set, so everything consumed before it started is missing from its
+	// record and cannot be recovered WITHIN that set.
+	//
+	// Kept for the whole run, which is conservative rather than necessary: by
+	// the same argument that expires the set-scoped latch below, the next
+	// boundary wipes the replacement's history and RunTestSet allocates a fresh
+	// CLI map, so both sides are empty and back in agreement. Un-sticking it
+	// would buy the optimization back only for the remainder of a run in which
+	// a repair already fired — an already-degraded path — at the cost of a
+	// second piece of reasoning about a process we just concluded we could not
+	// trust. The cost of leaving it is marshaling, and the failure direction is
+	// the always-correct legacy path.
+	agentHistoryIncompleteForRun atomic.Bool
+	// agentHistoryStaleForSet: a --retry-passing-test cycle rewound the CLI's
+	// map to its baseline so single-use mocks are servable again. Nothing
+	// rewinds the agent's, so within this set the retry would be filtered
+	// against the previous cycle and fail with match_phase=no_mocks.
+	//
+	// Scoped to the SET, because this cause expires at the boundary: #4621
+	// makes the agent wipe its per-name history in ResetForReplaySession, which
+	// the per-set MockOutgoing triggers, so from there on the rewind has
+	// nothing left to be stale against. Cleared ONLY by mockOutgoingForTestSet,
+	// i.e. strictly after the agent has answered that call.
+	agentHistoryStaleForSet atomic.Bool
 
 	completeTestReport    map[string]TestReportVerdict
 	firstRun              bool
@@ -1530,7 +1591,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		}
-		err = r.instrumentation.MockOutgoing(runTestSetCtx, outgoingOpts)
+		err = r.mockOutgoingForTestSet(runTestSetCtx, outgoingOpts)
 		if err != nil {
 			if ctx.Err() != context.Canceled {
 				utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -1770,7 +1831,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			})
 		}
 
-		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
+		err = r.mockOutgoingForTestSet(runTestSetCtx, models.OutgoingOptions{
 			Rules:                     r.config.BypassRules,
 			MongoPassword:             r.config.Test.MongoPassword,
 			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
@@ -3880,7 +3941,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// put it straight back to filtering against an empty map — already-consumed
 	// mocks re-served for the rest of the run. Once an agent has been replaced,
 	// the CLI's map is the only complete record there is.
-	if agentOwnsConsumed && r.agentConsumedHistoryStale.Load() {
+	if agentOwnsConsumed && r.agentConsumedHistoryUnusable() {
 		agentOwnsConsumed = false
 		consumedForAgent = totalConsumedMocks
 		r.logger.Debug("sending the CLI's consumed-mock history: KEPLOY_AGENT_OWNS_CONSUMED is set but "+
@@ -3983,7 +4044,7 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 //
 // The whole repair runs under agentRepairTimeout, and from the moment a
 // replacement is detected every later filter-params send carries the CLI's own
-// consumption history (see agentConsumedHistoryStale).
+// consumption history (see agentHistoryIncompleteForRun).
 func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase) error {
 	stored := len(filteredMocks) + len(unfilteredMocks)
 	if !r.instrument || stored == 0 {
@@ -4026,7 +4087,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	// replacement's own history is missing everything consumed before it
 	// started, so handing filtering back to it on the next per-test call would
 	// re-serve already-consumed mocks for the rest of the run.
-	r.agentConsumedHistoryStale.Store(true)
+	r.agentHistoryIncompleteForRun.Store(true)
 
 	// One ceiling for the whole repair; see agentRepairTimeout.
 	ctx, cancelRepair := context.WithTimeout(ctx, agentRepairTimeout)

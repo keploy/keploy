@@ -1,10 +1,13 @@
 package replay
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // A test set that stops part-way is not a pass. scoredNothing catches only the
@@ -88,7 +91,7 @@ func TestRewindConsumedForRetryCycleMarksAgentHistoryStale(t *testing.T) {
 
 	rewound := r.rewindConsumedForRetryCycle(total, baseline, across)
 
-	if !r.agentConsumedHistoryStale.Load() {
+	if !r.agentHistoryStaleForSet.Load() {
 		t.Fatal("the retry rewind did not mark the agent's history stale; cycle 2 would be filtered " +
 			"against cycle 1 and fail with match_phase=no_mocks")
 	}
@@ -172,3 +175,61 @@ func TestAppCrashReasonCarriesBothFacts(t *testing.T) {
 		t.Fatalf("the reason does not mention the tests that never ran: %q", got)
 	}
 }
+
+// The two causes of an untrustworthy agent history have different lifetimes,
+// and conflating them is what made one retry in test-set 0 disable
+// KEPLOY_AGENT_OWNS_CONSUMED for every remaining set.
+func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
+	t.Run("a retry rewind is cleared by the next set's MockOutgoing", func(t *testing.T) {
+		r := &Replayer{logger: zap.NewNop(), instrumentation: &latchInstr{}}
+		r.rewindConsumedForRetryCycle(
+			map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
+
+		if !r.agentConsumedHistoryUnusable() {
+			t.Fatal("the rewind did not disqualify the agent's history; cycle 2 would be filtered " +
+				"against cycle 1 and fail with match_phase=no_mocks")
+		}
+		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err != nil {
+			t.Fatalf("MockOutgoing: %v", err)
+		}
+		if r.agentConsumedHistoryUnusable() {
+			t.Fatal("the retry-rewind staleness survived the test-set boundary; the agent wipes its " +
+				"per-name history in ResetForReplaySession there, so there is nothing left to be stale")
+		}
+	})
+
+	t.Run("a replaced agent stays disqualified across the boundary", func(t *testing.T) {
+		r := &Replayer{logger: zap.NewNop(), instrumentation: &latchInstr{}}
+		r.agentHistoryIncompleteForRun.Store(true)
+
+		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err != nil {
+			t.Fatalf("MockOutgoing: %v", err)
+		}
+		if !r.agentConsumedHistoryUnusable() {
+			t.Fatal("a replacement agent's missing history was cleared at a set boundary; what it lost " +
+				"is gone for the run, so the CLI's map stays the only complete record")
+		}
+	})
+
+	t.Run("a failed MockOutgoing clears nothing", func(t *testing.T) {
+		r := &Replayer{logger: zap.NewNop(), instrumentation: &latchInstr{err: errors.New("agent refused")}}
+		r.agentHistoryStaleForSet.Store(true)
+
+		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err == nil {
+			t.Fatal("expected the error through")
+		}
+		if !r.agentConsumedHistoryUnusable() {
+			t.Fatal("staleness was dropped although the agent never answered — the clear must follow " +
+				"the round trip that wipes the agent's history, not merely the attempt")
+		}
+	})
+}
+
+// latchInstr answers only MockOutgoing; anything else panics on the nil
+// embedded interface rather than quietly returning a zero value.
+type latchInstr struct {
+	Instrumentation
+	err error
+}
+
+func (f *latchInstr) MockOutgoing(context.Context, models.OutgoingOptions) error { return f.err }

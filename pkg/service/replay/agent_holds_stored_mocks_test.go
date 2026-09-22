@@ -613,7 +613,7 @@ func TestRepairLatchesBeforeItResetsTheAgentsMockManager(t *testing.T) {
 	r := newRearmReplayer(f)
 
 	var latchedAtOutgoing bool
-	f.onOutgoing = func() { latchedAtOutgoing = r.agentConsumedHistoryStale.Load() }
+	f.onOutgoing = func() { latchedAtOutgoing = r.agentHistoryIncompleteForRun.Load() }
 
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",

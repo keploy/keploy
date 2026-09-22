@@ -133,6 +133,9 @@ type prInstr struct {
 	// the set, the way a crash or an OOM kill does. 0 = it stays up.
 	stopAppAfterNUpdates int
 	appStopped           chan struct{}
+	// lastParams is the filter-params payload of the most recent send, so a
+	// test can assert what the agent was actually told.
+	lastParams models.MockFilterParams
 }
 
 func (f *prInstr) Setup(context.Context, string, models.SetupOptions) error     { return nil }
@@ -165,9 +168,10 @@ func (f *prInstr) AfterTestRun(context.Context, string, []string, models.TestCov
 	return nil
 }
 func (f *prInstr) StoreMocks(context.Context, []*models.Mock, []*models.Mock) error { return nil }
-func (f *prInstr) UpdateMockParams(ctx context.Context, _ models.MockFilterParams) error {
+func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastParams = params
 	f.updateCalls++
 	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates {
 		close(f.appStopped) // the application exits mid-set
@@ -544,5 +548,80 @@ func TestRunTestSetAppCrashKeepsItsOwnFailureReason(t *testing.T) {
 	if got := h.report.report.AppLogs; got != "panic: runtime error: out of memory\n" {
 		t.Fatalf("report app_logs = %q; the crash output the app-error channel captured was "+
 			"overwritten by the recent-logs fallback", got)
+	}
+}
+
+// TestRunTestSetClearsTheRetryStalenessAtTheBoundary pins the CALL SITE. The
+// helper's own tests call mockOutgoingForTestSet directly, so reverting
+// RunTestSet's per-set call back to instrumentation.MockOutgoing — a complete
+// revert of the fix on the native and docker-run paths — leaves them green.
+//
+// This drives the real RunTestSet with the set-scoped latch already set, as if
+// a previous test set had ended in a --retry-passing-test rewind, and asserts
+// the boundary dropped it. The run-scoped latch must survive the same boundary:
+// a replaced agent's history stays incomplete for the rest of the run.
+func TestRunTestSetClearsTheRetryStalenessAtTheBoundary(t *testing.T) {
+	t.Run("the retry rewind is dropped", func(t *testing.T) {
+		h := newPartialRunHarness(t, 2, 0)
+		h.replayer.agentHistoryStaleForSet.Store(true)
+
+		if status := h.run(t); status != models.TestSetStatusPassed {
+			t.Fatalf("healthy run reported %q", status)
+		}
+		if h.replayer.agentConsumedHistoryUnusable() {
+			t.Fatal("RunTestSet did not drop the previous set's retry staleness, so " +
+				"KEPLOY_AGENT_OWNS_CONSUMED stays disabled for every remaining test set")
+		}
+	})
+
+	t.Run("a replaced agent stays disqualified", func(t *testing.T) {
+		h := newPartialRunHarness(t, 2, 0)
+		h.replayer.agentHistoryIncompleteForRun.Store(true)
+
+		_ = h.run(t)
+
+		if !h.replayer.agentConsumedHistoryUnusable() {
+			t.Fatal("the test-set boundary cleared a replacement agent's missing history; what it lost " +
+				"is gone for the run, so the CLI's map stays the only complete record")
+		}
+	})
+}
+
+// TestSendMockFilterParamsFallsBackAfterARetryRewind pins the READER through
+// the real send path. Splitting one latch into two lost coverage the single
+// field used to have: the repair tests exercise only the run-scoped one now, so
+// a reader that consults it alone passes the suite while silently deleting the
+// whole #4622 fix.
+func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
+	t.Setenv("KEPLOY_AGENT_OWNS_CONSUMED", "1")
+
+	h := newPartialRunHarness(t, 1, 0)
+	r := h.replayer
+	consumed := map[string]models.MockState{"mock-1": {Name: "mock-1", Usage: models.Deleted}}
+
+	// Baseline: with a trustworthy agent history the flag is honoured and the
+	// CLI's map is NOT sent. Without this the assertion below proves nothing.
+	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
+		models.BaseTime, time.Now(), consumed, false, time.Time{}); err != nil {
+		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
+	}
+	if !h.instr.lastParams.AgentOwnsConsumed {
+		t.Fatal("precondition: the flag was not honoured on a healthy run, so this test cannot detect " +
+			"the fallback it is about to assert")
+	}
+
+	// A retry cycle rewinds the CLI's map; nothing rewinds the agent's.
+	r.rewindConsumedForRetryCycle(map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
+
+	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
+		models.BaseTime, time.Now(), consumed, false, time.Time{}); err != nil {
+		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
+	}
+	if h.instr.lastParams.AgentOwnsConsumed {
+		t.Fatal("after a retry rewind the agent was still told to filter from its OWN history, which " +
+			"still holds the previous cycle — the retry fails with match_phase=no_mocks (#4622)")
+	}
+	if len(h.instr.lastParams.TotalConsumedMocks) == 0 {
+		t.Fatal("the fallback did not carry the CLI's consumed map")
 	}
 }
