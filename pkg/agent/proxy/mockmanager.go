@@ -435,7 +435,7 @@ func (m *MockManager) ResetForReplaySession() {
 	//
 	// This also runs MID-SET on the agent-replacement repair path, which calls
 	// MockOutgoing again (pkg/service/replay). That is safe, but only because
-	// the repair latches agentConsumedHistoryLost BEFORE that call, so every
+	// the repair latches agentConsumedHistoryStale BEFORE that call, so every
 	// later send carries the CLI's map and this (cleared) history is not
 	// consulted — including on a false-positive repair, where the agent is
 	// alive and its history was real. Move that latch after the MockOutgoing

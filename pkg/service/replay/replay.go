@@ -168,15 +168,67 @@ func isWordChar(ch byte) bool {
 	return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'
 }
 
-func describeTestSetFailure(status models.TestSetStatus, testCaseResults []models.TestResult) string {
+// runShape carries what the report's reason string needs to know beyond the
+// status. Two separate facts, because they are not interchangeable: a run can
+// stop early for a reason that ALREADY has an honest diagnosis (an app that
+// crashed), and that diagnosis must survive.
+type runShape struct {
+	// stoppedEarly: the cycle ended before every test it intended to run had
+	// produced a verdict.
+	stoppedEarly bool
+	// downgradedFromPassed: stoppedEarly is what turned an otherwise-PASSED set
+	// into APP_FAULT, so the status describes the partial run itself rather
+	// than something that went wrong independently.
+	downgradedFromPassed bool
+}
+
+const partialRunReason = "replay stopped before every test ran - the tests missing from the totals were not " +
+	"verified; check the app_logs field and keploy's own logs for why the run ended early"
+
+// withUnverifiedNote appends the unverified-tests note to a diagnosis that
+// stands on its own, so a reader gets both facts rather than whichever one the
+// status happened to name.
+func withUnverifiedNote(base string, shape runShape) string {
+	if !shape.stoppedEarly {
+		return base
+	}
+	return base + "; it also stopped before every test ran, so treat the tests missing from the totals as unverified"
+}
+
+func describeTestSetFailure(status models.TestSetStatus, testCaseResults []models.TestResult, shape runShape) string {
 	switch status {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
+		// A run that stopped part-way gets its own wording, but ONLY when this
+		// status came from that fact. It reaches this status without the app
+		// necessarily having stopped — the common cause is the agent being
+		// replaced mid-set and then refusing the per-test filter params — so
+		// "application stopped during replay" would send the reader to an
+		// application that is still running and still healthy.
+		//
+		// The inverse matters just as much: an app that genuinely crashed
+		// mid-set ALSO stopped the run early, and it must keep its own
+		// diagnosis rather than be told to go and read keploy's logs.
+		if shape.downgradedFromPassed {
+			return partialRunReason
+		}
 		if len(testCaseResults) == 0 {
 			return "application startup failed - check application logs in the app_logs field for details and next steps"
 		}
-		return "application stopped during replay - check application logs in the app_logs field for details and next steps"
+		return withUnverifiedNote(
+			"application stopped during replay - check application logs in the app_logs field for details and next steps",
+			shape)
+	case models.TestSetStatusFailed:
+		// A set that both failed a test AND stopped early said nothing at all
+		// about the second half: the report read `Total 4, passed 0, failed 1`
+		// with an empty reason, so the natural reading was that the other three
+		// were skipped for some legitimate purpose. That is the same misreading
+		// as #4618, arriving on a red set instead of a green one.
+		if shape.stoppedEarly {
+			return partialRunReason
+		}
+		return ""
 	case models.TestSetStatusInternalErr:
-		return "replay failed with an internal error - please report this issue if it persists"
+		return withUnverifiedNote("replay failed with an internal error - please report this issue if it persists", shape)
 	default:
 		return ""
 	}
@@ -207,6 +259,54 @@ func describeTestSetFailure(status models.TestSetStatus, testCaseResults []model
 func scoredNothing(status models.TestSetStatus, loaded, success, failure, ignored, obsolete int) bool {
 	return status == models.TestSetStatusPassed && loaded > 0 &&
 		success == 0 && failure == 0 && ignored == 0 && obsolete == 0
+}
+
+// rewindConsumedForRetryCycle folds the finished cycle's consumption into the
+// across-cycles record and returns the map the next cycle starts from: the
+// baseline, so per-test single-use mocks are servable again.
+//
+// It also marks the AGENT's own consumption history stale. That rewind reaches
+// the CLI's map only; under KEPLOY_AGENT_OWNS_CONSUMED the agent filters from
+// its own history and nothing rewinds that one, so the retry would filter
+// against the previous cycle and fail with match_phase=no_mocks — precisely the
+// failure the rewind exists to prevent (#4622).
+func (r *Replayer) rewindConsumedForRetryCycle(total, baseline, allAcrossCycles map[string]models.MockState) map[string]models.MockState {
+	for k, v := range total {
+		allAcrossCycles[k] = v
+	}
+	rewound := make(map[string]models.MockState, len(baseline))
+	for k, v := range baseline {
+		rewound[k] = v
+	}
+	r.agentConsumedHistoryStale.Store(true)
+	return rewound
+}
+
+// cycleIncomplete reports that a retry cycle ended before every test it
+// intended to run had produced a verdict.
+//
+// It compares against the cycle's OWN testsToRun rather than the loaded count,
+// which is the only comparison that survives the shapes around it: `success` is
+// ASSIGNED per cycle while `failure`/`obsolete` accumulate across cycles, and
+// the loaded count also covers the ignored, the deferred streaming tests and
+// anything a selected-test list dropped.
+//
+// Every test that RUNS lands in exactly one of passed/obsolete/failed, so a
+// shortfall means the loop broke out early — unless the loop deliberately
+// passed a test over, which records no verdict and is not a fault. That is what
+// `skipped` carries. Both in-loop skip guards (a test absent from the selected
+// list, and one in the ignored list) duplicate the pre-loop filter that builds
+// activeTestCases, and testsToRun only ever holds tests that already cleared
+// it, so today neither can fire and skipped is always 0.
+//
+// Counting them anyway is deliberate: it costs nothing and stops this
+// predicate resting on that reachability argument. The asymmetry is the reason
+// — a missed skip reports a healthy run as an app fault, and APP_FAULT aborts
+// every remaining test-set on the native and docker-run paths
+// (shouldAbortTestRun). Being wrong in that direction is worse than the bug
+// this function exists to catch.
+func cycleIncomplete(success, failure, obsolete, skipped, intended int) bool {
+	return success+failure+obsolete+skipped < intended
 }
 
 func shouldIncludeAppLogs(status models.TestSetStatus) bool {
@@ -243,11 +343,18 @@ type Replayer struct {
 	testRunID          string               // current test run ID (used by RunTestSet)
 	afterTestRunCalled bool                 // guards duplicate AfterTestRun calls
 	hookImpl           TestHooks
-	// agentConsumedHistoryLost latches when a replacement agent has been
-	// re-registered. From then on this run cannot trust the agent's own
-	// consumption history under KEPLOY_AGENT_OWNS_CONSUMED, because everything
-	// consumed before the replacement is missing from it.
-	agentConsumedHistoryLost atomic.Bool
+	// agentConsumedHistoryStale latches when the agent's OWN consumption history
+	// stops being authoritative for this run, after which every filter-params
+	// send carries the CLI's map instead (KEPLOY_AGENT_OWNS_CONSUMED is ignored).
+	//
+	// Two causes, same consequence:
+	//   - a replacement agent was re-registered: everything consumed before it
+	//     started is missing from its history;
+	//   - a --retry-passing-test cycle rewound the CLI's map to its baseline so
+	//     single-use mocks are servable again. Nothing rewinds the agent's, so
+	//     the retry would filter against the previous cycle and fail with
+	//     match_phase=no_mocks — the exact failure that rewind exists to prevent.
+	agentConsumedHistoryStale atomic.Bool
 
 	completeTestReport    map[string]TestReportVerdict
 	firstRun              bool
@@ -1938,6 +2045,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	testsToRun := activeTestCases
+	// stoppedEarly records that a cycle exited before every test it intended to
+	// run had produced a verdict. The counters cannot express this on their own:
+	// `success` is ASSIGNED per cycle while `failure`/`obsolete` accumulate, and
+	// `testCasesCount` counts loaded tests including the ignored, the deferred
+	// streaming ones and any the selection dropped. Comparing verdicts against
+	// the cycle's own testsToRun is the only statement that stays true in all of
+	// those cases.
+	stoppedEarly := false
 	finalTestCaseResults := make(map[string]*models.TestResult)
 	itr := 1
 	if r.config.RetryPassing {
@@ -1959,20 +2074,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// cycle are folded into allConsumedAcrossCycles first so the post-loop
 		// readers (Mocks-Consumed telemetry and PersistMockNoise) stay complete.
 		if replay > 0 {
-			for k, v := range totalConsumedMocks {
-				allConsumedAcrossCycles[k] = v
-			}
-			totalConsumedMocks = make(map[string]models.MockState, len(baselineConsumedMocks))
-			for k, v := range baselineConsumedMocks {
-				totalConsumedMocks[k] = v
-			}
+			totalConsumedMocks = r.rewindConsumedForRetryCycle(totalConsumedMocks, baselineConsumedMocks, allConsumedAcrossCycles)
 		}
 		var nextTestsToRun []*models.TestCase
 		var currentFailures int
 		var currentObsolete int
+		var currentSkipped int
 		var currentSuccess int
 		currentPassingMocks := make(map[string]models.MockState)
 
+		// Labelled so the two type-assertion failure paths inside
+		// `switch testCase.Kind` can leave the LOOP. A bare `break` there exits
+		// only the switch, and execution falls through to the scoring switch
+		// with testPass=false/testResult=nil — counting the same test a second
+		// time and then persisting an "internal error: comparison returned no
+		// result" row for it, so a test that never ran shows up in the failure
+		// total. Their sibling at the simulate-error site is not inside a
+		// switch and has always exited the loop; these two differed only by
+		// accident of nesting.
+	testLoop:
 		for idx, testCase := range testsToRun {
 
 			// check if its the last test case running
@@ -1982,6 +2102,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
+				currentSkipped++
 				continue
 			}
 
@@ -2000,6 +2121,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					break
 				}
 				ignored++
+				currentSkipped++
 				continue
 			}
 
@@ -2303,7 +2425,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
-						break
+						break testLoop
 					}
 					continue
 				}
@@ -2320,7 +2442,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
-						break
+						break testLoop
 					}
 					continue
 				}
@@ -2753,6 +2875,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				r.logger.Debug("sleeping for a second to avoid mismatching of mocks during keploy testing via test-bench")
 				time.Sleep(time.Second)
 			}
+		}
+		// Every test this cycle meant to run must have produced a verdict. Short
+		// of that, the loop broke out early — a failed result insert, an abort
+		// signal, or the agent refusing the per-test filter params because it
+		// was replaced mid-set (#4614) — and the tests it never reached are
+		// simply absent from the report.
+		if cycleIncomplete(currentSuccess, currentFailures, currentObsolete, currentSkipped, len(testsToRun)) {
+			stoppedEarly = true
 		}
 		failure += currentFailures
 		success = currentSuccess
@@ -3277,6 +3407,60 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	appFailure := getLastAppErr()
 	appLogs := appFailure.AppLogs
+
+	// A set that stopped part-way is not a pass. scoredNothing below catches
+	// only the all-or-nothing case: with at least one test scored, its four-zero
+	// predicate is false, and because a failure would have taken the `default`
+	// arm of the scoring switch, an all-passing or all-obsolete partial run kept
+	// its PASSED status. The report then showed the gap and still called it
+	// green — `Total tests: 4, passed 2, failed 0` — so the natural reading was
+	// that two tests were skipped for some legitimate reason (#4618).
+	//
+	// APP_FAULT rather than FAILED for the same reason scoredNothing picks it:
+	// no test failed, so calling the set FAILED sends someone looking for a
+	// failing assertion that does not exist. It is also a status
+	// shouldIncludeAppLogs carries logs for, and describeTestSetFailure now
+	// gives this case its own wording rather than blaming an application that
+	// is usually still running.
+	//
+	// Known cost, accepted: shouldAbortTestRun(APP_FAULT) is true off compose,
+	// so the remaining test-sets are skipped rather than run. That is the same
+	// consequence scoredNothing's doc refuses for an all-obsolete set, and the
+	// reasoning differs because the situation does: an all-obsolete set ran and
+	// answered, while this one stopped for a reason that is very unlikely to be
+	// specific to this test-set — a replaced agent stays replaced. Continuing
+	// would spend the remaining sets producing failures with the same cause.
+	// The exit code is non-zero either way; what is lost is per-set detail.
+	//
+	// Guarded on PASSED so it only ever adds information: a set already carrying
+	// a more specific verdict — FAILED, USER_ABORT, whatever resolveTestSetStatus
+	// chose, or the INTERNAL_ERR a later insert failure sets — keeps it.
+	// Whether the downgrade below actually fired — NOT merely whether the run
+	// stopped early. The two are different for every early exit that already
+	// had an honest diagnosis, and the reason string keys off this one.
+	//
+	// An app that OOM-kills after test 2 of 10 sets APP_HALTED via the app-error
+	// channel and breaks the loop, so stoppedEarly is true there too. Handing
+	// that to describeTestSetFailure replaced "application stopped during
+	// replay" with "check keploy's own logs for why the run ended early" —
+	// deleting the correct diagnosis for a plain app crash, on the most common
+	// way APP_HALTED is reached with results present.
+	partialRunDowngrade := stoppedEarly && testSetStatus == models.TestSetStatusPassed
+	if stoppedEarly {
+		// Logged whenever the run stopped early, not only when that changed the
+		// status: a set that stopped early AND failed a test is still a set
+		// whose remaining tests were never verified.
+		r.logger.Error("test-set stopped before running every test; treat the tests missing from the totals as unverified, not as skipped",
+			zap.String("test-set", testSetID),
+			zap.Int("test-cases-loaded", testCasesCount),
+			zap.Int("passed", success), zap.Int("failed", failure), zap.Int("obsolete", obsolete),
+			zap.Bool("refusing-to-report-as-passed", partialRunDowngrade),
+			zap.String("next_step", "the run ended early rather than completing: check the application logs in this report for why"))
+	}
+	if partialRunDowngrade {
+		testSetStatus = models.TestSetStatusFaultUserApp
+	}
+
 	// APP_FAULT rather than FAILED, because no test failed (see scoredNothing):
 	// describeTestSetFailure already renders this exact case as "application
 	// startup failed — check application logs", and shouldIncludeAppLogs
@@ -3291,7 +3475,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if !shouldIncludeAppLogs(testSetStatus) {
 		appLogs = ""
-	} else if appLogs == "" && testSetStatus == models.TestSetStatusAppHalted {
+	} else if appLogs == "" {
+		// Was gated on APP_HALTED, which made the fallback unreachable for every
+		// other status that shouldIncludeAppLogs says carries logs. lastAppErr is
+		// written only from the app-error channel, so a set that reaches APP_FAULT
+		// WITHOUT the app erroring — a partial run, or a scoreless one where the
+		// app never spoke — persisted a report whose own reason says "check
+		// application logs in the app_logs field" next to an empty app_logs field.
+		// shouldIncludeAppLogs already decides who gets logs; let it decide alone.
 		logCtx, cancel := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
 		defer cancel()
 		appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
@@ -3307,7 +3498,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: describeTestSetFailure(testSetStatus, testCaseResults),
+		FailureReason: describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade}),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
@@ -3689,11 +3880,12 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// put it straight back to filtering against an empty map — already-consumed
 	// mocks re-served for the rest of the run. Once an agent has been replaced,
 	// the CLI's map is the only complete record there is.
-	if agentOwnsConsumed && r.agentConsumedHistoryLost.Load() {
+	if agentOwnsConsumed && r.agentConsumedHistoryStale.Load() {
 		agentOwnsConsumed = false
 		consumedForAgent = totalConsumedMocks
 		r.logger.Debug("sending the CLI's consumed-mock history: KEPLOY_AGENT_OWNS_CONSUMED is set but "+
-			"this agent was replaced mid-run, so its own history is missing everything before that",
+			"the agent's own history is no longer authoritative for this run — either it was replaced "+
+			"mid-run, or a retry cycle rewound the CLI's map and nothing rewinds the agent's",
 			zap.Int("consumed", len(totalConsumedMocks)))
 	}
 	params := models.MockFilterParams{
@@ -3791,7 +3983,7 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 //
 // The whole repair runs under agentRepairTimeout, and from the moment a
 // replacement is detected every later filter-params send carries the CLI's own
-// consumption history (see agentConsumedHistoryLost).
+// consumption history (see agentConsumedHistoryStale).
 func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase) error {
 	stored := len(filteredMocks) + len(unfilteredMocks)
 	if !r.instrument || stored == 0 {
@@ -3834,7 +4026,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	// replacement's own history is missing everything consumed before it
 	// started, so handing filtering back to it on the next per-test call would
 	// re-serve already-consumed mocks for the rest of the run.
-	r.agentConsumedHistoryLost.Store(true)
+	r.agentConsumedHistoryStale.Store(true)
 
 	// One ceiling for the whole repair; see agentRepairTimeout.
 	ctx, cancelRepair := context.WithTimeout(ctx, agentRepairTimeout)
