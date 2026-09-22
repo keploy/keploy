@@ -182,31 +182,65 @@ func describeTestSetFailure(status models.TestSetStatus, testCaseResults []model
 	}
 }
 
-// scoredNothing reports whether a test-set loaded test cases and produced no
-// outcome for a single one of them: nothing passed, nothing failed, nothing was
-// ignored, nothing was marked obsolete.
+// testSetStoppedEarly reports whether a test-set that still claims PASSED
+// produced an outcome for fewer tests than it loaded: the run stopped
+// part-way, and the tests that never ran stay counted in the total.
 //
-// testSetStatus starts at PASSED and is only ever downgraded, so such a run
-// reaches the report still PASSED and is published as a green suite. Observed
-// on enterprise pipeline 9321: a dependency crashed the compose stack, keploy's
-// bring-up retry replaced the agent container so its mocks were gone, every
-// request timed out against the readiness ceiling, and the run printed
-// "Total tests: 4, passed 0, failed 0" and exited 0. Nothing was verified, and
-// nothing said so.
+// testSetStatus starts at PASSED and is only ever downgraded, so a run that
+// exits the replay loop early and never records a failure reaches the report
+// still PASSED and is published as a green suite. Observed on enterprise
+// pipeline 9321: a dependency crashed the compose stack, keploy's bring-up
+// retry replaced the agent container so its mocks were gone, every request
+// timed out against the readiness ceiling, and the run printed "Total tests:
+// 4, passed 0, failed 0" and exited 0. Nothing was verified, and nothing said
+// so. The partial case is the same defect one test later: the mockless agent
+// breaks the per-test loop (SendMockFilterParamsToAgent's error path), the
+// tests that already passed keep the set green, and the report shows
+// "Total: 4, passed 2, failed 0" with the tests that never ran counted in the
+// total. A CI gate keying on the status, or on failed == 0, passes either way.
 //
-// All FOUR counters, because each of the other three means the tests did run:
-//   - ignored: the user asked for those to be skipped.
-//   - obsolete: with StrictFailure off, a mock-set mismatch demotes a test that
-//     executed and answered. An all-obsolete set is drifted mocks, not a dead
-//     app — and calling it APP_FAULT would abort the remaining test-sets on the
-//     native and docker-run paths (shouldAbortTestRun), turning a re-record
-//     nudge into a halted run.
+// All FOUR counters, because each of the other three means the test DID run:
+//   - ignored: the user asked for that test to be skipped.
+//   - obsolete: with StrictFailure off, a mock-set mismatch demotes a test
+//     that executed and answered. An all-obsolete set is drifted mocks, not a
+//     dead run, so it must not be flagged either.
+//
+// A complete run has success + failure + ignored + obsolete == loaded: ignored
+// tests are counted where they are skipped, the scoring switch counts the
+// rest, and the deferred streaming phase counts its outcomes at its own
+// scoring site. Fewer than loaded means the loop exited before every test got
+// a turn, whichever early break did it.
 //
 // A set with no test cases at all is NOT this: it returns earlier as
 // NO_TESTS_TO_RUN, which is an honest answer to an honest question.
-func scoredNothing(status models.TestSetStatus, loaded, success, failure, ignored, obsolete int) bool {
+func testSetStoppedEarly(status models.TestSetStatus, loaded, success, failure, ignored, obsolete int) bool {
 	return status == models.TestSetStatusPassed && loaded > 0 &&
-		success == 0 && failure == 0 && ignored == 0 && obsolete == 0
+		success+failure+ignored+obsolete < loaded
+}
+
+// applyStoppedEarlyVerdict refuses to publish PASSED for a test-set that
+// stopped before every loaded test produced an outcome, logging which
+// diagnosis applies, and returns the status the report must carry instead.
+// Split out of the report path so the verdict and the evidence attached to it
+// are pinned by tests rather than reviewed by eye.
+func (r *Replayer) applyStoppedEarlyVerdict(testSetID string, status models.TestSetStatus, loaded, success, failure, ignored, obsolete int) models.TestSetStatus {
+	if !testSetStoppedEarly(status, loaded, success, failure, ignored, obsolete) {
+		return status
+	}
+	scored := success + failure + ignored + obsolete
+	if scored == 0 {
+		r.logger.Error("test-set produced no results at all; refusing to report it as passed",
+			zap.String("test-set", testSetID),
+			zap.Int("test-cases-loaded", loaded),
+			zap.String("next_step", "nothing was verified by this run: check the application logs in this report, and — if a selected-test list is configured — that its names still match test cases in this set"))
+	} else {
+		r.logger.Error("test-set stopped before every loaded test produced a result; refusing to report it as passed",
+			zap.String("test-set", testSetID),
+			zap.Int("test-cases-loaded", loaded),
+			zap.Int("test-cases-scored", scored),
+			zap.String("next_step", "the tests with no outcome are the difference between the loaded and the scored counts: check the application logs in this report for why the run stopped"))
+	}
+	return models.TestSetStatusFaultUserApp
 }
 
 func shouldIncludeAppLogs(status models.TestSetStatus) bool {
@@ -3277,17 +3311,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	appFailure := getLastAppErr()
 	appLogs := appFailure.AppLogs
-	// APP_FAULT rather than FAILED, because no test failed (see scoredNothing):
-	// describeTestSetFailure already renders this exact case as "application
-	// startup failed — check application logs", and shouldIncludeAppLogs
-	// attaches those logs, which is what someone looking at an empty run needs.
-	if scoredNothing(testSetStatus, testCasesCount, success, failure, ignored, obsolete) {
-		r.logger.Error("test-set produced no results at all; refusing to report it as passed",
-			zap.String("test-set", testSetID),
-			zap.Int("test-cases-loaded", testCasesCount),
-			zap.String("next_step", "nothing was verified by this run: check the application logs in this report, and — if a selected-test list is configured — that its names still match test cases in this set"))
-		testSetStatus = models.TestSetStatusFaultUserApp
-	}
+	// A set that did not produce an outcome for every test it loaded is not a
+	// pass, even when nothing failed (see testSetStoppedEarly). APP_FAULT
+	// rather than FAILED because describeTestSetFailure and
+	// shouldIncludeAppLogs use it to attach the reason and the app logs, which
+	// is what someone looking at a run with tests missing from it needs.
+	testSetStatus = r.applyStoppedEarlyVerdict(testSetID, testSetStatus, testCasesCount, success, failure, ignored, obsolete)
 
 	if !shouldIncludeAppLogs(testSetStatus) {
 		appLogs = ""
