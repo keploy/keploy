@@ -16,10 +16,17 @@ type recordingMappingDB struct {
 	startupOnDisk []models.MockEntry
 	startupErr    error
 	inserted      []*models.Mapping
+	// replaced[i] is the refresh intent Insert was called with for
+	// inserted[i]. Recorded so a call site cannot silently start
+	// republishing a run's per-test consumption: replace=true on this path
+	// would overwrite the operator's curated lists with whatever a subset or
+	// partly-failed run happened to observe.
+	replaced []bool
 }
 
-func (f *recordingMappingDB) Insert(_ context.Context, m *models.Mapping) error {
+func (f *recordingMappingDB) Insert(_ context.Context, m *models.Mapping, replace bool) error {
 	f.inserted = append(f.inserted, m)
+	f.replaced = append(f.replaced, replace)
 	return nil
 }
 func (f *recordingMappingDB) Exists(context.Context, string) (bool, error) { return true, nil }
@@ -52,12 +59,18 @@ func TestStartupBackfill(t *testing.T) {
 			t.Fatalf("expected exactly one write, got %d", len(db.inserted))
 		}
 		got := db.inserted[0]
-		// THE point of this test. Insert REPLACES per-test entries by ID, so a
-		// document carrying TestCases would overwrite the operator's curated
-		// mapping for test-A with whatever this run happened to consume — on a
-		// subset or partly-failed run, a strict subset written as authoritative.
+		// THE point of this test. A document carrying TestCases would publish
+		// this run's per-test consumption — on a subset or partly-failed run,
+		// a strict subset — and the per-test list is the allow-list the agent
+		// enforces, so a stale name there makes a foreign mock servable.
 		if len(got.TestCases) != 0 {
 			t.Fatalf("backfill must not carry per-test entries, got %+v", got.TestCases)
+		}
+		// And it must go in as a report, not a refresh. replace=true would
+		// overwrite the operator's curated lists rather than leave them alone,
+		// which is the whole reason this writes a startup-only document.
+		if db.replaced[0] {
+			t.Fatal("backfill must not request a refresh — replace=true overwrites curated per-test lists")
 		}
 		if len(got.Startup) != 1 || got.Startup[0].Name != "boot-0" {
 			t.Fatalf("startup section not written: %+v", got.Startup)

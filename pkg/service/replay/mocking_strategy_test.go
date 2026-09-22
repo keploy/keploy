@@ -18,8 +18,8 @@ type fakeMappingDB struct {
 	startupErr error
 }
 
-func (f *fakeMappingDB) Insert(context.Context, *models.Mapping) error { return nil }
-func (f *fakeMappingDB) Exists(context.Context, string) (bool, error)  { return true, nil }
+func (f *fakeMappingDB) Insert(context.Context, *models.Mapping, bool) error { return nil }
+func (f *fakeMappingDB) Exists(context.Context, string) (bool, error)        { return true, nil }
 func (f *fakeMappingDB) Get(context.Context, string) (map[string][]models.MockEntry, bool, error) {
 	return f.mappings, f.meaningful, f.getErr
 }

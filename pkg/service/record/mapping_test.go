@@ -228,7 +228,7 @@ func TestConsumeMappings_CountsShortPoolTests(t *testing.T) {
 // correlation accounting, not what reaches mappings.yaml.
 type countingMappingDB struct{}
 
-func (countingMappingDB) Insert(context.Context, *models.Mapping) error { return nil }
+func (countingMappingDB) Insert(context.Context, *models.Mapping, bool) error { return nil }
 func (countingMappingDB) Upsert(context.Context, string, string, []models.MockEntry) error {
 	return nil
 }

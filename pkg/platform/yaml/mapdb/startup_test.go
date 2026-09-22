@@ -30,7 +30,7 @@ func TestStartupSectionRoundTripsThroughDisk(t *testing.T) {
 			{Name: "mock-1", Kind: "Redis", Timestamp: 12},
 		},
 	}
-	if err := db.Insert(context.Background(), in); err != nil {
+	if err := db.Insert(context.Background(), in, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestGetStartupOnMappingWithoutSection(t *testing.T) {
 		Kind:      models.MappingKind,
 		TestSetID: "test-set-0",
 		TestCases: []models.MappedTestCase{{ID: "t", Mocks: []models.MockEntry{{Name: "m"}}}},
-	}); err != nil {
+	}, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
@@ -108,7 +108,7 @@ func TestStartupKeyOmittedWhenEmpty(t *testing.T) {
 		Kind:      models.MappingKind,
 		TestSetID: "test-set-0",
 		TestCases: []models.MappedTestCase{{ID: "t", Mocks: []models.MockEntry{{Name: "m"}}}},
-	}); err != nil {
+	}, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "test-set-0", "mappings.yaml"))
@@ -132,7 +132,7 @@ func TestInsertPreservesStartupWhenCallerSuppliesNone(t *testing.T) {
 		Version: string(models.GetVersion()), Kind: models.MappingKind, TestSetID: "test-set-0",
 		TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: []models.MockEntry{{Name: "mock-5"}}}},
 		Startup:   []models.MockEntry{{Name: "mock-0", Kind: "Postgres"}},
-	}); err != nil {
+	}, false); err != nil {
 		t.Fatalf("first Insert: %v", err)
 	}
 
@@ -140,7 +140,7 @@ func TestInsertPreservesStartupWhenCallerSuppliesNone(t *testing.T) {
 	if err := db.Insert(ctx, &models.Mapping{
 		Version: string(models.GetVersion()), Kind: models.MappingKind, TestSetID: "test-set-0",
 		TestCases: []models.MappedTestCase{{ID: "test-2", Mocks: []models.MockEntry{{Name: "mock-6"}}}},
-	}); err != nil {
+	}, false); err != nil {
 		t.Fatalf("second Insert: %v", err)
 	}
 
@@ -164,7 +164,7 @@ func TestInsertReplacesStartupWhenCallerSuppliesSome(t *testing.T) {
 			Version: string(models.GetVersion()), Kind: models.MappingKind, TestSetID: "test-set-0",
 			TestCases: []models.MappedTestCase{{ID: "t", Mocks: []models.MockEntry{{Name: "m"}}}},
 			Startup:   []models.MockEntry{{Name: name}},
-		}); err != nil {
+		}, false); err != nil {
 			t.Fatalf("Insert %s: %v", name, err)
 		}
 	}
@@ -190,7 +190,7 @@ func TestUpsertBatchPreservesStartup(t *testing.T) {
 		Version: string(models.GetVersion()), Kind: models.MappingKind, TestSetID: "test-set-0",
 		TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: []models.MockEntry{{Name: "mock-5"}}}},
 		Startup:   []models.MockEntry{{Name: "mock-0"}},
-	}); err != nil {
+	}, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
