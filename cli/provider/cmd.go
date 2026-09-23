@@ -679,21 +679,28 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 
 	c.logger.Debug("config path is ", zap.String("configPath", configPath))
 
-	// 5) Read base keploy.yml exactly like before
-	viper.SetConfigName("keploy")
+	// 5) Read the base config: keploy.yaml or keploy.yml in configPath, and
+	// nothing else. viper's own lookup -- SetConfigName("keploy") with a
+	// config type set -- also took keploy.json/.toml/.env/.ini/... and a file
+	// named just `keploy`, all parsed as YAML. `keploy` is the binary itself
+	// when it is downloaded into the project, so a command run beside it
+	// stopped with "failed to read config file" (the YAML parser rejecting the
+	// binary: "invalid trailing UTF-8 octet" on macOS, "control characters are
+	// not allowed" on Linux) until a keploy.yml existed. Under the default
+	// --path, <path>/keploy is also where keploy keeps its tests, which
+	// utils.EnsureKeployPathIsFolder explains.
+	configFile := findKeployConfig(configPath)
 	viper.SetConfigType("yml")
-	viper.AddConfigPath(configPath)
-
-	if err := viper.ReadInConfig(); err != nil {
-		var notFound viper.ConfigFileNotFoundError
-		if !errors.As(err, &notFound) {
-			errMsg := "failed to read config file"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
+	if configFile == "" {
 		IsConfigFileFound = false
 		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
+		viper.SetConfigFile(configFile)
+		if err := viper.ReadInConfig(); err != nil {
+			errMsg := "failed to read config file"
+			utils.LogError(c.logger, err, errMsg, zap.String("file", configFile))
+			return errors.New(errMsg)
+		}
 		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the application folder (current working directory)
 		lastDir, err := utils.GetLastDirectory()
 		if err != nil {
@@ -739,6 +746,23 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	// 8) Persist the path used
 	c.cfg.ConfigPath = configPath
 	return nil
+}
+
+// keployConfigNames are the files that are keploy's configuration, in the
+// order viper's lookup preferred them. CreateConfigFile writes keploy.yml.
+var keployConfigNames = []string{"keploy.yaml", "keploy.yml"}
+
+// findKeployConfig returns the path of keploy's config file in dir, or "" when
+// there is none. A directory, or a file that cannot be stat'd, is not one --
+// as viper's lookup treated them.
+func findKeployConfig(dir string) string {
+	for _, name := range keployConfigNames {
+		p := filepath.Join(dir, name)
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
 }
 
 // mentionsDockerBinary reports whether the command actually invokes docker,
@@ -966,6 +990,42 @@ func isMachineReadableOutput(cmd *cobra.Command, cfgFormat string, jsonOutput bo
 // the only one whose --format value can make stdout machine-readable.
 const reportCmdName = "report"
 
+// keployFolder turns a --path value into <path>/keploy, the folder keploy keeps
+// its tests, mocks and reports in, and refuses a file there
+// (utils.EnsureKeployPathIsFolder). Every command in this file that works in
+// that folder resolves it here and nowhere else. A command that skipped the
+// check failed later with "readdirent <path>/keploy: not a directory", or did
+// nothing, and exited 0.
+//
+// On a refusal it returns "": callers assign the result to cfg.Path, and main
+// restores the ownership of whatever cfg.Path names after the command.
+func (c *CmdConfigurator) keployFolder(path string) (string, error) {
+	folder, err := c.keployFolderPath(path)
+	if err != nil {
+		return "", err
+	}
+	if err := utils.EnsureKeployPathIsFolder(folder); err != nil {
+		utils.LogError(c.logger, err, "cannot use the keploy folder")
+		return "", err
+	}
+	return folder, nil
+}
+
+// keployFolderPath is keployFolder's resolution alone, with no look at what is
+// there. Only a run that never reads or writes the folder uses it directly:
+// `report --report-path <file>` reads that one file and nothing else, so a
+// file at <path>/keploy -- the downloaded binary, say -- is no reason to
+// refuse it. cfg.Path still gets the folder, as before the check existed:
+// the stores are built from it whether or not the run opens them.
+func (c *CmdConfigurator) keployFolderPath(path string) (string, error) {
+	absPath, err := utils.GetAbsPath(path)
+	if err != nil {
+		utils.LogError(c.logger, err, "error while getting absolute path")
+		return "", errors.New("failed to get the absolute path")
+	}
+	return absPath + "/keploy", nil
+}
+
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	// The --json flag isn't registered on every subcommand (record / agent
 	// don't define it in enterprise builds), so Lookup + fallback avoids
@@ -1117,7 +1177,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
 
 		testSets, err := cmd.Flags().GetStringSlice("test-sets")
 		if err != nil {
@@ -1159,6 +1218,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		c.cfg.Report.ReportPath = reportPath
+
+		// With --report-path the report is that one file (GenerateReport reads
+		// it and nothing else), so what sits at <path>/keploy does not matter.
+		// Without it, the report comes from the keploy folder, which has to be
+		// one.
+		if reportPath != "" {
+			c.cfg.Path, err = c.keployFolderPath(path)
+		} else {
+			c.cfg.Path, err = c.keployFolder(path)
+		}
+		if err != nil {
+			return err
+		}
 
 		// whether to print entire body for comparison
 		fb, err := cmd.Flags().GetBool("full")
@@ -1209,7 +1281,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+		if c.cfg.Path, err = c.keployFolder(path); err != nil {
+			return err
+		}
 
 		testSets, err := cmd.Flags().GetStringSlice("test-sets")
 		if err != nil {
@@ -1226,7 +1300,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+		if c.cfg.Path, err = c.keployFolder(path); err != nil {
+			return err
+		}
 
 		testSets, err := cmd.Flags().GetStringSlice("test-sets")
 		if err != nil {
@@ -1244,7 +1320,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 
-		c.cfg.Contract.Path = utils.ToAbsPath(c.logger, path)
+		if c.cfg.Path, err = c.keployFolder(path); err != nil {
+			return err
+		}
+		c.cfg.Contract.Path = c.cfg.Path
 
 		services, err := cmd.Flags().GetStringSlice("services")
 		if err != nil {
@@ -1272,8 +1351,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		}
 
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
-
 	case "config":
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
@@ -1296,7 +1373,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
-			c.cfg.Contract.Path = utils.ToAbsPath(c.logger, path)
+			if c.cfg.Path, err = c.keployFolder(path); err != nil {
+				return err
+			}
+			c.cfg.Contract.Path = c.cfg.Path
 
 			services, err := cmd.Flags().GetStringSlice("services")
 			if err != nil {
@@ -1324,8 +1404,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-
-			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 			return nil
 		}
 
@@ -1399,12 +1477,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-		absPath, err := utils.GetAbsPath(c.cfg.Path)
-		if err != nil {
-			utils.LogError(c.logger, err, "error while getting absolute path")
-			return errors.New("failed to get the absolute path")
+		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
+			return err
 		}
-		c.cfg.Path = absPath + "/keploy"
 
 		// Check and fix keploy folder permissions for native mode only
 		// (handles root-owned files from older sudo-based versions)
@@ -1751,7 +1826,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 	case "normalize":
-		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
+		var err error
+		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
+			return err
+		}
 		tests, err := cmd.Flags().GetString("tests")
 		if err != nil {
 			errMsg := "failed to read tests to be normalized"
@@ -1773,7 +1851,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 	case "templatize":
-		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
+		var err error
+		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
+			return err
+		}
 	case "agent":
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
@@ -2310,12 +2391,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		utils.LogError(c.logger, err, "failed to get the path")
 		return errors.New("failed to get the path")
 	}
-	absPath, err := utils.GetAbsPath(path)
-	if err != nil {
-		utils.LogError(c.logger, err, "error while getting absolute path")
-		return errors.New("failed to get the absolute path")
+	if c.cfg.Path, err = c.keployFolder(path); err != nil {
+		return err
 	}
-	c.cfg.Path = absPath + "/keploy"
 
 	// Fix folder permissions (and cache sudo creds) for native runs.
 	if !utils.IsDockerCmd(utils.CmdType(c.cfg.CommandType)) {
