@@ -140,7 +140,7 @@ func start(ctx context.Context) {
 		return
 	}
 
-	// Nudge OSS users toward Keploy Community Edition. Placed AFTER the
+	// Nudge users of this open-source build toward Keploy. Placed AFTER the
 	// sudo re-exec gate (mirroring where the logo prints via the cobra
 	// PreRunE in cli/provider/cmd.go) so the original process is already
 	// replaced by syscall.Exec before this runs — guarantees the banner
@@ -324,9 +324,10 @@ func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink)
 }
 
 // printEnterpriseUpgradeBanner emits a high-visibility nudge to install
-// the Keploy Enterprise binary — entry plan is Community Edition (free)
-// which unlocks the broader protocol/dependency set + AI features that
-// the OSS binary doesn't ship.
+// Keploy from keploy.io — free with an account — which adds the broader
+// protocol/dependency set, native macOS and Windows recording, and the AI
+// features that this open-source build doesn't ship. User-facing text names
+// no editions: the product is just "keploy".
 //
 // Lives in the OSS binary's main.go (not in cli/root.go) so the
 // enterprise binary — which has its own main.go and does not import
@@ -394,12 +395,13 @@ func printEnterpriseUpgradeBanner() {
 	bar := "═══════════════════════════════════════════════════════════════════════════════"
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, orange+bar+reset)
-	fmt.Fprintf(os.Stderr, "  %s🚀  TRY KEPLOY COMMUNITY EDITION (FREE)%s\n", bold+orange, reset)
-	fmt.Fprintln(os.Stderr, "  You're on the open-source binary. Community Edition (free) adds:")
-	fmt.Fprintln(os.Stderr, "    • PostgreSQL, MongoDB, gRPC, HTTP/2, Kafka — on top of OSS's HTTP + MySQL")
+	fmt.Fprintf(os.Stderr, "  %s🚀  TRY THE FULL KEPLOY (FREE)%s\n", bold+orange, reset)
+	fmt.Fprintln(os.Stderr, "  This is Keploy's open-source build. Keploy from keploy.io (free with an account) adds:")
+	fmt.Fprintln(os.Stderr, "    • PostgreSQL, MongoDB, gRPC, HTTP/2, Kafka — on top of this build's HTTP + MySQL")
+	fmt.Fprintln(os.Stderr, "    • Recording apps running natively on macOS and Windows")
 	fmt.Fprintln(os.Stderr, "    • AI-powered test generation, sandbox replay, MCP for AI agents")
 	fmt.Fprintln(os.Stderr, "      (Claude Code, Cursor, Copilot, Gemini, …)")
-	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+"curl --silent -O -L https://keploy.io/ent/install.sh && source install.sh"+reset)
+	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+"curl --silent -O -L https://keploy.io/install.sh && source install.sh"+reset)
 	fmt.Fprintln(os.Stderr, orange+bar+reset)
 	fmt.Fprintln(os.Stderr)
 }

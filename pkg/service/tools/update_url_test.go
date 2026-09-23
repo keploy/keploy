@@ -42,6 +42,14 @@ func TestUpdateDownloadURL(t *testing.T) {
 			if got != "" {
 				t.Errorf("updateDownloadURL(%q, %q) = %q, want no URL alongside the error", tc.goos, tc.goarch, got)
 			}
+			// An Intel Mac is sent to Lima, not Docker: there is no Intel macOS
+			// build to update to, and the keploy.io CLI that drives the Docker
+			// route on a Mac is arm64-only. Lima runs the Linux build instead.
+			if tc.goos == "darwin" && err != nil {
+				if !strings.Contains(err.Error(), "inside Lima") || strings.Contains(err.Error(), "Docker") {
+					t.Errorf("updateDownloadURL(%q, %q) err = %v, want it to send an Intel Mac to Lima and not to Docker", tc.goos, tc.goarch, err)
+				}
+			}
 			if utils.ErrCode != utils.ExitUnsupportedPlatform {
 				t.Errorf("updateDownloadURL(%q, %q) left ErrCode = %d, want %d so `keploy update` exits non-zero", tc.goos, tc.goarch, utils.ErrCode, utils.ExitUnsupportedPlatform)
 			}
