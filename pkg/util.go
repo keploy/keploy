@@ -2490,10 +2490,22 @@ func MakeCurlCommand(tc models.HTTPReq) string {
 	curl = curl + fmt.Sprintf("  --url %s \\\n", tc.URL)
 	header := ToHTTPHeader(tc.Header)
 
-	for k, v := range ToYamlHTTPHeader(header) {
-		if k != "Content-Length" {
-			curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
+	// Sorted, not map-ranged. Go randomises map iteration, so emitting the
+	// headers in map order made this block's line order differ between two
+	// recordings of identical traffic — pure churn in the recorded test case,
+	// and noise in any diff of it. The set of headers is unchanged; only their
+	// order is now deterministic.
+	yamlHeader := ToYamlHTTPHeader(header)
+	headerKeys := make([]string, 0, len(yamlHeader))
+	for k := range yamlHeader {
+		if k == "Content-Length" {
+			continue
 		}
+		headerKeys = append(headerKeys, k)
+	}
+	sort.Strings(headerKeys)
+	for _, k := range headerKeys {
+		curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, yamlHeader[k])
 	}
 	if len(tc.Form) > 0 {
 		for _, form := range tc.Form {
