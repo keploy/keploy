@@ -2,6 +2,7 @@ package mapdb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 )
 
@@ -287,6 +289,28 @@ func (db *MappingDb) Exists(ctx context.Context, testSetID string) (bool, error)
 		fileName = "mappings"
 	}
 	return yaml.FileExists(ctx, db.logger, mappingPath, fileName)
+}
+
+// Delete removes the set's mappings file in every format; a missing file is not an error.
+func (db *MappingDb) Delete(_ context.Context, testSetID string) error {
+	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
+		return fmt.Errorf("rejecting Delete: testSetID %q must be a single-segment name under the mappings directory: %w", testSetID, err)
+	}
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		path, err := yaml.ValidatePath(filepath.Join(db.path, testSetID, fileName+"."+format.FileExtension()))
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			utils.LogError(db.logger, err, "failed to delete the mapping file", zap.String("path", path))
+			return err
+		}
+	}
+	return nil
 }
 
 // decodeMapping reads and decodes a test-set's mappings file.

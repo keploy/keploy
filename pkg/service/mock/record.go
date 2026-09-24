@@ -116,6 +116,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
 	}
 	m.mockDB.ResetCounterID()
+	m.deleteMappings(persistCtx, name)
 
 	// 4. Arm the record proxy and stream captured mocks.
 	captureCtx, stopCapture := context.WithCancel(context.WithoutCancel(ctx))
@@ -309,6 +310,21 @@ func (m *mockService) runnerScope(ctx context.Context) *runnerScope {
 		return nil
 	}
 	return newRunnerScope(ctx, m.logger, marker)
+}
+
+// deleteMappings drops the set's old per-test mappings so a re-record cannot leave tests pointing at renamed mocks.
+func (m *mockService) deleteMappings(ctx context.Context, name string) {
+	if m.mappingDB == nil {
+		return
+	}
+	deleter, ok := m.mappingDB.(MappingDeleter)
+	if !ok {
+		m.logger.Warn("the mapping store cannot delete, so old per-test mappings may linger", zap.String("mock-set", name))
+		return
+	}
+	if err := deleter.Delete(ctx, name); err != nil {
+		m.logger.Debug("no existing mappings to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
+	}
 }
 
 // firstFew joins up to n items, saying how many more there are.

@@ -116,6 +116,11 @@ type MappingDB interface {
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
 }
 
+// MappingDeleter is an optional MappingDB extension: Record drops the set's old mappings through it before a re-record.
+type MappingDeleter interface {
+	Delete(ctx context.Context, testSetID string) error
+}
+
 // Store is the mock-set persistence backend. OSS uses FileStore (mocks live on
 // disk, no remote sync). Enterprise plugs in a registry-backed store that
 // uploads after record and downloads before replay. Registry-first by default;
