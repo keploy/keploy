@@ -9,7 +9,9 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 const testToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -223,4 +225,58 @@ func TestNextStepFor_NamesTheVariableAScopeCallerIsMissing(t *testing.T) {
 	require.Contains(t, nextStepFor("/agent/scope/end"), "Authorization: Bearer")
 	require.NotContains(t, nextStepFor("/agent/stop"), "KEPLOY_MOCK_AGENT_TOKEN",
 		"a rejected /agent/stop is not a test-runner problem; pointing the operator at the scope variable would misdirect them")
+}
+
+// TestAuthProbe_AnswersDifferentlyDependingOnWhetherTheGuardIsLive is the
+// assumption the CLI's self-check rests on, asserted against the REAL router
+// rather than a stub: a guarded agent refuses the probe with 401, and an
+// unguarded one falls through to chi's 404.
+//
+// If those two ever coincide the check silently stops working — or worse,
+// reports every healthy run as unauthenticated and fails CI everywhere. Note
+// chi's Mux.ServeHTTP has a fast path that skips middleware entirely when no
+// route is registered, which is exactly the shape that would break it, so this
+// builds the router the way production does.
+func TestAuthProbe_AnswersDifferentlyDependingOnWhetherTheGuardIsLive(t *testing.T) {
+	probe := func(sessionToken string) int {
+		router := chi.NewRouter()
+		router.Use(Authenticate(zap.NewNop(), sessionToken))
+		DefaultRoutes{}.New(router, nil, zap.NewNop())
+
+		req := httptest.NewRequest(http.MethodGet, agentRoutePrefix+token.ProbePath, nil)
+		req.Header.Set("Authorization", "Bearer not-the-session-token")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	require.Equal(t, http.StatusUnauthorized, probe(testToken),
+		"a guarded agent must refuse the probe; the CLI reads anything else as an unauthenticated control plane")
+	require.Equal(t, http.StatusNotFound, probe(""),
+		"an unguarded agent must fall through to chi's 404; if it answered 401 the check could never detect one")
+}
+
+// TestAuthenticate_DoesNotReportTheCLIsOwnProbeAsAnIntruder pins the other half.
+// The CLI sends a deliberately wrong token once per agent, so refusing it is
+// expected — reported as an intruder it would print a security warning on the
+// user's terminal on every healthy run.
+func TestAuthenticate_DoesNotReportTheCLIsOwnProbeAsAnIntruder(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	h := Authenticate(zap.New(core), testToken)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, agentRoutePrefix+token.ProbePath, nil)
+	req.Header.Set("Authorization", "Bearer not-the-session-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "the probe must still be refused")
+	require.Zero(t, logs.Len(), "the CLI's own probe was reported as a rejected intruder")
+
+	// A genuinely unauthenticated caller on any other route still is.
+	core2, logs2 := observer.New(zap.WarnLevel)
+	h2 := Authenticate(zap.New(core2), testToken)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	h2.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/agent/stop", nil))
+	require.Equal(t, 1, logs2.Len(), "a real unauthenticated request must still be reported")
 }

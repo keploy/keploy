@@ -12,6 +12,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// agentRoutePrefix is where DefaultRoutes.New mounts every route.
+const agentRoutePrefix = "/agent"
+
 // isAuthExempt reports whether a path is served without a token. Exactly one
 // is: liveness takes no input, returns no captured data, and callers need it
 // before they can be sure the agent is up at all.
@@ -71,6 +74,21 @@ func Authenticate(logger *zap.Logger, sessionToken string) func(http.Handler) ht
 			}
 
 			if !tokenMatches(r.Header.Get("Authorization"), sessionToken) {
+				// The keploy CLI deliberately sends a wrong token here once per
+				// run to confirm this guard is live. Refusing it is the correct
+				// and expected outcome, so it must not be reported as an
+				// intruder — every healthy run would print a security warning.
+				//
+				// Matched exactly, against the mount prefix these routes are
+				// registered under in DefaultRoutes.New. A suffix match would
+				// also quiet a crafted path like /agent/stop/../<probe>, which
+				// costs nothing to refuse loudly.
+				if r.URL.Path == agentRoutePrefix+token.ProbePath {
+					logger.Debug("refused the keploy control-plane authentication probe, as expected",
+						zap.String("path", r.URL.Path))
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
 				logger.Warn("rejecting unauthenticated agent API request",
 					zap.String("path", r.URL.Path), zap.String("remote", r.RemoteAddr),
 					zap.String("next_step", nextStepFor(r.URL.Path)))

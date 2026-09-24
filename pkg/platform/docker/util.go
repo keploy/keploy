@@ -257,9 +257,15 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	// `-p 0:0` outright, so a caller that intentionally sets
 	// ProxyPort=0 (e.g. to run the agent without a listening proxy
 	// socket) would fail the whole docker-run alias build otherwise.
+	//
+	// Published to the host's loopback only, like the agent port: the
+	// application reaches the proxy through the agent's network namespace
+	// (`--network=container:<keploy container>`, see pkg/client/app), not
+	// through this publish, so there is nothing for the other host interfaces
+	// to serve but the interception point itself.
 	proxyPortStr := ""
 	if opts.ProxyPort != 0 {
-		proxyPortStr = " -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort)
+		proxyPortStr = " -p 127.0.0.1:" + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort)
 	}
 	switch osName {
 	case "linux":

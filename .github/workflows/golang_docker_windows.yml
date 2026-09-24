@@ -11,7 +11,8 @@ on:
 # this workflow across the entire repo at a time — every other run
 # queued and 3 of the 4 runners sat idle. That constant group was a
 # band-aid for the fact that concurrent jobs collided on shared-VM
-# resources: the host-published keploy proxy port (-p 16789:16789), a
+# resources: the host-published keploy proxy port (-p 127.0.0.1:16789:16789,
+# which still allocates the host port and still collides), a
 # machine-wide keploy.exe kill that would abort a sibling's CLI, and the
 # shared docker-compose project name (network/volumes). (This lane
 # intercepts via a per-job eBPF keploy-agent container in the compose

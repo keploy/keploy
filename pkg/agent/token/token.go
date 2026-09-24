@@ -29,6 +29,19 @@ import (
 // only its path travels in argv. See WriteFile.
 const Env = "KEPLOY_AGENT_TOKEN"
 
+// ProbePath is the path the keploy CLI uses to check that an agent is really
+// enforcing the token it was handed, appended to the agent's base URL.
+//
+// It is deliberately a route the agent does not serve. routes.Authenticate is
+// router-level middleware, so it runs before chi matches anything: a guarded
+// agent answers 401 here and an unguarded one falls through to chi's 404.
+// Neither reaches a handler, so the check cannot touch the session.
+//
+// Shared from this leaf package because both sides need to agree on it — the
+// client to send it, and the agent to recognise it as its own health check
+// rather than report it as an intruder.
+const ProbePath = "/__keploy_auth_probe"
+
 // MockAgentTokenEnv carries the same token the other way: out to the test
 // runner the user wraps with `keploy mock record|replay`, which drives the
 // per-test scope API at {KEPLOY_MOCK_AGENT}/agent/scope/*.

@@ -83,12 +83,15 @@ do_record_iteration() {
         cat "docker-compose-tmp.yaml"
         exit 1
     fi
-    # The agent says this when it was handed no control-plane token. It then
+    # The agent says this when it was handed no control-plane token: it then
     # serves /agent/pcap/keylog, /agent/stop and /agent/storemocks to anything
-    # that can reach the port, and the run still passes -- so without this
-    # check a broken token handoff in compose mode is invisible. This is the
-    # docker counterpart to the unauthenticated probe in
-    # test_workflow_scripts/mock/mock-parallel-linux.sh.
+    # that can reach the port, and the run still passes.
+    #
+    # keploy probes for this itself at the readiness gate and logs an ERROR,
+    # which the check above already catches. This is the second line of
+    # defence, on the handoff most likely to break: keploy rewrites this
+    # compose file heavily, and losing the agent service's env_file: key in one
+    # of those rewrites is exactly the silent regression this guards.
     if grep -q "running WITHOUT authentication" "$log"; then
         echo "The agent came up with no control-plane token; the compose env_file handoff is broken."
         cat "$log"

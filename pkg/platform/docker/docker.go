@@ -789,7 +789,22 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.AgentPort, opts.AgentPort))
 	}
 	if opts.ProxyPort != 0 {
-		ports = append(ports, fmt.Sprintf("%d:%d", opts.ProxyPort, opts.ProxyPort))
+		// Host loopback only, for the same reason as the agent port above.
+		//
+		// The proxy is the interception point for the application's outgoing
+		// dependency calls: reaching it means being able to drive mock
+		// matching and to see what a recorded dependency answers. The app does
+		// not need this publish to get there — it runs in the agent's own
+		// network namespace (`network_mode: service:keploy-agent`, set in
+		// modifyAppService) and reaches the proxy over that namespace's
+		// loopback. The DNS port, used exactly the same way, is not published
+		// at all, which is the clearest evidence the publish was never what
+		// made interception work.
+		//
+		// It dates from the agent/client split, where it was introduced as a
+		// copy of the agent port's `%d:%d` line; the agent port has since been
+		// narrowed and this one had not been.
+		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.ProxyPort, opts.ProxyPort))
 	}
 
 	ports = append(ports, opts.AppPorts...)
