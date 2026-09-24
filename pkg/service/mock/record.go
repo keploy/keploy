@@ -41,6 +41,12 @@ func (m *mockService) Record(ctx context.Context) error {
 		zap.String("mock-set", name),
 		zap.String("command", m.userCommand))
 
+	// The caller's context: only ITS cancellation is the user's Ctrl+C. The
+	// errgroup below cancels the context it derives whenever any goroutine in
+	// it fails -- the agent process exiting is one of them -- so testing that
+	// one reported keploy's own failure as an interrupt: exit 0, the test
+	// command never run, and a CI job gating on the exit code went green.
+	parent := ctx
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 	ctx, cancel := context.WithCancel(ctx)
@@ -72,12 +78,12 @@ func (m *mockService) Record(ctx context.Context) error {
 		MockMode:      true,
 		ConfigPath:    m.config.ConfigPath,
 	}); err != nil {
-		if ctx.Err() != nil {
+		if parent.Err() != nil {
 			return nil
 		}
 		stopReason = "failed setting up the environment"
 		utils.LogError(m.logger, err, stopReason)
-		return fmt.Errorf("%s", stopReason)
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
 	// 2. Docker compose inverts this function's normal order: arming the
@@ -94,12 +100,12 @@ func (m *mockService) Record(ctx context.Context) error {
 	//    itself never came up at all.
 	composeAppExit, err := m.startComposeApp(ctx, errGrp, "record")
 	if err != nil {
-		if ctx.Err() != nil {
+		if parent.Err() != nil {
 			return nil
 		}
 		stopReason = "failed to bring up the keploy-agent compose service"
 		utils.LogError(m.logger, err, stopReason)
-		return fmt.Errorf("%s", stopReason)
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
 	// 3. Overwrite the named set in place: drop the previous mocks so the
@@ -122,12 +128,12 @@ func (m *mockService) Record(ctx context.Context) error {
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 	})
 	if err != nil {
-		if ctx.Err() != nil {
+		if parent.Err() != nil {
 			return nil
 		}
 		stopReason = "failed to start capturing outgoing calls"
 		utils.LogError(m.logger, err, stopReason)
-		return fmt.Errorf("%s", stopReason)
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
 	// recorded remembers each captured mock's name + request timestamp so the
@@ -170,12 +176,12 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 5. Release the compose app now that the capture is armed and draining.
 	//    This is the post-arm half of step 2 — see releaseComposeApp.
 	if err := m.releaseComposeApp(ctx); err != nil {
-		if ctx.Err() != nil {
+		if parent.Err() != nil {
 			return nil
 		}
 		stopReason = "failed to release the app behind the keploy-agent healthcheck"
 		utils.LogError(m.logger, err, stopReason)
-		return fmt.Errorf("%s", stopReason)
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
 	// 6. Optional record timer.
@@ -228,9 +234,19 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Debug("timed out waiting for the mock consumer to finish after teardown")
 	}
 
-	if ctx.Err() != nil { // user Ctrl+C
+	if parent.Err() != nil { // user Ctrl+C
 		m.logger.Info("recording stopped", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return nil
+	}
+	if ctx.Err() != nil {
+		// Not the user: something in the run's own errgroup failed while the
+		// test command ran -- the agent died under it. What was captured is on
+		// disk, but it is not a whole recording, and saying "recorded" over it
+		// (or exiting 0) would vouch for one.
+		stopReason = "the recording did not finish"
+		cause := context.Cause(ctx)
+		utils.LogError(m.logger, cause, stopReason, zap.Int("mocks", mockCount), zap.String("mock-set", name))
+		return fmt.Errorf("%s: %w", stopReason, cause)
 	}
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).

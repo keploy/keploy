@@ -64,13 +64,14 @@ type Receipt struct {
 	OnMiss string `yaml:"onMiss" json:"onMiss"`
 	Strict bool   `yaml:"strict" json:"strict"`
 	// ExitCode is what keploy exited with. RunnerExitCode is what the test
-	// command itself exited with (-1 when it never ran), so a run failed by
-	// a gate is not mistaken for a failing test. FailedBy names which one
-	// failed the run, when one did.
+	// command itself exited with (-1 when it has no exit of its own: it never
+	// ran, or keploy failed before it exited), so a run failed by a gate is
+	// not mistaken for a failing test. FailedBy names which one failed the
+	// run, when one did.
 	ExitCode       int    `yaml:"exitCode" json:"exitCode"`
 	RunnerExitCode int    `yaml:"runnerExitCode" json:"runnerExitCode"`
 	FailedBy       string `yaml:"failedBy,omitempty" json:"failedBy,omitempty"`
-	// Error is why keploy could not run the replay at all.
+	// Error is why keploy could not run the replay, or did not complete it.
 	Error string `yaml:"error,omitempty" json:"error,omitempty"`
 	// Loaded, Consumed and Missed are mock counts. -1 means the agent never
 	// reported that count, which is not the same as zero.

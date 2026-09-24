@@ -6,6 +6,8 @@ name: Mock Mode Regression (Linux)
 # and asserts (a) the suite still passes entirely from mocks, (b) per-test
 # mappings are written via the scope API, and (c) a failing runner propagates a
 # non-zero exit code. Runs the PR `build` binary for both record and replay.
+# A third step runs the same binary where its agent cannot start, and asserts
+# the run fails at once with the code that names why, the test never run.
 on:
   workflow_call:
     inputs:
@@ -55,3 +57,9 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-parallel-linux.sh"
+
+      - name: Run mock-mode agent-cannot-start e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-agent-cannot-start-linux.sh"

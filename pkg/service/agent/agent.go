@@ -529,7 +529,11 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 }
 
 func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
-	hookErr := errors.New("failed to hook into the app")
+	// Every failure below is WRAPPED, never replaced: what failed decides the
+	// agent's exit status (utils.ExitCodeFor), and that status is the only way
+	// the CLI that launched this agent learns whether it lacks privileges or
+	// the environment lacks something. A fresh "failed to hook into the app"
+	// error here is what made every such agent exit the same.
 
 	parentErrGrp := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 
@@ -583,7 +587,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load hooks")
-		return hookErr
+		return fmt.Errorf("failed to hook into the app: %w", err)
 	}
 
 	if a.proxyStarted {
@@ -599,7 +603,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	DNSIPv4, err := utils.GetContainerIPv4()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get container IP")
-		return hookErr
+		return fmt.Errorf("failed to hook into the app: %w", err)
 	}
 	if coreAgent.ProxyHook != nil {
 		a.Proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
@@ -621,7 +625,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		// StartProxy propagates auxiliary-hook failures (keploy#4078)
 		// rather than swallowing them.
 		proxyCtxCancel()
-		return hookErr
+		return fmt.Errorf("failed to hook into the app: %w", err)
 	}
 
 	a.proxyStarted = true
