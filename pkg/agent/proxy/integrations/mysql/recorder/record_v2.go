@@ -213,6 +213,10 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		decodeCtx.ServerCaps = greeting.CapabilityFlags
 		decodeCtx.ServerGreetings.Store(clientKey, greeting)
 		serverID = greetingServerIdentity(greeting)
+		// A live greeting is the freshest word on what this server is, for any
+		// later connection to it that has to borrow one (see
+		// fetchServerGreetingShared). No-op without a handshake store.
+		rememberServerGreeting(ctx, sess.Opts, handshake, serverID)
 	}
 	pluginName, err := wire.GetPluginName(handshakePkt.Message)
 	if err != nil {
@@ -412,10 +416,10 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	}
 	clientKey := *clientKeyPtr
 
-	// 1. Pop the pre-TLS server greeting (+ SSLRequest) from TLSHandshakeStore.
-	//    The proxy/uprobe see different TCP connections, so the conn-specific
-	//    key usually misses in proxyless — fall back to the port-only key
-	//    (port:3306), the same convention the legacy handlePostTLSRecord uses.
+	// 1. Pop the pre-TLS server greeting (+ SSLRequest) from TLSHandshakeStore:
+	//    the raw leg queued it under the destination port's key (port:3306),
+	//    tagged with its connection, the same convention the legacy
+	//    handlePostTLSRecord uses (see resolvePreTLSGreeting).
 	dstPort := uint16(0)
 	if sess.Opts.DstCfg != nil {
 		dstPort = uint16(sess.Opts.DstCfg.Port)
@@ -424,28 +428,45 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	if hsStore == nil {
 		return res, fmt.Errorf("post-TLS V2: PostTLSModeKey is set but TLSHandshakeStore is missing from the context — the SSL/GoTLS reader callback must set models.TLSHandshakeStoreKey (same store the pre-TLS raw stream pushes the greeting into) before dispatching the decrypted tls-* stream")
 	}
+	// Read the first client packet BEFORE resolving the greeting: its sequence
+	// number decides whether there is a greeting worth waiting for. seq>=1 is
+	// a HandshakeResponse41, a fresh connection captured from its auth exchange.
+	// seq==0 is a command on a pooled connection that was authenticated before
+	// capture began (joined mid-stream). The client's bytes are buffered on
+	// ClientStream, so reading them first costs nothing, and a stream whose own
+	// bytes never arrive now fails here, before it can take a greeting from the
+	// shared port FIFO that a live connection needs.
+	firstBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+	if err != nil {
+		return res, fmt.Errorf("post-TLS V2: read first client packet: %w", err)
+	}
+	if len(firstBuf) < 4 {
+		return res, fmt.Errorf("post-TLS V2: first client packet too short (%d bytes)", len(firstBuf))
+	}
+	firstReadAt := sess.ClientStream.LastReadTime()
+	joinedMidStream := firstBuf[3] == 0
+
 	// The raw leg's push rides the SAME capture as this decrypted stream, so
 	// under CPU pressure it can land arbitrarily late — a short fixed timeout
 	// here converted that lateness into total capture loss (the CI "served but
-	// NOT recorded" shortfall). resolvePreTLSGreeting waits (bounded by ctx and
-	// by the store TTL) for this connection's own greeting, but falls back FAST
-	// to the port's last-greeting cache when the raw leg was genuinely dropped —
-	// so a dropped leg does not stall the whole overall window and push the
-	// COM_QUERY decode past the CI (2a) gate. Waiting is free: the client's
-	// post-TLS bytes are buffered on ClientStream and read only after this
-	// returns.
-	entry, source := resolvePreTLSGreeting(ctx, hsStore, sess.Opts.ConnKey, dstPort, sess.Opts.PassThroughScope, sess.Opts.DstCfg)
-	// A greetingShared entry came off the port-only FIFO, which is shared by
-	// every decrypted stream to this port — in proxyless that FIFO is the ONLY
-	// key that bridges the raw and decrypted legs, so all of them draw from it.
-	// Popping is destructive. If this stream then fails before producing a mock
-	// (the common case being a decrypted stream whose own bytes never arrive, so
-	// the first-client-packet read returns EOF), the greeting it consumed is
-	// gone and a LIVE connection that needed it is starved — silent decode loss,
-	// which is what made this a "served but not recorded" shortfall rather than
-	// an error. Put an unused entry back so the rightful owner still gets it;
-	// Push broadcasts the store's cond, so a sibling already blocked in
-	// resolvePreTLSGreeting wakes immediately.
+	// NOT recorded" shortfall). For a fresh connection resolvePreTLSGreeting
+	// waits (bounded by ctx and by the store TTL) for this connection's own
+	// greeting, but falls back FAST to the port's last-greeting cache when the
+	// raw leg was genuinely dropped — so a dropped leg does not stall the whole
+	// overall window and push the COM_QUERY decode past the CI (2a) gate. A
+	// connection that joined mid-stream does not wait at all: see
+	// resolvePreTLSGreeting.
+	entry, taker, source := resolvePreTLSGreeting(ctx, hsStore, models.HandshakeOwnerOf(sess.Opts), dstPort, sess.Opts.PassThroughScope, sess.Opts.NetNS, sess.Opts.DstCfg, joinedMidStream)
+	// A greetingShared entry came off the port's queue without being provably
+	// this connection's (the capture layer could not name its connection on one
+	// of the legs), so it may be another stream's, which draws from the same
+	// queue. Popping is destructive. If this stream then fails before producing
+	// a mock, the greeting it consumed is gone and a LIVE connection that
+	// needed it is starved — silent decode loss, which is what made this a
+	// "served but not recorded" shortfall rather than an error. Put an unused
+	// entry back, with the owner it was pushed with, so the rightful owner
+	// still gets it; PushFor broadcasts the store's cond, so a sibling already
+	// blocked in resolvePreTLSGreeting wakes immediately.
 	//
 	// Restore-if-UNUSED, not restore-if-error: the direct-fetch branch below
 	// discards a payload-less entry and can then SUCCEED, which must still give
@@ -484,7 +505,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 			if sharedAdopted && sharedUndecodable {
 				return
 			}
-			hsStore.Push(sharedKey, sharedEntry)
+			hsStore.PushFor(sharedKey, taker, sharedEntry)
 			logger.Debug("post-TLS V2: returned an unused shared greeting to the port FIFO",
 				zap.Uint16("dstPort", dstPort), zap.Error(err))
 		}()
@@ -577,21 +598,14 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		}
 	}
 
-	// 4. Read the first client packet. seq>=1 = HandshakeResponse41 (fresh
-	//    connection captured from the start); seq==0 = a command on a pre-warmed
-	//    pool connection joined mid-stream (already authed).
-	firstBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
-	if err != nil {
-		return res, fmt.Errorf("post-TLS V2: read first client packet: %w", err)
-	}
-	if len(firstBuf) < 4 {
-		return res, fmt.Errorf("post-TLS V2: first client packet too short (%d bytes)", len(firstBuf))
-	}
+	// 4. The first client packet, read above: seq>=1 = HandshakeResponse41
+	//    (fresh connection captured from the start); seq==0 = a command on a
+	//    pre-warmed pool connection joined mid-stream (already authed).
 	if res.reqTimestamp.IsZero() {
-		res.reqTimestamp = sess.ClientStream.LastReadTime()
+		res.reqTimestamp = firstReadAt
 	}
 
-	if firstBuf[3] == 0 {
+	if joinedMidStream {
 		// seq==0: existing connection, already authenticated. No HandshakeResponse41
 		// and no auth exchange to consume. Assume a modern client (every supported
 		// driver negotiates CLIENT_DEPRECATE_EOF) so the EOF-less result-set decode
@@ -958,19 +972,21 @@ const (
 	// greetingNone: nothing available within the bounds — the caller must fetch
 	// the greeting directly or abort cleanly.
 	greetingNone preTLSGreetingSource = iota
-	// greetingOwn: this connection's own raw-leg stash, found under the
-	// conn-specific key. Carries the real per-connection salt + request timestamp.
+	// greetingOwn: this connection's own raw-leg stash: the entry its raw leg
+	// pushed under the same connection identity (models.HandshakeOwner.Is).
+	// Carries the real per-connection salt + request timestamp.
 	greetingOwn
-	// greetingShared: an entry taken from the port-only FIFO (e.g. "port:3306").
-	// That queue is CROSS-CONNECTION: in proxyless the raw and decrypted legs are
-	// different TCP connections, so this is the only key that bridges them, but
-	// the entry popped is not necessarily the one this connection's own raw leg
-	// pushed. Consuming it is destructive — every other decrypted stream waiting
-	// on that port is competing for the same FIFO — so a caller that fails before
-	// producing a mock MUST put it back (handlePostTLSHandshakeV2 does, via a
-	// defer on sharedAdopted). Otherwise a
-	// stream that pops one and then errors silently starves a live connection of
-	// the greeting it needed, which is decode loss with no diagnostic.
+	// greetingShared: an entry taken from the port's queue (e.g. "port:3306")
+	// that is not provably this connection's: one leg or the other carried no
+	// connection identity, so the store could only rule out other known
+	// connections and other processes, and gave the oldest that remained. The
+	// queue is shared by every stream to the port. Consuming it is destructive
+	// — every other decrypted stream waiting on that port may be competing for
+	// it — so a caller that fails before producing a mock MUST put it back
+	// (handlePostTLSHandshakeV2 does, via a defer on sharedAdopted). Otherwise
+	// a stream that pops one and then errors silently starves a live
+	// connection of the greeting it needed, which is decode loss with no
+	// diagnostic.
 	greetingShared
 	// greetingCached: another connection's most-recent greeting for the port,
 	// from the non-consuming last-greeting cache. Reusable for stitching
@@ -981,40 +997,70 @@ const (
 )
 
 // resolvePreTLSGreeting obtains the pre-TLS greeting (+SSLRequest) for a
-// decrypted tls-* stream. It prefers THIS connection's own raw-leg stash, but a
-// genuinely-dropped raw leg must NOT block the full overall window before using
-// a reusable cached greeting — that stall could push the COM_QUERY decode past
-// the CI (2a) 30s "served but NOT recorded" gate. So the wait is two-phase:
+// decrypted tls-* stream, and the owner the stashed entry was pushed with. It
+// prefers THIS connection's own raw-leg stash, but a genuinely-dropped raw leg
+// must NOT block the full overall window before using a reusable cached
+// greeting — that stall could push the COM_QUERY decode past the CI (2a) 30s
+// "served but NOT recorded" gate. So the wait is two-phase:
 //
 //   - up to `primary` (short): wait for this connection's own entry, waking the
 //     instant a Push arrives (the store broadcasts its cond). A merely-late own
 //     leg is absorbed here and stitched with its real salt+timestamp.
-//   - once `primary` elapses AND a CAPTURED greeting (one carrying its
-//     SSLRequest) is cached for the port: use the cache immediately (the
-//     dropped-leg fast path).
-//   - only when no captured greeting is cached yet (the first connection to the
-//     port, or every sibling leg also dropped) keep waiting for the own entry up
-//     to `overall`, since nothing better can serve this connection. A greeting
-//     cached from a direct fetch is used at that point, in place of fetching
-//     again.
+//   - once `primary` elapses AND a greeting is cached for the destination: use
+//     the cache immediately (the dropped-leg fast path).
+//   - only when nothing is cached yet (the first connection to the port, or
+//     every sibling leg also dropped) keep waiting for the own entry up to
+//     `overall`, since nothing better can serve this connection. The caller
+//     then consults the per-server memo, and only then dials.
 //
 // ctx cancellation (stream/session teardown) cuts any wait short within one
 // poll slice. On a final miss it returns greetingNone so the caller can
 // fetchServerGreetingShared / abort cleanly.
 //
-// It checks the conn-specific key and the port-only key on every pass: in
-// proxyless the raw and decrypted legs are different TCP connections, so only
-// the port-only key (e.g. "port:3306") reliably bridges them — the raw leg
-// pushes under both (storePreTLSHandshakeV2).
-func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, connKey string, dstPort uint16, scope string, dst *models.ConditionalDstCfg) (models.TLSHandshakeEntry, preTLSGreetingSource) {
-	connSpecificKey := models.HandshakeStoreKey(connKey, dstPort)
+// Every raw leg pushes its entry once, under the destination port's key,
+// tagged with the connection identity the capture layer gave it (owner; see
+// models.HandshakeOwner). The store hands this stream its own entry when both
+// legs carry the same identity. Without one on either leg it hands the oldest
+// entry this stream may take: never another known connection's, never another
+// known process's.
+//
+// joinedMidStream (the stream's first decrypted client packet had seq==0) skips
+// the wait entirely: it returns this connection's own entry or a cached
+// greeting, and otherwise greetingNone at once. That signal is a fact about
+// THIS connection, not a guess about timing: a HandshakeResponse41 is always
+// the first thing a client sends after its TLS handshake, so a first decrypted
+// packet that is a command proves the session was authenticated before capture
+// of its plaintext began. A pooled connection opened before the recording is
+// exactly that, and its greeting went over the wire before its authentication.
+// Waiting cannot improve on what is already here, because what a wait delivers
+// is only ever useful to an auth exchange:
+//
+//   - The wait exists so a FRESH connection gets its own raw leg: the
+//     SSLRequest that precedes its HandshakeResponse41 in the config mock, and
+//     its real timestamp. A joined connection has no auth exchange on this
+//     stream to stitch them to. Its config mock is synthesized
+//     (buildSyntheticPostTLSConfig) from any SSLRequest of the same client,
+//     and a borrowed greeting's timestamp is never used: it is timed from its
+//     first command.
+//   - What its commands need from a greeting are the server's capability flags
+//     and auth plugin, which every greeting of the same server carries. The
+//     salt is never verified on the record or replay path.
+//
+// A joined connection takes from the port's queue ONLY an entry that is
+// provably its own: anything else there may be a fresh connection's own leg
+// that it has not reached yet. Otherwise it borrows the app-scoped cache (and,
+// in the caller, the per-server memo), which cannot hand it another server's
+// greeting. Main waited out the stash bound (30s default) per pooled
+// connection at every recording start, and took every entry that landed on the
+// port meanwhile.
+func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, owner models.HandshakeOwner, dstPort uint16, scope, netNS string, dst *models.ConditionalDstCfg, joinedMidStream bool) (models.TLSHandshakeEntry, models.HandshakeOwner, preTLSGreetingSource) {
 	portKey := models.HandshakeStoreKey("", dstPort)
 	// The cross-connection fallback has TWO keys. One names the destination: the
 	// fields it lets us reuse (capability flags, protocol version, auth plugin)
 	// are per-server, so an entry is only reusable for the same server. The key
 	// combines the app/session scope with the address so that a shared
 	// DaemonSet store cannot serve one app's greeting to another.
-	lastKey := models.HandshakeLastKey(scope, dst)
+	lastKey := lastGreetingKey(scope, netNS, dst)
 	// The decrypted leg's address is frequently a capture-layer stand-in, which
 	// can never match what the raw leg wrote. The port is agreed between the two
 	// legs, so it is the key that actually bridges them here.
@@ -1048,40 +1094,13 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 	overallDeadline := start.Add(overall)
 	primaryDeadline := start.Add(primary)
 
-	// popOwn returns this connection's own stashed entry (either key), if
-	// present, without blocking.
-	popOwn := func() (models.TLSHandshakeEntry, preTLSGreetingSource) {
-		if entry, ok := hsStore.PopWait(connSpecificKey, 0); ok {
-			// An empty connKey (the proxyless decrypted stream, which cannot know
-			// the raw leg's connection identity) collapses the conn-specific key
-			// onto the port-only key. The entry then came off the SHARED FIFO
-			// even though this branch read it, so it must be classified — and
-			// restored on failure — as shared.
-			if connSpecificKey == portKey {
-				return entry, greetingShared
-			}
-			return entry, greetingOwn
-		}
-		if portKey != connSpecificKey {
-			if entry, ok := hsStore.PopWait(portKey, 0); ok {
-				return entry, greetingShared
-			}
-		}
-		return models.TLSHandshakeEntry{}, greetingNone
-	}
 	// cachedGreeting returns the port's last-greeting cache entry, if usable.
-	//
-	// captured restricts it to entries a raw leg CAPTURED (they carry the
-	// SSLRequest). An entry without one was fetched from the server
-	// (fetchServerGreetingShared) and is no better than fetching again: only the
-	// greeting, no SSLRequest for the config mock. So it is consulted only where
-	// the direct fetch would be, after the overall wait. It must not cut short
-	// the wait for this connection's own late raw leg at the primary bound,
-	// which a captured entry does because it is as good as the own entry.
-	cachedGreeting := func(captured bool) (models.TLSHandshakeEntry, bool) {
-		usable := func(c models.TLSHandshakeEntry) bool {
-			return len(c.RespPackets) > 0 && (!captured || len(c.ReqPackets) > 0)
-		}
+	// Every entry here was CAPTURED by a raw leg (it carries the SSLRequest): a
+	// greeting fetched from the server is remembered per server instead
+	// (fetchServerGreetingShared), and is consulted only where the fetch would
+	// be, after the overall wait.
+	cachedGreeting := func() (models.TLSHandshakeEntry, bool) {
+		usable := func(c models.TLSHandshakeEntry) bool { return len(c.RespPackets) > 0 }
 		// A latched port key is POSITIVE proof that this scope+port serves more
 		// than one server. Falling through to the address key would then quietly
 		// answer from the shared placeholder bucket — which carries no identity
@@ -1123,28 +1142,54 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 		return models.TLSHandshakeEntry{}, false
 	}
 
+	// take pops, within wait, this connection's own entry or (unless ownOnly)
+	// one it may take, and classifies it.
+	take := func(ownOnly bool, wait time.Duration) (models.TLSHandshakeEntry, models.HandshakeOwner, preTLSGreetingSource) {
+		entry, taker, ok := hsStore.PopWaitFor(portKey, owner, ownOnly, wait)
+		switch {
+		case !ok:
+			return models.TLSHandshakeEntry{}, models.HandshakeOwner{}, greetingNone
+		case owner.Is(taker):
+			return entry, taker, greetingOwn
+		default:
+			return entry, taker, greetingShared
+		}
+	}
+
+	if joinedMidStream {
+		// Only an entry provably its own; see above.
+		if owner.Conn != "" {
+			if entry, taker, src := take(true, 0); src != greetingNone {
+				return entry, taker, src
+			}
+		}
+		if entry, ok := cachedGreeting(); ok {
+			return entry, models.HandshakeOwner{}, greetingCached
+		}
+		return models.TLSHandshakeEntry{}, models.HandshakeOwner{}, greetingNone
+	}
+
 	for {
 		// 1. This connection's own entry is always preferred.
-		if entry, src := popOwn(); src != greetingNone {
-			return entry, src
+		if entry, taker, src := take(false, 0); src != greetingNone {
+			return entry, taker, src
 		}
 		now := time.Now()
 		// 2. Past the primary bound, a cached greeting is good enough — take it
 		//    rather than blocking out the full overall window (the dropped-leg
 		//    fast path that keeps the decode inside the CI gate).
 		if !now.Before(primaryDeadline) {
-			if entry, ok := cachedGreeting(true); ok {
-				return entry, greetingCached
+			if entry, ok := cachedGreeting(); ok {
+				return entry, models.HandshakeOwner{}, greetingCached
 			}
 		}
 		// 3. Overall bound / teardown.
 		if !now.Before(overallDeadline) || ctx.Err() != nil {
 			break
 		}
-		// 4. Block on the port-only key (the one the raw leg reliably lands
-		//    under), waking the moment a Push broadcasts the cond. Bound the
-		//    slice by the next deadline so the cache is re-checked promptly at
-		//    the primary boundary.
+		// 4. Block on the port's queue, waking the moment a Push broadcasts the
+		//    cond. Bound the slice by the next deadline so the cache is
+		//    re-checked promptly at the primary boundary.
 		nextEval := overallDeadline
 		if now.Before(primaryDeadline) && primaryDeadline.Before(nextEval) {
 			nextEval = primaryDeadline
@@ -1156,17 +1201,17 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 		if slice <= 0 {
 			continue
 		}
-		if entry, ok := hsStore.PopWait(portKey, slice); ok {
-			return entry, greetingShared
+		if entry, taker, src := take(false, slice); src != greetingNone {
+			return entry, taker, src
 		}
 	}
 
 	// Final miss on the own entry: the cache is the last resort before a direct
 	// fetch (it may have been populated by a sibling during the overall wait).
-	if entry, ok := cachedGreeting(false); ok {
-		return entry, greetingCached
+	if entry, ok := cachedGreeting(); ok {
+		return entry, models.HandshakeOwner{}, greetingCached
 	}
-	return models.TLSHandshakeEntry{}, greetingNone
+	return models.TLSHandshakeEntry{}, models.HandshakeOwner{}, greetingNone
 }
 
 // greetingServerIdentity fingerprints the SERVER-STABLE parts of a HandshakeV10
@@ -1182,22 +1227,36 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 // server, and none of them is verified on the record or replay path (the
 // replayer skips AuthResponse comparison precisely because it is salt-derived).
 // Including them would make every connection look like a different server.
+//
+// It is computed for every recorded handshake (rememberServerGreeting), so it is
+// built by appending rather than with fmt, which cost most of that call. The
+// text is "v<proto>|<version>|caps=<caps>|cs=<charset>|<plugin>".
 func greetingServerIdentity(g *mysql.HandshakeV10Packet) string {
 	if g == nil {
 		return ""
 	}
-	return fmt.Sprintf("v%d|%s|caps=%d|cs=%d|%s",
-		g.ProtocolVersion, g.ServerVersion, g.CapabilityFlags, g.CharacterSet, g.AuthPluginName)
+	b := make([]byte, 0, 40+len(g.ServerVersion)+len(g.AuthPluginName))
+	b = append(b, 'v')
+	b = strconv.AppendUint(b, uint64(g.ProtocolVersion), 10)
+	b = append(b, '|')
+	b = append(b, g.ServerVersion...)
+	b = append(b, "|caps="...)
+	b = strconv.AppendUint(b, uint64(g.CapabilityFlags), 10)
+	b = append(b, "|cs="...)
+	b = strconv.AppendUint(b, uint64(g.CharacterSet), 10)
+	b = append(b, '|')
+	b = append(b, g.AuthPluginName...)
+	return string(b)
 }
 
 // storePreTLSHandshakeV2 pushes the pre-TLS MySQL server greeting and the
 // client SSLRequest into the shared TLSHandshakeStore so the decrypted
-// (uprobe) tls-* stream's handlePostTLSRecord can recover them. It mirrors
-// the legacy conn.go SkipTLSMITM branch exactly: it stores under both the
-// conn-specific key and the port-only fallback key, because the raw
-// observe-only stream and the decrypted uprobe stream are different TCP
-// connections with different connIDs — only the port-only key (port:3306)
-// reliably bridges the two.
+// (uprobe) tls-* stream's handlePostTLSHandshakeV2 can recover them. It mirrors
+// the legacy conn.go SkipTLSMITM branch exactly: it stores ONCE under the
+// destination port's key (port:3306), tagged with the connection's identity
+// (models.HandshakeOwnerOf), because the raw observe-only stream and the
+// decrypted uprobe stream reach the recorder as different streams, and the
+// identity the capture layer gives both is what pairs them.
 func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, greeting, sslRequest []byte, reqTimestamp time.Time, serverID string) error {
 	hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
 	if !ok || hsStore == nil {
@@ -1212,14 +1271,8 @@ func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *super
 		ReqPackets:   [][]byte{sslRequest},
 		ReqTimestamp: reqTimestamp,
 	}
-	storeKey := models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort)
-	hsStore.Push(storeKey, hsEntry)
-	// Port-only fallback: the proxy/uprobe see different ephemeral ports,
-	// so conn-specific keys won't match across the two streams.
 	portKey := models.HandshakeStoreKey("", dstPort)
-	if portKey != storeKey {
-		hsStore.Push(portKey, hsEntry)
-	}
+	hsStore.PushFor(portKey, models.HandshakeOwnerOf(sess.Opts), hsEntry)
 	// Seed the last-greeting cache too. Push/PopWait entries are CONSUMED, so a
 	// connection whose own raw leg never produced one — a pooled connection
 	// reused long after its handshake, or a leg the ringbuf dropped under load —
@@ -1236,7 +1289,7 @@ func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *super
 	// synthesized stand-in and could never match an address-keyed entry. See
 	// models.HandshakeLastPortKey.
 	scope := sess.Opts.PassThroughScope
-	hsStore.RememberLast(models.HandshakeLastKey(scope, sess.Opts.DstCfg), hsEntry)
+	hsStore.RememberLast(lastGreetingKey(scope, sess.Opts.NetNS, sess.Opts.DstCfg), hsEntry)
 	// The port-scoped copy is tagged with the SERVER's identity, taken from the
 	// greeting itself rather than from the address it arrived from. Address is
 	// the wrong identity here: in Kubernetes the same logical MySQL gets a new
@@ -1248,9 +1301,9 @@ func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *super
 	// reuse would genuinely be unsafe.
 	hsStore.RememberLastForPort(models.HandshakeLastPortKey(scope, dstPort), serverID, hsEntry)
 	logger.Debug("V2: pushed pre-TLS MySQL greeting + SSLRequest to TLSHandshakeStore for post-TLS stitch",
-		zap.String("key", storeKey),
 		zap.String("portKey", portKey),
 		zap.String("connKey", sess.Opts.ConnKey),
+		zap.String("connProc", sess.Opts.ConnProc),
 		zap.String("scope", scope),
 		zap.Uint16("dstPort", dstPort))
 	return nil

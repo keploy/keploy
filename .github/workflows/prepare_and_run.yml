@@ -739,7 +739,10 @@ jobs:
     # code on the V2 path because only the legacy handleInitialHandshake ever
     # seeded it, so a pooled connection whose own greeting had been consumed
     # lost its whole command phase. Includes a mutation guard that fails the
-    # build if the regression tests stop actually exercising the fix.
+    # build if the regression tests stop actually exercising the fix, and a
+    # real-MySQL run: a pool opened before recording is recorded promptly, and
+    # consecutive recording sessions cost the server ONE greeting dial
+    # (Aborted_connects).
     uses: ./.github/workflows/mysql-tls-greeting-stitch-linux.yml
   run_http_stale_pool_race_linux:
     # Regression guard for issue #4165 (upstream-pool half-close race

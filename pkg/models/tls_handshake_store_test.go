@@ -725,36 +725,471 @@ func TestTLSHandshakeStore_PushBoundsQueuePerKey(t *testing.T) {
 	}
 }
 
-// RememberLastIfAbsent writes a destination key only when it holds nothing
-// servable, and like RememberLast it refuses port keys.
-func TestRememberLastIfAbsent(t *testing.T) {
-	s := NewTLSHandshakeStore()
-	dst := &ConditionalDstCfg{Addr: "10.0.0.5:3306", Port: 3306}
-	key := HandshakeLastKey("scope", dst)
-	fetched := TLSHandshakeEntry{RespPackets: [][]byte{{0x0a}}}
-	rich := TLSHandshakeEntry{RespPackets: [][]byte{{0x0a}}, ReqPackets: [][]byte{{0x20}}}
+// A full queue makes room at the expense of the process that fills it. An app
+// whose decrypted streams are never captured leaves every entry it pushes on
+// the queue until it expires; dropping plain oldest-first would push another
+// app's live entry out before its own decrypted stream arrives.
+func TestTLSHandshakeStore_FullQueueEvictsFromTheProcessFillingIt(t *testing.T) {
+	store := NewTLSHandshakeStore()
+	const key = "port:3306"
+	live := HandshakeOwner{Conn: "sk:1", Proc: "pid:10"}
+	store.PushFor(key, live, TLSHandshakeEntry{RespPackets: [][]byte{{0x0a, 1}}})
+	flood := func(i int) HandshakeOwner { return HandshakeOwner{Conn: fmt.Sprintf("sk:%d", 1000+i), Proc: "pid:20"} }
+	for i := 0; i < 2*tlsHandshakeMaxQueuePerKey; i++ {
+		store.PushFor(key, flood(i), TLSHandshakeEntry{RespPackets: [][]byte{{0x0a, 2}}})
+	}
+	if e, _, ok := store.PopWaitFor(key, live, true, 0); !ok || e.RespPackets[0][1] != 1 {
+		t.Fatal("another process's flood of never-taken entries evicted this connection's live entry")
+	}
+	// The flooding process keeps its newest entries.
+	if _, _, ok := store.PopWaitFor(key, flood(2*tlsHandshakeMaxQueuePerKey-1), true, 0); !ok {
+		t.Fatal("the flooding process lost its newest entry")
+	}
+	if _, _, ok := store.PopWaitFor(key, flood(0), true, 0); ok {
+		t.Fatal("the flooding process kept its oldest entry past the bound")
+	}
+}
 
-	if !s.RememberLastIfAbsent(key, fetched) {
-		t.Fatal("an empty key was not written")
+// Which addresses can name a different server in every network namespace. The
+// cost of each mistake differs: a routable address classed as local only costs
+// one extra greeting dial per namespace, while a local address classed as
+// routable hands one pod's loopback server's greeting to every other pod.
+func TestAddrIsNetnsLocal(t *testing.T) {
+	for _, tc := range []struct {
+		host  string
+		local bool
+	}{
+		{"127.0.0.1", true},
+		{"127.0.0.2", true}, // all of 127.0.0.0/8
+		{"::1", true},
+		{"::ffff:127.0.0.1", true}, // v4-mapped loopback
+		{"0.0.0.0", true},          // connects to the local host
+		{"::", true},
+		{"169.254.169.254", true},
+		{"fe80::1", true},
+		{"fe80::1%eth0", true},
+		{"ff02::1", true}, // link-local multicast
+		{"mysql", true},   // resolved per pod
+		{"mysql.db.svc.cluster.local", true},
+		{"", true},
+		{"10.0.0.5", false}, // pod IP
+		{"10.96.0.10", false},
+		{"172.17.0.2", false},
+		{"192.168.1.20", false},
+		{"34.120.1.2", false},
+		{"fd00::5", false},
+		{"2001:db8::5", false},
+		{"::ffff:10.0.0.5", false},
+	} {
+		if got := AddrIsNetnsLocal(tc.host); got != tc.local {
+			t.Errorf("AddrIsNetnsLocal(%q) = %v, want %v", tc.host, got, tc.local)
+		}
 	}
-	if got, ok := s.Last(key); !ok || len(got.RespPackets) != 1 {
-		t.Fatalf("Last after write = %+v, %v", got, ok)
+}
+
+// A server key names the SERVER. For a routable address that is the address
+// alone: the recording session (which carries the test-set id) and the app must
+// not be part of it, or every session learns the same server again with a dial.
+// A namespace-local address is qualified by the connection's namespace, and has
+// no key when the namespace is unknown. Nothing without an address is a key.
+func TestHandshakeServerKey(t *testing.T) {
+	dst := func(addr string) *ConditionalDstCfg { return &ConditionalDstCfg{Addr: addr, Port: 3306} }
+	key := HandshakeServerKey
+
+	t.Run("routable: one key across sessions, apps and namespaces", func(t *testing.T) {
+		d := dst("10.0.0.5:3306")
+		base := key("", d)
+		for _, other := range []string{
+			key("netns:1@pid:10:1", d),
+			key("netns:2@pid:20:2", d),
+			key("", dst("[::ffff:10.0.0.5]:3306")),
+		} {
+			if other != base {
+				t.Errorf("key %q != %q for the same routable server", other, base)
+			}
+		}
+		if base != "srv:10.0.0.5:3306" {
+			t.Errorf("routable key = %q, want the address alone", base)
+		}
+		if key("", dst("10.0.0.5:3307")) == base || key("", dst("10.0.0.6:3306")) == base {
+			t.Error("a different port or address shares the server key")
+		}
+		if got := key("", dst("[2001:db8::5]:3306")); got != "srv:[2001:db8::5]:3306" {
+			t.Errorf("v6 key = %q", got)
+		}
+	})
+
+	t.Run("namespace-local: qualified by the namespace", func(t *testing.T) {
+		for _, addr := range []string{"127.0.0.1:3306", "[::1]:3306", "169.254.10.1:3306", "[fe80::1%eth0]:3306", "mysql:3306"} {
+			d := dst(addr)
+			podA := key("netns:A", d)
+			podB := key("netns:B", d)
+			if podA == podB {
+				t.Errorf("%s: two pods' namespace-local servers share key %q", addr, podA)
+			}
+			if !strings.Contains(podA, "netns=netns:A|") {
+				t.Errorf("%s: key %q is not namespace-qualified", addr, podA)
+			}
+		}
+		if key("netns:A", dst("127.0.0.1:3306")) == key("netns:A", dst("127.0.0.2:3306")) {
+			t.Error("127.0.0.1 and 127.0.0.2 are different hosts and must not share a key")
+		}
+		if key("netns:A", dst("[::ffff:127.0.0.1]:3306")) != key("netns:A", dst("127.0.0.1:3306")) {
+			t.Error("the v4-mapped spelling of 127.0.0.1 got its own key")
+		}
+	})
+
+	// Without a namespace there is nothing that tells two pods' loopback servers
+	// apart: an app/session scope is shared by every replica of a deployment.
+	// No key means no memo and no shared fetch: nothing crosses connections.
+	t.Run("namespace-local with the namespace unknown: no key", func(t *testing.T) {
+		for _, addr := range []string{"127.0.0.1:3306", "[::1]:3306", "169.254.10.1:3306", "mysql:3306"} {
+			if got := key("", dst(addr)); got != "" {
+				t.Errorf("%s: key %q with no namespace; replicas sharing one would share a server", addr, got)
+			}
+		}
+	})
+
+	t.Run("no server named", func(t *testing.T) {
+		for name, d := range map[string]*ConditionalDstCfg{
+			"nil":        nil,
+			"no address": {Port: 3306},
+			"fabricated": {Addr: "10.0.0.5:3306", Port: 3306, AddrFabricated: true},
+			"no port":    {Addr: "10.0.0.5", Port: 3306},
+			"port only":  {Addr: ":3306", Port: 3306},
+			"empty port": {Addr: "10.0.0.5:", Port: 3306},
+		} {
+			if got := key("netns:A", d); got != "" {
+				t.Errorf("%s: key = %q, want none", name, got)
+			}
+		}
+	})
+}
+
+// A server key holds only the server's own greeting: every app and session that
+// reaches the server reads it. A fetched greeting is written only into an empty
+// key, a captured one replaces anything, and no other writer can put client data
+// there.
+func TestServerGreetingMemo(t *testing.T) {
+	s := NewTLSHandshakeStore()
+	key := HandshakeServerKey("", &ConditionalDstCfg{Addr: "10.0.0.5:3306", Port: 3306})
+	fetched := []byte{0x01, 0x00, 0x00, 0x00, 0x0a}
+	live := []byte{0x02, 0x00, 0x00, 0x00, 0x0a, 0x38}
+
+	if _, ok := s.ServerGreeting(key); ok {
+		t.Fatal("an empty store served a greeting")
 	}
-	s.RememberLast(key, rich)
-	if s.RememberLastIfAbsent(key, fetched) {
-		t.Fatal("a key holding a servable entry was overwritten")
+	if !s.RememberServerGreetingIfAbsent(key, fetched) {
+		t.Fatal("a fetched greeting was not written into an empty key")
 	}
-	if got, _ := s.Last(key); len(got.ReqPackets) != 1 {
-		t.Fatalf("the existing entry was replaced: %+v", got)
+	if got, ok := s.ServerGreeting(key); !ok || !bytes.Equal(got, fetched) {
+		t.Fatalf("ServerGreeting = %x, %v", got, ok)
 	}
+	// A live greeting replaces the fetched one, even one of the same server
+	// identity: a fetched entry carries none to compare.
+	s.RememberServerGreeting(key, live, "v10|8.0.36")
+	if got, _ := s.ServerGreeting(key); !bytes.Equal(got, live) {
+		t.Fatalf("a captured greeting did not replace the fetched one: %x", got)
+	}
+	// A later fetch does not replace the live one.
+	if s.RememberServerGreetingIfAbsent(key, fetched) {
+		t.Fatal("a fetch overwrote a greeting a raw leg captured")
+	}
+	if got, _ := s.ServerGreeting(key); !bytes.Equal(got, live) {
+		t.Fatalf("server key holds %x after a refused fetch write", got)
+	}
+	// The store keeps its own copy.
+	buf := append([]byte(nil), live...)
+	s.RememberServerGreeting(key, buf, "v10|8.0.37")
+	buf[4] = 0xff
+	if got, _ := s.ServerGreeting(key); got[4] != 0x0a {
+		t.Fatal("the store aliases the caller's buffer")
+	}
+
+	// Nothing else writes a server key, and the greeting API writes nothing else.
+	withClient := TLSHandshakeEntry{RespPackets: [][]byte{live}, ReqPackets: [][]byte{{0x20}}, ReqTimestamp: time.Now()}
+	other := HandshakeServerKey("", &ConditionalDstCfg{Addr: "10.0.0.6:3306", Port: 3306})
+	s.RememberLast(other, withClient)
+	s.RememberLastForPort(other, "server-a", withClient)
+	if _, ok := s.Last(other); ok {
+		t.Fatal("an entry carrying one client's SSLRequest was written under a server key")
+	}
+	if _, ok := s.ServerGreeting(other); ok {
+		t.Fatal("RememberLast reached the server memo")
+	}
+	dstKey := HandshakeLastKey("scope", &ConditionalDstCfg{Addr: "10.0.0.5:3306"})
 	portKey := HandshakeLastPortKey("scope", 3306)
-	if s.RememberLastIfAbsent(portKey, fetched) {
-		t.Fatal("a port key, which names no server, was written without an identity")
+	for _, k := range []string{dstKey, portKey, "", "port:3306"} {
+		s.RememberServerGreeting(k, live, "id")
+		if s.RememberServerGreetingIfAbsent(k, live) {
+			t.Errorf("RememberServerGreetingIfAbsent wrote the non-server key %q", k)
+		}
+		if _, ok := s.Last(k); ok {
+			t.Errorf("the server-greeting API wrote the non-server key %q", k)
+		}
+		if _, ok := s.ServerGreeting(k); ok {
+			t.Errorf("ServerGreeting read the non-server key %q", k)
+		}
 	}
-	if _, ok := s.Last(portKey); ok {
-		t.Fatal("port key readable after a refused write")
+	if s.RememberServerGreetingIfAbsent(other, nil) {
+		t.Fatal("an empty greeting was written")
 	}
-	if s.RememberLastIfAbsent("", fetched) {
-		t.Fatal("an empty key was written")
+}
+
+// Every recorded handshake reports its server's greeting. The memo is written
+// only when that says something new: a different server identity replaces at
+// once, the same identity only refreshes an entry older than
+// serverGreetingRefresh. Neither ever touches the queue's lock.
+func TestServerGreetingRefresh(t *testing.T) {
+	key := HandshakeServerKey("", &ConditionalDstCfg{Addr: "10.0.0.5:3306", Port: 3306})
+	g := func(b byte) []byte { return []byte{0x01, 0x00, 0x00, 0x00, 0x0a, b} }
+	age := func(s *TLSHandshakeStore, by time.Duration) {
+		s.srvMu.Lock()
+		v := s.servers[key]
+		v.seen = v.seen.Add(-by)
+		s.servers[key] = v
+		s.srvMu.Unlock()
 	}
+	for _, tc := range []struct {
+		name      string
+		age       time.Duration
+		identity  string
+		wantBytes byte
+	}{
+		{"same server, fresh: not rewritten", time.Second, "A", 1},
+		{"same server, due a refresh: rewritten", serverGreetingRefresh + time.Second, "A", 2},
+		{"another server identity, fresh: replaced at once", time.Second, "B", 2},
+		{"no identity: always written", time.Second, "", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewTLSHandshakeStore()
+			s.RememberServerGreeting(key, g(1), "A")
+			age(s, tc.age)
+			s.RememberServerGreeting(key, g(2), tc.identity)
+			got, ok := s.ServerGreeting(key)
+			if !ok || got[5] != tc.wantBytes {
+				t.Fatalf("memo holds %x (%v), want greeting %d", got, ok, tc.wantBytes)
+			}
+		})
+	}
+
+	// The memo does not take the queue's lock: a refresh completes while the
+	// queue's lock is held elsewhere (as by a Push or a waiting PopWait).
+	s := NewTLSHandshakeStore()
+	s.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		s.RememberServerGreeting(key, g(3), "C")
+		_, _ = s.ServerGreeting(key)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server memo waited on the queue's lock")
+	}
+	s.mu.Unlock()
+}
+
+// The memo is bounded: past maxServerGreetings the least recently seen server
+// is forgotten first.
+func TestServerGreetingMemoIsBounded(t *testing.T) {
+	s := NewTLSHandshakeStore()
+	keyOf := func(i int) string {
+		return HandshakeServerKey("", &ConditionalDstCfg{Addr: fmt.Sprintf("10.1.%d.%d:3306", i/250, i%250), Port: 3306})
+	}
+	for i := 0; i < maxServerGreetings+40; i++ {
+		s.RememberServerGreeting(keyOf(i), []byte{0x01, 0x00, 0x00, 0x00, 0x0a}, fmt.Sprint(i))
+	}
+	s.srvMu.RLock()
+	n := len(s.servers)
+	s.srvMu.RUnlock()
+	if n != maxServerGreetings {
+		t.Fatalf("memo holds %d servers, want the cap %d", n, maxServerGreetings)
+	}
+	if _, ok := s.ServerGreeting(keyOf(maxServerGreetings + 39)); !ok {
+		t.Fatal("the newest server was evicted")
+	}
+}
+
+// A remembered server greeting goes stale on the same schedule as any cached
+// greeting (lastGreetingTTL): a server restarted since may advertise different
+// capabilities. Past it, the next connection that needs one learns it again.
+func TestServerGreetingExpiresWithTheLastGreetingTTL(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		s := NewTLSHandshakeStore()
+		key := HandshakeServerKey("", &ConditionalDstCfg{Addr: "10.0.0.5:3306", Port: 3306})
+		g := []byte{0x01, 0x00, 0x00, 0x00, 0x0a}
+		if live {
+			s.RememberServerGreeting(key, g, "A")
+		} else {
+			s.RememberServerGreetingIfAbsent(key, g)
+		}
+
+		s.srvMu.Lock()
+		v := s.servers[key]
+		v.seen = time.Now().Add(-lastGreetingTTL - time.Second)
+		s.servers[key] = v
+		s.srvMu.Unlock()
+
+		if _, ok := s.ServerGreeting(key); ok {
+			t.Fatalf("live=%v: a greeting older than lastGreetingTTL was served", live)
+		}
+		if !s.RememberServerGreetingIfAbsent(key, g) {
+			t.Fatalf("live=%v: an expired entry blocked the next fetch from remembering", live)
+		}
+		if _, ok := s.ServerGreeting(key); !ok {
+			t.Fatalf("live=%v: the re-learned greeting is not served", live)
+		}
+	}
+}
+
+// The ownership rule: a stream may take its own connection's entry, and when
+// it cannot name its connection (or the entry's leg could not), the oldest
+// entry it cannot rule out. It can rule out another known connection and
+// another known process.
+func TestHandshakeOwnerMayTake(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		consumer HandshakeOwner
+		entry    HandshakeOwner
+		is, may  bool
+	}{
+		{"same connection", HandshakeOwner{"sk:1", "p1"}, HandshakeOwner{"sk:1", "p1"}, true, true},
+		{"another connection of the same process", HandshakeOwner{"sk:1", "p1"}, HandshakeOwner{"sk:2", "p1"}, false, false},
+		{"another connection, process unknown", HandshakeOwner{"sk:1", ""}, HandshakeOwner{"sk:2", ""}, false, false},
+		{"consumer cannot name its connection, same process", HandshakeOwner{"", "p1"}, HandshakeOwner{"sk:2", "p1"}, false, true},
+		{"consumer cannot name its connection, another process", HandshakeOwner{"", "p1"}, HandshakeOwner{"sk:2", "p2"}, false, false},
+		{"entry's leg could not name its connection, same process", HandshakeOwner{"sk:1", "p1"}, HandshakeOwner{"", "p1"}, false, true},
+		{"entry's leg could not name its connection, another process", HandshakeOwner{"sk:1", "p1"}, HandshakeOwner{"", "p2"}, false, false},
+		{"nothing known on the entry", HandshakeOwner{"sk:1", "p1"}, HandshakeOwner{}, false, true},
+		{"nothing known on the consumer", HandshakeOwner{}, HandshakeOwner{"sk:2", "p2"}, false, true},
+		{"nothing known at all", HandshakeOwner{}, HandshakeOwner{}, false, true},
+	} {
+		if got := tc.consumer.Is(tc.entry); got != tc.is {
+			t.Errorf("%s: Is = %v, want %v", tc.name, got, tc.is)
+		}
+		if got := tc.consumer.mayTake(tc.entry); got != tc.may {
+			t.Errorf("%s: mayTake = %v, want %v", tc.name, got, tc.may)
+		}
+	}
+}
+
+// A raw leg's capture is queued ONCE, tagged with its connection, and each
+// decrypted stream is handed its own connection's entry whatever the order in
+// which the legs arrive. Nothing is left behind for another stream.
+func TestPopWaitForPairsByOwner(t *testing.T) {
+	const key = "port:3306"
+	e := func(b byte) TLSHandshakeEntry {
+		return TLSHandshakeEntry{RespPackets: [][]byte{{0x0a, b}}, ReqPackets: [][]byte{{0x20, b}}, ReqTimestamp: time.Unix(int64(b), 0)}
+	}
+	conn := func(i byte) HandshakeOwner { return HandshakeOwner{Conn: fmt.Sprintf("sk:%d", i), Proc: "p1"} }
+	id := func(en TLSHandshakeEntry) byte { return en.RespPackets[0][1] }
+
+	t.Run("own entry first, wherever it sits", func(t *testing.T) {
+		s := NewTLSHandshakeStore()
+		for i := byte(1); i <= 3; i++ {
+			s.PushFor(key, conn(i), e(i))
+		}
+		for _, i := range []byte{3, 1, 2} {
+			got, taker, ok := s.PopWaitFor(key, conn(i), false, 0)
+			if !ok || id(got) != i || taker != conn(i) {
+				t.Fatalf("connection %d got %v (owner %v, %v)", i, got, taker, ok)
+			}
+		}
+		if _, ok := s.PopWait(key, 0); ok {
+			t.Fatal("an entry was left behind")
+		}
+	})
+
+	// An entry whose raw leg could not name its connection is one this stream
+	// may take, but its own is better, even behind it in the queue.
+	t.Run("own entry before an older one it may take", func(t *testing.T) {
+		s := NewTLSHandshakeStore()
+		s.PushFor(key, HandshakeOwner{Proc: "p1"}, e(9))
+		s.PushFor(key, conn(1), e(1))
+		if got, taker, ok := s.PopWaitFor(key, conn(1), false, 0); !ok || id(got) != 1 || taker != conn(1) {
+			t.Fatalf("got %v (owner %v, %v), want its own entry 1", got, taker, ok)
+		}
+		if got, _, ok := s.PopWaitFor(key, conn(1), false, 0); !ok || id(got) != 9 {
+			t.Fatalf("then %v (%v), want the unnamed entry it may take", got, ok)
+		}
+	})
+
+	t.Run("never another known connection's", func(t *testing.T) {
+		s := NewTLSHandshakeStore()
+		s.PushFor(key, conn(2), e(2))
+		if got, _, ok := s.PopWaitFor(key, conn(1), false, 30*time.Millisecond); ok {
+			t.Fatalf("connection 1 took connection 2's entry %v", got)
+		}
+		if got, _, ok := s.PopWaitFor(key, conn(2), true, 0); !ok || id(got) != 2 {
+			t.Fatal("connection 2 lost its entry")
+		}
+	})
+
+	t.Run("a stream that cannot name its connection takes the oldest of its own process", func(t *testing.T) {
+		s := NewTLSHandshakeStore()
+		s.PushFor(key, HandshakeOwner{Conn: "sk:9", Proc: "p2"}, e(9)) // another app
+		s.PushFor(key, conn(1), e(1))
+		s.PushFor(key, conn(2), e(2))
+		got, taker, ok := s.PopWaitFor(key, HandshakeOwner{Proc: "p1"}, false, 0)
+		if !ok || id(got) != 1 || taker != conn(1) {
+			t.Fatalf("got %v (owner %v, %v), want the oldest of its process", got, taker, ok)
+		}
+		if got, _, ok := s.PopWaitFor(key, HandshakeOwner{Proc: "p3"}, false, 0); ok {
+			t.Fatalf("a third process took %v", got)
+		}
+	})
+
+	t.Run("ownOnly takes nothing that is not provably its own", func(t *testing.T) {
+		s := NewTLSHandshakeStore()
+		s.PushFor(key, HandshakeOwner{Proc: "p1"}, e(1))
+		for _, c := range []HandshakeOwner{conn(1), {Proc: "p1"}, {}} {
+			if got, _, ok := s.PopWaitFor(key, c, true, 0); ok {
+				t.Fatalf("%v took %v with ownOnly", c, got)
+			}
+		}
+	})
+
+	t.Run("a consumer with no identity takes in arrival order, as Pop always did", func(t *testing.T) {
+		s := NewTLSHandshakeStore()
+		s.PushFor(key, conn(2), e(2))
+		s.Push(key, e(1))
+		if got, ok := s.PopWait(key, 0); !ok || id(got) != 2 {
+			t.Fatalf("PopWait = %v, %v; want the oldest", got, ok)
+		}
+	})
+
+	t.Run("a waiter wakes for its own entry and not for another's", func(t *testing.T) {
+		s := NewTLSHandshakeStore()
+		got := make(chan byte, 1)
+		go func() {
+			en, _, ok := s.PopWaitFor(key, conn(1), false, 2*time.Second)
+			if !ok {
+				got <- 0
+				return
+			}
+			got <- id(en)
+		}()
+		time.Sleep(20 * time.Millisecond)
+		s.PushFor(key, conn(2), e(2)) // wakes the waiter, which must keep waiting
+		time.Sleep(20 * time.Millisecond)
+		s.PushFor(key, conn(1), e(1))
+		if g := <-got; g != 1 {
+			t.Fatalf("the waiter took %d, want its own 1", g)
+		}
+		if en, _, ok := s.PopWaitFor(key, conn(2), true, 0); !ok || id(en) != 2 {
+			t.Fatal("the other connection's entry is gone")
+		}
+	})
+
+	t.Run("an entry put back keeps its owner", func(t *testing.T) {
+		s := NewTLSHandshakeStore()
+		s.PushFor(key, conn(1), e(1))
+		en, taker, _ := s.PopWaitFor(key, HandshakeOwner{Proc: "p1"}, false, 0)
+		s.PushFor(key, taker, en) // the borrower failed before using it
+		if got, _, ok := s.PopWaitFor(key, conn(1), true, 0); !ok || id(got) != 1 {
+			t.Fatal("the owner could not find its entry after it was put back")
+		}
+	})
 }

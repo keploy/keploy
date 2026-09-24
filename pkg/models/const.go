@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/fatih/color"
@@ -225,6 +226,41 @@ func CapturedReqTime(ctx context.Context) time.Time {
 // context doesn't carry a captured-time source.
 func CapturedRespTime(ctx context.Context) time.Time {
 	return capturedTime(ctx, CapturedRespTimeKey)
+}
+
+// DstDialerKey holds a DstDialer for the enclosing connection (see
+// DstDialerFrom).
+const DstDialerKey contextKey = "dstDialer"
+
+// DstDialer opens keploy's OWN TCP connection to a recorded connection's
+// destination address, from the network namespace that connection was made in.
+//
+// When it cannot dial from that namespace at all (it cannot be entered, or is
+// gone), its error wraps ErrDstDialerUnavailable: that says something about
+// this one connection, not about the destination, so it must not be taken as
+// the server failing for every other connection to it.
+type DstDialer func(ctx context.Context, addr string) (net.Conn, error)
+
+// ErrDstDialerUnavailable is wrapped by a DstDialer's error when the dialer
+// could not dial from its connection's network namespace at all.
+var ErrDstDialerUnavailable = errors.New("the connection's network namespace cannot be dialled from")
+
+// DstDialerFrom returns the dialer the capture layer installed for this
+// connection, or nil. nil means dialling from keploy's own network namespace
+// reaches the same server the application reached.
+//
+// A capture layer installs one when that is not true: the connection was made
+// from another network namespace and its destination is namespace-local
+// (AddrIsNetnsLocal), so the same address from keploy's namespace is a
+// different server or nothing at all. The enterprise DaemonSet agent runs
+// hostNetwork, so a pod's "127.0.0.1:3306" dialled from the agent reaches the
+// NODE's loopback.
+func DstDialerFrom(ctx context.Context) DstDialer {
+	if ctx == nil {
+		return nil
+	}
+	d, _ := ctx.Value(DstDialerKey).(DstDialer)
+	return d
 }
 
 func capturedTime(ctx context.Context, key contextKey) time.Time {
