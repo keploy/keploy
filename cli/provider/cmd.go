@@ -655,7 +655,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	viper.SetEnvPrefix("KEPLOY")
 
 	// 3) Nested flag binding (your existing util)
-	if err := utils.BindFlagsToViper(c.logger, cmd, ""); err != nil {
+	if err := utils.BindFlagsToViper(c.logger, cmd, mockViperPrefix(cmd)); err != nil {
 		errMsg := "failed to bind cmd specific flags to viper"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
@@ -746,6 +746,14 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	// 8) Persist the path used
 	c.cfg.ConfigPath = configPath
 	return nil
+}
+
+// mockViperPrefix keeps `keploy mock record` flags out of the record.* config section, whose passThroughPorts holds rules, not ports.
+func mockViperPrefix(cmd *cobra.Command) string {
+	if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		return "mock"
+	}
+	return ""
 }
 
 // keployConfigNames are the files that are keploy's configuration, in the
