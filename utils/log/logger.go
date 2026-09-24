@@ -2,7 +2,6 @@
 package log
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -13,7 +12,6 @@ import (
 
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
-	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -122,7 +120,10 @@ var LogCfg zap.Config
 //   - everything else (zap.Any over http.Header, protocol structs, byte
 //     packets, reflect-marshaled values) — those only exist as text after
 //     zap's encoder runs. RedactEncoded operates on that final text, so it
-//     catches anything the field-level pass couldn't reach.
+//     catches anything the field-level pass couldn't reach. It sees the
+//     line without the reset the encoder may end it with, and a line
+//     it changes goes through the encoder's terminal rule again (see
+//     redactingWriter), so it may return any text.
 //
 // Implementations MUST be safe for concurrent use — the methods are called
 // on the log hot path from any goroutine.
@@ -208,22 +209,28 @@ func (c *redactingCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 }
 
 // redactingWriter wraps a zapcore.WriteSyncer and runs the active Redactor's
-// RedactEncoded pass on every byte slice before it reaches the sink. This is
-// the last line of defence for fields that zap encodes via reflection
-// (zap.Any, zap.Binary, zap.ByteString) — the field-level pass on Core.Write
-// never sees those as strings, but by the time zap calls sink.Write the
-// whole log line is a single formatted byte slice we can scan.
+// RedactEncoded pass on every line before it reaches the sink. This is the
+// last line of defence for fields that zap encodes via reflection (zap.Any,
+// zap.Binary, zap.ByteString) — the field-level pass on Core.Write never
+// sees those as strings, but by the time zap calls sink.Write the whole log
+// line is a single formatted byte slice we can scan.
 //
-// Wrapping at the writer level (rather than the encoder) is deliberate: it
-// works the same regardless of which encoder built the line, so the console
-// path, the JSON path (ChangeColorEncoding), and any future encoder choice
-// all get the same post-serialization scrub.
+// It carries the encoder whose lines it writes, because a redactor can undo
+// what that encoder made safe for the terminal: enterprise's keeps ESC, '['
+// and ';' and maps each digit to a digit and each letter to a letter, which
+// turns an SGR colour into a cursor move or a request the terminal answers
+// into the user's input. So a line the redactor changed goes through the
+// encoder's rule again, with its line ending, and the rule stays the last
+// thing to touch a line before the sink. A line it left alone is already
+// under the rule. consoleCore pairs the encoder of every logger this package
+// builds with a redactingWriter this way, the --disable-ansi one included.
 type redactingWriter struct {
 	inner zapcore.WriteSyncer
+	enc   consoleEncoder
 }
 
-func wrapWriter(w zapcore.WriteSyncer) zapcore.WriteSyncer {
-	return &redactingWriter{inner: w}
+func wrapWriter(w zapcore.WriteSyncer, enc consoleEncoder) zapcore.WriteSyncer {
+	return &redactingWriter{inner: w, enc: enc}
 }
 
 func (w *redactingWriter) Write(p []byte) (int, error) {
@@ -231,14 +238,24 @@ func (w *redactingWriter) Write(p []byte) (int, error) {
 	if r == nil {
 		return w.inner.Write(p)
 	}
-	// RedactEncoded is byte-length-preserving (Redact substitutes within
-	// the same character class), so the redacted slice has len(p). We
-	// transform p, hand the result to the sink, and report success in
+	// We transform p, hand the result to the sink, and report success in
 	// terms of p — the io.Writer contract is "wrote n bytes from p"; the
 	// transformation is invisible to the caller. On error, return 0 so
 	// the caller can retry the original p without trying to reason about
 	// partial writes of redacted text.
-	if _, err := w.inner.Write([]byte(r.RedactEncoded(string(p)))); err != nil {
+	//
+	// The redactor sees the line without the reset the encoder ended it
+	// with: a redactor that rewrites the value before it, as enterprise's
+	// does to the rest of an "Authorization: " line, would rewrite the reset
+	// too, into junk text, and the rule puts one back if the line needs it.
+	line, text := p, w.enc.withoutEndReset(string(p))
+	if redacted := r.RedactEncoded(text); redacted != text {
+		out := linePool.Get()
+		defer out.Free()
+		w.enc.sanitizeRewritten(out, redacted)
+		line = out.Bytes()
+	}
+	if _, err := w.inner.Write(line); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -246,47 +263,6 @@ func (w *redactingWriter) Write(p []byte) (int, error) {
 
 func (w *redactingWriter) Sync() error {
 	return w.inner.Sync()
-}
-
-// ANSI-friendly console encoder
-type ansiConsoleEncoder struct {
-	*zapcore.EncoderConfig
-	zapcore.Encoder
-}
-
-func NewANSIConsoleEncoder(cfg zapcore.EncoderConfig) zapcore.Encoder {
-	return ansiConsoleEncoder{
-		EncoderConfig: &cfg,
-		Encoder:       zapcore.NewConsoleEncoder(cfg),
-	}
-}
-
-func (e ansiConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (*buffer.Buffer, error) {
-	buf, err := e.Encoder.EncodeEntry(ent, fields)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert escaped unicode sequences back to raw ANSI codes
-	bytes := buf.Bytes()
-	bytes = replaceAll(bytes, []byte("\\u001b"), []byte("\u001b"))
-	bytes = replaceAll(bytes, []byte("\\u001B"), []byte("\u001b"))
-
-	buf.Reset()
-	buf.AppendString(string(bytes))
-	return buf, nil
-}
-
-// replaceAll replaces all occurrences of old with new in the byte slice
-func replaceAll(s, old, new []byte) []byte {
-	return bytes.Replace(s, old, new, -1)
-}
-
-func (e ansiConsoleEncoder) Clone() zapcore.Encoder {
-	return ansiConsoleEncoder{
-		EncoderConfig: e.EncoderConfig,
-		Encoder:       e.Encoder.Clone(),
-	}
 }
 
 // defaultLogCfg is the package's baseline zap.Config, factored out of New so
@@ -304,6 +280,23 @@ func defaultLogCfg() zap.Config {
 	cfg.DisableStacktrace = true
 	cfg.EncoderConfig.EncodeCaller = nil
 	return cfg
+}
+
+// consoleCore builds the core of every logger this package makes: the console
+// encoder cfg asks for — the plain one once ChangeColorEncoding has set
+// --disable-ansi's "console" encoding, the ANSI one otherwise — writing to ws
+// through a redactingWriter that carries the same encoder. Each rebuild takes
+// its encoder from LogCfg through here, so one that runs after --disable-ansi
+// (ChangeLogLevel, AddMode, RedirectToStderr, a debug file sink) keeps ESC off
+// the terminal, as it keeps the sink RedirectToStderr chose.
+func consoleCore(cfg zap.Config, ws zapcore.WriteSyncer, level zapcore.LevelEnabler) zapcore.Core {
+	var encoder consoleEncoder
+	if cfg.Encoding == "console" {
+		encoder = newPlainConsoleEncoder(cfg.EncoderConfig)
+	} else {
+		encoder = newANSIConsoleEncoder(cfg.EncoderConfig)
+	}
+	return zapcore.NewCore(encoder, wrapWriter(ws, encoder), level)
 }
 
 // ensureLogCfg makes the rebuild helpers safe to call before New() has run.
@@ -336,17 +329,10 @@ func New() (*zap.Logger, *os.File, error) {
 		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
 	}
 
-	writer := wrapWriter(zapcore.NewMultiWriteSyncer(primarySyncer(), zapcore.AddSync(logFile)))
-
 	LogCfg = defaultLogCfg()
 
 	// Build the core with our custom encoder
-	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
-	core := zapcore.NewCore(
-		encoder,
-		writer,
-		LogCfg.Level,
-	)
+	core := consoleCore(LogCfg, zapcore.NewMultiWriteSyncer(primarySyncer(), zapcore.AddSync(logFile)), LogCfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
 	return logger, logFile, nil
@@ -355,7 +341,9 @@ func New() (*zap.Logger, *os.File, error) {
 // reattachDebugFileSink wraps logger with a tee branch onto the active
 // debug-file sink (registered via SetDebugFileSink), reusing the
 // existing buffered + capped writer chain so any in-flight rotation
-// state is preserved. No-op when no sink is registered.
+// state is preserved. No-op when no sink is registered. The branch's
+// encoder is the one LogCfg asks for (consoleCore), so the file follows
+// --disable-ansi as the console does.
 //
 // Called by every helper that REBUILDS the core from scratch
 // (AddMode, ChangeLogLevel, RedirectToStderr, ChangeColorEncoding) —
@@ -371,12 +359,7 @@ func reattachDebugFileSink(logger *zap.Logger) *zap.Logger {
 	if sink == nil || sink.buffered == nil {
 		return logger
 	}
-	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
-	debugCore := newRedactingCore(zapcore.NewCore(
-		encoder,
-		wrapWriter(sink.buffered),
-		zap.NewAtomicLevelAt(zap.DebugLevel),
-	))
+	debugCore := newRedactingCore(consoleCore(LogCfg, sink.buffered, zap.NewAtomicLevelAt(zap.DebugLevel)))
 	return logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 		return zapcore.NewTee(c, debugCore)
 	}))
@@ -391,12 +374,7 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	}
 
 	// Use our custom encoder when building
-	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
-	core := zapcore.NewCore(
-		encoder,
-		wrapWriter(primarySyncer()),
-		LogCfg.Level,
-	)
+	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
 	return reattachDebugFileSink(logger), nil
@@ -415,12 +393,7 @@ func RedirectToStderr() (*zap.Logger, error) {
 	// (ChangeLogLevel / AddMode / ChangeColorEncoding) inherits stderr
 	// instead of resetting the logger back onto stdout.
 	setPrimarySink(os.Stderr)
-	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
-	core := zapcore.NewCore(
-		encoder,
-		wrapWriter(primarySyncer()),
-		LogCfg.Level,
-	)
+	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
 	return reattachDebugFileSink(logger), nil
@@ -435,12 +408,7 @@ func AddMode(mode string) (*zap.Logger, error) {
 		enc.AppendString(emoji + " " + modeStr + " " + t.Format(time.RFC3339))
 	}
 
-	encoder := NewANSIConsoleEncoder(cfg.EncoderConfig)
-	core := zapcore.NewCore(
-		encoder,
-		wrapWriter(primarySyncer()),
-		cfg.Level,
-	)
+	core := consoleCore(cfg, primarySyncer(), cfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
 	return reattachDebugFileSink(logger), nil
@@ -448,7 +416,9 @@ func AddMode(mode string) (*zap.Logger, error) {
 
 func ChangeColorEncoding() (*zap.Logger, error) {
 	ensureLogCfg()
-	// For non-color mode, use the standard console encoder.
+	// For non-color mode, use the plain console encoder: the same terminal
+	// safety as the ANSI one, and no ESC reaches the terminal from it. Every
+	// later rebuild reads it back from LogCfg (consoleCore).
 	LogCfg.Encoding = "console"
 	LogCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 
@@ -458,12 +428,7 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 	// would mean the post-encode RedactEncoded pass never runs in
 	// --disable-ansi mode and non-string zap fields (Any/Binary/Reflect)
 	// would leak from that path.
-	encoder := zapcore.NewConsoleEncoder(LogCfg.EncoderConfig)
-	core := zapcore.NewCore(
-		encoder,
-		wrapWriter(primarySyncer()),
-		LogCfg.Level,
-	)
+	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
 	return reattachDebugFileSink(zap.New(newRedactingCore(core))), nil
 }
 
@@ -596,7 +561,9 @@ func (s *DebugFileSink) Written() int64 {
 // is locked at DebugLevel). The new branch is wrapped in its own
 // redactingCore so field-level redaction runs before bytes hit the
 // file, and the writer is wrapped in redactingWriter so post-encode
-// redaction catches non-string fields rendered via reflection.
+// redaction catches non-string fields rendered via reflection. Its
+// encoder is the one LogCfg asks for (consoleCore), so under --disable-ansi
+// no ESC reaches the file either.
 //
 // Caller owns `file`. Call DebugFileSink.Flush before closing the file
 // at end-of-run.
@@ -617,12 +584,7 @@ func AddDebugFileSink(logger *zap.Logger, file *os.File, capBytes int64) (*zap.L
 	// empty. 1s keeps the buffering performance benefit while
 	// bounding data-loss-on-crash to ~1s of records.
 	buffered := &zapcore.BufferedWriteSyncer{WS: capped, Size: 256 << 10, FlushInterval: time.Second}
-	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
-	debugCore := newRedactingCore(zapcore.NewCore(
-		encoder,
-		wrapWriter(buffered),
-		zap.NewAtomicLevelAt(zap.DebugLevel),
-	))
+	debugCore := newRedactingCore(consoleCore(LogCfg, buffered, zap.NewAtomicLevelAt(zap.DebugLevel)))
 	newLogger := logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 		return zapcore.NewTee(c, debugCore)
 	}))
