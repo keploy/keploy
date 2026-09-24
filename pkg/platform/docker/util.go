@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -124,9 +125,11 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 // to the host. Every getAlias platform arm must call it rather than building
 // its own "-p" fragment.
 //
-// The scoping is load-bearing, not cosmetic. The control-plane server is
-// unauthenticated: /agent/pcap/keylog streams live TLS session keys,
-// /agent/stop kills the session and /agent/storemocks injects mock data. In
+// The scoping is load-bearing, not cosmetic. The control-plane server carries
+// serious capability — /agent/pcap/keylog streams live TLS session keys,
+// /agent/stop kills the session and /agent/storemocks injects mock data — and
+// while a bearer token now guards each route (see routes.Authenticate), the
+// port should still not be offered to the whole network. In
 // docker mode the in-container listener deliberately stays on every interface
 // (see agentBindAddr) so docker can forward the published port in, which makes
 // this host-IP scoping the only thing keeping that control plane off every
@@ -147,7 +150,44 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	//TODO: configure the hardcoded port mapping
 	img := DockerConfig.DockerImage + ":v" + utils.Version
 	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
-	envs := GenerateDockerEnvs(DockerConfig)
+	// envParts is assembled and joined rather than concatenated: the alias is
+	// split on single spaces on windows (util_windows.go), so an empty piece
+	// would become an empty argv entry.
+	var envParts []string
+	if base := GenerateDockerEnvs(DockerConfig); base != "" {
+		envParts = append(envParts, base)
+	}
+	// The control-plane token, by reference. `-e NAME=value` would put the
+	// token in the `docker run` argv, where /proc/<pid>/cmdline and `ps` show
+	// it to every user on the box — the ones the token exists to keep out of
+	// the control plane. --env-file passes a path instead, and that file is
+	// 0600.
+	//
+	// A failure here is not fatal: the agent starts unauthenticated and says
+	// so, which is how it behaved before this existed, rather than leaving the
+	// user unable to record at all.
+	switch tokenFile, err := token.WriteFile(); {
+	case err != nil:
+		logger.Warn("could not hand a control-plane token to the agent container; it will start without authentication",
+			zap.Error(err))
+	case osName != "windows":
+		envParts = append(envParts, "--env-file "+shellQuote(tokenFile))
+	// util_windows.go hands this alias to cmd.exe as strings.Split(alias, " ")
+	// — there is no quoting layer, so a path with a space would arrive as two
+	// arguments, and windows temp paths sit under a user profile directory
+	// that can contain one.
+	case !strings.ContainsAny(tokenFile, " \t\"^&|<>"):
+		envParts = append(envParts, "--env-file "+tokenFile)
+	default:
+		// Fall back to the value in argv. On windows another user cannot read
+		// this process's command line without administrator rights, so the
+		// exposure the env file avoids on unix does not apply in the same way
+		// — and an agent that starts unauthenticated would be worse.
+		logger.Debug("agent control-plane token file path is not splittable on windows; passing the token as a docker env instead",
+			zap.String("path", tokenFile))
+		envParts = append(envParts, "-e "+token.Env+"="+token.Session())
+	}
+	envs := strings.Join(envParts, " ")
 	if envs != "" {
 		envs = envs + " "
 	}
@@ -217,9 +257,15 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	// `-p 0:0` outright, so a caller that intentionally sets
 	// ProxyPort=0 (e.g. to run the agent without a listening proxy
 	// socket) would fail the whole docker-run alias build otherwise.
+	//
+	// Published to the host's loopback only, like the agent port: the
+	// application reaches the proxy through the agent's network namespace
+	// (`--network=container:<keploy container>`, see pkg/client/app), not
+	// through this publish, so there is nothing for the other host interfaces
+	// to serve but the interception point itself.
 	proxyPortStr := ""
 	if opts.ProxyPort != 0 {
-		proxyPortStr = " -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort)
+		proxyPortStr = " -p 127.0.0.1:" + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort)
 	}
 	switch osName {
 	case "linux":

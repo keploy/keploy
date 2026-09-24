@@ -147,7 +147,9 @@ function Find-FreePort {
 # is forwarded to the container but bound in the container's own netns,
 # and incoming-proxy-port is not forwarded at all. So:
 #   - --proxy-port is the ESSENTIAL fix: it is host-published as
-#     `-p <proxyPort>:<proxyPort>`, so two jobs on the default 16789
+#     `-p 127.0.0.1:<proxyPort>:<proxyPort>`. Scoping it to loopback
+#     narrows who can reach the interception listener but still
+#     allocates the host port, so two jobs on the default 16789 still
 #     make the second `docker compose up` fail with "port is already
 #     allocated". AgentPort is separately OS-assigned (unique), and the
 #     app host port is $appPort. Making --proxy-port unique per job is

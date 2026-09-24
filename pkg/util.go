@@ -34,6 +34,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/andybalholm/brotli"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -2767,7 +2768,12 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 	return err
 }
 
-// AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
+// AgentHealthTicker continuously monitors the agent health endpoint at specified intervals.
+//
+// When an agent first becomes healthy it also kicks off verifyControlPlaneGuarded
+// for it, off this goroutine and after the readiness signal, so the check never
+// spends the caller's readiness budget. That check can log at error level, which
+// keploy's CI treats as fatal.
 // and signals on the provided channel when the agent becomes available or unavailable.
 // It respects the context timeout and returns when the context is cancelled.
 func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
@@ -2792,6 +2798,16 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 				agentStarted = true
 				select {
 				case agentReadyCh <- true:
+					// Only now, and off this goroutine. The check is a
+					// diagnostic: every caller races this send against a
+					// readiness deadline, and spending any of that budget on
+					// it could fail the user's run with "did not become ready"
+					// against an agent that had just answered its health
+					// check. Detached from ctx for the same reason it runs at
+					// all — the caller cancels this context as soon as it has
+					// its answer, which would cancel the check before it could
+					// report anything.
+					go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
 					return
 				case <-ctx.Done():
 					return
@@ -4144,3 +4160,84 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 	logger.Debug("Final resolved target", zap.String("target", finalTarget))
 	return finalTarget, nil
 }
+
+// controlPlaneProbed records the agents that have already given a conclusive
+// answer to the check below, keyed by their address.
+//
+// Per agent, not per process: a docker-compose `keploy test` restarts the agent
+// for each test-set, and each one gets its own port. A process-wide latch would
+// check the first agent and none of the others — and the one handoff failure
+// that breaks on the SECOND agent and not the first is the token file being
+// consumed and not re-created, which is the specific regression
+// token.WriteFile documents itself as preventing.
+var controlPlaneProbed sync.Map
+
+// verifyControlPlaneGuarded checks that the agent this process is about to use
+// is really enforcing the control-plane token it was handed.
+//
+// Every handoff of that token fails OPEN rather than closed: the 0600 file and
+// --token-file natively, --env-file for `docker run`, and a compose `env_file:`
+// key in a compose file keploy rewrites heavily. If any of them breaks, the
+// agent starts with no token and serves its whole control plane — live TLS
+// session keys included — to anything that can reach the port, while this
+// process keeps sending a header nothing checks. Every request still succeeds,
+// so nothing downstream notices and no test of a working flow can tell.
+//
+// One request settles it: a token that is wrong by construction must be
+// refused. It runs here, at the readiness gate, because this is the one point
+// every mode passes through — native, `docker run` and docker compose, where
+// the agent is started by the user's own `docker compose up` and this process
+// never launches it at all.
+//
+// Reported rather than fatal: an agent that could not be given a token still
+// records and replays, and refusing to run would be the worse outcome. It is
+// logged at error level so that it reaches the operator and fails keploy's own
+// CI, which treats any ERROR in a run as fatal.
+func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI string) {
+	if token.Session() == "" {
+		// This process never had a token to hand over, so there is nothing to
+		// hold the agent to. The agent says so on its own side.
+		return
+	}
+	if _, done := controlPlaneProbed.Load(agentURI); done {
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agentURI+token.ProbePath, nil)
+	if err != nil {
+		logger.Debug("could not build the agent authentication probe", zap.Error(err))
+		return
+	}
+	// Wrong by construction, and a bare client: a request carrying the real
+	// token would be accepted by a guarded agent and prove nothing.
+	req.Header.Set("Authorization", "Bearer not-the-session-token")
+
+	resp, err := (&http.Client{Timeout: controlPlaneProbeTimeout}).Do(req)
+	if err != nil {
+		// The agent answered its health check a moment ago, so a failure here
+		// is not evidence either way. Saying nothing beats crying wolf with an
+		// error that fails CI — and this attempt is deliberately NOT recorded,
+		// so a later readiness gate for the same agent tries again.
+		logger.Debug("agent authentication probe did not complete", zap.Error(err))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Only an answer counts. Marking earlier would let an attempt that proved
+	// nothing retire the check for this agent.
+	controlPlaneProbed.Store(agentURI, struct{}{})
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		logger.Debug("agent control-plane authentication verified", zap.String("agent", agentURI))
+		return
+	}
+
+	utils.LogError(logger, nil, "the agent is NOT enforcing control-plane authentication: it accepted a request carrying an invalid token",
+		zap.Int("probe_status", resp.StatusCode),
+		zap.String("impact", "/agent/pcap/keylog streams live TLS session keys and /agent/stop and /agent/storemocks alter this session; any local user or neighbouring container that can reach the agent port can use them"),
+		zap.String("next_step", "the token this keploy process generated did not reach the agent — check that the agent was started with --token-file (native) or with the "+token.Env+" env file (docker), and report this if you did not change how keploy starts its agent"))
+}
+
+// controlPlaneProbeTimeout bounds the check above. Generous: the agent answered
+// a health check with a 500ms budget immediately before it runs.
+const controlPlaneProbeTimeout = 5 * time.Second

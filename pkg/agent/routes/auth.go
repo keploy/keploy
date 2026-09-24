@@ -1,0 +1,173 @@
+// Package routes defines the routes for the agent service.
+package routes
+
+import (
+	"crypto/subtle"
+	"net/http"
+	"os"
+	"strings"
+
+	"go.keploy.io/server/v3/pkg/agent/token"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+)
+
+// agentRoutePrefix is where DefaultRoutes.New mounts every route.
+const agentRoutePrefix = "/agent"
+
+// isAuthExempt reports whether a path is served without a token. Exactly one
+// is: liveness takes no input, returns no captured data, and callers need it
+// before they can be sure the agent is up at all.
+//
+// A switch rather than a package-level map, so the allow-list cannot be
+// appended to from somewhere else at run time — adding to it should require
+// editing this function.
+func isAuthExempt(path string) bool {
+	switch path {
+	case "/agent/health":
+		return true
+	default:
+		return false
+	}
+}
+
+// Authenticate guards the control-plane API.
+//
+// The API is worth guarding because of what it carries, not because of who can
+// route to it: GET /agent/pcap/keylog streams live TLS session keys,
+// GET /agent/pcap/traffic streams captured traffic, and POST /agent/stop and
+// /agent/storemocks mutate a running session. Binding to loopback (native) and
+// publishing only to the host's loopback (docker) narrowed the network reach,
+// but every one of these is still reachable by:
+//
+//   - any other local user or process on a shared dev box or CI runner, since
+//     loopback is not a privilege boundary;
+//   - any container on the same compose network, and the application under test
+//     itself, which runs in the agent's own network namespace
+//     (network_mode: service:keploy-agent);
+//   - a web page the developer happens to open, for the side-effecting routes.
+//
+// So: a bearer token on every route, compared in constant time.
+//
+// The Origin check is not redundant with the token. A browser cannot read a
+// cross-origin response without CORS, but it CAN send a simple POST — no
+// preflight, no custom headers — and POST /agent/stop ignores its request
+// entirely, so the side effect lands. No programmatic client sends Origin, so
+// refusing requests that carry one costs nothing and closes that path even if a
+// token were to leak.
+func Authenticate(logger *zap.Logger, sessionToken string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Browser-originated: refused before anything else, and refused
+			// even on exempt paths, because the point is to keep pages from
+			// probing the API at all.
+			if r.Header.Get("Origin") != "" {
+				logger.Warn("rejecting agent API request carrying an Origin header; no keploy client sends one, so this is a browser",
+					zap.String("path", r.URL.Path), zap.String("origin", r.Header.Get("Origin")))
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+
+			if isAuthExempt(r.URL.Path) || sessionToken == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if !tokenMatches(r.Header.Get("Authorization"), sessionToken) {
+				// The keploy CLI deliberately sends a wrong token here once per
+				// run to confirm this guard is live. Refusing it is the correct
+				// and expected outcome, so it must not be reported as an
+				// intruder — every healthy run would print a security warning.
+				//
+				// Matched exactly, against the mount prefix these routes are
+				// registered under in DefaultRoutes.New. A suffix match would
+				// also quiet a crafted path like /agent/stop/../<probe>, which
+				// costs nothing to refuse loudly.
+				if r.URL.Path == agentRoutePrefix+token.ProbePath {
+					logger.Debug("refused the keploy control-plane authentication probe, as expected",
+						zap.String("path", r.URL.Path))
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+				logger.Warn("rejecting unauthenticated agent API request",
+					zap.String("path", r.URL.Path), zap.String("remote", r.RemoteAddr),
+					zap.String("next_step", nextStepFor(r.URL.Path)))
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// nextStepFor tells the operator what to do about a rejected request.
+//
+// The scope API gets its own answer because it is the one route a request can
+// legitimately arrive on from code keploy did not write — a user's test runner
+// — and because the published examples for it predate authentication. A runner
+// that swallows the error (the documented pytest fixture does) would otherwise
+// just stop scoping, with nothing but a bare 401 in the log to explain it.
+func nextStepFor(path string) string {
+	if strings.HasPrefix(path, "/agent/scope/") {
+		return "your test runner must send 'Authorization: Bearer $" + token.MockAgentTokenEnv +
+			"' on the scope API; keploy exports that variable into the wrapped command alongside KEPLOY_MOCK_AGENT"
+	}
+	return "this API is reachable only by the keploy process that started this agent; if you are that process, check that the agent was started with a token"
+}
+
+// tokenMatches compares an Authorization header against the session token
+// without leaking the token's contents through timing.
+func tokenMatches(header, sessionToken string) bool {
+	const prefix = "Bearer "
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return false
+	}
+	got := header[len(prefix):]
+	// ConstantTimeCompare is only constant-time for equal lengths, and it
+	// returns 0 on a length mismatch, which already leaks length — acceptable
+	// here since the length is a fixed, public 64 hex chars.
+	return subtle.ConstantTimeCompare([]byte(got), []byte(sessionToken)) == 1
+}
+
+// ConsumeSessionToken resolves the token the process that started this agent
+// passed down, and reports loudly when there isn't one — an agent launched
+// without a token serves its control plane to anything that can reach it.
+//
+// It consumes rather than merely reads: the token file is unlinked once it has
+// been read, so calling this twice is not the same as calling it once.
+//
+// The file comes first because it is the only handoff that survives the common
+// native path: the CLI starts the agent as `sudo keploy agent`, and sudo's
+// default env_reset drops the variable. The environment still serves the
+// container modes, where there is no sudo in between.
+func ConsumeSessionToken(logger *zap.Logger, tokenFile string) string {
+	if tokenFile != "" {
+		tok, err := token.ReadFile(tokenFile)
+		if err == nil {
+			// Read once and then gone: it has done its job, and leaving it
+			// behind leaves the session's token on disk for the rest of the run.
+			if rmErr := os.Remove(tokenFile); rmErr != nil {
+				logger.Debug("could not remove the agent control-plane token file after reading it",
+					zap.String("path", tokenFile), zap.Error(rmErr))
+			}
+			// So that anything in this process that later asks for the
+			// session token gets the one being enforced, rather than
+			// minting an unrelated value that would look just as valid.
+			token.Adopt(tok)
+			return tok
+		}
+		// Not fatal, and not silent: fall through to the environment, and if
+		// that is empty too the warning below says the control plane is open.
+		utils.LogError(logger, err, "could not read the agent control-plane token file passed by the keploy client; falling back to the environment",
+			zap.String("path", tokenFile))
+	}
+
+	tok := token.FromEnv()
+	token.Adopt(tok)
+	if tok == "" {
+		logger.Warn("agent control-plane API is running WITHOUT authentication: the process that started this agent supplied no " + token.Env +
+			" and no --token-file. Any local user or neighbouring container that can reach the port can read TLS session keys and " +
+			"captured traffic, and can stop or alter the session.")
+	}
+	return tok
+}

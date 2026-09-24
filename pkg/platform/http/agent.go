@@ -24,6 +24,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/token"
+
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
@@ -52,11 +54,15 @@ type AgentClient struct {
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	apps         sync.Map
 	client       http.Client
-	conf         *config.Config
-	agentCmd     *exec.Cmd             // Track the agent process
-	agentPTY     *agentUtils.PTYHandle // Track the PTY handle for interactive commands
-	mu           sync.Mutex
-	agentCancel  context.CancelFunc // Function to cancel the agent context
+	// hookClient serves the /hooks/* calls, which want a request deadline.
+	// Built here, not at the call sites, so it carries the bearer token like
+	// every other request to the agent.
+	hookClient  http.Client
+	conf        *config.Config
+	agentCmd    *exec.Cmd             // Track the agent process
+	agentPTY    *agentUtils.PTYHandle // Track the PTY handle for interactive commands
+	mu          sync.Mutex
+	agentCancel context.CancelFunc // Function to cancel the agent context
 	// --from-container only. The user's own container is stopped for the
 	// duration of the session, so SOMETHING has to start it again on every way
 	// out. restoreOnce makes that safe to call from each of them.
@@ -80,7 +86,8 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 	return &AgentClient{
 		logger:       logger,
 		dockerClient: client,
-		client:       http.Client{},
+		client:       agentHTTPClient(token.Session()),
+		hookClient:   agentHTTPClientWithTimeout(token.Session(), agentHookTimeout),
 		conf:         c,
 	}
 }
@@ -646,8 +653,7 @@ func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.hookClient.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-simulate"), zap.Error(err))
 		return nil
@@ -682,8 +688,7 @@ func (a *AgentClient) AfterSimulate(ctx context.Context, tcName string, testSetI
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.hookClient.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-simulate"), zap.Error(err))
 		return nil
@@ -717,8 +722,7 @@ func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.hookClient.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-run"), zap.Error(err))
 		return nil
@@ -754,8 +758,7 @@ func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.hookClient.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-set-compose"), zap.Error(err))
 		return nil
@@ -792,8 +795,7 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.hookClient.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-test-run"), zap.Error(err))
 		return nil
@@ -1373,6 +1375,8 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
+
+	args = appendTokenFileArg(a.logger, args)
 
 	// The PTY and the cached-credentials probe both exist for one reason: sudo
 	// may prompt for a password. On a platform where the agent is never
@@ -1993,6 +1997,25 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		if err := os.Setenv("KEPLOY_MOCK_AGENT", fmt.Sprintf("http://localhost:%d", agentPort)); err != nil {
 			a.logger.Debug("failed to export KEPLOY_MOCK_AGENT", zap.Error(err))
 		}
+		// The scope API is guarded like every other control-plane route, and
+		// this caller is not keploy — it is the user's test runner. Without a
+		// credential the advertised integration would simply 401.
+		//
+		// os.Setenv is process-wide, so strictly every child started after
+		// this inherits it, not only the wrapped runner. That is the same
+		// trust domain: in mock mode the wrapped process is the intended API
+		// client, and the incidental children are keploy's own docker and
+		// shell teardown commands. What matters is the guard: only under
+		// MockMode, so the application under test in a record or test run is
+		// still handed nothing.
+		//
+		// A separate variable from token.Env, so a process that inherits it
+		// presents the token rather than adopting it as one to enforce.
+		if tok := token.Session(); tok != "" {
+			if err := os.Setenv(token.MockAgentTokenEnv, tok); err != nil {
+				a.logger.Debug("failed to export "+token.MockAgentTokenEnv, zap.Error(err))
+			}
+		}
 		session := "record"
 		if opts.Mode == models.MODE_TEST {
 			session = "replay"
@@ -2093,7 +2116,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return nil
 	}
 
-	logger.Debug("running the following command to start agent in docker", zap.String("command", cmd.String()))
+	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
 	// Check if we need PTY for interactive input (e.g., sudo password on Linux)
 	if agentUtils.NeedsPTY() {
