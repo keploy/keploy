@@ -107,6 +107,21 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
+			// Guard every route before any of them are registered. The
+			// control plane streams live TLS session keys and captured
+			// traffic and accepts session-mutating POSTs, and loopback is
+			// not a privilege boundary: other local users, neighbouring
+			// containers, and the application under test (which shares this
+			// agent's network namespace) can all reach it.
+			// Read directly, like client-pid above, so this never depends on
+			// config wiring. An unreadable flag is not a reason to refuse to
+			// start; SessionToken falls back to the environment and warns if
+			// that is empty too.
+			tokenFile, tfErr := cmd.Flags().GetString("token-file")
+			if tfErr != nil {
+				logger.Debug("could not read the token-file flag", zap.Error(tfErr))
+			}
+			router.Use(routes.Authenticate(logger, routes.ConsumeSessionToken(logger, tokenFile)))
 
 			routes.ActiveHooks.New(router, a, logger)
 			go func() {

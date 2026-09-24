@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	nativeDockerClient "github.com/docker/docker/client"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -779,11 +780,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Generate ports
 	var ports []string
 	if opts.AgentPort != 0 {
-		// The agent control-plane HTTP server is unauthenticated (it streams
-		// live TLS session keys on /agent/pcap/keylog and accepts
-		// unauthenticated /agent/stop and /agent/storemocks). Only the local
-		// keploy CLI needs to reach it, so publish it to the host's own
-		// loopback rather than every host-network interface.
+		// The agent control-plane HTTP server streams live TLS session keys
+		// on /agent/pcap/keylog and accepts session-mutating POSTs on
+		// /agent/stop and /agent/storemocks. Requests carry a bearer token
+		// (see routes.Authenticate); publishing to the host's own loopback
+		// rather than every host-network interface narrows who can reach the
+		// port in the first place.
 		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.AgentPort, opts.AgentPort))
 	}
 	if opts.ProxyPort != 0 {
@@ -934,6 +936,28 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 				"Review and allow only what your security policy permits."},
 			{Kind: yaml.SequenceNode, Content: capAdd},
 		},
+	}
+
+	// The control-plane token, by reference. Not an inline `environment:`
+	// entry: this compose file is written 0644 into the user's project, so an
+	// embedded token would be readable by every local user — the ones the
+	// token exists to keep out of the control plane. The env file itself is
+	// 0600 and lives outside the project.
+	//
+	// The agent needs it because publishing its port to the host's loopback
+	// narrows who can route to it but not who can reach it: every container on
+	// this network can, and so can the application under test, which runs in
+	// the agent's own network namespace.
+	if tokenFile, err := token.WriteFile(); err != nil {
+		idc.logger.Warn("could not hand a control-plane token to the agent container; it will start without authentication",
+			zap.Error(err))
+	} else {
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "env_file"},
+			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: tokenFile},
+			}},
+		)
 	}
 
 	if needsCgroupV2Mount {

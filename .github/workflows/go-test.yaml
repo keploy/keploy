@@ -120,3 +120,12 @@ jobs:
       # ./pkg/agent/proxy/ alone, which dominates either way.
       - name: Running Race Detector (agent proxy)
         run: go test -race -count=1 ./pkg/agent/proxy/...
+
+      # Same argument, different subtree: pkg/agent/token holds the
+      # control-plane token behind a mutex that Session and Adopt share, and a
+      # reader that slipped between them would hand the agent an empty token
+      # and serve the whole control plane unauthenticated. Plain `go test`
+      # cannot see that — the guard's absence is a data race, not a failed
+      # assertion — so the test that covers it only proves anything here.
+      - name: Running Race Detector (agent control-plane token)
+        run: go test -race -count=1 ./pkg/agent/token/...

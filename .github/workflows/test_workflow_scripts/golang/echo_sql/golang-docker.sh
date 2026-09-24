@@ -83,6 +83,18 @@ do_record_iteration() {
         cat "docker-compose-tmp.yaml"
         exit 1
     fi
+    # The agent says this when it was handed no control-plane token. It then
+    # serves /agent/pcap/keylog, /agent/stop and /agent/storemocks to anything
+    # that can reach the port, and the run still passes -- so without this
+    # check a broken token handoff in compose mode is invisible. This is the
+    # docker counterpart to the unauthenticated probe in
+    # test_workflow_scripts/mock/mock-parallel-linux.sh.
+    if grep -q "running WITHOUT authentication" "$log"; then
+        echo "The agent came up with no control-plane token; the compose env_file handoff is broken."
+        cat "$log"
+        cat "docker-compose-tmp.yaml"
+        exit 1
+    fi
     sleep 5
     echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
 }

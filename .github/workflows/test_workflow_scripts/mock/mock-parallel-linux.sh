@@ -34,13 +34,38 @@ PY
 # Record driver: one process, two SEQUENTIAL scopes each reporting its PID, so
 # the mapping ends up t1->[/a mock], t2->[/b mock].
 cat > rec.py <<'PY'
-import os, json, urllib.request, sys, time
+import os, json, urllib.request, urllib.error, sys, time
 AG = os.environ["KEPLOY_MOCK_AGENT"]; PORT = sys.argv[1]; pid = os.getpid()
+def _auth():
+    # The agent guards its control plane with a bearer token and exports it
+    # here for exactly this caller. Absent when recording with an older
+    # released binary, which is why this is conditional rather than required.
+    t = os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
+    return {"Authorization": "Bearer " + t} if t else {}
 def scope(path, name):
     d = json.dumps({"name": name, "pid": pid}).encode()
-    urllib.request.urlopen(urllib.request.Request(AG + path, data=d, headers={"Content-Type": "application/json"}, method="POST"), timeout=5).read()
+    h = {"Content-Type": "application/json"}; h.update(_auth())
+    urllib.request.urlopen(urllib.request.Request(AG + path, data=d, headers=h, method="POST"), timeout=5).read()
 def call(p): return urllib.request.urlopen("http://127.0.0.1:%s%s" % (PORT, p), timeout=5).read()
 time.sleep(3)  # let keploy warm up eBPF redirect so the FIRST call is intercepted (not raced)
+
+# The control plane must REFUSE a caller with no credential. Without this the
+# whole feature can regress to a no-op with a green pipeline: an agent that was
+# handed no token serves everything, and every other assertion here still
+# passes. Conditional on the token existing, so an older RECORD_BIN that
+# predates authentication still runs this lane.
+if os.environ.get("KEPLOY_MOCK_AGENT_TOKEN"):
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            AG + "/agent/scope/begin",
+            data=json.dumps({"name": "unauthenticated-probe", "pid": pid}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST"), timeout=5).read()
+    except urllib.error.HTTPError as e:
+        assert e.code == 401, "expected 401 for an unauthenticated scope call, got %d" % e.code
+    else:
+        raise AssertionError("the agent served /agent/scope/begin to a caller with no token")
+    # And health stays reachable without one, so callers can still find the agent.
+    assert urllib.request.urlopen(AG + "/agent/health", timeout=5).status == 200
 scope("/agent/scope/begin", "t1"); assert call("/a") == b"AAA"; scope("/agent/scope/end", "t1")
 scope("/agent/scope/begin", "t2"); assert call("/b") == b"BBB"; scope("/agent/scope/end", "t2")
 print("RECORD_OK", flush=True)
@@ -50,9 +75,16 @@ PY
 cat > worker.py <<'PY'
 import os, json, urllib.request, sys, time
 AG = os.environ["KEPLOY_MOCK_AGENT"]; PORT = sys.argv[1]; name = sys.argv[2]
+def _auth():
+    # The agent guards its control plane with a bearer token and exports it
+    # here for exactly this caller. Absent when recording with an older
+    # released binary, which is why this is conditional rather than required.
+    t = os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
+    return {"Authorization": "Bearer " + t} if t else {}
 def scope(path):
     d = json.dumps({"name": name, "pid": os.getpid()}).encode()
-    urllib.request.urlopen(urllib.request.Request(AG + path, data=d, headers={"Content-Type": "application/json"}, method="POST"), timeout=5).read()
+    h = {"Content-Type": "application/json"}; h.update(_auth())
+    urllib.request.urlopen(urllib.request.Request(AG + path, data=d, headers=h, method="POST"), timeout=5).read()
 scope("/agent/scope/begin")
 time.sleep(2)  # overlap the two workers' scopes AND let the replay proxy warm up
 try:
