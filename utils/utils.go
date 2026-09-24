@@ -1948,7 +1948,11 @@ func GetContainerIPv4() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("could not find a non-loopback IP for the container")
+	// Tagged, so the agent that cannot start without it says so in its exit
+	// status: a machine or container with no IPv4 address but loopback's
+	// (docker --network none, a sandbox, an IPv6-only host) is the
+	// environment to change, not a privilege to grant.
+	return "", fmt.Errorf("%w: could not find a non-loopback IP for the container", ErrEnvironmentUnsupported)
 }
 
 // GetFullCommandUsed returns the full command-line used to run the current process.

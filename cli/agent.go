@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 
 	"github.com/go-chi/chi/v5"
@@ -38,6 +39,16 @@ func init() {
 	Register("agent", Agent)
 }
 
+// agentFailed separates an agent that died from the ways a healthy one ends.
+// Setup returns nil when the process is stopped before the agent announced its
+// port, and context.Canceled when a serving agent is stopped (SIGTERM from the
+// CLI, docker stop, the kubelet); an error that arrives while the root context
+// is already cancelled is teardown, not the agent failing. Reading any of
+// those as a failure would turn every clean stop into a crash.
+func agentFailed(ctx context.Context, err error) bool {
+	return err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil
+}
+
 func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
@@ -47,9 +58,16 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Every failure below arms a non-zero exit and returns nil: the
+			// failure is already logged, and a returned error would have cobra
+			// print usage on top of it. What must not happen is what used to:
+			// `return nil` alone, so an agent that could not start exited 0 --
+			// and the CLI that launched it, docker, and the kubelet all read
+			// that as a clean finish.
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
+				utils.SetExitCodeOnce(utils.ExitKeployError)
 				return nil
 			}
 
@@ -57,6 +75,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			var ok bool
 			if a, ok = svc.(agent.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
+				utils.SetExitCodeOnce(utils.ExitKeployError)
 				return nil
 			}
 
@@ -125,6 +144,14 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			err = a.Setup(ctx, startAgentCh)
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")
+				if agentFailed(ctx, err) {
+					// The specific code when the failure carries one: the CLI
+					// that launched this agent reads it back as its own
+					// (pkg/platform/http AgentClient.Setup), which is how a
+					// user is told "grant privileges" apart from "mount
+					// tracefs".
+					utils.SetExitCodeOnce(utils.ExitCodeFor(err))
+				}
 				return nil
 			}
 

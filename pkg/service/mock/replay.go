@@ -40,12 +40,18 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// during bring-up has already mirrored ITS code into utils.ErrCode, so
 		// writing a flat 1 here would have the receipt contradict the exit the
 		// shell sees -- and claim the runner never ran when it had just
-		// exited 7.
+		// exited 7. Keploy's OWN specific code lands there too -- an agent
+		// that could not start for want of privileges (3) or of something in
+		// the environment (6) -- and that one is not the runner's: the test
+		// command never started.
 		code, runner, note := utils.ErrCode, -1, "the test command never ran"
 		failed := FailedBySetup
-		if code == 0 {
+		switch {
+		case code == 0:
 			code = 1
-		} else {
+		case code != utils.ExitKeployError && code == utils.ExitCodeFor(err):
+			// Keploy's own, armed for the failure err describes.
+		default:
 			runner, failed = code, FailedByRunner
 			note = "the test command exited before keploy finished starting"
 		}
@@ -257,6 +263,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if parent.Err() != nil { // user Ctrl+C
 		return nil
 	}
+	if ctx.Err() != nil && (appErr.AppErrorType == models.ErrCtxCanceled || appErr.AppErrorType == "") {
+		// Not the user: something in the run's own errgroup failed while the
+		// test command ran -- the agent died under it -- and the runner was
+		// stopped with it. That is keploy not completing the run. Left as a
+		// cancellation it mirrored nothing, and the replay exited 0 on a
+		// suite that never finished.
+		cause := context.Cause(ctx)
+		utils.LogError(m.logger, cause, "the replay did not finish")
+		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: cause}
+	}
 
 	// 9. Under --on-miss record, append any calls served live-from-upstream to
 	//    the set so the next replay serves them from the mock (VCR new_episodes).
@@ -282,8 +298,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	case models.ErrUnExpected, models.ErrCommandError:
 		runnerExit, failedBy = utils.ErrCode, FailedByRunner
 	default:
-		// ErrInternal and anything else: keploy's side, not the suite's.
-		failedBy = FailedByKeploy
+		// ErrInternal and anything else: keploy's side, not the suite's. The
+		// test command has no exit of its own to report -- keploy failed
+		// before it exited, or stopped it -- and a 0 here read as a suite
+		// that passed.
+		runnerExit, failedBy = -1, FailedByKeploy
 	}
 	// --strict means "fail unless every recorded call was matched". An
 	// unreadable miss list is not proof of that, so it fails too: a
@@ -311,8 +330,12 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//     from the runner's own report, and the --min-coverage floor.
 	bypass := bypassList(m.config.BypassRules)
 	isolated, isolationNote := isolation(runnerExit, policy, counts, bypass)
+	var keployErr string
 	if failedBy == FailedByKeploy {
 		isolated, isolationNote = false, "keploy did not complete the run: "+string(appErr.AppErrorType)
+		if appErr.Err != nil {
+			keployErr = appErr.Err.Error()
+		}
 	}
 	cov, covNote := m.readCoverage(workDir, coverageBefore, isolated)
 	if m.enforceMinCoverage(cov, covNote) {
@@ -342,6 +365,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		ExitCode:       utils.ErrCode,
 		RunnerExitCode: runnerExit,
 		FailedBy:       failedBy,
+		Error:          keployErr,
 		Loaded:         loaded,
 		Consumed:       counts.consumed,
 		Missed:         counts.missed,

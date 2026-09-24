@@ -93,7 +93,7 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	})
 	err := h.load(ctx, opts, setupOpts)
 	if err != nil {
-		return err
+		return privilegeFailure(err)
 	}
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -206,7 +206,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
 		if err != nil {
 			utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
-			return err
+			return tracepointFailure(err, tracefsMounted())
 		}
 		h.socket = socket
 	}

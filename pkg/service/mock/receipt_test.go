@@ -1,8 +1,10 @@
 package mock
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -379,22 +381,114 @@ func TestSetupFailureReplacesTheReceipt(t *testing.T) {
 	}
 }
 
-// A user's Ctrl+C is not a failure: the last completed run's receipt stays.
-func TestCancelledReplayKeepsTheLastReceipt(t *testing.T) {
-	keployDir, _, _ := replayIn(t, replayCase{})
-	before := mustReceipt(t, keployDir)
+// An agent that could not start arms keploy's own specific exit code (3: no
+// privileges, 6: the environment lacks something) before Setup returns. That
+// code is not the runner's: the receipt must say the tests never ran, while
+// still recording the exit the shell sees.
+func TestAKeployExitCodeIsNotTheRunners(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		why  error
+	}{
+		{utils.ExitPrivilegeRequired, utils.ErrPrivilegeRequired},
+		{utils.ExitEnvironmentUnsupported, utils.ErrEnvironmentUnsupported},
+	} {
+		t.Run(fmt.Sprint(tc.code), func(t *testing.T) {
+			repo := t.TempDir()
+			t.Chdir(repo)
+			keployDir := filepath.Join(repo, "keploy")
+			if err := os.MkdirAll(filepath.Join(keployDir, "set"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			base := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+			setupErr := fmt.Errorf("%w: the keploy agent could not start (exit status %d)", tc.why, tc.code)
+			// What pkg/platform/http does on the way out of Setup.
+			instr := &armsThenFails{runWrites: &runWrites{composeInstr: base, setupErr: setupErr}, code: tc.code}
+			cfg := instrConfig(base, utils.Native, "go test ./...")
+			cfg.Path = keployDir
+			cfg.Mock.OnMiss = "fail"
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
 
-	base := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
-	instr := &runWrites{composeInstr: base, setupErr: context.Canceled}
-	cfg := instrConfig(base, utils.Native, "go test ./...")
-	cfg.Path = keployDir
-	cfg.Mock.OnMiss = "fail"
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg)
-	_ = svc.Replay(ctx)
-	if after := mustReceipt(t, keployDir); after.FailedBy != before.FailedBy || !after.Isolated {
-		t.Fatalf("a cancelled run replaced the receipt: %+v", after)
+			if err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background()); err == nil {
+				t.Fatal("a replay whose agent could not start returned no error")
+			}
+			r := mustReceipt(t, keployDir)
+			if r.FailedBy != FailedBySetup || r.RunnerExitCode != -1 || r.IsolationNote != "the test command never ran" {
+				t.Fatalf("the receipt blames the test command for keploy's exit %d: %+v", tc.code, r)
+			}
+			if r.ExitCode != tc.code {
+				t.Fatalf("receipt exit %d, but the process exits %d", r.ExitCode, tc.code)
+			}
+		})
+	}
+}
+
+// armsThenFails arms keploy's exit code and then fails Setup, the order the
+// agent client does both in.
+type armsThenFails struct {
+	*runWrites
+	code int
+}
+
+func (a *armsThenFails) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
+	utils.SetExitCodeOnce(a.code)
+	return a.runWrites.Setup(ctx, cmd, opts)
+}
+
+// A user's Ctrl+C is not a failure, wherever it lands: no error, exit 0, and
+// the last completed run's receipt stays, since it still truthfully describes
+// that run. While the test command runs, the interrupt cancels the run's own
+// context too, which is exactly what keploy's agent dying under it looks like
+// from there; only the caller's context tells the two apart.
+func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
+	for _, tc := range []struct {
+		stage string
+		// What the stopped runner reports: the cancellation, or -- when its
+		// own exit wins Run's select, as when the interrupt reached it too
+		// (a CI job being cancelled signals every process) -- that exit.
+		runExit models.AppError
+	}{
+		{"setup", models.AppError{AppErrorType: models.ErrAppStopped}},
+		{"run", models.AppError{AppErrorType: models.ErrCtxCanceled}},
+		{"run-exit", models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 130}},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			keployDir, _, _ := replayIn(t, replayCase{})
+			// The last completed run was an hour ago, so any receipt this run
+			// writes differs from it.
+			last := mustReceipt(t, keployDir)
+			last.At = last.At.Add(-time.Hour)
+			writeReceipt(zap.NewNop(), keployDir, *last)
+			receiptPath := filepath.Join(keployDir, "set", ReceiptFile)
+			before, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			base := newInstr(t, agentUpFromSetup, false, tc.runExit)
+			instr := &runWrites{composeInstr: base, onRun: cancel}
+			if tc.stage == "setup" {
+				instr = &runWrites{composeInstr: base, setupErr: context.Canceled}
+				cancel()
+			}
+			cfg := instrConfig(base, utils.Native, "go test ./...")
+			cfg.Path = keployDir
+			cfg.Mock.OnMiss = "fail"
+			utils.ErrCode = 0
+
+			if err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(ctx); err != nil {
+				t.Fatalf("an interrupted replay failed: %v", err)
+			}
+			if utils.ErrCode != 0 {
+				t.Fatalf("an interrupted replay exits %d", utils.ErrCode)
+			}
+			if after, err := os.ReadFile(receiptPath); err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("an interrupted replay replaced the last receipt (%v):\n%s", err, after)
+			}
+		})
 	}
 }
 
@@ -436,36 +530,42 @@ func TestMocksFileFollowsTheLoader(t *testing.T) {
 // A compose project that dies while keploy is still starting mirrors its exit
 // code, so the receipt must carry THAT code -- not a flat 1 that contradicts
 // the exit the shell sees, and not "the test command never ran" about a runner
-// that had just exited 7.
+// that had just exited 7. Nor when the runner exited 1: that is keploy's
+// generic code too, but keploy arms it for no failure of its own (a Setup
+// error travels as the error), so a 1 already set is the runner's.
 func TestSetupFailureRecordsTheMirroredExitCode(t *testing.T) {
-	repo := t.TempDir()
-	t.Chdir(repo)
-	keployDir := filepath.Join(repo, "keploy")
-	if err := os.MkdirAll(filepath.Join(keployDir, "set"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
-	instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 7})
-	cfg := instrConfig(instr, utils.DockerCompose, "docker compose run --rm tests")
-	cfg.Path = keployDir
-	cfg.Mock.Name = "set"
-	cfg.Mock.OnMiss = "fail"
-	utils.ErrCode = 0
-	t.Cleanup(func() { utils.ErrCode = 0 })
+	for _, runnerExit := range []int{7, 1} {
+		t.Run(fmt.Sprint(runnerExit), func(t *testing.T) {
+			repo := t.TempDir()
+			t.Chdir(repo)
+			keployDir := filepath.Join(repo, "keploy")
+			if err := os.MkdirAll(filepath.Join(keployDir, "set"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
+			instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: runnerExit})
+			cfg := instrConfig(instr, utils.DockerCompose, "docker compose run --rm tests")
+			cfg.Path = keployDir
+			cfg.Mock.Name = "set"
+			cfg.Mock.OnMiss = "fail"
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
 
-	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg)
-	if err := svc.Replay(context.Background()); err == nil {
-		t.Fatal("Replay succeeded against a compose project that died")
-	}
-	r := mustReceipt(t, keployDir)
-	if r.ExitCode != utils.ErrCode {
-		t.Fatalf("receipt exit %d but the process exits %d", r.ExitCode, utils.ErrCode)
-	}
-	if r.ExitCode != 7 || r.RunnerExitCode != 7 || r.FailedBy != FailedByRunner {
-		t.Fatalf("receipt: exit=%d runner=%d failedBy=%q, want the runner's 7", r.ExitCode, r.RunnerExitCode, r.FailedBy)
-	}
-	if r.Isolated || r.Error == "" {
-		t.Fatalf("a run that never replayed anything claims isolation: %+v", r)
+			svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg)
+			if err := svc.Replay(context.Background()); err == nil {
+				t.Fatal("Replay succeeded against a compose project that died")
+			}
+			r := mustReceipt(t, keployDir)
+			if r.ExitCode != utils.ErrCode {
+				t.Fatalf("receipt exit %d but the process exits %d", r.ExitCode, utils.ErrCode)
+			}
+			if r.ExitCode != runnerExit || r.RunnerExitCode != runnerExit || r.FailedBy != FailedByRunner {
+				t.Fatalf("receipt: exit=%d runner=%d failedBy=%q, want the runner's %d", r.ExitCode, r.RunnerExitCode, r.FailedBy, runnerExit)
+			}
+			if r.Isolated || r.Error == "" {
+				t.Fatalf("a run that never replayed anything claims isolation: %+v", r)
+			}
+		})
 	}
 }
 
@@ -498,6 +598,22 @@ func (f *failsGroup) Setup(ctx context.Context, cmd string, opts models.SetupOpt
 		killGroup(ctx)
 	}
 	return f.composeInstr.Setup(ctx, cmd, opts)
+}
+
+// Run is where an agent that dies after coming up takes the run with it: the
+// app runner sees its context cancelled and stops the test command, and says
+// so -- or, at "run-silent", reports nothing at all, the other exit
+// propagateExit leaves unmirrored.
+func (f *failsGroup) Run(ctx context.Context, opts models.RunOptions) models.AppError {
+	switch f.stage {
+	case "run":
+		killGroup(ctx)
+		return models.AppError{AppErrorType: models.ErrCtxCanceled}
+	case "run-silent":
+		killGroup(ctx)
+		return models.AppError{}
+	}
+	return f.composeInstr.Run(ctx, opts)
 }
 
 func (f *failsGroup) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
@@ -570,6 +686,35 @@ func TestAnInternalFailureIsNotAUserInterrupt(t *testing.T) {
 	}
 }
 
+// The agent dying while the test command runs stops the runner with it, which
+// reached the replay as a plain cancellation: nothing mirrored, exit 0, and a
+// CI step went green on a suite that never finished.
+func TestAnAgentDyingMidRunFailsTheReplay(t *testing.T) {
+	for _, stage := range []string{"run", "run-silent"} {
+		t.Run(stage, func(t *testing.T) {
+			keployDir, _, _ := replayIn(t, replayCase{})
+			t.Chdir(filepath.Dir(keployDir))
+			base := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+			cfg := instrConfig(base, utils.Native, "go test ./...")
+			cfg.Path = keployDir
+			cfg.Mock.OnMiss = "fail"
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+
+			_ = New(zap.NewNop(), &failsGroup{composeInstr: base, stage: stage}, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
+			if utils.ErrCode == 0 {
+				t.Fatal("a replay whose agent died mid-run exits 0")
+			}
+			// Keploy stopped the test command, so it has no exit of its own
+			// to report -- a 0 there read as a suite that passed -- and the
+			// receipt says why keploy did not finish.
+			if r := mustReceipt(t, keployDir); r.FailedBy != FailedByKeploy || r.Isolated || r.RunnerExitCode != -1 || !strings.Contains(r.Error, "the agent stopped") {
+				t.Fatalf("receipt: failedBy=%q isolated=%v runner=%d error=%q, want keploy's own failure and why", r.FailedBy, r.Isolated, r.RunnerExitCode, r.Error)
+			}
+		})
+	}
+}
+
 // A panic inside keploy's own app-runner arrives as ErrInternal. Recording it
 // as the runner's failure wrote "the test command failed" into the receipt
 // about a suite that may never have been reached.
@@ -579,8 +724,11 @@ func TestKeploysOwnFailureIsNotTheTestsFailing(t *testing.T) {
 		t.Fatal("an internal failure exited cleanly")
 	}
 	r := mustReceipt(t, keployDir)
-	if r.FailedBy != FailedByKeploy || r.RunnerExitCode != 0 {
+	if r.FailedBy != FailedByKeploy || r.RunnerExitCode != -1 {
 		t.Fatalf("receipt blames the runner for keploy's failure: failedBy=%q runner=%d", r.FailedBy, r.RunnerExitCode)
+	}
+	if r.Error != "the app runner panicked" {
+		t.Fatalf("receipt error %q does not say why keploy did not complete the run", r.Error)
 	}
 	if r.Isolated || !strings.Contains(r.IsolationNote, "keploy did not complete") {
 		t.Fatalf("isolation note: %q (isolated=%v)", r.IsolationNote, r.Isolated)
