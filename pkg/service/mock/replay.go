@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"fmt"
+	"go.keploy.io/server/v3/config"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -111,14 +112,15 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 1. Instrument in mock (test) mode — no ingress port relocation.
 	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
-		Container:     m.config.ContainerName,
-		FromContainer: m.config.FromContainer,
-		CommandType:   m.config.CommandType,
-		DockerDelay:   m.config.BuildDelay,
-		BuildDelay:    m.config.BuildDelay,
-		Mode:          models.MODE_TEST,
-		MockMode:      true,
-		ConfigPath:    m.config.ConfigPath,
+		Container:        m.config.ContainerName,
+		FromContainer:    m.config.FromContainer,
+		CommandType:      m.config.CommandType,
+		DockerDelay:      m.config.BuildDelay,
+		BuildDelay:       m.config.BuildDelay,
+		Mode:             models.MODE_TEST,
+		MockMode:         true,
+		ConfigPath:       m.config.ConfigPath,
+		PassThroughPorts: config.GetByPassPorts(m.config),
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the

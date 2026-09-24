@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go.keploy.io/server/v3/config"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -70,14 +71,15 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 1. Instrument: start the agent, hooks and proxy in mock mode (no ingress
 	//    port relocation — the runner is not a server).
 	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
-		Container:     m.config.ContainerName,
-		FromContainer: m.config.FromContainer,
-		CommandType:   m.config.CommandType,
-		DockerDelay:   m.config.BuildDelay,
-		BuildDelay:    m.config.BuildDelay,
-		Mode:          models.MODE_RECORD,
-		MockMode:      true,
-		ConfigPath:    m.config.ConfigPath,
+		Container:        m.config.ContainerName,
+		FromContainer:    m.config.FromContainer,
+		CommandType:      m.config.CommandType,
+		DockerDelay:      m.config.BuildDelay,
+		BuildDelay:       m.config.BuildDelay,
+		Mode:             models.MODE_RECORD,
+		MockMode:         true,
+		ConfigPath:       m.config.ConfigPath,
+		PassThroughPorts: config.GetByPassPorts(m.config),
 	}); err != nil {
 		if parent.Err() != nil {
 			return nil
