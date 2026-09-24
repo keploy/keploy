@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
+	"sync"
 	"time"
 
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
@@ -20,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 // Record mode
@@ -965,7 +968,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 			zap.String("connKey", opts.ConnKey),
 			zap.Uint16("dstPort", dstPort))
 		var err error
-		serverGreetingBuf, err = fetchServerGreeting(ctx, logger, opts)
+		serverGreetingBuf, err = fetchServerGreetingShared(ctx, logger, hsStore, opts)
 		if err != nil {
 			return fmt.Errorf("no server greeting in TLSHandshakeStore for key %s and direct fetch failed: %w", storeKey, err)
 		}
@@ -1377,4 +1380,206 @@ func fetchServerGreeting(ctx context.Context, logger *zap.Logger, opts models.Ou
 	copy(buf, header)
 	copy(buf[4:], payload)
 	return buf, nil
+}
+
+// greetingFetches coalesces concurrent direct greeting fetches for the same
+// store and destination key (see fetchServerGreetingShared).
+var greetingFetches singleflight.Group
+
+// greetingFetchFailureBackoff is how long a failed direct fetch is answered
+// from memory instead of dialled again. A variable so tests can shorten it.
+var greetingFetchFailureBackoff = 15 * time.Second
+
+// greetingFetchFailures remembers the most recent failed fetch per flight key
+// for greetingFetchFailureBackoff. Values are greetingFetchFailure.
+var greetingFetchFailures sync.Map
+
+type greetingFetchFailure struct {
+	err error
+	at  time.Time
+}
+
+// greetingFetchResult is what one flight hands every caller sharing it.
+type greetingFetchResult struct {
+	buf        []byte
+	fromCache  bool // served by an entry remembered before this flight started
+	remembered bool // this flight's fetch was remembered for later connections
+}
+
+// fetchServerGreetingShared is how the post-TLS paths fall back to dialling the
+// server for its greeting. Use it instead of calling fetchServerGreeting
+// directly: it dials at most ONCE per destination, not once per connection.
+//
+// Every dial reads the greeting and hangs up before authenticating, and MySQL
+// counts that as an aborted handshake from the dialling host. Enough of them
+// (max_connect_errors, default 100) blocks the host. When the dial comes from a
+// node's network (a DaemonSet agent), pods reaching the server through SNAT
+// share that host, so the whole node loses its database. Before the capture
+// layer reported real destinations, these dials hit the pod's own IP and failed
+// instantly. Now they reach the server, and a pool of pre-recording connections
+// with nothing captured dialled once per connection at every recording start,
+// each costing up to 3s dial + 2s loopback-fallback dial + 3s read when a
+// firewall drops it.
+//
+// So:
+//   - A fetched greeting is remembered under the connection's ADDRESS-keyed
+//     last-greeting entry (models.HandshakeLastKey), where the existing Last()
+//     fallback in both post-TLS paths finds it for later connections to the same
+//     server. Only the packets are cached: no SSLRequest was captured, and no
+//     ReqTimestamp is stored because timing is per-connection. It never
+//     replaces an entry a raw leg recorded meanwhile, which is richer (it
+//     carries the SSLRequest).
+//   - Concurrent callers for the same store and key share ONE in-flight dial.
+//     The dial is detached from the calling connection's cancellation, so one
+//     stream's teardown does not fail the others waiting on it. It stays bounded
+//     by fetchServerGreeting's own dial and read limits. Each caller stops
+//     waiting when its own ctx ends, and a caller whose ctx has already ended
+//     never STARTS a dial: recording stop is not a reason to reach the server.
+//   - A failed fetch caches nothing as a success. Callers already waiting share
+//     its error, and callers arriving within greetingFetchFailureBackoff get
+//     that error without dialling again. After that the next caller dials. A
+//     reply that is not a HandshakeV10 greeting (for example the ERR packet
+//     MySQL sends a blocked host) counts as a failure.
+//   - It never remembers under a port-only key, which names no server and is
+//     safe only with RememberLastForPort's identity latch, and it never
+//     remembers for a fabricated destination, which fetchServerGreeting refuses
+//     to dial in the first place.
+//
+// The flight runs on its own goroutine, where singleflight re-panics any panic
+// out of reach of every recover, so it recovers its own and fails instead.
+// It also does not log; its callers do, with their own loggers.
+func fetchServerGreetingShared(ctx context.Context, logger *zap.Logger, hsStore *models.TLSHandshakeStore, opts models.OutgoingOptions) ([]byte, error) {
+	lastKey := ""
+	if opts.DstCfg != nil && !opts.DstCfg.AddrFabricated {
+		lastKey = models.HandshakeLastKey(opts.PassThroughScope, opts.DstCfg)
+	}
+	if hsStore == nil || lastKey == "" {
+		// Nothing to remember under and nothing to coalesce on: no store, no
+		// address, or a stand-in address (which fetchServerGreeting refuses).
+		return fetchServerGreeting(ctx, logger, opts)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// The store pointer is part of the key: the address key alone is not unique
+	// across stores (each has its own cache), and a flight must remember into
+	// the store its callers read.
+	flight := fmt.Sprintf("%p|%s", hsStore, lastKey)
+	// Same order as inside the flight: a remembered greeting (for instance one a
+	// raw leg recorded since the last failure) beats a remembered failure.
+	if c, ok := hsStore.Last(lastKey); ok && len(c.RespPackets) > 0 {
+		return c.RespPackets[0], nil
+	}
+	if err := recentGreetingFetchFailure(flight); err != nil {
+		logger.Debug("post-TLS MySQL: not dialling the server for its greeting again; a fetch failed moments ago",
+			zap.String("lastKey", lastKey), zap.Error(err))
+		return nil, err
+	}
+	dialLogger := logger
+	ch := greetingFetches.DoChan(flight, func() (res interface{}, err error) {
+		dialled := false
+		defer func() {
+			if r := recover(); r != nil {
+				res, err = nil, fmt.Errorf("greeting fetch from %s panicked: %v\n%s", opts.DstCfg.Addr, r, debug.Stack())
+				dialled = true
+			}
+			if !dialled {
+				return
+			}
+			if err != nil {
+				greetingFetchFailures.Store(flight, greetingFetchFailure{err: err, at: time.Now()})
+				pruneGreetingFetchFailures()
+			} else {
+				greetingFetchFailures.Delete(flight)
+			}
+		}()
+		// A flight that finished just before this one started may already have
+		// remembered the greeting (so may a raw leg), or may have failed: a
+		// caller can pass the check above just as that flight ends. Either way,
+		// no dial.
+		if c, ok := hsStore.Last(lastKey); ok && len(c.RespPackets) > 0 {
+			return greetingFetchResult{buf: c.RespPackets[0], fromCache: true}, nil
+		}
+		if err := recentGreetingFetchFailure(flight); err != nil {
+			return nil, err
+		}
+		dialled = true
+		buf, err := fetchServerGreeting(context.WithoutCancel(ctx), dialLogger, opts)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateFetchedGreeting(buf); err != nil {
+			return nil, fmt.Errorf("server at %s: %w", opts.DstCfg.Addr, err)
+		}
+		remembered := hsStore.RememberLastIfAbsent(lastKey, models.TLSHandshakeEntry{RespPackets: [][]byte{buf}})
+		return greetingFetchResult{buf: buf, remembered: remembered}, nil
+	})
+	select {
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		res, _ := r.Val.(greetingFetchResult)
+		switch {
+		case res.fromCache:
+			logger.Debug("post-TLS MySQL: greeting was remembered by an earlier connection; not dialling",
+				zap.String("lastKey", lastKey))
+		case r.Shared:
+			logger.Debug("post-TLS MySQL: shared another connection's greeting fetch instead of dialling",
+				zap.String("lastKey", lastKey))
+		case res.remembered:
+			logger.Debug("post-TLS MySQL: remembered a directly fetched greeting for later connections to this destination",
+				zap.String("lastKey", lastKey))
+		}
+		return res.buf, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// recentGreetingFetchFailure returns the failure recorded for flight within
+// greetingFetchFailureBackoff, or nil.
+func recentGreetingFetchFailure(flight string) error {
+	v, ok := greetingFetchFailures.Load(flight)
+	if !ok {
+		return nil
+	}
+	f, ok := v.(greetingFetchFailure)
+	if !ok {
+		return nil
+	}
+	ago := time.Since(f.at)
+	if ago >= greetingFetchFailureBackoff {
+		return nil
+	}
+	return fmt.Errorf("greeting fetch failed %s ago, not retrying for %s: %w",
+		ago.Truncate(time.Millisecond), greetingFetchFailureBackoff, f.err)
+}
+
+// pruneGreetingFetchFailures drops failure records past their backoff so the
+// map holds only live ones: one per destination that failed in the last
+// greetingFetchFailureBackoff.
+func pruneGreetingFetchFailures() {
+	greetingFetchFailures.Range(func(k, v interface{}) bool {
+		if f, ok := v.(greetingFetchFailure); !ok || time.Since(f.at) >= greetingFetchFailureBackoff {
+			greetingFetchFailures.Delete(k)
+		}
+		return true
+	})
+}
+
+// validateFetchedGreeting accepts only a HandshakeV10 greeting packet: protocol
+// version 10 and a payload that decodes. Anything else, such as the ERR packet
+// MySQL sends a blocked host or a truncated reply, must not be cached or reused.
+func validateFetchedGreeting(buf []byte) error {
+	if len(buf) < 5 {
+		return fmt.Errorf("greeting reply too short (%d bytes)", len(buf))
+	}
+	if buf[4] != mysql.HandshakeV10 {
+		return fmt.Errorf("reply is not a HandshakeV10 greeting (first payload byte 0x%02x)", buf[4])
+	}
+	if _, err := connPhase.DecodeHandshakeV10(context.Background(), zap.NewNop(), buf[4:]); err != nil {
+		return fmt.Errorf("undecodable HandshakeV10 greeting: %w", err)
+	}
+	return nil
 }

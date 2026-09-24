@@ -269,6 +269,31 @@ func (s *TLSHandshakeStore) RememberLast(key string, entry TLSHandshakeEntry) {
 	s.rememberLast(key, "", entry)
 }
 
+// RememberLastIfAbsent records entry under a DESTINATION key only when that key
+// holds no servable greeting, and reports whether it wrote. The check and the
+// write are one acquisition of the lock.
+//
+// It exists for a greeting the caller FETCHED from the server rather than
+// captured: such an entry carries no SSLRequest, so it is strictly poorer than
+// one a raw leg records (which the seq==0 path needs to synthesize a
+// replay-matchable HandshakeResponse41). A raw leg that lands while the fetch
+// is in flight must keep its richer entry, and a separate Last-then-RememberLast
+// would overwrite it in that window. The same port-key refusal as RememberLast
+// applies.
+func (s *TLSHandshakeStore) RememberLastIfAbsent(key string, entry TLSHandshakeEntry) bool {
+	if key == "" || strings.HasPrefix(key, lastPortKeyPrefix) {
+		return false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.lastLocked(key, now); ok {
+		return false
+	}
+	s.rememberLastLocked(key, "", entry, now)
+	return true
+}
+
 // IsAmbiguous reports whether a key has been latched: two different servers were
 // seen under it, so nothing recorded there may be reused. Callers use this as
 // POSITIVE evidence that this scope+port serves more than one server, and should
@@ -311,6 +336,11 @@ func (s *TLSHandshakeStore) rememberLast(key string, serverID string, entry TLSH
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.rememberLastLocked(key, serverID, entry, now)
+}
+
+// rememberLastLocked is the body of rememberLast. Callers hold s.mu.
+func (s *TLSHandshakeStore) rememberLastLocked(key string, serverID string, entry TLSHandshakeEntry, now time.Time) {
 	if s.last == nil {
 		s.last = make(map[string]lastGreeting)
 	}

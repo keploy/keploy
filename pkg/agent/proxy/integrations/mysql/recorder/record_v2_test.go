@@ -3,8 +3,10 @@ package recorder
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1182,4 +1184,205 @@ func TestPostTLSHandshakeV2_DoesNotRecycleUndecodableGreeting(t *testing.T) {
 		t.Fatal("an undecodable greeting was put back into the shared FIFO; Push re-stamps its expiry so it " +
 			"would never age out and would trip every later stream to this port")
 	}
+}
+
+// runPostTLSSession drives one RecordV2 session to want mocks without touching
+// t, so several can run concurrently.
+func runPostTLSSession(ctx context.Context, h *v2Harness, want int, patience time.Duration) ([]*models.Mock, error) {
+	done := make(chan error, 1)
+	go func() {
+		cctx, cancel := context.WithTimeout(ctx, patience)
+		defer cancel()
+		done <- RecordV2(cctx, h.logger, h.sess)
+	}()
+	var got []*models.Mock
+	deadline := time.After(patience)
+	for len(got) < want {
+		select {
+		case m, ok := <-h.mocks:
+			if !ok {
+				return got, fmt.Errorf("mocks channel closed after %d of %d", len(got), want)
+			}
+			got = append(got, m)
+		case err := <-done:
+			return got, fmt.Errorf("RecordV2 returned after %d of %d mocks: %v", len(got), want, err)
+		case <-deadline:
+			return got, fmt.Errorf("timed out after %d of %d mocks", len(got), want)
+		}
+	}
+	h.closeStreams()
+	if err := <-done; err != nil {
+		return got, fmt.Errorf("RecordV2: %w", err)
+	}
+	return got, nil
+}
+
+// Pooled connections opened before the recording started reach the V2
+// post-TLS path with nothing captured: no own greeting, and no cached one for
+// their (real, resolved) destination. Each used to dial the server for its
+// greeting. Every dial is an aborted handshake the server counts against the
+// dialling host (max_connect_errors), and a DaemonSet agent dials from the
+// node its SNATed pods share. N such connections to one server must cost ONE
+// dial, each must still record its command, and a later connection must reuse
+// the remembered greeting instead of dialling. A second server gets its own
+// dial.
+func TestRecordV2_PostTLS_ConcurrentPooledConnsDialTheServerOnce(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "150")
+
+	handshakeBuf := cannedHandshakeV10(t)
+	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), handshakeBuf[4:])
+	if err != nil {
+		t.Fatalf("decode handshake v10: %v", err)
+	}
+	srv := startFakeMySQLGreeter(t, handshakeBuf, time.Second)
+	store := models.NewTLSHandshakeStore()
+	ctx := postTLSCtxWithStore(store)
+	const scope = "ns/app/ts0"
+	base := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+
+	session := func(addr string) *v2Harness {
+		h := newV2Harness(t)
+		h.sess.Opts.DstCfg = &models.ConditionalDstCfg{Addr: addr, Port: 3306}
+		h.sess.Opts.PassThroughScope = scope
+		// Joined mid-stream (seq==0): one command, one response.
+		h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base.Add(20*time.Millisecond))
+		h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
+		return h
+	}
+	runAll := func(hs []*v2Harness) [][]*models.Mock {
+		t.Helper()
+		out := make([][]*models.Mock, len(hs))
+		errs := make([]error, len(hs))
+		var wg sync.WaitGroup
+		for i, h := range hs {
+			wg.Add(1)
+			go func(i int, h *v2Harness) {
+				defer wg.Done()
+				// config (greeting-only: nothing captured an SSLRequest) + query.
+				out[i], errs[i] = runPostTLSSession(ctx, h, 2, 10*time.Second)
+			}(i, h)
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("session %d: %v", i, err)
+			}
+		}
+		return out
+	}
+
+	const n = 6
+	batch := make([]*v2Harness, n)
+	for i := range batch {
+		batch[i] = session(srv.addr)
+	}
+	for i, got := range runAll(batch) {
+		if got[0].Name != "config" || len(got[0].Spec.MySQLResponses) < 1 {
+			t.Errorf("session %d: first mock %q has no greeting", i, got[0].Name)
+		}
+		assertQueryMock(t, got[1])
+	}
+	if got := srv.accepted.Load(); got != 1 {
+		t.Fatalf("%d concurrent pooled connections dialled the server %d times, want 1", n, got)
+	}
+
+	// A later connection to the same server: served from the remembered
+	// greeting, no dial.
+	later := runAll([]*v2Harness{session(srv.addr)})
+	assertQueryMock(t, later[0][1])
+	if got := srv.accepted.Load(); got != 1 {
+		t.Fatalf("a later connection dialled again (%d dials) instead of reusing the remembered greeting", got)
+	}
+
+	// A second server is its own destination.
+	srv2 := startFakeMySQLGreeter(t, handshakeBuf, 200*time.Millisecond)
+	other := runAll([]*v2Harness{session(srv2.addr), session(srv2.addr)})
+	assertQueryMock(t, other[0][1])
+	assertQueryMock(t, other[1][1])
+	if a, b := srv.accepted.Load(), srv2.accepted.Load(); a != 1 || b != 1 {
+		t.Fatalf("dials: first server %d, second server %d; want 1 each", a, b)
+	}
+}
+
+// Recording stop during the stash wait must not dial the server: the wait
+// exits on ctx cancellation and the connection is being torn down, so there is
+// nothing to fetch a greeting for — only an aborted handshake to cost the host.
+func TestRecordV2_PostTLS_TeardownDuringStashWaitNeverDials(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "5000")
+	srv := startFakeMySQLGreeter(t, cannedHandshakeV10(t), 0)
+	h := newV2Harness(t)
+	h.sess.Opts.DstCfg = &models.ConditionalDstCfg{Addr: srv.addr, Port: 3306}
+	h.sess.Opts.PassThroughScope = "ns/app/ts0"
+	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), time.Now())
+
+	ctx, cancel := context.WithCancel(postTLSCtxWithStore(models.NewTLSHandshakeStore()))
+	done := make(chan error, 1)
+	go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+	time.Sleep(300 * time.Millisecond) // inside the 5s stash wait
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RecordV2 did not return after teardown")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := srv.accepted.Load(); got != 0 {
+		t.Fatalf("teardown during the stash wait dialled the server %d times", got)
+	}
+}
+
+// A greeting cached from a direct fetch carries no SSLRequest, so it is no
+// better than fetching again, and it must not stop a fresh connection from
+// waiting for its OWN raw leg. That leg carries the SSLRequest (the config
+// mock's hosted shape) and the connection's real timestamp. Only a CAPTURED
+// cached entry is good enough at the primary bound; a fetched one is used
+// where the fetch would have happened, after the overall wait.
+func TestRecordV2_PostTLS_FetchedCacheDoesNotPreemptOwnLateLeg(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_PRIMARY_MS", "100")
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "5000")
+
+	h := newV2Harness(t)
+	h.sess.Opts.DstCfg = &models.ConditionalDstCfg{Addr: "10.0.0.5:3306", Port: 3306}
+	h.sess.Opts.PassThroughScope = "ns/app/ts0"
+	base := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+
+	handshakeBuf := cannedHandshakeV10(t)
+	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), handshakeBuf[4:])
+	if err != nil {
+		t.Fatalf("decode handshake v10: %v", err)
+	}
+	store := models.NewTLSHandshakeStore()
+	// What fetchServerGreetingShared leaves behind for this destination.
+	store.RememberLast(models.HandshakeLastKey(h.sess.Opts.PassThroughScope, h.sess.Opts.DstCfg),
+		models.TLSHandshakeEntry{RespPackets: [][]byte{handshakeBuf}})
+
+	h.pushClient(cannedHandshakeResponse41(t, 2, false), base.Add(5*time.Millisecond))
+	h.pushDest(cannedOK(t, 3, greeting.CapabilityFlags), base.Add(10*time.Millisecond))
+	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base.Add(20*time.Millisecond))
+	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
+
+	// This connection's own raw leg lands well past the primary bound.
+	ownLeg := models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{handshakeBuf},
+		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+		ReqTimestamp: base,
+	}
+	go func() {
+		time.Sleep(700 * time.Millisecond)
+		store.Push(models.HandshakeStoreKey("", 3306), ownLeg)
+	}()
+
+	got := collectPostTLSMocks(t, h, postTLSCtxWithStore(store), 2, 10*time.Second)
+	cfg := got[0]
+	if cfg.Name != "config" {
+		t.Fatalf("first mock = %q, want config", cfg.Name)
+	}
+	if len(cfg.Spec.MySQLRequests) < 2 {
+		t.Fatalf("config mock has %d requests, want the own leg's SSLRequest + HandshakeResponse41: "+
+			"the fetched cache entry pre-empted this connection's own late raw leg", len(cfg.Spec.MySQLRequests))
+	}
+	if !cfg.Spec.ReqTimestampMock.Equal(base) {
+		t.Errorf("config ReqTimestampMock = %v, want the own raw leg's %v", cfg.Spec.ReqTimestampMock, base)
+	}
+	assertQueryMock(t, got[1])
 }

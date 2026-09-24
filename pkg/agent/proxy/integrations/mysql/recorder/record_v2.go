@@ -512,11 +512,14 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	} else {
 		// The pre-TLS handshake was never captured (connection opened before
 		// interception started) and no greeting is cached for the port. Fetch
-		// the greeting directly, matching legacy. fetchServerGreeting refuses
+		// the greeting directly, matching legacy — once per destination, not
+		// once per connection, and remembered for the next one (see
+		// fetchServerGreetingShared: every fetch is an aborted handshake the
+		// server counts against the dialling host). fetchServerGreeting refuses
 		// fabricated destinations (see models.ConditionalDstCfg.AddrFabricated),
 		// so this cannot dial an address the capture layer merely invented.
 		var gErr error
-		greetingBuf, gErr = fetchServerGreeting(ctx, logger, sess.Opts)
+		greetingBuf, gErr = fetchServerGreetingShared(ctx, logger, hsStore, sess.Opts)
 		if gErr != nil {
 			return res, fmt.Errorf("post-TLS V2: no greeting in store (key port %d) and direct fetch failed: %w", dstPort, gErr)
 		}
@@ -986,15 +989,18 @@ const (
 //   - up to `primary` (short): wait for this connection's own entry, waking the
 //     instant a Push arrives (the store broadcasts its cond). A merely-late own
 //     leg is absorbed here and stitched with its real salt+timestamp.
-//   - once `primary` elapses AND a greeting is cached for the port: use the
-//     cache immediately (the dropped-leg fast path).
-//   - only when NO greeting is cached yet (the first connection to the port, or
-//     every sibling leg also dropped) keep waiting for the own entry up to
-//     `overall`, since nothing better can serve this connection.
+//   - once `primary` elapses AND a CAPTURED greeting (one carrying its
+//     SSLRequest) is cached for the port: use the cache immediately (the
+//     dropped-leg fast path).
+//   - only when no captured greeting is cached yet (the first connection to the
+//     port, or every sibling leg also dropped) keep waiting for the own entry up
+//     to `overall`, since nothing better can serve this connection. A greeting
+//     cached from a direct fetch is used at that point, in place of fetching
+//     again.
 //
 // ctx cancellation (stream/session teardown) cuts any wait short within one
 // poll slice. On a final miss it returns greetingNone so the caller can
-// fetchServerGreeting / abort cleanly.
+// fetchServerGreetingShared / abort cleanly.
 //
 // It checks the conn-specific key and the port-only key on every pass: in
 // proxyless the raw and decrypted legs are different TCP connections, so only
@@ -1064,7 +1070,18 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 		return models.TLSHandshakeEntry{}, greetingNone
 	}
 	// cachedGreeting returns the port's last-greeting cache entry, if usable.
-	cachedGreeting := func() (models.TLSHandshakeEntry, bool) {
+	//
+	// captured restricts it to entries a raw leg CAPTURED (they carry the
+	// SSLRequest). An entry without one was fetched from the server
+	// (fetchServerGreetingShared) and is no better than fetching again: only the
+	// greeting, no SSLRequest for the config mock. So it is consulted only where
+	// the direct fetch would be, after the overall wait. It must not cut short
+	// the wait for this connection's own late raw leg at the primary bound,
+	// which a captured entry does because it is as good as the own entry.
+	cachedGreeting := func(captured bool) (models.TLSHandshakeEntry, bool) {
+		usable := func(c models.TLSHandshakeEntry) bool {
+			return len(c.RespPackets) > 0 && (!captured || len(c.ReqPackets) > 0)
+		}
 		// A latched port key is POSITIVE proof that this scope+port serves more
 		// than one server. Falling through to the address key would then quietly
 		// answer from the shared placeholder bucket — which carries no identity
@@ -1094,12 +1111,12 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 				// proven is not necessarily this connection's.
 				return models.TLSHandshakeEntry{}, false
 			}
-			if ok && len(c.RespPackets) > 0 {
+			if ok && usable(c) {
 				return c, true
 			}
 		}
 		if lastKey != "" {
-			if c, ok := hsStore.Last(lastKey); ok && len(c.RespPackets) > 0 {
+			if c, ok := hsStore.Last(lastKey); ok && usable(c) {
 				return c, true
 			}
 		}
@@ -1116,7 +1133,7 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 		//    rather than blocking out the full overall window (the dropped-leg
 		//    fast path that keeps the decode inside the CI gate).
 		if !now.Before(primaryDeadline) {
-			if entry, ok := cachedGreeting(); ok {
+			if entry, ok := cachedGreeting(true); ok {
 				return entry, greetingCached
 			}
 		}
@@ -1146,7 +1163,7 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 
 	// Final miss on the own entry: the cache is the last resort before a direct
 	// fetch (it may have been populated by a sibling during the overall wait).
-	if entry, ok := cachedGreeting(); ok {
+	if entry, ok := cachedGreeting(false); ok {
 		return entry, greetingCached
 	}
 	return models.TLSHandshakeEntry{}, greetingNone

@@ -724,3 +724,37 @@ func TestTLSHandshakeStore_PushBoundsQueuePerKey(t *testing.T) {
 			drained, tlsHandshakeMaxQueuePerKey)
 	}
 }
+
+// RememberLastIfAbsent writes a destination key only when it holds nothing
+// servable, and like RememberLast it refuses port keys.
+func TestRememberLastIfAbsent(t *testing.T) {
+	s := NewTLSHandshakeStore()
+	dst := &ConditionalDstCfg{Addr: "10.0.0.5:3306", Port: 3306}
+	key := HandshakeLastKey("scope", dst)
+	fetched := TLSHandshakeEntry{RespPackets: [][]byte{{0x0a}}}
+	rich := TLSHandshakeEntry{RespPackets: [][]byte{{0x0a}}, ReqPackets: [][]byte{{0x20}}}
+
+	if !s.RememberLastIfAbsent(key, fetched) {
+		t.Fatal("an empty key was not written")
+	}
+	if got, ok := s.Last(key); !ok || len(got.RespPackets) != 1 {
+		t.Fatalf("Last after write = %+v, %v", got, ok)
+	}
+	s.RememberLast(key, rich)
+	if s.RememberLastIfAbsent(key, fetched) {
+		t.Fatal("a key holding a servable entry was overwritten")
+	}
+	if got, _ := s.Last(key); len(got.ReqPackets) != 1 {
+		t.Fatalf("the existing entry was replaced: %+v", got)
+	}
+	portKey := HandshakeLastPortKey("scope", 3306)
+	if s.RememberLastIfAbsent(portKey, fetched) {
+		t.Fatal("a port key, which names no server, was written without an identity")
+	}
+	if _, ok := s.Last(portKey); ok {
+		t.Fatal("port key readable after a refused write")
+	}
+	if s.RememberLastIfAbsent("", fetched) {
+		t.Fatal("an empty key was written")
+	}
+}
