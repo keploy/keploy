@@ -223,7 +223,8 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 
 	if len(collection.Items.PostmanItems) > 0 {
 		for _, item := range collection.Items.PostmanItems {
-			if len(item.Item) == 0 {
+			requests := item.CollectRequests()
+			if len(requests) == 0 {
 				continue
 			}
 
@@ -235,12 +236,12 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 			testSetPath := filepath.Join(cwd, "keploy", testSet)
 			testsPath := filepath.Join(testSetPath, "tests")
 
-			for _, testItem := range item.Item {
-				if err := pi.processEmptyResponse(&testItem, globalVariables, basePath); err != nil {
+			for i := range requests {
+				if err := pi.processEmptyResponse(&requests[i], globalVariables, basePath); err != nil {
 					return err
 				}
 
-				if err := pi.writeTestData(testItem, testsPath, globalVariables, &testCounter); err != nil {
+				if err := pi.writeTestData(requests[i], testsPath, globalVariables, &testCounter); err != nil {
 					return fmt.Errorf("failed to write test data: %w", err)
 				}
 			}
@@ -288,9 +289,9 @@ func (pi *PostmanImporter) generateTestSetName() string {
 }
 
 func (pi *PostmanImporter) scanForEmptyResponses(collection *PostmanCollectionStruct) bool {
-
 	for _, item := range collection.Items.PostmanItems {
-		for _, testItem := range item.Item {
+		requests := item.CollectRequests()
+		for _, testItem := range requests {
 			if len(testItem.Response) == 0 {
 				pi.logger.Debug("Empty response found", zap.String("testItem", testItem.Name))
 				return true
@@ -519,8 +520,42 @@ type ItemsContainer struct {
 
 type PostmanItem struct {
 	Name      string              `json:"name"`
-	Variables []map[string]string `json:"variable"`
-	Item      []TestData          `json:"item"`
+	Variables []map[string]string `json:"variable,omitempty"`
+	Item      []PostmanItemNode   `json:"item"`
+}
+
+func (pi *PostmanItem) CollectRequests() []TestData {
+	var reqs []TestData
+	for i := range pi.Item {
+		reqs = append(reqs, pi.Item[i].CollectRequests()...)
+	}
+	return reqs
+}
+
+type PostmanItemNode struct {
+	Name      string                   `json:"name"`
+	Request   *PostmanRequest          `json:"request,omitempty"`
+	Response  []PostmanResponse        `json:"response,omitempty"`
+	Item      []PostmanItemNode        `json:"item,omitempty"`
+	Variables []map[string]interface{} `json:"variable,omitempty"`
+}
+
+func (n *PostmanItemNode) CollectRequests() []TestData {
+	if n.Request != nil {
+		return []TestData{
+			{
+				Name:      n.Name,
+				Request:   *n.Request,
+				Response:  n.Response,
+				Variables: n.Variables,
+			},
+		}
+	}
+	var reqs []TestData
+	for i := range n.Item {
+		reqs = append(reqs, n.Item[i].CollectRequests()...)
+	}
+	return reqs
 }
 
 type TestData struct {
@@ -591,6 +626,16 @@ func (ic *ItemsContainer) UnmarshalJSON(data []byte) error {
 }
 
 func (ic ItemsContainer) MarshalJSON() ([]byte, error) {
+	if len(ic.PostmanItems) > 0 && len(ic.TestDataItems) > 0 {
+		var all []interface{}
+		for _, pi := range ic.PostmanItems {
+			all = append(all, pi)
+		}
+		for _, td := range ic.TestDataItems {
+			all = append(all, td)
+		}
+		return json.Marshal(all)
+	}
 	if len(ic.PostmanItems) > 0 {
 		return json.Marshal(ic.PostmanItems)
 	}
