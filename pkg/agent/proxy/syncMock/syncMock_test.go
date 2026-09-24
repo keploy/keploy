@@ -1948,3 +1948,178 @@ func TestNonStartupMockPrunedFromDuplicateWindowResolve(t *testing.T) {
 		t.Fatalf("pruned mock should leave the buffer; buffer=%d", len(mgr.buffer))
 	}
 }
+
+// A late mock's fate is decided by the window that OWNS it, not by the resolve
+// or flush that happens to find it. With static dedup on, most resolves are
+// duplicates (keep=false), so deciding by the finder dropped a KEPT test's mock
+// whenever it finished decoding after its own window closed — routine for
+// decrypted-TLS mocks, which reach the manager after the plaintext ingress that
+// closes the window — and replay then had no mock for that test. The same rule
+// holds on every path that can find a late mock: ResolveRange's retroactive
+// bin, the periodic FlushOwnedWindows, and DeleteMocksStrictlyBefore.
+
+// httpMockAt builds a per-test outbound HTTP mock requested at reqTS. Whether
+// AddMock tags it IsStartup depends only on the manager's resolved-test count.
+func httpMockAt(reqTS time.Time) *models.Mock { return startupHTTPMock(reqTS) }
+
+// lateMockTestManager returns a manager wired to out and mapping, either inside
+// the startup window or past it.
+func lateMockTestManager(out chan *models.Mock, mapping chan models.TestMockMapping, inStartupWindow bool) *SyncMockManager {
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetOutputChannel(out)
+	mgr.SetMappingChannel(context.Background(), mapping)
+	mgr.SetFirstRequestSignaled()
+	if !inStartupWindow {
+		mgr.resolvedTestCount = models.StartupMockTestCaseWindow
+	}
+	return mgr
+}
+
+// lateMockIn resolves the owning window "test-1" with ownerKeep, then adds a
+// mock whose timestamp is inside it (the late decode). The caller then drives
+// whichever path should find it.
+func lateMockIn(t *testing.T, mgr *SyncMockManager, base time.Time, ownerKeep, startup bool) *models.Mock {
+	t.Helper()
+	mgr.ResolveRange(base, base.Add(5*time.Millisecond), "test-1", ownerKeep, true)
+	late := httpMockAt(base.Add(2 * time.Millisecond))
+	mgr.AddMock(late)
+	if got := mgr.buffer[len(mgr.buffer)-1].TestModeInfo.IsStartup; got != startup {
+		t.Fatalf("fixture: late mock IsStartup=%v, want %v", got, startup)
+	}
+	return late
+}
+
+// findLateMock drives one of the three paths that can find a late mock.
+func findLateMock(mgr *SyncMockManager, base time.Time, path string, finderKeep bool) {
+	switch path {
+	case "ResolveRange":
+		mgr.ResolveRange(base.Add(100*time.Millisecond), base.Add(105*time.Millisecond), "test-2", finderKeep, true)
+	case "ResolveRange, window containing it":
+		// A concurrent request whose window overlaps the owner's and contains
+		// the mock resolves after the owner did.
+		mgr.ResolveRange(base.Add(time.Millisecond), base.Add(60*time.Millisecond), "test-2", finderKeep, true)
+	case "FlushOwnedWindows":
+		mgr.FlushOwnedWindows()
+	case "DeleteMocksStrictlyBefore":
+		mgr.DeleteMocksStrictlyBefore(base.Add(100 * time.Millisecond))
+	}
+}
+
+func TestLateMockIsDecidedByItsOwningWindow(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name            string
+		path            string
+		ownerKeep       bool
+		finderKeep      bool
+		startup         bool
+		wantSent        bool
+		wantMappingTo   string // "" = no mapping for the late mock
+		regressionOfOld string
+	}{
+		{name: "kept owner, found by a duplicate's resolve", path: "ResolveRange", ownerKeep: true, finderKeep: false,
+			wantSent: true, wantMappingTo: "test-1",
+			regressionOfOld: "a kept test's late mock was dropped because a DUPLICATE's resolve found it"},
+		{name: "duplicate owner, found by a kept resolve", path: "ResolveRange", ownerKeep: false, finderKeep: true,
+			regressionOfOld: "a duplicate's late mock was persisted because a KEPT resolve found it"},
+		{name: "kept owner, found by an overlapping duplicate's resolve", path: "ResolveRange, window containing it",
+			ownerKeep: true, finderKeep: false, wantSent: true, wantMappingTo: "test-1",
+			regressionOfOld: "a kept test's mock was pruned because an overlapping DUPLICATE window contained it"},
+		{name: "duplicate owner, found by an overlapping kept resolve", path: "ResolveRange, window containing it",
+			ownerKeep: false, finderKeep: true, wantSent: true, wantMappingTo: "test-2"},
+		{name: "duplicate owner, startup mock, found by a duplicate's resolve", path: "ResolveRange", startup: true,
+			wantSent: true, regressionOfOld: "a startup-window mock of a duplicate was dropped for decoding late"},
+		{name: "kept owner, found by the flush tick", path: "FlushOwnedWindows", ownerKeep: true,
+			wantSent: true, wantMappingTo: "test-1"},
+		{name: "duplicate owner, found by the flush tick", path: "FlushOwnedWindows",
+			regressionOfOld: "the flush tick persisted a duplicate's late mock (and mapped it to the duplicate)"},
+		{name: "duplicate owner, startup mock, found by the flush tick", path: "FlushOwnedWindows", startup: true,
+			wantSent: true},
+		{name: "kept owner, found by a duplicate's cleanup", path: "DeleteMocksStrictlyBefore", ownerKeep: true,
+			wantSent: true, wantMappingTo: "test-1"},
+		{name: "duplicate owner, found by a duplicate's cleanup", path: "DeleteMocksStrictlyBefore",
+			regressionOfOld: "a duplicate window's debris was rescued as if its window were kept"},
+		{name: "duplicate owner, startup mock, found by a duplicate's cleanup", path: "DeleteMocksStrictlyBefore",
+			startup: true, wantSent: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := make(chan *models.Mock, 4)
+			mapping := make(chan models.TestMockMapping, 4)
+			mgr := lateMockTestManager(out, mapping, tc.startup)
+			base := time.Now().Add(-2 * time.Second)
+			late := lateMockIn(t, mgr, base, tc.ownerKeep, tc.startup)
+			findLateMock(mgr, base, tc.path, tc.finderKeep)
+
+			var sent *models.Mock
+			select {
+			case sent = <-out:
+			default:
+			}
+			if (sent != nil) != tc.wantSent {
+				t.Fatalf("late mock sent=%v, want %v (%s)", sent != nil, tc.wantSent, tc.regressionOfOld)
+			}
+			if sent != nil && !sent.Spec.ReqTimestampMock.Equal(late.Spec.ReqTimestampMock) {
+				t.Fatalf("flushed the wrong mock: %v", sent.Spec.ReqTimestampMock)
+			}
+			if len(mgr.buffer) != 0 {
+				t.Fatalf("buffer=%d, want the late mock handled", len(mgr.buffer))
+			}
+			var mappedTo []string
+			for len(mapping) > 0 {
+				m := <-mapping
+				for _, id := range m.MockIDs {
+					if sent != nil && id == sent.Name {
+						mappedTo = append(mappedTo, m.TestName)
+					}
+				}
+			}
+			switch {
+			case tc.wantMappingTo == "" && len(mappedTo) != 0:
+				t.Fatalf("late mock mapped to %v, want no mapping (a duplicate's testName is synthetic)", mappedTo)
+			case tc.wantMappingTo != "" && (len(mappedTo) != 1 || mappedTo[0] != tc.wantMappingTo):
+				t.Fatalf("late mock mapped to %v, want exactly [%s]", mappedTo, tc.wantMappingTo)
+			}
+		})
+	}
+}
+
+// Concurrent sync-mode requests can leave overlapping windows. When a kept
+// window contains a duplicate one, a mock in the overlap belongs to the kept
+// test: pruning it fails that test's replay, keeping it costs one extra mock.
+func TestLateMockInOverlappingWindowsGoesToTheKeptOne(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"ResolveRange", "ResolveRange, window containing it", "FlushOwnedWindows", "DeleteMocksStrictlyBefore"} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			out := make(chan *models.Mock, 4)
+			mapping := make(chan models.TestMockMapping, 4)
+			mgr := lateMockTestManager(out, mapping, false)
+			base := time.Now().Add(-2 * time.Second)
+			// The short duplicate resolves first, so it is the OLDER window.
+			mgr.ResolveRange(base.Add(20*time.Millisecond), base.Add(30*time.Millisecond), "test-0", false, true)
+			mgr.ResolveRange(base, base.Add(50*time.Millisecond), "test-1", true, true)
+			mgr.AddMock(httpMockAt(base.Add(25 * time.Millisecond)))
+			findLateMock(mgr, base, path, false)
+
+			select {
+			case sent := <-out:
+				var got []string
+				for len(mapping) > 0 {
+					m := <-mapping
+					for _, id := range m.MockIDs {
+						if id == sent.Name {
+							got = append(got, m.TestName)
+						}
+					}
+				}
+				if len(got) != 1 || got[0] != "test-1" {
+					t.Fatalf("overlap mock mapped to %v, want [test-1]", got)
+				}
+			default:
+				t.Fatal("a mock inside a kept window was pruned because an overlapping duplicate window resolved first")
+			}
+		})
+	}
+}
