@@ -91,6 +91,13 @@ type App struct {
 	sourceTTY     bool
 	EnableTesting bool
 	Mode          models.Mode
+	// stdoutObserver also receives the app's stdout while it runs, when set.
+	stdoutObserver io.Writer
+}
+
+// SetStdoutObserver sends a copy of the app's stdout to w while it runs.
+func (a *App) SetStdoutObserver(w io.Writer) {
+	a.stdoutObserver = w
 }
 
 func (a *App) Setup(ctx context.Context) error {
@@ -1646,7 +1653,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	var err error
-	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent)
+	cmdErr := utils.ExecuteCommandTee(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, a.stdoutObserver)
 	// A user-app `docker run --name X` can still lose the container-name race to
 	// the prior test-set's --rm reaper on a saturated CI daemon even after the
 	// pre-run ensureContainerNameFreeWithin verified the name was free — the
@@ -1666,7 +1673,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		a.logger.Warn("docker run exited 125 with the --name still in use (container-name conflict); force-removing the name and retrying",
 			zap.String("container", dockerRunName), zap.Int("attempt", attempt))
 		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
-		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent)
+		cmdErr = utils.ExecuteCommandTee(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, a.stdoutObserver)
 	}
 
 	// Compose mode: a `docker compose up` can fail not because the user's app is
@@ -1739,7 +1746,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 			a.ensureContainerNameFreeWithin(a.keployContainer, preRunRemoveBudget)
 		}
 
-		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent)
+		cmdErr = utils.ExecuteCommandTee(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, a.stdoutObserver)
 	}
 
 	if cmdErr.Err != nil {

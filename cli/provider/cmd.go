@@ -2270,6 +2270,8 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	switch cmd.Name() {
 	case "record":
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
+		cmd.Flags().Bool("allow-parallel-tests", c.cfg.Mock.AllowParallelTests, "Keep recording when tests run at the same time; per-test mock mappings are then best-effort")
+		cmd.Flags().Bool("no-runner-scope", c.cfg.Mock.NoRunnerScope, "Do not read go test output for per-test boundaries (for suites that post scopes themselves)")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
@@ -2278,6 +2280,20 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")
 		cmd.Flags().String("coverage-report", c.cfg.Mock.CoverageReport, "Coverage report the test command writes, when it is not a default location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...)")
 	}
+	return nil
+}
+
+// readMockBool copies a bool flag into dst unless keploy.yml set the key and the flag was left alone.
+func (c *CmdConfigurator) readMockBool(cmd *cobra.Command, flag, key string, dst *bool) error {
+	if !cmd.Flags().Changed(flag) && viper.IsSet(key) {
+		return nil
+	}
+	v, err := cmd.Flags().GetBool(flag)
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the "+flag+" flag")
+		return fmt.Errorf("failed to get the %s flag", flag)
+	}
+	*dst = v
 	return nil
 }
 
@@ -2457,6 +2473,12 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 				return errors.New("failed to get the record-timer flag")
 			}
 			c.cfg.Mock.RecordTimer = d
+		}
+		if err := c.readMockBool(cmd, "allow-parallel-tests", "mock.allowParallelTests", &c.cfg.Mock.AllowParallelTests); err != nil {
+			return err
+		}
+		if err := c.readMockBool(cmd, "no-runner-scope", "mock.noRunnerScope", &c.cfg.Mock.NoRunnerScope); err != nil {
+			return err
 		}
 	case "replay":
 		onMiss, err := cmd.Flags().GetString("on-miss")

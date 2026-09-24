@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
@@ -40,6 +41,11 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 //	}
 
 func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
+	return ExecuteCommandTee(ctx, logger, userCmd, kind, cancel, waitDelay, stdin, nil)
+}
+
+// ExecuteCommandTee is ExecuteCommand that also copies the command's stdout to tee, when set.
+func ExecuteCommandTee(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, tee io.Writer) CmdError {
 	// On Windows, commands are typically executed via 'cmd /C' or 'powershell -Command'
 	// to handle complex shell-like logic in 'userCmd'. 'cmd /C' is the most robust default.
 	cmd := exec.CommandContext(ctx, "cmd", "/C", userCmd)
@@ -65,7 +71,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 	}
 
 	// Set the output of the command
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = teeStdout(tee)
 	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application (Windows):", zap.String("executing_cli", cmd.String()))

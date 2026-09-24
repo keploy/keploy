@@ -359,6 +359,10 @@ type MockCmd struct {
 	// it is not one of the runners' default locations. Relative to the
 	// directory keploy runs in.
 	CoverageReport string `json:"coverageReport" yaml:"coverageReport" mapstructure:"coverageReport"`
+	// AllowParallelTests keeps a record going when tests overlap in time; per-test mappings are then best-effort.
+	AllowParallelTests bool `json:"allowParallelTests" yaml:"allowParallelTests" mapstructure:"allowParallelTests"`
+	// NoRunnerScope stops record from reading the test runner's output for per-test boundaries.
+	NoRunnerScope bool `json:"noRunnerScope" yaml:"noRunnerScope" mapstructure:"noRunnerScope"`
 }
 
 type Contract struct {

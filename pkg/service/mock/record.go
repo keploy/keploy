@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -98,7 +99,8 @@ func (m *mockService) Record(ctx context.Context) error {
 	//    Without this the run dialled an agent that was never started, failed
 	//    to arm the capture, and ended having recorded nothing — while the app
 	//    itself never came up at all.
-	composeAppExit, err := m.startComposeApp(ctx, errGrp, "record")
+	scope := m.runnerScope(ctx)
+	composeAppExit, err := m.startComposeApp(ctx, errGrp, "record", scope.writer())
 	if err != nil {
 		if parent.Err() != nil {
 			return nil
@@ -208,7 +210,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	if composeAppExit != nil {
 		appErr = <-composeAppExit
 	} else {
-		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command, StdoutObserver: scope.writer()})
 	}
 
 	// 8. Drain the trailing mocks, THEN stop capturing.
@@ -250,6 +252,16 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
+	if overlaps := scope.overlapping(); len(overlaps) > 0 {
+		if !m.config.Mock.AllowParallelTests {
+			m.propagateExit(appErr, "record")
+			stopReason = "tests ran at the same time, so their mocks cannot be mapped per test"
+			err := fmt.Errorf("%s (%s); run them one at a time (go test -p 1, no t.Parallel()) or pass --allow-parallel-tests", stopReason, firstFew(overlaps, 10))
+			utils.LogError(m.logger, err, stopReason)
+			return err
+		}
+		m.logger.Warn("tests ran at the same time; per-test mappings are best-effort", zap.Strings("overlaps", overlaps))
+	}
 	if m.mappingDB != nil {
 		if reader, ok := m.instrumentation.(ScopeReader); ok {
 			scopeCtx, cancelScope := context.WithTimeout(persistCtx, agentEpilogueTimeout)
@@ -285,6 +297,26 @@ func (m *mockService) Record(ctx context.Context) error {
 	//     fails when the tests fail.
 	m.propagateExit(appErr, "record")
 	return nil
+}
+
+// runnerScope builds the adapter that turns test output into scope calls, or nil when it is off.
+func (m *mockService) runnerScope(ctx context.Context) *runnerScope {
+	if m.config.Mock.NoRunnerScope || m.mappingDB == nil {
+		return nil
+	}
+	marker, ok := m.instrumentation.(ScopeMarker)
+	if !ok {
+		return nil
+	}
+	return newRunnerScope(ctx, m.logger, marker)
+}
+
+// firstFew joins up to n items, saying how many more there are.
+func firstFew(items []string, n int) string {
+	if len(items) <= n {
+		return strings.Join(items, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(items[:n], ", "), len(items)-n)
 }
 
 // capturedMock is one recorded mock's name + request timestamp + source worker

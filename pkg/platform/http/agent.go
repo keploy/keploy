@@ -1154,11 +1154,14 @@ func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error
 	return stats, nil
 }
 
-func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+func (a *AgentClient) Run(ctx context.Context, opts models.RunOptions) models.AppError {
 	app, err := a.getApp()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app while running")
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
+	}
+	if opts.StdoutObserver != nil {
+		app.SetStdoutObserver(opts.StdoutObserver)
 	}
 
 	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
@@ -2462,6 +2465,42 @@ func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]str
 	if res.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("scope table returned status %d: %s", res.StatusCode, string(b))
+	}
+	return nil
+}
+
+// BeginScope marks the start of a named per-test scope on the agent.
+func (a *AgentClient) BeginScope(ctx context.Context, name string, pid int) error {
+	return a.postScope(ctx, "begin", name, pid)
+}
+
+// EndScope marks the end of a named per-test scope on the agent.
+func (a *AgentClient) EndScope(ctx context.Context, name string, pid int) error {
+	return a.postScope(ctx, "end", name, pid)
+}
+
+func (a *AgentClient) postScope(ctx context.Context, mark string, name string, pid int) error {
+	url := fmt.Sprintf("%s/scope/%s", a.conf.Agent.AgentURI, mark)
+	body, err := json.Marshal(models.ScopeReq{Name: name, Pid: pid})
+	if err != nil {
+		return fmt.Errorf("failed to marshal scope %s: %w", mark, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create scope-%s request: %w", mark, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to post scope %s: %w", mark, err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("scope %s returned status %d: %s", mark, res.StatusCode, string(b))
 	}
 	return nil
 }
