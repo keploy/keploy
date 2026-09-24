@@ -260,6 +260,10 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		pass = false
 	}
 
+	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
+		return AssertionMatch(tc, actualResponse, logger)
+	}
+
 	skipSuccessMsg := false
 	if !pass {
 		isStatusMismatch := false
@@ -535,10 +539,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if err != nil {
 			utils.LogError(logger, err, "failed to print the logs")
 		}
-	}
-
-	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
-		return AssertionMatch(tc, actualResponse, logger)
 	}
 
 	return pass, res
