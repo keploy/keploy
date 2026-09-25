@@ -10,9 +10,19 @@ import "errors"
 //	<runner> the wrapped test command's OWN exit code, propagated verbatim.
 //	         Every CI job depends on this, so Keploy must never overwrite it —
 //	         see mock.propagateExit.
+//	<app>    `keploy record`: the recorded application's OWN exit code, when
+//	         the application ended the recording — exited non-zero, was
+//	         killed (128+N), or the shell could not run it (126, 127). See
+//	         cli.recordExitCode. Like <runner>, it can be any code, the ones
+//	         below included; the "failed to record" line carries it as
+//	         appExitCode, which is how a 3 from the application is told from
+//	         Keploy's own.
 //	1        a generic Keploy-side failure
 //	3,4,6    a SPECIFIC Keploy-side failure, listed below (5 is the enterprise
 //	         build's: a command that needs a session it cannot use)
+//
+// A signal (Ctrl+C, SIGTERM) is a stop, not a failure: a command it ends arms
+// no code for what it meets on the way out (SetFailureExitCode).
 //
 // The specific codes exist so a caller can react correctly instead of pattern
 // matching log text or guessing from a bare 1. The VS Code extension, for
@@ -87,4 +97,37 @@ func SetExitCodeOnce(code int) {
 	if ErrCode == 0 {
 		ErrCode = code
 	}
+}
+
+// SetFailureExitCode arms code as the exit code of a command that failed, and
+// reports whether it did: never over a code already set (SetExitCodeOnce), and
+// never once a signal has ended the run.
+//
+// A run a signal ended did not fail. Ctrl+C is the user saying stop, a SIGTERM
+// is CI or the kubelet saying it, and whatever the command met on the way out
+// -- a context cancelled under its service, an application the same signal
+// killed -- is part of the stop. Decided one command at a time, a stopped
+// `keploy report` or `keploy contract test` would exit 1 where a stopped
+// `keploy record` exits 0, so these commands arm their failures here: record,
+// agent, contract, diff, export, import, normalize, report, sanitize,
+// templatize, update, and test for the two failures before its service runs
+// (replay.Start arms the rest itself, and reads a stop from its context).
+// Whether a signal ended the run is Interrupted's to say: a cancelled context
+// is also the CLI's own teardown, and a signal that lands during that teardown
+// ended nothing (NewCtx).
+//
+// `keploy mock` does not: its exit code is its runner's (<runner>), and it
+// returns a failure of its own as an error, which exits 1 -- cli/mock.go reads
+// a stop from its context, not from this rule. Nor does `keploy config`, which
+// returns its failures as errors.
+//
+// A verdict a service reached before the signal is not a failure of the
+// command, and stands: the tests that had already failed, the wrapped
+// runner's own code. The service arms that itself.
+func SetFailureExitCode(code int) bool {
+	if Interrupted() || ErrCode != 0 {
+		return false
+	}
+	ErrCode = code
+	return true
 }

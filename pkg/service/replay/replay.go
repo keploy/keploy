@@ -497,6 +497,19 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// Registered at the TOP and driven off the named return, so it covers the
 	// returns that happen before there is any verdict to speak of, and so the
 	// next early return added here cannot forget it.
+	//
+	// parentCtx is the context as passed into Start — canceled only by a
+	// real user interrupt (SIGINT via utils.NewCtx). The errgroup-derived
+	// ctx below additionally cancels on ANY goroutine error, so it must NOT
+	// be used to detect user-abort: doing so would suppress TestRunAborted
+	// for exactly the internal graceful-abort paths this telemetry targets.
+	//
+	// Captured BEFORE this defer, which reads it: `g, ctx :=` below reassigns
+	// ctx in this same scope, and the teardown defer cancels that one before
+	// this defer runs, so reading ctx here saw every run as interrupted and
+	// dropped every error Start returned -- `keploy test` over an empty
+	// keploy/ folder exited 0. Pinned by TestStartThatRunsNoTestExitsNonZero.
+	parentCtx := ctx
 	testRunResult := true
 	defer func() {
 		r.completeTestReportMu.RLock()
@@ -509,18 +522,11 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// DEADLINE on some sub-context is a different thing and still counts:
 		// only the root being cancelled is a user saying stop.
 		runErr := err
-		if ctx.Err() != nil {
+		if parentCtx.Err() != nil {
 			runErr = nil
 		}
 		armRunExitCode(runErr, testRunResult, failed)
 	}()
-
-	// parentCtx is the context as passed into Start — canceled only by a
-	// real user interrupt (SIGINT via utils.NewCtx). The errgroup-derived
-	// ctx below additionally cancels on ANY goroutine error, so it must NOT
-	// be used to detect user-abort: doing so would suppress TestRunAborted
-	// for exactly the internal graceful-abort paths this telemetry targets.
-	parentCtx := ctx
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)

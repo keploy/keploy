@@ -60,3 +60,35 @@ func TestKeploysExitCodesAreDistinct(t *testing.T) {
 		taken[code] = name
 	}
 }
+
+// A command's failure is armed once, and never after a signal: a run the user
+// or CI stopped exits as stopped, whatever failed on the way out.
+func TestSetFailureExitCode(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		armed       int
+		interrupted bool
+		wantArmed   bool
+		want        int
+	}{
+		{"a failure", 0, false, true, ExitEnvironmentUnsupported},
+		{"a failure after a code was set", ExitPrivilegeRequired, false, false, ExitPrivilegeRequired},
+		{"a failure after a signal", 0, true, false, 0},
+		{"a failure after a signal and a verdict", 7, true, false, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(func() { ErrCode = 0; ClearInterrupted() })
+			ErrCode = tc.armed
+			ClearInterrupted()
+			if tc.interrupted {
+				MarkInterrupted()
+			}
+			if armed := SetFailureExitCode(ExitEnvironmentUnsupported); armed != tc.wantArmed {
+				t.Errorf("SetFailureExitCode reported armed=%v, want %v", armed, tc.wantArmed)
+			}
+			if ErrCode != tc.want {
+				t.Errorf("exit code %d, want %d", ErrCode, tc.want)
+			}
+		})
+	}
+}

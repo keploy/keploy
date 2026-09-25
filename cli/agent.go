@@ -67,7 +67,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
-				utils.SetExitCodeOnce(utils.ExitKeployError)
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 
@@ -75,7 +75,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			var ok bool
 			if a, ok = svc.(agent.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
-				utils.SetExitCodeOnce(utils.ExitKeployError)
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 
@@ -165,7 +165,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					// (pkg/platform/http AgentClient.Setup), which is how a
 					// user is told "grant privileges" apart from "mount
 					// tracefs".
-					utils.SetExitCodeOnce(utils.ExitCodeFor(err))
+					utils.SetFailureExitCode(utils.ExitCodeFor(err))
 				}
 				return nil
 			}

@@ -62,15 +62,19 @@ func RegisterPreCancelHook(fn func()) {
 // as "a signal ended this" therefore reported every recording the VS Code
 // extension made as interrupted, and the panel told the user their recording
 // had been cut short over a recording that had just succeeded.
+//
+// Nor does a signal that lands AFTER that teardown began end anything: the run
+// was over before it, so NewCtx's handler does not record it.
 var interrupted atomic.Bool
 
-// Interrupted reports whether SIGINT or SIGTERM reached this process.
+// Interrupted reports whether SIGINT or SIGTERM ended this run: reached this
+// process while its root context was still live.
 func Interrupted() bool { return interrupted.Load() }
 
 // MarkInterrupted records that a signal ended this run. The signal handler
-// below calls it; a build that installs its own handler, and a test that
-// simulates one, call it instead of cancelling a context and hoping the two
-// are read as the same thing.
+// below calls it for a signal that lands while the run is live; a build that
+// installs its own handler, and a test that simulates one, call it instead of
+// cancelling a context and hoping the two are read as the same thing.
 func MarkInterrupted() { interrupted.Store(true) }
 
 // ClearInterrupted is for tests, which share one process across cases.
@@ -90,7 +94,16 @@ func NewCtx() context.Context {
 	// Start a goroutine that will cancel the context when a signal is received
 	go func() {
 		sig := <-sigs // this received signal will be inside keploy docker container if running in docker else on the host.
-		MarkInterrupted()
+		// Only while the run is live does a signal end it. Once the CLI has
+		// cancelled this context itself -- `keploy record` whose application
+		// exited, `keploy mock` at the end of every run -- the outcome was
+		// decided before the signal, and Keploy is only tearing down. Marked,
+		// such a signal erased that outcome: an application that exited 7,
+		// then CI's stop signal a moment behind it, and `keploy record`
+		// exited 0.
+		if ctx.Err() == nil {
+			MarkInterrupted()
+		}
 		fmt.Printf("Signal received: %s, canceling context...\n", sig)
 
 		// App-managed graceful-shutdown drain (Kubernetes sidecar path).

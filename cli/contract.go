@@ -43,15 +43,19 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			logger.Info("`keploy contract generate` is a community-maintained OpenAPI spec generator; a fully managed, production-grade version is available as part of Keploy Enterprise")
 
+			// Failures arm a non-zero exit and return nil: they are already
+			// logged, and an error returned to cobra would print usage over them.
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			var contract contractSvc.Service
 			var ok bool
 			if contract, ok = svc.(contractSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 
@@ -64,6 +68,7 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate contract")
+				utils.SetFailureExitCode(utils.ExitCodeFor(err))
 				return nil
 			}
 
@@ -85,21 +90,26 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Failures arm a non-zero exit and return nil: they are already
+			// logged, and an error returned to cobra would print usage over them.
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			var contract contractSvc.Service
 			var ok bool
 			if contract, ok = svc.(contractSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			err = contract.Download(ctx, true)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to download contract")
+				utils.SetFailureExitCode(utils.ExitCodeFor(err))
 			}
 			return nil
 		},
@@ -118,20 +128,25 @@ func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Failures arm a non-zero exit and return nil: they are already
+			// logged, and an error returned to cobra would print usage over them.
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			var contract contractSvc.Service
 			var ok bool
 			if contract, ok = svc.(contractSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			err = contract.Validate(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to validate contract")
+				utils.SetFailureExitCode(utils.ExitCodeFor(err))
 			}
 			return nil
 		},

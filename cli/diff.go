@@ -46,20 +46,25 @@ func Diff(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 				return fmt.Errorf("%s failed to read test-sets flag: %w", utils.Emoji, err)
 			}
 
+			// Failures arm a non-zero exit and return nil: they are already
+			// logged, and an error returned to cobra would print usage over them.
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			var diffService diffSvc.Service
 			var ok bool
 			if diffService, ok = svc.(diffSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy diff service interface")
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 
 			if err := diffService.Compare(ctx, run1, run2, testSets); err != nil {
 				utils.LogError(logger, err, "failed to compare test runs")
+				utils.SetFailureExitCode(utils.ExitCodeFor(err))
 				return nil
 			}
 			return nil
