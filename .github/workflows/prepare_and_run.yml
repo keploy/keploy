@@ -350,7 +350,10 @@ jobs:
           New-Item -Path $lockDir -ItemType Directory -Force | Out-Null
           $timestamp = (Get-Date -UFormat %s)
           $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
-          Set-Content -Path $lockPath -Value "started-$timestamp"
+          # Repository first: cleanup-windows.ps1 asks the Actions API whether
+          # this run is over, since this run's cleanup_windows (the only step
+          # that deletes the lock) is skipped when the run is cancelled.
+          Set-Content -Path $lockPath -Value "$env:GITHUB_REPOSITORY started-$timestamp"
           Write-Host "Created workflow start lock: $lockPath"
 
       # Inline because this runs BEFORE checkout (workspace may not exist).
@@ -1189,6 +1192,10 @@ jobs:
         id: count_stash
         continue-on-error: true
         shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        env:
+          # cleanup-windows.ps1 asks the Actions API whether each lock's run is
+          # over; the token only raises the rate limit (the repo is public).
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/cleanup-windows.ps1'
           if (Test-Path $script) {

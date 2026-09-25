@@ -1,4 +1,4 @@
-# Tests for reap-keploy-containers.ps1 and cleanup-windows.ps1. Plain
+# Tests for reap-keploy-containers.ps1, cleanup-windows.ps1 and take-docker-job-lock.ps1. Plain
 # PowerShell, no Pester, so it runs unchanged under Windows PowerShell 5.1
 # (what the self-hosted runners use) and PowerShell 7 on Linux (what the ubuntu
 # CI job uses):
@@ -67,7 +67,13 @@ switch ($args[0]) {
         Save; exit 0
     }
     { $_ -in 'image', 'volume', 'system' } {
-        $state.pruned = @($state.pruned) + @($args[0]); Save; exit 0
+        # Record each prune, and whether a cleanup's in-progress marker was
+        # down while it ran (FAKE_LOCK_DIR is the lock directory of the case).
+        $what = $args[0]
+        if ($env:FAKE_LOCK_DIR -and -not @(Get-ChildItem -LiteralPath $env:FAKE_LOCK_DIR -Filter 'docker-prune-*.inprogress' -ErrorAction SilentlyContinue).Count) {
+            $what = "$what-unannounced"
+        }
+        $state.pruned = @($state.pruned) + @($what); Save; exit 0
     }
     default { Write-Error "fake docker: unexpected command $($args -join ' ')"; exit 2 }
 }
@@ -271,20 +277,50 @@ try {
 
     # ---- cleanup-windows.ps1 ------------------------------------------------
 
-    function Invoke-Cleanup($locks) {
+    # $locks maps a lock file name to its age in minutes, or to @(age,
+    # content). $runs maps "<run>" or "<run>/<attempt>" to what the Actions API
+    # says of it; anything else is unknown ($null), so age alone decides.
+    function Invoke-Cleanup($locks, $runs = @{}) {
         $lockDir = New-Dir 'locks'
         foreach ($name in $locks.Keys) {
             $p = Join-Path $lockDir $name
-            Set-Content -Path $p -Value 'x'
-            (Get-Item $p).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-$locks[$name])
+            $spec = @($locks[$name])
+            $content = 'x'
+            if ($spec.Count -gt 1) { $content = $spec[1] }
+            Set-Content -Path $p -Value $content
+            (Get-Item $p).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-$spec[0])
         }
-        $r = Invoke-Script $cleanup @{ LockDir = $lockDir; WedgeDir = (New-Dir 'wedge') }
+        # A list, not an array: the closure below gets its own scope, so it can
+        # only add to an object it shares with this function.
+        $asked = New-Object System.Collections.ArrayList
+        $status = {
+            param($repo, $run, $attempt)
+            $key = $run
+            if ($attempt) { $key = "$run/$attempt" }
+            $announced = @(Get-ChildItem -LiteralPath $lockDir -Filter 'docker-prune-*.inprogress').Count -gt 0
+            [void]$asked.Add("$repo#$key$(if (-not $announced) { '-unannounced' })")
+            $runs[$key]
+        }.GetNewClosure()
+        $env:FAKE_LOCK_DIR = $lockDir
+        try {
+            $r = Invoke-Script $cleanup @{ LockDir = $lockDir; WedgeDir = (New-Dir 'wedge'); Repository = 'keploy/keploy'; GetRunStatus = $status }
+        } finally {
+            $env:FAKE_LOCK_DIR = ''
+        }
         $r | Add-Member -NotePropertyName Locks -NotePropertyValue @(Get-ChildItem $lockDir | ForEach-Object { $_.Name } | Sort-Object)
+        $r | Add-Member -NotePropertyName Asked -NotePropertyValue @($asked | Sort-Object)
         $r
     }
     function Pruned($result, [bool]$want) {
         $did = $result.Pruned.Count -gt 0
         if ($did -ne $want) { "pruned=$did, want $want" }
+        $bare = @($result.Pruned | Where-Object { $_ -like '*-unannounced' })
+        if ($bare.Count) { "pruned with no in-progress marker down: $($bare -join ', ')" }
+    }
+    function Asked($result, [string[]]$want) {
+        $got = @($result.Asked) -join ','
+        $exp = @($want | Sort-Object) -join ','
+        if ($got -ne $exp) { "asked the Actions API about [$got], want [$exp]" }
     }
     function Locks($result, [string[]]$want) {
         $got = @($result.Locks) -join ','
@@ -317,6 +353,72 @@ try {
     Set-State @()
     $r = Invoke-Cleanup @{ 'docker-job-1-1-a.lock' = 41; 'prepare-windows-workflow-2.lock' = (25 * 60) }
     Report "once every lock is stale the prune runs" $r @((Pruned $r $true), (Locks $r @()))
+
+    # A cancelled run's cleanup_windows can be cancelled at "Set up job"
+    # (run 35707841215), so its run lock is never deleted by its owner. Its
+    # run being over is what makes it stale, not a day passing.
+    Set-State @()
+    $r = Invoke-Cleanup @{
+        'prepare-windows-workflow-35707841215.lock' = @(90, 'started-1758531582')
+        'prepare-windows-workflow-36092000545.lock' = @(20, 'keploy/keploy started-1758772800')
+        'docker-job-36091939524-1-a.lock'          = @(10, 'keploy/keploy Prepare Binary and Run Workflows win-runner-3')
+    } @{ '35707841215' = 'completed'; '36092000545' = 'in_progress'; '36091939524/1' = 'completed' }
+    Report "locks of runs that are over are deleted at once; a live run's lock blocks the prune" $r @(
+        (Pruned $r $false), (Locks $r @('prepare-windows-workflow-36092000545.lock')),
+        (Asked $r @('keploy/keploy#35707841215', 'keploy/keploy#36092000545', 'keploy/keploy#36091939524/1'))
+    )
+
+    Set-State @()
+    $r = Invoke-Cleanup @{
+        'prepare-windows-workflow-7.lock' = @(30, 'keploy/other started-1')
+        'docker-job-8-2-a.lock'           = @(5, 'keploy/other wf win-runner-1')
+    } @{ '7' = 'gone'; '8/2' = 'completed' }
+    Report "each lock's run is looked up in the repository the lock names, and once all are over the prune runs" $r @(
+        (Pruned $r $true), (Locks $r @()), (Asked $r @('keploy/other#7', 'keploy/other#8/2'))
+    )
+
+    Set-State @()
+    $r = Invoke-Cleanup @{ 'prepare-windows-workflow-9.lock' = 30; 'docker-job-9-1-a.lock' = 45 }
+    Report "a lock past its age bound is stale without asking; when the API cannot answer, age decides" $r @(
+        (Pruned $r $false), (Locks $r @('prepare-windows-workflow-9.lock')), (Asked $r @('keploy/keploy#9'))
+    )
+
+    # ---- take-docker-job-lock.ps1, the job's half of the prune handshake ----
+
+    $takeLock = Join-Path $here 'take-docker-job-lock.ps1'
+    $lockDir = New-Dir 'locks'
+    $savedRepo = $env:GITHUB_REPOSITORY
+    $env:GITHUB_REPOSITORY = 'keploy/keploy'
+    try { $out = @(& $takeLock -LockDir $lockDir -RunId 11 -RunAttempt 3 6>$null) } finally { $env:GITHUB_REPOSITORY = $savedRepo }
+    $problems = @()
+    if ($out.Count -ne 1 -or -not (Test-Path -LiteralPath "$($out[0])")) { $problems += "printed [$($out -join '|')], want the one lock path" }
+    elseif ((Split-Path -Leaf $out[0]) -notmatch '^docker-job-11-3-[0-9a-f]{32}\.lock$') { $problems += "lock named $(Split-Path -Leaf $out[0])" }
+    elseif ("$(Get-Content -LiteralPath $out[0] -TotalCount 1)" -notmatch '^keploy/keploy ') { $problems += "lock does not start with the repository" }
+    Report "the job lock names its run and attempt and starts with its repository" ([pscustomobject]@{ Output = ($out -join "`n") }) $problems
+
+    # A prune announced 3s short of the marker's lifetime: the job waits for
+    # it (here, until the marker ages out; a finishing cleanup deletes it).
+    $lockDir = New-Dir 'locks'
+    $m = Join-Path $lockDir 'docker-prune-0123.inprogress'
+    Set-Content -Path $m -Value 'x'
+    (Get-Item $m).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-15).AddSeconds(3)
+    $t = [Diagnostics.Stopwatch]::StartNew()
+    $out = & $takeLock -LockDir $lockDir -RunId 12 -RunAttempt 1 -PollSeconds 1 *>&1 | Out-String
+    $waited = $t.Elapsed.TotalSeconds
+    Report "a job waits for a prune in progress before using Docker" ([pscustomobject]@{ Output = $out }) @(
+        $(if ($waited -lt 2) { "returned after $([Math]::Round($waited, 1))s, before the prune was over" }),
+        $(if ($out -notmatch 'A Docker prune is in progress') { "did not say it was waiting" })
+    )
+
+    $lockDir = New-Dir 'locks'
+    $m = Join-Path $lockDir 'docker-prune-4567.inprogress'
+    Set-Content -Path $m -Value 'x'
+    (Get-Item $m).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-16)
+    $t = [Diagnostics.Stopwatch]::StartNew()
+    $out = & $takeLock -LockDir $lockDir -RunId 13 -RunAttempt 1 -PollSeconds 1 *>&1 | Out-String
+    Report "a marker left by a killed cleanup is not waited for" ([pscustomobject]@{ Output = $out }) @(
+        $(if ($t.Elapsed.TotalSeconds -ge 1) { "waited $([Math]::Round($t.Elapsed.TotalSeconds, 1))s" })
+    )
 
     # ---- the thresholds against every job that can run on these runners ----
 

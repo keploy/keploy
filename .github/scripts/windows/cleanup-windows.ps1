@@ -16,28 +16,50 @@
 #
 # - Prune: `docker system prune -af --volumes` removes every stopped (including
 #   Created) container and every image, network and volume no container uses,
-#   so it runs only when no lock file is live. A lock is live until it is older
-#   than the longest its holder can legitimately run:
-#     docker-job-*.lock   held by each golang_docker_windows job from before it
-#                         loads its images until its teardown; the job cannot
-#                         outlive its timeout, so older than -MinAgeMinutes
-#                         (the reaper's threshold, >= that timeout) is stale.
-#     anything else       the run-level prepare-windows-workflow-<run>.lock,
-#                         held from build-windows-amd64 until this job; stale
-#                         after -RunLockMaxAgeHours, the age the macOS twin's
-#                         lock sweep also uses.
-#   Stale locks are deleted, so a run that never reached cleanup cannot block
-#   pruning forever. Removing a container no longer forces a prune past live
-#   locks. Lock ages compare the file's write time with the host clock that
-#   wrote it.
+#   so it runs only when no lock file is live. A lock is live while the run
+#   that holds it is not over, and never longer than its holder can
+#   legitimately run:
+#     docker-job-<run>-<attempt>-*.lock   held by each golang_docker_windows
+#                         job from before it builds or loads its images until
+#                         its teardown. Stale once that run attempt has
+#                         completed, or once older than -MinAgeMinutes (the
+#                         reaper's threshold, >= the job's timeout).
+#     prepare-windows-workflow-<run>.lock the run-level lock, held from
+#                         build-windows-amd64 until cleanup_windows. Stale once
+#                         that run has completed, or once older than
+#                         -RunLockMaxAgeHours (the age the macOS twin's lock
+#                         sweep also uses).
+#   Whether a run is over is asked of the Actions API (the run ID is in the
+#   file name, the repository in the file), not inferred from the lock still
+#   being there. Only the run's own cleanup_windows deletes its run lock, and a
+#   run cancelled by a newer push can have that job cancelled at "Set up job",
+#   before any step (run 35707841215); its lock then blocked every prune on
+#   the machine. Nothing used to delete such locks, and 42-45 of them sat in the
+#   directory from at least 2026-09-20, so the no-lock prune never ran. When
+#   the API cannot answer, the age bound alone decides. Stale locks are
+#   deleted. Removing a container never forces a prune past live locks. Lock
+#   ages compare the file's write time with the host clock that wrote it.
+#
+#   A job that takes its lock while a prune is already under way is not saved
+#   by the lock alone, since the check came first. So the prune announces
+#   itself with a marker (docker-prune-*.inprogress) BEFORE it checks the locks,
+#   and a job checks for that marker AFTER writing its lock
+#   (take-docker-job-lock.ps1) and waits until the prune is over. Whichever
+#   comes second sees the other: either this script sees the job's lock and
+#   does not prune, or the job sees the marker and waits.
 [CmdletBinding()]
 param(
     [string]$LockDir = '',
     [int]$MinAgeMinutes = 40,
     [int]$RunLockMaxAgeHours = 24,
-    # Only the tests override these.
+    # The repository whose runs a lock names, for locks that do not say.
+    [string]$Repository = $env:GITHUB_REPOSITORY,
+    # Only the tests override these. GetRunStatus takes (repository, run ID,
+    # attempt or '') and returns the run's status, 'gone', or $null when it
+    # could not find out.
     [string]$DockerExe = 'docker',
-    [string]$WedgeDir = ''
+    [string]$WedgeDir = '',
+    [scriptblock]$GetRunStatus = $null
 )
 $ErrorActionPreference = 'Continue'
 
@@ -63,28 +85,80 @@ try {
     Write-Warning "container reap failed: $($_.Exception.Message)"
 }
 
-# Locks.
-$live = @()
-$nowUtc = [DateTime]::UtcNow
-if (Test-Path -LiteralPath $LockDir) {
+# Whether a run (or one attempt of it) is still going, from the Actions API.
+# keploy/keploy is public, so this needs no token; GITHUB_TOKEN is sent when
+# the step provides one, for the higher rate limit.
+function Get-RunStatusFromApi([string]$Repo, [string]$RunId, [string]$Attempt) {
+    if (-not $Repo) { return $null }
+    $uri = "https://api.github.com/repos/$Repo/actions/runs/$RunId"
+    if ($Attempt) { $uri = "$uri/attempts/$Attempt" }
+    $headers = @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'keploy-cleanup-windows' }
+    if ($env:GITHUB_TOKEN) { $headers.Authorization = "Bearer $($env:GITHUB_TOKEN)" }
+    try {
+        # Windows PowerShell 5.1 on .NET Framework may not offer TLS 1.2 by default.
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        return "$((Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 15 -UseBasicParsing).status)"
+    } catch {
+        $code = 0
+        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+        if ($code -eq 404) { return 'gone' }  # deleted run: nothing holds the lock
+        Write-Host "  could not ask the Actions API about run $RunId ($($_.Exception.Message)); judging its lock by age."
+        return $null
+    }
+}
+if (-not $GetRunStatus) { $GetRunStatus = ${function:Get-RunStatusFromApi} }
+
+# Locks. The marker goes down first: see the header.
+New-Item -ItemType Directory -Force -Path $LockDir | Out-Null
+# One marker per cleanup, so one cleanup finishing does not take down the
+# marker of another that is still pruning.
+$marker = Join-Path $LockDir ("docker-prune-{0}.inprogress" -f [guid]::NewGuid().ToString('N'))
+Set-Content -LiteralPath $marker -Value "$env:GITHUB_REPOSITORY run $env:GITHUB_RUN_ID $env:RUNNER_NAME"
+try {
+    $live = @()
+    $nowUtc = [DateTime]::UtcNow
     foreach ($lock in @(Get-ChildItem -LiteralPath $LockDir -Filter '*.lock' -ErrorAction SilentlyContinue)) {
         $maxAge = [TimeSpan]::FromHours($RunLockMaxAgeHours)
-        if ($lock.Name -like 'docker-job-*') { $maxAge = [TimeSpan]::FromMinutes($MinAgeMinutes) }
+        $runId = ''; $attempt = ''
+        if ($lock.Name -match '^docker-job-(\d+)-(\d+)-') {
+            $maxAge = [TimeSpan]::FromMinutes($MinAgeMinutes)
+            $runId = $Matches[1]; $attempt = $Matches[2]
+        } elseif ($lock.Name -match '^prepare-windows-workflow-(\d+)\.lock$') {
+            $runId = $Matches[1]
+        }
         $age = $nowUtc - $lock.LastWriteTimeUtc
+        $why = ''
         if ($age -ge $maxAge) {
-            Write-Host "Deleting stale lock $($lock.Name) ($([int]$age.TotalMinutes) min old; its holder cannot run longer than $([int]$maxAge.TotalMinutes) min)."
+            $why = "$([int]$age.TotalMinutes) min old; its holder cannot run longer than $([int]$maxAge.TotalMinutes) min"
+        } elseif ($runId) {
+            # Both kinds of lock start with their repository (older run
+            # locks do not, and were only ever written by this repository).
+            $repo = $Repository
+            $first = "$(Get-Content -LiteralPath $lock.FullName -TotalCount 1 -ErrorAction SilentlyContinue)".Trim().Split(' ')[0]
+            if ($first -match '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { $repo = $first }
+            $status = & $GetRunStatus $repo $runId $attempt
+            if ($status -eq 'completed' -or $status -eq 'gone') {
+                $what = "run $runId"
+                if ($attempt) { $what = "attempt $attempt of run $runId" }
+                $why = "$what of $repo is $status"
+            }
+        }
+        if ($why) {
+            Write-Host "Deleting stale lock $($lock.Name) ($why)."
             Remove-Item -LiteralPath $lock.FullName -Force -ErrorAction SilentlyContinue
         } else {
             $live += $lock.Name
         }
     }
-}
-if ($live.Count -gt 0) {
-    Write-Host "Skipping Docker prune: $($live.Count) live lock(s) - $($live -join ', ')."
-    return
-}
+    if ($live.Count -gt 0) {
+        Write-Host "Skipping Docker prune: $($live.Count) live lock(s) - $($live -join ', ')."
+        return
+    }
 
-Write-Host "No live locks. Pruning Docker images, volumes, networks and build cache..."
-try { & $DockerExe image prune -af 2>&1 | Write-Host } catch { Write-Warning "docker image prune failed: $($_.Exception.Message)" }
-try { & $DockerExe volume prune -f 2>&1 | Write-Host } catch { Write-Warning "docker volume prune failed: $($_.Exception.Message)" }
-try { & $DockerExe system prune -af --volumes 2>&1 | Write-Host } catch { Write-Warning "docker system prune failed: $($_.Exception.Message)" }
+    Write-Host "No live locks. Pruning Docker images, volumes, networks and build cache..."
+    try { & $DockerExe image prune -af 2>&1 | Write-Host } catch { Write-Warning "docker image prune failed: $($_.Exception.Message)" }
+    try { & $DockerExe volume prune -f 2>&1 | Write-Host } catch { Write-Warning "docker volume prune failed: $($_.Exception.Message)" }
+    try { & $DockerExe system prune -af --volumes 2>&1 | Write-Host } catch { Write-Warning "docker system prune failed: $($_.Exception.Message)" }
+} finally {
+    Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+}
