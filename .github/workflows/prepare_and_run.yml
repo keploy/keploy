@@ -1035,6 +1035,16 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
+      # The reaper and cleanup-windows.ps1 run on these runners under Windows
+      # PowerShell 5.1, not the pwsh 7 the ubuntu lane (windows-ci-scripts.yml)
+      # tests them with, so run their cases here too. They drive a fake docker
+      # CLI and temp lock dirs, and touch nothing on the shared Docker VM.
+      - name: Test the Windows Docker cleanup scripts (Windows PowerShell)
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\reap-keploy-containers.tests.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Ensure Docker is running
         shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |

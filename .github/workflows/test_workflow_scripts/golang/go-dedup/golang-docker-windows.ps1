@@ -186,6 +186,11 @@ $containerName = "dedup-go-$id"
 # up` that keploy spawns share the same, job-unique project.
 $env:COMPOSE_PROJECT_NAME = "keploy-$id"
 Write-Host "Using COMPOSE_PROJECT_NAME = $env:COMPOSE_PROJECT_NAME"
+# The job's "Remove this job's containers" step removes exactly this project's
+# containers (every one carries its label), so hand the name to later steps.
+if ($env:GITHUB_ENV) {
+  "KEPLOY_JOB_COMPOSE_PROJECT=$env:COMPOSE_PROJECT_NAME" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+}
 Write-Host "Allocated ports -> app:$appPort proxy:$proxyPort incoming:$incomingPort dns:$dnsPort"
 
 $dcFile = Join-Path (Get-Location) 'docker-compose.yml'

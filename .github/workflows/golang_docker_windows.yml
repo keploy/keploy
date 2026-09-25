@@ -39,6 +39,12 @@ jobs:
     # Same hung-shutdown rationale as the other Windows lanes -
     # cap per-job wall-clock at 30 min so a stuck intercepted
     # process cannot hold a self-hosted Windows runner for 6h.
+    #
+    # Load-bearing for reap-keploy-containers.ps1 and cleanup-windows.ps1 too:
+    # they remove other jobs' containers, and treat this job's lock as stale,
+    # only past their -MinAgeMinutes, because no live job can own anything
+    # older than this timeout. Raising this without raising that fails
+    # reap-keploy-containers.tests.ps1.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -164,8 +170,20 @@ jobs:
         # report connection failures, so starting work on one only produces a
         # misleading result. The guaranteed sweep after a run lives in
         # cleanup-windows.ps1, which warns instead of failing.
+        #
+        # It first takes this job's Docker lock, before any image is loaded:
+        # while it exists, cleanup_windows of any run on this machine will not
+        # prune the images, volumes and stopped containers this job needs
+        # between its record and replay phases. Per job rather than per run, so
+        # a re-run of just this job (which gets no run-level lock) is covered.
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
+          $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
+          New-Item -Path $lockDir -ItemType Directory -Force | Out-Null
+          $jobLock = Join-Path $lockDir ("docker-job-{0}-{1}-{2}.lock" -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT, [guid]::NewGuid().ToString('N'))
+          Set-Content -Path $jobLock -Value "$env:GITHUB_REPOSITORY $env:GITHUB_WORKFLOW $env:RUNNER_NAME"
+          "KEPLOY_DOCKER_JOB_LOCK=$jobLock" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
           $reaper = Join-Path $env:GITHUB_WORKSPACE '.github\scripts\windows\reap-keploy-containers.ps1'
           # Say so plainly if the script is not there. It lives in the repo, so
           # this step must run after checkout; when it did not, PowerShell threw
@@ -236,6 +254,29 @@ jobs:
         run: |
           cd samples-go/${{ matrix.app.path }}
           & "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\golang\${{ matrix.app.script_dir }}\golang-docker-windows.ps1"
+
+      # The owner's half of the container rule: remove every container this
+      # job started (its compose project), at any age, and release its Docker
+      # lock. If one survives `docker rm -f` the VM is wedged: the reaper
+      # records it so the next job on any runner fails its pre-job reap at
+      # once instead of after the age threshold, and fails this job with the
+      # remediation.
+      - name: Remove this job's containers
+        if: always()
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $code = 0
+          $reaper = Join-Path $env:GITHUB_WORKSPACE '.github\scripts\windows\reap-keploy-containers.ps1'
+          if (-not $env:KEPLOY_JOB_COMPOSE_PROJECT) {
+            Write-Host "This job recorded no compose project, so it started no containers."
+          } elseif (-not (Test-Path $reaper)) {
+            Write-Host "::warning::$reaper not found; leaving project $env:KEPLOY_JOB_COMPOSE_PROJECT to the age sweep."
+          } else {
+            & $reaper -ComposeProject $env:KEPLOY_JOB_COMPOSE_PROJECT -FailOnStuck
+            $code = $LASTEXITCODE
+          }
+          if ($env:KEPLOY_DOCKER_JOB_LOCK) { Remove-Item -LiteralPath $env:KEPLOY_DOCKER_JOB_LOCK -Force -ErrorAction SilentlyContinue }
+          exit $code
 
       - name: Prune stale git isolation dirs
         if: always()
