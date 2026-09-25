@@ -47,15 +47,21 @@ Set-Content -Path $fake -Encoding ASCII -Value @'
 # way, with exit 3.
 # FAKE_DOCKER_CALLS, when set, gets a line per call as it starts (the call,
 # its process, and whether <state>.up was there) and an indented one as it
-# ends: its exit code, and why when it failed. A failing case can then tell a
-# call that found the daemon down from one that threw, and a call with no end
-# line died on the way: killed, or its PowerShell never got that far.
+# ends: its exit code, the daemonDown and psDown it read from the state, and
+# why when it failed. A failing case can then tell a call that found the
+# daemon down from one that threw, and a call with no end line died on the
+# way: killed, or its PowerShell never got that far.
 $ownProcess = $MyInvocation.CommandOrigin -eq 'Runspace'
+# Not read yet. Run inside the calling script, an unset $state would be the
+# caller's.
+$state = $null
 function Exit-Fake([int]$code, [string]$why = '') {
     if ($env:FAKE_DOCKER_CALLS) {
         $how = ''
         if ($why) { $how = ": $why" }
-        Add-Content -LiteralPath $env:FAKE_DOCKER_CALLS -Value ("  -> exit {0} (pid {1} at {2:HH:mm:ss.fff}){3}" -f $code, $PID, [DateTime]::UtcNow, $how)
+        $read = 'state not read'
+        if ($null -ne $state) { $read = "daemonDown $($state.daemonDown), psDown $($state.psDown)" }
+        Add-Content -LiteralPath $env:FAKE_DOCKER_CALLS -Value ("  -> exit {0} (pid {1} at {2:HH:mm:ss.fff}, {3}){4}" -f $code, $PID, [DateTime]::UtcNow, $read, $how)
     }
     if ($why) {
         if ($ownProcess) { [Console]::Error.WriteLine($why) } else { Write-Error $why }
@@ -77,7 +83,11 @@ function Find($id) { @($state.containers | Where-Object { $_.id -eq $id }) | Sel
 # A down daemon comes up once a fake Docker Desktop start writes <state>.up.
 # <state>.hang makes every call hang, the way a wedged Docker Desktop's do,
 # and hangInfo hangs just the next that many `info` calls: the caller has to
-# kill them.
+# kill them. dllInitInfo makes the next that many `info` calls exit 0xC0000142
+# without a word, as a docker CLI does that Windows could not initialize (the
+# runner service's desktop heap exhausted). Only on Windows, and only in a
+# process of its own, is that the exit code the caller sees: elsewhere it is
+# cut to 8 bits.
 function Test-Down { $state.daemonDown -and -not (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up") }
 if (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.hang") { Start-Sleep -Seconds 120 }
 # stampOnCall counts down the calls until another runner's start or restart of
@@ -89,6 +99,7 @@ if ($state.stampOnCall -gt 0) {
 }
 switch ($args[0]) {
     'info' {
+        if ($state.dllInitInfo -gt 0) { $state.dllInitInfo--; Save; Exit-Fake (-1073741502) }
         if ($state.hangInfo -gt 0) { $state.hangInfo--; Save; Start-Sleep -Seconds 120 }
         if (Test-Down) { Exit-Fake 1 'the fake Docker daemon is down' }
         # A daemon too busy to answer the next failInfo calls.
@@ -184,8 +195,8 @@ function Ago([double]$minutes) {
 function Container($id, $name, $created, $started = $NEVER, $finished = $NEVER, $project = '', [switch]$Stuck, [int]$RemovingFor = 0, [switch]$Vanishing) {
     [pscustomobject]@{ id = $id; name = $name; created = $created; started = $started; finished = $finished; project = $project; stuck = [bool]$Stuck; removing = $RemovingFor; gone = $false; vanishing = [bool]$Vanishing }
 }
-function Set-State($containers, $systemTime = $NOW, [switch]$DaemonDown, [switch]$PsDown, [int]$FailInfo = 0, [int]$HangInfo = 0) {
-    [pscustomobject]@{ systemTime = $systemTime; daemonDown = [bool]$DaemonDown; psDown = [bool]$PsDown; failInfo = $FailInfo; hangInfo = $HangInfo; stampOnCall = 0; stampFile = ''; containers = @($containers); removed = @(); pruned = @() } |
+function Set-State($containers, $systemTime = $NOW, [switch]$DaemonDown, [switch]$PsDown, [int]$FailInfo = 0, [int]$HangInfo = 0, [int]$DllInitInfo = 0) {
+    [pscustomobject]@{ systemTime = $systemTime; daemonDown = [bool]$DaemonDown; psDown = [bool]$PsDown; failInfo = $FailInfo; hangInfo = $HangInfo; dllInitInfo = $DllInitInfo; stampOnCall = 0; stampFile = ''; containers = @($containers); removed = @(); pruned = @() } |
         ConvertTo-Json -Depth 5 | Set-Content -Path $stateFile -Encoding ASCII
     Remove-Item -LiteralPath "$stateFile.up", "$stateFile.hang" -Force -ErrorAction SilentlyContinue
     $env:FAKE_DOCKER_STATE = $stateFile
@@ -210,14 +221,15 @@ function ConvertTo-Text($records) {
 }
 # Runs a script; returns its output, exit code, the error records it wrote,
 # and what the fake saw. An error the script throws ends up in Errors too, so
-# it fails the case that caused it instead of aborting the whole run.
-function Invoke-Script($script, [hashtable]$scriptArgs) {
+# it fails the case that caused it instead of aborting the whole run. $OnSay
+# gets each record's text as the script writes it, before the script goes on.
+function Invoke-Script($script, [hashtable]$scriptArgs, [scriptblock]$OnSay = $null) {
     $ErrorActionPreference = 'Continue'
     if (-not $scriptArgs.ContainsKey('DockerExe')) { $scriptArgs.DockerExe = $fake }
     $global:LASTEXITCODE = 0
     $records = New-Object System.Collections.ArrayList
     try {
-        & $script @scriptArgs *>&1 | ForEach-Object { [void]$records.Add($_) }
+        & $script @scriptArgs *>&1 | ForEach-Object { [void]$records.Add($_); if ($OnSay) { & $OnSay "$_" } }
     } catch {
         [void]$records.Add($_)
     }
@@ -952,9 +964,10 @@ try {
     # another runner's start or restart lands on the Nth docker call (the fake
     # docker's stampOnCall). -InLockDir runs it in a lock directory an earlier
     # run left, instead of a new one made from $locks. $locks and $runs are as for Invoke-Cleanup; $Extra
-    # overrides any parameter. Two checks before giving up rather than the
-    # script's five: each docker call here starts a PowerShell process.
-    function Invoke-Ensure($locks = @{}, $runs = @{}, [switch]$DesktopDown, [switch]$StaysDown, [switch]$HangsAfterStart, [switch]$StartedUnwritable, [int]$StampOnCall = 0, [string]$InLockDir = '', [scriptblock]$OnAsk = $null, [hashtable]$Extra = @{}) {
+    # overrides any parameter, and -OnSay is Invoke-Script's. Two checks
+    # before giving up rather than the script's five: each docker call here
+    # starts a PowerShell process.
+    function Invoke-Ensure($locks = @{}, $runs = @{}, [switch]$DesktopDown, [switch]$StaysDown, [switch]$HangsAfterStart, [switch]$StartedUnwritable, [int]$StampOnCall = 0, [string]$InLockDir = '', [scriptblock]$OnAsk = $null, [hashtable]$Extra = @{}, [scriptblock]$OnSay = $null) {
         $lockDir = $InLockDir
         if (-not $lockDir) { $lockDir = New-LockDir $locks }
         if ($StampOnCall) {
@@ -1000,7 +1013,7 @@ try {
             }.GetNewClosure()
         }
         foreach ($k in $Extra.Keys) { $ensureArgs[$k] = $Extra[$k] }
-        $r = Invoke-Script $ensure $ensureArgs
+        $r = Invoke-Script $ensure $ensureArgs -OnSay $OnSay
         $held = $null
         if ($markedAt.Count) { $held = ([DateTime]::UtcNow - $markedAt[0]).TotalSeconds }
         Remove-Item -LiteralPath "$stateFile.hang" -Force -ErrorAction SilentlyContinue
@@ -1062,6 +1075,30 @@ try {
         $(if (($why.Count -ne 1) -or ($why[0] -ne "'docker info --format `"{{.ServerVersion}}`"' failed (exit 1): the fake Docker daemon is too busy to answer")) {
                 "said [$($why -join ' | ')] of the failed calls, want the one line with docker's exit code and stderr"
             })
+    )
+
+    # A call's failure is said again when its reason changes: Docker Desktop
+    # started, and the daemon, down before, is now only busy.
+    Set-State @() -DaemonDown -FailInfo 1
+    $r = Invoke-Ensure -DesktopDown -Extra @{ ReadyTimeoutSeconds = 30 }
+    $down = @($r.Output -split "`n" | Where-Object { $_ -eq "'docker info --format `"{{.ServerVersion}}`"' failed (exit 1): the fake Docker daemon is down" })
+    $busy = @($r.Output -split "`n" | Where-Object { $_ -eq "'docker info --format `"{{.ServerVersion}}`"' failed (exit 1): the fake Docker daemon is too busy to answer" })
+    Report "a call that fails for another reason than before says the new reason" $r @(
+        (Ensured $r 0 @('start+marker')),
+        $(if (($down.Count -ne 1) -or ($busy.Count -ne 1)) { "said the daemon was down $($down.Count) time(s) and busy $($busy.Count) time(s), want once each" })
+    )
+
+    # And again after the call answered in between: 'docker info' fails,
+    # answers (and 'docker ps' fails), then fails as before under the
+    # restart's marker, set up while the API is asked about the lock.
+    Set-State @() -PsDown -FailInfo 1
+    $r = Invoke-Ensure @{ 'docker-job-76-1-a.lock' = @(5, 'keploy/keploy wf win-runner-2') } @{ '76/1' = 'completed' } -OnAsk {
+        param($dir) Set-Docker -FailInfo 1
+    }
+    $busy = @($r.Output -split "`n" | Where-Object { $_ -eq "'docker info --format `"{{.ServerVersion}}`"' failed (exit 1): the fake Docker daemon is too busy to answer" })
+    Report "a call that fails as before, but answered since, says why again" $r @(
+        (Ensured $r 0 @('ask keploy/keploy#76/1', 'stop+marker', 'start+marker')),
+        $(if ($busy.Count -ne 2) { "said the daemon was busy $($busy.Count) time(s), want 2: once per failure with an answer between" })
     )
 
     # A wedged Docker Desktop often hangs `docker info` instead of failing it.
@@ -1150,6 +1187,122 @@ try {
     Report "without a docker CLI on the PATH, Docker Desktop is neither started nor restarted" $r @(
         (Ensured $r 1 @()), (Says $r "::error::docker CLI not found on PATH for this runner" "the missing-CLI error"), (Locks $r @())
     )
+
+    # A docker CLI on the PATH that a case can break and mend between calls
+    # (New-Cli, then Set-Cli from -OnSay or -OnAsk): $cliBroken is not a
+    # program at all, so starting its process throws; $cliWedged runs and
+    # fails every call, as a CLI that reaches a wedged Docker does (on
+    # Windows a copy of where.exe, which rejects `--format`); $cliHung, on
+    # Unix only, never returns. The one in place is moved aside, not
+    # overwritten: on Windows a program that has just run can stay locked.
+    $onUnix = [Environment]::OSVersion.Platform -eq [PlatformID]::Unix
+    $cliSources = New-Dir 'cli-sources'
+    $cliBroken = Join-Path $cliSources 'broken'
+    $cliWedged = Join-Path $cliSources 'wedged'
+    $cliHung = Join-Path $cliSources 'hung'
+    Set-Content -LiteralPath $cliBroken -Encoding ASCII -Value 'not a program'
+    if ($onUnix) {
+        Set-Content -LiteralPath $cliWedged -Encoding ASCII -Value "#!/bin/sh`necho 'error during connect: the Docker daemon is wedged' >&2`nexit 1"
+        Set-Content -LiteralPath $cliHung -Encoding ASCII -Value "#!/bin/sh`nexec sleep 120"
+    } else {
+        Copy-Item -LiteralPath (Join-Path ([Environment]::SystemDirectory) 'where.exe') -Destination $cliWedged
+    }
+    function Set-Cli([string]$path, [string]$from) {
+        if (Test-Path -LiteralPath $path) { Move-Item -LiteralPath $path -Destination "$path.$([guid]::NewGuid().ToString('N'))" }
+        Copy-Item -LiteralPath $from -Destination $path
+        if ($onUnix) { & chmod +x $path }
+    }
+    function New-Cli([string]$from) {
+        $path = Join-Path (New-Dir 'cli') 'docker.exe'
+        Set-Cli $path $from
+        $path
+    }
+    $sayCliRefusal = "::error::Docker Desktop is running, but each of the 2 attempts to ask Docker whether it answers failed because the docker CLI could not run \(the last: could not run 'docker info [^\n]*\), not because Docker did not answer\. Docker Desktop was NOT restarted"
+
+    # A docker CLI that is on the PATH but cannot run asks Docker nothing,
+    # and a restart cannot make it run: when no call of the check got as far
+    # as Docker, Docker Desktop is left alone, before any Actions API
+    # question or lock can decide it. Its failure is said once, like any.
+    Set-State @() -DaemonDown
+    $cli = New-Cli $cliBroken
+    $r = Invoke-Ensure @{ 'docker-job-77-1-a.lock' = @(5, 'keploy/keploy wf win-runner-2') } @{ '77/1' = 'in_progress' } -Extra @{ DockerExe = $cli }
+    $said = @($r.Output -split "`n" | Where-Object { $_ -like "could not run 'docker info*" })
+    Report "a docker CLI that cannot run does not get Docker Desktop restarted, and the job fails naming it" $r @(
+        (Ensured $r 1 @()), (Locks $r @('docker-job-77-1-a.lock')),
+        $(if ($said.Count -ne 1) { "said $($said.Count) time(s) that the CLI could not run, want once" }),
+        (Says $r $sayCliRefusal "the error naming the CLI's failure")
+    )
+
+    # A check whose other call got as far as Docker and failed does count,
+    # in either order, and the restart goes ahead. The CLI that cannot run
+    # after that has the not-ready error name it: restarting Docker again
+    # cannot fix it.
+    Set-State @() -DaemonDown
+    $cli = New-Cli $cliBroken
+    $r = Invoke-Ensure -Extra @{ DockerExe = $cli } -OnSay {
+        param($line) if ($line -like "could not run 'docker info*") { Set-Cli $cli $cliWedged }
+    }
+    Report "a docker CLI that could not run, then reaches a Docker that fails, gets Docker Desktop restarted" $r @(
+        (Ensured $r 1 @('stop+marker', 'start+marker')), (Locks $r @()),
+        (Says $r "::error::Docker did not become ready within 0 s of restarting Docker Desktop\. Restart it on the host" "the not-ready error for Docker")
+    )
+
+    Set-State @() -DaemonDown
+    $cli = New-Cli $cliWedged
+    $r = Invoke-Ensure -Extra @{ DockerExe = $cli } -OnSay {
+        param($line) if ($line -like "'docker info *' failed (exit *") { Set-Cli $cli $cliBroken }
+    }
+    Report "a docker CLI that reaches a Docker that fails, then cannot run, gets Docker Desktop restarted and names the CLI after" $r @(
+        (Ensured $r 1 @('stop+marker', 'start+marker')), (Locks $r @()),
+        (Says $r "::error::Docker did not become ready within 0 s of restarting Docker Desktop, and the last check did not ask Docker: the docker CLI could not run \(could not run 'docker info" "the not-ready error naming the CLI")
+    )
+
+    # A call killed for not returning got as far as Docker too.
+    $title = "a docker call that hangs, then a CLI that cannot run, gets Docker Desktop restarted"
+    if ($onUnix) {
+        Set-State @() -DaemonDown
+        $cli = New-Cli $cliHung
+        $r = Invoke-Ensure -Extra @{ DockerExe = $cli; CallTimeoutSeconds = 2 } -OnSay {
+            param($line) if ($line -like "'docker info *' did not return within *") { Set-Cli $cli $cliBroken }
+        }
+        Report $title $r @((Ensured $r 1 @('stop+marker', 'start+marker')), (Locks $r @()), (Says $r 'did not return within 2 s; killing it' "the killed call"))
+    } else {
+        Write-Host "skip - $title (no native program that hangs on Windows)"
+    }
+
+    # What the check before said does not count for the next: here a
+    # Docker that failed, then another runner's restart, and after it a CLI
+    # that cannot run.
+    Set-State @() -DaemonDown
+    $cli = New-Cli $cliWedged
+    $r = Invoke-Ensure @{ 'docker-job-78-1-a.lock' = @(5, 'keploy/keploy wf win-runner-2') } @{ '78/1' = 'completed' } -Extra @{ DockerExe = $cli } -OnAsk {
+        param($dir) Write-OtherStart $dir; Set-Cli $cli $cliBroken
+    }
+    Report "a docker CLI that cannot run after another runner's restart does not get Docker Desktop restarted, whatever the check before found" $r @(
+        (Ensured $r 1 @('ask keploy/keploy#78/1')), (Locks $r @()),
+        (Says $r 'started or restarted by another runner since this one checked Docker' "the out-of-date check"),
+        (Says $r $sayCliRefusal "the error naming the CLI's failure")
+    )
+
+    # The docker CLI Windows cannot initialize, as a runner service whose
+    # desktop heap is exhausted gets: exit 0xC0000142 (the fake's
+    # dllInitInfo). Every attempt so: no restart. Then Docker, down: the
+    # restart goes ahead.
+    $titles = @("a docker CLI that exits 0xC0000142 on every attempt does not get Docker Desktop restarted",
+        "a docker CLI that exits 0xC0000142, then reaches a Docker that is down, gets Docker Desktop restarted")
+    if (-not $onUnix) {
+        Set-State @() -DaemonDown -DllInitInfo 2
+        $r = Invoke-Ensure
+        Report $titles[0] $r @(
+            (Ensured $r 1 @()), (Locks $r @()),
+            (Says $r "::error::Docker Desktop is running, but each of the 2 attempts to ask Docker whether it answers failed because the docker CLI could not run \(the last: 'docker info [^\n]*' exited 0xC0000142 \(STATUS_DLL_INIT_FAILED\)" "the error naming the CLI's failure")
+        )
+        Set-State @() -DaemonDown -DllInitInfo 1
+        $r = Invoke-Ensure
+        Report $titles[1] $r @((Ensured $r 0 @('stop+marker', 'start+marker')), (Locks $r @()))
+    } else {
+        foreach ($t in $titles) { Write-Host "skip - $t (only a process on Windows can exit 0xC0000142)" }
+    }
 
     # `docker ps` is half the check: the original script restarted a Docker
     # that answered `info` but not `ps`, and it still counts as not answering.
@@ -1578,8 +1731,12 @@ function Set-Content {
         # When the case fails, each run's docker calls, in order, each with
         # what it found as it started and how it ended (the runs' logs above
         # are in the same order, a then b).
+        # Then the fake's state as the runs left it, and whether <state>.up
+        # (written by the start) was there.
         if ($problems.Count) {
             foreach ($id in 'a', 'b') { $said += "`n---- docker calls of run $id`n" + (@(Get-Events (Join-Path $barrierDir "calls-$id")) -join "`n") }
+            $said += "`n---- the fake's state at the end, .up $(Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up")`n" +
+                "$(Get-Content -Raw -LiteralPath $env:FAKE_DOCKER_STATE -ErrorAction SilentlyContinue)"
         }
         Report "two runners that put their markers down at the same moment $($race.What) Docker Desktop once" ([pscustomobject]@{ Output = $said }) $problems
     }

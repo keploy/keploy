@@ -10,6 +10,8 @@
 # images and starting eBPF agents at once) fails a check like that. Now:
 #   1. Without a docker CLI there is nothing to check, and starting or
 #      restarting Docker Desktop cannot put one on the PATH: the job fails.
+#      It fails too when Docker Desktop is running and the CLI is there but
+#      cannot run (see 5).
 #   2. A failed check is retried -Attempts times, with the wait doubling each
 #      time from -BackoffSeconds. A call that has not returned after
 #      -CallTimeoutSeconds is killed and counts as failed: a wedged Docker
@@ -23,7 +25,11 @@
 #      with the remediation, instead of being killed at its timeout-minutes.
 #   4. If Docker Desktop is not running at all, it is started under a marker.
 #      Nothing is running on it, so nothing is lost.
-#   5. If it is running but still does not answer, only a restart helps. The
+#   5. If it is running but still does not answer, only a restart helps,
+#      unless no call of the check reached Docker and failed: every attempt
+#      failed because the docker CLI itself could not run. Nothing then says
+#      Docker needs a restart, and a restart cannot make the CLI run: the job
+#      fails naming the CLI's failure. Otherwise the
 #      restart happens only when no golang_docker_windows job holds a live
 #      Docker lock, judged the way cleanup-windows.ps1 judges its locks, and
 #      it runs under the same marker handshake. A job that starts meanwhile
@@ -127,11 +133,23 @@ if ($docker.CommandType -eq 'ExternalScript') {
 # One docker call, $true when it exits 0 within CallTimeoutSeconds. Its output
 # is read and dropped, so a long `docker ps` cannot block on a full pipe. A
 # call that fails says how: its exit code and the first line of its stderr,
-# which is the daemon's own error ("error during connect: ...", say). It says
-# so whenever that differs from how the same call last failed, so that a
-# Docker that keeps failing the same way says it once, not on every poll.
+# which is the daemon's own error ("error during connect: ...", say), or why
+# its process could not start. It says so whenever that differs from how the
+# same call last failed, or the call answered since, so that a Docker or CLI
+# that keeps failing the same way says it once, not on every poll.
+# $cliFault says why when the last call failed because the docker CLI itself
+# could not run, and is empty otherwise: the process could not be started, or
+# it exited 0xC0000142 (STATUS_DLL_INIT_FAILED, -1073741502 as an exit code),
+# Windows failing to initialize it, typically because the desktop heap of the
+# runner's service is exhausted. Such a call asked Docker nothing.
+# $dockerFailed is whether a call of the check Test-DockerAnswers is making
+# reached Docker and failed: it did not return in time, or it exited non-zero
+# for any other reason.
 $lastFailure = @{}
+$cliFault = ''
+$dockerFailed = $false
 function Invoke-DockerCall([string]$Arguments) {
+    $script:cliFault = ''
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $dockerFile
     $psi.Arguments = $dockerArgs + $Arguments
@@ -142,7 +160,9 @@ function Invoke-DockerCall([string]$Arguments) {
     try {
         $p = [System.Diagnostics.Process]::Start($psi)
     } catch {
-        Write-Host "could not run 'docker $Arguments': $($_.Exception.Message)"
+        $script:cliFault = "could not run 'docker $Arguments': $($_.Exception.Message)"
+        if ($script:cliFault -ne $lastFailure[$Arguments]) { Write-Host $script:cliFault }
+        $lastFailure[$Arguments] = $script:cliFault
         return $false
     }
     [void]$p.StandardOutput.ReadToEndAsync()
@@ -151,10 +171,19 @@ function Invoke-DockerCall([string]$Arguments) {
         Write-Host "'docker $Arguments' did not return within $CallTimeoutSeconds s; killing it and counting the check as failed."
         try { $p.Kill() } catch { }
         [void]$p.WaitForExit(5000)
+        $script:dockerFailed = $true
         return $false
     }
     $p.WaitForExit()
-    if ($p.ExitCode -eq 0) { return $true }
+    if ($p.ExitCode -eq 0) {
+        $lastFailure.Remove($Arguments)
+        return $true
+    }
+    if ($p.ExitCode -eq -1073741502) {
+        $script:cliFault = "'docker $Arguments' exited 0xC0000142 (STATUS_DLL_INIT_FAILED): Windows could not initialize it, typically because the desktop heap of the runner's service is exhausted"
+    } else {
+        $script:dockerFailed = $true
+    }
     # Its stderr ends when it does, unless a process it started still holds
     # it: a moment for that, no more.
     $said = 'nothing on stderr'
@@ -178,6 +207,7 @@ function Test-DockerHealthy {
 
 # Up to -Attempts checks, with backoff between them.
 function Test-DockerAnswers {
+    $script:dockerFailed = $false
     $delay = $BackoffSeconds
     for ($i = 1; $i -le $Attempts; $i++) {
         if (Test-DockerHealthy) { return $true }
@@ -251,6 +281,8 @@ function Stop-Refusing([string[]]$Holders, [string]$How) {
 # then takes the marker back down and returns, and the caller checks again
 # from the top, with every retry. It also checks Docker once more before
 # acting: an operation this one waited for can have found Docker answering.
+# A call there that cannot run the docker CLI says nothing of Docker either
+# way, so the check that got here stands and the start or restart goes on.
 function Invoke-UnderMarker([string]$Marker, [string]$Started, [switch]$Restart) {
     $what = 'starting'; $done = 'started'; $operation = 'a Docker Desktop start'
     if ($Restart) { $what = 'restarting'; $done = 'restarted'; $operation = 'a Docker Desktop restart' }
@@ -288,6 +320,12 @@ function Invoke-UnderMarker([string]$Marker, [string]$Started, [switch]$Restart)
     if ($ready) {
         Write-Host "Docker is ready."
         exit 0
+    }
+    if ($cliFault) {
+        Write-Host ("::error::Docker did not become ready within $ReadyTimeoutSeconds s of $what Docker Desktop, and " +
+            "the last check did not ask Docker: the docker CLI could not run ($cliFault). Restarting Docker Desktop " +
+            "cannot fix that. Fix what keeps the docker CLI from running under this runner's service, and re-run the job.")
+        exit 1
     }
     Write-Host "::error::Docker did not become ready within $ReadyTimeoutSeconds s of $what Docker Desktop. Restart it on the host: quit Docker Desktop, run 'wsl --shutdown', and start Docker Desktop again."
     exit 1
@@ -327,9 +365,20 @@ while ($true) {
     }
 
     # Running but not answering. Only a restart helps, and a restart kills
-    # every container on the daemon. Live locks call it off before the marker
-    # goes down: a starting job should not wait on a restart that will not
-    # happen.
+    # every container on the daemon. Unless no call of the check reached
+    # Docker and failed: each attempt failed because the docker CLI could not
+    # run, the last one as $cliFault says. Nothing then says Docker needs a
+    # restart, and a restart cannot make the CLI run.
+    if ($cliFault -and -not $dockerFailed) {
+        Write-Host ("::error::Docker Desktop is running, but each of the $Attempts attempts to ask Docker whether it " +
+            "answers failed because the docker CLI could not run (the last: $cliFault), not because Docker did not " +
+            "answer. Docker Desktop was NOT restarted: a restart cannot fix the CLI, and it kills the containers of " +
+            "every job on the machine. Fix what keeps the docker CLI from running under this runner's service, and " +
+            "re-run the job.")
+        exit 1
+    }
+    # Live locks call the restart off before the marker goes down: a starting
+    # job should not wait on a restart that will not happen.
     $locks = Resolve-DockerLocks -LockDir $LockDir -Filter 'docker-job-*.lock' -JobLockMaxMinutes $MinAgeMinutes -Repository $Repository -GetRunStatus $GetRunStatus
     if ($locks.Live.Count -gt 0) { Stop-Refusing $locks.Live 'hold a live Docker lock' }
     try {
