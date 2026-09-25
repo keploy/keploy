@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -207,6 +208,23 @@ func TestRunnerScopeIgnoresUnrelatedOutput(t *testing.T) {
 	marker, scope := feed(t, "collected 3 items\n\ntest_cart.py::test_add PASSED\n=== something else\n")
 	require.Empty(t, marker.calls)
 	require.Empty(t, scope.overlapping())
+}
+
+func TestNearBoundaryCountsMocksAtAWindowEdge(t *testing.T) {
+	windows := []models.ScopeWindow{
+		{Name: "t1", Start: ts(10), End: ts(20)},
+		{Name: "t2", Start: ts(20), End: ts(30)},
+	}
+	mocks := []capturedMock{
+		{name: "just after a start", ts: ts(10).Add(5 * time.Millisecond)},
+		{name: "just before an end", ts: ts(20).Add(-15 * time.Millisecond)},
+		{name: "on the shared edge, counted once", ts: ts(20)},
+		{name: "just before a start", ts: ts(10).Add(-20 * time.Millisecond)},
+		{name: "safely inside", ts: ts(15)},
+		{name: "too far after", ts: ts(30).Add(21 * time.Millisecond)},
+	}
+	require.Equal(t, 4, nearBoundary(windows, mocks, boundarySlack))
+	require.Equal(t, 0, nearBoundary(nil, mocks, boundarySlack))
 }
 
 func TestFirstFew(t *testing.T) {

@@ -10,11 +10,15 @@ import (
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
 // scopeCallTimeout bounds one scope call so a stuck agent cannot stall the runner's stdout.
 const scopeCallTimeout = 2 * time.Second
+
+// boundarySlack is how close to a window edge a mock has to be to count as at risk of landing in the wrong test.
+const boundarySlack = 20 * time.Millisecond
 
 type scopeEventKind int
 
@@ -217,6 +221,20 @@ func (r *runnerScope) usedReadTime() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.readTimed > 0
+}
+
+// nearBoundary counts the mocks whose request fell within slack of any window's start or end.
+func nearBoundary(windows []models.ScopeWindow, mocks []capturedMock, slack time.Duration) int {
+	n := 0
+	for _, mk := range mocks {
+		for _, w := range windows {
+			if mk.ts.Sub(w.Start).Abs() <= slack || mk.ts.Sub(w.End).Abs() <= slack {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // overlapping lists the pairs of tests that ran at the same time, in the order they were seen.

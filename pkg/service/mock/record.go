@@ -273,6 +273,10 @@ func (m *mockService) Record(ctx context.Context) error {
 			if werr != nil {
 				m.logger.Debug("failed to read per-test scope windows; recording suite-level", zap.Error(werr))
 			} else if len(windows) > 0 {
+				if scope.usedReadTime() {
+					m.logger.Warn(fmt.Sprintf("test boundaries taken from output timing; %d mocks fell within 20 ms of a boundary — use `go test -json` (or `go tool test2json -t`) for exact attribution",
+						nearBoundary(windows, recorded, boundarySlack)))
+				}
 				byTest := correlateScopes(windows, recorded)
 				if len(byTest) > 0 {
 					if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {

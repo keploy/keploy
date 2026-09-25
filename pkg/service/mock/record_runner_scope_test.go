@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // runnerInstr is a native instrumentation whose wrapped command prints output,
@@ -82,6 +83,11 @@ func (r *runnerInstr) seen() (marks []string, observed bool) {
 
 func recordSet(t *testing.T, instr *runnerInstr, mapDB MappingDB, tweak func(*config.Config)) error {
 	t.Helper()
+	return recordSetLogging(t, zap.NewNop(), instr, mapDB, tweak)
+}
+
+func recordSetLogging(t *testing.T, logger *zap.Logger, instr *runnerInstr, mapDB MappingDB, tweak func(*config.Config)) error {
+	t.Helper()
 	cfg := instrConfig(instr.composeInstr, utils.Native, "./shop.test -test.v")
 	cfg.Path = t.TempDir()
 	if tweak != nil {
@@ -89,7 +95,42 @@ func recordSet(t *testing.T, instr *runnerInstr, mapDB MappingDB, tweak func(*co
 	}
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	return New(zap.NewNop(), instr, stubMockDB{}, mapDB, nil, nil, cfg).Record(context.Background())
+	return New(logger, instr, stubMockDB{}, mapDB, nil, nil, cfg).Record(context.Background())
+}
+
+const outputTimingWarn = "test boundaries taken from output timing"
+
+// Plain output gives read-time boundaries; the record says so once and counts the mocks that sat close to one.
+func TestRecordWarnsOnceWhenBoundariesCameFromOutputTiming(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	instr := newRunnerInstr(t, plainSequential)
+	instr.windows = []models.ScopeWindow{{Name: "TestA", Start: ts(10), End: ts(20)}, {Name: "TestC", Start: ts(20), End: ts(30)}}
+	instr.mocks = []*models.Mock{
+		mockAt("mock-0", ts(10).Add(3*time.Millisecond)),
+		mockAt("mock-1", ts(15)),
+		mockAt("mock-2", ts(20).Add(-2*time.Millisecond)),
+	}
+	require.NoError(t, recordSetLogging(t, zap.New(core), instr, mapdb.New(zap.NewNop(), t.TempDir(), ""), nil))
+
+	warns := logs.FilterMessageSnippet(outputTimingWarn).All()
+	require.Len(t, warns, 1)
+	require.Contains(t, warns[0].Message, "2 mocks fell within 20 ms of a boundary")
+	require.Contains(t, warns[0].Message, "go test -json")
+}
+
+const jsonSequential = `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.01Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.01Z","Action":"run","Package":"orders/e2e","Test":"TestC"}
+{"Time":"2026-09-24T10:00:00.02Z","Action":"pass","Package":"orders/e2e","Test":"TestC"}
+`
+
+func TestRecordDoesNotWarnWhenTheRunnerGaveItsOwnTime(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	instr := newRunnerInstr(t, jsonSequential)
+	instr.windows = []models.ScopeWindow{{Name: "orders/e2e.TestA", Start: ts(10), End: ts(20)}}
+	instr.mocks = []*models.Mock{mockAt("mock-0", ts(10).Add(time.Millisecond))}
+	require.NoError(t, recordSetLogging(t, zap.New(core), instr, mapdb.New(zap.NewNop(), t.TempDir(), ""), nil))
+	require.Empty(t, logs.FilterMessageSnippet(outputTimingWarn).All())
 }
 
 func TestRecordReadsTestBoundariesFromRunnerOutput(t *testing.T) {
