@@ -363,7 +363,7 @@ type MockCmd struct {
 	AllowParallelTests bool `json:"allowParallelTests" yaml:"allowParallelTests" mapstructure:"allowParallelTests"`
 	// NoRunnerScope stops record from reading the test runner's output for per-test boundaries.
 	NoRunnerScope bool `json:"noRunnerScope" yaml:"noRunnerScope" mapstructure:"noRunnerScope"`
-	// RecordRequests also captures the app's incoming requests as test cases; needs --pass-through-ports <app port>.
+	// RecordRequests captures the app's incoming requests as test cases, on by default; needs --pass-through-ports <app port>.
 	RecordRequests bool `json:"recordRequests" yaml:"recordRequests" mapstructure:"recordRequests"`
 }
 

@@ -2290,7 +2290,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
 		cmd.Flags().Bool("allow-parallel-tests", c.cfg.Mock.AllowParallelTests, "Keep recording when tests run at the same time; per-test mock mappings are then best-effort")
 		cmd.Flags().Bool("no-runner-scope", c.cfg.Mock.NoRunnerScope, "Do not read go test output for per-test boundaries (for suites that post scopes themselves)")
-		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Also record the app's incoming requests as test cases; pass the app's port with --pass-through-ports so the tests reach it")
+		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
