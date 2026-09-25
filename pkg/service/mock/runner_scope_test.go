@@ -21,12 +21,12 @@ func TestParseRunnerLine(t *testing.T) {
 		{"json run is a begin, qualified by package, at the runner's time", `{"Time":"2026-09-24T10:00:00.000123456Z","Action":"run","Package":"github.com/acme/shop/cart","Test":"TestAdd"}`,
 			scopeEvent{kind: scopeBegin, pkg: "github.com/acme/shop/cart", test: "TestAdd", at: time.Date(2026, 9, 24, 10, 0, 0, 123456, time.UTC)}},
 		{"json time with an offset", `{"Time":"2026-09-24T15:30:00.5+05:30","Action":"pass","Package":"cart","Test":"TestAdd"}`,
-			scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd", at: time.Date(2026, 9, 24, 10, 0, 0, 500000000, time.UTC)}},
+			scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd", at: time.Date(2026, 9, 24, 10, 0, 0, 500000000, time.UTC), status: "pass"}},
 		{"json with an unreadable time still marks the boundary", `{"Time":"yesterday","Action":"run","Package":"cart","Test":"TestAdd"}`,
 			scopeEvent{kind: scopeBegin, pkg: "cart", test: "TestAdd"}},
-		{"json pass is an end", `{"Action":"pass","Package":"cart","Test":"TestAdd","Elapsed":0.01}`, scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd"}},
-		{"json fail is an end", `{"Action":"fail","Package":"cart","Test":"TestAdd"}`, scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd"}},
-		{"json skip is an end", `{"Action":"skip","Package":"cart","Test":"TestAdd/empty"}`, scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd/empty"}},
+		{"json pass is an end, with how long it took", `{"Action":"pass","Package":"cart","Test":"TestAdd","Elapsed":0.01}`, scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd", status: "pass", elapsed: 10 * time.Millisecond}},
+		{"json fail is an end", `{"Action":"fail","Package":"cart","Test":"TestAdd"}`, scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd", status: "fail"}},
+		{"json skip is an end", `{"Action":"skip","Package":"cart","Test":"TestAdd/empty"}`, scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd/empty", status: "skip"}},
 		{"json subtest keeps its full path", `{"Action":"run","Package":"cart","Test":"TestAdd/two_items"}`, scopeEvent{kind: scopeBegin, pkg: "cart", test: "TestAdd/two_items"}},
 		{"json without a package uses the bare test", `{"Action":"run","Test":"TestAdd"}`, scopeEvent{kind: scopeBegin, test: "TestAdd"}},
 		{"json pause is a pause", `{"Action":"pause","Package":"cart","Test":"TestAdd"}`, scopeEvent{kind: scopePause, pkg: "cart", test: "TestAdd"}},
@@ -36,10 +36,11 @@ func TestParseRunnerLine(t *testing.T) {
 		{"broken json is ignored", `{"Action":"run","Test":`, scopeEvent{}},
 		{"plain run", "=== RUN   TestAdd", scopeEvent{kind: scopeBegin, test: "TestAdd"}},
 		{"plain indented subtest run", "    === RUN   TestAdd/two_items", scopeEvent{kind: scopeBegin, test: "TestAdd/two_items"}},
-		{"plain pass with duration", "--- PASS: TestAdd (0.01s)", scopeEvent{kind: scopeEnd, test: "TestAdd"}},
-		{"plain indented subtest pass", "    --- PASS: TestAdd/two_items (0.00s)", scopeEvent{kind: scopeEnd, test: "TestAdd/two_items"}},
-		{"plain fail", "--- FAIL: TestAdd (0.01s)", scopeEvent{kind: scopeEnd, test: "TestAdd"}},
-		{"plain skip", "        --- SKIP: TestAdd/empty (0.00s)", scopeEvent{kind: scopeEnd, test: "TestAdd/empty"}},
+		{"plain pass with duration", "--- PASS: TestAdd (0.01s)", scopeEvent{kind: scopeEnd, test: "TestAdd", status: "pass", elapsed: 10 * time.Millisecond}},
+		{"plain indented subtest pass", "    --- PASS: TestAdd/two_items (0.00s)", scopeEvent{kind: scopeEnd, test: "TestAdd/two_items", status: "pass"}},
+		{"plain fail", "--- FAIL: TestAdd (0.01s)", scopeEvent{kind: scopeEnd, test: "TestAdd", status: "fail", elapsed: 10 * time.Millisecond}},
+		{"plain skip", "        --- SKIP: TestAdd/empty (0.00s)", scopeEvent{kind: scopeEnd, test: "TestAdd/empty", status: "skip"}},
+		{"plain result without a duration", "--- FAIL: TestAdd", scopeEvent{kind: scopeEnd, test: "TestAdd", status: "fail"}},
 		{"plain pause", "=== PAUSE TestAdd", scopeEvent{kind: scopePause, test: "TestAdd"}},
 		{"plain cont is ignored", "=== CONT  TestAdd", scopeEvent{}},
 		{"plain name marker is ignored", "=== NAME  TestAdd", scopeEvent{}},
@@ -50,7 +51,7 @@ func TestParseRunnerLine(t *testing.T) {
 		{"empty line is ignored", "", scopeEvent{}},
 		{"compose service prefix is dropped", "tests-1  | === RUN   TestAdd", scopeEvent{kind: scopeBegin, test: "TestAdd"}},
 		{"compose prefix on json", `tests-1  | {"Action":"run","Package":"cart","Test":"TestAdd"}`, scopeEvent{kind: scopeBegin, pkg: "cart", test: "TestAdd"}},
-		{"colour codes are dropped", "\x1b[36mtests-1  | \x1b[0m--- PASS: TestAdd (0.00s)", scopeEvent{kind: scopeEnd, test: "TestAdd"}},
+		{"colour codes are dropped", "\x1b[36mtests-1  | \x1b[0m--- PASS: TestAdd (0.00s)", scopeEvent{kind: scopeEnd, test: "TestAdd", status: "pass"}},
 		{"a pipe inside a log line is not a prefix", "    cart_test.go:12: got a | b", scopeEvent{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -306,5 +307,6 @@ func TestNilRunnerScopeIsOff(t *testing.T) {
 	require.Nil(t, scope.writer())
 	require.Nil(t, scope.overlapping())
 	require.Nil(t, scope.windows())
+	require.Nil(t, scope.tests())
 	require.False(t, scope.usedReadTime())
 }

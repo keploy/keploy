@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -155,7 +156,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 				t.Errorf("metered %+v on a run whose outcome was only partly read; it must not be counted at all", metered[0])
 			case tc.wantMetered != nil && len(metered) != 1:
 				t.Errorf("metered %d time(s), want exactly 1", len(metered))
-			case tc.wantMetered != nil && metered[0] != *tc.wantMetered:
+			case tc.wantMetered != nil && !reflect.DeepEqual(metered[0], *tc.wantMetered):
 				t.Errorf("metered %+v, want %+v", metered[0], *tc.wantMetered)
 			}
 

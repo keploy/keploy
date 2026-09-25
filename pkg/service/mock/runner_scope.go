@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"regexp"
 	"strings"
 	"sync"
@@ -36,6 +37,9 @@ type scopeEvent struct {
 	test string
 	// at is the runner's own clock for this boundary; zero when the output carries none.
 	at time.Time
+	// status and elapsed come with a result line: pass, fail or skip, and how long the test took.
+	status  string
+	elapsed time.Duration
 }
 
 // name is the scope name: the test, qualified by its package when the runner reports one.
@@ -81,7 +85,10 @@ func cleanRunnerLine(line string) string {
 }
 
 func parseJSONLine(line string) scopeEvent {
-	var ev struct{ Action, Package, Test, Time string }
+	var ev struct {
+		Action, Package, Test, Time string
+		Elapsed                     float64
+	}
 	if err := json.Unmarshal([]byte(line), &ev); err != nil || ev.Test == "" {
 		return scopeEvent{}
 	}
@@ -90,7 +97,12 @@ func parseJSONLine(line string) scopeEvent {
 		return scopeEvent{}
 	}
 	at, _ := time.Parse(time.RFC3339Nano, ev.Time)
-	return scopeEvent{kind: kind, pkg: ev.Package, test: ev.Test, at: at}
+	out := scopeEvent{kind: kind, pkg: ev.Package, test: ev.Test, at: at}
+	if kind == scopeEnd {
+		out.status = ev.Action
+		out.elapsed = time.Duration(math.Round(ev.Elapsed * float64(time.Second)))
+	}
+	return out
 }
 
 func kindOfAction(action string) scopeEventKind {
@@ -116,9 +128,18 @@ func parsePlainLine(line string) scopeEvent {
 	case fields[0] == "===" && fields[1] == "PAUSE":
 		return scopeEvent{kind: scopePause, test: fields[2]}
 	case fields[0] == "---" && (fields[1] == "PASS:" || fields[1] == "FAIL:" || fields[1] == "SKIP:"):
-		return scopeEvent{kind: scopeEnd, test: fields[2]}
+		return scopeEvent{kind: scopeEnd, test: fields[2], status: strings.ToLower(strings.TrimSuffix(fields[1], ":")), elapsed: plainElapsed(fields)}
 	}
 	return scopeEvent{}
+}
+
+// plainElapsed reads the "(0.01s)" a result line ends with; zero when it is missing or unreadable.
+func plainElapsed(fields []string) time.Duration {
+	if len(fields) < 4 {
+		return 0
+	}
+	d, _ := time.ParseDuration(strings.Trim(fields[3], "()"))
+	return d
 }
 
 // runnerScope turns the wrapped test runner's output into per-test windows, and posts the same boundaries to the agent.
@@ -134,6 +155,7 @@ type runnerScope struct {
 	overlaps  []string
 	starts    map[string]time.Time
 	closed    []models.ScopeWindow
+	results   []TestOutcome
 	readTimed int
 }
 
@@ -207,6 +229,9 @@ func (r *runnerScope) begin(ev scopeEvent, at time.Time) {
 func (r *runnerScope) end(ev scopeEvent, at time.Time) {
 	delete(r.paused, ev.name())
 	r.finish(ev.name(), at)
+	if ev.status != "" {
+		r.results = append(r.results, TestOutcome{Name: ev.name(), Status: ev.status, Duration: ev.elapsed})
+	}
 	for i, running := range r.open {
 		if running.name() == ev.name() {
 			r.open = append(r.open[:i], r.open[i+1:]...)
@@ -233,6 +258,16 @@ func (r *runnerScope) windows() []models.ScopeWindow {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]models.ScopeWindow(nil), r.closed...)
+}
+
+// tests lists every result the runner printed, in the order it printed them.
+func (r *runnerScope) tests() []TestOutcome {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]TestOutcome(nil), r.results...)
 }
 
 // mergeWindows keeps the adapter's windows and adds the agent's only for tests the adapter never saw.

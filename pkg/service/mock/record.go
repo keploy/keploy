@@ -102,7 +102,10 @@ func (m *mockService) Record(ctx context.Context) error {
 	//    Without this the run dialled an agent that was never started, failed
 	//    to arm the capture, and ended having recorded nothing — while the app
 	//    itself never came up at all.
-	scope := m.runnerScope(ctx)
+	var scope *runnerScope
+	if m.mappingDB != nil {
+		scope = m.runnerScope(ctx)
+	}
 	composeAppExit, err := m.startComposeApp(ctx, errGrp, "record", scope.writer())
 	if err != nil {
 		if parent.Err() != nil {
@@ -324,7 +327,7 @@ func (m *mockService) Record(ctx context.Context) error {
 
 // runnerScope builds the adapter that turns test output into scope calls, or nil when it is off.
 func (m *mockService) runnerScope(ctx context.Context) *runnerScope {
-	if m.config.Mock.NoRunnerScope || m.mappingDB == nil {
+	if m.config.Mock.NoRunnerScope {
 		return nil
 	}
 	marker, ok := m.instrumentation.(ScopeMarker)
