@@ -43,7 +43,12 @@ Set-Content -Path $fake -Encoding ASCII -Value @'
 if ($env:FAKE_DOCKER_CALLS) { Add-Content -LiteralPath $env:FAKE_DOCKER_CALLS -Value "$args" }
 $state = Get-Content -Raw -Path $env:FAKE_DOCKER_STATE | ConvertFrom-Json
 function Save { $state | ConvertTo-Json -Depth 5 | Set-Content -Path $env:FAKE_DOCKER_STATE -Encoding ASCII }
-function Find($id) { @($state.containers | Where-Object { $_.id -eq $id }) }
+# The container with this id, or $null. The object itself, not an array: a
+# function's output is unrolled, so a one-element array comes back as the bare
+# [pscustomobject], and Windows PowerShell 5.1 gives that no .Count ($null
+# there, PowerShell/PowerShell#3671). A container that is there would then
+# look like none: `rm` would leave it listed, a wedge on every healthy removal.
+function Find($id) { @($state.containers | Where-Object { $_.id -eq $id }) | Select-Object -First 1 }
 # A down daemon comes up once a fake Docker Desktop start writes <state>.up.
 # <state>.hang makes every call hang, the way a wedged Docker Desktop's do,
 # and hangInfo hangs just the next that many `info` calls: the caller has to
@@ -88,8 +93,7 @@ switch ($args[0]) {
     }
     'inspect' {
         $format = $args[2]; $c = Find $args[3]
-        if ($c.Count -eq 0) { exit 1 }
-        $c = $c[0]
+        if ($null -eq $c) { exit 1 }
         if ($format -eq '{{.Name}}') { Write-Output "/$($c.name)"; exit 0 }
         if ($format -eq '{{.Name}}|{{.Created}}|{{.State.StartedAt}}|{{.State.FinishedAt}}') {
             Write-Output "/$($c.name)|$($c.created)|$($c.started)|$($c.finished)"; exit 0
@@ -100,10 +104,10 @@ switch ($args[0]) {
         $id = $args[2]
         $state.removed = @($state.removed) + @($id)
         $c = Find $id
-        if (($c.Count -gt 0) -and $c[0].removing) {
+        if ($c -and $c.removing) {
             Save; Write-Error "Error response from daemon: removal of container $id is already in progress"; exit 1
         }
-        if (($c.Count -gt 0) -and -not $c[0].stuck) {
+        if ($c -and -not $c.stuck) {
             $state.containers = @($state.containers | Where-Object { $_.id -ne $id })
         }
         Save; exit 0
