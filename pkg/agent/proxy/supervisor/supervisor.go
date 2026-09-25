@@ -31,7 +31,12 @@ type Config struct {
 
 	// HangBudget is the maximum time the supervisor tolerates no
 	// progress (no BumpActivity call) while there is pending work
-	// before declaring the parser hung. Default 60s.
+	// before declaring the parser hung. Default 60s. The watchdog
+	// checks it every HangBudget/4, but never more often than every
+	// 5ms. A stall of the whole process (GC, SIGSTOP, a paused
+	// container or VM) counts as one such interval however long it
+	// lasts, and the first check after a stall never declares the hang
+	// itself (see checkHang).
 	HangBudget time.Duration
 
 	// MemCap is the per-connection byte cap on parser-owned buffers.
@@ -67,11 +72,20 @@ type Supervisor struct {
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 
-	// Activity bookkeeping. lastProgressNano holds a UnixNano stamp
-	// updated on every BumpActivity call. pending toggles whether
-	// the watchdog is armed.
-	lastProgressNano atomic.Int64
-	pending          atomic.Bool
+	// clock times the hang watchdog. See clock.
+	clock clock
+
+	// Activity bookkeeping. lastProgress holds the clock reading of
+	// the latest BumpActivity call. pending toggles whether the
+	// watchdog is armed.
+	lastProgress atomic.Int64
+	pending      atomic.Bool
+
+	// wd is the watchdog's running measurement. After New only
+	// checkHang touches it, and only the watchdog goroutine calls
+	// checkHang (a test on a fake clock calls it instead: that
+	// clock's ticker never ticks).
+	wd watchdogState
 
 	// Abort path: hung is closed by the watchdog when the activity
 	// budget is exceeded while pending work is outstanding.
@@ -115,10 +129,32 @@ type Supervisor struct {
 	closed atomic.Bool
 }
 
+// watchdogState is what checkHang carries from one check to the next.
+type watchdogState struct {
+	// tick is the interval between checks, and so the most silence
+	// a single check may charge.
+	tick time.Duration
+	// prev is the clock reading at the previous check.
+	prev time.Duration
+	// seen is the progress stamp the previous check read.
+	seen time.Duration
+	// silence is how long the pending request has gone without
+	// progress, as far as the watchdog has seen.
+	silence time.Duration
+	// held is set when a late check found the budget spent and left
+	// the verdict to the next check.
+	held bool
+}
+
 // New constructs a Supervisor and starts its watchdog goroutine. The
 // returned Supervisor owns internal resources until either Run
 // returns or Close is called; Run calls Close on exit.
 func New(cfg Config) *Supervisor {
+	return newSupervisor(cfg, newMonoClock())
+}
+
+// newSupervisor is New with the watchdog's clock supplied.
+func newSupervisor(cfg Config, clk clock) *Supervisor {
 	if cfg.Logger == nil {
 		cfg.Logger = zap.NewNop()
 	}
@@ -132,14 +168,25 @@ func New(cfg Config) *Supervisor {
 	rootCtx, cancel := context.WithCancel(context.Background())
 	s := &Supervisor{
 		cfg:        cfg,
+		clock:      clk,
 		rootCtx:    rootCtx,
 		rootCancel: cancel,
 		hungCh:     make(chan struct{}),
 		wdStop:     make(chan struct{}),
 		wdDone:     make(chan struct{}),
 	}
-	s.lastProgressNano.Store(time.Now().UnixNano())
-	go s.watchdogLoop()
+
+	tick := cfg.HangBudget / 4
+	if tick < minHangTick {
+		tick = minHangTick
+	}
+	// Measure from here rather than from whenever the goroutine gets
+	// to run: a late start is itself a stall.
+	start := clk.now()
+	s.lastProgress.Store(int64(start))
+	s.wd = watchdogState{tick: tick, prev: start, seen: start}
+	ticks, stopTicker := clk.newTicker(tick)
+	go s.watchdogLoop(ticks, stopTicker)
 	return s
 }
 
@@ -147,7 +194,7 @@ func New(cfg Config) *Supervisor {
 // to a FakeConn or an Ack is delivered. It resets the watchdog
 // timer. Cheap; a single atomic store.
 func (s *Supervisor) BumpActivity() {
-	s.lastProgressNano.Store(time.Now().UnixNano())
+	s.lastProgress.Store(int64(s.clock.now()))
 }
 
 // MarkPendingWork indicates an in-flight request is awaiting a
@@ -417,41 +464,83 @@ func (s *Supervisor) Close() {
 	<-s.wdDone
 }
 
-// watchdogLoop polls the activity clock. Closes hungCh when budget
-// exceeded while pending work is outstanding.
-func (s *Supervisor) watchdogLoop() {
+// watchdogLoop runs checkHang on every tick until the watchdog fires
+// or the Supervisor is closed.
+func (s *Supervisor) watchdogLoop(ticks <-chan time.Time, stopTicker func()) {
 	defer close(s.wdDone)
-
-	tick := s.cfg.HangBudget / 4
-	if tick < minHangTick {
-		tick = minHangTick
-	}
-	t := time.NewTicker(tick)
-	defer t.Stop()
+	defer stopTicker()
 
 	for {
 		select {
 		case <-s.wdStop:
 			return
-		case <-t.C:
-			if !s.pending.Load() {
-				continue
-			}
-			// A poll-lane connection is expected to make no byte
-			// progress for a long time; do not treat that as a hang.
-			if s.suspended.Load() {
-				continue
-			}
-			last := s.lastProgressNano.Load()
-			if last == 0 {
-				continue
-			}
-			if time.Since(time.Unix(0, last)) > s.cfg.HangBudget {
-				s.hungOnce.Do(func() { close(s.hungCh) })
+		case <-ticks:
+			if s.checkHang() {
 				return
 			}
 		}
 	}
+}
+
+// checkHang charges the pending request with the silence since the
+// previous check and closes hungCh once that exceeds the budget. It
+// reports whether it did.
+//
+// A check charges at most one tick, however long it has been since
+// the previous one. The ticker asks for a check every tick, so a check
+// that arrives later than that means the watchdog was not running —
+// and usually neither was the rest of the process: a GC pause, a
+// SIGSTOP or debugger breakpoint, a paused container or VM, a host too
+// loaded to schedule it. The relay was not forwarding in that time
+// either, so its silence says nothing about the parser.
+//
+// Nor does a late check declare the hang. When the process resumes,
+// the relay and the watchdog are both due to run, and the overdue
+// check would otherwise abort a live parser before the relay has
+// forwarded what reached its sockets during the stall. A late check
+// that finds the budget spent holds the verdict to the next check,
+// which declares the hang unless the relay made progress in between.
+// That check decides even if it runs late too, so a watchdog that is
+// always late still catches a hung parser.
+//
+// A hung parser is always caught, because every check charges
+// something: at the first check past the budget, the next one if that
+// check ran late, and later only when checks keep running late.
+func (s *Supervisor) checkHang() bool {
+	// Clock first, stamp second. A bump that lands in between is later
+	// than now, so the silence restarts below zero by exactly that
+	// much, and stays the time since the bump.
+	now := s.clock.now()
+	elapsed := now - s.wd.prev
+	s.wd.prev = now
+	step := min(elapsed, s.wd.tick)
+
+	// Idle, or a poll-lane connection that is expected to make no byte
+	// progress for a long time: nothing to charge. Re-arming bumps, so
+	// the next armed check starts the silence afresh.
+	if !s.pending.Load() || s.suspended.Load() {
+		return false
+	}
+
+	last := time.Duration(s.lastProgress.Load())
+	if last != s.wd.seen {
+		// Progress since the previous check: the silence restarts at
+		// the bump, and is charged no more than any other check.
+		s.wd.seen = last
+		s.wd.silence = min(now-last, step)
+		s.wd.held = false
+	} else {
+		s.wd.silence += step
+	}
+	if s.wd.silence <= s.cfg.HangBudget {
+		return false
+	}
+	if elapsed > s.wd.tick && !s.wd.held {
+		s.wd.held = true
+		return false
+	}
+	s.hungOnce.Do(func() { close(s.hungCh) })
+	return true
 }
 
 // wrapPanic converts a recovered panic value into an error suitable

@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,40 @@ func shortCfg(t *testing.T) Config {
 		Logger:     zaptest.NewLogger(t),
 		HangBudget: 50 * time.Millisecond,
 	}
+}
+
+// fakeClock stands still until the test moves it, and its ticker never
+// ticks: a Supervisor built on one checks for a hang only when the
+// test calls checkHang, at a reading the test chose. Whether the
+// watchdog fires is then decided by the test's steps alone, not by how
+// the scheduler interleaved goroutines, and every check a test counts
+// on is known to have run.
+type fakeClock struct {
+	t atomic.Int64
+	// every is the interval the Supervisor asked its ticker for.
+	every time.Duration
+}
+
+func (c *fakeClock) now() time.Duration { return time.Duration(c.t.Load()) }
+
+// newTicker hands back a nil channel, which is never ready.
+func (c *fakeClock) newTicker(d time.Duration) (<-chan time.Time, func()) {
+	c.every = d
+	return nil, func() {}
+}
+
+func (c *fakeClock) advance(d time.Duration) { c.t.Add(int64(d)) }
+
+func (c *fakeClock) set(d time.Duration) { c.t.Store(int64(d)) }
+
+// newFakeClockSupervisor returns a Supervisor with the given hang
+// budget whose watchdog runs only when the test calls checkHang.
+func newFakeClockSupervisor(t *testing.T, budget time.Duration) (*Supervisor, *fakeClock) {
+	t.Helper()
+	clk := &fakeClock{}
+	s := newSupervisor(Config{Logger: zaptest.NewLogger(t), HangBudget: budget}, clk)
+	t.Cleanup(s.Close)
+	return s, clk
 }
 
 func TestRunOK(t *testing.T) {
@@ -127,45 +162,137 @@ func TestRunPanicWithError(t *testing.T) {
 	}
 }
 
+// With every check on time, the watchdog fires at the first check at
+// which the pending request has gone longer than the budget without
+// progress, and not a check sooner, wherever between two checks that
+// progress happened.
 func TestHangDetectedWhenPending(t *testing.T) {
 	t.Parallel()
-	aborted := make(chan struct{})
-	s := New(shortCfg(t))
-	s.SessionOnAbort = func() { close(aborted) }
+	const tick = 20 * time.Millisecond // an 80ms budget is checked every 20ms
+	for _, tc := range []struct {
+		name string
+		// lastChunk is when the relay last forwarded a chunk; 0 means
+		// only MarkPendingWork, when the request arrived.
+		lastChunk time.Duration
+		// firesAt is the first check more than 80ms after lastChunk.
+		firesAt time.Duration
+	}{
+		{"no chunk after the request", 0, 100 * time.Millisecond},
+		{"last chunk between checks", 25 * time.Millisecond, 120 * time.Millisecond},
+		{"last chunk just before a check", 40 * time.Millisecond, 140 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			aborted := make(chan struct{})
+			s, clk := newFakeClockSupervisor(t, 80*time.Millisecond)
+			s.SessionOnAbort = func() { close(aborted) }
 
-	// Arm pending work so the watchdog is eligible to fire.
+			// Arm pending work so the watchdog is eligible to fire.
+			s.MarkPendingWork()
+
+			done := make(chan Result, 1)
+			parserStarted := make(chan struct{})
+			go func() {
+				done <- s.Run(context.Background(),
+					func(ctx context.Context, sess *Session) error {
+						close(parserStarted)
+						<-ctx.Done()
+						return ctx.Err()
+					},
+					&Session{})
+			}()
+			<-parserStarted
+
+			// Walk the clock in 5ms steps, forwarding the last chunk when
+			// its time comes and checking on every tick.
+			for now := 5 * time.Millisecond; now <= tc.firesAt; now += 5 * time.Millisecond {
+				clk.advance(5 * time.Millisecond)
+				if now == tc.lastChunk {
+					s.BumpActivity()
+				}
+				if now%tick != 0 {
+					continue
+				}
+				if fired := s.checkHang(); fired != (now == tc.firesAt) {
+					t.Fatalf("check at %v: fired=%v; want the first firing at %v, the first check more than 80ms after the chunk at %v",
+						now, fired, tc.firesAt, tc.lastChunk)
+				}
+			}
+
+			var res Result
+			select {
+			case res = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("Run did not return within 5s of the watchdog firing")
+			}
+			if res.Status != StatusHung {
+				t.Fatalf("status: got %s, want hung", res.Status)
+			}
+			if !res.FallthroughToPassthrough {
+				t.Fatalf("fallthrough: got false, want true")
+			}
+			// Run invokes SessionOnAbort before it returns on the hang path.
+			select {
+			case <-aborted:
+			default:
+				t.Fatalf("SessionOnAbort was not invoked")
+			}
+		})
+	}
+}
+
+// The watchdog checks every quarter of the budget, and charges a check
+// at most that much, but never checks more often than minHangTick.
+func TestWatchdogTicksEveryQuarterBudget(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ budget, tick time.Duration }{
+		{80 * time.Millisecond, 20 * time.Millisecond},
+		{0, defaultHangBudget / 4},
+		{12 * time.Millisecond, minHangTick},
+	} {
+		clk := &fakeClock{}
+		s := newSupervisor(Config{Logger: zaptest.NewLogger(t), HangBudget: tc.budget}, clk)
+		s.Close()
+		if clk.every != tc.tick || s.wd.tick != tc.tick {
+			t.Errorf("budget %v: ticker every %v, charging up to %v per check; want %v for both",
+				tc.budget, clk.every, s.wd.tick, tc.tick)
+		}
+	}
+}
+
+// The fake-clock tests drive checkHang themselves. This one leaves the
+// watchdog to New's own clock and ticker, the wiring production runs.
+func TestHangDetectedOnRealClock(t *testing.T) {
+	t.Parallel()
+	s := New(shortCfg(t))
 	s.MarkPendingWork()
 
-	start := time.Now()
-	res := s.Run(context.Background(),
-		func(ctx context.Context, sess *Session) error {
-			<-ctx.Done()
-			return ctx.Err()
-		},
-		&Session{})
-	elapsed := time.Since(start)
+	done := make(chan Result, 1)
+	go func() {
+		done <- s.Run(context.Background(),
+			func(ctx context.Context, sess *Session) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			&Session{})
+	}()
 
-	if res.Status != StatusHung {
-		t.Fatalf("status: got %s, want hung", res.Status)
-	}
-	if !res.FallthroughToPassthrough {
-		t.Fatalf("fallthrough: got false, want true")
-	}
-	// Budget is 50ms + up to one tick (12.5ms) + scheduling slop.
-	// Fail if we wildly overshot — something is broken.
-	if elapsed > time.Second {
-		t.Fatalf("hang detection too slow: %v", elapsed)
-	}
+	// The watchdog should fire by 75ms: at the first check past the
+	// 50ms budget, or the next one. The bound only catches a watchdog
+	// that never fires, so it leaves a loaded runner a wide margin.
 	select {
-	case <-aborted:
-	case <-time.After(time.Second):
-		t.Fatalf("SessionOnAbort was not invoked")
+	case res := <-done:
+		if res.Status != StatusHung {
+			t.Fatalf("status: got %s, want hung", res.Status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("watchdog did not fire within 5s on a 50ms budget")
 	}
 }
 
 func TestHangNotDetectedWhenIdle(t *testing.T) {
 	t.Parallel()
-	s := New(shortCfg(t)) // 50ms budget
+	s, clk := newFakeClockSupervisor(t, 50*time.Millisecond) // a check every 12.5ms
 
 	done := make(chan Result, 1)
 	parserStarted := make(chan struct{})
@@ -180,20 +307,18 @@ func TestHangNotDetectedWhenIdle(t *testing.T) {
 	}()
 
 	<-parserStarted
-	// Give the watchdog five budgets of wallclock time; without
-	// MarkPendingWork it must not fire.
-	select {
-	case r := <-done:
-		t.Fatalf("watchdog fired while idle: %+v", r)
-	case <-time.After(250 * time.Millisecond):
+	// Five budgets of checks; without MarkPendingWork none may fire.
+	for i := 0; i < 20; i++ {
+		clk.advance(12500 * time.Microsecond)
+		if s.checkHang() {
+			t.Fatalf("watchdog fired while idle, at %v", clk.now())
+		}
 	}
 
 	// Cleanup: cancel via Close so the parser exits and the test finishes.
 	s.Close()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatalf("parser did not exit after Close")
+	if r := <-done; r.Status == StatusHung {
+		t.Fatalf("watchdog fired while idle: %+v", r)
 	}
 }
 
@@ -204,7 +329,7 @@ func TestHangNotDetectedWhenIdle(t *testing.T) {
 // work is armed.
 func TestHangNotDetectedWhenSuspended(t *testing.T) {
 	t.Parallel()
-	s := New(shortCfg(t)) // 50ms budget
+	s, clk := newFakeClockSupervisor(t, 50*time.Millisecond) // a check every 12.5ms
 
 	// Arm pending work (as the relay does when the request bytes are teed),
 	// then suspend the watchdog (as the dispatcher does once the request is
@@ -225,62 +350,195 @@ func TestHangNotDetectedWhenSuspended(t *testing.T) {
 	}()
 
 	<-parserStarted
-	// Pending is armed and several budgets elapse, but the watchdog is
-	// suspended for this poll connection, so it must not fire.
-	select {
-	case r := <-done:
-		t.Fatalf("watchdog fired while suspended: %+v", r)
-	case <-time.After(250 * time.Millisecond):
+	// Pending is armed and five budgets of checks go by, but the
+	// watchdog is suspended for this poll connection, so none may fire.
+	for i := 0; i < 20; i++ {
+		clk.advance(12500 * time.Microsecond)
+		if s.checkHang() {
+			t.Fatalf("watchdog fired while suspended, at %v", clk.now())
+		}
 	}
 
 	s.Close()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatalf("parser did not exit after Close")
+	if r := <-done; r.Status == StatusHung {
+		t.Fatalf("watchdog fired while suspended: %+v", r)
 	}
 }
 
 func TestHangResetOnActivity(t *testing.T) {
 	t.Parallel()
-	cfg := Config{
-		Logger:     zaptest.NewLogger(t),
-		HangBudget: 80 * time.Millisecond,
-	}
-	s := New(cfg)
+	s, clk := newFakeClockSupervisor(t, 80*time.Millisecond) // a check every 20ms
 	s.MarkPendingWork()
 
-	// Drive activity well faster than the budget so the parser's
-	// effective run time exceeds budget but the watchdog never fires.
-	runFor := 300 * time.Millisecond
-	stopBumping := make(chan struct{})
-	go func() {
-		tick := time.NewTicker(20 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			select {
-			case <-tick.C:
-				s.BumpActivity()
-			case <-stopBumping:
-				return
-			}
-		}
-	}()
-
+	// The parser stays busy for 300ms, several budgets, while the relay
+	// forwards a chunk between every two checks: the watchdog never sees
+	// more than a tick of silence, so it must never fire.
 	res := s.Run(context.Background(),
 		func(ctx context.Context, sess *Session) error {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(runFor):
-				return nil
+			for now := time.Duration(0); now < 300*time.Millisecond; now += 20 * time.Millisecond {
+				clk.advance(10 * time.Millisecond)
+				s.BumpActivity()
+				clk.advance(10 * time.Millisecond)
+				if s.checkHang() {
+					return fmt.Errorf("watchdog fired at %v with a chunk every 20ms", clk.now())
+				}
 			}
+			return nil
 		},
 		&Session{})
-	close(stopBumping)
 
 	if res.Status != StatusOK {
 		t.Fatalf("expected OK with activity bumps, got %s (err=%v)", res.Status, res.Err)
+	}
+}
+
+// processStall is a point at which a stall of the whole process — a GC
+// pause, a SIGSTOP or debugger breakpoint, a paused container or VM, a
+// host too loaded to run it — can catch a pending request under an 80ms
+// budget, checked every 20ms.
+type processStall struct {
+	name string
+	// lastChunk is when the relay last forwarded a chunk before the
+	// stall; 0 means only MarkPendingWork, when the request arrived.
+	lastChunk time.Duration
+	// stallFrom is when the process stops running.
+	stallFrom time.Duration
+	// firesAfter is how many on-time checks after the stall it takes to
+	// catch a parser that stays silent.
+	firesAfter int
+}
+
+var processStalls = []processStall{
+	// 20ms charged before the stall and 20ms for it; 60, 80, then 100ms.
+	{"stall after a quiet tick", 0, 25 * time.Millisecond, 3},
+	// The stall's check restarts the silence at 20ms; 40, 60, 80, 100ms.
+	{"stall right after a chunk", 25 * time.Millisecond, 25 * time.Millisecond, 4},
+	// 65ms charged before the stall, so the tick its check charges takes
+	// the silence past the budget. That check holds the verdict; the
+	// next one gives it.
+	{"stall in the budget's last tick", 15 * time.Millisecond, 85 * time.Millisecond, 1},
+}
+
+// walkIntoStall takes s, pending, from the clock's reading through
+// tc.stallFrom with a check every 20ms tick, then stalls the process
+// for a second, twelve budgets, and runs the check that was overdue
+// meanwhile. It fails the test if any of those checks fires.
+func walkIntoStall(t *testing.T, s *Supervisor, clk *fakeClock, tc processStall) {
+	t.Helper()
+	base := clk.now()
+	for d := 5 * time.Millisecond; d <= tc.stallFrom; d += 5 * time.Millisecond {
+		clk.set(base + d)
+		if d == tc.lastChunk {
+			s.BumpActivity()
+		}
+		if d%(20*time.Millisecond) == 0 && s.checkHang() {
+			t.Fatalf("fired %v in, before the stall", d)
+		}
+	}
+	clk.advance(time.Second)
+	if s.checkHang() {
+		t.Fatalf("the first check after a 1s stall declared the parser hung")
+	}
+}
+
+// When the process resumes, the watchdog's overdue check can run before
+// the relay has forwarded what reached its sockets during the stall. So
+// that check must neither charge the stall to the parser nor declare the
+// hang; doing either aborts a paused agent's live parsers. Each case runs
+// twice, so the second stall meets a watchdog already through the first.
+func TestHangNotChargedForProcessStall(t *testing.T) {
+	t.Parallel()
+	for _, tc := range processStalls {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, clk := newFakeClockSupervisor(t, 80*time.Millisecond)
+			s.MarkPendingWork()
+			for range 2 {
+				walkIntoStall(t, s, clk, tc)
+				// The relay catches up with what arrived during the stall.
+				s.BumpActivity()
+			}
+			clk.advance(20 * time.Millisecond)
+			if s.checkHang() {
+				t.Fatalf("fired a tick after the relay caught up")
+			}
+		})
+	}
+}
+
+// Leaving a stall uncharged must not blind the watchdog: a parser still
+// silent after the process resumes is caught once the checks after the
+// stall have seen the rest of the budget go by.
+func TestHangDetectedAfterProcessStall(t *testing.T) {
+	t.Parallel()
+	for _, tc := range processStalls {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, clk := newFakeClockSupervisor(t, 80*time.Millisecond)
+			s.MarkPendingWork()
+			walkIntoStall(t, s, clk, tc)
+			for i := 1; i <= tc.firesAfter; i++ {
+				clk.advance(20 * time.Millisecond)
+				if fired := s.checkHang(); fired != (i == tc.firesAfter) {
+					t.Fatalf("check %d after the stall: fired=%v; want the first firing at check %d",
+						i, fired, tc.firesAfter)
+				}
+			}
+		})
+	}
+}
+
+// A watchdog that only ever runs late, on a host too starved to wake it
+// on time, still catches a hung parser: each late check charges a tick,
+// and the check after one that held the verdict gives it, late or not.
+func TestHangDetectedWhenEveryCheckIsLate(t *testing.T) {
+	t.Parallel()
+	s, clk := newFakeClockSupervisor(t, 80*time.Millisecond) // a check every 20ms
+	s.MarkPendingWork()
+
+	// Checks 30ms apart, each charged 20ms: 20, 40, 60, 80ms are within
+	// the budget, 100ms is past it but held, and 120ms declares the hang.
+	for i, want := range []bool{false, false, false, false, false, true} {
+		clk.advance(30 * time.Millisecond)
+		if got := s.checkHang(); got != want {
+			t.Fatalf("check %d: fired=%v, want %v", i+1, got, want)
+		}
+	}
+}
+
+// The ticker keeps to its schedule, so the check after a late one comes
+// early. It must charge only the time since the late check: a full tick
+// would declare a live parser hung before its budget ran out.
+func TestHangCheckAfterALateOneChargesOnlyItsTime(t *testing.T) {
+	t.Parallel()
+	s, clk := newFakeClockSupervisor(t, 80*time.Millisecond) // a check every 20ms
+	s.MarkPendingWork()
+
+	clk.set(20 * time.Millisecond)
+	if s.checkHang() {
+		t.Fatalf("fired 20ms into an 80ms budget")
+	}
+	clk.set(45 * time.Millisecond)
+	s.BumpActivity() // the last chunk
+
+	// The check due at 40ms runs 18ms late, then the ticker is back on
+	// its 20ms schedule. 120ms is 75ms after the chunk, within the
+	// budget; 140ms is 95ms after it.
+	for _, c := range []struct {
+		at    time.Duration
+		fires bool
+	}{
+		{58 * time.Millisecond, false},
+		{60 * time.Millisecond, false},
+		{80 * time.Millisecond, false},
+		{100 * time.Millisecond, false},
+		{120 * time.Millisecond, false},
+		{140 * time.Millisecond, true},
+	} {
+		clk.set(c.at)
+		if got := s.checkHang(); got != c.fires {
+			t.Fatalf("check at %v: fired=%v, want %v (last chunk at 45ms, budget 80ms)", c.at, got, c.fires)
+		}
 	}
 }
 
@@ -554,16 +812,24 @@ func TestRegisterGoroutine(t *testing.T) {
 		close(helperDone)
 	}()
 
-	// Parser blocks forever on ctx; watchdog fires after 50ms.
-	res := s.Run(context.Background(),
-		func(ctx context.Context, sess *Session) error {
-			<-ctx.Done()
-			return ctx.Err()
-		},
-		&Session{})
-
-	if res.Status != StatusHung {
-		t.Fatalf("status: got %s, want hung", res.Status)
+	// Parser blocks forever on ctx; the watchdog should fire by 75ms,
+	// and the bound only catches one that never does.
+	done := make(chan Result, 1)
+	go func() {
+		done <- s.Run(context.Background(),
+			func(ctx context.Context, sess *Session) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			&Session{})
+	}()
+	select {
+	case res := <-done:
+		if res.Status != StatusHung {
+			t.Fatalf("status: got %s, want hung", res.Status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("watchdog did not fire within 5s on a 50ms budget")
 	}
 
 	select {
@@ -656,33 +922,26 @@ func TestBumpActivityIsCheap(t *testing.T) {
 
 func TestClearPendingDisarmsWatchdog(t *testing.T) {
 	t.Parallel()
-	s := New(shortCfg(t))
+	s, clk := newFakeClockSupervisor(t, 50*time.Millisecond) // a check every 12.5ms
 	s.MarkPendingWork()
 	// Immediately clear; subsequent quiet period should not fire.
 	s.ClearPendingWork()
 
-	done := make(chan Result, 1)
-	go func() {
-		done <- s.Run(context.Background(),
-			func(ctx context.Context, sess *Session) error {
-				// Quiet for 4 budgets; should NOT be classified as hung.
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(200 * time.Millisecond):
-					return nil
+	res := s.Run(context.Background(),
+		func(ctx context.Context, sess *Session) error {
+			// Quiet for 4 budgets; should NOT be classified as hung.
+			for i := 0; i < 16; i++ {
+				clk.advance(12500 * time.Microsecond)
+				if s.checkHang() {
+					return fmt.Errorf("watchdog fired at %v with no pending work", clk.now())
 				}
-			},
-			&Session{})
-	}()
+			}
+			return nil
+		},
+		&Session{})
 
-	select {
-	case r := <-done:
-		if r.Status != StatusOK {
-			t.Fatalf("status: got %s, want ok", r.Status)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("parser did not finish")
+	if res.Status != StatusOK {
+		t.Fatalf("status: got %s, want ok (err=%v)", res.Status, res.Err)
 	}
 }
 
