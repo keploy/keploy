@@ -110,7 +110,9 @@ func (m *mockService) setName() string {
 // Natively the agent is keploy's own sibling and is alive right through
 // teardown, so those reads always answer. Under compose the runner exiting is
 // what stops the whole project — the agent service included — so every one of
-// them is fired at an agent that is dying in that instant. The agent client
+// them is fired at an agent that is dying in that instant. (The replay's
+// outcome is the exception: the agent leaves it as it stops, and it is read
+// back from the stopped container instead -- ComposeOutcomeReader.) The agent client
 // holds a zero-value http.Client with no timeout of its own
 // (pkg/platform/http/agent.go), and a SIGTERM'd server that still accepts but
 // never answers would hang the run: forever on the record side, whose reads sit

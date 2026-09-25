@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,7 +22,8 @@ import (
 // the runner drives the requests, Keploy answers the outgoing calls from the
 // set. On a miss it applies the configured policy (fail / passthrough /
 // record). It propagates the runner's exit code, and with --strict also exits
-// non-zero when any recorded mock was missed.
+// non-zero when any recorded mock was missed. It returns an error only for a
+// failure of keploy's own, which a failing test command never is.
 func (m *mockService) Replay(ctx context.Context) (err error) {
 	name := m.setName()
 	started := time.Now()
@@ -307,12 +309,17 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// --strict means "fail unless every recorded call was matched". An
 	// unreadable miss list is not proof of that, so it fails too: a
 	// verification flag that passes when it could not verify is worse than no
-	// flag at all. Under compose this fires on every run today, because the
-	// agent is stopped with the app before the miss list can be read — which is
-	// the point. Loud beats quietly green.
+	// flag at all. Loud beats quietly green.
+	//
+	// And it is keploy's failure, not the suite's, so Replay returns it: a
+	// returned error is how a caller -- the enterprise run result, and the
+	// editor reading it -- tells keploy's own 1 from a test command's. Left as
+	// a bare exit 1, an unverifiable run read as a failing suite.
+	var keployFailure error
 	if m.config.Mock.Strict && !missesKnown && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByStrict
+		keployFailure = errors.New("--strict could not verify this replay: the agent never reported which recorded calls were missed")
 		m.logger.Error("replay failed under --strict: the agent never reported which calls were missed, so a clean run could not be proven",
 			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended"))
 	}
@@ -378,7 +385,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		MinCoverage:    m.config.Mock.MinCoverage,
 		Version:        utils.Version,
 	})
-	return nil
+	return keployFailure
 }
 
 // readCoverage parses the coverage report this run's test command wrote, if
@@ -586,9 +593,24 @@ type replayCounts struct {
 // agent answer" flag makes a half-answer indistinguishable from no answer, and
 // then reports a run whose misses were never read as a clean one.
 func (m *mockService) reportOutcome(ctx context.Context, loaded int) replayCounts {
-	outcomeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
-	defer cancel()
-	consumed, consumedErr := m.instrumentation.GetConsumedMocks(outcomeCtx)
+	var consumed []models.MockState
+	var misses []models.UnmatchedCall
+	var consumedErr, missesErr error
+	// Under docker compose the runner exiting is what stops the whole project,
+	// the agent service included, so by now there is no agent left to ask. It
+	// says what it served and missed as it is stopped, and that account is
+	// read here instead.
+	composeOutcome, fromCompose := m.instrumentation.(ComposeOutcomeReader)
+	fromCompose = fromCompose && m.isDockerCompose()
+	if fromCompose {
+		outcome, err := composeOutcome.ComposeAgentOutcome()
+		consumed, misses, consumedErr, missesErr = outcome.Consumed, outcome.Missed, err, err
+	} else {
+		outcomeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
+		defer cancel()
+		consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
+		misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
+	}
 	if consumedErr == nil && m.config.Mock.EmitMockEvents {
 		// Flush the tail. The poll loop stops when the runner exits, so
 		// anything served in the last poll interval would be counted in the
@@ -605,17 +627,16 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int) replayCount
 	if consumedErr != nil {
 		m.logger.Debug("failed to read consumed mocks", zap.Error(consumedErr))
 	}
-	misses, missesErr := m.instrumentation.GetMockErrors(outcomeCtx)
 	if missesErr != nil {
 		m.logger.Debug("failed to read mock misses", zap.Error(missesErr))
 	}
 
-	// The outcome is read after the runner exits, and under docker compose the
-	// runner exiting is what stops the whole project — the agent service
-	// included. So a read routinely finds nothing left to ask, and reporting
-	// that as "0 consumed, 0 missed" would read as a clean replay when in truth
-	// nothing is known. Each count says "unknown" only for the read that
-	// actually failed; the other still carries its real value.
+	// The outcome is read after the runner exits, from an agent that may have
+	// died with it, or -- under compose -- from an account the agent never got
+	// to leave. Reporting a failed read as "0 consumed, 0 missed" would read as
+	// a clean replay when in truth nothing is known. Each count says "unknown"
+	// only for the read that actually failed; the other still carries its real
+	// value.
 	summary := []zap.Field{zap.Int("loaded", loaded)}
 	if consumedErr != nil {
 		summary = append(summary, zap.String("consumed", "unknown"))
@@ -630,8 +651,16 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int) replayCount
 	if consumedErr == nil && missesErr == nil {
 		m.logger.Info("mock replay summary", summary...)
 	} else {
+		next := "check the agent logs for why it stopped before the run ended"
+		if fromCompose {
+			// Compose stopping the agent is the normal end of the run, not
+			// the thing to look into: the agent writes its account as it
+			// stops, and what needs explaining is why this one did not.
+			summary = append(summary, zap.NamedError("reason", consumedErr))
+			next = "the keploy-agent container writes what it served and missed as compose stops it; check its logs above for why this one did not, and that its image is the one this keploy version runs"
+		}
 		m.logger.Warn("mock replay summary (incomplete: the agent did not report the whole outcome)",
-			append(summary, zap.String("next_step", "check the agent logs for why it stopped before the run ended"))...)
+			append(summary, zap.String("next_step", next))...)
 	}
 
 	for _, miss := range misses {
@@ -646,11 +675,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int) replayCount
 	// the user actually needs to see first. Never for --local — that is the free
 	// offline loop and is deliberately unmetered and untracked.
 	//
-	// And never on a partial read. Under compose that read fails on essentially
-	// every run, so reporting it anyway would meter each one as zero mocks
-	// consumed — the same false-clean the summary above exists to stop, only
-	// silent and permanent. A run left uncounted is recoverable; a run counted
-	// wrong is not.
+	// And never on a partial read. Reporting it anyway would meter the run as
+	// zero mocks consumed — the same false-clean the summary above exists to
+	// stop, only silent and permanent. A run left uncounted is recoverable; a
+	// run counted wrong is not.
 	if replayOutcomeReporter != nil && !m.config.Mock.Local {
 		if consumedErr != nil || missesErr != nil {
 			m.logger.Info("not metering this replay: the agent did not report the whole outcome, and a run counted as zero is worse than one left uncounted")

@@ -91,6 +91,9 @@ type App struct {
 	sourceTTY     bool
 	EnableTesting bool
 	Mode          models.Mode
+	// stopped is what readStoppedAgent read from the keploy-agent compose
+	// service's container after compose stopped it.
+	stopped stoppedAgent
 }
 
 func (a *App) Setup(ctx context.Context) error {
@@ -1484,6 +1487,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 	composeDown := func() { downOnce.Do(a.ComposeDown) }
 	if a.kind == utils.DockerCompose {
 		defer composeDown()
+		// Deferred after the teardown so that it runs BEFORE it: the agent's
+		// container has to be read between compose stopping it and keploy
+		// removing it. See readStoppedAgent.
+		defer a.readStoppedAgent(ctx)
 	}
 
 	// dockerRunName is the resolved user-app container name; reused by the

@@ -29,7 +29,7 @@ FAIL=0
 
 # Tear down only this project, by name. Never a blanket prune.
 cleanup() {
-  for f in docker-compose.yml docker-compose.nodep.yml docker-compose.fail.yml; do
+  for f in docker-compose.yml docker-compose.nodep.yml docker-compose.fail.yml docker-compose.miss.yml; do
     [ -f "$f" ] && sudo docker compose -f "$f" down --remove-orphans >/dev/null 2>&1
   done
 }
@@ -75,6 +75,13 @@ for p in ["/price/aapl", "/price/msft", "/price/goog"]:
     body = get(p)
     assert body["path"] == p, body
     print("ok", p, body, flush=True)
+# A call the recording does not have, made only when asked. The runner does not
+# depend on its answer: it is there for keploy to report as missed.
+if os.environ.get("UNRECORDED"):
+    try:
+        get(os.environ["UNRECORDED"])
+    except Exception as e:
+        print("unrecorded call failed as expected:", type(e).__name__, flush=True)
 print("RUNNER PASSED 3", flush=True)
 sys.exit(EXIT)
 PY
@@ -112,6 +119,13 @@ YML
 YML
 } > docker-compose.fail.yml
 
+# Same again, plus one call the recording does not have.
+{ echo "services:"; runner_service; cat <<'YML'
+    environment:
+      UNRECORDED: "/price/tsla"
+YML
+} > docker-compose.miss.yml
+
 priced_mocks() {
   local n
   n=$(sudo grep -c 'url: /price/' keploy/e2e/mocks.yaml 2>/dev/null)
@@ -134,28 +148,34 @@ RC=${PIPESTATUS[0]}
 echo "replay exit=$RC"
 [ "$RC" -eq 0 ] || { echo "FAIL: replay should pass entirely from mocks (exit 0), got $RC"; FAIL=1; }
 grep -q "RUNNER PASSED 3" rep.log || { echo "FAIL: the runner did not get all 3 answers from the mock set"; FAIL=1; }
-grep -q "mock replay summary" rep.log || { echo "FAIL: replay reported no outcome at all"; FAIL=1; }
+# --abort-on-container-exit stops the agent with the app, so the agent is gone
+# before keploy can ask it what it served. It leaves that account as it is
+# stopped, and keploy reads it out of the stopped container: the outcome must be
+# known, and this run -- every answer from the recording -- must be PROVEN.
+grep -q 'mock replay summary.*"missed": 0' rep.log || { echo "FAIL: the replay's outcome was not read back from the stopped agent (consumed/missed unknown)"; FAIL=1; }
+grep -q "incomplete" rep.log && { echo "FAIL: the replay summary is incomplete under compose"; FAIL=1; }
+sudo grep -q '^isolated: true' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not prove the run isolated:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 cleanup
 
-echo "== 3. --strict must not pass a run it could not verify =="
-# --abort-on-container-exit stops the agent with the app, so today the miss list
-# is read from an agent that is already gone and --strict fails closed on every
-# compose run. Assert the contract rather than today's branch of it: --strict
-# fails exactly when the miss count came back unknown, and must not otherwise.
-# Fixing the teardown so the outcome IS readable should make this lane greener.
+echo "== 3. --strict passes a compose replay it can now verify =="
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay \
   -c "docker compose -f docker-compose.nodep.yml up" --container-name mockc-runner --name e2e --disable-tele --strict 2>&1 | tee strict.log
 RC=${PIPESTATUS[0]}
 echo "strict replay exit=$RC"
 grep -q "RUNNER PASSED 3" strict.log || { echo "FAIL: the runner did not complete under --strict"; FAIL=1; }
-if grep -q '"missed": "unknown"' strict.log; then
-  echo "note: the miss list was unreadable (the agent is stopped with the app under compose)"
-  [ "$RC" -ne 0 ] || { echo "FAIL: --strict passed a run whose misses were never read"; FAIL=1; }
-  grep -q "could not be proven" strict.log || { echo "FAIL: --strict failed without saying why"; FAIL=1; }
-else
-  echo "note: the miss list was readable; --strict applied to it"
-  [ "$RC" -eq 0 ] || { echo "FAIL: --strict failed a replay that missed nothing (exit $RC)"; FAIL=1; }
-fi
+[ "$RC" -eq 0 ] || { echo "FAIL: --strict failed a compose replay that missed nothing (exit $RC)"; FAIL=1; }
+grep -q "could not be proven" strict.log && { echo "FAIL: --strict could not read the miss list under compose"; FAIL=1; }
+cleanup
+
+echo "== 3b. --strict fails on a call the recording lacks, read back from the stopped agent =="
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay \
+  -c "docker compose -f docker-compose.miss.yml up" --container-name mockc-runner --name e2e --disable-tele --strict 2>&1 | tee miss.log
+RC=${PIPESTATUS[0]}
+echo "strict replay with an unrecorded call exit=$RC"
+grep -q "RUNNER PASSED 3" miss.log || { echo "FAIL: the runner did not complete"; FAIL=1; }
+[ "$RC" -eq 1 ] || { echo "FAIL: --strict must fail a replay that missed a call (exit 1), got $RC"; FAIL=1; }
+grep -q 'mock replay summary.*"missed": 1' miss.log || { echo "FAIL: the missed call was not read back from the stopped agent"; FAIL=1; }
+sudo grep -q '^failedBy: strict' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not blame --strict:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 cleanup
 
 echo "== 4. exit-code propagation: a failing runner must fail keploy =="

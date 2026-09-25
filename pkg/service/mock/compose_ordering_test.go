@@ -57,6 +57,10 @@ type composeInstr struct {
 	runBlocks bool
 	runPanics bool
 	runResult models.AppError
+	// runUntilReady makes Run return runResult only once the app has been
+	// released -- the "ready" post -- the way a compose runner held at the
+	// agent's healthcheck runs and then exits.
+	runUntilReady bool
 
 	// What the agent reports back when asked for the replay outcome. Under
 	// compose it is routinely asked after it has already been stopped, so both
@@ -65,6 +69,11 @@ type composeInstr struct {
 	consumedErr   error
 	mockErrors    []models.UnmatchedCall
 	mockErrorsErr error
+
+	// What the agent left as compose stopped it (ComposeOutcomeReader): under
+	// compose, the only account of the run there is.
+	leftOutcome    models.MockOutcome
+	leftOutcomeErr error
 
 	mu         sync.Mutex
 	events     []string
@@ -158,7 +167,27 @@ func (f *composeInstr) Run(ctx context.Context, _ models.RunOptions) models.AppE
 	if f.runBlocks {
 		<-ctx.Done() // a compose project runs until it is torn down
 	}
+	for f.runUntilReady && !f.released() {
+		select {
+		case <-ctx.Done():
+			return models.AppError{AppErrorType: models.ErrCtxCanceled}
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	return f.runResult
+}
+
+func (f *composeInstr) released() bool {
+	for _, e := range f.seq() {
+		if e == "ready" {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *composeInstr) ComposeAgentOutcome() (models.MockOutcome, error) {
+	return f.leftOutcome, f.leftOutcomeErr
 }
 
 func (f *composeInstr) GetOutgoing(context.Context, models.OutgoingOptions) (<-chan *models.Mock, error) {

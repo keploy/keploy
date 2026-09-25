@@ -2056,6 +2056,32 @@ func (a *AgentClient) getApp() (*app.App, error) {
 	return h, nil
 }
 
+// ComposeAgentOutcome is what the keploy-agent compose service served and
+// missed in a mock replay, as it wrote it on being stopped.
+//
+// Under docker compose it is the only way to learn either: compose stops the
+// agent service the moment the app exits, so the agent is gone before
+// GetConsumedMocks or GetMockErrors could reach it. The App reads the account
+// out of the stopped container before keploy's teardown removes it.
+func (a *AgentClient) ComposeAgentOutcome() (models.MockOutcome, error) {
+	ap, err := a.getApp()
+	if err != nil {
+		return models.MockOutcome{}, err
+	}
+	stopped, ok := ap.StoppedAgent()
+	if !ok {
+		return models.MockOutcome{}, errors.New("keploy did not read the keploy-agent container before it was removed")
+	}
+	if stopped.OutcomeErr != nil {
+		return models.MockOutcome{}, stopped.OutcomeErr
+	}
+	var outcome models.MockOutcome
+	if err := json.Unmarshal(stopped.Outcome, &outcome); err != nil {
+		return models.MockOutcome{}, fmt.Errorf("failed to decode the replay outcome the keploy-agent container left: %w", err)
+	}
+	return outcome, nil
+}
+
 // ComposeDownOnSetupFailure tears down the managed docker-compose stack so a
 // retry after a per-test-set setup failure (e.g. agent-readiness timeout) does
 // not hit a "container name already in use" conflict from the dependency

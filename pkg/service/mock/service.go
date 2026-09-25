@@ -82,6 +82,16 @@ type MissCapturer interface {
 	DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error)
 }
 
+// ComposeOutcomeReader is an optional Instrumentation extension for a docker
+// compose replay. There the keploy agent is a service in the project, and
+// compose stops it along with the app -- so by the time Replay has the
+// runner's exit, the agent is gone and GetConsumedMocks / GetMockErrors have
+// nothing to ask. This returns what the agent served and missed as it wrote
+// them on being stopped.
+type ComposeOutcomeReader interface {
+	ComposeAgentOutcome() (models.MockOutcome, error)
+}
+
 // ScopePusher is an optional Instrumentation extension: Replay uses it to hand
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
