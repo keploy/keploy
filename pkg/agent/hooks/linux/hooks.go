@@ -484,23 +484,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if err != nil {
 		h.logger.Debug("Failed to register Client")
 	}
-	proxyInfo, err := h.GetProxyInfo(ctx, setupOpts, opts)
+	proxyInfo, err := h.resolveProxyInfo(ctx, setupOpts, opts)
 	if err != nil {
 		return err
-	}
-
-	if opts.IsDocker {
-		h.proxyIP4, err = utils.GetContainerIPv4()
-		if err != nil {
-			h.logger.Error("Failed to get the container IP", zap.Error(err))
-			return err
-		}
-		ipv6, err := ToIPv4MappedIPv6(h.proxyIP4)
-		if err != nil {
-			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", h.proxyIP4, err)
-		}
-		h.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.proxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
-		h.proxyIP6 = ipv6
 	}
 	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
 
@@ -513,6 +499,35 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	return nil
 }
+
+// resolveProxyInfo is GetProxyInfo, keeping the addresses it picked: where the
+// kernel is told to send the application's connections is where the
+// application reaches the proxy, and so what ProxyIPv4 reports. Looking the
+// address up a second time could come back with another interface's.
+func (h *Hooks) resolveProxyInfo(ctx context.Context, setupOpts config.Agent, opts agent.HookCfg) (structs.ProxyInfo, error) {
+	info, err := h.GetProxyInfo(ctx, setupOpts, opts)
+	if err != nil {
+		return structs.ProxyInfo{}, err
+	}
+	var ip4 [4]byte
+	binary.BigEndian.PutUint32(ip4[:], info.IP4)
+	h.proxyIP4 = net.IP(ip4[:]).String()
+	h.proxyIP6 = info.IP6
+	return info, nil
+}
+
+// ProxyIPv4 is the IPv4 address the application reaches the proxy at, once
+// Load has returned: loopback for a native agent, which shares the
+// application's network namespace, and for one started with --is-docker, its
+// container's own address, as GetProxyInfo decides.
+func (h *Hooks) ProxyIPv4() string {
+	return h.proxyIP4
+}
+
+// Compile-time proof that the Linux hooks report where the proxy is reached:
+// were the method renamed, the agent's type assertion would stop matching
+// and an --is-docker agent's DNS server would silently answer loopback.
+var _ agent.ProxyAddressReporter = (*Hooks)(nil)
 
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events

@@ -3,12 +3,11 @@ package http
 // AN AGENT THAT CANNOT START MUST FAIL THE RUN, AT ONCE, AND SAY WHY.
 //
 // The native agent is a separate process. When it could not start -- no
-// privileges to raise the memlock rlimit, no tracefs, no non-loopback IPv4
-// address -- the readiness wait never looked at the process: it polled a
-// dead port for the whole ready budget (330s), or, when the agent's exit
-// failed the caller's errgroup first, returned a bare "context canceled" that
-// `keploy mock record` then read as the user's Ctrl+C and exited 0 on, with
-// the test command never run.
+// privileges to raise the memlock rlimit, no tracefs -- the readiness wait
+// never looked at the process: it polled a dead port for the whole ready
+// budget (330s), or, when the agent's exit failed the caller's errgroup
+// first, returned a bare "context canceled" that `keploy mock record` then
+// read as the user's Ctrl+C and exited 0 on, with the test command never run.
 
 import (
 	"context"
@@ -206,8 +205,10 @@ func TestAnAgentThatAnswersIsReady(t *testing.T) {
 // already has one. A native agent refused it may not be in a container at
 // all: on a bare host, root is refused eBPF by kernel lockdown or by an
 // SELinux or AppArmor policy, which no container flag changes. And tracefs is
-// only ever missing on Linux: a macOS or Windows agent reporting its
-// environment is short of something is short of a network.
+// only ever missing on Linux, while no native agent needs a network: it is
+// reached over loopback, so a machine with its network off has nothing to
+// connect. The agent container does need an address, on the network the
+// application's command names.
 func TestAnAgentThatCouldNotStartIsGivenARemedyThatCanWork(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -218,11 +219,11 @@ func TestAnAgentThatCouldNotStartIsGivenARemedyThatCanWork(t *testing.T) {
 		wrong    []string
 	}{
 		{"native, privileges", utils.ErrPrivilegeRequired, false, "linux", []string{"--privileged", "lockdown", "SELinux or AppArmor"}, nil},
-		{"native, environment", utils.ErrEnvironmentUnsupported, false, "linux", []string{"mount -t tracefs", "non-loopback IPv4 address"}, nil},
-		{"native on macOS, environment", utils.ErrEnvironmentUnsupported, false, "darwin", []string{"non-loopback IPv4 address"}, []string{"tracefs", "mount"}},
-		{"native on Windows, environment", utils.ErrEnvironmentUnsupported, false, "windows", []string{"non-loopback IPv4 address"}, []string{"tracefs", "mount"}},
+		{"native, environment", utils.ErrEnvironmentUnsupported, false, "linux", []string{"mount -t tracefs"}, []string{"IPv4", "network"}},
+		{"native on macOS, environment", utils.ErrEnvironmentUnsupported, false, "darwin", []string{"the agent's log"}, []string{"tracefs", "mount", "IPv4", "network"}},
+		{"native on Windows, environment", utils.ErrEnvironmentUnsupported, false, "windows", []string{"the agent's log"}, []string{"tracefs", "mount", "IPv4", "network"}},
 		{"docker, privileges", utils.ErrPrivilegeRequired, true, "linux", []string{"rootless", "SELinux or AppArmor"}, []string{"Run keploy against a rootful Docker daemon"}},
-		{"docker, environment", utils.ErrEnvironmentUnsupported, true, "linux", []string{"mount -t debugfs"}, nil},
+		{"docker, environment", utils.ErrEnvironmentUnsupported, true, "linux", []string{"mount -t debugfs", "--network none"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			remedy := agentStartRemedy(tc.cause, tc.isDocker, tc.goos)

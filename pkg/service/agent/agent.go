@@ -600,10 +600,16 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		return ctx.Err()
 	default:
 	}
-	DNSIPv4, err := utils.GetContainerIPv4()
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to get container IP")
-		return fmt.Errorf("failed to hook into the app: %w", err)
+	// DNSIPv4 is the address the proxy's DNS server answers with when it has
+	// no recorded answer to serve, so it has to be one the application reaches
+	// the proxy at — which the hooks that just loaded know, and hooks that do
+	// not say leave the proxy's loopback default. Asking the machine for a
+	// non-loopback address here instead, for every agent, kept a native one
+	// from starting on a machine with none: a laptop with its network off,
+	// exactly where replaying recorded mocks has to work.
+	var DNSIPv4 string
+	if h, ok := a.Hooks.(coreAgent.ProxyAddressReporter); ok {
+		DNSIPv4 = h.ProxyIPv4()
 	}
 	if coreAgent.ProxyHook != nil {
 		a.Proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
