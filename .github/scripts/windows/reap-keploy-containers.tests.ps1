@@ -39,8 +39,12 @@ $stateFile = Join-Path $work 'state.json'
 # docker's semantics (the name filter is an unanchored match); anything else
 # fails loudly so a new call cannot silently get an empty answer.
 Set-Content -Path $fake -Encoding ASCII -Value @'
-# FAKE_DOCKER_CALLS, when set, gets a line per call.
-if ($env:FAKE_DOCKER_CALLS) { Add-Content -LiteralPath $env:FAKE_DOCKER_CALLS -Value "$args" }
+# FAKE_DOCKER_CALLS, when set, gets a line per call, as it starts: the call,
+# its process, and whether <state>.up was there. A failing case can then tell
+# a call that found the daemon down from one that never got that far.
+if ($env:FAKE_DOCKER_CALLS) {
+    Add-Content -LiteralPath $env:FAKE_DOCKER_CALLS -Value ("{0} (pid {1} at {2:HH:mm:ss.fff}, .up {3})" -f "$args", $PID, [DateTime]::UtcNow, (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up"))
+}
 $state = Get-Content -Raw -Path $env:FAKE_DOCKER_STATE | ConvertFrom-Json
 function Save { $state | ConvertTo-Json -Depth 5 | Set-Content -Path $env:FAKE_DOCKER_STATE -Encoding ASCII }
 # The container with this id, or $null. The object itself, not an array: a
@@ -1400,6 +1404,7 @@ function Get-ChildItem {
     # Docker answering.
     function Get-RacePrelude([string]$barrierDir, [string]$id) {
         @'
+$env:FAKE_DOCKER_CALLS = Join-Path '@@BARRIER@@' 'calls-@@ID@@'
 $global:listed = $false; $global:marked = $false; $global:raced = $false
 function Wait-Barrier([string]$what, [scriptblock]$ready) {
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
@@ -1469,6 +1474,11 @@ function Set-Content {
             if ($left.Count) { $problems += "left $($left -join ', ')" }
         } finally {
             foreach ($bg in $bgs) { Stop-Background $bg }
+        }
+        # When the case fails, each run's docker calls, in order, with what
+        # each found (the runs' logs above are in the same order, a then b).
+        if ($problems.Count) {
+            foreach ($id in 'a', 'b') { $said += "`n---- docker calls of run $id`n" + (@(Get-Events (Join-Path $barrierDir "calls-$id")) -join "`n") }
         }
         Report "two runners that put their markers down at the same moment $($race.What) Docker Desktop once" ([pscustomobject]@{ Output = $said }) $problems
     }
