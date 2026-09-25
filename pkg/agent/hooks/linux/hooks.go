@@ -252,7 +252,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	h.sockops = sockops
 
-	if opts.Mode == models.MODE_RECORD && (!setupOpts.MockMode || setupOpts.RecordRequests) {
+	// Ingress is captured while recording, and in mock mode whenever requests are on, so a replay can
+	// compare the app's actual responses with the recorded cases.
+	if (opts.Mode == models.MODE_RECORD && !setupOpts.MockMode) || (setupOpts.MockMode && setupOpts.RecordRequests) {
 
 		// Skipped in mock mode (--mock-mode): the wrapped process is a test
 		// runner, not a server. Relocating any port it binds (a pytest
@@ -581,7 +583,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	}
 	h.objectsMutex.Unlock()
 
-	if opts.Mode == models.MODE_RECORD {
+	if h.cgBind4 != nil || h.cgBind6 != nil {
 		if h.cgBind4 != nil {
 			if err := h.cgBind4.Close(); err != nil {
 				utils.LogError(h.logger, err, "failed to close the cgBind4")
