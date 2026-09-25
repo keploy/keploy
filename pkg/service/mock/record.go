@@ -124,7 +124,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	m.mockDB.ResetCounterID()
 	m.deleteMappings(persistCtx, name)
 	if m.config.Mock.RecordRequests {
-		m.deleteCases(persistCtx, name)
+		// The old cases stay until the run has ended so the new ones are numbered after them: a flow
+		// re-recorded on its own must not reuse the names of the flows the set carries.
+		defer m.deleteCases(persistCtx, name, m.caseNames(persistCtx, name))
 	}
 
 	// 4. Arm the record proxy and stream captured mocks.
@@ -368,18 +370,26 @@ func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
 	return windows
 }
 
-// deleteCases drops the set's old test cases so a re-record starts clean, as it does for mocks.
-func (m *mockService) deleteCases(ctx context.Context, name string) {
+// caseNames lists the test cases the set holds before a re-record.
+func (m *mockService) caseNames(ctx context.Context, name string) []string {
 	if m.testDB == nil {
-		return
+		return nil
 	}
 	tcs, err := m.testDB.GetTestCases(ctx, name)
-	if err != nil || len(tcs) == 0 {
-		return
+	if err != nil {
+		return nil
 	}
 	ids := make([]string, 0, len(tcs))
 	for _, tc := range tcs {
 		ids = append(ids, tc.Name)
+	}
+	return ids
+}
+
+// deleteCases drops the set's old test cases so a re-record ends clean, as it does for mocks.
+func (m *mockService) deleteCases(ctx context.Context, name string, ids []string) {
+	if m.testDB == nil || len(ids) == 0 {
+		return
 	}
 	if err := m.testDB.DeleteTests(ctx, name, ids); err != nil {
 		m.logger.Debug("failed to delete the old test cases", zap.String("mock-set", name), zap.Error(err))

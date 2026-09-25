@@ -21,12 +21,15 @@ type memTestDB struct {
 	existing []*models.TestCase
 	inserted []string
 	deleted  []string
+	// presentAtInsert is how many old cases were still stored when the last new one was inserted.
+	presentAtInsert int
 }
 
 func (db *memTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ string, _ bool) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.inserted = append(db.inserted, tc.Name)
+	db.presentAtInsert = len(db.existing) - len(db.deleted)
 	return nil
 }
 
@@ -94,7 +97,8 @@ func TestRecordRequestsStoresCasesAndListsThemPerFlow(t *testing.T) {
 	require.NoError(t, recordSetWith(t, zap.NewNop(), instr, mapdb.New(zap.NewNop(), dir, ""), db, withRequests))
 
 	require.Equal(t, []string{"test-1", "test-2", "test-3"}, db.inserted)
-	require.Equal(t, []string{"test-9"}, db.deleted, "a re-record starts from an empty tests directory")
+	require.Equal(t, []string{"test-9"}, db.deleted, "a re-record ends with the old cases gone")
+	require.Equal(t, 1, db.presentAtInsert, "the old cases are still there while the new ones are named, so numbering continues past them")
 	require.Equal(t, map[string][]string{
 		"orders/e2e.TestA": {"test-1"},
 		"orders/e2e.TestC": {"test-2"},
