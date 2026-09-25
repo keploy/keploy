@@ -2074,14 +2074,7 @@ func (a *AgentClient) ComposeAgentOutcome() (models.MockOutcome, error) {
 	if !ok {
 		return models.MockOutcome{}, errors.New("keploy did not read the keploy-agent container before it was removed")
 	}
-	if stopped.OutcomeErr != nil {
-		return models.MockOutcome{}, stopped.OutcomeErr
-	}
-	var outcome models.MockOutcome
-	if err := json.Unmarshal(stopped.Outcome, &outcome); err != nil {
-		return models.MockOutcome{}, fmt.Errorf("failed to decode the replay outcome the keploy-agent container left: %w", err)
-	}
-	return outcome, nil
+	return stopped.MockOutcome()
 }
 
 // agentContainerExit is a keploy-agent container that stopped, as docker
@@ -2123,7 +2116,16 @@ func (a *AgentClient) ComposeAgentFailure() error {
 		return nil
 	}
 	stopped, ok := ap.StoppedAgent()
-	if !ok || !stopped.AgentFailed() {
+	if !ok {
+		return nil
+	}
+	return a.composeAgentFailure(stopped)
+}
+
+// composeAgentFailure is ComposeAgentFailure for what keploy read from the
+// stopped agent's container.
+func (a *AgentClient) composeAgentFailure(stopped app.StoppedAgent) error {
+	if !stopped.AgentFailed() {
 		return nil
 	}
 	exit := &agentContainerExit{container: stopped.Container, code: stopped.Agent.ExitCode, oomKilled: stopped.Agent.OOMKilled}

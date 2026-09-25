@@ -24,7 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -500,5 +502,105 @@ func TestAgentContainerExitSaysItRanOutOfMemory(t *testing.T) {
 	err := &agentContainerExit{container: "keploy-v3-x", code: 137, oomKilled: true}
 	if got := err.Error(); !strings.Contains(got, "exited with code 137") || !strings.Contains(got, "out of memory") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// What keploy read from the stopped keploy-agent compose service decides
+// whose failure a compose run is. An agent that never let the app start could
+// not start at all: its exit is armed, and the container remedy logged,
+// exactly as for any agent that could not start. One that died under a
+// running app is keploy's failure, and its code says nothing about the
+// machine. And one compose stopped after the app exited has not failed at
+// all: blaming it fails every compose run.
+func TestComposeAgentFailureDecidesFromTheStoppedAgent(t *testing.T) {
+	const at, later = "2026-09-25T12:00:00Z", "2026-09-25T12:00:10Z"
+	const neverStarted = "0001-01-01T00:00:00Z"
+	ended := func(status string, code int, started string) *container.State {
+		return &container.State{Status: status, ExitCode: code, StartedAt: started, FinishedAt: later}
+	}
+	for _, tc := range []struct {
+		name       string
+		agent, app *container.State
+		want       string // "" when there is no failure
+		cause      error  // the specific reason, armed and remedied; nil when there is none
+	}{
+		{
+			name:  "no tracefs: the agent exited 6 and compose never started the app",
+			agent: ended("exited", utils.ExitEnvironmentUnsupported, at),
+			app:   ended("created", 0, neverStarted),
+			want:  "the keploy agent could not start (the keploy-agent container keploy-v3-x exited with code 6)",
+			cause: utils.ErrEnvironmentUnsupported,
+		},
+		{
+			name:  "eBPF refused: the agent exited 3, and docker could not say how the app ended",
+			agent: ended("exited", utils.ExitPrivilegeRequired, at),
+			want:  "the keploy agent could not start (the keploy-agent container keploy-v3-x exited with code 3)",
+			cause: utils.ErrPrivilegeRequired,
+		},
+		{
+			name:  "the agent was killed mid-run, and the namespace took the app with it",
+			agent: ended("exited", 137, at),
+			app:   ended("exited", 137, at),
+			want:  "the keploy agent stopped while the test command was running: the keploy-agent container keploy-v3-x exited with code 137",
+		},
+		{
+			name:  "the normal end: the app exited, and compose stopped the agent",
+			agent: ended("exited", 0, at),
+			app:   ended("exited", 7, at),
+		},
+		{
+			name:  "the app returned its own code, then compose killed an agent slow to stop",
+			agent: ended("exited", 137, at),
+			app:   ended("exited", 0, at),
+		},
+		{name: "docker could not say how the agent ended", app: ended("exited", 137, at)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.ErrorLevel)
+			a := &AgentClient{logger: zap.New(core), conf: &config.Config{}}
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+
+			err := a.composeAgentFailure(app.StoppedAgent{Container: "keploy-v3-x", Agent: tc.agent, App: tc.app})
+			if tc.want == "" {
+				if err != nil || utils.ErrCode != 0 || logs.Len() != 0 {
+					t.Fatalf("got %v (armed %d, logged %v), want no failure", err, utils.ErrCode, logs.All())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want %q", err, tc.want)
+			}
+			wantCode, remedies := 0, 0
+			if tc.cause != nil {
+				wantCode, remedies = utils.ExitCodeFor(tc.cause), 1
+				if !errors.Is(err, tc.cause) {
+					t.Fatalf("got %q, want it to carry %q", err, tc.cause)
+				}
+			}
+			if utils.ErrCode != wantCode {
+				t.Fatalf("armed exit %d, want %d", utils.ErrCode, wantCode)
+			}
+			if n := logs.FilterFieldKey("next_step").Len(); n != remedies {
+				t.Fatalf("logged %v, want %d remedy", logs.All(), remedies)
+			}
+		})
+	}
+}
+
+// Nothing read from the stopped agent -- the app never ran it under compose,
+// or read nothing before the teardown -- is no account of a replay, and no
+// sign that the agent failed.
+func TestComposeReadsWithNothingReadFromTheStoppedAgent(t *testing.T) {
+	a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{}}
+	if _, err := a.ComposeAgentOutcome(); err == nil {
+		t.Fatal("ComposeAgentOutcome with no app returned an outcome")
+	}
+	a.apps.Store(uint64(0), &app.App{})
+	if got, err := a.ComposeAgentOutcome(); err == nil {
+		t.Fatalf("ComposeAgentOutcome with nothing read returned %+v: an account nobody read", got)
+	}
+	if err := a.ComposeAgentFailure(); err != nil {
+		t.Fatalf("ComposeAgentFailure with nothing read returned %v", err)
 	}
 }

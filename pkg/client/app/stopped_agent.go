@@ -3,6 +3,8 @@ package app
 import (
 	"archive/tar"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -84,6 +86,24 @@ func (s StoppedAgent) AgentFailed() bool {
 		return true
 	}
 	return s.App.ExitCode == 128+int(syscall.SIGKILL) || s.App.ExitCode == 128+int(syscall.SIGTERM)
+}
+
+// MockOutcome is what the agent served and missed in a mock replay, decoded
+// from the account it left as compose stopped it -- or why there is none. An
+// account keploy did not get is never an empty one: read as "served nothing,
+// missed nothing", it would prove a replay nobody saw.
+func (s StoppedAgent) MockOutcome() (models.MockOutcome, error) {
+	if s.OutcomeErr != nil {
+		return models.MockOutcome{}, s.OutcomeErr
+	}
+	if s.Outcome == nil {
+		return models.MockOutcome{}, errors.New("keploy did not read the replay outcome the keploy-agent container left")
+	}
+	var outcome models.MockOutcome
+	if err := json.Unmarshal(s.Outcome, &outcome); err != nil {
+		return models.MockOutcome{}, fmt.Errorf("failed to decode the replay outcome the keploy-agent container left: %w", err)
+	}
+	return outcome, nil
 }
 
 // stoppedAgent holds the last StoppedAgent read. Guarded because the App runs

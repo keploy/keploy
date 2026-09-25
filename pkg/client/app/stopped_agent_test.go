@@ -199,6 +199,39 @@ func TestReadStoppedAgentRecordsAMissingOutcome(t *testing.T) {
 	}
 }
 
+// MockOutcome is the account the agent left, decoded -- and an account keploy
+// does not have is an error, never an empty one: "served nothing, missed
+// nothing" passes --strict and meters a replay as zero.
+func TestStoppedAgentMockOutcome(t *testing.T) {
+	t.Run("the account the agent left", func(t *testing.T) {
+		got, err := StoppedAgent{Outcome: []byte(`{"consumed":[{"name":"mock-1"}],"missed":[{"actual_summary":"GET /price/tsla"}]}`)}.MockOutcome()
+		if err != nil || len(got.Consumed) != 1 || got.Consumed[0].Name != "mock-1" || len(got.Missed) != 1 || got.Missed[0].ActualSummary != "GET /price/tsla" {
+			t.Fatalf("MockOutcome() = %+v, %v; want mock-1 served and GET /price/tsla missed", got, err)
+		}
+	})
+	left := errors.New("the keploy-agent container keploy-v3-test left no " + docker.AgentOutcomeFile)
+	for _, tc := range []struct {
+		name    string
+		stopped StoppedAgent
+		wantErr error // nil: any error
+	}{
+		{name: "an agent that left nothing", stopped: StoppedAgent{OutcomeErr: left}, wantErr: left},
+		{name: "a read that never happened", stopped: StoppedAgent{}},
+		{name: "an account that is not one", stopped: StoppedAgent{Outcome: []byte(`{"consumed":`)}},
+		{name: "an empty file", stopped: StoppedAgent{Outcome: []byte{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.stopped.MockOutcome()
+			if err == nil {
+				t.Fatalf("MockOutcome() = %+v, nil; want an error", got)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("MockOutcome() error %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestReadContainerFileRefusesWhatItCannotTrust(t *testing.T) {
 	t.Run("over the limit", func(t *testing.T) {
 		d := &stoppedAgentDocker{files: map[string]map[string][]byte{"c": {"/f": []byte("0123456789")}}}

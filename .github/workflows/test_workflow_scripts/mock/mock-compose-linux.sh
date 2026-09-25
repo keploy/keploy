@@ -163,6 +163,7 @@ grep -q "RUNNER PASSED 3" rep.log || { echo "FAIL: the runner did not get all 3 
 # stopped, and keploy reads it out of the stopped container: the outcome must be
 # known, and this run -- every answer from the recording -- must be PROVEN.
 grep -q 'mock replay summary.*"missed": 0' rep.log || { echo "FAIL: the replay's outcome was not read back from the stopped agent (consumed/missed unknown)"; FAIL=1; }
+grep -q 'mock replay summary.*"consumed": [1-9]' rep.log || { echo "FAIL: the replay served every answer from the recording, and its outcome says it served none"; FAIL=1; }
 grep -q "incomplete" rep.log && { echo "FAIL: the replay summary is incomplete under compose"; FAIL=1; }
 sudo grep -q '^isolated: true' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not prove the run isolated:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 cleanup
@@ -215,6 +216,11 @@ grep -q "RUNNER PASSED 3" agentdies.log || { echo "FAIL: the runner never got as
 grep -q "the keploy agent stopped while the test command was running" agentdies.log || { echo "FAIL: keploy did not say its agent died"; FAIL=1; }
 sudo grep -q '^failedBy: keploy' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not blame keploy:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 sudo grep -q '^runnerExitCode: -1' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt gives the runner an exit of its own:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
+# Killed, the agent left no account of what it served: what it served and
+# missed is unknown, and must read so. Read as 0 and 0, it proves a run nobody
+# saw -- --strict passes it, and it is metered as zero.
+grep -q 'mock replay summary.*"missed": "unknown"' agentdies.log || { echo "FAIL: the replay summary gives a killed agent's outcome as known"; FAIL=1; }
+sudo grep -q '^missed: -1' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt gives a killed agent's misses as known:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK COMPOSE E2E: PASSED"; else echo "MOCK COMPOSE E2E: FAILED"; fi
 exit "$FAIL"
