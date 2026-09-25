@@ -116,6 +116,28 @@ type MappingDB interface {
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
 }
 
+// CaseMapper is an optional MappingDB extension: Record writes which test cases each flow produced through it.
+type CaseMapper interface {
+	UpsertCases(ctx context.Context, testSetID string, byTest map[string][]string) error
+}
+
+// IncomingReader is an optional Instrumentation extension: the agent's stream of the app's captured incoming requests.
+type IncomingReader interface {
+	GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error)
+}
+
+// TestDB stores the app's incoming requests as test cases under --record-requests.
+type TestDB interface {
+	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error
+	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+}
+
+// TestDBSetter is how the CLI hands the mock service a test-case store when --record-requests is set.
+type TestDBSetter interface {
+	SetTestDB(db TestDB)
+}
+
 // MappingDeleter is an optional MappingDB extension: Record drops the set's old mappings through it before a re-record.
 type MappingDeleter interface {
 	Delete(ctx context.Context, testSetID string) error

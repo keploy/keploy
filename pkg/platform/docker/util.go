@@ -606,8 +606,11 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 // mockModeSuffix returns " --mock-mode" when the session is a `keploy mock`
 // record/replay run, so the containerised agent skips ingress/bind relocation.
 func mockModeSuffix(opts models.SetupOptions) string {
-	if opts.MockMode {
-		return " --mock-mode"
+	if !opts.MockMode {
+		return ""
 	}
-	return ""
+	if opts.RecordRequests {
+		return " --mock-mode --record-requests"
+	}
+	return " --mock-mode"
 }

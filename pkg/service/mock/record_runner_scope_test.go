@@ -20,13 +20,41 @@ import (
 // whose proxy captures mocks, and whose agent answers the scope API.
 type runnerInstr struct {
 	*composeInstr
-	output  string
-	mocks   []*models.Mock
-	windows []models.ScopeWindow
+	output   string
+	mocks    []*models.Mock
+	windows  []models.ScopeWindow
+	incoming []*models.TestCase
 
-	mu       sync.Mutex
-	marks    []string
-	observed bool
+	mu           sync.Mutex
+	marks        []string
+	observed     bool
+	setupOpts    models.SetupOptions
+	incomingRead bool
+}
+
+func (r *runnerInstr) Setup(_ context.Context, _ string, opts models.SetupOptions) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setupOpts = opts
+	return nil
+}
+
+func (r *runnerInstr) GetIncoming(_ context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
+	r.mu.Lock()
+	r.incomingRead = true
+	r.mu.Unlock()
+	out := make(chan *models.TestCase, len(r.incoming))
+	for _, tc := range r.incoming {
+		out <- tc
+	}
+	close(out)
+	return out, nil
+}
+
+func (r *runnerInstr) setup() (models.SetupOptions, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.setupOpts, r.incomingRead
 }
 
 func newRunnerInstr(t *testing.T, output string) *runnerInstr {
@@ -88,6 +116,11 @@ func recordSet(t *testing.T, instr *runnerInstr, mapDB MappingDB, tweak func(*co
 
 func recordSetLogging(t *testing.T, logger *zap.Logger, instr *runnerInstr, mapDB MappingDB, tweak func(*config.Config)) error {
 	t.Helper()
+	return recordSetWith(t, logger, instr, mapDB, nil, tweak)
+}
+
+func recordSetWith(t *testing.T, logger *zap.Logger, instr *runnerInstr, mapDB MappingDB, testDB TestDB, tweak func(*config.Config)) error {
+	t.Helper()
 	cfg := instrConfig(instr.composeInstr, utils.Native, "./shop.test -test.v")
 	cfg.Path = t.TempDir()
 	if tweak != nil {
@@ -95,7 +128,11 @@ func recordSetLogging(t *testing.T, logger *zap.Logger, instr *runnerInstr, mapD
 	}
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	return New(logger, instr, stubMockDB{}, mapDB, nil, nil, cfg).Record(context.Background())
+	svc := New(logger, instr, stubMockDB{}, mapDB, nil, nil, cfg)
+	if testDB != nil {
+		svc.(TestDBSetter).SetTestDB(testDB)
+	}
+	return svc.Record(context.Background())
 }
 
 const outputTimingWarn = "test boundaries taken from output timing"

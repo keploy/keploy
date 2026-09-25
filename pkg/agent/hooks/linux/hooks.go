@@ -252,7 +252,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	h.sockops = sockops
 
-	if opts.Mode == models.MODE_RECORD && !setupOpts.MockMode {
+	if opts.Mode == models.MODE_RECORD && (!setupOpts.MockMode || setupOpts.RecordRequests) {
 
 		// Skipped in mock mode (--mock-mode): the wrapped process is a test
 		// runner, not a server. Relocating any port it binds (a pytest

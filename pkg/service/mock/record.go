@@ -80,6 +80,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		MockMode:         true,
 		ConfigPath:       m.config.ConfigPath,
 		PassThroughPorts: config.GetByPassPorts(m.config),
+		RecordRequests:   m.config.Mock.RecordRequests,
 	}); err != nil {
 		if parent.Err() != nil {
 			return nil
@@ -119,6 +120,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	m.mockDB.ResetCounterID()
 	m.deleteMappings(persistCtx, name)
+	if m.config.Mock.RecordRequests {
+		m.deleteCases(persistCtx, name)
+	}
 
 	// 4. Arm the record proxy and stream captured mocks.
 	captureCtx, stopCapture := context.WithCancel(context.WithoutCancel(ctx))
@@ -177,6 +181,17 @@ func (m *mockService) Record(ctx context.Context) error {
 			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID})
 		}
 	}()
+
+	// 4b. With --record-requests, also store the app's incoming requests as test cases.
+	capture, err := m.captureCases(captureCtx, persistCtx, name, &mocksSeen)
+	if err != nil {
+		if parent.Err() != nil {
+			return nil
+		}
+		stopReason = "failed to start capturing incoming requests"
+		utils.LogError(m.logger, err, stopReason)
+		return fmt.Errorf("%s: %w", stopReason, err)
+	}
 
 	// 5. Release the compose app now that the capture is armed and draining.
 	//    This is the post-arm half of step 2 — see releaseComposeApp.
@@ -238,6 +253,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	case <-time.After(mockDrainGrace):
 		m.logger.Debug("timed out waiting for the mock consumer to finish after teardown")
 	}
+	capture.wait(mockDrainGrace)
 
 	if parent.Err() != nil { // user Ctrl+C
 		m.logger.Info("recording stopped", zap.Int("mocks", mockCount), zap.String("mock-set", name))
@@ -280,6 +296,9 @@ func (m *mockService) Record(ctx context.Context) error {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
 				}
 			}
+			if byCase := correlateCases(windows, capture.list()); len(byCase) > 0 {
+				m.upsertCases(persistCtx, name, byCase)
+			}
 		}
 	}
 
@@ -289,6 +308,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 
 	m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+	if capture != nil {
+		m.logger.Info("recorded test cases", zap.Int("cases", len(capture.list())), zap.String("mock-set", name))
+	}
 	if mockCount == 0 {
 		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
 			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
@@ -326,6 +348,38 @@ func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
 		return nil
 	}
 	return windows
+}
+
+// deleteCases drops the set's old test cases so a re-record starts clean, as it does for mocks.
+func (m *mockService) deleteCases(ctx context.Context, name string) {
+	if m.testDB == nil {
+		return
+	}
+	tcs, err := m.testDB.GetTestCases(ctx, name)
+	if err != nil || len(tcs) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(tcs))
+	for _, tc := range tcs {
+		ids = append(ids, tc.Name)
+	}
+	if err := m.testDB.DeleteTests(ctx, name, ids); err != nil {
+		m.logger.Debug("failed to delete the old test cases", zap.String("mock-set", name), zap.Error(err))
+	}
+}
+
+// upsertCases writes which test cases each flow produced into the mapping.
+func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[string][]string) {
+	mapper, ok := m.mappingDB.(CaseMapper)
+	if !ok {
+		m.logger.Warn("the mapping store cannot record test cases per flow", zap.String("mock-set", name))
+		return
+	}
+	if err := mapper.UpsertCases(ctx, name, byCase); err != nil {
+		m.logger.Warn("failed to write per-flow test cases", zap.Error(err))
+		return
+	}
+	m.logger.Info("wrote per-flow test cases", zap.Int("flows", len(byCase)), zap.String("mock-set", name))
 }
 
 // deleteMappings drops the set's old per-test mappings so a re-record cannot leave tests pointing at renamed mocks.
@@ -412,6 +466,17 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 			continue
 		}
 		byTest[windows[best].Name] = append(byTest[windows[best].Name], models.MockEntry{Name: mk.name})
+	}
+	return byTest
+}
+
+// correlateCases lists each flow's test cases by the window their request fell in; a case outside every window stays unmapped.
+func correlateCases(windows []models.ScopeWindow, cases []capturedMock) map[string][]string {
+	byTest := make(map[string][]string)
+	for test, entries := range correlateScopes(windows, cases) {
+		for _, e := range entries {
+			byTest[test] = append(byTest[test], e.Name)
+		}
 	}
 	return byTest
 }

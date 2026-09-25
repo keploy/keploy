@@ -354,6 +354,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// relocation (the wrapped process is a test runner, not a server).
 		cmd.Flags().Bool("mock-mode", c.cfg.Agent.MockMode, "Internal: agent-side mirror of `keploy mock` mode; disables ingress port relocation. Set by the orchestrator, not by users.")
 		_ = cmd.Flags().MarkHidden("mock-mode")
+		cmd.Flags().Bool("record-requests", c.cfg.Agent.RecordRequests, "Internal: keeps the ingress hooks on in mock mode. Set by the orchestrator, not by users.")
+		_ = cmd.Flags().MarkHidden("record-requests")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -1904,6 +1906,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.MockMode = mockMode
 
+		recordRequests, err := cmd.Flags().GetBool("record-requests")
+		if err != nil {
+			errMsg := "failed to read the record-requests flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.RecordRequests = recordRequests
+
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on
 		// Changed() — but the gate now records that the flag was PRESENT
 		// (…Set) rather than leaving the agent to guess. The orchestrator
@@ -2280,6 +2290,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
 		cmd.Flags().Bool("allow-parallel-tests", c.cfg.Mock.AllowParallelTests, "Keep recording when tests run at the same time; per-test mock mappings are then best-effort")
 		cmd.Flags().Bool("no-runner-scope", c.cfg.Mock.NoRunnerScope, "Do not read go test output for per-test boundaries (for suites that post scopes themselves)")
+		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Also record the app's incoming requests as test cases; pass the app's port with --pass-through-ports so the tests reach it")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
@@ -2486,6 +2497,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			return err
 		}
 		if err := c.readMockBool(cmd, "no-runner-scope", "mock.noRunnerScope", &c.cfg.Mock.NoRunnerScope); err != nil {
+			return err
+		}
+		if err := c.readMockBool(cmd, "record-requests", "mock.recordRequests", &c.cfg.Mock.RecordRequests); err != nil {
 			return err
 		}
 	case "replay":

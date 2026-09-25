@@ -94,16 +94,20 @@ func (m *Mapping) StartupMockNames() []string {
 type MappedTestCase struct {
 	ID    string      `json:"id" yaml:"id" bson:"id"`
 	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
+	// Cases names the test cases this test produced when its record captured incoming requests.
+	Cases []string `json:"cases,omitempty" yaml:"cases,omitempty" bson:"cases,omitempty"`
 }
 
 type persistedTestFormat struct {
 	ID          string      `json:"id" yaml:"id"`
 	MockEntries []MockEntry `json:"mock_entries,omitempty" yaml:"mock_entries,omitempty"`
+	Cases       []string    `json:"cases,omitempty" yaml:"cases,omitempty"`
 }
 
 type structuredTestFormat struct {
 	ID    string      `json:"id" yaml:"id"`
 	Mocks []MockEntry `json:"mocks" yaml:"mocks"`
+	Cases []string    `json:"cases,omitempty" yaml:"cases,omitempty"`
 }
 
 type stringSliceTestFormat struct {
@@ -140,8 +144,8 @@ func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
 func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
-	if err := node.Decode(&persisted); err == nil && nodeHasField(node, "mock_entries") {
-		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
+	if err := node.Decode(&persisted); err == nil && (nodeHasField(node, "mock_entries") || nodeHasField(node, "cases")) {
+		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
 		return nil
 	}
 
@@ -151,20 +155,20 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	}
 	var legacy legacyTestFormat
 	if err := node.Decode(&legacy); err == nil {
-		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
+		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, nil)
 		return nil
 	}
 
 	var structured structuredTestFormat
 	if err := node.Decode(&structured); err == nil {
-		tc.applyDecodedMocks(structured.ID, structured.Mocks, "")
+		tc.applyDecodedMocks(structured.ID, structured.Mocks, "", structured.Cases)
 		return nil
 	}
 
 	// Accept a string slice too so intermediate/custom fixtures remain readable.
 	var stringSlice stringSliceTestFormat
 	if err := node.Decode(&stringSlice); err == nil {
-		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
+		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "", nil)
 		return nil
 	}
 
@@ -175,8 +179,8 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 // string format while supporting the structured formats used by newer builds.
 func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	var persisted persistedTestFormat
-	if err := json.Unmarshal(data, &persisted); err == nil && jsonContainsField(data, "mock_entries") {
-		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
+	if err := json.Unmarshal(data, &persisted); err == nil && (jsonContainsField(data, "mock_entries") || jsonContainsField(data, "cases")) {
+		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
 		return nil
 	}
 
@@ -186,19 +190,19 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	}
 	var legacy legacyTestFormat
 	if err := json.Unmarshal(data, &legacy); err == nil {
-		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
+		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, nil)
 		return nil
 	}
 
 	var structured structuredTestFormat
 	if err := json.Unmarshal(data, &structured); err == nil {
-		tc.applyDecodedMocks(structured.ID, structured.Mocks, "")
+		tc.applyDecodedMocks(structured.ID, structured.Mocks, "", structured.Cases)
 		return nil
 	}
 
 	var stringSlice stringSliceTestFormat
 	if err := json.Unmarshal(data, &stringSlice); err == nil {
-		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
+		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "", nil)
 		return nil
 	}
 
@@ -218,11 +222,13 @@ func (tc MappedTestCase) persistedFormat() persistedTestFormat {
 	return persistedTestFormat{
 		ID:          tc.ID,
 		MockEntries: append([]MockEntry(nil), tc.Mocks...),
+		Cases:       append([]string(nil), tc.Cases...),
 	}
 }
 
-func (tc *MappedTestCase) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string) {
+func (tc *MappedTestCase) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string, cases []string) {
 	tc.ID = id
+	tc.Cases = append([]string(nil), cases...)
 	tc.Mocks = nil
 	if len(mockEntries) > 0 {
 		tc.Mocks = append([]MockEntry(nil), mockEntries...)

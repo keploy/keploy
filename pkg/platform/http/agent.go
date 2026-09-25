@@ -1325,6 +1325,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.MockMode {
 		args = append(args, "--mock-mode")
 	}
+	if opts.RecordRequests {
+		args = append(args, "--record-requests")
+	}
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
 	// pattern (and for the same reason) as --disable-mapping above: the
 	// orchestrator has already applied flag > yaml > default, and the native

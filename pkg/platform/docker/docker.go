@@ -825,6 +825,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		// ingress/bind relocation (the wrapped process is a test runner).
 		command = append(command, "--mock-mode")
 	}
+	if opts.RecordRequests {
+		command = append(command, "--record-requests")
+	}
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}

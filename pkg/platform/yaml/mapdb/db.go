@@ -276,6 +276,73 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	return nil
 }
 
+// UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
+func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string][]string) error {
+	if len(byTest) == 0 {
+		return nil
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	at := make(map[string]int, len(mapping.TestCases))
+	for i, t := range mapping.TestCases {
+		at[t.ID] = i
+	}
+	testIDs := make([]string, 0, len(byTest))
+	for testID := range byTest {
+		testIDs = append(testIDs, testID)
+	}
+	sort.Strings(testIDs)
+	for _, testID := range testIDs {
+		if i, ok := at[testID]; ok {
+			mapping.TestCases[i].Cases = mergeNames(mapping.TestCases[i].Cases, byTest[testID])
+			continue
+		}
+		mapping.TestCases = append(mapping.TestCases, models.MappedTestCase{ID: testID, Cases: byTest[testID]})
+	}
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	if !exists && effFormat == yaml.FormatYAML {
+		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// mergeNames unions incoming names into existing ones, keeping order and dropping repeats.
+func mergeNames(existing, incoming []string) []string {
+	seen := make(map[string]struct{}, len(existing))
+	for _, n := range existing {
+		seen[n] = struct{}{}
+	}
+	merged := existing
+	for _, n := range incoming {
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		merged = append(merged, n)
+	}
+	return merged
+}
+
 // Exists reports whether mappings.yaml is on disk for the given
 // test-set. Used by the test-mode create-if-not-present write path —
 // distinct from Get's second return (which is "has at least one
