@@ -3,7 +3,7 @@
 package utils
 
 import (
-	"syscall"
+	"fmt"
 
 	"golang.org/x/sys/unix"
 )
@@ -16,23 +16,37 @@ import (
 // /proc/<pid>/status" -- an ERROR in an interrupt that had otherwise gone as
 // it should, which an editor driving keploy shows in red.
 
-// getProcessGroupID returns pid's process group.
-func getProcessGroupID(pid int) (int, error) {
-	return syscall.Getpgid(pid)
-}
-
-// findChildPIDs returns every descendant of parentPID, from one snapshot of
-// the process table (sysctl kern.proc.all).
-func findChildPIDs(parentPID int) ([]int, error) {
+// findChildPIDs returns every descendant of parentPID, and how to read each
+// one's process group -- both from one snapshot of the process table (sysctl
+// kern.proc.all).
+//
+// The groups come from that snapshot, not from getpgid(2). getpgid refuses a
+// zombie with ESRCH -- a child its parent has not waited for yet, which a
+// test that starts a subprocess and never waits for it leaves behind -- and
+// cannot find a process that exited after the snapshot was taken. Either
+// failed the lookup of every group in the tree, so such an interrupt logged
+// "failed to find unique process groups: no such process" at ERROR, and fell
+// back to signalling each pid as if it led a group. The table holds every
+// process's group, a zombie's included.
+func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	parents := make(map[int]int, len(procs))
+	groups := make(map[int]int, len(procs))
 	for _, p := range procs {
 		parents[int(p.Proc.P_pid)] = int(p.Eproc.Ppid)
+		groups[int(p.Proc.P_pid)] = int(p.Eproc.Pgid)
 	}
-	return descendantsOf(parentPID, parents), nil
+	groupOf := func(pid int) (int, error) {
+		pgid, ok := groups[pid]
+		if !ok {
+			return 0, fmt.Errorf("process %d is not in the process table", pid)
+		}
+		return pgid, nil
+	}
+	return descendantsOf(parentPID, parents), groupOf, nil
 }
 
 // descendantsOf returns every descendant of root in a pid -> parent pid table,

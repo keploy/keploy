@@ -3,9 +3,13 @@
 package utils
 
 import (
+	"os"
 	"sort"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestDescendantsOfWalksTheWholeTree(t *testing.T) {
@@ -44,4 +48,31 @@ func TestDescendantsOfSurvivesALoop(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("descendantsOf never finished walking a table that loops")
 	}
+}
+
+// The groups findChildPIDs hands back are the kernel's, read from the same
+// snapshot as the tree. A pid that snapshot did not hold is an error, never a
+// group of 0: signalled as -0, that is keploy's own process group.
+func TestFindChildPIDsReadsGroupsFromItsSnapshot(t *testing.T) {
+	_, groupOf, err := findChildPIDs(os.Getpid())
+	if err != nil {
+		t.Fatalf("findChildPIDs: %v", err)
+	}
+	if got, err := groupOf(os.Getpid()); err != nil || got != syscall.Getpgrp() {
+		t.Fatalf("groupOf(self) = %d, %v; want this process's group %d", got, err, syscall.Getpgrp())
+	}
+	if got, err := groupOf(-1); err == nil {
+		t.Fatalf("groupOf(a pid the snapshot never held) = %d, want an error", got)
+	}
+}
+
+// isZombie reports whether pid has exited and is waiting for its parent to
+// reap it.
+func isZombie(t *testing.T, pid int) bool {
+	t.Helper()
+	p, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		t.Fatalf("read process %d: %v", pid, err)
+	}
+	return p.Proc.P_stat == 5 // SZOMB, sys/proc.h
 }

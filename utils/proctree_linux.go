@@ -40,8 +40,9 @@ func extractIDFromStatusLine(line string) int {
 	return -1
 }
 
-// findChildPIDs takes a parent PID and returns a slice of all descendant PIDs.
-func findChildPIDs(parentPID int) ([]int, error) {
+// findChildPIDs takes a parent PID and returns a slice of all descendant PIDs,
+// and how to read each one's process group.
+func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 	var childPIDs []int
 
 	// Recursive helper function to find all descendants of a given PID.
@@ -91,5 +92,5 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	// Start the recursion with the initial parent PID.
 	findDescendants(parentPID)
 
-	return childPIDs, nil
+	return childPIDs, getProcessGroupID, nil
 }

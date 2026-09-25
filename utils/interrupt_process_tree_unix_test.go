@@ -202,3 +202,115 @@ func TestInterruptProcessTreeReachesADescendantInItsOwnProcessGroup(t *testing.T
 		}
 	}
 }
+
+// buildZombieRunner compiles a stand-in test runner that starts a subprocess
+// and never waits for it -- as a Go test that calls exec.Cmd.Start without
+// Wait does, or a Python one that calls Popen without wait. The subprocess
+// exits at once, and stays in the process table as a zombie until its parent
+// reaps it, which this one never does. The runner writes the subprocess's
+// pid to a file, then waits to be interrupted.
+func buildZombieRunner(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	prog := `package main
+import ("os";"os/exec";"strconv";"time")
+func main(){
+	if len(os.Args) > 2 { return }
+	c:=exec.Command(os.Args[0], os.Args[1], "exit")
+	if err:=c.Start(); err!=nil { os.Exit(3) }
+	_ = os.WriteFile(os.Args[1], []byte(strconv.Itoa(c.Process.Pid)), 0o644)
+	time.Sleep(10*time.Minute)
+}`
+	if err := os.WriteFile(src, []byte(prog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "zombie-runner")
+	if out, err := exec.Command("go", "build", "-o", bin, src).CombinedOutput(); err != nil {
+		t.Fatalf("build runner: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// TestInterruptProcessTreeWithAZombieDescendant interrupts a runner that
+// left a zombie behind. The zombie is part of the tree the walk finds, and
+// looking up its process group must not fail the interrupt.
+//
+// On macOS it did: getpgid(2) answers ESRCH for a zombie, so every such
+// interrupt logged "failed to find unique process groups: no such process"
+// at ERROR and fell back to signalling each pid as if it were a group.
+func TestInterruptProcessTreeWithAZombieDescendant(t *testing.T) {
+	bin := buildZombieRunner(t)
+	pidFile := filepath.Join(t.TempDir(), "zombie.pid")
+
+	cmd := exec.Command(bin, pidFile)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // as keploy starts a native command
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }() // reap on exit
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if pid, _ := strconv.Atoi(strings.TrimSpace(string(b))); pid > 0 && isZombie(t, pid) {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the runner's subprocess never became a zombie")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	core, logs := observer.New(zap.DebugLevel)
+	if err := InterruptProcessTree(zap.New(core), cmd.Process.Pid, syscall.SIGINT); err != nil {
+		t.Fatalf("InterruptProcessTree: %v", err)
+	}
+	for _, e := range logs.FilterLevelExact(zap.ErrorLevel).All() {
+		t.Errorf("an interrupt that went as it should logged an ERROR: %q %v", e.Message, e.ContextMap())
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the runner outlived the interrupt")
+	}
+}
+
+// findChildPIDs reads each descendant's process group as the kernel has it.
+// A process that joined another's group is reached through that group: there
+// is no group of its own pid to signal, and signalling one fails silently
+// (ESRCH is read as "already gone").
+func TestFindChildPIDsReadsEachDescendantsProcessGroup(t *testing.T) {
+	start := func(attr *syscall.SysProcAttr) *exec.Cmd {
+		t.Helper()
+		cmd := exec.Command("sleep", "60")
+		cmd.SysProcAttr = attr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+		return cmd
+	}
+	leader := start(&syscall.SysProcAttr{Setpgid: true})
+	member := start(&syscall.SysProcAttr{Setpgid: true, Pgid: leader.Process.Pid})
+
+	children, groupOf, err := findChildPIDs(os.Getpid())
+	if err != nil {
+		t.Fatalf("findChildPIDs: %v", err)
+	}
+	for _, c := range []*exec.Cmd{leader, member} {
+		found := false
+		for _, pid := range children {
+			found = found || pid == c.Process.Pid
+		}
+		if !found {
+			t.Fatalf("findChildPIDs(%d) = %v, missing child %d", os.Getpid(), children, c.Process.Pid)
+		}
+		if got, err := groupOf(c.Process.Pid); err != nil || got != leader.Process.Pid {
+			t.Fatalf("process group of %d = %d, %v; want %d", c.Process.Pid, got, err, leader.Process.Pid)
+		}
+	}
+}

@@ -1021,7 +1021,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 	// Non-windows (existing logic)
 	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
-	children, err := findChildPIDs(ppid)
+	children, groupOf, err := findChildPIDs(ppid)
 	if err != nil {
 		return err
 	}
@@ -1030,7 +1030,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 
 	logger.Debug("Found child PIDs", zap.Ints("children", children))
 
-	uniqueProcess, err := uniqueProcessGroups(children)
+	uniqueProcess, err := uniqueProcessGroups(children, groupOf)
 	if err != nil {
 		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
 		uniqueProcess = children
@@ -1140,12 +1140,14 @@ func isProcessRunning(pid int) (bool, error) {
 	return true, nil
 }
 
-func uniqueProcessGroups(pids []int) ([]int, error) {
+// uniqueProcessGroups returns the process group of each of pids, as groupOf
+// reads it, each group once.
+func uniqueProcessGroups(pids []int, groupOf func(pid int) (int, error)) ([]int, error) {
 	uniqueGroups := make(map[int]bool)
 	var uniqueGPIDs []int
 
 	for _, pid := range pids {
-		pgid, err := getProcessGroupID(pid)
+		pgid, err := groupOf(pid)
 		if err != nil {
 			return nil, err
 		}
