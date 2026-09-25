@@ -25,6 +25,13 @@ func TestUpsertCasesRoundTripsThroughDisk(t *testing.T) {
 			if err := db.UpsertCases(ctx, "set", map[string][]string{"t1": {"test-1", "test-3"}}); err != nil {
 				t.Fatal(err)
 			}
+			cases, err := db.GetCases(ctx, "set")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cases["t1"]) != 2 || cases["t1"][1] != "test-3" || len(cases["t2"]) != 1 {
+				t.Fatalf("GetCases read %v", cases)
+			}
 
 			data, err := yaml.ReadFileF(ctx, zap.NewNop(), dir+"/set", "mappings", format)
 			if err != nil {
