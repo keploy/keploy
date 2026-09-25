@@ -101,6 +101,10 @@ param(
     [string]$DockerExe = 'docker'
 )
 
+# Under the tests, no default may reach the shared machine (test-overrides.ps1).
+. (Join-Path $PSScriptRoot 'test-overrides.ps1')
+Assert-TestOverrides 'reap-keploy-containers.ps1' $PSBoundParameters @('WedgeDir', 'DockerExe')
+
 $ErrorActionPreference = 'Continue'
 
 if (-not $WedgeDir) {

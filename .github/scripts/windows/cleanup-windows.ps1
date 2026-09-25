@@ -43,6 +43,10 @@ param(
     [string]$WedgeDir = '',
     [scriptblock]$GetRunStatus = $null
 )
+
+# Under the tests, no default may reach the shared machine (test-overrides.ps1).
+. (Join-Path $PSScriptRoot 'test-overrides.ps1')
+Assert-TestOverrides 'cleanup-windows.ps1' $PSBoundParameters @('LockDir', 'WedgeDir', 'DockerExe')
 $ErrorActionPreference = 'Continue'
 
 if (-not $LockDir) {

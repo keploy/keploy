@@ -13,9 +13,10 @@
 # so every case pins the daemon clock and each container's timestamps exactly.
 # Nothing here touches the real Docker daemon, Docker Desktop, processes or
 # services: the scripts' actions on those go to fakes too. These tests run on
-# the shared Windows machine itself, so ensure-docker.ps1 refuses to run here
-# with any of its Docker Desktop actions left at the real default
-# (KEPLOY_WINDOWS_SCRIPT_TESTS).
+# the shared Windows machine itself, so every script refuses to run here with
+# a parameter left at a default that reaches the machine's real Docker, Docker
+# Desktop, lock directory or wedge records (KEPLOY_WINDOWS_SCRIPT_TESTS,
+# test-overrides.ps1).
 $ErrorActionPreference = 'Stop'
 $savedTestsFlag = $env:KEPLOY_WINDOWS_SCRIPT_TESTS
 $env:KEPLOY_WINDOWS_SCRIPT_TESTS = '1'
@@ -38,6 +39,8 @@ $stateFile = Join-Path $work 'state.json'
 # docker's semantics (the name filter is an unanchored match); anything else
 # fails loudly so a new call cannot silently get an empty answer.
 Set-Content -Path $fake -Encoding ASCII -Value @'
+# FAKE_DOCKER_CALLS, when set, gets a line per call.
+if ($env:FAKE_DOCKER_CALLS) { Add-Content -LiteralPath $env:FAKE_DOCKER_CALLS -Value "$args" }
 $state = Get-Content -Raw -Path $env:FAKE_DOCKER_STATE | ConvertFrom-Json
 function Save { $state | ConvertTo-Json -Depth 5 | Set-Content -Path $env:FAKE_DOCKER_STATE -Encoding ASCII }
 function Find($id) { @($state.containers | Where-Object { $_.id -eq $id }) }
@@ -57,6 +60,8 @@ switch ($args[0]) {
     }
     'ps' {
         if (Test-Down) { exit 1 }
+        # psDown: `info` answers but `ps` does not, until Docker Desktop starts.
+        if ($state.psDown -and -not (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up")) { exit 1 }
         # A container whose removal is already under way leaves the list after
         # its countdown of `ps` calls, the way the daemon finishes it.
         # Written back only when that changed it: the background cases run
@@ -138,8 +143,8 @@ function Ago([double]$minutes) {
 function Container($id, $name, $created, $started = $NEVER, $finished = $NEVER, $project = '', [switch]$Stuck, [int]$RemovingFor = 0) {
     [pscustomobject]@{ id = $id; name = $name; created = $created; started = $started; finished = $finished; project = $project; stuck = [bool]$Stuck; removing = $RemovingFor; gone = $false }
 }
-function Set-State($containers, $systemTime = $NOW, [switch]$DaemonDown, [int]$FailInfo = 0, [int]$HangInfo = 0) {
-    [pscustomobject]@{ systemTime = $systemTime; daemonDown = [bool]$DaemonDown; failInfo = $FailInfo; hangInfo = $HangInfo; containers = @($containers); removed = @(); pruned = @() } |
+function Set-State($containers, $systemTime = $NOW, [switch]$DaemonDown, [switch]$PsDown, [int]$FailInfo = 0, [int]$HangInfo = 0) {
+    [pscustomobject]@{ systemTime = $systemTime; daemonDown = [bool]$DaemonDown; psDown = [bool]$PsDown; failInfo = $FailInfo; hangInfo = $HangInfo; containers = @($containers); removed = @(); pruned = @() } |
         ConvertTo-Json -Depth 5 | Set-Content -Path $stateFile -Encoding ASCII
     Remove-Item -LiteralPath "$stateFile.up", "$stateFile.hang" -Force -ErrorAction SilentlyContinue
     $env:FAKE_DOCKER_STATE = $stateFile
@@ -825,15 +830,20 @@ try {
     # real Docker Desktop of the machine these tests also run on. Each fake
     # action is recorded, suffixed +marker if a prune/restart marker was down
     # at that moment, and Held is how long the marker it saw had been down
-    # when the script ended. Starting Desktop brings the fake daemon back
+    # when the script ended. Stamps is what docker-desktop.started said at
+    # each action (THE LAST START in docker-locks.ps1). Starting Desktop brings the fake daemon back
     # unless -StaysDown; with -HangsAfterStart it comes back wedged, and every
-    # docker call hangs. $locks and $runs are as for Invoke-Cleanup; $Extra
+    # docker call hangs. -StartedUnwritable puts a directory where
+    # docker-desktop.started goes, so that writing it fails. $locks and $runs are as for Invoke-Cleanup; $Extra
     # overrides any parameter. Two checks before giving up rather than the
     # script's five: each docker call here starts a PowerShell process.
-    function Invoke-Ensure($locks = @{}, $runs = @{}, [switch]$DesktopDown, [switch]$StaysDown, [switch]$HangsAfterStart, [scriptblock]$OnAsk = $null, [hashtable]$Extra = @{}) {
+    function Invoke-Ensure($locks = @{}, $runs = @{}, [switch]$DesktopDown, [switch]$StaysDown, [switch]$HangsAfterStart, [switch]$StartedUnwritable, [scriptblock]$OnAsk = $null, [hashtable]$Extra = @{}) {
         $lockDir = New-LockDir $locks
+        if ($StartedUnwritable) { New-Item -ItemType Directory -Path (Join-Path $lockDir 'docker-desktop.started') | Out-Null }
         $events = New-Object System.Collections.ArrayList
         $markedAt = New-Object System.Collections.ArrayList
+        $stamps = New-Object System.Collections.ArrayList
+        $stampFile = Join-Path $lockDir 'docker-desktop.started'
         $stateFile = $env:FAKE_DOCKER_STATE
         $running = -not $DesktopDown
         $ensureArgs = @{
@@ -844,11 +854,13 @@ try {
             StopDesktop = {
                 $m = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir -Filter 'docker-prune-*.inprogress')
                 if ($m.Count) { [void]$markedAt.Add($m[0].LastWriteTimeUtc) }
+                [void]$stamps.Add("$(Get-Content -LiteralPath $stampFile -Raw -ErrorAction SilentlyContinue)".Trim())
                 [void]$events.Add("stop$(if ($m.Count) { '+marker' })")
             }.GetNewClosure()
             StartDesktop = {
                 $m = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir -Filter 'docker-prune-*.inprogress')
                 if ($m.Count) { [void]$markedAt.Add($m[0].LastWriteTimeUtc) }
+                [void]$stamps.Add("$(Get-Content -LiteralPath $stampFile -Raw -ErrorAction SilentlyContinue)".Trim())
                 [void]$events.Add("start$(if ($m.Count) { '+marker' })")
                 if ($HangsAfterStart) { Set-Content -LiteralPath "$stateFile.hang" -Value 'hang' }
                 if (-not $StaysDown) { Set-Content -LiteralPath "$stateFile.up" -Value 'up' }
@@ -868,10 +880,23 @@ try {
         $held = $null
         if ($markedAt.Count) { $held = ([DateTime]::UtcNow - $markedAt[0]).TotalSeconds }
         Remove-Item -LiteralPath "$stateFile.hang" -Force -ErrorAction SilentlyContinue
-        $r | Add-Member -NotePropertyName Locks -NotePropertyValue @(Get-ChildItem $lockDir | ForEach-Object { $_.Name } | Sort-Object)
+        $r | Add-Member -NotePropertyName Locks -NotePropertyValue @(Get-ChildItem $lockDir | Where-Object { $_.Name -ne 'docker-desktop.started' } | ForEach-Object { $_.Name } | Sort-Object)
         $r | Add-Member -NotePropertyName Events -NotePropertyValue @($events)
         $r | Add-Member -NotePropertyName Held -NotePropertyValue $held
+        $r | Add-Member -NotePropertyName Stamps -NotePropertyValue @($stamps)
         $r
+    }
+    # What another runner's start or restart of Docker Desktop leaves behind:
+    # a new docker-desktop.started, and Docker answering (-Up) or not, maybe
+    # only after -FailInfo more failed checks while it comes up.
+    function Write-OtherStart([string]$dir, [switch]$Up, [int]$FailInfo = 0) {
+        Set-Content -LiteralPath (Join-Path $dir 'docker-desktop.started') -Value "$([guid]::NewGuid().ToString('N')) another runner's restart"
+        if ($FailInfo) {
+            $st = Get-State
+            $st.failInfo = $FailInfo
+            $st | ConvertTo-Json -Depth 5 | Set-Content -Path $stateFile -Encoding ASCII
+        }
+        if ($Up) { Set-Content -LiteralPath "$stateFile.up" -Value 'up' }
     }
     function Events($result, [string[]]$want) {
         $got = @($result.Events) -join ','
@@ -879,8 +904,18 @@ try {
         if ($got -ne $exp) { "did [$got], want [$exp]" }
     }
     # Exit code, Docker Desktop actions, and no error records: a script that
-    # throws (the tests' guard below, say) exits 0 and does nothing.
-    function Ensured($result, [int]$code, [string[]]$events) { (Code $result $code); (Events $result $events); (NoErrors $result) }
+    # throws (the tests' guard below, say) exits 0 and does nothing. Every
+    # action must come after its own start or restart wrote
+    # docker-desktop.started: another runner's start or restart (the cases
+    # below write one saying "another runner") does not count.
+    function Ensured($result, [int]$code, [string[]]$events) {
+        (Code $result $code); (Events $result $events); (NoErrors $result)
+        $what = 'start'
+        if (@($events) -match '^stop') { $what = 'restart' }
+        foreach ($st in @($result.Stamps)) {
+            if ($st -notmatch "^[0-9a-f]{32} a Docker Desktop $what by ") { "acted with docker-desktop.started saying [$st], want this run's $what" }
+        }
+    }
 
     Set-State @()
     $r = Invoke-Ensure
@@ -979,14 +1014,68 @@ try {
         (Ensured $r 1 @()), (Says $r "::error::docker CLI not found on PATH for this runner" "the missing-CLI error"), (Locks $r @())
     )
 
-    # The guard that keeps these cases off the real Docker Desktop. Healthy
-    # Docker and every Desktop action faked but -GetRunStatus, so that if the
-    # guard failed, the script would only exit 0.
-    Set-State @()
-    $r = Invoke-Script $ensure @{ LockDir = (New-Dir 'locks'); TestDesktopRunning = { $true }; StopDesktop = { }; StartDesktop = { } }
-    Report "under the tests, ensure-docker.ps1 refuses to run with a Docker Desktop action left at its default" $r @(
-        $(if (-not @($r.Errors | Where-Object { "$($_.Exception.Message)" -match 'without a fake for -GetRunStatus' }).Count) { "ran without the -GetRunStatus fake" }),
-        $(if ($r.Output -match 'healthy') { "checked Docker before refusing" })
+    # `docker ps` is half the check: the original script restarted a Docker
+    # that answered `info` but not `ps`, and it still counts as not answering.
+    Set-State @() -PsDown
+    $r = Invoke-Ensure
+    Report "a Docker that answers 'docker info' but not 'docker ps' is asked again, then restarted under the marker" $r @(
+        (Ensured $r 0 @('stop+marker', 'start+marker')), (Says $r 'attempt 1 of 2' "the retry"), (Locks $r @())
+    )
+
+    Set-State @() -PsDown
+    $r = Invoke-Ensure @{ 'docker-job-85-1-a.lock' = @(5, 'keploy/keploy wf win-runner-2') } @{ '85/1' = 'in_progress' }
+    Report "a Docker that answers 'docker info' but not 'docker ps' is not restarted while a job holds a live Docker lock" $r @(
+        (Ensured $r 1 @('ask keploy/keploy#85/1')),
+        (Says $r 'hold a live Docker lock \(docker-job-85-1-a\.lock\), so Docker Desktop was NOT restarted' "the refusal naming the lock"),
+        (Locks $r @('docker-job-85-1-a.lock'))
+    )
+
+    # Another runner restarts Docker Desktop while this one asks the Actions
+    # API: its marker comes and goes before this one's is down, so there is
+    # nothing to wait for. Docker is still coming up and fails the next check,
+    # but the check this one made before that restart no longer counts: it
+    # checks again, with every retry, instead of restarting.
+    Set-State @() -DaemonDown
+    $r = Invoke-Ensure @{ 'docker-job-72-1-a.lock' = @(5, 'keploy/keploy wf win-runner-2') } @{ '72/1' = 'completed' } -OnAsk {
+        param($dir) Write-OtherStart $dir -Up -FailInfo 1
+    }
+    Report "a restart by another runner just before this one's marker went down is not followed by a second restart" $r @(
+        (Ensured $r 0 @('ask keploy/keploy#72/1')),
+        (Says $r 'started or restarted by another runner since this one checked Docker' "the out-of-date check"),
+        (Says $r 'Docker engine is running and healthy' "the check after it"), (Locks $r @())
+    )
+
+    # Docker can answer again by the time the marker is down with nobody
+    # having started or restarted it: a prune or an operation this one waited
+    # for found it answering, or it recovered. It is checked once more under
+    # the marker, and not restarted.
+    Set-State @() -DaemonDown
+    $r = Invoke-Ensure @{ 'docker-job-74-1-a.lock' = @(5, 'keploy/keploy wf win-runner-2') } @{ '74/1' = 'completed' } -OnAsk {
+        param($dir) Set-Content -LiteralPath "$env:FAKE_DOCKER_STATE.up" -Value 'up'
+    }
+    Report "a Docker that answers again once the restart's marker is down is not restarted" $r @(
+        (Ensured $r 0 @('ask keploy/keploy#74/1')), (Says $r 'Docker answers now' "the check under the marker"), (Locks $r @())
+    )
+
+    # Every round after the first follows another runner's operation, and
+    # MaxWaitMinutes (0 here) ends them: the job fails with the remediation.
+    Set-State @() -DaemonDown
+    $r = Invoke-Ensure @{ 'docker-job-73-1-a.lock' = @(5, 'keploy/keploy wf win-runner-2') } @{ '73/1' = 'completed' } -OnAsk {
+        param($dir) Write-OtherStart $dir
+    } -Extra @{ MaxWaitMinutes = 0 }
+    Report "past MaxWaitMinutes it fails the job instead of checking again after another runner's restart" $r @(
+        (Ensured $r 1 @('ask keploy/keploy#73/1')),
+        (Says $r '::error::Docker does not answer, and 0 min after this step started' "the deadline error"),
+        (Says $r "wsl --shutdown" "the remediation"), (Locks $r @())
+    )
+
+    # Without docker-desktop.started written first, another runner could
+    # restart Docker again while this one's restart comes up: no restart.
+    # (A directory in its place makes the write fail.)
+    Set-State @() -DaemonDown
+    $r = Invoke-Ensure -StartedUnwritable
+    Report "a restart that cannot write docker-desktop.started first does not happen" $r @(
+        (Ensured $r 1 @()), (Says $r '::error::Docker Desktop was NOT restarted: docker-desktop.started' "the error"), (Locks $r @())
     )
 
     # Another runner's start or restart is under way. The runs below are in
@@ -997,8 +1086,10 @@ try {
     # with the same key has already been added".) Their Docker Desktop fakes
     # record into a file of their own, a start writes the fake daemon's .up,
     # and they also write, to <events>.marked, when the marker they saw was
-    # last written. $getRunStatus is the body of the -GetRunStatus fake and
-    # $prelude runs before the script. Time is real here (PollSeconds 1), and
+    # last written. $getRunStatus is the body of the -GetRunStatus fake,
+    # $prelude runs before the script, $extra adds parameters (lines of a
+    # hashtable), and $running is the body of -TestDesktopRunning. Time is
+    # real here (PollSeconds 1), and
     # the cases move on events, not on timing: the deadlines only bound a
     # failure.
     $ensureDriver = @'
@@ -1021,20 +1112,23 @@ $drvParams = @{
         Microsoft.PowerShell.Management\Set-Content -LiteralPath "$drvState.up" -Value up
     }
     GetRunStatus = { param($repo, $run, $attempt) @@RUNSTATUS@@ }
+    @@EXTRA@@
 }
 & '@@ENSURE@@' @drvParams *>&1 | ForEach-Object { Microsoft.PowerShell.Management\Add-Content -LiteralPath $drvLog -Value "$_" }
 $drvCode = $LASTEXITCODE
 Microsoft.PowerShell.Management\Add-Content -LiteralPath $drvLog -Value "exit=$drvCode"
 exit $drvCode
 '@
-    function Start-Ensure([string]$lockDir, [string]$events, [switch]$DesktopDown, [string]$prelude = '', [string]$getRunStatus = '$null') {
+    function Start-Ensure([string]$lockDir, [string]$events, [switch]$DesktopDown, [string]$prelude = '', [string]$getRunStatus = '$null', [string]$extra = '', [string]$running = '') {
         $dir = New-Dir 'ensure'
         $driver = Join-Path $dir 'driver.ps1'
         $log = Join-Path $dir 'log'
         Set-Content -LiteralPath $log -Value $null
-        $running = '$true'
-        if ($DesktopDown) { $running = "Test-Path -LiteralPath '$env:FAKE_DOCKER_STATE.up'" }
-        $text = $ensureDriver.Replace('@@PRELUDE@@', $prelude).Replace('@@RUNNING@@', $running).Replace('@@RUNSTATUS@@', $getRunStatus).
+        if (-not $running) {
+            $running = '$true'
+            if ($DesktopDown) { $running = "Test-Path -LiteralPath '$env:FAKE_DOCKER_STATE.up'" }
+        }
+        $text = $ensureDriver.Replace('@@PRELUDE@@', $prelude).Replace('@@RUNNING@@', $running).Replace('@@RUNSTATUS@@', $getRunStatus).Replace('@@EXTRA@@', $extra).
             Replace('@@LOG@@', $log).Replace('@@LOCKDIR@@', $lockDir).Replace('@@EVENTS@@', $events).Replace('@@STATE@@', $env:FAKE_DOCKER_STATE).
             Replace('@@FAKE@@', $fake).Replace('@@ENSURE@@', $ensure)
         Set-Content -LiteralPath $driver -Encoding ASCII -Value $text
@@ -1049,14 +1143,28 @@ exit $drvCode
         [pscustomobject]@{ Proc = $p; Log = $log; StdOut = $p.StandardOutput.ReadToEndAsync(); Err = $p.StandardError.ReadToEndAsync() }
     }
     function Get-Events([string]$file) { @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue | Where-Object { $_ }) }
+    function Get-Markers([string]$dir) { @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $dir -Filter 'docker-prune-*.inprogress' | ForEach-Object { $_.Name } | Sort-Object) }
 
-    # (the reviewer's repro) A restart by another runner has its marker down,
-    # Desktop is running and the daemon does not answer yet. Restarting now
-    # would kill that restart mid-startup.
+    # A restart by another runner has its marker down, Desktop is running and
+    # the daemon does not answer yet. Restarting now would kill that restart
+    # mid-startup. The wait itself is pinned by what
+    # happens meanwhile, not by timing: the fake docker logs every call
+    # (FAKE_DOCKER_CALLS) and the prelude every look for markers, and the
+    # other runner's marker stays down until this one has looked for it
+    # three more times without a single docker call.
     Set-State @() -DaemonDown
     $lockDir = New-LockDir @{ 'docker-prune-other.inprogress' = @(0, 'a Docker Desktop restart by keploy/keploy run 1 win-runner-2') }
     $evFile = Join-Path (New-Dir 'events') 'events'
-    $bg = Start-Ensure $lockDir $evFile
+    $callsFile = "$evFile.calls"; $listedFile = "$evFile.listed"
+    $countPrelude = @'
+$env:FAKE_DOCKER_CALLS = '@@CALLS@@'
+function Get-ChildItem {
+    $items = Microsoft.PowerShell.Management\Get-ChildItem @args
+    if ($args -contains 'docker-prune-*.inprogress') { Microsoft.PowerShell.Management\Add-Content -LiteralPath '@@LISTED@@' -Value x }
+    $items
+}
+'@ -replace '@@CALLS@@', $callsFile -replace '@@LISTED@@', $listedFile
+    $bg = Start-Ensure $lockDir $evFile -prelude $countPrelude
     $problems = @(); $said = ''
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds(120)
@@ -1068,9 +1176,20 @@ exit $drvCode
             Start-Sleep -Milliseconds 200
         }
         if (-not $problems.Count) {
+            $calls0 = (Get-Events $callsFile).Count
+            $listed0 = (Get-Events $listedFile).Count
+            while ($true) {
+                if ((Get-Events $callsFile).Count -gt $calls0) { $problems += "asked docker while the other runner's marker was down"; break }
+                if ((Get-Events $listedFile).Count -ge $listed0 + 3) { break }
+                if ((Test-BackgroundDone $bg) -or (Get-Events $evFile).Count) { $problems += "stopped waiting while the other runner's marker was down"; break }
+                if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not look for the marker 3 times within 120s"; break }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if (-not $problems.Count) {
             # The other runner's restart finishes: Docker answers, and its
             # marker comes down.
-            Set-Content -LiteralPath "$env:FAKE_DOCKER_STATE.up" -Value 'up'
+            Write-OtherStart $lockDir -Up
             Remove-Item -LiteralPath (Join-Path $lockDir 'docker-prune-other.inprogress') -Force
             if (-not (Wait-Background $bg 120)) { $problems += "still going 120s after the other runner's restart finished" }
             $said = Read-Background $bg
@@ -1079,7 +1198,8 @@ exit $drvCode
         }
         $ev = @(Get-Events $evFile) -join ','
         if ($ev) { $problems += "did [$ev], want nothing" }
-        if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir).Count) { $problems += "left $(@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir | ForEach-Object { $_.Name }) -join ', ')" }
+        $left = Get-Markers $lockDir
+        if ($left.Count) { $problems += "left $($left -join ', ')" }
     } finally {
         Stop-Background $bg
     }
@@ -1088,19 +1208,30 @@ exit $drvCode
     # Another runner's restart gets going just after this one looked for
     # markers: its marker comes down while this one judges the locks (the
     # Actions API call). Its name sorts after any GUID's, so this one waits
-    # for it under its own marker. When that restart ends:
-    # - with Docker answering, this one checks Docker under its marker before
-    #   restarting, and does not restart it again;
-    # - with Docker answering and a job that took its lock meanwhile, it
-    #   checks Docker again instead of failing for that lock;
-    # - with Docker still down, it restarts, and its marker is written again
-    #   first: the wait can outlast part of the marker's life (here it is
-    #   made to look 10 minutes old), and a job stops waiting for a marker
+    # for it under its own marker. When it ends:
+    # - having restarted Docker Desktop (a new docker-desktop.started), the
+    #   check this one made before no longer counts, since Docker may still
+    #   be coming up. It takes its marker back down and checks again, with
+    #   every retry: Docker answers, or answers only after another failed
+    #   check (one probe there would restart it again), or a job took its
+    #   lock meanwhile, or Docker is still down, and then it restarts on the
+    #   next round, one that did not wait;
+    # - having given way (no start or restart), this one's check still
+    #   counts: it restarts under its marker, which is written again first.
+    #   The wait can outlast part of the marker's life (here it is made to
+    #   look 10 minutes old), and a job stops waiting for a marker
     #   PruneMaxMinutes old.
     foreach ($v in @(
-            @{ What = 'brought Docker back'; Up = $true; Lock = $false; Want = ''; Says = 'Docker answers now' },
-            @{ What = 'brought Docker back, and a job took its lock meanwhile'; Up = $true; Lock = $true; Want = ''; Says = 'checking Docker again' },
-            @{ What = 'left Docker down'; Up = $false; Lock = $false; Want = 'stop+marker,start+marker'; Says = 'restarting Docker Desktop' })) {
+            @{ What = 'restarted Docker Desktop and brought Docker back'; Started = $true; Up = $true; FailInfo = 0; Lock = $false; Want = ''
+                Says = @('since this one checked Docker', 'Docker engine is running and healthy') },
+            @{ What = 'restarted Docker Desktop, which fails one more check before it answers'; Started = $true; Up = $true; FailInfo = 1; Lock = $false; Want = ''
+                Says = @('since this one checked Docker', 'attempt 1 of 2', 'Docker engine is running and healthy') },
+            @{ What = 'restarted Docker Desktop, and a job took its lock meanwhile'; Started = $true; Up = $true; FailInfo = 0; Lock = $true; Want = ''
+                Says = @('took a Docker lock while this waited', 'Docker engine is running and healthy') },
+            @{ What = 'restarted Docker Desktop and left Docker down'; Started = $true; Up = $false; FailInfo = 0; Lock = $false; Want = 'stop+marker,start+marker'
+                Says = @('since this one checked Docker(.|\n)*restarting Docker Desktop', 'Docker is ready') },
+            @{ What = 'gave way without starting or restarting Docker Desktop'; Started = $false; Up = $false; FailInfo = 0; Lock = $false; Want = 'stop+marker,start+marker'
+                Says = @('restarting Docker Desktop', 'Docker is ready'); SaysNot = 'since this one checked Docker' })) {
         Set-State @() -DaemonDown
         $lockDir = New-LockDir @{ 'docker-job-90-1-a.lock' = @(5, 'keploy/keploy wf win-runner-2') }
         $other = Join-Path $lockDir 'docker-prune-zzzz.inprogress'
@@ -1111,7 +1242,7 @@ exit $drvCode
             $deadline = [DateTime]::UtcNow.AddSeconds(120)
             while ($true) {
                 $said = Read-Background $bg
-                if ($said -match 'gives way; waiting for its marker to go') { break }
+                if ($said -match 'waiting for its marker to go') { break }
                 if ((Test-BackgroundDone $bg) -or (Get-Events $evFile).Count) { $problems += "did not wait for the other runner's restart"; break }
                 if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not say it was waiting within 120s"; break }
                 Start-Sleep -Milliseconds 200
@@ -1121,36 +1252,78 @@ exit $drvCode
                 if ($mine.Count -ne 1) { $problems += "found $($mine.Count) marker(s) of its own while it waited" }
                 else { $mine[0].LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-10) }
                 if ($v.Lock) { Set-Content -LiteralPath (Join-Path $lockDir 'docker-job-91-1-b.lock') -Value 'keploy/keploy wf win-runner-4' }
-                if ($v.Up) { Set-Content -LiteralPath "$env:FAKE_DOCKER_STATE.up" -Value 'up' }
+                if ($v.Started) { Write-OtherStart $lockDir -Up:$v.Up -FailInfo $v.FailInfo }
                 $wentAt = [DateTime]::UtcNow
                 Remove-Item -LiteralPath $other -Force
                 if (-not (Wait-Background $bg 120)) { $problems += "still going 120s after the other runner's restart ended" }
                 $said = Read-Background $bg
                 if ((Get-BackgroundExit $bg) -ne 0) { $problems += "exit $(Get-BackgroundExit $bg), want 0" }
-                if ($said -notmatch $v.Says) { $problems += "missing '$($v.Says)'" }
+                foreach ($p in $v.Says) { if ($said -notmatch $p) { $problems += "missing '$p'" } }
+                if ($v.SaysNot -and ($said -match $v.SaysNot)) { $problems += "says '$($v.SaysNot)'" }
             }
             $ev = @(Get-Events $evFile) -join ','
             if ($ev -ne $v.Want) { $problems += "did [$ev], want [$($v.Want)]" }
             foreach ($t in @(Get-Events "$evFile.marked")) {
                 if ($wentAt -and ([DateTime]::new([long]$t, [DateTimeKind]::Utc) -lt $wentAt.AddSeconds(-5))) { $problems += "restarted under a marker last written before its wait ended" }
             }
-            $left = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir -Filter 'docker-prune-*.inprogress')
-            if ($left.Count) { $problems += "left $(@($left | ForEach-Object { $_.Name }) -join ', ')" }
+            $left = Get-Markers $lockDir
+            if ($left.Count) { $problems += "left $($left -join ', ')" }
         } finally {
             Stop-Background $bg
         }
         Report "a restart that waited for another runner's, which $($v.What), goes on correctly" ([pscustomobject]@{ Output = $said }) $problems
     }
 
+    # The waits end at MaxWaitMinutes (0 here: at once), and the job fails
+    # with the remediation, taking its own marker back down. In the
+    # background, since a wait that did not end would never end: the other
+    # runner's marker stays down.
+    foreach ($v in @(
+            @{ What = "for a marker already down"; Other = 'other'; Via = '' },
+            @{ What = "for a marker put down while this one judged the locks, to restart Docker Desktop"; Other = 'zzzz'; Via = 'locks' },
+            @{ What = "for a marker put down while this one looked at Docker Desktop, to start it"; Other = 'zzzz'; Via = 'desktop' })) {
+        Set-State @() -DaemonDown
+        $locks = @{}
+        if ($v.Via -eq 'locks') { $locks['docker-job-95-1-a.lock'] = @(5, 'keploy/keploy wf win-runner-2') }
+        elseif (-not $v.Via) { $locks["docker-prune-$($v.Other).inprogress"] = @(0, 'a Docker Desktop restart by keploy/keploy run 1 win-runner-2') }
+        $lockDir = New-LockDir $locks
+        $other = Join-Path $lockDir "docker-prune-$($v.Other).inprogress"
+        $putDown = "Microsoft.PowerShell.Management\Set-Content -LiteralPath '$other' -Value 'a Docker Desktop start by keploy/keploy run 2 win-runner-3'"
+        $runStatus = '$null'; $running = ''
+        if ($v.Via -eq 'locks') { $runStatus = "$putDown; 'completed'" }
+        if ($v.Via -eq 'desktop') { $running = "$putDown; `$false" }
+        $evFile = Join-Path (New-Dir 'events') 'events'
+        $bg = Start-Ensure $lockDir $evFile -getRunStatus $runStatus -extra 'MaxWaitMinutes = 0' -running $running
+        $problems = @(); $said = ''
+        try {
+            if (-not (Wait-Background $bg 120)) { $problems += "still waiting 120s later" }
+            $said = Read-Background $bg
+            if ((Get-BackgroundExit $bg) -ne 1) { $problems += "exit $(Get-BackgroundExit $bg), want 1" }
+            if ($said -notmatch "::error::Docker does not answer, and 0 min after this step started, .*\(docker-prune-$($v.Other)\.inprogress\)") { $problems += "missing the deadline error naming the other marker" }
+            if ($said -notmatch 'wsl --shutdown') { $problems += "missing the remediation" }
+            $ev = @(Get-Events $evFile) -join ','
+            if ($ev) { $problems += "did [$ev], want nothing" }
+            $left = (Get-Markers $lockDir) -join ','
+            if ($left -ne "docker-prune-$($v.Other).inprogress") { $problems += "markers left [$left], want only the other runner's" }
+        } finally {
+            Stop-Background $bg
+        }
+        Report "a wait $($v.What) ends at MaxWaitMinutes and fails the job" ([pscustomobject]@{ Output = $said }) $problems
+    }
+
     # Two runners whose checks fail together put their markers down at the
     # same moment, and each sees the other's. Barriers make that happen every
     # time: neither goes on from its first look for markers until both have
-    # looked, nor from writing its marker until both markers are down.
-    # Exactly one of them may start or restart Docker Desktop; the other
-    # waits for it and finds Docker answering.
+    # looked, nor from writing its marker until both markers are down, nor
+    # from its look at the markers then until both have looked.
+    # Exactly one of them may start or restart Docker Desktop, and the names
+    # decide which: the lower-named waits for the other to give way, and goes
+    # on; the other gives way, and then waits for it and finds Docker
+    # answering. Each run's log says which part it took, and ends with
+    # Docker answering.
     function Get-RacePrelude([string]$barrierDir, [string]$id) {
         @'
-$global:listed = $false; $global:marked = $false
+$global:listed = $false; $global:marked = $false; $global:raced = $false
 function Wait-Barrier([string]$what, [scriptblock]$ready) {
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     while (-not (& $ready)) {
@@ -1160,6 +1333,13 @@ function Wait-Barrier([string]$what, [scriptblock]$ready) {
 }
 function Get-ChildItem {
     $items = Microsoft.PowerShell.Management\Get-ChildItem @args
+    if ($global:marked -and (-not $global:raced) -and ($args -contains 'docker-prune-*.inprogress')) {
+        # The race's look, made with both markers down: neither acts on it
+        # (gives way, and takes its marker back down) until both have looked.
+        $global:raced = $true
+        Microsoft.PowerShell.Management\Set-Content -LiteralPath (Join-Path '@@BARRIER@@' 'raced-@@ID@@') -Value x
+        Wait-Barrier 'both saw both markers' { @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath '@@BARRIER@@' -Filter 'raced-*').Count -ge 2 }
+    }
     if ((-not $global:listed) -and ($args -contains 'docker-prune-*.inprogress')) {
         $global:listed = $true
         Microsoft.PowerShell.Management\Set-Content -LiteralPath (Join-Path '@@BARRIER@@' 'listed-@@ID@@') -Value x
@@ -1193,13 +1373,23 @@ function Set-Content {
         $problems = @(); $said = ''
         try {
             foreach ($bg in $bgs) { if (-not (Wait-Background $bg 180)) { $problems += "a run was still going after 180s" } }
-            $said = @($bgs | ForEach-Object { Read-Background $_ }) -join "`n----`n"
+            $logs = @($bgs | ForEach-Object { Read-Background $_ })
+            $said = $logs -join "`n----`n"
             foreach ($bg in $bgs) { if ((Get-BackgroundExit $bg) -ne 0) { $problems += "a run exited $(Get-BackgroundExit $bg), want 0" } }
             if ($said -match 'BARRIER TIMEOUT') { $problems += "the runs never both put their markers down" }
-            elseif ($said -notmatch 'at the same time') { $problems += "neither run saw the other's marker" }
+            $waiters = @($logs | Where-Object { $_ -match 'waiting for its marker to go' })
+            $yielders = @($logs | Where-Object { $_ -match "leaving the $($race.What) to it" })
+            if (($waiters.Count -ne 1) -or ($yielders.Count -ne 1) -or ($waiters[0] -eq $yielders[0])) {
+                $problems += "$($waiters.Count) run(s) waited for the other to give way and $($yielders.Count) gave way, want one of each"
+            }
+            foreach ($log in $logs) {
+                $last = @($log -split "`r?`n" | Where-Object { $_.Trim() -and ($_ -notmatch '^exit=') }) | Select-Object -Last 1
+                if ($last -notmatch '^(Docker engine is running and healthy|Docker is ready)\.$') { $problems += "a run ended with [$last], not with Docker answering" }
+            }
             $ev = @(foreach ($id in 'a', 'b') { Get-Events (Join-Path $evDir $id) })
             if (($ev -join ',') -ne $race.Want) { $problems += "together did [$($ev -join ',')], want [$($race.Want)]" }
-            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir).Count) { $problems += "left $(@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir | ForEach-Object { $_.Name }) -join ', ')" }
+            $left = Get-Markers $lockDir
+            if ($left.Count) { $problems += "left $($left -join ', ')" }
         } finally {
             foreach ($bg in $bgs) { Stop-Background $bg }
         }
@@ -1298,6 +1488,80 @@ function Set-Content {
     }
     if ($steps.Count -lt 4) { $problems += "found $($steps.Count) Recover stale runner state step(s) ($($steps -join ', ')), want the 4 of the self-hosted Windows jobs" }
     Report "every Recover stale runner state step runs recover-runner-state.ps1's text" ([pscustomobject]@{ Output = ($steps -join "`n") }) $problems
+
+    # ---- the guard that keeps these cases off the shared machine ----------
+
+    # Each script, with one of its shared-machine parameters left out and the
+    # rest given, must itself stop before it does anything (not leave that to
+    # a script it calls). Were it to run, the
+    # default would land here instead: USERPROFILE points at an empty
+    # directory (the default lock directory and wedge records live under
+    # it), and a `docker` function stands in for the real CLI and records
+    # every call, as the fake docker does (FAKE_DOCKER_CALLS). Passing '' is
+    # leaving it out: the script then falls back to the default. With nothing
+    # left out, each runs: the list of what is given is complete.
+    function Invoke-Guarded([string]$script, [hashtable]$given, [string]$leftOut, [switch]$Blank) {
+        $profileDir = New-Dir 'profile'
+        $callsFile = Join-Path (New-Dir 'calls') 'calls'
+        $dockerCalls = New-Object System.Collections.ArrayList
+        function docker { [void]$dockerCalls.Add("$args") }
+        $p = @{}
+        foreach ($k in $given.Keys) { if ($k -ne $leftOut) { $p[$k] = $given[$k] } elseif ($Blank) { $p[$k] = '' } }
+        $savedProfile = $env:USERPROFILE
+        $env:USERPROFILE = $profileDir
+        $env:FAKE_DOCKER_CALLS = $callsFile
+        $records = New-Object System.Collections.ArrayList
+        $global:LASTEXITCODE = 0
+        try {
+            try { & $script @p *>&1 | ForEach-Object { [void]$records.Add($_) } } catch { [void]$records.Add($_) }
+        } finally {
+            $env:USERPROFILE = $savedProfile
+            $env:FAKE_DOCKER_CALLS = $null
+        }
+        [pscustomobject]@{
+            Output  = ($records | Out-String)
+            Refused = @(foreach ($rec in @($records | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })) {
+                    if ("$($rec.Exception.Message)" -match "^$([regex]::Escape((Split-Path -Leaf $script))) run by the tests \(KEPLOY_WINDOWS_SCRIPT_TESTS\) without -(\S.*): the default") { $Matches[1] -split ', -' }
+                })
+            Calls   = $dockerCalls.Count + (Get-Events $callsFile).Count
+            Wrote   = @(Get-ChildItem -LiteralPath $profileDir -Recurse -Force | ForEach-Object { $_.FullName.Substring($profileDir.Length) })
+        }
+    }
+    $sbParams = @(([System.Management.Automation.Language.Parser]::ParseFile($ensure, [ref]$null, [ref]$null)).ParamBlock.Parameters |
+        Where-Object { $_.StaticType -eq [scriptblock] } | ForEach-Object { $_.Name.VariablePath.UserPath })
+    $ensureGiven = @{
+        LockDir = (New-Dir 'locks'); DockerExe = $fake; Repository = 'keploy/keploy'; Attempts = 1; BackoffSeconds = 0
+        PollSeconds = 0; ReadyTimeoutSeconds = 0; StabilizeSeconds = 0
+        GetRunStatus = { $null }; TestDesktopRunning = { $true }; StopDesktop = { }; StartDesktop = { }
+    }
+    foreach ($guarded in @(
+            @{ Script = $ensure; Names = @('LockDir', 'DockerExe') + $sbParams; Given = $ensureGiven },
+            @{ Script = $cleanup; Names = @('LockDir', 'WedgeDir', 'DockerExe')
+                Given = @{ LockDir = (New-Dir 'locks'); WedgeDir = (New-Dir 'wedge'); DockerExe = $fake; Repository = 'keploy/keploy'; GetRunStatus = { $null } } },
+            @{ Script = $takeLock; Names = @('LockDir'); Given = @{ LockDir = (New-Dir 'locks'); RunId = 7; RunAttempt = 1 } },
+            @{ Script = $reaper; Names = @('WedgeDir', 'DockerExe'); Given = @{ WedgeDir = (New-Dir 'wedge'); DockerExe = $fake; SettleSeconds = 0 } },
+            @{ Script = $removeJob; Names = @('WedgeDir', 'DockerExe')
+                Given = @{ WedgeDir = (New-Dir 'wedge'); DockerExe = $fake; ComposeProject = 'keploy-guard'; JobLock = ''; StartStepOutcome = '' } })) {
+        $name = Split-Path -Leaf $guarded.Script
+        $problems = @(); $out = ''
+        Set-State @()
+        $r = Invoke-Guarded $guarded.Script $guarded.Given ''
+        $out += $r.Output
+        if ($r.Refused.Count) { $problems += "refused to run with everything given (without -$($r.Refused -join ', -'))" }
+        foreach ($n in $guarded.Names) {
+            foreach ($blank in @($false) + @(if ($guarded.Given[$n] -is [string]) { $true })) {
+                $how = "without -$n"
+                if ($blank) { $how = "with -$n ''" }
+                Set-State @()
+                $r = Invoke-Guarded $guarded.Script $guarded.Given $n -Blank:$blank
+                $out += $r.Output
+                if ($r.Refused -notcontains $n) { $problems += "ran $how" }
+                if ($r.Calls) { $problems += "called docker $($r.Calls) time(s) $how" }
+                if ($r.Wrote.Count) { $problems += "wrote $($r.Wrote -join ', ') under USERPROFILE $how" }
+            }
+        }
+        Report "under the tests, $name refuses to run with $($guarded.Names -join ', ') left at a default that reaches the shared machine" ([pscustomobject]@{ Output = $out }) $problems
+    }
 
     # ---- the thresholds against every job that can run on these runners ----
 
@@ -1543,6 +1807,25 @@ jobs: { flowjob: { runs-on: [self-hosted, Windows] } }
         }),
         $(if ($cw.Count -ne 1 -or $null -eq $cw[0].timeout -or ($cw[0].timeout + $timeoutMargin -gt $pruneMax)) {
             "cleanup_windows timeout-minutes [$(@($cw | ForEach-Object { $_.timeout }) -join ',')] is not at least $timeoutMargin below PruneMaxMinutes ($pruneMax)"
+        })
+    )
+
+    # ensure-docker.ps1 must fail with its remediation before precheck-windows
+    # is killed at its timeout-minutes. It stops waiting for other runners at
+    # MaxWaitMinutes after it started; past that it may still finish one full
+    # check of Docker (every attempt, each of two calls cut off at
+    # CallTimeoutSeconds, and the backoff between them) and one start or
+    # restart (the marker bound above). The margin is for the job's other
+    # steps.
+    $e = @{}
+    foreach ($p in 'Attempts', 'BackoffSeconds', 'CallTimeoutSeconds', 'PollSeconds', 'ReadyTimeoutSeconds', 'StabilizeSeconds', 'MaxWaitMinutes') { $e[$p] = Get-Default $ensure $p }
+    $fullCheck = $e.Attempts * 2 * $e.CallTimeoutSeconds + $e.BackoffSeconds * ([Math]::Pow(2, $e.Attempts - 1) - 1)
+    $restart = 2 * $e.PollSeconds + $e.ReadyTimeoutSeconds + $e.StabilizeSeconds + 6 * $e.CallTimeoutSeconds
+    $ensureMax = $e.MaxWaitMinutes * 60 + $fullCheck + $restart
+    $pc = @($jobs | Where-Object { $_.where -eq 'prepare_and_run.yml:precheck-windows' })
+    Report "ensure-docker.ps1 gives up on other runners in time to fail precheck-windows with its remediation" ([pscustomobject]@{ Output = '' }) @(
+        $(if ($pc.Count -ne 1 -or $null -eq $pc[0].timeout -or ($ensureMax + $timeoutMargin * 60 -gt $pc[0].timeout * 60)) {
+            "ensure-docker.ps1 can run $([int]$ensureMax) s (MaxWaitMinutes $($e.MaxWaitMinutes)), not at least $timeoutMargin min below precheck-windows' timeout-minutes [$(@($pc | ForEach-Object { $_.timeout }) -join ',')]"
         })
     )
 } finally {

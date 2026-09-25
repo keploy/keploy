@@ -19,6 +19,8 @@
 #      for it and checks again from the top. When Docker is wedged, every
 #      run's precheck-windows gets here at about the same time, and a restart
 #      now would kill the other runner's start that is still coming up.
+#      Waits end at -MaxWaitMinutes after this started: the job then fails
+#      with the remediation, instead of being killed at its timeout-minutes.
 #   4. If Docker Desktop is not running at all, it is started under a marker.
 #      Nothing is running on it, so nothing is lost.
 #   5. If it is running but still does not answer, only a restart helps. The
@@ -36,6 +38,11 @@
 # Two starts or restarts that put their markers down at the same moment settle
 # it by name (Resolve-MarkerRace in docker-locks.ps1): exactly one of them goes
 # on, and the others wait for it and check Docker again.
+# A start or restart acts only on a check (with every retry) that no other
+# start or restart of Docker Desktop followed, whether it waited for that one
+# or it happened just before its marker went down (THE LAST START in
+# docker-locks.ps1). Otherwise Docker may still be coming up from it, and this
+# checks again from the top instead.
 [CmdletBinding()]
 param(
     [int]$Attempts = 5,
@@ -55,9 +62,13 @@ param(
     [int]$ReadyTimeoutSeconds = 120,
     [int]$PollSeconds = 5,
     [int]$StabilizeSeconds = 30,
-    # How many times to wait for another runner's prune, start or restart of
-    # Docker, and check again, before giving up.
-    [int]$MaxWaits = 3,
+    # How long after it starts this may still wait for other runners' Docker
+    # prunes, starts and restarts, or go round again after one. Past it, the
+    # job fails with the remediation. reap-keploy-containers.tests.ps1 keeps
+    # this, plus one more full check of Docker and one restart, under
+    # precheck-windows' timeout-minutes: a job killed at its timeout says
+    # nothing of why.
+    [int]$MaxWaitMinutes = 10,
     [string]$LockDir = '',
     # A Docker lock older than this is stale: the reaper's MinAgeMinutes.
     [int]$MinAgeMinutes = 45,
@@ -65,8 +76,8 @@ param(
     [int]$PruneMaxMinutes = 15,
     [string]$Repository = $env:GITHUB_REPOSITORY,
     [string]$DesktopExe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe',
-    # Only the tests override these. They must override all of the Desktop
-    # ones: the defaults act on the real Docker Desktop of the shared machine.
+    # Only the tests override these, and under the tests they must, like
+    # LockDir (test-overrides.ps1): the defaults act on the shared machine.
     [string]$DockerExe = 'docker',
     [scriptblock]$GetRunStatus = $null,
     [scriptblock]$TestDesktopRunning = { [bool](Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue) },
@@ -80,18 +91,13 @@ param(
 # throws NativeCommandError. Every outcome below is an explicit exit code.
 $ErrorActionPreference = 'Continue'
 
-# reap-keploy-containers.tests.ps1 runs on the shared machine itself, and sets
-# this. There a default Desktop action would act on the real Docker Desktop,
-# killing every sibling job's containers, so a case that leaves one out is
-# stopped before anything runs.
-if ($env:KEPLOY_WINDOWS_SCRIPT_TESTS) {
-    $unset = @($MyInvocation.MyCommand.Parameters.Values |
-        Where-Object { ($_.ParameterType -eq [scriptblock]) -and -not $PSBoundParameters.ContainsKey($_.Name) } |
-        ForEach-Object { $_.Name })
-    if ($unset.Count -gt 0) {
-        throw "ensure-docker.ps1 run by the tests (KEPLOY_WINDOWS_SCRIPT_TESTS) without a fake for -$($unset -join ', -'): the default acts on the shared machine's real Docker Desktop."
-    }
-}
+# Under the tests, no default may reach the shared machine (test-overrides.ps1):
+# the lock directory, the docker CLI, and every scriptblock, whose defaults act
+# on the real Docker Desktop and ask the real Actions API.
+. (Join-Path $PSScriptRoot 'test-overrides.ps1')
+Assert-TestOverrides 'ensure-docker.ps1' $PSBoundParameters (@('LockDir', 'DockerExe') + @($MyInvocation.MyCommand.Parameters.Values |
+        Where-Object { $_.ParameterType -eq [scriptblock] } | ForEach-Object { $_.Name }))
+$deadline = [DateTime]::UtcNow.AddMinutes($MaxWaitMinutes)
 
 if (-not $LockDir) {
     $base = $env:USERPROFILE
@@ -181,24 +187,27 @@ function Wait-DockerReady {
 . (Join-Path $PSScriptRoot 'docker-locks.ps1')
 New-Item -ItemType Directory -Force -Path $LockDir | Out-Null
 
+# Ends the job once MaxWaitMinutes have passed. $Others names what it was
+# waiting for, when it was waiting.
+function Stop-PastDeadline([string]$Others = '') {
+    if ($Others) { $Others = " ($Others)" }
+    Write-Host ("::error::Docker does not answer, and $MaxWaitMinutes min after this step started, other runners' " +
+        "Docker prunes, starts or restarts$Others still kept this one from starting or restarting Docker Desktop, so " +
+        "it did NOT. Re-run this job. If Docker still does not answer, restart it on the host: quit Docker Desktop, run " +
+        "'wsl --shutdown', and start Docker Desktop again.")
+    exit 1
+}
+
 # $true once it has waited for other runners' markers to go; $false when there
-# are none. Fails the job after MaxWaits waits.
-$waits = 0
+# are none.
 function Wait-OtherOperations {
     $others = @(Get-DockerMarkers -LockDir $LockDir -MaxMinutes $PruneMaxMinutes)
     if ($others.Count -eq 0) { return $false }
     $names = ($others | ForEach-Object { $_.Name }) -join ', '
-    if ($script:waits -ge $MaxWaits) {
-        Write-Host ("::error::Docker does not answer, and after $MaxWaits waits for other runners' Docker prunes, starts " +
-            "or restarts, another is still under way ($names), so Docker Desktop was NOT started or restarted. Re-run " +
-            "this job. If Docker still does not answer, restart it on the host: quit Docker Desktop, run 'wsl --shutdown', " +
-            "and start Docker Desktop again.")
-        exit 1
-    }
-    $script:waits++
     Write-Host ("Docker does not answer, and another runner has a Docker prune, start or restart under way ($names). " +
         "Starting or restarting Docker Desktop now would kill it; waiting for it to finish, then checking Docker again.")
     while (@(Get-DockerMarkers -LockDir $LockDir -MaxMinutes $PruneMaxMinutes).Count -gt 0) {
+        if ([DateTime]::UtcNow -ge $deadline) { Stop-PastDeadline $names }
         Start-Sleep -Seconds $PollSeconds
     }
     return $true
@@ -214,20 +223,35 @@ function Stop-Refusing([string[]]$Holders, [string]$How) {
     exit 1
 }
 
-# With $Marker down: (re)starts Docker Desktop and waits for Docker. It first
-# checks Docker once more: another runner's start or restart can have made it
-# answer since this one checked, whether or not this one waited for it, and a
-# restart then would kill what that one brought up. Takes the marker back down
-# however that ends, and ends the script.
-function Invoke-UnderMarker([string]$Marker, [switch]$Restart) {
-    $what = 'starting'
-    if ($Restart) { $what = 'restarting' }
+# With $Marker down and the race settled: (re)starts Docker Desktop and waits
+# for Docker, then takes the marker back down and ends the script. It does not
+# act when Docker Desktop was started or restarted since $Started was read,
+# before this round's check (THE LAST START in docker-locks.ps1): Docker may
+# still be coming up from that, and the check that failed does not count. It
+# then takes the marker back down and returns, and the caller checks again
+# from the top, with every retry. It also checks Docker once more before
+# acting: an operation this one waited for can have found Docker answering.
+function Invoke-UnderMarker([string]$Marker, [string]$Started, [switch]$Restart) {
+    $what = 'starting'; $done = 'started'; $operation = 'a Docker Desktop start'
+    if ($Restart) { $what = 'restarting'; $done = 'restarted'; $operation = 'a Docker Desktop restart' }
+    $now = Get-DesktopStarted -LockDir $LockDir
+    if ($now -ne $Started) {
+        Remove-Item -LiteralPath $Marker -Force -ErrorAction SilentlyContinue
+        Write-Host "Docker Desktop was started or restarted by another runner since this one checked Docker ($now). Docker may still be coming up, so this is not $what it; checking Docker again, with every retry."
+        return
+    }
     $ready = $false
     try {
         if (Test-DockerHealthy) {
-            Write-Host "Docker answers now (another runner's start or restart may have finished); not $what Docker Desktop."
+            Write-Host "Docker answers now (an operation this one waited for may have found it answering); not $what Docker Desktop."
             $ready = $true
         } else {
+            try {
+                Set-DesktopStarted -LockDir $LockDir -Operation $operation
+            } catch {
+                Write-Host "::error::Docker Desktop was NOT $($done): docker-desktop.started, which keeps other runners from $what it again while it comes up, could not be written ($($_.Exception.Message))."
+                exit 1
+            }
             if ($Restart) {
                 Write-Host "Docker Desktop is running but $failed, and no job is using Docker; restarting Docker Desktop."
                 & $StopDesktop
@@ -250,28 +274,36 @@ function Invoke-UnderMarker([string]$Marker, [switch]$Restart) {
 }
 
 $failed = "it did not answer 'docker info' / 'docker ps' in $Attempts attempts"
+$round = 0
 while ($true) {
+    $round++
+    # Read before the check, so that a start or restart after it shows.
+    $started = Get-DesktopStarted -LockDir $LockDir
     if (Test-DockerAnswers) {
         Write-Host "Docker engine is running and healthy."
         exit 0
     }
+    # Every round after the first follows another runner's operation.
+    if (($round -gt 1) -and ([DateTime]::UtcNow -ge $deadline)) { Stop-PastDeadline }
     if (Wait-OtherOperations) { continue }
 
     if (-not (& $TestDesktopRunning)) {
         $marker = $null
         try {
             $marker = New-DockerMarker -LockDir $LockDir -Operation 'a Docker Desktop start'
-            $race = Resolve-MarkerRace -LockDir $LockDir -Marker $marker -MaxMinutes $PruneMaxMinutes -Wait -PollSeconds $PollSeconds
+            $race = Resolve-MarkerRace -LockDir $LockDir -Marker $marker -MaxMinutes $PruneMaxMinutes -Wait -PollSeconds $PollSeconds -Until $deadline
         } catch {
             if ($marker) { Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue }
             Write-Host "::error::Docker Desktop is not running, and it cannot be started safely: the marker that keeps other runners from restarting it while it comes up could not be written ($($_.Exception.Message))."
             exit 1
         }
+        if ($race.TimedOut) { Stop-PastDeadline ($race.Others -join ', ') }
         if (-not $race.Go) {
-            Write-Host "Another runner put its marker down at the same time ($($race.Others -join ', ')); leaving the start to it."
+            Write-Host "Another runner's Docker start or restart has its marker down ($($race.Others -join ', ')); leaving the start to it."
             continue
         }
-        Invoke-UnderMarker -Marker $marker
+        Invoke-UnderMarker -Marker $marker -Started $started
+        continue
     }
 
     # Running but not answering. Only a restart helps, and a restart kills
@@ -281,13 +313,14 @@ while ($true) {
     $locks = Resolve-DockerLocks -LockDir $LockDir -Filter 'docker-job-*.lock' -JobLockMaxMinutes $MinAgeMinutes -Repository $Repository -GetRunStatus $GetRunStatus
     if ($locks.Live.Count -gt 0) { Stop-Refusing $locks.Live 'hold a live Docker lock' }
     try {
-        $exclusive = Enter-DockerExclusive -LockDir $LockDir -Filter 'docker-job-*.lock' -Stale $locks.Stale -Operation 'a Docker Desktop restart' -MaxMinutes $PruneMaxMinutes -Wait -PollSeconds $PollSeconds
+        $exclusive = Enter-DockerExclusive -LockDir $LockDir -Filter 'docker-job-*.lock' -Stale $locks.Stale -Operation 'a Docker Desktop restart' -MaxMinutes $PruneMaxMinutes -Wait -PollSeconds $PollSeconds -Until $deadline
     } catch {
         Write-Host "::error::Docker Desktop is running but $failed, and it cannot be restarted safely: the marker that keeps jobs from starting on Docker during the restart could not be written ($($_.Exception.Message))."
         exit 1
     }
+    if ($exclusive.TimedOut) { Stop-PastDeadline ($exclusive.Others -join ', ') }
     if (@($exclusive.Others).Count -gt 0) {
-        Write-Host "Another runner put its marker down at the same time ($($exclusive.Others -join ', ')); leaving the restart to it."
+        Write-Host "Another runner's Docker prune, start or restart has its marker down ($($exclusive.Others -join ', ')); leaving the restart to it."
         continue
     }
     if (-not $exclusive.Marker) {
@@ -300,5 +333,5 @@ while ($true) {
         }
         Stop-Refusing $exclusive.Taken 'took a Docker lock while the others were being judged'
     }
-    Invoke-UnderMarker -Marker $exclusive.Marker -Restart
+    Invoke-UnderMarker -Marker $exclusive.Marker -Started $started -Restart
 }

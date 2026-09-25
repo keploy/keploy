@@ -25,6 +25,10 @@ param(
     [string]$RunAttempt = $env:GITHUB_RUN_ATTEMPT,
     [int]$PollSeconds = 2
 )
+
+# Under the tests, no default may reach the shared machine (test-overrides.ps1).
+. (Join-Path $PSScriptRoot 'test-overrides.ps1')
+Assert-TestOverrides 'take-docker-job-lock.ps1' $PSBoundParameters @('LockDir')
 $ErrorActionPreference = 'Stop'
 
 if (-not $LockDir) {

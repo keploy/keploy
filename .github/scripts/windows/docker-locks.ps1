@@ -64,6 +64,19 @@
 # waiting for its marker.
 # A marker older than PruneMaxMinutes was left by an operation that was
 # killed, and nobody waits for it.
+#
+# THE LAST START. What an operation waited for may have started or restarted
+# Docker Desktop, and Docker can still be coming up from that when its marker
+# goes (a restart that gave up at its ready timeout). A second restart then
+# would kill that startup, so a restart must not follow from a check made
+# before it. Every start or restart of Docker Desktop therefore first writes
+# docker-desktop.started in -LockDir, with something new each time
+# (Set-DesktopStarted). ensure-docker.ps1 reads it before it checks Docker, and
+# again once its own marker is down and the race settled: if it changed,
+# Docker Desktop was started or restarted in between, whether this operation
+# waited for that or it happened before its marker went down, and the check
+# no longer counts. Only a start or restart writes it, so waiting for an
+# operation that gave way does not throw a check away.
 
 # Whether a run (or one attempt of it) is still going, from the Actions API.
 # keploy/keploy is public, so this needs no token. GITHUB_TOKEN is sent when
@@ -181,17 +194,19 @@ function New-DockerMarker {
 # taken back down, and Others names the markers it yielded to. Without -Wait
 # it yields to any other marker. With -Wait it yields only to a lower-named
 # one, and waits while every other one is higher-named. Waited says whether
-# it waited, in which case the operation it waited for may have done its work
-# and what was judged before the wait may be out of date. After a wait,
-# $Marker is written again; throws when it cannot be, since an operation
-# must not go on under a marker jobs may already take for abandoned.
+# it waited, in which case what was judged before the wait may be out of
+# date (THE LAST START above says how a restart tells). After a wait, $Marker
+# is written again; throws when it cannot be, since an operation must not go
+# on under a marker jobs may already take for abandoned. A wait that reaches
+# -Until takes $Marker back down and returns Go $false with TimedOut $true.
 function Resolve-MarkerRace {
     param(
         [string]$LockDir,
         [string]$Marker,
         [int]$MaxMinutes = 15,
         [switch]$Wait,
-        [int]$PollSeconds = 5
+        [int]$PollSeconds = 5,
+        [DateTime]$Until = [DateTime]::MaxValue
     )
     $mine = Split-Path -Leaf $Marker
     $waited = $false
@@ -205,16 +220,17 @@ function Resolve-MarkerRace {
                     throw "could not write $mine again after waiting: $($_.Exception.Message)"
                 }
             }
-            return [pscustomobject]@{ Go = $true; Waited = $waited; Others = @() }
+            return [pscustomobject]@{ Go = $true; Waited = $waited; Others = @(); TimedOut = $false }
         }
         $names = @($others | ForEach-Object { $_.Name })
         $lower = @($names | Where-Object { [string]::CompareOrdinal($_, $mine) -lt 0 })
-        if ((-not $Wait) -or ($lower.Count -gt 0)) {
+        $timedOut = $Wait -and ($lower.Count -eq 0) -and ([DateTime]::UtcNow -ge $Until)
+        if ((-not $Wait) -or ($lower.Count -gt 0) -or $timedOut) {
             Remove-Item -LiteralPath $Marker -Force -ErrorAction SilentlyContinue
-            return [pscustomobject]@{ Go = $false; Waited = $waited; Others = $names }
+            return [pscustomobject]@{ Go = $false; Waited = $waited; Others = $names; TimedOut = $timedOut }
         }
         if (-not $waited) {
-            Write-Host "Another Docker prune, start or restart put its marker down at the same time ($($names -join ', ')). Its name is higher than this one's ($mine), so it gives way; waiting for its marker to go."
+            Write-Host "Another Docker prune, start or restart has its marker down ($($names -join ', ')). It is under way, or it is about to give way to this one, whose name sorts first ($mine); waiting for its marker to go."
             $waited = $true
         }
         Start-Sleep -Seconds $PollSeconds
@@ -222,14 +238,14 @@ function Resolve-MarkerRace {
 }
 
 # Step 2: puts this operation's marker down, settles any race with another
-# operation (Resolve-MarkerRace; -Wait as there), then lists the locks again
-# with no API call. A lock is live unless step 1 judged that same file stale:
-# same path and same write time. A lock re-created under a judged name (a
-# re-run of that run) is new. Returns the marker's path when the operation may
-# run. Otherwise the marker is back down, and either Others names the
-# operations it yielded to, or Taken names the live locks. Waited is as for
-# Resolve-MarkerRace. Throws when the marker cannot be written: without it the
-# operation is not safe to run.
+# operation (Resolve-MarkerRace; -Wait, -Until and TimedOut as there), then
+# lists the locks again with no API call. A lock is live unless step 1 judged
+# that same file stale: same path and same write time. A lock re-created
+# under a judged name (a re-run of that run) is new. Returns the marker's path
+# when the operation may run. Otherwise the marker is back down, and either
+# Others names the operations it yielded to (or stopped waiting for), or
+# Taken names the live locks. Waited is as for Resolve-MarkerRace. Throws when
+# the marker cannot be written: without it the operation is not safe to run.
 function Enter-DockerExclusive {
     param(
         [string]$LockDir,
@@ -238,24 +254,37 @@ function Enter-DockerExclusive {
         [string]$Operation = 'a Docker prune',
         [int]$MaxMinutes = 15,
         [switch]$Wait,
-        [int]$PollSeconds = 5
+        [int]$PollSeconds = 5,
+        [DateTime]$Until = [DateTime]::MaxValue
     )
     $marker = New-DockerMarker -LockDir $LockDir -Operation $Operation
     try {
-        $race = Resolve-MarkerRace -LockDir $LockDir -Marker $marker -MaxMinutes $MaxMinutes -Wait:$Wait -PollSeconds $PollSeconds
+        $race = Resolve-MarkerRace -LockDir $LockDir -Marker $marker -MaxMinutes $MaxMinutes -Wait:$Wait -PollSeconds $PollSeconds -Until $Until
     } catch {
         Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
         throw
     }
     if (-not $race.Go) {
-        return [pscustomobject]@{ Marker = $null; Taken = @(); Others = $race.Others; Waited = $race.Waited }
+        return [pscustomobject]@{ Marker = $null; Taken = @(); Others = $race.Others; Waited = $race.Waited; TimedOut = $race.TimedOut }
     }
     $taken = @(Get-ChildItem -LiteralPath $LockDir -Filter $Filter -ErrorAction SilentlyContinue |
         Where-Object { -not ($Stale.ContainsKey($_.FullName) -and ($Stale[$_.FullName] -eq $_.LastWriteTimeUtc.Ticks)) } |
         ForEach-Object { $_.Name })
     if ($taken.Count -gt 0) {
         Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
-        return [pscustomobject]@{ Marker = $null; Taken = $taken; Others = @(); Waited = $race.Waited }
+        return [pscustomobject]@{ Marker = $null; Taken = $taken; Others = @(); Waited = $race.Waited; TimedOut = $false }
     }
-    [pscustomobject]@{ Marker = $marker; Taken = @(); Others = @(); Waited = $race.Waited }
+    [pscustomobject]@{ Marker = $marker; Taken = @(); Others = @(); Waited = $race.Waited; TimedOut = $false }
+}
+
+# THE LAST START (above): what the last start or restart of Docker Desktop on
+# this machine wrote, '' when there has been none.
+function Get-DesktopStarted([string]$LockDir) {
+    "$(Get-Content -LiteralPath (Join-Path $LockDir 'docker-desktop.started') -Raw -ErrorAction SilentlyContinue)".Trim()
+}
+# Written by a start or restart of Docker Desktop, under its marker, before it
+# acts. Throws when it cannot be written.
+function Set-DesktopStarted([string]$LockDir, [string]$Operation) {
+    Set-Content -LiteralPath (Join-Path $LockDir 'docker-desktop.started') -ErrorAction Stop -Value (
+        "{0} {1} by {2} run {3} {4} at {5:o}" -f [guid]::NewGuid().ToString('N'), $Operation, $env:GITHUB_REPOSITORY, $env:GITHUB_RUN_ID, $env:RUNNER_NAME, [DateTime]::UtcNow)
 }
