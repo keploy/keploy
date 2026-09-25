@@ -119,6 +119,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		BuildDelay:       m.config.BuildDelay,
 		Mode:             models.MODE_TEST,
 		MockMode:         true,
+		RecordRequests:   m.config.Mock.RecordRequests,
 		ConfigPath:       m.config.ConfigPath,
 		PassThroughPorts: config.GetByPassPorts(m.config),
 	}); err != nil {
@@ -187,6 +188,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	// 4. Load the whole set and push it into the proxy.
+	watchCtx, stopWatch := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopWatch()
+	actual := m.watchIncoming(watchCtx)
 	empty := map[string]bool{}
 	filtered, err := m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), empty, empty)
 	if err != nil {
@@ -276,6 +280,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		utils.LogError(m.logger, cause, "the replay did not finish")
 		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: cause}
 	}
+	stopWatch()
+	actual.wait(mockDrainGrace)
 
 	// 9. Under --on-miss record, append any calls served live-from-upstream to
 	//    the set so the next replay serves them from the mock (VCR new_episodes).
@@ -284,7 +290,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	// 10. Summarise what was served and missed.
-	counts := m.reportOutcome(ctx, loaded, scope.tests())
+	detail := replayDetail{
+		windows:  scope.windows(),
+		expected: m.expectedMocks(ctx, name),
+		recorded: m.recordedCases(ctx, name),
+		actual:   actual.list(),
+	}
+	counts := m.reportOutcome(ctx, loaded, scope.tests(), detail)
 	missed, missesKnown := counts.missed, counts.missed >= 0
 
 	// 11. Exit code: mirror the runner; with --strict also fail on any miss.
@@ -560,6 +572,10 @@ type ReplayOutcome struct {
 	Loaded   int
 	Consumed int
 	Missed   int
+	// Cases is each recorded request replayed, with the app's answer compared to the recording.
+	Cases []CaseOutcome
+	// Mocks is what each test used and missed, next to what it recorded.
+	Mocks []FlowMocks
 	// Tests is each test the runner reported, read from its output; empty when the runner-scope adapter is off.
 	Tests []TestOutcome
 }
@@ -597,7 +613,7 @@ type replayCounts struct {
 // The two reads are tracked apart on purpose. Collapsing them into one "did the
 // agent answer" flag makes a half-answer indistinguishable from no answer, and
 // then reports a run whose misses were never read as a clean one.
-func (m *mockService) reportOutcome(ctx context.Context, loaded int, tests []TestOutcome) replayCounts {
+func (m *mockService) reportOutcome(ctx context.Context, loaded int, tests []TestOutcome, detail replayDetail) replayCounts {
 	outcomeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
 	defer cancel()
 	consumed, consumedErr := m.instrumentation.GetConsumedMocks(outcomeCtx)
@@ -673,6 +689,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, tests []Tes
 				Consumed: len(consumed),
 				Missed:   len(misses),
 				Tests:    tests,
+				Cases:    pairCases(detail.windows, detail.recorded, detail.actual, m.compareCase),
+				Mocks:    attributeMocks(detail.windows, detail.expected, consumed, misses),
 			})
 		}
 	}
