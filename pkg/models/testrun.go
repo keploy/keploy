@@ -23,6 +23,7 @@ type TestReport struct {
 	TimeTaken     string       `json:"time_taken" yaml:"time_taken"`
 	CmdUsed       string       `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
 	AppLogs       string       `json:"appLogs,omitempty" yaml:"app_logs,omitempty"`
+	Logs          string       `json:"logs,omitempty" yaml:"logs,omitempty"`
 }
 
 type TestCoverage struct {
