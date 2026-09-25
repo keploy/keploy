@@ -1103,6 +1103,12 @@ jobs:
     # pass is cheap and self-correcting — the next push schedules a fresh one,
     # as the concurrency comment at the top of this file already notes.
     timeout-minutes: 10
+    # Its token goes to cleanup-windows.ps1 on a machine four runners share,
+    # and the script only reads run status; this workflow has no permissions
+    # block, so without this the job would get the org's write-all default.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Pre-checkout git isolation
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'

@@ -23,7 +23,7 @@
 #                         job from before it builds or loads its images until
 #                         its teardown. Stale once that run attempt has
 #                         completed, or once older than -MinAgeMinutes (the
-#                         reaper's threshold, >= the job's timeout).
+#                         reaper's threshold, above the job's timeout).
 #     prepare-windows-workflow-<run>.lock the run-level lock, held from
 #                         build-windows-amd64 until cleanup_windows. Stale once
 #                         that run has completed, or once older than
@@ -50,13 +50,18 @@
 [CmdletBinding()]
 param(
     [string]$LockDir = '',
-    [int]$MinAgeMinutes = 40,
+    [int]$MinAgeMinutes = 45,
     [int]$RunLockMaxAgeHours = 24,
+    # take-docker-job-lock.ps1's bound: a job stops waiting for a prune marker
+    # this old, because only a cleanup killed before its finally block (past
+    # cleanup_windows' 10-minute timeout) leaves one that old behind. Such
+    # markers are deleted here.
+    [int]$PruneMaxMinutes = 15,
     # The repository whose runs a lock names, for locks that do not say.
     [string]$Repository = $env:GITHUB_REPOSITORY,
     # Only the tests override these. GetRunStatus takes (repository, run ID,
-    # attempt or '') and returns the run's status, 'gone', or $null when it
-    # could not find out.
+    # attempt or '') and returns the run's status, or $null when it could not
+    # find out.
     [string]$DockerExe = 'docker',
     [string]$WedgeDir = '',
     [scriptblock]$GetRunStatus = $null
@@ -99,10 +104,11 @@ function Get-RunStatusFromApi([string]$Repo, [string]$RunId, [string]$Attempt) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         return "$((Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 15 -UseBasicParsing).status)"
     } catch {
-        $code = 0
-        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
-        if ($code -eq 404) { return 'gone' }  # deleted run: nothing holds the lock
-        Write-Host "  could not ask the Actions API about run $RunId ($($_.Exception.Message)); judging its lock by age."
+        # A 404 is no answer either: besides a deleted run, it is what a token
+        # that cannot see $Repo gets, or a repository misread from the lock.
+        # Taking it for "over" would delete a live lock; a deleted run's lock
+        # ages out instead.
+        Write-Host "  could not ask the Actions API about run $RunId of $Repo ($($_.Exception.Message)); judging its lock by age."
         return $null
     }
 }
@@ -110,6 +116,13 @@ if (-not $GetRunStatus) { $GetRunStatus = ${function:Get-RunStatusFromApi} }
 
 # Locks. The marker goes down first: see the header.
 New-Item -ItemType Directory -Force -Path $LockDir | Out-Null
+foreach ($old in @(Get-ChildItem -LiteralPath $LockDir -Filter 'docker-prune-*.inprogress' -ErrorAction SilentlyContinue)) {
+    $oldAge = [DateTime]::UtcNow - $old.LastWriteTimeUtc
+    if ($oldAge.TotalMinutes -ge $PruneMaxMinutes) {
+        Write-Host "Deleting $($old.Name), left $([int]$oldAge.TotalMinutes) min ago by a cleanup that was killed mid-prune; jobs no longer wait for it."
+        Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
 # One marker per cleanup, so one cleanup finishing does not take down the
 # marker of another that is still pruning.
 $marker = Join-Path $LockDir ("docker-prune-{0}.inprogress" -f [guid]::NewGuid().ToString('N'))
@@ -137,7 +150,7 @@ try {
             $first = "$(Get-Content -LiteralPath $lock.FullName -TotalCount 1 -ErrorAction SilentlyContinue)".Trim().Split(' ')[0]
             if ($first -match '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { $repo = $first }
             $status = & $GetRunStatus $repo $runId $attempt
-            if ($status -eq 'completed' -or $status -eq 'gone') {
+            if ($status -eq 'completed') {
                 $what = "run $runId"
                 if ($attempt) { $what = "attempt $attempt of run $runId" }
                 $why = "$what of $repo is $status"

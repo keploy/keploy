@@ -72,11 +72,12 @@ param(
 
     # The age sweep leaves any container whose last lifecycle event is younger
     # than this, because it may belong to a job still running on another runner
-    # of this machine. Must be at least the timeout-minutes of every job that
-    # can run on these runners: keploy/windows-redirector's build job (40, no
-    # Docker today) shares them with this repo's self-hosted Windows jobs (at
-    # most 30). reap-keploy-containers.tests.ps1 enforces this repo's half.
-    [int]$MinAgeMinutes = 40,
+    # of this machine. Must exceed, by a few minutes, the timeout-minutes of
+    # every job that can run on these runners: a job's if: always() steps still
+    # run after it is cancelled at its timeout. keploy/windows-redirector's
+    # build job (40, no Docker today) shares them with this repo's self-hosted
+    # Windows jobs (at most 30). reap-keploy-containers.tests.ps1 enforces both.
+    [int]$MinAgeMinutes = 45,
 
     # Which containers the age sweep considers: names starting with this.
     # Empty means every container on the daemon (cleanup-windows.ps1).
