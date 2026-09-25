@@ -108,12 +108,17 @@ switch ($args[0]) {
         foreach ($c in $counting) { $c.removing--; if ($c.removing -eq 0) { $c.gone = $true } }
         if ($counting.Count) { $state.containers = @($state.containers | Where-Object { -not $_.gone }); Save }
         $filter = "$($args | Where-Object { "$_" -like 'name=*' -or "$_" -like 'label=*' } | Select-Object -First 1)"
+        $vanished = @()
         foreach ($c in @($state.containers)) {
             if ($filter -like 'name=*') { if ($c.name -notlike ("*" + $filter.Substring(5) + "*")) { continue } }
             elseif ($filter -like 'label=com.docker.compose.project=*') { if ($c.project -ne ($filter -replace '^label=com\.docker\.compose\.project=', '')) { continue } }
             elseif ($filter) { Exit-Fake 2 "fake docker: unexpected filter $filter" }
             Write-Output $c.id
+            # Its owner removes it right after this listing: listed here, gone
+            # by the `inspect` that follows.
+            if ($c.vanishing) { $vanished += $c.id }
         }
+        if ($vanished.Count) { $state.containers = @($state.containers | Where-Object { $vanished -notcontains $_.id }); Save }
         Exit-Fake 0
     }
     'inspect' {
@@ -176,8 +181,8 @@ function Ago([double]$minutes) {
     # Nine fractional digits, as docker prints them.
     ([DateTimeOffset]::Parse('2026-09-25T04:05:33Z')).AddMinutes(-$minutes).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'.'fffffff'00Z'")
 }
-function Container($id, $name, $created, $started = $NEVER, $finished = $NEVER, $project = '', [switch]$Stuck, [int]$RemovingFor = 0) {
-    [pscustomobject]@{ id = $id; name = $name; created = $created; started = $started; finished = $finished; project = $project; stuck = [bool]$Stuck; removing = $RemovingFor; gone = $false }
+function Container($id, $name, $created, $started = $NEVER, $finished = $NEVER, $project = '', [switch]$Stuck, [int]$RemovingFor = 0, [switch]$Vanishing) {
+    [pscustomobject]@{ id = $id; name = $name; created = $created; started = $started; finished = $finished; project = $project; stuck = [bool]$Stuck; removing = $RemovingFor; gone = $false; vanishing = [bool]$Vanishing }
 }
 function Set-State($containers, $systemTime = $NOW, [switch]$DaemonDown, [switch]$PsDown, [int]$FailInfo = 0, [int]$HangInfo = 0) {
     [pscustomobject]@{ systemTime = $systemTime; daemonDown = [bool]$DaemonDown; psDown = [bool]$PsDown; failInfo = $FailInfo; hangInfo = $HangInfo; stampOnCall = 0; stampFile = ''; containers = @($containers); removed = @(); pruned = @() } |
@@ -384,6 +389,20 @@ try {
     $r = Invoke-Reaper
     Report "a container whose age cannot be read is left alone" $r @(Removed $r @())
 
+    # Its owner can remove a container between the sweep's listing and its
+    # inspect. That one is skipped without a word: it is neither removed nor
+    # taken for a container whose age cannot be read. Swept by every name, as
+    # cleanup-windows sweeps, so that no prefix check skips it either.
+    Set-State @(
+        (Container 'gone4a1f' 'dedup-go-gone4a1f' (Ago 300) (Ago 300) -Vanishing),
+        (Container 'old' 'dedup-go-0badf00d' (Ago 300) (Ago 300))
+    )
+    $r = Invoke-Reaper @{ NamePrefix = '' }
+    Report "a container gone between the sweep's listing and its inspect is skipped" $r @(
+        (Removed $r @('old')), (Code $r 0),
+        $(if ($r.Output -match 'gone4a1f') { "said something of the container that went: $(@($r.Output -split "`n" | Where-Object { $_ -match 'gone4a1f' }) -join ' | ')" })
+    )
+
     Set-State @((Container 'old' 'keploy-v3-old' (Ago 360) (Ago 360))) -systemTime 'garbage'
     $r = Invoke-Reaper
     # Guarded, not left to `$null - [DateTimeOffset]` throwing and a $null idle
@@ -416,11 +435,26 @@ try {
     # keploy's own teardown is still removing its agent when the job's
     # teardown step asks: rm -f says "already in progress" and the container
     # is listed (state "removing") for a moment. That is not a wedge.
+    # The fake's call log pins that it went that way: `rm` failed saying so,
+    # and the first look after it still listed the container.
     Set-State @((Container 'mine' 'keploy-v3-eeee' (Ago 2) (Ago 2) $NEVER 'keploy-5e7e50f3' -RemovingFor 3))
     $shared = New-Dir 'wedge'
-    $r = Invoke-Reaper @{ ComposeProject = 'keploy-5e7e50f3'; FailOnStuck = $true; SettleSeconds = 10; WedgeDir = $shared }
+    $calls = Join-Path (New-Dir 'calls') 'calls'
+    $env:FAKE_DOCKER_CALLS = $calls
+    try {
+        $r = Invoke-Reaper @{ ComposeProject = 'keploy-5e7e50f3'; FailOnStuck = $true; SettleSeconds = 10; WedgeDir = $shared }
+    } finally {
+        $env:FAKE_DOCKER_CALLS = $null
+    }
+    $seen = @(Get-Content -LiteralPath $calls)
+    $rmAt = @(for ($i = 0; $i -lt $seen.Count; $i++) { if ($seen[$i] -like 'rm -f mine *') { $i } })
+    $looks = @($seen | Where-Object { $_ -like 'ps -aq (pid *' }).Count
     Report "a removal already in progress elsewhere is waited for, not reported as a wedge" $r @(
-        (Code $r 0), $(if (@(Get-ChildItem $shared).Count -ne 0) { "wrote a wedge record for a healthy removal" })
+        (Code $r 0), $(if (@(Get-ChildItem $shared).Count -ne 0) { "wrote a wedge record for a healthy removal" }),
+        $(if (($rmAt.Count -ne 1) -or ($seen[$rmAt[0] + 1] -notlike '  -> exit 1 *: Error response from daemon: removal of container mine is already in progress')) {
+                "the fake's 'rm -f mine' did not fail as already in progress: [$($seen -join ' | ')]"
+            }),
+        $(if ($looks -lt 2) { "looked $looks time(s) after the removal, want the container still listed at the first and gone at a later one" })
     )
 
     # ---- the owner's teardown, and wedge detection that does not wait -------
@@ -433,6 +467,15 @@ try {
     )
     $r = Invoke-Reaper @{ ComposeProject = 'keploy-5e7e50f3'; FailOnStuck = $true }
     Report "the owning job removes exactly its own containers, young as they are" $r @((Removed $r @('mine1', 'mine2')), (Code $r 0))
+
+    # keploy removes its own agent as it exits, and can do so between the
+    # owner's listing and its inspect: that one is skipped, not removed again.
+    Set-State @(
+        (Container 'mine1' 'keploy-v3-aaaa' (Ago 2) (Ago 2) $NEVER 'keploy-5e7e50f3' -Vanishing),
+        (Container 'mine2' 'dedup-go-5e7e50f3' (Ago 2) (Ago 2) (Ago 0.2) 'keploy-5e7e50f3')
+    )
+    $r = Invoke-Reaper @{ ComposeProject = 'keploy-5e7e50f3'; FailOnStuck = $true }
+    Report "the owning job skips its container removed between the listing and its inspect" $r @((Removed $r @('mine2')), (Code $r 0))
 
     # Another runner recorded a wedge during this job. The owner's teardown
     # neither retries it nor fails for it; the next pre-job reap does.
@@ -595,9 +638,10 @@ try {
     # prune marker was down while it was asked: it must not be, since that
     # would keep starting jobs waiting on the API.
     # -OnAsk runs on each question (a job taking its lock meanwhile).
+    # -MarkerUnwritable makes writing a docker-prune-*.inprogress marker fail.
     # -KeepOnDelete names a lock whose deletion fails; -RecreateOnDelete one
     # that is written again the moment it is deleted (a re-run of its run).
-    function Invoke-Cleanup($locks, $runs = @{}, [switch]$HttpApi, [scriptblock]$OnAsk = $null, [string]$KeepOnDelete = '', [string]$RecreateOnDelete = '') {
+    function Invoke-Cleanup($locks, $runs = @{}, [switch]$HttpApi, [scriptblock]$OnAsk = $null, [string]$KeepOnDelete = '', [string]$RecreateOnDelete = '', [switch]$MarkerUnwritable) {
         $lockDir = New-LockDir $locks
         # Lists, not arrays: the closures below get their own scope, so they
         # can only add to objects they share with this function.
@@ -628,6 +672,12 @@ try {
             Microsoft.PowerShell.Management\Remove-Item @args
             if ($RecreateOnDelete -and ("$args" -like "*$RecreateOnDelete*")) {
                 Set-Content -Path (Join-Path $lockDir $RecreateOnDelete) -Value 'keploy/keploy started-2'
+            }
+        }
+        if ($MarkerUnwritable) {
+            function Set-Content {
+                if ("$args" -like '*docker-prune-*.inprogress*') { throw 'Access to the path is denied.' }
+                Microsoft.PowerShell.Management\Set-Content @args
             }
         }
         if ($HttpApi) {
@@ -685,9 +735,15 @@ try {
         (Says $r 'Skipping Docker prune: 2 live lock\(s\)' "the live-locks message")
     )
 
+    # The leftover goes, and cleanup's reap finds it gone: a leftover still
+    # listed after its removal is a wedge, and the reap says so.
     Set-State @((Container 'old' 'dedup-go-0badf00d' (Ago 300) (Ago 300) (Ago 200)))
     $r = Invoke-Cleanup @{ 'docker-job-1-1-a.lock' = 5 }
-    Report "removing a leftover no longer forces a prune past a live job lock" $r @((Removed $r @('old')), (Pruned $r $false))
+    Report "removing a leftover no longer forces a prune past a live job lock" $r @(
+        (Removed $r @('old')), (Pruned $r $false),
+        (Says $r 'All 1 container\(s\) removed\.' "the reap finding the leftover gone"),
+        $(if ($r.Output -match 'Docker VM is wedged') { "reported a wedge for the leftover it removed" })
+    )
 
     Set-State @()
     $r = Invoke-Cleanup @{ 'docker-job-1-1-a.lock' = ($minAge + 1); 'prepare-windows-workflow-2.lock' = (25 * 60); 'prepare-windows-workflow-3.lock' = (23 * 60) }
@@ -698,6 +754,16 @@ try {
     Set-State @()
     $r = Invoke-Cleanup @{ 'docker-job-1-1-a.lock' = ($minAge + 1); 'prepare-windows-workflow-2.lock' = (25 * 60) }
     Report "once every lock is stale the prune runs" $r @((Pruned $r $true), (Locks $r @()))
+
+    # Without its marker down, a job starting on Docker meanwhile would be
+    # pruned under. A marker that cannot be written calls the prune off, and
+    # cleanup says why in a warning (it does not fail the job it tears down).
+    Set-State @()
+    $r = Invoke-Cleanup @{ 'docker-job-1-1-a.lock' = ($minAge + 1) } -MarkerUnwritable
+    Report "a prune whose marker cannot be put down does not run, and cleanup warns why" $r @(
+        (Pruned $r $false), (Locks $r @()), (NoErrors $r),
+        (Says $r '(?m)^WARNING: could not put down the prune marker \(Access to the path is denied\.\); not pruning\.$' "the warning")
+    )
 
     # A cancelled run's cleanup_windows can be cancelled at "Set up job"
     # (run 35707841215), so its run lock is never deleted by its owner. Its
