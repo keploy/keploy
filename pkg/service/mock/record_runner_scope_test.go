@@ -104,7 +104,7 @@ const outputTimingWarn = "test boundaries taken from output timing"
 func TestRecordWarnsOnceWhenBoundariesCameFromOutputTiming(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
 	instr := newRunnerInstr(t, plainSequential)
-	instr.windows = []models.ScopeWindow{{Name: "TestA", Start: ts(10), End: ts(20)}, {Name: "TestC", Start: ts(20), End: ts(30)}}
+	instr.windows = []models.ScopeWindow{{Name: "fixture.A", Start: ts(10), End: ts(20)}, {Name: "fixture.B", Start: ts(20), End: ts(30)}}
 	instr.mocks = []*models.Mock{
 		mockAt("mock-0", ts(10).Add(3*time.Millisecond)),
 		mockAt("mock-1", ts(15)),
@@ -193,4 +193,62 @@ func TestNoMappingDBMeansNoRunnerScope(t *testing.T) {
 	require.NoError(t, recordSet(t, instr, nil, nil))
 	_, observed := instr.seen()
 	require.False(t, observed)
+}
+
+// mappedNames is the mapping on disk as test name -> mock names.
+func mappedNames(t *testing.T, mapDB *mapdb.MappingDb) map[string][]string {
+	t.Helper()
+	got, _, err := mapDB.Get(context.Background(), "set")
+	require.NoError(t, err)
+	out := make(map[string][]string, len(got))
+	for test, entries := range got {
+		for _, e := range entries {
+			out[test] = append(out[test], e.Name)
+		}
+	}
+	return out
+}
+
+// The published agent ignores the runner's time and stamps its own; the CLI's windows must not depend on it.
+func TestRecordMapsFromTheAdapterWindowsWhenTheAgentHasNone(t *testing.T) {
+	instr := newRunnerInstr(t, jsonSequential)
+	instr.mocks = []*models.Mock{
+		mockAt("mock-0", runnerT0.Add(5*time.Millisecond)),
+		mockAt("mock-1", runnerT0.Add(15*time.Millisecond)),
+	}
+	mapDB := mapdb.New(zap.NewNop(), t.TempDir(), "")
+	require.NoError(t, recordSet(t, instr, mapDB, nil))
+	require.Equal(t, map[string][]string{
+		"orders/e2e.TestA": {"mock-0"},
+		"orders/e2e.TestC": {"mock-1"},
+	}, mappedNames(t, mapDB))
+}
+
+// A suite that also calls the scope API itself keeps those windows.
+func TestRecordKeepsAgentWindowsForTestsTheAdapterDidNotSee(t *testing.T) {
+	instr := newRunnerInstr(t, jsonSequential)
+	instr.windows = []models.ScopeWindow{{Name: "fixture.Setup", Start: ts(10), End: ts(20)}}
+	instr.mocks = []*models.Mock{
+		mockAt("mock-0", runnerT0.Add(5*time.Millisecond)),
+		mockAt("mock-1", ts(15)),
+	}
+	mapDB := mapdb.New(zap.NewNop(), t.TempDir(), "")
+	require.NoError(t, recordSet(t, instr, mapDB, nil))
+	require.Equal(t, map[string][]string{
+		"orders/e2e.TestA": {"mock-0"},
+		"fixture.Setup":    {"mock-1"},
+	}, mappedNames(t, mapDB))
+}
+
+// The lab's failure: the agent's windows for the same tests sat one test late; the adapter's must win.
+func TestRecordPrefersTheAdapterWindowForTheSameTest(t *testing.T) {
+	instr := newRunnerInstr(t, jsonSequential)
+	instr.windows = []models.ScopeWindow{
+		{Name: "orders/e2e.TestA", Start: runnerT0.Add(8 * time.Millisecond), End: runnerT0.Add(18 * time.Millisecond)},
+		{Name: "orders/e2e.TestC", Start: runnerT0.Add(18 * time.Millisecond), End: runnerT0.Add(28 * time.Millisecond)},
+	}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(15*time.Millisecond))}
+	mapDB := mapdb.New(zap.NewNop(), t.TempDir(), "")
+	require.NoError(t, recordSet(t, instr, mapDB, nil))
+	require.Equal(t, map[string][]string{"orders/e2e.TestC": {"mock-0"}}, mappedNames(t, mapDB))
 }

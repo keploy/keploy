@@ -121,7 +121,7 @@ func parsePlainLine(line string) scopeEvent {
 	return scopeEvent{}
 }
 
-// runnerScope turns the wrapped test runner's output into scope begin/end calls on the agent.
+// runnerScope turns the wrapped test runner's output into per-test windows, and posts the same boundaries to the agent.
 type runnerScope struct {
 	ctx    context.Context
 	logger *zap.Logger
@@ -132,11 +132,13 @@ type runnerScope struct {
 	open      []scopeEvent
 	paused    map[string]bool
 	overlaps  []string
+	starts    map[string]time.Time
+	closed    []models.ScopeWindow
 	readTimed int
 }
 
 func newRunnerScope(ctx context.Context, logger *zap.Logger, marker ScopeMarker) *runnerScope {
-	return &runnerScope{ctx: ctx, logger: logger, marker: marker, paused: map[string]bool{}}
+	return &runnerScope{ctx: ctx, logger: logger, marker: marker, paused: map[string]bool{}, starts: map[string]time.Time{}}
 }
 
 // writer is the stdout observer to hand the app runner; nil when the adapter is off.
@@ -165,34 +167,46 @@ func (r *runnerScope) Write(p []byte) (int, error) {
 func (r *runnerScope) handle(ev scopeEvent) {
 	switch ev.kind {
 	case scopeBegin:
-		r.begin(ev)
+		r.begin(ev, r.stamp(ev))
 		r.mark(ev, r.marker.BeginScope)
 	case scopePause:
 		r.paused[ev.name()] = true
 	case scopeEnd:
-		r.end(ev)
+		r.end(ev, r.stamp(ev))
 		r.mark(ev, r.marker.EndScope)
 	}
 }
 
-// begin lists ev as running; a sibling still listed has only not printed its result yet, unless it paused for t.Parallel().
-func (r *runnerScope) begin(ev scopeEvent) {
+// stamp is the runner's own time for ev, or the time keploy read the line when the output carries none.
+func (r *runnerScope) stamp(ev scopeEvent) time.Time {
+	if !ev.at.IsZero() {
+		return ev.at
+	}
+	r.readTimed++
+	return time.Now()
+}
+
+// begin opens ev's window; a sibling still listed has only not printed its result yet, so its window closes here, unless it paused for t.Parallel().
+func (r *runnerScope) begin(ev scopeEvent, at time.Time) {
 	kept := r.open[:0]
 	for _, running := range r.open {
 		switch {
 		case ev.inside(running):
 			kept = append(kept, running)
 		case ev.parent() == running.parent() && !r.paused[running.name()]:
+			r.finish(running.name(), at)
 		default:
 			r.overlaps = append(r.overlaps, running.name()+" and "+ev.name())
 			kept = append(kept, running)
 		}
 	}
 	r.open = append(kept, ev)
+	r.starts[ev.name()] = at
 }
 
-func (r *runnerScope) end(ev scopeEvent) {
+func (r *runnerScope) end(ev scopeEvent, at time.Time) {
 	delete(r.paused, ev.name())
+	r.finish(ev.name(), at)
 	for i, running := range r.open {
 		if running.name() == ev.name() {
 			r.open = append(r.open[:i], r.open[i+1:]...)
@@ -201,11 +215,43 @@ func (r *runnerScope) end(ev scopeEvent) {
 	}
 }
 
+// finish turns an open test into a window; a test already closed at a sibling's start is left alone.
+func (r *runnerScope) finish(name string, at time.Time) {
+	start, ok := r.starts[name]
+	if !ok {
+		return
+	}
+	delete(r.starts, name)
+	r.closed = append(r.closed, models.ScopeWindow{Name: name, Start: start, End: at})
+}
+
+// windows lists every test that began and ended, stamped by the runner's clock where the output had one.
+func (r *runnerScope) windows() []models.ScopeWindow {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]models.ScopeWindow(nil), r.closed...)
+}
+
+// mergeWindows keeps the adapter's windows and adds the agent's only for tests the adapter never saw.
+func mergeWindows(adapter, agent []models.ScopeWindow) []models.ScopeWindow {
+	seen := make(map[string]struct{}, len(adapter))
+	for _, w := range adapter {
+		seen[w.Name] = struct{}{}
+	}
+	out := append([]models.ScopeWindow(nil), adapter...)
+	for _, w := range agent {
+		if _, ok := seen[w.Name]; !ok {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 // mark posts one test boundary to the agent; a failure is logged, never fatal.
 func (r *runnerScope) mark(ev scopeEvent, post func(context.Context, string, int, time.Time) error) {
-	if ev.at.IsZero() {
-		r.readTimed++
-	}
 	ctx, cancel := context.WithTimeout(r.ctx, scopeCallTimeout)
 	defer cancel()
 	if err := post(ctx, ev.name(), 0, ev.at); err != nil {

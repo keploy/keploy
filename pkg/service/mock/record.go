@@ -266,24 +266,18 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Warn("tests ran at the same time; per-test mappings are best-effort", zap.Strings("overlaps", overlaps))
 	}
 	if m.mappingDB != nil {
-		if reader, ok := m.instrumentation.(ScopeReader); ok {
-			scopeCtx, cancelScope := context.WithTimeout(persistCtx, agentEpilogueTimeout)
-			windows, werr := reader.GetScopeWindows(scopeCtx)
-			cancelScope()
-			if werr != nil {
-				m.logger.Debug("failed to read per-test scope windows; recording suite-level", zap.Error(werr))
-			} else if len(windows) > 0 {
-				if scope.usedReadTime() {
-					m.logger.Warn(fmt.Sprintf("test boundaries taken from output timing; %d mocks fell within 20 ms of a boundary — use `go test -json` (or `go tool test2json -t`) for exact attribution",
-						nearBoundary(windows, recorded, boundarySlack)))
-				}
-				byTest := correlateScopes(windows, recorded)
-				if len(byTest) > 0 {
-					if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
-						m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
-					} else {
-						m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
-					}
+		windows := mergeWindows(scope.windows(), m.agentWindows(persistCtx))
+		if len(windows) > 0 {
+			if scope.usedReadTime() {
+				m.logger.Warn(fmt.Sprintf("test boundaries taken from output timing; %d mocks fell within 20 ms of a boundary — use `go test -json` (or `go tool test2json -t`) for exact attribution",
+					nearBoundary(windows, recorded, boundarySlack)))
+			}
+			byTest := correlateScopes(windows, recorded)
+			if len(byTest) > 0 {
+				if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
+					m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
+				} else {
+					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
 				}
 			}
 		}
@@ -316,6 +310,22 @@ func (m *mockService) runnerScope(ctx context.Context) *runnerScope {
 		return nil
 	}
 	return newRunnerScope(ctx, m.logger, marker)
+}
+
+// agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.
+func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
+	reader, ok := m.instrumentation.(ScopeReader)
+	if !ok {
+		return nil
+	}
+	scopeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
+	defer cancel()
+	windows, err := reader.GetScopeWindows(scopeCtx)
+	if err != nil {
+		m.logger.Debug("failed to read per-test scope windows from the agent", zap.Error(err))
+		return nil
+	}
+	return windows
 }
 
 // deleteMappings drops the set's old per-test mappings so a re-record cannot leave tests pointing at renamed mocks.

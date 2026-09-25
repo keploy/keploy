@@ -210,6 +210,75 @@ func TestRunnerScopeIgnoresUnrelatedOutput(t *testing.T) {
 	require.Empty(t, scope.overlapping())
 }
 
+var runnerT0 = time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+
+func sameWindows(t *testing.T, want, got []models.ScopeWindow) {
+	t.Helper()
+	require.Len(t, got, len(want), "windows %+v", got)
+	for i := range want {
+		require.Equal(t, want[i].Name, got[i].Name)
+		require.True(t, got[i].Start.Equal(want[i].Start), "%s start %v want %v", want[i].Name, got[i].Start, want[i].Start)
+		require.True(t, got[i].End.Equal(want[i].End), "%s end %v want %v", want[i].Name, got[i].End, want[i].End)
+		require.Equal(t, want[i].PID, got[i].PID)
+	}
+}
+
+// go test -json events carry the runner's clock, so the windows are the runner's, not the moment keploy read them.
+func TestRunnerScopeBuildsWindowsFromTheRunnerClock(t *testing.T) {
+	_, scope := feed(t, `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.002Z","Action":"run","Package":"orders/e2e","Test":"TestA/one"}
+{"Time":"2026-09-24T10:00:00.004Z","Action":"pass","Package":"orders/e2e","Test":"TestA/one"}
+{"Time":"2026-09-24T10:00:00.01Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.01Z","Action":"run","Package":"orders/e2e","Test":"TestC"}
+{"Time":"2026-09-24T10:00:00.02Z","Action":"fail","Package":"orders/e2e","Test":"TestC"}
+`)
+	sameWindows(t, []models.ScopeWindow{
+		{Name: "orders/e2e.TestA/one", Start: runnerT0.Add(2 * time.Millisecond), End: runnerT0.Add(4 * time.Millisecond)},
+		{Name: "orders/e2e.TestA", Start: runnerT0, End: runnerT0.Add(10 * time.Millisecond)},
+		{Name: "orders/e2e.TestC", Start: runnerT0.Add(10 * time.Millisecond), End: runnerT0.Add(20 * time.Millisecond)},
+	}, scope.windows())
+	require.False(t, scope.usedReadTime())
+}
+
+// Plain output has no clock, so windows are stamped on read; a subtest's result prints only after its parent's, so its window closes when the next sibling starts.
+func TestRunnerScopeStampsPlainWindowsOnRead(t *testing.T) {
+	before := time.Now()
+	_, scope := feed(t, plainSequential)
+	after := time.Now()
+
+	ws := scope.windows()
+	names := make([]string, 0, len(ws))
+	for _, w := range ws {
+		names = append(names, w.Name)
+		require.False(t, w.Start.Before(before), "%s started before the output was read", w.Name)
+		require.False(t, w.End.After(after), "%s ended after the output was read", w.Name)
+		require.False(t, w.End.Before(w.Start), "%s ends before it starts", w.Name)
+	}
+	require.Equal(t, []string{"TestA/one", "TestA", "TestA/two", "TestC"}, names)
+	require.True(t, ws[0].End.Equal(ws[2].Start), "TestA/one must close exactly where TestA/two opens")
+	require.True(t, scope.usedReadTime())
+}
+
+func TestRunnerScopeLeavesAnUnfinishedTestOut(t *testing.T) {
+	_, scope := feed(t, "=== RUN   TestA\n=== RUN   TestA/one\n")
+	require.Empty(t, scope.windows())
+}
+
+// The adapter's window carries the runner's clock; the agent's copy of the same test was stamped on receipt and loses.
+func TestMergeWindowsPrefersTheAdapter(t *testing.T) {
+	adapter := []models.ScopeWindow{{Name: "p.TestA", Start: ts(10), End: ts(20)}}
+	agent := []models.ScopeWindow{
+		{Name: "p.TestA", Start: ts(11), End: ts(21), PID: 7},
+		{Name: "fixture.Setup", Start: ts(30), End: ts(40), PID: 7},
+	}
+	sameWindows(t, []models.ScopeWindow{
+		{Name: "p.TestA", Start: ts(10), End: ts(20)},
+		{Name: "fixture.Setup", Start: ts(30), End: ts(40), PID: 7},
+	}, mergeWindows(adapter, agent))
+	sameWindows(t, agent, mergeWindows(nil, agent))
+	sameWindows(t, adapter, mergeWindows(adapter, nil))
+}
+
 func TestNearBoundaryCountsMocksAtAWindowEdge(t *testing.T) {
 	windows := []models.ScopeWindow{
 		{Name: "t1", Start: ts(10), End: ts(20)},
@@ -236,5 +305,6 @@ func TestNilRunnerScopeIsOff(t *testing.T) {
 	var scope *runnerScope
 	require.Nil(t, scope.writer())
 	require.Nil(t, scope.overlapping())
+	require.Nil(t, scope.windows())
 	require.False(t, scope.usedReadTime())
 }
