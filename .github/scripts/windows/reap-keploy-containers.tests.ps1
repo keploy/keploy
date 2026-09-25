@@ -1876,19 +1876,93 @@ jobs: { flowjob: { runs-on: [self-hosted, Windows] } }
     # MaxWaitMinutes after it started; past that it may still finish one full
     # check of Docker (every attempt, each of two calls cut off at
     # CallTimeoutSeconds, and the backoff between them) and one start or
-    # restart (the marker bound above). The margin is for the job's other
-    # steps.
+    # restart (the marker bound above). These tests run in the same job
+    # before it, as long as their step's own timeout-minutes lets them. The
+    # margin is for the steps before them (both git isolation steps,
+    # stale-state recovery and checkout), which have no timeout-minutes of
+    # their own.
     $e = @{}
     foreach ($p in 'Attempts', 'BackoffSeconds', 'CallTimeoutSeconds', 'PollSeconds', 'ReadyTimeoutSeconds', 'StabilizeSeconds', 'MaxWaitMinutes') { $e[$p] = Get-Default $ensure $p }
     $fullCheck = $e.Attempts * 2 * $e.CallTimeoutSeconds + $e.BackoffSeconds * ([Math]::Pow(2, $e.Attempts - 1) - 1)
     $restart = 2 * $e.PollSeconds + $e.ReadyTimeoutSeconds + $e.StabilizeSeconds + 6 * $e.CallTimeoutSeconds
     $ensureMax = $e.MaxWaitMinutes * 60 + $fullCheck + $restart
-    $pc = @($jobs | Where-Object { $_.where -eq 'prepare_and_run.yml:precheck-windows' })
-    Report "ensure-docker.ps1 gives up on other runners in time to fail precheck-windows with its remediation" ([pscustomobject]@{ Output = '' }) @(
-        $(if ($pc.Count -ne 1 -or $null -eq $pc[0].timeout -or ($ensureMax + $timeoutMargin * 60 -gt $pc[0].timeout * 60)) {
-            "ensure-docker.ps1 can run $([int]$ensureMax) s (MaxWaitMinutes $($e.MaxWaitMinutes)), not at least $timeoutMargin min below precheck-windows' timeout-minutes [$(@($pc | ForEach-Object { $_.timeout }) -join ',')]"
-        })
+    # The steps of job $job in $dir/prepare_and_run.yml whose text mentions
+    # $needle, each with its timeout-minutes ($null without one). Only a key
+    # at the step's own level counts, not a line of its run: script.
+    function Get-Steps([string]$dir, [string]$job, [string]$needle) {
+        $lines = [string[]]@(Get-Content -Path (Join-Path $dir 'prepare_and_run.yml'))
+        $at = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match ('^\s+' + [regex]::Escape($job) + ':\s*(#.*)?$')) { $at = $i; break } }
+        if ($at -lt 0) { return }
+        $steps = New-Object System.Collections.ArrayList
+        $stepsAt = -1; $itemAt = -1; $step = $null
+        foreach ($line in @(Get-Block $lines $at)) {
+            $ind = ($line -replace '^(\s*).*$', '$1').Length
+            if ($stepsAt -lt 0) {
+                if ($line -match '^\s*steps:\s*(#.*)?$') { $stepsAt = $ind }
+                continue
+            }
+            if (($ind -lt $stepsAt) -or (($ind -eq $stepsAt) -and ($line -notmatch '^\s*-\s'))) { break }
+            if ($itemAt -lt 0) { $itemAt = $ind }
+            if (($ind -eq $itemAt) -and ($line -match '^\s*-\s')) {
+                $step = [pscustomobject]@{ Text = ''; Timeout = $null }
+                [void]$steps.Add($step)
+                $line = (' ' * ($ind + 2)) + ($line -replace '^\s*-\s+', '')
+            }
+            $step.Text += "$line`n"
+            if ($line -match ('^' + (' ' * ($itemAt + 2)) + 'timeout-minutes:\s*(\d+)\s*(#.*)?$')) { $step.Timeout = [int]$Matches[1] }
+        }
+        $steps | Where-Object { $_.Text -match [regex]::Escape($needle) }
+    }
+    function Get-BudgetProblems([string]$dir) {
+        $pc = @(Get-Jobs $dir | Where-Object { $_.where -eq 'prepare_and_run.yml:precheck-windows' })
+        $suite = @(Get-Steps $dir 'precheck-windows' 'reap-keploy-containers.tests.ps1')
+        if ($pc.Count -ne 1 -or $null -eq $pc[0].timeout) { "precheck-windows has no timeout-minutes" }
+        elseif ($suite.Count -ne 1) { "precheck-windows has $($suite.Count) steps running reap-keploy-containers.tests.ps1, want 1" }
+        elseif ($null -eq $suite[0].Timeout) { "precheck-windows' step running reap-keploy-containers.tests.ps1 has no timeout-minutes" }
+        elseif (($suite[0].Timeout * 60) + $ensureMax + ($timeoutMargin * 60) -gt $pc[0].timeout * 60) {
+            "its tests' step (timeout-minutes $($suite[0].Timeout)) and ensure-docker.ps1 (up to $([int]$ensureMax) s, MaxWaitMinutes $($e.MaxWaitMinutes)) can run to less than $timeoutMargin min short of precheck-windows' timeout-minutes ($($pc[0].timeout))"
+        }
+    }
+    # The step parser, and a budget only the tests' step overruns: the job's
+    # timeout fits ensure-docker.ps1 and the margin, with less than the
+    # step's 7 min to spare. Each decoy timeout-minutes inside a run: script
+    # comes after any real one, so a parser that took it would read 99. The
+    # last step names the script only on its "- " line.
+    $budgetDir = New-Dir 'budget'
+    $budgetJob = [int][Math]::Ceiling(($ensureMax + ($timeoutMargin * 60)) / 60) + 3
+    Set-Content -Path (Join-Path $budgetDir 'prepare_and_run.yml') -Value (@'
+on: push
+jobs:
+  precheck-windows:
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: JOB_MINUTES
+    steps:
+      - name: Other
+        timeout-minutes: 1
+        run: echo
+      - name: Tests
+        timeout-minutes: 7 # minutes
+        run: |
+          & .github/scripts/windows/reap-keploy-containers.tests.ps1
+            timeout-minutes: 99
+      - uses: actions/checkout@v4
+  other:
+    runs-on: [self-hosted, Windows]
+    steps:
+    - run: |
+        & .github/scripts/windows/reap-keploy-containers.tests.ps1
+        timeout-minutes: 99
+    - run: '& .github/scripts/windows/reap-keploy-containers.tests.ps1'
+'@).Replace('JOB_MINUTES', "$budgetJob")
+    $got = @(@(Get-Steps $budgetDir 'precheck-windows' 'reap-keploy-containers.tests.ps1') + @(Get-Steps $budgetDir 'other' 'reap-keploy-containers.tests.ps1') | ForEach-Object { "$($_.Timeout)" }) -join ','
+    $bp = @(Get-BudgetProblems $budgetDir)
+    Report "the budget check reads a step's own timeout-minutes, and counts the tests' step" ([pscustomobject]@{ Output = "$got $bp" }) @(
+        $(if ($got -ne '7,,') { "read timeouts [$got], want [7,,]" }),
+        $(if (($bp.Count -ne 1) -or ($bp[0] -notmatch 'timeout-minutes 7\)')) { "flagged [$($bp -join '; ')], want the tests' step" })
     )
+    $bp = @(Get-BudgetProblems (Join-Path $repoRoot '.github/workflows'))
+    Report "ensure-docker.ps1 gives up on other runners in time to fail precheck-windows with its remediation" ([pscustomobject]@{ Output = '' }) @($bp)
 } finally {
     $env:KEPLOY_WINDOWS_SCRIPT_TESTS = $savedTestsFlag
     Remove-Item -Recurse -Force -Path $work -ErrorAction SilentlyContinue

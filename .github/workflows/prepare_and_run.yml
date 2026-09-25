@@ -969,7 +969,10 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     # Same rationale as build-windows-amd64: bound the wall-clock so a
     # hung self-hosted Windows runner cannot stall the whole pipeline.
-    timeout-minutes: 30
+    # reap-keploy-containers.tests.ps1 keeps it above the tests step's
+    # timeout-minutes plus the longest ensure-docker.ps1 can take, so that
+    # the job fails with a reason instead of being killed.
+    timeout-minutes: 35
     # Its token goes to ensure-docker.ps1, which only reads run status; this
     # workflow has no permissions block, so without this the job would get
     # the org's write-all default.
@@ -1080,8 +1083,12 @@ jobs:
       # under Windows PowerShell 5.1, not the pwsh 7 the ubuntu lane
       # (windows-ci-scripts.yml) tests them with, so run their cases here too.
       # They drive a fake docker CLI, fake Docker Desktop actions and temp lock
-      # dirs, and touch nothing on the shared Docker VM.
+      # dirs, and touch nothing on the shared Docker VM. They take about
+      # 2.5 min under pwsh 7 on Linux; the timeout leaves room for Windows
+      # PowerShell, which starts a powershell.exe for each of the fake
+      # docker's ~130 calls, on a loaded machine.
       - name: Test the Windows Docker cleanup scripts (Windows PowerShell)
+        timeout-minutes: 10
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\reap-keploy-containers.tests.ps1"

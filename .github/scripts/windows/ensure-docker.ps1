@@ -65,9 +65,10 @@ param(
     # How long after it starts this may still wait for other runners' Docker
     # prunes, starts and restarts, or go round again after one. Past it, the
     # job fails with the remediation. reap-keploy-containers.tests.ps1 keeps
-    # this, plus one more full check of Docker and one restart, under
-    # precheck-windows' timeout-minutes: a job killed at its timeout says
-    # nothing of why.
+    # this, plus one more full check of Docker and one restart, plus the
+    # timeout-minutes of the step before this one that runs those tests,
+    # under precheck-windows' timeout-minutes: a job killed at its timeout
+    # says nothing of why.
     [int]$MaxWaitMinutes = 10,
     [string]$LockDir = '',
     # A Docker lock older than this is stale: the reaper's MinAgeMinutes.
