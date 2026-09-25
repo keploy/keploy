@@ -46,7 +46,7 @@ section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
 dump_state() {
-  rc=$?
+  local rc=$1
   echo "::error::e2e failed (mode=${MODE_NAME:-?}, exit=$rc). Dumping context for triage…"
   echo "== keploy log (last 200 lines) =="
   [[ -f keploy-record.log ]] && tail -200 keploy-record.log || true
@@ -61,9 +61,12 @@ dump_state() {
   echo "== mysql/postgres docker logs =="
   docker logs sample-mysql-tls 2>&1 | tail -40 || true
   docker logs sample-pg-tls 2>&1 | tail -40 || true
-  exit "$rc"
 }
-trap dump_state ERR
+# On EXIT, not ERR: most assertions below fail with `exit 1`, which never
+# fires an ERR trap, so every assertion failure used to end the job with none
+# of this context - run 36092000545's decrypt failure left no keploy log, no
+# keylog and no capture summary to look at.
+trap 'rc=$?; trap - EXIT; if [[ $rc -ne 0 ]]; then dump_state "$rc"; fi; exit "$rc"' EXIT
 
 wait_for_http() {
   local url="$1" tries="${2:-90}"
@@ -276,6 +279,9 @@ endsec
 QUOTE_HOST=quote.keploy.local
 ECHO_HOST=echo.keploy.local
 UPSTREAM_PORT=7443
+# keploy's outgoing proxy port, passed explicitly because the decrypt below
+# pins it to TLS (see tshark_tls) and must name the port keploy really used.
+KEPLOY_PROXY_PORT=16789
 
 section "Start local TLS upstream (replaces api.github.com / httpbin.org)"
 echo "127.0.0.1 ${QUOTE_HOST} ${ECHO_HOST}" | sudo tee -a /etc/hosts >/dev/null
@@ -326,16 +332,15 @@ sudo -E env PATH="$PATH" MYSQL_DSN="$MYSQL_DSN" POSTGRES_DSN="$POSTGRES_DSN" \
   "$RECORD_BIN" record \
   -c "./sample-tls-app" \
   $KEPLOY_FLAGS \
+  --proxy-port "$KEPLOY_PROXY_PORT" \
   > keploy-record.log 2>&1 &
 endsec
 
 section "Drive HTTP / MySQL / Postgres traffic"
 if ! wait_for_http "http://localhost:8080/" 120; then
   echo "::error::sample-tls-app did not become healthy on :8080"
-  # Explicit dump_state — `exit 1` on a control-flow branch like
-  # this does not trigger the ERR trap under `set -e`, so we'd
-  # otherwise lose keploy's stderr. False, by contrast, fires ERR.
-  false
+  # Any non-zero exit dumps keploy's log via the EXIT trap.
+  exit 1
 fi
 
 # HTTP routes — outbound TLS to the LOCAL upstream.
@@ -442,9 +447,30 @@ sudo grep -q "^CLIENT_TRAFFIC_SECRET_0 " "$KEYLOG" || {
 }
 endsec
 
+# tshark over a keploy capture, with keploy's proxy port pinned to TLS.
+#
+# Every TLS stream in the capture is application <-> keploy's outgoing proxy
+# port, which no Wireshark dissector knows as TLS, so without -d the ONLY thing
+# that makes tshark decode one as TLS is its tls heuristic - and TCP heuristics
+# run only when no PORT dissector claims the stream first. The application's
+# side of each connection is an ephemeral port, and Wireshark 4.2 (the tshark
+# ubuntu-24.04 installs) registers port dissectors on eight ports of Linux's
+# 32768-60999 range: 34980 ecatf, 40000 sapni, 44321 pcp, 44322 pmproxy,
+# 44818 enip, 48049 cbsp, 48898 ams, 57000 irc. A connection that drew one of
+# them was dissected as that protocol and never as TLS, so its requests
+# vanished from the decrypt even with its keys and packets in the files - one
+# HTTPS host at random: echo.keploy.local on run 36092000545, quote.keploy.local
+# on run 35130298832 (neither capture was kept; moving one connection of a
+# complete capture onto 44818 reproduces 36092000545's output exactly). (Measured over every port of the range, a real capture's
+# ClientHello decodes as TLS on all 28232 with -d, and on 28224 without it
+# under 4.2.2.)
+tshark_tls() {
+  local pcap=$1; shift
+  sudo tshark -r "$pcap" -o "tls.keylog_file:$KEYLOG" -d "tcp.port==${KEPLOY_PROXY_PORT},tls" "$@" 2>/dev/null
+}
+
 section "Assert tshark + keylog decrypts HTTP-over-TLS sessions"
-DECRYPTED_REQS=$(sudo tshark -r "$PCAP" -o "tls.keylog_file:$KEYLOG" \
-  -Y "http.request" -T fields -e http.host -e http.request.uri 2>/dev/null || true)
+DECRYPTED_REQS=$(tshark_tls "$PCAP" -Y "http.request" -T fields -e http.host -e http.request.uri || true)
 echo "decrypted HTTP requests:"
 echo "$DECRYPTED_REQS"
 
@@ -461,13 +487,70 @@ echo "$DECRYPTED_REQS" | grep -q "ci-${MODE_NAME}" || {
   exit 1
 }
 
-DECRYPTED_RESP_OK=$(sudo tshark -r "$PCAP" -o "tls.keylog_file:$KEYLOG" \
-  -Y "http.response" -T fields -e http.response.code 2>/dev/null | grep -c "^200$" || true)
+DECRYPTED_RESP_OK=$(tshark_tls "$PCAP" -Y "http.response" -T fields -e http.response.code | grep -c "^200$" || true)
 echo "decrypted 200 responses: $DECRYPTED_RESP_OK"
 if [[ "$DECRYPTED_RESP_OK" -lt 2 ]]; then
   echo "::error::expected >=2 decrypted 200 responses; saw $DECRYPTED_RESP_OK"
   exit 1
 fi
+endsec
+
+section "Assert the decrypt does not depend on the application's ephemeral ports"
+# The decrypt above passing says nothing about the draw that used to lose a
+# host: only 8 of 28232 ephemeral ports trigger it. So replay that draw
+# deterministically - in a copy of the capture, move the application's side of
+# every HTTPS connection onto a port Wireshark 4.2 claims for another protocol,
+# and require the decrypt of the copy to match the original exactly. This only
+# has teeth under Wireshark 4.2.x (what ubuntu-24.04 ships): 4.4 decodes the
+# moved copy as TLS even without -d.
+CLAIMED_PORTS=(44818 48898 34980 57000 40000 44321 44322 48049)
+mapfile -t HTTPS_CLIENT_PORTS < <(tshark_tls "$PCAP" -Y "tls.handshake.type==1" \
+  -T fields -e tls.handshake.extensions_server_name -e tcp.srcport \
+  | awk -v q="$QUOTE_HOST" -v e="$ECHO_HOST" '($1==q || $1==e) && !seen[$2]++ {print $2}')
+if [[ ${#HTTPS_CLIENT_PORTS[@]} -lt 2 || ${#HTTPS_CLIENT_PORTS[@]} -gt ${#CLAIMED_PORTS[@]} ]]; then
+  echo "::error::expected 2..${#CLAIMED_PORTS[@]} application-side ports for the $QUOTE_HOST/$ECHO_HOST connections; got '${HTTPS_CLIENT_PORTS[*]}'"
+  exit 1
+fi
+PORT_MAP=()
+for i in "${!HTTPS_CLIENT_PORTS[@]}"; do PORT_MAP+=("${HTTPS_CLIENT_PORTS[$i]}:${CLAIMED_PORTS[$i]}"); done
+REMAPPED_PCAP=$(mktemp --suffix=.pcap)
+if ! REMAPPED_FIELDS=$(sudo cat "$PCAP" | python3 -c '
+import struct, sys
+remap = dict((int(a), int(b)) for a, b in (m.split(":") for m in sys.argv[1:]))
+data = sys.stdin.buffer.read()
+# keploy writes a classic little-endian Ethernet pcap (pcapgo, LinkTypeEthernet).
+if data[:4] not in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1") or struct.unpack("<I", data[20:24])[0] != 1:
+    sys.exit("not a little-endian Ethernet pcap")
+out, off, moved = bytearray(data[:24]), 24, 0
+while off + 16 <= len(data):
+    hdr = data[off:off + 16]
+    incl = struct.unpack("<I", hdr[8:12])[0]
+    frame = bytearray(data[off + 16:off + 16 + incl])
+    off += 16 + incl
+    if len(frame) >= 38 and frame[12:14] == b"\x08\x00" and frame[23] == 6:  # IPv4 + TCP
+        tcp = 14 + (frame[14] & 0x0F) * 4
+        for at in (tcp, tcp + 2):
+            port = struct.unpack(">H", frame[at:at + 2])[0]
+            if port in remap:
+                frame[at:at + 2] = struct.pack(">H", remap[port])
+                moved += 1
+    out += hdr + frame
+sys.stdout.buffer.write(bytes(out))
+sys.stderr.write(str(moved))
+' "${PORT_MAP[@]}" 2>&1 >"$REMAPPED_PCAP") || ! [[ "$REMAPPED_FIELDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "::error::could not rewrite the capture's HTTPS client ports (${PORT_MAP[*]}): $REMAPPED_FIELDS"
+  exit 1
+fi
+echo "rewrote $REMAPPED_FIELDS TCP port field(s): ${PORT_MAP[*]}"
+REMAPPED_REQS=$(tshark_tls "$REMAPPED_PCAP" -Y "http.request" -T fields -e http.host -e http.request.uri || true)
+rm -f "$REMAPPED_PCAP"
+echo "decrypted HTTP requests with the client ports moved:"
+echo "$REMAPPED_REQS"
+if [[ "$REMAPPED_REQS" != "$DECRYPTED_REQS" ]]; then
+  echo "::error::moving the HTTPS connections onto ephemeral ports Wireshark assigns to other protocols changed what decrypts - the decrypt depends on the port the application happened to draw"
+  exit 1
+fi
+echo "good! decrypt holds on every ephemeral port"
 endsec
 
 section "Assert the captured pcap contains the HTTP-over-TLS ClientHellos"
@@ -481,15 +564,18 @@ section "Assert the captured pcap contains the HTTP-over-TLS ClientHellos"
 # and was the real reason this step flaked (it silently leaned on the
 # old public endpoints NOT reusing connections to reach its threshold).
 #
-# MySQL/Postgres are deliberately NOT checked here: their streams open
+# MySQL/Postgres are deliberately NOT asserted here. Their streams open
 # with the protocol's STARTTLS preamble (MySQL server greeting /
-# Postgres SSLRequest) before the embedded ClientHello, so tshark's TLS
-# dissector can't latch onto them on keploy's proxy port. Their TLS is
-# proven instead by the openssl s_client sanity above and the
-# round-trip asserts (POST→GET through the proxy) earlier in this run.
-HELLO_SNIS=$(sudo tshark -r "$PCAP" -Y "tls.handshake.type==1" \
-  -T fields -e tls.handshake.extensions_server_name 2>/dev/null | sort -u)
-HELLO_COUNT=$(sudo tshark -r "$PCAP" -Y "tls.handshake.type==1" 2>/dev/null | wc -l)
+# Postgres SSLRequest) before the embedded ClientHello. tshark_tls forces
+# keploy's proxy port to TLS, so tshark does dissect those ClientHellos
+# too, and they are counted in HELLO_COUNT and listed in HELLO_SNIS
+# (SNI "localhost", or none). But neither SNI names the upstream, so
+# they prove nothing about where the traffic went. Their TLS is proven
+# instead by the openssl s_client sanity above and the round-trip
+# asserts (POST→GET through the proxy) earlier in this run.
+HELLO_SNIS=$(tshark_tls "$PCAP" -Y "tls.handshake.type==1" \
+  -T fields -e tls.handshake.extensions_server_name | sort -u)
+HELLO_COUNT=$(tshark_tls "$PCAP" -Y "tls.handshake.type==1" | wc -l)
 echo "TLS ClientHello frames in pcap: $HELLO_COUNT"
 echo "ClientHello SNIs:"; echo "$HELLO_SNIS"
 echo "$HELLO_SNIS" | grep -q "$QUOTE_HOST" || {
