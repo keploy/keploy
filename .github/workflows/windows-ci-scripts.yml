@@ -8,9 +8,9 @@ name: Windows CI scripts
 # application containers and pruned under live locks, and ensure-docker.ps1
 # restarted Docker Desktop under running jobs after one failed `docker info`.
 # Their cases run here under pwsh on every change to them or to a workflow (the
-# cases pin the self-hosted Windows jobs' timeouts, and the go-dedup script's
-# compose-project hand-off), and under Windows PowerShell 5.1 in
-# prepare_and_run's precheck-windows.
+# cases pin the self-hosted Windows jobs' timeouts, the go-dedup script's
+# compose-project hand-off, and the text of every "Recover stale runner state"
+# step), and under Windows PowerShell 5.1 in prepare_and_run's precheck-windows.
 
 on:
   push:

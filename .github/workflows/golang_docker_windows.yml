@@ -81,74 +81,69 @@ jobs:
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "GIT_ISOLATION_ID=$isoName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # If a prior run on this self-hosted runner left the workspace
-      # populated with files but no .git directory, actions/checkout's
-      # clean:true fails at "git config --local" with "not a git repository".
-      # Wipe in that case so checkout starts fresh; healthy workspaces are
-      # left alone.
+      # Clears what an interrupted run of THIS runner left behind, before
+      # checkout: its keploy processes, the WinDivert driver when no other
+      # keploy uses it, and a workspace without a .git. It runs before the
+      # checkout, so its text is .github/scripts/windows/recover-runner-state.ps1
+      # verbatim; reap-keploy-containers.tests.ps1 fails if the two differ.
       - name: Recover stale runner state
         continue-on-error: true
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
+          # "Recover stale runner state": the step before actions/checkout in every job
+          # on the self-hosted Windows runners. It runs before the checkout, so it cannot
+          # call a script from the repository: each such step's run: block is this
+          # file's text, and reap-keploy-containers.tests.ps1 fails if one differs.
+          #
+          # win-runner-1..4 run on ONE machine, so this acts only on what THIS job's
+          # runner left behind. It used to stop every process named keploy and the
+          # WinDivert driver unconditionally, which kills a sibling job's keploy
+          # mid-run and pulls the driver from under the one capturing through it.
           $ErrorActionPreference = 'Continue'
           try {
             $ws = $env:GITHUB_WORKSPACE
-            # Prefix with a trailing separator so `...\keploy` can't be
-            # mistaken for a sibling `...\keploy2`. Each self-hosted
-            # runner has a distinct $GITHUB_WORKSPACE, so the exe path is
-            # the reliable ownership key (see TEST PLAN assumption).
-            $wsPrefix = if ($ws) { $ws.TrimEnd('\','/') + '\' } else { $null }
-
-            # Job-scoped cleanup ONLY. Four self-hosted runners share this
-            # VM, so a bare `Get-Process -Name keploy | Stop-Process` (the
-            # old behaviour) would kill a sibling job's HOST keploy CLI
-            # (the process orchestrating that job's `docker compose up`),
-            # aborting its whole run. Our keploy binaries live under
-            # $ws\bin. Kill only THIS workspace's leftover keploy (e.g.
-            # from a prior interrupted run in this same workspace).
-            $ownKeploy = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-              $_.ProcessName -like 'keploy*' -and $_.Path -and $wsPrefix -and
-              $_.Path.StartsWith($wsPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+            # Each runner has a workspace of its own, so a process's executable path
+            # tells whose it is. The trailing separator keeps ...\keploy from matching a
+            # sibling ...\keploy2.
+            $wsPrefix = $null
+            if ($ws) { $wsPrefix = $ws.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar }
+            $keploy = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'keploy*' })
+            $own = @($keploy | Where-Object {
+                $_.Path -and $wsPrefix -and $_.Path.StartsWith($wsPrefix, [System.StringComparison]::OrdinalIgnoreCase)
             })
-            foreach ($p in $ownKeploy) {
-              Write-Host "Stopping this workspace's leftover keploy pid=$($p.Id) path=$($p.Path)"
+
+            # 1. This workspace's leftover keploy processes (from an interrupted run of
+            #    this runner). They hold files open under the workspace's bin/, notably
+            #    WinDivert64.sys, and actions/checkout's clean then fails with EPERM.
+            foreach ($p in $own) {
+              Write-Host "Stopping this workspace's leftover $($p.ProcessName) pid=$($p.Id) path=$($p.Path)"
               try { $p | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
             }
 
-            # WinDivert reset is DEFENSIVE here: this docker-compose lane
-            # intercepts inside the compose network via a per-job eBPF
-            # keploy-agent container, so it does not load the host Windows
-            # WinDivert driver (that is the native-Windows lane's path).
-            # But WinDivert is still a SINGLE machine-wide kernel service,
-            # so if some other keploy on this VM ever did load it, the old
-            # UNCONDITIONAL `Stop-Service` would break that sibling. Only
-            # reset it when NO OTHER keploy is running. Our own leftovers
-            # were already killed above, so restrict the gate to keploy
-            # NOT under this workspace (or with an unreadable path —
-            # counted as "other" to stay conservative).
-            $otherKeploy = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-              $_.ProcessName -like 'keploy*' -and -not (
-                $_.Path -and $wsPrefix -and
-                $_.Path.StartsWith($wsPrefix, [System.StringComparison]::OrdinalIgnoreCase)
-              )
-            })
-            if ($otherKeploy.Count -eq 0) {
+            # 2. The WinDivert driver keploy registers ("WinDivert", or "WinDivert64")
+            #    pins its .sys the same way. It is ONE service for the whole machine,
+            #    so it is reset only when no other keploy is running. A keploy whose
+            #    path cannot be read counts as another's.
+            $others = @($keploy | Where-Object { $own -notcontains $_ })
+            if ($others.Count -eq 0) {
               foreach ($name in @('WinDivert', 'WinDivert64')) {
                 $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
                 if ($svc -and $svc.Status -ne 'Stopped') {
-                  Write-Host "No other keploy running on this VM; resetting stale kernel driver service $name (status=$($svc.Status))"
+                  Write-Host "No other keploy is running on this machine; stopping the kernel driver service $name (status=$($svc.Status))"
                   try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
                 }
               }
             } else {
-              Write-Host "Skipping WinDivert driver reset: $($otherKeploy.Count) other keploy process(es) running on this VM (sibling jobs may be capturing)."
+              Write-Host "Not resetting the WinDivert driver: $($others.Count) other keploy process(es) are running on this machine, and a sibling job may be capturing through it."
             }
 
-            if ($ws -and (Test-Path $ws)) {
-              $gitDir = Join-Path $ws '.git'
-              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
-              $hasFiles = $items.Count -gt 0
-              if ($hasFiles -and -not (Test-Path $gitDir)) {
+            # 3. A prior run interrupted mid-cleanup can leave the workspace with files
+            #    but no .git, and actions/checkout's clean then fails with "not a git
+            #    repository". Wipe it so checkout starts fresh; a workspace with a .git
+            #    is left alone, so checkout's clean+fetch fast path keeps working.
+            if ($ws -and (Test-Path -LiteralPath $ws)) {
+              $items = @(Get-ChildItem -LiteralPath $ws -Force -ErrorAction SilentlyContinue)
+              if (($items.Count -gt 0) -and -not (Test-Path -LiteralPath (Join-Path $ws '.git'))) {
                 Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
                 Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
               }

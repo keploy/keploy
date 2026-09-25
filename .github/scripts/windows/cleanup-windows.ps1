@@ -28,9 +28,10 @@ param(
     [int]$MinAgeMinutes = 45,
     [int]$RunLockMaxAgeHours = 24,
     # take-docker-job-lock.ps1's bound: a job stops waiting for a marker this
-    # old, because only a prune or Docker restart killed before its finally
-    # block leaves one that old behind (cleanup_windows has a 10-minute
-    # timeout, and ensure-docker.ps1's restart is bounded well below this).
+    # old, because only a prune, or a start or restart of Docker Desktop,
+    # killed before its finally block leaves one that old behind
+    # (cleanup_windows has a 10-minute timeout, and ensure-docker.ps1's start
+    # or restart is bounded well below this).
     # Such markers are deleted here.
     [int]$PruneMaxMinutes = 15,
     # The repository whose runs a lock names, for locks that do not say.
@@ -72,7 +73,7 @@ New-Item -ItemType Directory -Force -Path $LockDir | Out-Null
 foreach ($old in @(Get-ChildItem -LiteralPath $LockDir -Filter 'docker-prune-*.inprogress' -ErrorAction SilentlyContinue)) {
     $oldAge = [DateTime]::UtcNow - $old.LastWriteTimeUtc
     if ($oldAge.TotalMinutes -ge $PruneMaxMinutes) {
-        Write-Host "Deleting $($old.Name), left $([int]$oldAge.TotalMinutes) min ago by a prune or Docker restart that was killed; jobs no longer wait for it."
+        Write-Host "Deleting $($old.Name), left $([int]$oldAge.TotalMinutes) min ago by a prune, start or restart of Docker that was killed; jobs no longer wait for it."
         Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
     }
 }
@@ -85,11 +86,17 @@ if ($locks.Live.Count -gt 0) {
 }
 
 # 2. Marker down, then one more look at the locks, with no API call. The
-# marker is down only for that look and the prune.
+# marker is down only for that look and the prune. Another prune, or a start
+# or restart of Docker Desktop (ensure-docker.ps1), under way at the same time
+# calls this prune off: the next cleanup prunes.
 try {
-    $exclusive = Enter-DockerExclusive -LockDir $LockDir -Stale $locks.Stale -Operation 'a Docker prune'
+    $exclusive = Enter-DockerExclusive -LockDir $LockDir -Stale $locks.Stale -Operation 'a Docker prune' -MaxMinutes $PruneMaxMinutes
 } catch {
     Write-Warning "could not put down the prune marker ($($_.Exception.Message)); not pruning."
+    return
+}
+if (@($exclusive.Others).Count -gt 0) {
+    Write-Host "Skipping Docker prune: another Docker prune, start or restart is under way - $($exclusive.Others -join ', ')."
     return
 }
 if (-not $exclusive.Marker) {
