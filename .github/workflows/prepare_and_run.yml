@@ -958,6 +958,12 @@ jobs:
     # Same rationale as build-windows-amd64: bound the wall-clock so a
     # hung self-hosted Windows runner cannot stall the whole pipeline.
     timeout-minutes: 30
+    # Its token goes to ensure-docker.ps1, which only reads run status; this
+    # workflow has no permissions block, so without this the job would get
+    # the org's write-all default.
+    permissions:
+      contents: read
+      actions: read
     steps:
       # Create a minimal per-job gitconfig BEFORE checkout to prevent
       # concurrent jobs' SSH redirects from leaking into our checkout.
@@ -1038,21 +1044,30 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
-      # The reaper and cleanup-windows.ps1 run on these runners under Windows
-      # PowerShell 5.1, not the pwsh 7 the ubuntu lane (windows-ci-scripts.yml)
-      # tests them with, so run their cases here too. They drive a fake docker
-      # CLI and temp lock dirs, and touch nothing on the shared Docker VM.
+      # The Docker scripts in .github/scripts/windows run on these runners
+      # under Windows PowerShell 5.1, not the pwsh 7 the ubuntu lane
+      # (windows-ci-scripts.yml) tests them with, so run their cases here too.
+      # They drive a fake docker CLI, fake Docker Desktop actions and temp lock
+      # dirs, and touch nothing on the shared Docker VM.
       - name: Test the Windows Docker cleanup scripts (Windows PowerShell)
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\reap-keploy-containers.tests.ps1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Restarts Docker Desktop only when no job holds a live Docker lock (a
+      # restart kills every container on the machine); see ensure-docker.ps1.
       - name: Ensure Docker is running
         shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        env:
+          # ensure-docker.ps1 asks the Actions API whether each Docker lock's
+          # run is over; the token only raises the rate limit.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
-          if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
+          if (-not (Test-Path $script)) { Write-Error "Required helper script not found: $script"; exit 1 }
+          & $script
+          exit $LASTEXITCODE
 
       - name: Wait for Docker to be ready
         shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'

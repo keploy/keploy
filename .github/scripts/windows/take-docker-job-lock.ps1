@@ -8,13 +8,14 @@
 # attempt, and the file starts with the repository, so the cleanup can ask the
 # Actions API whether the holder is over instead of guessing from its age.
 #
-# A prune that is already under way when the lock is written does not look at
-# locks again, so after writing the lock this waits for any prune in progress
-# to finish. The cleanup writes its docker-prune-*.inprogress marker before it
-# checks the locks, and this checks for markers after writing the lock, so one
-# of the two always sees the other. A marker older than -PruneMaxMinutes is
-# left behind by a cleanup that was killed (cleanup_windows has a 10-minute
-# timeout) and is not waited for.
+# A prune (cleanup-windows.ps1) or Docker Desktop restart (ensure-docker.ps1)
+# that is already under way when the lock is written does not look at locks
+# again, so after writing the lock this waits for any such operation to finish.
+# The operation puts its docker-prune-*.inprogress marker down before its final
+# look at the locks (docker-locks.ps1), and this checks for markers after
+# writing the lock, so one of the two always sees the other. A marker older
+# than -PruneMaxMinutes was left behind by an operation that was killed, and is
+# not waited for.
 [CmdletBinding()]
 param(
     [string]$LockDir = '',
@@ -42,10 +43,10 @@ while ($true) {
         Where-Object { ($now - $_.LastWriteTimeUtc).TotalMinutes -lt $PruneMaxMinutes })
     if ($pruning.Count -eq 0) { break }
     if (-not $announced) {
-        Write-Host "A Docker prune is in progress ($($pruning[0].Name)); waiting for it to finish before using Docker."
+        Write-Host "A Docker prune or restart is in progress ($($pruning[0].Name)); waiting for it to finish before using Docker."
         $announced = $true
     }
     Start-Sleep -Seconds $PollSeconds
 }
-if ($announced) { Write-Host "The Docker prune has finished." }
+if ($announced) { Write-Host "The Docker prune or restart has finished." }
 Write-Output $lock

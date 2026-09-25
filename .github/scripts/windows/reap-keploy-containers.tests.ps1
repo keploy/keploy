@@ -1,18 +1,25 @@
-# Tests for reap-keploy-containers.ps1, cleanup-windows.ps1 and take-docker-job-lock.ps1. Plain
-# PowerShell, no Pester, so it runs unchanged under Windows PowerShell 5.1
-# (what the self-hosted runners use) and PowerShell 7 on Linux (what the ubuntu
-# CI job uses):
+# Tests for the scripts in this directory that act on the self-hosted Windows
+# runners' shared Docker daemon: reap-keploy-containers.ps1,
+# cleanup-windows.ps1, take-docker-job-lock.ps1, remove-job-containers.ps1 (with
+# register-job-compose-project.ps1) and ensure-docker.ps1. Plain PowerShell, no
+# Pester, so it runs unchanged under Windows PowerShell 5.1 (what the
+# self-hosted runners use) and PowerShell 7 on Linux (what the ubuntu CI job
+# uses):
 #
 #   pwsh -NoProfile -File .github/scripts/windows/reap-keploy-containers.tests.ps1
 #
-# Both scripts drive a fake docker CLI (-DockerExe) backed by a JSON state file,
+# The scripts drive a fake docker CLI (-DockerExe) backed by a JSON state file,
 # so every case pins the daemon clock and each container's timestamps exactly.
+# Nothing here touches the real Docker daemon or Docker Desktop.
 $ErrorActionPreference = 'Stop'
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $reaper = Join-Path $here 'reap-keploy-containers.ps1'
 $cleanup = Join-Path $here 'cleanup-windows.ps1'
 $takeLock = Join-Path $here 'take-docker-job-lock.ps1'
+$ensure = Join-Path $here 'ensure-docker.ps1'
+$removeJob = Join-Path $here 'remove-job-containers.ps1'
+$register = Join-Path $here 'register-job-compose-project.ps1'
 $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $here))
 $work = Join-Path ([IO.Path]::GetTempPath()) ("reap-tests-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
@@ -29,9 +36,12 @@ function Find($id) { @($state.containers | Where-Object { $_.id -eq $id }) }
 switch ($args[0]) {
     'info' {
         if ($state.daemonDown) { exit 1 }
+        # A daemon too busy to answer the next failInfo calls.
+        if ($state.failInfo -gt 0) { $state.failInfo--; Save; exit 1 }
         Write-Output $state.systemTime; exit 0
     }
     'ps' {
+        if ($state.daemonDown) { exit 1 }
         # A container whose removal is already under way leaves the list after
         # its countdown of `ps` calls, the way the daemon finishes it.
         foreach ($c in @($state.containers)) { if ($c.removing) { $c.removing--; if ($c.removing -eq 0) { $c.gone = $true } } }
@@ -109,8 +119,8 @@ function Ago([double]$minutes) {
 function Container($id, $name, $created, $started = $NEVER, $finished = $NEVER, $project = '', [switch]$Stuck, [int]$RemovingFor = 0) {
     [pscustomobject]@{ id = $id; name = $name; created = $created; started = $started; finished = $finished; project = $project; stuck = [bool]$Stuck; removing = $RemovingFor; gone = $false }
 }
-function Set-State($containers, $systemTime = $NOW, [switch]$DaemonDown) {
-    [pscustomobject]@{ systemTime = $systemTime; daemonDown = [bool]$DaemonDown; containers = @($containers); removed = @(); pruned = @() } |
+function Set-State($containers, $systemTime = $NOW, [switch]$DaemonDown, [int]$FailInfo = 0) {
+    [pscustomobject]@{ systemTime = $systemTime; daemonDown = [bool]$DaemonDown; failInfo = $FailInfo; containers = @($containers); removed = @(); pruned = @() } |
         ConvertTo-Json -Depth 5 | Set-Content -Path $stateFile -Encoding ASCII
     $env:FAKE_DOCKER_STATE = $stateFile
 }
@@ -120,15 +130,24 @@ function New-Dir($name) {
     New-Item -ItemType Directory -Path $d | Out-Null
     $d
 }
-# Runs a script; returns its output, exit code, and what the fake saw.
+# Runs a script; returns its output, exit code, the error records it wrote,
+# and what the fake saw. An error the script throws ends up in Errors too, so
+# it fails the case that caused it instead of aborting the whole run.
 function Invoke-Script($script, [hashtable]$scriptArgs) {
+    $ErrorActionPreference = 'Continue'
     $scriptArgs.DockerExe = $fake
     $global:LASTEXITCODE = 0
-    $output = & $script @scriptArgs *>&1 | Out-String
+    $records = New-Object System.Collections.ArrayList
+    try {
+        & $script @scriptArgs *>&1 | ForEach-Object { [void]$records.Add($_) }
+    } catch {
+        [void]$records.Add($_)
+    }
     $code = $LASTEXITCODE
     $after = Get-State
     [pscustomobject]@{
-        Output  = $output
+        Output  = ($records | Out-String)
+        Errors  = @($records | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
         Code    = $code
         Removed = @($after.removed | Where-Object { $_ })
         Pruned  = @($after.pruned | Where-Object { $_ })
@@ -161,6 +180,10 @@ function Removed($result, [string[]]$want) {
     if ($got -ne $exp) { "removed [$got], want [$exp]" }
 }
 function Code($result, $want) { if ($result.Code -ne $want) { "exit $($result.Code), want $want" } }
+function Says($result, [string]$pattern, [string]$what) { if ($result.Output -notmatch $pattern) { "missing $what" } }
+function NoErrors($result) {
+    if ($result.Errors.Count) { "wrote $($result.Errors.Count) error record(s): $(($result.Errors | ForEach-Object { $_.Exception.GetType().Name + ': ' + $_.Exception.Message }) -join ' | ')" }
+}
 
 try {
     # ---- the age sweep ------------------------------------------------------
@@ -218,7 +241,12 @@ try {
 
     Set-State @((Container 'old' 'keploy-v3-old' (Ago 360) (Ago 360))) -systemTime 'garbage'
     $r = Invoke-Reaper
-    Report "an unreadable daemon clock reaps nothing by age" $r @((Removed $r @()), (Code $r 0))
+    # Guarded, not left to `$null - [DateTimeOffset]` throwing and a $null idle
+    # time happening to compare below the threshold.
+    Report "an unreadable daemon clock reaps nothing by age" $r @(
+        (Removed $r @()), (Code $r 0), (NoErrors $r),
+        (Says $r "::warning::could not read the Docker daemon's clock \(got 'garbage'\); sweeping nothing by age" "the unreadable-clock warning")
+    )
 
     Set-State @((Container 'old' 'keploy-v3-old' (Ago 360) (Ago 360))) -DaemonDown
     $r = Invoke-Reaper
@@ -309,16 +337,97 @@ try {
         $(if (Test-Path $marker) { "the wedge record outlived the wedge" })
     )
 
+    # ---- remove-job-containers.ps1: the owner's teardown step ---------------
+
+    # The plumbing end to end: the run step records its project through
+    # register-job-compose-project.ps1 into GITHUB_ENV; the runner hands
+    # GITHUB_ENV's lines to later steps as environment; the teardown step
+    # reads it and removes exactly that project's containers.
+    function Read-GitHubEnv($file) {
+        $vars = @{}
+        foreach ($l in @(Get-Content -Path $file -Encoding UTF8)) {
+            $l = $l.TrimStart([char]0xFEFF)
+            if ($l -match '^([^=]+)=(.*)$') { $vars[$Matches[1]] = $Matches[2] }
+        }
+        $vars
+    }
+    $saved = @{}
+    foreach ($v in 'GITHUB_ENV', 'EARLIER', 'COMPOSE_PROJECT_NAME', 'KEPLOY_JOB_COMPOSE_PROJECT', 'KEPLOY_DOCKER_JOB_LOCK', 'KEPLOY_START_STEP_OUTCOME') {
+        $saved[$v] = [Environment]::GetEnvironmentVariable($v)
+    }
+    function Clear-JobEnv { foreach ($v in 'COMPOSE_PROJECT_NAME', 'KEPLOY_JOB_COMPOSE_PROJECT', 'KEPLOY_DOCKER_JOB_LOCK', 'KEPLOY_START_STEP_OUTCOME') { [Environment]::SetEnvironmentVariable($v, $null) } }
+    try {
+        Clear-JobEnv
+        $envFile = Join-Path (New-Dir 'ghenv') 'env'
+        Set-Content -Path $envFile -Value 'EARLIER=1'
+        $env:GITHUB_ENV = $envFile
+        & $register -Project 'keploy-5e7e50f3' 6>$null
+        $problems = @()
+        if ($env:COMPOSE_PROJECT_NAME -ne 'keploy-5e7e50f3') { $problems += "COMPOSE_PROJECT_NAME is '$env:COMPOSE_PROJECT_NAME' in the run step" }
+        $vars = Read-GitHubEnv $envFile
+        Clear-JobEnv; $env:GITHUB_ENV = $saved['GITHUB_ENV']
+        foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
+        $lockDir = New-Dir 'locks'
+        $env:KEPLOY_DOCKER_JOB_LOCK = Join-Path $lockDir 'docker-job-40-1-a.lock'
+        Set-Content -Path $env:KEPLOY_DOCKER_JOB_LOCK -Value 'x'
+        $env:KEPLOY_START_STEP_OUTCOME = 'failure'
+        Set-State @(
+            (Container 'mine' 'keploy-v3-aaaa' (Ago 2) (Ago 2) $NEVER 'keploy-5e7e50f3'),
+            (Container 'sib' 'keploy-v3-bbbb' (Ago 1) (Ago 1) $NEVER 'keploy-0c0ffee0')
+        )
+        $r = Invoke-Script $removeJob @{ WedgeDir = (New-Dir 'wedge') }
+        Report "the project the run step records reaches the teardown, which removes exactly its containers and releases the lock" $r @(
+            $problems, (Removed $r @('mine')), (Code $r 0),
+            $(if ($vars['KEPLOY_JOB_COMPOSE_PROJECT'] -ne 'keploy-5e7e50f3') { "GITHUB_ENV recorded [$($vars['KEPLOY_JOB_COMPOSE_PROJECT'])]" }),
+            $(if (Test-Path -LiteralPath $env:KEPLOY_DOCKER_JOB_LOCK) { "the job's Docker lock was not released" }),
+            $(if ($r.Output -match '::warning::') { "warned" })
+        )
+
+        # The run step started (and maybe started containers) but recorded
+        # nothing: say only that, loudly.
+        Clear-JobEnv
+        $env:KEPLOY_DOCKER_JOB_LOCK = Join-Path $lockDir 'docker-job-41-1-a.lock'
+        Set-Content -Path $env:KEPLOY_DOCKER_JOB_LOCK -Value 'x'
+        $env:KEPLOY_START_STEP_OUTCOME = 'failure'
+        Set-State @((Container 'mine' 'keploy-v3-aaaa' (Ago 2) (Ago 2) $NEVER 'keploy-5e7e50f3'))
+        $r = Invoke-Script $removeJob @{ WedgeDir = (New-Dir 'wedge') }
+        Report "a job that took its Docker lock and ran its app step but recorded no project warns, and claims nothing about its containers" $r @(
+            (Removed $r @()), (Code $r 0),
+            (Says $r '::warning::This job took its Docker lock but recorded no compose project' "the missing-project warning"),
+            $(if ($r.Output -match 'started no containers') { "claimed it started no containers" }),
+            $(if (Test-Path -LiteralPath $env:KEPLOY_DOCKER_JOB_LOCK) { "the job's Docker lock was not released" })
+        )
+
+        Clear-JobEnv
+        $env:KEPLOY_DOCKER_JOB_LOCK = Join-Path $lockDir 'docker-job-42-1-a.lock'
+        Set-Content -Path $env:KEPLOY_DOCKER_JOB_LOCK -Value 'x'
+        $env:KEPLOY_START_STEP_OUTCOME = 'skipped'
+        $r = Invoke-Script $removeJob @{ WedgeDir = (New-Dir 'wedge') }
+        $r2 = $null
+        Clear-JobEnv
+        $r2 = Invoke-Script $removeJob @{ WedgeDir = (New-Dir 'wedge') }
+        Report "a job whose app step never ran, or that never took its Docker lock, has nothing to warn about" ([pscustomobject]@{ Output = $r.Output + $r2.Output }) @(
+            (Code $r 0), (Code $r2 0),
+            $(if (($r.Output + $r2.Output) -match '::warning::') { "warned" }),
+            $(if (Test-Path -LiteralPath (Join-Path $lockDir 'docker-job-42-1-a.lock')) { "the job's Docker lock was not released" })
+        )
+
+        # The run step's script finds the recorder by a path relative to its own.
+        $dedup = Join-Path $repoRoot '.github/workflows/test_workflow_scripts/golang/go-dedup'
+        $call = @(Select-String -Path (Join-Path $dedup 'golang-docker-windows.ps1') -Pattern "Join-Path \`$PSScriptRoot '([^']*register-job-compose-project\.ps1)'")
+        $problems = @()
+        if ($call.Count -ne 1) { $problems += "go-dedup's golang-docker-windows.ps1 calls register-job-compose-project.ps1 $($call.Count) time(s), want 1" }
+        elseif (-not (Test-Path -LiteralPath (Join-Path $dedup ($call[0].Matches[0].Groups[1].Value -replace '\\', '/')))) { $problems += "its path $($call[0].Matches[0].Groups[1].Value) does not resolve" }
+        Report "go-dedup records its compose project through the recorder the teardown reads" ([pscustomobject]@{ Output = '' }) $problems
+    } finally {
+        foreach ($v in $saved.Keys) { [Environment]::SetEnvironmentVariable($v, $saved[$v]) }
+    }
+
     # ---- cleanup-windows.ps1 ------------------------------------------------
 
     # $locks maps a lock file name to its age in minutes, or to @(age,
     # content); a docker-prune-*.inprogress name is a marker of that age.
-    # $runs maps "<run>" or "<run>/<attempt>" to what the Actions API says of
-    # it; anything else is unknown ($null), so age alone decides. With
-    # -HttpApi, the script's own Get-RunStatusFromApi asks a fake
-    # Invoke-RestMethod instead, and $runs maps to a status or an HTTP error
-    # code.
-    function Invoke-Cleanup($locks, $runs = @{}, [switch]$HttpApi) {
+    function New-LockDir($locks) {
         $lockDir = New-Dir 'locks'
         foreach ($name in $locks.Keys) {
             $p = Join-Path $lockDir $name
@@ -328,24 +437,59 @@ try {
             Set-Content -Path $p -Value $content
             (Get-Item $p).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-$spec[0])
         }
-        # A list, not an array: the closure below gets its own scope, so it can
-        # only add to an object it shares with this function.
+        $lockDir
+    }
+    # Whether a docker-prune-*.inprogress marker is down in $dir right now.
+    function Test-Marker($dir) { @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $dir -Filter 'docker-prune-*.inprogress').Count -gt 0 }
+
+    # $runs maps "<run>" or "<run>/<attempt>" to what the Actions API says of
+    # it; anything else is unknown ($null), so age alone decides. With
+    # -HttpApi, the script's own Get-RunStatusFromApi asks a fake
+    # Invoke-RestMethod instead, and $runs maps to a status or an HTTP error
+    # code. Each question is recorded as repo#key, suffixed +marker if a
+    # prune marker was down while it was asked: it must not be, since that
+    # would keep starting jobs waiting on the API.
+    # -OnAsk runs on each question (a job taking its lock meanwhile).
+    # -KeepOnDelete names a lock whose deletion fails; -RecreateOnDelete one
+    # that is written again the moment it is deleted (a re-run of its run).
+    function Invoke-Cleanup($locks, $runs = @{}, [switch]$HttpApi, [scriptblock]$OnAsk = $null, [string]$KeepOnDelete = '', [string]$RecreateOnDelete = '') {
+        $lockDir = New-LockDir $locks
+        # Lists, not arrays: the closures below get their own scope, so they
+        # can only add to objects they share with this function.
         $asked = New-Object System.Collections.ArrayList
+        $listings = New-Object System.Collections.ArrayList
         $status = {
             param($repo, $run, $attempt)
             $key = $run
             if ($attempt) { $key = "$run/$attempt" }
-            $announced = @(Get-ChildItem -LiteralPath $lockDir -Filter 'docker-prune-*.inprogress').Count -gt 0
-            [void]$asked.Add("$repo#$key$(if (-not $announced) { '-unannounced' })")
+            # Inline, not Test-Marker: a closure does not see this file's functions.
+            $down = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir -Filter 'docker-prune-*.inprogress').Count -gt 0
+            [void]$asked.Add("$repo#$key$(if ($down) { '+marker' })")
+            if ($OnAsk) { & $OnAsk $lockDir }
             $runs[$key]
         }.GetNewClosure()
         $cleanupArgs = @{ LockDir = $lockDir; WedgeDir = (New-Dir 'wedge'); Repository = 'keploy/keploy'; GetRunStatus = $status }
+        # Local to this call, like the fakes below; the scripts find them
+        # before the cmdlets. Every look at the locks is recorded with whether
+        # a marker was down: the one a prune relies on must come after the
+        # marker, or a job that takes its lock in between is pruned under.
+        function Get-ChildItem {
+            $items = Microsoft.PowerShell.Management\Get-ChildItem @args
+            if ("$args" -match '\*\.lock') { [void]$listings.Add($(if (Test-Marker $lockDir) { 'marker' } else { 'bare' })) }
+            $items
+        }
+        function Remove-Item {
+            if ($KeepOnDelete -and ("$args" -like "*$KeepOnDelete*")) { return }
+            Microsoft.PowerShell.Management\Remove-Item @args
+            if ($RecreateOnDelete -and ("$args" -like "*$RecreateOnDelete*")) {
+                Set-Content -Path (Join-Path $lockDir $RecreateOnDelete) -Value 'keploy/keploy started-2'
+            }
+        }
         if ($HttpApi) {
             $cleanupArgs.Remove('GetRunStatus')
-            # Local to this call; the script finds it before the cmdlet.
             function Invoke-RestMethod($Uri, $Headers, $TimeoutSec, [switch]$UseBasicParsing) {
                 $key = $Uri -replace '^https://api\.github\.com/repos/[^/]+/[^/]+/actions/runs/', '' -replace '/attempts/', '/'
-                [void]$asked.Add(($Uri -replace '^https://api\.github\.com/repos/([^/]+/[^/]+)/actions/runs/.*$', '$1') + "#$key")
+                [void]$asked.Add(($Uri -replace '^https://api\.github\.com/repos/([^/]+/[^/]+)/actions/runs/.*$', '$1') + "#$key$(if (Test-Marker $lockDir) { '+marker' })")
                 $answer = $runs[$key]
                 if ($answer -is [int]) { throw (New-Object FakeHttpException $answer) }
                 [pscustomobject]@{ status = $answer }
@@ -357,8 +501,9 @@ try {
         } finally {
             $env:FAKE_LOCK_DIR = ''
         }
-        $r | Add-Member -NotePropertyName Locks -NotePropertyValue @(Get-ChildItem $lockDir | ForEach-Object { $_.Name } | Sort-Object)
+        $r | Add-Member -NotePropertyName Locks -NotePropertyValue @(Microsoft.PowerShell.Management\Get-ChildItem $lockDir | ForEach-Object { $_.Name } | Sort-Object)
         $r | Add-Member -NotePropertyName Asked -NotePropertyValue @($asked | Sort-Object)
+        $r | Add-Member -NotePropertyName Listings -NotePropertyValue @($listings)
         $r
     }
     function Pruned($result, [bool]$want) {
@@ -366,6 +511,7 @@ try {
         if ($did -ne $want) { "pruned=$did, want $want" }
         $bare = @($result.Pruned | Where-Object { $_ -like '*-unannounced' })
         if ($bare.Count) { "pruned with no in-progress marker down: $($bare -join ', ')" }
+        if ($did -and (@($result.Listings)[-1] -ne 'marker')) { "pruned on a look at the locks taken before the marker went down (looks: $($result.Listings -join ','))" }
     }
     function Asked($result, [string[]]$want) {
         $got = @($result.Asked) -join ','
@@ -387,7 +533,11 @@ try {
     )
     $r = Invoke-Cleanup @{ 'docker-job-1-1-a.lock' = 1; 'prepare-windows-workflow-2.lock' = 20 }
     Report "cleanup keeps a sibling's Created-state app and does not prune under live locks" $r @(
-        (Removed $r @()), (Pruned $r $false), (Locks $r @('docker-job-1-1-a.lock', 'prepare-windows-workflow-2.lock'))
+        (Removed $r @()), (Pruned $r $false), (Locks $r @('docker-job-1-1-a.lock', 'prepare-windows-workflow-2.lock')),
+        # Live locks found by the first look call the prune off before any
+        # marker goes down, so no starting job waits on a prune that will not run.
+        $(if (@($r.Listings) -join ',' -ne 'bare') { "looked at the locks [$($r.Listings -join ',')], want one look with no marker down" }),
+        (Says $r 'Skipping Docker prune: 2 live lock\(s\)' "the live-locks message")
     )
 
     Set-State @((Container 'old' 'dedup-go-0badf00d' (Ago 300) (Ago 300) (Ago 200)))
@@ -446,6 +596,30 @@ try {
         (Asked $r @('keploy/keploy#21', 'keploy/private#22', 'keploy/keploy#23/1'))
     )
 
+    # The marker goes down only after the API has been asked (every Asked
+    # above has no +marker), so the handshake rests on the look at the locks
+    # after it: a lock not judged stale before the marker is live.
+    Set-State @()
+    $r = Invoke-Cleanup @{ 'docker-job-30-1-a.lock' = @(5, 'keploy/keploy wf win-runner-1') } @{ '30/1' = 'completed' } -OnAsk {
+        param($dir) Set-Content -Path (Join-Path $dir 'docker-job-31-1-b.lock') -Value 'keploy/keploy wf win-runner-2'
+    }
+    Report "a job lock taken while the Actions API was being asked calls the prune off" $r @(
+        (Pruned $r $false), (Locks $r @('docker-job-31-1-b.lock')), (Asked $r @('keploy/keploy#30/1')),
+        (Says $r 'lock\(s\) taken while the others were judged - docker-job-31-1-b\.lock' "the taken-meanwhile message")
+    )
+
+    Set-State @()
+    $r = Invoke-Cleanup @{ 'docker-job-32-1-a.lock' = @(5, 'keploy/keploy wf win-runner-1') } @{ '32/1' = 'completed' } -KeepOnDelete 'docker-job-32-1-a.lock'
+    Report "a lock judged stale that could not be deleted does not call the prune off" $r @(
+        (Pruned $r $true), (Locks $r @('docker-job-32-1-a.lock'))
+    )
+
+    Set-State @()
+    $r = Invoke-Cleanup @{ 'prepare-windows-workflow-33.lock' = @(30, 'keploy/keploy started-1') } @{ '33' = 'completed' } -RecreateOnDelete 'prepare-windows-workflow-33.lock'
+    Report "a lock written again under a name judged stale (a re-run) calls the prune off" $r @(
+        (Pruned $r $false), (Locks $r @('prepare-windows-workflow-33.lock'))
+    )
+
     # A cleanup killed mid-prune leaves its marker; jobs stop waiting on it
     # after PruneMaxMinutes, and the next cleanup deletes it. A younger one may
     # be another cleanup's, still pruning.
@@ -468,37 +642,191 @@ try {
     elseif ("$(Get-Content -LiteralPath $out[0] -TotalCount 1)" -notmatch '^keploy/keploy ') { $problems += "lock does not start with the repository" }
     Report "the job lock names its run and attempt and starts with its repository" ([pscustomobject]@{ Output = ($out -join "`n") }) $problems
 
-    # A prune announced 3s short of the marker's lifetime: the job waits for
-    # it (here, until the marker ages out at $pruneEnds; a finishing cleanup
-    # deletes it). The lock must already be down while it waits - written
-    # after the wait, a prune that started in between would not see it - so it
-    # must predate the prune's end by most of those 3s.
+    # A job that takes its lock while a prune is under way waits for it, and
+    # its lock is already down while it waits: written after the wait, a
+    # prune that started in between would not see it. Driven by events, not
+    # by timing - the job runs in the background, and the marker it waits on
+    # is far from expiry and is taken down only once the job has written its
+    # lock and said it is waiting. The deadlines only bound a failure.
     $lockDir = New-Dir 'locks'
     $m = Join-Path $lockDir 'docker-prune-0123.inprogress'
     Set-Content -Path $m -Value 'x'
-    $pruneEnds = [DateTime]::UtcNow.AddSeconds(3)
-    (Get-Item $m).LastWriteTimeUtc = $pruneEnds.AddMinutes(-15)
-    $t = [Diagnostics.Stopwatch]::StartNew()
-    $out = & $takeLock -LockDir $lockDir -RunId 12 -RunAttempt 1 -PollSeconds 1 *>&1 | Out-String
-    $waited = $t.Elapsed.TotalSeconds
-    $held = @(Get-ChildItem -LiteralPath $lockDir -Filter 'docker-job-12-1-*.lock')
-    Report "a job waits for a prune in progress before using Docker, holding its lock" ([pscustomobject]@{ Output = $out }) @(
-        $(if ($waited -lt 2) { "returned after $([Math]::Round($waited, 1))s, before the prune was over" }),
-        $(if ($out -notmatch 'A Docker prune is in progress') { "did not say it was waiting" }),
-        $(if ($held.Count -ne 1) { "left $($held.Count) docker-job-12-1-*.lock files, want 1" }
-          elseif ($held[0].LastWriteTimeUtc -gt $pruneEnds.AddSeconds(-1)) {
-              "the lock was not written before waiting for the prune (written $([Math]::Round(($held[0].LastWriteTimeUtc - $pruneEnds).TotalSeconds, 2))s from the prune's end)"
-          })
-    )
+    $job = Start-Job -ScriptBlock {
+        param($script, $dir)
+        & $script -LockDir $dir -RunId 12 -RunAttempt 1 -PollSeconds 1 *>&1 | ForEach-Object { "$_" }
+    } -ArgumentList $takeLock, $lockDir
+    $problems = @()
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(120)
+        $held = @(); $said = ''
+        while ($true) {
+            $held = @(Get-ChildItem -LiteralPath $lockDir -Filter 'docker-job-12-1-*.lock')
+            $said = @(Receive-Job -Job $job -Keep) -join "`n"
+            if (($held.Count -gt 0) -and ($said -match 'A Docker prune or restart is in progress')) { break }
+            if ("$($job.State)" -in 'Completed', 'Failed', 'Stopped') { break }
+            if ([DateTime]::UtcNow -ge $deadline) { break }
+            Start-Sleep -Milliseconds 200
+        }
+        if ("$($job.State)" -in 'Completed', 'Failed', 'Stopped') {
+            $problems += "take-docker-job-lock.ps1 finished ($($job.State)) while the prune marker was down"
+        } elseif ($held.Count -ne 1) {
+            $problems += "no docker-job-12-1-*.lock written before waiting for the prune (found $($held.Count))"
+        } elseif ($said -notmatch 'A Docker prune or restart is in progress') {
+            $problems += "did not say it was waiting for the prune"
+        } else {
+            Remove-Item -LiteralPath $m -Force
+            if (-not (Wait-Job -Job $job -Timeout 120)) { $problems += "still waiting 120s after the prune marker was taken down" }
+            elseif ($job.State -ne 'Completed') { $problems += "ended $($job.State)" }
+            else {
+                $said = @(Receive-Job -Job $job -Keep) -join "`n"
+                $after = @(Get-ChildItem -LiteralPath $lockDir -Filter 'docker-job-12-1-*.lock')
+                if ($said -notmatch 'The Docker prune or restart has finished') { $problems += "did not say the prune was over" }
+                if (($after.Count -ne 1) -or ($said -notmatch [regex]::Escape($after[0].FullName))) { $problems += "did not print the one lock it holds" }
+            }
+        }
+    } finally {
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+    Report "a job waits for a prune in progress before using Docker, holding its lock" ([pscustomobject]@{ Output = $said }) $problems
 
+    # A marker past PruneMaxMinutes: its cleanup was killed. Waiting on it is
+    # announced before the first sleep, so the case ends on whichever comes
+    # first, the announcement or the script finishing; the deadline only
+    # bounds a failure.
     $lockDir = New-Dir 'locks'
     $m = Join-Path $lockDir 'docker-prune-4567.inprogress'
     Set-Content -Path $m -Value 'x'
-    (Get-Item $m).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-16)
-    $t = [Diagnostics.Stopwatch]::StartNew()
-    $out = & $takeLock -LockDir $lockDir -RunId 13 -RunAttempt 1 -PollSeconds 1 *>&1 | Out-String
-    Report "a marker left by a killed cleanup is not waited for" ([pscustomobject]@{ Output = $out }) @(
-        $(if ($t.Elapsed.TotalSeconds -ge 1) { "waited $([Math]::Round($t.Elapsed.TotalSeconds, 1))s" })
+    (Get-Item $m).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-((Get-Default $takeLock 'PruneMaxMinutes') + 1))
+    $job = Start-Job -ScriptBlock {
+        param($script, $dir)
+        & $script -LockDir $dir -RunId 13 -RunAttempt 1 -PollSeconds 60 *>&1 | ForEach-Object { "$_" }
+    } -ArgumentList $takeLock, $lockDir
+    $problems = @()
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(120)
+        $said = ''
+        while ($true) {
+            $said = @(Receive-Job -Job $job -Keep) -join "`n"
+            if ($said -match 'is in progress') { $problems += "waits for it"; break }
+            if ("$($job.State)" -in 'Completed', 'Failed', 'Stopped') { break }
+            if ([DateTime]::UtcNow -ge $deadline) { $problems += "neither finished nor said it was waiting within 120s"; break }
+            Start-Sleep -Milliseconds 200
+        }
+        if (-not $problems.Count) {
+            $said = @(Receive-Job -Job $job -Keep) -join "`n"
+            if ("$($job.State)" -ne 'Completed') { $problems += "ended $($job.State)" }
+            elseif ($said -notmatch 'docker-job-13-1-[0-9a-f]{32}\.lock') { $problems += "did not print its lock" }
+        }
+    } finally {
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+    Report "a marker left by a killed cleanup is not waited for" ([pscustomobject]@{ Output = $said }) $problems
+
+    # ---- ensure-docker.ps1: precheck-windows' Docker check ------------------
+
+    # Every Docker Desktop action goes to a fake here: the defaults act on the
+    # real Docker Desktop of the machine these tests also run on. Each fake
+    # action is recorded, suffixed +marker if a prune/restart marker was down
+    # at that moment. Starting Desktop brings the fake daemon back unless
+    # -StaysDown. $locks and $runs are as for Invoke-Cleanup.
+    function Invoke-Ensure($locks = @{}, $runs = @{}, [switch]$DesktopDown, [switch]$StaysDown, [scriptblock]$OnAsk = $null) {
+        $lockDir = New-LockDir $locks
+        $events = New-Object System.Collections.ArrayList
+        $stateFile = $env:FAKE_DOCKER_STATE
+        $running = -not $DesktopDown
+        $ensureArgs = @{
+            LockDir = $lockDir; Repository = 'keploy/keploy'
+            BackoffSeconds = 0; PollSeconds = 0; ReadyTimeoutSeconds = 0; StabilizeSeconds = 0
+            DesktopExe = 'C:\no\such\Docker Desktop.exe'
+            TestDesktopRunning = { $running }.GetNewClosure()
+            StopDesktop = {
+                $down = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir -Filter 'docker-prune-*.inprogress').Count -gt 0
+                [void]$events.Add("stop$(if ($down) { '+marker' })")
+            }.GetNewClosure()
+            StartDesktop = {
+                $down = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir -Filter 'docker-prune-*.inprogress').Count -gt 0
+                [void]$events.Add("start$(if ($down) { '+marker' })")
+                if (-not $StaysDown) {
+                    $st = Get-Content -Raw -Path $stateFile | ConvertFrom-Json
+                    $st.daemonDown = $false
+                    $st | ConvertTo-Json -Depth 5 | Set-Content -Path $stateFile -Encoding ASCII
+                }
+            }.GetNewClosure()
+            GetRunStatus = {
+                param($repo, $run, $attempt)
+                $key = $run
+                if ($attempt) { $key = "$run/$attempt" }
+                $down = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $lockDir -Filter 'docker-prune-*.inprogress').Count -gt 0
+                [void]$events.Add("ask $repo#$key$(if ($down) { '+marker' })")
+                if ($OnAsk) { & $OnAsk $lockDir }
+                $runs[$key]
+            }.GetNewClosure()
+        }
+        $r = Invoke-Script $ensure $ensureArgs
+        $r | Add-Member -NotePropertyName Locks -NotePropertyValue @(Get-ChildItem $lockDir | ForEach-Object { $_.Name } | Sort-Object)
+        $r | Add-Member -NotePropertyName Events -NotePropertyValue @($events)
+        $r
+    }
+    function Events($result, [string[]]$want) {
+        $got = @($result.Events) -join ','
+        $exp = @($want) -join ','
+        if ($got -ne $exp) { "did [$got], want [$exp]" }
+    }
+
+    Set-State @()
+    $r = Invoke-Ensure
+    Report "a healthy Docker is left alone" $r @((Code $r 0), (Events $r @()))
+
+    # A daemon too busy to answer (four jobs loading images) used to get
+    # Docker Desktop force-killed on the first failed `docker info`.
+    Set-State @() -FailInfo 2
+    $r = Invoke-Ensure
+    Report "a Docker that misses a check or two is asked again, not restarted" $r @((Code $r 0), (Events $r @()))
+
+    Set-State @() -DaemonDown
+    $r = Invoke-Ensure @{
+        'docker-job-50-1-a.lock'           = @(5, 'keploy/keploy wf win-runner-2')
+        'prepare-windows-workflow-51.lock' = @(20, 'keploy/keploy started-1')
+    } @{ '50/1' = 'in_progress'; '51' = 'in_progress' }
+    Report "Docker Desktop is not restarted while a job holds a live Docker lock, and the job fails saying why" $r @(
+        (Code $r 1), (Events $r @('ask keploy/keploy#50/1')),
+        (Says $r '::error::Docker Desktop is running but .* 1 job\(s\) hold a live Docker lock \(docker-job-50-1-a\.lock\), so Docker Desktop was NOT restarted' "the refusal naming the lock"),
+        (Says $r "wsl --shutdown" "the remediation"),
+        (Locks $r @('docker-job-50-1-a.lock', 'prepare-windows-workflow-51.lock'))
+    )
+
+    # A run lock marks a run in flight, not a container: it does not hold the
+    # restart off, or a sick daemon would never be restarted on a busy day.
+    Set-State @() -DaemonDown
+    $r = Invoke-Ensure @{
+        'docker-job-60-1-a.lock'           = @(5, 'keploy/keploy wf win-runner-2')
+        'docker-job-61-1-b.lock'           = ($minAge + 1)
+        'prepare-windows-workflow-62.lock' = @(20, 'keploy/keploy started-1')
+    } @{ '60/1' = 'completed'; '62' = 'in_progress' }
+    Report "with no live Docker lock, Docker Desktop is restarted under the marker, asking the API before it" $r @(
+        (Code $r 0), (Events $r @('ask keploy/keploy#60/1', 'stop+marker', 'start+marker')),
+        (Locks $r @('prepare-windows-workflow-62.lock'))
+    )
+
+    Set-State @() -DaemonDown
+    $r = Invoke-Ensure @{ 'docker-job-70-1-a.lock' = @(5, 'keploy/keploy wf win-runner-2') } @{ '70/1' = 'completed' } -OnAsk {
+        param($dir) Set-Content -Path (Join-Path $dir 'docker-job-71-1-b.lock') -Value 'keploy/keploy wf win-runner-3'
+    }
+    Report "a job lock taken while the API was being asked calls the restart off" $r @(
+        (Code $r 1), (Events $r @('ask keploy/keploy#70/1')),
+        (Says $r 'took a Docker lock while the others were being judged \(docker-job-71-1-b\.lock\)' "the refusal naming the new lock"),
+        (Locks $r @('docker-job-71-1-b.lock'))
+    )
+
+    Set-State @() -DaemonDown
+    $r = Invoke-Ensure @{ 'docker-job-80-1-a.lock' = @(5, 'keploy/keploy wf win-runner-2') } @{ '80/1' = 'in_progress' } -DesktopDown
+    Report "a Docker Desktop that is not running is started, whatever the locks" $r @((Code $r 0), (Events $r @('start')))
+
+    Set-State @() -DaemonDown
+    $r = Invoke-Ensure -StaysDown
+    Report "a restart after which Docker never answers fails the job and takes its marker down" $r @(
+        (Code $r 1), (Events $r @('stop+marker', 'start+marker')), (Locks $r @()),
+        (Says $r '::error::Docker did not become ready' "the not-ready error")
     )
 
     # ---- the thresholds against every job that can run on these runners ----
@@ -573,24 +901,50 @@ try {
         }
         $true
     }
+    # Jobs are the keys one level under a top-level jobs:, at whatever
+    # indentation the file uses, and a job's timeout-minutes and runs-on are
+    # the keys one level under it. A line at job-key indentation that is not a
+    # plain job key (a quoted key, a flow mapping, ...) fails the check, and
+    # so does a jobs: line it cannot read: a job the guard does not see is one
+    # it silently passes, and its runs-on and timeout-minutes would be
+    # credited to the job above it.
     function Get-Jobs([string]$dir) {
         $files = @{}
         foreach ($wf in @(Get-ChildItem -Path $dir -File | Where-Object { $_.Extension -in '.yml', '.yaml' })) {
             $files[$wf.Name] = [string[]]@(Get-Content -Path $wf.FullName)
         }
         foreach ($name in @($files.Keys | Sort-Object)) {
-            $lines = $files[$name]; $job = $null; $inJobs = $false
+            $lines = $files[$name]; $job = $null; $inJobs = $false; $jobIndent = -1; $keyIndent = -1
             for ($i = 0; $i -lt $lines.Count; $i++) {
                 $line = $lines[$i]
-                if ($line -match '^jobs:\s*$') { $inJobs = $true; continue }
-                if ($line -match '^[^\s#]') { $inJobs = $false }
+                if ($line -match '^jobs:\s*(#.*)?$') { $inJobs = $true; $jobIndent = -1; continue }
+                if ($line -match '^[^\s#]') {
+                    $inJobs = $false
+                    if ($line -match '^jobs\s*:') {
+                        if ($job) { $job }
+                        $job = $null
+                        [pscustomobject]@{ where = "$name`:line$($i + 1)"; windows = $false; timeout = $null; unknown = "a jobs: line it cannot read: $($line.Trim())" }
+                    }
+                }
                 if (-not $inJobs) { continue }
-                if ($line -match '^  ([A-Za-z0-9_-]+):\s*$') {
+                if ($line -match '^\s*(#.*)?$') { continue }
+                $ind = ($line -replace '^(\s*).*$', '$1').Length
+                if ($jobIndent -lt 0) { $jobIndent = $ind }
+                if ($ind -le $jobIndent) {
                     if ($job) { $job }
-                    $job = [pscustomobject]@{ where = "$name`:$($Matches[1])"; windows = $false; timeout = $null; unknown = '' }
-                } elseif ($job -and $line -match '^    timeout-minutes:\s*(\d+)') {
+                    $keyIndent = -1
+                    if (($ind -eq $jobIndent) -and ($line -match '^\s*([A-Za-z_][A-Za-z0-9_-]*):\s*(#.*)?$')) {
+                        $job = [pscustomobject]@{ where = "$name`:$($Matches[1])"; windows = $false; timeout = $null; unknown = '' }
+                    } else {
+                        $job = [pscustomobject]@{ where = "$name`:line$($i + 1)"; windows = $false; timeout = $null; unknown = "a line at job-key indentation that is not a job key: $($line.Trim())" }
+                    }
+                    continue
+                }
+                if ($keyIndent -lt 0) { $keyIndent = $ind }
+                if ($ind -ne $keyIndent) { continue }
+                if ($line -match '^\s*timeout-minutes:\s*(\d+)\s*(#.*)?$') {
                     $job.timeout = [int]$Matches[1]
-                } elseif ($job -and $line -match '^    runs-on:(?:\s+(.*))?$') {
+                } elseif ($line -match '^\s*runs-on:(?:\s+(.*))?$') {
                     $value = ("$($Matches[1])" -replace '(^|\s+)#.*$', '').Trim()
                     $sets = New-Object System.Collections.ArrayList
                     if ($value -match '\$\{\{') {
@@ -657,14 +1011,40 @@ jobs:
     uses: ./.github/workflows/forms.yml
     with:
       runner: ubuntu-latest
+  commented: # a trailing comment on the job key
+    runs-on: [self-hosted, Windows]
+  'quoted':
+    runs-on: [self-hosted, Windows]
+  after:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 '@
-    $got = @(Get-TimeoutProblems @(Get-Jobs $wfDir) 45 | ForEach-Object { ($_ -split ' ')[0] + $(if ($_ -match 'cannot tell') { '=unresolved' } else { '=timeout' }) }) -join ','
-    $want = 'forms.yml:listform=timeout,forms.yml:grouped=unresolved,forms.yml:viainput=timeout,forms.yml:fromvars=unresolved'
-    Report "the timeout guard reads list, group, flow and expression runs-on forms" ([pscustomobject]@{ Output = $got }) @(
+    # Jobs indented by four, a comment on jobs:, and timeout-minutes read only
+    # at the job's own level (a step's does not count for the job).
+    Set-Content -Path (Join-Path $wfDir 'deep.yml') -Value @'
+on: push
+jobs: # four-space job keys
+    deepbare:
+        runs-on: [self-hosted, Windows]
+        steps:
+          - run: echo
+            timeout-minutes: 5
+    deepok:   # with a comment
+        runs-on: [self-hosted, Windows]
+        timeout-minutes: 20 # minutes
+'@
+    Set-Content -Path (Join-Path $wfDir 'flow.yml') -Value @'
+on: push
+jobs: { flowjob: { runs-on: [self-hosted, Windows] } }
+'@
+    $got = @(Get-TimeoutProblems @(Get-Jobs $wfDir) 45 | ForEach-Object { ($_ -split ' \(', 2)[0] + $(if ($_ -match 'cannot tell') { '=unresolved' } else { '=timeout' }) }) -join ','
+    $quoted = [array]::IndexOf([string[]]@(Get-Content -Path (Join-Path $wfDir 'forms.yml')), "  'quoted':") + 1
+    $want = "deep.yml:deepbare=timeout,flow.yml:line2=unresolved,forms.yml:listform=timeout,forms.yml:grouped=unresolved,forms.yml:viainput=timeout,forms.yml:fromvars=unresolved,forms.yml:commented=timeout,forms.yml:line$quoted=unresolved"
+    Report "the timeout guard reads list, group, flow and expression runs-on forms, and every job-key form" ([pscustomobject]@{ Output = $got }) @(
         $(if ($got -ne $want) { "flagged [$got], want [$want]" })
     )
 
-    $limit = [Math]::Min($minAge, (Get-Default $cleanup 'MinAgeMinutes'))
+    $limit = [Math]::Min([Math]::Min($minAge, (Get-Default $cleanup 'MinAgeMinutes')), (Get-Default $ensure 'MinAgeMinutes'))
     $jobs = @(Get-Jobs (Join-Path $repoRoot '.github/workflows')) +
         @([pscustomobject]@{ where = 'keploy/windows-redirector:build'; windows = $true; timeout = 40; unknown = '' })
     $win = @($jobs | Where-Object { $_.windows })
@@ -681,8 +1061,13 @@ jobs:
     # cleanup job's timeout keeps it under the bound both scripts use.
     $pruneMax = Get-Default $cleanup 'PruneMaxMinutes'
     $cw = @($jobs | Where-Object { $_.where -eq 'prepare_and_run.yml:cleanup_windows' })
-    Report "a live cleanup's prune marker is younger than PruneMaxMinutes" ([pscustomobject]@{ Output = '' }) @(
-        $(if ($pruneMax -ne (Get-Default $takeLock 'PruneMaxMinutes')) { "PruneMaxMinutes differs: cleanup-windows.ps1 $pruneMax, take-docker-job-lock.ps1 $(Get-Default $takeLock 'PruneMaxMinutes')" }),
+    Report "a live cleanup's or restart's marker is younger than PruneMaxMinutes" ([pscustomobject]@{ Output = '' }) @(
+        $(foreach ($other in @($takeLock, $ensure)) {
+            if ($pruneMax -ne (Get-Default $other 'PruneMaxMinutes')) { "PruneMaxMinutes differs: cleanup-windows.ps1 $pruneMax, $(Split-Path -Leaf $other) $(Get-Default $other 'PruneMaxMinutes')" }
+        }),
+        $(if ((Get-Default $ensure 'PollSeconds') + (Get-Default $ensure 'ReadyTimeoutSeconds') + (Get-Default $ensure 'StabilizeSeconds') + ($timeoutMargin * 60) -gt ($pruneMax * 60)) {
+            "ensure-docker.ps1's restart can hold its marker for longer than $timeoutMargin min short of PruneMaxMinutes ($pruneMax)"
+        }),
         $(if ($cw.Count -ne 1 -or $null -eq $cw[0].timeout -or ($cw[0].timeout + $timeoutMargin -gt $pruneMax)) {
             "cleanup_windows timeout-minutes [$(@($cw | ForEach-Object { $_.timeout }) -join ',')] is not at least $timeoutMargin below PruneMaxMinutes ($pruneMax)"
         })

@@ -4,10 +4,12 @@ name: Windows CI scripts
 # (.github/scripts/windows) runs on runners that share ONE Docker daemon, so a
 # wrong decision there does not fail its own job - it kills a sibling job's
 # containers. reap-keploy-containers.ps1 did exactly that, removing live
-# keploy agents mid-replay, and cleanup-windows.ps1 removed Created-state
-# application containers and pruned under live locks. Their cases run here
-# under pwsh on every change to them or to a workflow (the cases pin the
-# self-hosted Windows jobs' timeouts), and under Windows PowerShell 5.1 in
+# keploy agents mid-replay, cleanup-windows.ps1 removed Created-state
+# application containers and pruned under live locks, and ensure-docker.ps1
+# restarted Docker Desktop under running jobs after one failed `docker info`.
+# Their cases run here under pwsh on every change to them or to a workflow (the
+# cases pin the self-hosted Windows jobs' timeouts, and the go-dedup script's
+# compose-project hand-off), and under Windows PowerShell 5.1 in
 # prepare_and_run's precheck-windows.
 
 on:

@@ -184,13 +184,12 @@ $containerName = "dedup-go-$id"
 # network/containers. Pin the project to the per-job guid and EXPORT it
 # so every `docker compose` call in this script AND the `docker compose
 # up` that keploy spawns share the same, job-unique project.
-$env:COMPOSE_PROJECT_NAME = "keploy-$id"
-Write-Host "Using COMPOSE_PROJECT_NAME = $env:COMPOSE_PROJECT_NAME"
-# The job's "Remove this job's containers" step removes exactly this project's
-# containers (every one carries its label), so hand the name to later steps.
-if ($env:GITHUB_ENV) {
-  "KEPLOY_JOB_COMPOSE_PROJECT=$env:COMPOSE_PROJECT_NAME" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-}
+#
+# register-job-compose-project.ps1 sets COMPOSE_PROJECT_NAME and records the
+# project for the job's "Remove this job's containers" step, which removes
+# exactly this project's containers (every one carries its label). It must run
+# before the first container starts.
+& (Join-Path $PSScriptRoot '..\..\..\..\scripts\windows\register-job-compose-project.ps1') -Project "keploy-$id"
 Write-Host "Allocated ports -> app:$appPort proxy:$proxyPort incoming:$incomingPort dns:$dnsPort"
 
 $dcFile = Join-Path (Get-Location) 'docker-compose.yml'

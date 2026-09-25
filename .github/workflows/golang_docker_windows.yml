@@ -247,6 +247,9 @@ jobs:
 
       # Your existing run step
       - name: Run ${{ matrix.app.name }} application (Windows)
+        # Its id feeds "Remove this job's containers". The script must call
+        # register-job-compose-project.ps1 before it starts any container.
+        id: run_app
         env:
           RECORD_BIN:  ${{ steps.setup_record.outputs.bin_name }}
           REPLAY_BIN:  ${{ steps.setup_replay.outputs.bin_name }}
@@ -258,30 +261,24 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\golang\${{ matrix.app.script_dir }}\golang-docker-windows.ps1"
 
       # The owner's half of the container rule: remove every container this
-      # job started (its compose project), at any age, and release its Docker
-      # lock. If one survives `docker rm -f` the reaper records it, so the next
-      # job on any runner fails its pre-job reap at once instead of after the
-      # age threshold. That pre-job reap is where a wedge fails a job: it
-      # retries the removal with a fresh settle window and blocks new work.
-      # Here it is only a warning, because this job's result is already known,
-      # and a removal that is merely slow on a loaded VM would otherwise turn a
-      # green job red with advice to restart the VM.
+      # job started (the compose project the run step recorded) and release
+      # the job's Docker lock. remove-job-containers.ps1 says why a wedge is
+      # only a warning here, and warns when a job that started containers
+      # recorded no project.
       - name: Remove this job's containers
         if: always()
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        env:
+          KEPLOY_START_STEP_OUTCOME: ${{ steps.run_app.outcome }}
         run: |
-          $code = 0
-          $reaper = Join-Path $env:GITHUB_WORKSPACE '.github\scripts\windows\reap-keploy-containers.ps1'
-          if (-not $env:KEPLOY_JOB_COMPOSE_PROJECT) {
-            Write-Host "This job recorded no compose project, so it started no containers."
-          } elseif (-not (Test-Path $reaper)) {
-            Write-Host "::warning::$reaper not found; leaving project $env:KEPLOY_JOB_COMPOSE_PROJECT to the age sweep."
-          } else {
-            & $reaper -ComposeProject $env:KEPLOY_JOB_COMPOSE_PROJECT
-            $code = $LASTEXITCODE
+          $script = Join-Path $env:GITHUB_WORKSPACE '.github\scripts\windows\remove-job-containers.ps1'
+          if (-not (Test-Path $script)) {
+            Write-Host "::warning::$script not found; leaving this job's containers to the age sweep."
+            if ($env:KEPLOY_DOCKER_JOB_LOCK) { Remove-Item -LiteralPath $env:KEPLOY_DOCKER_JOB_LOCK -Force -ErrorAction SilentlyContinue }
+            exit 0
           }
-          if ($env:KEPLOY_DOCKER_JOB_LOCK) { Remove-Item -LiteralPath $env:KEPLOY_DOCKER_JOB_LOCK -Force -ErrorAction SilentlyContinue }
-          exit $code
+          & $script
+          exit $LASTEXITCODE
 
       - name: Prune stale git isolation dirs
         if: always()
