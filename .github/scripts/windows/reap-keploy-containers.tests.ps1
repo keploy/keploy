@@ -166,6 +166,18 @@ function New-Dir($name) {
     New-Item -ItemType Directory -Path $d | Out-Null
     $d
 }
+# What a script wrote, as text the cases can match: each record on a line of
+# its own, as the job log shows it. Not Out-String: Windows PowerShell 5.1
+# renders records there through the formatter at the host's width and
+# word-wraps every longer line (at 120 columns on the runners), so a message
+# split across two lines no longer matches. pwsh 7 does not wrap there.
+function ConvertTo-Text($records) {
+    @($records | ForEach-Object {
+            if ($_ -is [System.Management.Automation.WarningRecord]) { "WARNING: $($_.Message)" }
+            elseif ($_ -is [System.Management.Automation.ErrorRecord]) { "ERROR: $_" }
+            else { "$_" }
+        }) -join "`n"
+}
 # Runs a script; returns its output, exit code, the error records it wrote,
 # and what the fake saw. An error the script throws ends up in Errors too, so
 # it fails the case that caused it instead of aborting the whole run.
@@ -182,7 +194,7 @@ function Invoke-Script($script, [hashtable]$scriptArgs) {
     $code = $LASTEXITCODE
     $after = Get-State
     [pscustomobject]@{
-        Output  = ($records | Out-String)
+        Output  = (ConvertTo-Text $records)
         Errors  = @($records | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
         Code    = $code
         Removed = @($after.removed | Where-Object { $_ })
@@ -1482,7 +1494,7 @@ function Set-Content {
         $env:GITHUB_WORKSPACE = $ws
         $global:LASTEXITCODE = 0
         try {
-            $out = & $recover *>&1 | Out-String
+            $out = ConvertTo-Text @(& $recover *>&1)
         } finally {
             $env:GITHUB_WORKSPACE = $savedWs
         }
@@ -1584,7 +1596,7 @@ function Set-Content {
             $env:FAKE_DOCKER_CALLS = $null
         }
         [pscustomobject]@{
-            Output  = ($records | Out-String)
+            Output  = (ConvertTo-Text $records)
             Refused = @(foreach ($rec in @($records | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })) {
                     if ("$($rec.Exception.Message)" -match "^$([regex]::Escape((Split-Path -Leaf $script))) run by the tests \(KEPLOY_WINDOWS_SCRIPT_TESTS\) without -(\S.*): the default") { $Matches[1] -split ', -' }
                 })
