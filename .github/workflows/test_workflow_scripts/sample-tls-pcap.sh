@@ -461,12 +461,18 @@ endsec
 # vanished from the decrypt even with its keys and packets in the files - one
 # HTTPS host at random: echo.keploy.local on run 36092000545, quote.keploy.local
 # on run 35130298832 (neither capture was kept; moving one connection of a
-# complete capture onto 44818 reproduces 36092000545's output exactly). (Measured over every port of the range, a real capture's
-# ClientHello decodes as TLS on all 28232 with -d, and on 28224 without it
-# under 4.2.2.)
+# complete capture onto 44818 reproduces 36092000545's output exactly).
+# Measured over every port of the range, a real capture's ClientHello decodes
+# as TLS on all 28232 with -d, and on 28224 without it under 4.2.2.
 tshark_tls() {
   local pcap=$1; shift
   sudo tshark -r "$pcap" -o "tls.keylog_file:$KEYLOG" -d "tcp.port==${KEPLOY_PROXY_PORT},tls" "$@" 2>/dev/null
+}
+# The same without -d: TLS found only by the heuristic, as before the fix.
+# Used only to tell whether the port check below can fail on this tshark.
+tshark_tls_heuristic() {
+  local pcap=$1; shift
+  sudo tshark -r "$pcap" -o "tls.keylog_file:$KEYLOG" "$@" 2>/dev/null
 }
 
 section "Assert tshark + keylog decrypts HTTP-over-TLS sessions"
@@ -498,11 +504,12 @@ endsec
 section "Assert the decrypt does not depend on the application's ephemeral ports"
 # The decrypt above passing says nothing about the draw that used to lose a
 # host: only 8 of 28232 ephemeral ports trigger it. So replay that draw
-# deterministically - in a copy of the capture, move the application's side of
-# every HTTPS connection onto a port Wireshark 4.2 claims for another protocol,
-# and require the decrypt of the copy to match the original exactly. This only
-# has teeth under Wireshark 4.2.x (what ubuntu-24.04 ships): 4.4 decodes the
-# moved copy as TLS even without -d.
+# deterministically - in copies of the capture, move the application's side
+# of every HTTPS connection onto ports Wireshark 4.2 claims for another
+# protocol, rotating through the copies until every claimed port has been
+# tried, and require the decrypt of each copy to match the original exactly.
+# This only has teeth under Wireshark 4.2.x (what ubuntu-24.04 ships): 4.4
+# decodes a moved copy as TLS even without -d, which is checked and reported.
 CLAIMED_PORTS=(44818 48898 34980 57000 40000 44321 44322 48049)
 mapfile -t HTTPS_CLIENT_PORTS < <(tshark_tls "$PCAP" -Y "tls.handshake.type==1" \
   -T fields -e tls.handshake.extensions_server_name -e tcp.srcport \
@@ -511,10 +518,34 @@ if [[ ${#HTTPS_CLIENT_PORTS[@]} -lt 2 || ${#HTTPS_CLIENT_PORTS[@]} -gt ${#CLAIME
   echo "::error::expected 2..${#CLAIMED_PORTS[@]} application-side ports for the $QUOTE_HOST/$ECHO_HOST connections; got '${HTTPS_CLIENT_PORTS[*]}'"
   exit 1
 fi
-PORT_MAP=()
-for i in "${!HTTPS_CLIENT_PORTS[@]}"; do PORT_MAP+=("${HTTPS_CLIENT_PORTS[$i]}:${CLAIMED_PORTS[$i]}"); done
+# A claimed port some other connection of this capture already uses cannot
+# take a moved one (the two TCP streams would merge), so it is left out and
+# named, rather than failing the run over a draw of the MySQL/Postgres ports.
+mapfile -t USED_PORTS < <(tshark_tls "$PCAP" -Y tcp -T fields -e tcp.srcport -e tcp.dstport | tr '\t' '\n' | sort -u)
+TARGET_PORTS=()
+for p in "${CLAIMED_PORTS[@]}"; do
+  if [[ " ${USED_PORTS[*]} " == *" $p "* ]]; then
+    echo "::notice::port $p is already used in this capture; not moving a connection onto it"
+  else
+    TARGET_PORTS+=("$p")
+  fi
+done
+N_CONN=${#HTTPS_CLIENT_PORTS[@]}
+if [[ ${#TARGET_PORTS[@]} -lt $N_CONN ]]; then
+  echo "::error::only ${#TARGET_PORTS[@]} claimed ports are free in this capture for $N_CONN HTTPS connections"
+  exit 1
+fi
 REMAPPED_PCAP=$(mktemp --suffix=.pcap)
-if ! REMAPPED_FIELDS=$(sudo cat "$PCAP" | python3 -c '
+HEURISTIC_HELD=()
+COVERED=()
+COPIES=$(( (${#TARGET_PORTS[@]} + N_CONN - 1) / N_CONN ))
+for (( copy = 0; copy < COPIES; copy++ )); do
+  PORT_MAP=()
+  for i in "${!HTTPS_CLIENT_PORTS[@]}"; do
+    PORT_MAP+=("${HTTPS_CLIENT_PORTS[$i]}:${TARGET_PORTS[$(( (copy * N_CONN + i) % ${#TARGET_PORTS[@]} ))]}")
+  done
+  COVERED+=("${PORT_MAP[@]#*:}")
+  if ! REMAPPED_FIELDS=$(sudo cat "$PCAP" | python3 -c '
 import struct, sys
 remap = dict((int(a), int(b)) for a, b in (m.split(":") for m in sys.argv[1:]))
 data = sys.stdin.buffer.read()
@@ -538,28 +569,37 @@ while off + 16 <= len(data):
 sys.stdout.buffer.write(bytes(out))
 sys.stderr.write(str(moved))
 ' "${PORT_MAP[@]}" 2>&1 >"$REMAPPED_PCAP") || ! [[ "$REMAPPED_FIELDS" =~ ^[1-9][0-9]*$ ]]; then
-  echo "::error::could not rewrite the capture's HTTPS client ports (${PORT_MAP[*]}): $REMAPPED_FIELDS"
-  exit 1
-fi
-echo "rewrote $REMAPPED_FIELDS TCP port field(s): ${PORT_MAP[*]}"
-REMAPPED_REQS=$(tshark_tls "$REMAPPED_PCAP" -Y "http.request" -T fields -e http.host -e http.request.uri || true)
+    echo "::error::could not rewrite the capture's HTTPS client ports (${PORT_MAP[*]}): $REMAPPED_FIELDS"
+    exit 1
+  fi
+  echo "copy $((copy + 1))/$COPIES: rewrote $REMAPPED_FIELDS TCP port field(s): ${PORT_MAP[*]}"
+  REMAPPED_REQS=$(tshark_tls "$REMAPPED_PCAP" -Y "http.request" -T fields -e http.host -e http.request.uri || true)
+  if [[ "$REMAPPED_REQS" != "$DECRYPTED_REQS" ]]; then
+    echo "decrypted HTTP requests with the client ports moved:"
+    echo "$REMAPPED_REQS"
+    echo "::error::moving the HTTPS connections onto ephemeral ports Wireshark assigns to other protocols (${PORT_MAP[*]}) changed what decrypts - the decrypt depends on the port the application happened to draw"
+    exit 1
+  fi
+  if [[ "$(tshark_tls_heuristic "$REMAPPED_PCAP" -Y "http.request" -T fields -e http.host -e http.request.uri || true)" == "$DECRYPTED_REQS" ]]; then
+    HEURISTIC_HELD+=("${PORT_MAP[@]}")
+  fi
+done
 rm -f "$REMAPPED_PCAP"
-echo "decrypted HTTP requests with the client ports moved:"
-echo "$REMAPPED_REQS"
-if [[ "$REMAPPED_REQS" != "$DECRYPTED_REQS" ]]; then
-  echo "::error::moving the HTTPS connections onto ephemeral ports Wireshark assigns to other protocols changed what decrypts - the decrypt depends on the port the application happened to draw"
-  exit 1
+if [[ ${#HEURISTIC_HELD[@]} -eq $(( COPIES * N_CONN )) ]]; then
+  echo "::notice::this tshark ($(tshark --version | head -n1)) decrypts the moved copies even without -d, so this check cannot fail here; it guards the fix only under Wireshark 4.2.x"
+elif [[ ${#HEURISTIC_HELD[@]} -gt 0 ]]; then
+  echo "::notice::without -d this tshark still decrypted the copies moved as ${HEURISTIC_HELD[*]}; those ports test nothing here"
 fi
-echo "good! decrypt holds on every ephemeral port"
+echo "good! decrypt holds with the HTTPS client ports moved onto each of $(printf '%s\n' "${COVERED[@]}" | sort -un | paste -sd' ')"
 endsec
 
 section "Assert the captured pcap contains the HTTP-over-TLS ClientHellos"
-# tshark only dissects a ClientHello when the TCP stream BEGINS with a
-# TLS record. That holds for the HTTP-over-TLS sessions, so we assert a
-# ClientHello carrying each upstream host's SNI actually crossed the
-# proxy (proving the traffic went out as TLS, not a fall-back to plain
-# TCP). We key on the SNI rather than a raw frame count: the app shares
-# one keep-alive client, so the two /echo calls collapse onto a single
+# tshark_tls dissects every stream to keploy's proxy port as TLS, so each
+# HTTP-over-TLS session's ClientHello is in the output, and we assert one
+# carrying each upstream host's SNI actually crossed the proxy (proving
+# the traffic went out as TLS, not a fall-back to plain TCP). We key
+# on the SNI rather than a raw frame count: the app shares one
+# keep-alive client, so the two /echo calls collapse onto a single
 # connection — a count-based check is at the mercy of connection reuse
 # and was the real reason this step flaked (it silently leaned on the
 # old public endpoints NOT reusing connections to reach its threshold).
