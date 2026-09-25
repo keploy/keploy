@@ -259,10 +259,13 @@ jobs:
 
       # The owner's half of the container rule: remove every container this
       # job started (its compose project), at any age, and release its Docker
-      # lock. If one survives `docker rm -f` the VM is wedged: the reaper
-      # records it so the next job on any runner fails its pre-job reap at
-      # once instead of after the age threshold, and fails this job with the
-      # remediation.
+      # lock. If one survives `docker rm -f` the reaper records it, so the next
+      # job on any runner fails its pre-job reap at once instead of after the
+      # age threshold. That pre-job reap is where a wedge fails a job: it
+      # retries the removal with a fresh settle window and blocks new work.
+      # Here it is only a warning, because this job's result is already known,
+      # and a removal that is merely slow on a loaded VM would otherwise turn a
+      # green job red with advice to restart the VM.
       - name: Remove this job's containers
         if: always()
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'

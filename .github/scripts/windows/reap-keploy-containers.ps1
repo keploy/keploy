@@ -56,16 +56,18 @@
 # That detection must not wait for the age threshold, so a container that
 # survives removal is recorded in -WedgeDir (one <id>.wedged file, shared by
 # every runner on the machine). A recorded container was already given up by
-# its owner, so every later run of this script - pre-job included - retries its
-# removal whatever its age: still there means the VM is still wedged (fail the
-# pre-job reap at once); gone means the VM was restarted, and the record is
-# deleted. A wedged job's own teardown records its agent, so the very next job
-# on any runner refuses to start instead of burning its budget.
+# its owner, so every later sweep - pre-job included, owner teardowns excepted -
+# retries its removal whatever its age: still there means the VM is still
+# wedged (fail the pre-job reap at once); gone means the VM was restarted, and
+# the record is deleted. A wedged job's own teardown records its agent (and
+# only warns), so the very next job on any runner refuses to start instead of
+# burning its budget.
 [CmdletBinding()]
 param(
-    # Exit non-zero when a container survives removal. The pre-job caller and
-    # the owning job's teardown want that; the post-run cleanup caller does not,
-    # because failing teardown would mask the real result of the run.
+    # Exit non-zero when a container survives removal. Only the pre-job caller
+    # wants that. The owning job's teardown and the post-run cleanup warn
+    # instead: failing teardown would mask the real result of the run, and the
+    # next pre-job reap retries the container and fails then.
     [switch]$FailOnStuck,
 
     # The age sweep leaves any container whose last lifecycle event is younger
@@ -142,9 +144,11 @@ function Request-Removal([string]$Id, [string]$Name, [string]$Why) {
     $names[$Id] = $Name
 }
 
-# 1. Containers an earlier run recorded as surviving removal.
+# 1. Containers an earlier run recorded as surviving removal. Not the owner's
+# teardown's business: it is about this job's own containers, and waiting out
+# another runner's wedge there would only fail a job whose result is known.
 $recorded = @()
-if (Test-Path -LiteralPath $WedgeDir) {
+if ((-not $ComposeProject) -and (Test-Path -LiteralPath $WedgeDir)) {
     $recorded = @(Get-ChildItem -LiteralPath $WedgeDir -Filter '*.wedged' -ErrorAction SilentlyContinue)
 }
 foreach ($f in $recorded) {

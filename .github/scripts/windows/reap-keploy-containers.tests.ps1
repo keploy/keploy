@@ -242,15 +242,30 @@ try {
     $r = Invoke-Reaper @{ ComposeProject = 'keploy-5e7e50f3'; FailOnStuck = $true }
     Report "the owning job removes exactly its own containers, young as they are" $r @((Removed $r @('mine1', 'mine2')), (Code $r 0))
 
+    # Another runner recorded a wedge during this job. The owner's teardown
+    # neither retries it nor fails for it; the next pre-job reap does.
+    $shared = New-Dir 'wedge'
+    Set-Content -Path (Join-Path $shared 'other.wedged') -Value 'keploy-v3-9999'
+    Set-State @(
+        (Container 'mine' 'keploy-v3-aaaa' (Ago 2) (Ago 2) $NEVER 'keploy-5e7e50f3'),
+        (Container 'other' 'keploy-v3-9999' (Ago 5) (Ago 5) $NEVER 'keploy-0c0ffee0' -Stuck)
+    )
+    $r = Invoke-Reaper @{ ComposeProject = 'keploy-5e7e50f3'; WedgeDir = $shared }
+    Report "the owner's teardown leaves another runner's recorded wedge to the pre-job reap" $r @(
+        (Removed $r @('mine')), (Code $r 0),
+        $(if (-not (Test-Path (Join-Path $shared 'other.wedged'))) { "dropped the other runner's wedge record" })
+    )
+
     $shared = New-Dir 'wedge'
     Set-State @(
         (Container 'mine' 'keploy-v3-cccc' (Ago 3) (Ago 3) $NEVER 'keploy-5e7e50f3' -Stuck),
         (Container 'sib' 'keploy-v3-dddd' (Ago 1) (Ago 1) $NEVER 'keploy-0c0ffee0')
     )
-    $r = Invoke-Reaper @{ ComposeProject = 'keploy-5e7e50f3'; FailOnStuck = $true; WedgeDir = $shared }
+    $r = Invoke-Reaper @{ ComposeProject = 'keploy-5e7e50f3'; WedgeDir = $shared }
     $marker = Join-Path $shared 'mine.wedged'
-    Report "the owning job fails, and records its agent, when it survives removal" $r @(
-        (Removed $r @('mine')), (Code $r 1),
+    Report "the owning job warns, and records its agent, when it survives removal" $r @(
+        (Removed $r @('mine')), (Code $r 0),
+        $(if ($r.Output -notmatch '::warning::Docker VM is wedged') { "missing the wedged-VM warning" }),
         $(if (-not (Test-Path $marker)) { "no wedge record written" })
     )
 
