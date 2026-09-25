@@ -118,6 +118,8 @@ type ScopeReq struct {
 	// (Design A). Optional: 0/omitted falls back to the single global scope
 	// (correct for sequential single-worker runs and suite-level).
 	Pid int `json:"pid,omitempty"`
+	// At is the runner's own clock for this boundary; zero means the agent stamps its read time.
+	At time.Time `json:"at,omitzero"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during

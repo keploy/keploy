@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
@@ -58,11 +59,11 @@ func (r *runnerInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, er
 	return r.windows, nil
 }
 
-func (r *runnerInstr) BeginScope(_ context.Context, name string, _ int) error {
+func (r *runnerInstr) BeginScope(_ context.Context, name string, _ int, _ time.Time) error {
 	return r.mark("begin " + name)
 }
 
-func (r *runnerInstr) EndScope(_ context.Context, name string, _ int) error {
+func (r *runnerInstr) EndScope(_ context.Context, name string, _ int, _ time.Time) error {
 	return r.mark("end " + name)
 }
 

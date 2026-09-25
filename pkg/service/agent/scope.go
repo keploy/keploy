@@ -39,7 +39,7 @@ type scopeKey struct {
 // that worker so PARALLEL workers each get their own served view without
 // stomping each other (Design A); pid == 0 falls back to the single global
 // scope (sequential single-worker runs, and the suite-level default).
-func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
+func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.Time) error {
 	if name == "" {
 		return nil
 	}
@@ -77,17 +77,22 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
 	if a.workerOpen == nil {
 		a.workerOpen = make(map[scopeKey]time.Time)
 	}
-	a.workerOpen[scopeKey{pid: uint32(pid), name: name}] = time.Now()
+	a.workerOpen[scopeKey{pid: uint32(pid), name: name}] = boundaryTime(at)
 	a.scopeMu.Unlock()
 	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
+}
+
+// BeginScope is BeginScopeAt stamped with the agent's clock.
+func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
+	return a.BeginScopeAt(ctx, name, pid, time.Time{})
 }
 
 // EndScope closes a per-test scope. In record mode it records the [begin, now]
 // window (tagged with the worker PID) for later correlation. In test mode it
 // restores this worker's whole-pool view so a call made between tests still
 // matches.
-func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
+func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Time) error {
 	if name == "" {
 		return nil
 	}
@@ -115,11 +120,24 @@ func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 	start, ok := a.workerOpen[k]
 	if ok {
 		delete(a.workerOpen, k)
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: time.Now(), PID: uint32(pid)})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid)})
 	}
 	a.scopeMu.Unlock()
 	a.logger.Debug("scope end (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
+}
+
+// EndScope is EndScopeAt stamped with the agent's clock.
+func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
+	return a.EndScopeAt(ctx, name, pid, time.Time{})
+}
+
+// boundaryTime is the runner's time when it gave one, else now.
+func boundaryTime(at time.Time) time.Time {
+	if at.IsZero() {
+		return time.Now()
+	}
+	return at
 }
 
 // GetScopeWindows returns the per-test windows collected this record session,

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -16,8 +17,12 @@ func TestParseRunnerLine(t *testing.T) {
 		line string
 		want scopeEvent
 	}{
-		{"json run is a begin, qualified by package", `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"github.com/acme/shop/cart","Test":"TestAdd"}`,
-			scopeEvent{kind: scopeBegin, pkg: "github.com/acme/shop/cart", test: "TestAdd"}},
+		{"json run is a begin, qualified by package, at the runner's time", `{"Time":"2026-09-24T10:00:00.000123456Z","Action":"run","Package":"github.com/acme/shop/cart","Test":"TestAdd"}`,
+			scopeEvent{kind: scopeBegin, pkg: "github.com/acme/shop/cart", test: "TestAdd", at: time.Date(2026, 9, 24, 10, 0, 0, 123456, time.UTC)}},
+		{"json time with an offset", `{"Time":"2026-09-24T15:30:00.5+05:30","Action":"pass","Package":"cart","Test":"TestAdd"}`,
+			scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd", at: time.Date(2026, 9, 24, 10, 0, 0, 500000000, time.UTC)}},
+		{"json with an unreadable time still marks the boundary", `{"Time":"yesterday","Action":"run","Package":"cart","Test":"TestAdd"}`,
+			scopeEvent{kind: scopeBegin, pkg: "cart", test: "TestAdd"}},
 		{"json pass is an end", `{"Action":"pass","Package":"cart","Test":"TestAdd","Elapsed":0.01}`, scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd"}},
 		{"json fail is an end", `{"Action":"fail","Package":"cart","Test":"TestAdd"}`, scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd"}},
 		{"json skip is an end", `{"Action":"skip","Package":"cart","Test":"TestAdd/empty"}`, scopeEvent{kind: scopeEnd, pkg: "cart", test: "TestAdd/empty"}},
@@ -48,7 +53,10 @@ func TestParseRunnerLine(t *testing.T) {
 		{"a pipe inside a log line is not a prefix", "    cart_test.go:12: got a | b", scopeEvent{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, parseRunnerLine(tc.line))
+			got := parseRunnerLine(tc.line)
+			require.True(t, got.at.Equal(tc.want.at), "time: got %v want %v", got.at, tc.want.at)
+			got.at, tc.want.at = time.Time{}, time.Time{}
+			require.Equal(t, tc.want, got)
 		})
 	}
 }
@@ -58,27 +66,29 @@ func TestScopeEventName(t *testing.T) {
 	require.Equal(t, "TestAdd", scopeEvent{test: "TestAdd"}.name())
 }
 
-// fakeMarker records the scope calls in order.
+// fakeMarker records the scope calls in order, and the time each one carried.
 type fakeMarker struct {
 	mu    sync.Mutex
 	calls []string
+	ats   []time.Time
 }
 
-func (f *fakeMarker) BeginScope(_ context.Context, name string, pid int) error {
-	return f.add("begin", name, pid)
+func (f *fakeMarker) BeginScope(_ context.Context, name string, pid int, at time.Time) error {
+	return f.add("begin", name, pid, at)
 }
 
-func (f *fakeMarker) EndScope(_ context.Context, name string, pid int) error {
-	return f.add("end", name, pid)
+func (f *fakeMarker) EndScope(_ context.Context, name string, pid int, at time.Time) error {
+	return f.add("end", name, pid, at)
 }
 
-func (f *fakeMarker) add(mark, name string, pid int) error {
+func (f *fakeMarker) add(mark, name string, pid int, at time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if pid != 0 {
 		f.calls = append(f.calls, "unexpected pid")
 	}
 	f.calls = append(f.calls, mark+" "+name)
+	f.ats = append(f.ats, at)
 	return nil
 }
 
@@ -171,6 +181,28 @@ func TestRunnerScopeFlagsPackagesRunningTogether(t *testing.T) {
 	require.Equal(t, []string{"github.com/acme/a.TestX and github.com/acme/b.TestY"}, scope.overlapping())
 }
 
+// go test -json carries the runner's own clock; plain output has none, so those boundaries get stamped on read.
+func TestRunnerScopePassesTheRunnerTime(t *testing.T) {
+	marker, scope := feed(t, `{"Time":"2026-09-24T10:00:00.000123456Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.5Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
+=== RUN   TestB
+--- PASS: TestB (0.00s)
+`)
+	require.Equal(t, []string{"begin orders/e2e.TestA", "end orders/e2e.TestA", "begin TestB", "end TestB"}, marker.calls)
+	require.True(t, marker.ats[0].Equal(time.Date(2026, 9, 24, 10, 0, 0, 123456, time.UTC)))
+	require.True(t, marker.ats[1].Equal(time.Date(2026, 9, 24, 10, 0, 0, 500000000, time.UTC)))
+	require.True(t, marker.ats[2].IsZero())
+	require.True(t, marker.ats[3].IsZero())
+	require.True(t, scope.usedReadTime())
+}
+
+func TestRunnerScopeWithTimedEventsNeverUsesReadTime(t *testing.T) {
+	_, scope := feed(t, `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"p","Test":"TestA"}
+{"Time":"2026-09-24T10:00:01Z","Action":"pass","Package":"p","Test":"TestA"}
+`)
+	require.False(t, scope.usedReadTime())
+}
+
 func TestRunnerScopeIgnoresUnrelatedOutput(t *testing.T) {
 	marker, scope := feed(t, "collected 3 items\n\ntest_cart.py::test_add PASSED\n=== something else\n")
 	require.Empty(t, marker.calls)
@@ -186,4 +218,5 @@ func TestNilRunnerScopeIsOff(t *testing.T) {
 	var scope *runnerScope
 	require.Nil(t, scope.writer())
 	require.Nil(t, scope.overlapping())
+	require.False(t, scope.usedReadTime())
 }

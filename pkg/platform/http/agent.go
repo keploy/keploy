@@ -2469,19 +2469,19 @@ func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]str
 	return nil
 }
 
-// BeginScope marks the start of a named per-test scope on the agent.
-func (a *AgentClient) BeginScope(ctx context.Context, name string, pid int) error {
-	return a.postScope(ctx, "begin", name, pid)
+// BeginScope marks the start of a named per-test scope on the agent; a zero at leaves the stamp to the agent's clock.
+func (a *AgentClient) BeginScope(ctx context.Context, name string, pid int, at time.Time) error {
+	return a.postScope(ctx, "begin", name, pid, at)
 }
 
-// EndScope marks the end of a named per-test scope on the agent.
-func (a *AgentClient) EndScope(ctx context.Context, name string, pid int) error {
-	return a.postScope(ctx, "end", name, pid)
+// EndScope marks the end of a named per-test scope on the agent; a zero at leaves the stamp to the agent's clock.
+func (a *AgentClient) EndScope(ctx context.Context, name string, pid int, at time.Time) error {
+	return a.postScope(ctx, "end", name, pid, at)
 }
 
-func (a *AgentClient) postScope(ctx context.Context, mark string, name string, pid int) error {
+func (a *AgentClient) postScope(ctx context.Context, mark string, name string, pid int, at time.Time) error {
 	url := fmt.Sprintf("%s/scope/%s", a.conf.Agent.AgentURI, mark)
-	body, err := json.Marshal(models.ScopeReq{Name: name, Pid: pid})
+	body, err := json.Marshal(models.ScopeReq{Name: name, Pid: pid, At: at})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope %s: %w", mark, err)
 	}

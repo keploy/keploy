@@ -77,8 +77,8 @@ type ScopeReader interface {
 
 // ScopeMarker is an optional Instrumentation extension: Record posts the test boundaries it reads from the runner's output through it.
 type ScopeMarker interface {
-	BeginScope(ctx context.Context, name string, pid int) error
-	EndScope(ctx context.Context, name string, pid int) error
+	BeginScope(ctx context.Context, name string, pid int, at time.Time) error
+	EndScope(ctx context.Context, name string, pid int, at time.Time) error
 }
 
 // MissCapturer is an optional Instrumentation extension: under `--on-miss

@@ -30,6 +30,8 @@ type scopeEvent struct {
 	kind scopeEventKind
 	pkg  string
 	test string
+	// at is the runner's own clock for this boundary; zero when the output carries none.
+	at time.Time
 }
 
 // name is the scope name: the test, qualified by its package when the runner reports one.
@@ -75,7 +77,7 @@ func cleanRunnerLine(line string) string {
 }
 
 func parseJSONLine(line string) scopeEvent {
-	var ev struct{ Action, Package, Test string }
+	var ev struct{ Action, Package, Test, Time string }
 	if err := json.Unmarshal([]byte(line), &ev); err != nil || ev.Test == "" {
 		return scopeEvent{}
 	}
@@ -83,7 +85,8 @@ func parseJSONLine(line string) scopeEvent {
 	if kind == scopeNone {
 		return scopeEvent{}
 	}
-	return scopeEvent{kind: kind, pkg: ev.Package, test: ev.Test}
+	at, _ := time.Parse(time.RFC3339Nano, ev.Time)
+	return scopeEvent{kind: kind, pkg: ev.Package, test: ev.Test, at: at}
 }
 
 func kindOfAction(action string) scopeEventKind {
@@ -120,11 +123,12 @@ type runnerScope struct {
 	logger *zap.Logger
 	marker ScopeMarker
 
-	mu       sync.Mutex
-	partial  []byte
-	open     []scopeEvent
-	paused   map[string]bool
-	overlaps []string
+	mu        sync.Mutex
+	partial   []byte
+	open      []scopeEvent
+	paused    map[string]bool
+	overlaps  []string
+	readTimed int
 }
 
 func newRunnerScope(ctx context.Context, logger *zap.Logger, marker ScopeMarker) *runnerScope {
@@ -158,12 +162,12 @@ func (r *runnerScope) handle(ev scopeEvent) {
 	switch ev.kind {
 	case scopeBegin:
 		r.begin(ev)
-		r.mark(ev.name(), r.marker.BeginScope)
+		r.mark(ev, r.marker.BeginScope)
 	case scopePause:
 		r.paused[ev.name()] = true
 	case scopeEnd:
 		r.end(ev)
-		r.mark(ev.name(), r.marker.EndScope)
+		r.mark(ev, r.marker.EndScope)
 	}
 }
 
@@ -194,12 +198,25 @@ func (r *runnerScope) end(ev scopeEvent) {
 }
 
 // mark posts one test boundary to the agent; a failure is logged, never fatal.
-func (r *runnerScope) mark(name string, post func(context.Context, string, int) error) {
+func (r *runnerScope) mark(ev scopeEvent, post func(context.Context, string, int, time.Time) error) {
+	if ev.at.IsZero() {
+		r.readTimed++
+	}
 	ctx, cancel := context.WithTimeout(r.ctx, scopeCallTimeout)
 	defer cancel()
-	if err := post(ctx, name, 0); err != nil {
-		r.logger.Debug("failed to report a test boundary to the agent", zap.String("test", name), zap.Error(err))
+	if err := post(ctx, ev.name(), 0, ev.at); err != nil {
+		r.logger.Debug("failed to report a test boundary to the agent", zap.String("test", ev.name()), zap.Error(err))
 	}
+}
+
+// usedReadTime reports whether any boundary had to be stamped when keploy read it, for want of a runner time.
+func (r *runnerScope) usedReadTime() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.readTimed > 0
 }
 
 // overlapping lists the pairs of tests that ran at the same time, in the order they were seen.
