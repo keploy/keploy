@@ -29,7 +29,7 @@ FAIL=0
 
 # Tear down only this project, by name. Never a blanket prune.
 cleanup() {
-  for f in docker-compose.yml docker-compose.nodep.yml docker-compose.fail.yml docker-compose.miss.yml; do
+  for f in docker-compose.yml docker-compose.nodep.yml docker-compose.fail.yml docker-compose.miss.yml docker-compose.linger.yml; do
     [ -f "$f" ] && sudo docker compose -f "$f" down --remove-orphans >/dev/null 2>&1
   done
 }
@@ -83,6 +83,9 @@ if os.environ.get("UNRECORDED"):
     except Exception as e:
         print("unrecorded call failed as expected:", type(e).__name__, flush=True)
 print("RUNNER PASSED 3", flush=True)
+# Stay up after the calls when asked, for a step that needs the runner alive
+# while something else happens to the project.
+time.sleep(int(os.environ.get("LINGER", "0")))
 sys.exit(EXIT)
 PY
 
@@ -125,6 +128,13 @@ YML
       UNRECORDED: "/price/tsla"
 YML
 } > docker-compose.miss.yml
+
+# Same again, but the runner stays up after its calls.
+{ echo "services:"; runner_service; cat <<'YML'
+    environment:
+      LINGER: "60"
+YML
+} > docker-compose.linger.yml
 
 priced_mocks() {
   local n
@@ -184,6 +194,27 @@ sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay \
 RC=${PIPESTATUS[0]}
 echo "failing-runner replay exit=$RC"
 [ "$RC" -eq 7 ] || { echo "FAIL: keploy must mirror the runner's exit code 7, got $RC"; FAIL=1; }
+cleanup
+
+echo "== 5. an agent that dies mid-run is keploy's failure, not the runner's =="
+# The agent is a service in the project: when it dies, compose aborts the
+# project and stops the runner, whose exit is then compose's stop (137/143),
+# not its verdict. keploy must say its agent died and exit with its own 1.
+( for _ in $(seq 1 240); do grep -q "RUNNER PASSED 3" agentdies.log 2>/dev/null && break; sleep 0.5; done
+  agent=$(sudo docker ps --format '{{.Names}}' | grep '^keploy-v3-' | head -1)
+  echo "killing the agent container ${agent:-<none found>}"
+  [ -n "$agent" ] && sudo docker kill "$agent" >/dev/null ) &
+KILLER=$!
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay \
+  -c "docker compose -f docker-compose.linger.yml up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee agentdies.log
+RC=${PIPESTATUS[0]}
+wait "$KILLER"
+echo "replay whose agent was killed exit=$RC"
+grep -q "RUNNER PASSED 3" agentdies.log || { echo "FAIL: the runner never got as far as the kill"; FAIL=1; }
+[ "$RC" -eq 1 ] || { echo "FAIL: keploy must exit its own 1 when its agent dies, got $RC (compose stopping the runner, mirrored as the runner's own exit)"; FAIL=1; }
+grep -q "the keploy agent stopped while the test command was running" agentdies.log || { echo "FAIL: keploy did not say its agent died"; FAIL=1; }
+sudo grep -q '^failedBy: keploy' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not blame keploy:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
+sudo grep -q '^runnerExitCode: -1' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt gives the runner an exit of its own:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK COMPOSE E2E: PASSED"; else echo "MOCK COMPOSE E2E: FAILED"; fi
 exit "$FAIL"

@@ -3,8 +3,11 @@ package mock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -74,6 +77,9 @@ type composeInstr struct {
 	// compose, the only account of the run there is.
 	leftOutcome    models.MockOutcome
 	leftOutcomeErr error
+	// agentFailure is what the agent's container says about how it stopped
+	// (ComposeAgentFailureReader); nil: it outlived the app.
+	agentFailure func() error
 
 	mu         sync.Mutex
 	events     []string
@@ -188,6 +194,13 @@ func (f *composeInstr) released() bool {
 
 func (f *composeInstr) ComposeAgentOutcome() (models.MockOutcome, error) {
 	return f.leftOutcome, f.leftOutcomeErr
+}
+
+func (f *composeInstr) ComposeAgentFailure() error {
+	if f.agentFailure == nil {
+		return nil
+	}
+	return f.agentFailure()
 }
 
 func (f *composeInstr) GetOutgoing(context.Context, models.OutgoingOptions) (<-chan *models.Mock, error) {
@@ -444,11 +457,126 @@ func TestComposeProjectThatDiesMirrorsItsExitCode(t *testing.T) {
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
 
-	if err := svc.Record(context.Background()); err == nil {
+	err := svc.Record(context.Background())
+	if err == nil {
 		t.Fatal("Record succeeded against a compose project that died")
 	}
 	if utils.ErrCode != 7 {
 		t.Fatalf("exit code %d, want the runner's 7", utils.ErrCode)
+	}
+	// Said in words, not with the AppErrorType spliced in: "the compose
+	// project an unexpected error occurred while ..." is what it used to say.
+	if !strings.Contains(err.Error(), "the compose project exited with code 7 while keploy was waiting for the keploy-agent to come up") ||
+		strings.Contains(err.Error(), string(models.ErrUnExpected)) {
+		t.Fatalf("Record returned %q", err)
+	}
+}
+
+// The agent is a service in the project, and when it is the one that stopped
+// -- it could not start: tracefs missing on the machine Docker runs on --
+// compose aborts the project over it, and the exit that arrives is compose's
+// ("dependency failed to start: container keploy-v3-… exited (6)"), never the
+// test command's: it did not run. Mirrored as the runner's code, it told the
+// user their tests failed, and the agent's own reason -- the remedy -- was
+// lost.
+func TestComposeAgentThatCannotStartIsKeploysFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(Service, context.Context) error
+	}{
+		{"record", func(s Service, ctx context.Context) error { return s.Record(ctx) }},
+		{"replay", func(s Service, ctx context.Context) error { return s.Replay(ctx) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
+			// compose's own exit status for a dependency that failed to start
+			instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 1})
+			instr.agentFailure = func() error {
+				// What AgentClient.ComposeAgentFailure does for an agent that
+				// exited 6 before the app started: arm the agent's own code
+				// and hand back its reason.
+				utils.SetExitCodeOnce(utils.ExitEnvironmentUnsupported)
+				return fmt.Errorf("%w: the keploy agent could not start (the keploy-agent container keploy-v3-x exited with code 6)", utils.ErrEnvironmentUnsupported)
+			}
+			cfg := instrConfig(instr, utils.DockerCompose, "docker compose up")
+			cfg.Mock.OnMiss = string(models.MissFail)
+			cfg.Path = t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cfg.Path, "set"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+
+			err := tc.run(New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg), context.Background())
+			if !errors.Is(err, utils.ErrEnvironmentUnsupported) {
+				t.Fatalf("returned %v, want the agent's own reason", err)
+			}
+			if utils.ErrCode != utils.ExitEnvironmentUnsupported {
+				t.Fatalf("exit code %d, want the agent's %d: compose's exit was mirrored as the test command's", utils.ErrCode, utils.ExitEnvironmentUnsupported)
+			}
+			if tc.name != "replay" {
+				return
+			}
+			r, rerr := ReadReceipt(cfg.Path, "set")
+			if rerr != nil || r == nil {
+				t.Fatalf("no receipt: %v", rerr)
+			}
+			if r.FailedBy != FailedBySetup || r.RunnerExitCode != -1 || r.ExitCode != utils.ExitEnvironmentUnsupported {
+				t.Fatalf("receipt failedBy=%q runner=%d exit=%d, want keploy's own setup failure with the test command never run", r.FailedBy, r.RunnerExitCode, r.ExitCode)
+			}
+		})
+	}
+}
+
+// An agent that dies while the test command runs takes the whole project
+// down with it -- compose aborts on it and stops the test command -- so the
+// exit that arrives is compose stopping the suite (137 here), not the suite's
+// verdict. Mirrored, it failed a suite that never finished, in the suite's
+// name, and said nothing about the agent.
+func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(Service, context.Context) error
+	}{
+		{"record", func(s Service, ctx context.Context) error { return s.Record(ctx) }},
+		{"replay", func(s Service, ctx context.Context) error { return s.Replay(ctx) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortAgentBudget(t)
+			instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 137})
+			instr.runUntilReady = true
+			died := errors.New("the keploy agent stopped while the test command was running: the keploy-agent container keploy-v3-x exited with code 137")
+			instr.agentFailure = func() error { return died }
+			cfg := instrConfig(instr, utils.DockerCompose, "docker compose up")
+			cfg.Mock.OnMiss = string(models.MissFail)
+			cfg.Path = t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cfg.Path, "set"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+
+			err := tc.run(New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg), context.Background())
+			if !errors.Is(err, died) {
+				t.Fatalf("returned %v, want keploy's own failure naming the agent", err)
+			}
+			if utils.ErrCode == 137 {
+				t.Fatal("exit 137: compose stopping the test command was mirrored as the test command's own exit")
+			}
+			if tc.name != "replay" {
+				return
+			}
+			if utils.ErrCode != utils.ExitKeployError {
+				t.Fatalf("exit code %d, want keploy's %d", utils.ErrCode, utils.ExitKeployError)
+			}
+			r, rerr := ReadReceipt(cfg.Path, "set")
+			if rerr != nil || r == nil {
+				t.Fatalf("no receipt: %v", rerr)
+			}
+			if r.FailedBy != FailedByKeploy || r.RunnerExitCode != -1 || r.Isolated || !strings.Contains(r.Error, "exited with code 137") {
+				t.Fatalf("receipt failedBy=%q runner=%d isolated=%v error=%q, want keploy's own failure and why", r.FailedBy, r.RunnerExitCode, r.Isolated, r.Error)
+			}
+		})
 	}
 }
 

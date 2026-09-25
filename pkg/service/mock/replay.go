@@ -22,8 +22,9 @@ import (
 // the runner drives the requests, Keploy answers the outgoing calls from the
 // set. On a miss it applies the configured policy (fail / passthrough /
 // record). It propagates the runner's exit code, and with --strict also exits
-// non-zero when any recorded mock was missed. It returns an error only for a
-// failure of keploy's own, which a failing test command never is.
+// non-zero when any recorded mock was missed. It returns an error for a
+// failure of keploy's own -- one that stopped the run, or left --strict unable
+// to verify it -- which a failing test command never is.
 func (m *mockService) Replay(ctx context.Context) (err error) {
 	name := m.setName()
 	started := time.Now()
@@ -265,7 +266,14 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if parent.Err() != nil { // user Ctrl+C
 		return nil
 	}
-	if ctx.Err() != nil && (appErr.AppErrorType == models.ErrCtxCanceled || appErr.AppErrorType == "") {
+	if cause := m.composeAgentFailure(); cause != nil {
+		// The agent died under the test command. Under compose that stops the
+		// whole project, test command included, and the exit that arrived
+		// above is compose's stop, not the suite's verdict: mirrored, it
+		// failed a suite that never finished, in the suite's name.
+		utils.LogError(m.logger, cause, "the replay did not finish")
+		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: cause}
+	} else if ctx.Err() != nil && (appErr.AppErrorType == models.ErrCtxCanceled || appErr.AppErrorType == "") {
 		// Not the user: something in the run's own errgroup failed while the
 		// test command ran -- the agent died under it -- and the runner was
 		// stopped with it. That is keploy not completing the run. Left as a
@@ -340,8 +348,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	var keployErr string
 	if failedBy == FailedByKeploy {
 		isolated, isolationNote = false, "keploy did not complete the run: "+string(appErr.AppErrorType)
+		keployFailure = errors.New(isolationNote)
 		if appErr.Err != nil {
 			keployErr = appErr.Err.Error()
+			keployFailure = fmt.Errorf("keploy did not complete the run: %w", appErr.Err)
 		}
 	}
 	cov, covNote := m.readCoverage(workDir, coverageBefore, isolated)

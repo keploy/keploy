@@ -12,6 +12,7 @@ package http
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -451,5 +452,53 @@ func TestDockerComposeThatMayNotLowerPerfEventParanoidSaysWhy(t *testing.T) {
 	}
 	if len(steps) != 1 || steps[0] != perfEventParanoidRemedy {
 		t.Fatalf("logged next_step %q, want only %q", steps, perfEventParanoidRemedy)
+	}
+}
+
+// Under docker compose the agent's exit reaches keploy as its container's
+// State.ExitCode, not as a process keploy waited on. It has to mean exactly
+// what a native agent's exit status means: the specific code armed, its
+// reason carried, and the remedy for an agent in a container logged. Read any
+// other way, the tracefs remedy never reached a compose user, and compose's
+// own exit was mirrored as the test command's.
+func TestAComposeAgentThatCouldNotStartSaysWhyAsAnyOtherDoes(t *testing.T) {
+	for _, tc := range []struct {
+		code     int
+		cause    error // nil: a failure with no specific reason
+		wantCode int   // the exit code armed; 0 when none is
+	}{
+		{utils.ExitEnvironmentUnsupported, utils.ErrEnvironmentUnsupported, utils.ExitEnvironmentUnsupported},
+		{utils.ExitPrivilegeRequired, utils.ErrPrivilegeRequired, utils.ExitPrivilegeRequired},
+		{137, nil, 0},
+		{utils.ExitKeployError, nil, 0},
+	} {
+		core, logs := observer.New(zap.ErrorLevel)
+		a := &AgentClient{logger: zap.New(core), conf: &config.Config{}}
+		utils.ErrCode = 0
+		t.Cleanup(func() { utils.ErrCode = 0 })
+
+		err := a.agentStoppedBeforeReady(&agentContainerExit{container: "keploy-v3-x", code: tc.code}, true)
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("the keploy-agent container keploy-v3-x exited with code %d", tc.code)) {
+			t.Fatalf("exit %d: got %v, want an error naming the agent's container and its exit", tc.code, err)
+		}
+		if tc.cause != nil && !errors.Is(err, tc.cause) {
+			t.Fatalf("exit %d: got %q, want it to carry %q", tc.code, err, tc.cause)
+		}
+		if utils.ErrCode != tc.wantCode {
+			t.Fatalf("exit %d: armed %d, want %d", tc.code, utils.ErrCode, tc.wantCode)
+		}
+		if tc.cause != nil {
+			want := agentStartRemedy(tc.cause, true, runtime.GOOS)
+			if n := logs.FilterField(zap.String("next_step", want)).Len(); n != 1 {
+				t.Fatalf("exit %d: logged %v, want the container remedy %q once", tc.code, logs.All(), want)
+			}
+		}
+	}
+}
+
+func TestAgentContainerExitSaysItRanOutOfMemory(t *testing.T) {
+	err := &agentContainerExit{container: "keploy-v3-x", code: 137, oomKilled: true}
+	if got := err.Error(); !strings.Contains(got, "exited with code 137") || !strings.Contains(got, "out of memory") {
+		t.Fatalf("got %q", got)
 	}
 }

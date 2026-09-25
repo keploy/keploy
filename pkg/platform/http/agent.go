@@ -1638,7 +1638,9 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 // a readiness timeout five and a half minutes later.
 func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) error {
 	var cause error
-	var ee *exec.ExitError
+	// An *exec.ExitError for an agent keploy started itself, an
+	// *agentContainerExit for one compose started.
+	var ee interface{ ExitCode() int }
 	if errors.As(exitErr, &ee) {
 		switch ee.ExitCode() {
 		case utils.ExitPrivilegeRequired:
@@ -2080,6 +2082,55 @@ func (a *AgentClient) ComposeAgentOutcome() (models.MockOutcome, error) {
 		return models.MockOutcome{}, fmt.Errorf("failed to decode the replay outcome the keploy-agent container left: %w", err)
 	}
 	return outcome, nil
+}
+
+// agentContainerExit is a keploy-agent container that stopped, as docker
+// reports it. Its ExitCode is the agent's own status: the agent is the
+// container's process.
+type agentContainerExit struct {
+	container string
+	code      int
+	oomKilled bool
+}
+
+func (e *agentContainerExit) Error() string {
+	msg := fmt.Sprintf("the keploy-agent container %s exited with code %d", e.container, e.code)
+	if e.oomKilled {
+		msg += ", killed for running out of memory"
+	}
+	return msg
+}
+
+func (e *agentContainerExit) ExitCode() int { return e.code }
+
+// ComposeAgentFailure is the keploy-agent compose service stopping while the
+// app still needed it, as keploy's own failure -- and nil when it did not,
+// which is every run in which compose stopped the agent after the app exited.
+//
+// Under compose the agent is a service in the project, and when it stops
+// first, compose aborts the project over it: the exit that reaches keploy is
+// compose reporting the dependency it lost, or the test command's code after
+// compose stopped it, and neither is the test command's verdict. The agent's
+// container, read before keploy's teardown removes it, says which it was.
+//
+// An agent that stopped before the app ever started could not start at all,
+// and its exit status says why, exactly as a native agent's does
+// (agentStoppedBeforeReady): the specific code is armed, and the remedy
+// logged.
+func (a *AgentClient) ComposeAgentFailure() error {
+	ap, err := a.getApp()
+	if err != nil {
+		return nil
+	}
+	stopped, ok := ap.StoppedAgent()
+	if !ok || !stopped.AgentFailed() {
+		return nil
+	}
+	exit := &agentContainerExit{container: stopped.Container, code: stopped.Agent.ExitCode, oomKilled: stopped.Agent.OOMKilled}
+	if !stopped.AppStarted() {
+		return a.agentStoppedBeforeReady(exit, true)
+	}
+	return fmt.Errorf("the keploy agent stopped while the test command was running: %w", exit)
 }
 
 // ComposeDownOnSetupFailure tears down the managed docker-compose stack so a

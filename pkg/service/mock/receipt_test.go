@@ -61,6 +61,9 @@ type replayCase struct {
 	noneServed bool
 	bypass     []models.BypassRule
 	setupErr   error
+	// keployFails: the run fails on keploy's side, and Replay returns that
+	// failure as its own error rather than only an exit code.
+	keployFails bool
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -122,8 +125,12 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	if c.rewriteLaunch {
 		cfg.Command = "DYLD_INSERT_LIBRARIES='/tmp/keploy-native-1/keploy_shim.dylib' " + cfg.Command
 	}
-	if err := svc.Replay(context.Background()); err != nil && c.setupErr == nil {
+	err := svc.Replay(context.Background())
+	if err != nil && c.setupErr == nil && !c.keployFails {
 		t.Fatalf("Replay: %v", err)
+	}
+	if err == nil && c.keployFails {
+		t.Fatal("Replay returned no error for a run keploy itself did not complete: its exit code alone reads as the test command's")
 	}
 	return keployDir, utils.ErrCode, logs
 }
@@ -701,9 +708,14 @@ func TestAnAgentDyingMidRunFailsTheReplay(t *testing.T) {
 			utils.ErrCode = 0
 			t.Cleanup(func() { utils.ErrCode = 0 })
 
-			_ = New(zap.NewNop(), &failsGroup{composeInstr: base, stage: stage}, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
+			err := New(zap.NewNop(), &failsGroup{composeInstr: base, stage: stage}, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
 			if utils.ErrCode == 0 {
 				t.Fatal("a replay whose agent died mid-run exits 0")
+			}
+			// Returned, not only armed: keploy's 1 and a failing suite's 1 are
+			// the same number, and the error is what tells them apart.
+			if err == nil || !strings.Contains(err.Error(), "keploy did not complete the run") {
+				t.Fatalf("Replay returned %v, want keploy's own failure", err)
 			}
 			// Keploy stopped the test command, so it has no exit of its own
 			// to report -- a 0 there read as a suite that passed -- and the
@@ -719,7 +731,7 @@ func TestAnAgentDyingMidRunFailsTheReplay(t *testing.T) {
 // as the runner's failure wrote "the test command failed" into the receipt
 // about a suite that may never have been reached.
 func TestKeploysOwnFailureIsNotTheTestsFailing(t *testing.T) {
-	keployDir, code, _ := replayIn(t, replayCase{runExit: models.AppError{AppErrorType: models.ErrInternal, Err: errors.New("the app runner panicked")}})
+	keployDir, code, _ := replayIn(t, replayCase{runExit: models.AppError{AppErrorType: models.ErrInternal, Err: errors.New("the app runner panicked")}, keployFails: true})
 	if code == 0 {
 		t.Fatal("an internal failure exited cleanly")
 	}

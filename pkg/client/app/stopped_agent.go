@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
@@ -34,10 +36,54 @@ const maxAgentOutcomeBytes = 64 << 20
 // exit, there is no agent left to ask anything: whatever keploy needs to know
 // about the agent's end of the run has to be read from the container it left.
 type StoppedAgent struct {
+	// Container is the agent's container name.
+	Container string
+	// Agent and App are how the agent's container and the app's ended, as
+	// docker reports them; nil when docker could not say.
+	Agent *container.State
+	App   *container.State
 	// Outcome is the models.MockOutcome JSON a replaying agent writes as it
 	// stops (docker.AgentOutcomeFile). OutcomeErr says why there is none.
 	Outcome    []byte
 	OutcomeErr error
+}
+
+// AppStarted reports whether the app's container ever started. Compose starts
+// it only once the agent's healthcheck passes, so an app that never started is
+// one the agent never let through.
+func (s StoppedAgent) AppStarted() bool {
+	if s.App == nil {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339Nano, s.App.StartedAt)
+	return err == nil && !started.IsZero()
+}
+
+// AgentFailed reports whether the agent's container ended the run: it stopped
+// on its own while the app still needed it -- died, or was killed -- rather
+// than being stopped by compose once the app had exited, which is how every
+// compose run ends. Compose's stop is graceful, and the agent exits 0 from it.
+//
+// Timestamps cannot tell the two apart. The app runs in the agent's PID
+// namespace (pkg/platform/docker, modifyAppService), so when the agent dies
+// the kernel kills the app along with it, and the two end within the same
+// instant, in an order docker does not reliably record. What does tell them
+// apart is how the APP ended: killed by a signal -- the namespace going away
+// (137), or compose stopping it over the dead agent (143) -- rather than
+// exiting with a code of its own. An agent that exits non-zero after the app
+// has returned its own code is one compose killed for not stopping in time:
+// the app's code still stands.
+//
+// When docker could not say how the app ended, the agent's own exit is all
+// there is.
+func (s StoppedAgent) AgentFailed() bool {
+	if s.Agent == nil || s.Agent.Running || s.Agent.ExitCode == 0 {
+		return false
+	}
+	if s.App == nil || !s.AppStarted() || s.App.Running {
+		return true
+	}
+	return s.App.ExitCode == 128+int(syscall.SIGKILL) || s.App.ExitCode == 128+int(syscall.SIGTERM)
 }
 
 // stoppedAgent holds the last StoppedAgent read. Guarded because the App runs
@@ -48,8 +94,8 @@ type stoppedAgent struct {
 }
 
 // StoppedAgent returns what keploy read from the stopped keploy-agent compose
-// service, and false when nothing was read: not a compose run, not a mock
-// replay, or a run that was interrupted.
+// service, and false when nothing was read: not a compose mock run, or a run
+// that was interrupted.
 func (a *App) StoppedAgent() (StoppedAgent, bool) {
 	a.stopped.mu.Lock()
 	defer a.stopped.mu.Unlock()
@@ -59,30 +105,47 @@ func (a *App) StoppedAgent() (StoppedAgent, bool) {
 	return *a.stopped.read, true
 }
 
-// readStoppedAgent reads the agent's end of a compose mock replay out of its
-// stopped container. It must run after `docker compose up` has returned and
-// before ComposeDown removes the container: run() defers it after the
-// teardown, so it runs first.
+// readStoppedAgent reads the agent's end of a compose mock run out of its
+// stopped container: how it ended beside how the app did, and -- for a replay
+// -- what it served and missed. It must run after `docker compose up` has
+// returned and before ComposeDown removes the container: run() defers it after
+// the teardown, so it runs first.
 func (a *App) readStoppedAgent(ctx context.Context) {
-	if a.kind != utils.DockerCompose || !a.opts.MockMode || a.opts.Mode != models.MODE_TEST || a.keployContainer == "" {
+	if a.kind != utils.DockerCompose || !a.opts.MockMode || a.keployContainer == "" {
 		return
 	}
 	if ctx.Err() != nil {
 		// Interrupted: cmdCancel has already brought the project down, and an
-		// interrupted replay reports no outcome.
+		// interrupted run reports neither an outcome nor a failure.
 		return
 	}
 	readCtx, cancel := context.WithTimeout(context.Background(), stoppedAgentReadBudget)
 	defer cancel()
-	read := &StoppedAgent{}
-	read.Outcome, read.OutcomeErr = readContainerFile(readCtx, a.docker, a.keployContainer, docker.AgentOutcomeFile, maxAgentOutcomeBytes)
-	if read.OutcomeErr != nil {
-		a.logger.Debug("could not read the replay outcome the keploy-agent container left",
-			zap.String("container", a.keployContainer), zap.Error(read.OutcomeErr))
+	read := &StoppedAgent{Container: a.keployContainer}
+	read.Agent = a.containerState(readCtx, a.keployContainer)
+	if a.container != "" {
+		read.App = a.containerState(readCtx, a.container)
+	}
+	if a.opts.Mode == models.MODE_TEST {
+		read.Outcome, read.OutcomeErr = readContainerFile(readCtx, a.docker, a.keployContainer, docker.AgentOutcomeFile, maxAgentOutcomeBytes)
+		if read.OutcomeErr != nil {
+			a.logger.Debug("could not read the replay outcome the keploy-agent container left",
+				zap.String("container", a.keployContainer), zap.Error(read.OutcomeErr))
+		}
 	}
 	a.stopped.mu.Lock()
 	a.stopped.read = read
 	a.stopped.mu.Unlock()
+}
+
+// containerState is how name ended, or nil when docker cannot say.
+func (a *App) containerState(ctx context.Context, name string) *container.State {
+	info, err := a.docker.ContainerInspect(ctx, name)
+	if err != nil || info.ContainerJSONBase == nil || info.State == nil {
+		a.logger.Debug("could not read how a compose container ended", zap.String("container", name), zap.Error(err))
+		return nil
+	}
+	return info.State
 }
 
 // readContainerFile returns the regular file at path in the container name,

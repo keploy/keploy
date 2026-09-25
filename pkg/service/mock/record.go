@@ -238,13 +238,18 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Info("recording stopped", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return nil
 	}
-	if ctx.Err() != nil {
-		// Not the user: something in the run's own errgroup failed while the
-		// test command ran -- the agent died under it. What was captured is on
-		// disk, but it is not a whole recording, and saying "recorded" over it
-		// (or exiting 0) would vouch for one.
+	// Not the user: the agent died under the test command. What was captured
+	// is on disk, but it is not a whole recording, and saying "recorded" over
+	// it (or exiting 0) would vouch for one. Natively that fails the run's own
+	// errgroup; under compose the agent is a service in the project, its death
+	// stops the project -- test command included, whose exit is then compose's
+	// stop and not its verdict -- and only the agent's container says so.
+	cause := m.composeAgentFailure()
+	if cause == nil && ctx.Err() != nil {
+		cause = context.Cause(ctx)
+	}
+	if cause != nil {
 		stopReason = "the recording did not finish"
-		cause := context.Cause(ctx)
 		utils.LogError(m.logger, cause, stopReason, zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return fmt.Errorf("%s: %w", stopReason, cause)
 	}

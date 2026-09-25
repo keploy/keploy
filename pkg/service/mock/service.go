@@ -92,6 +92,17 @@ type ComposeOutcomeReader interface {
 	ComposeAgentOutcome() (models.MockOutcome, error)
 }
 
+// ComposeAgentFailureReader is an optional Instrumentation extension for a
+// docker compose run: the keploy agent, a service in the project, having
+// stopped while the app still needed it. Compose then aborts the project over
+// the agent, and the exit that reaches Record/Replay -- compose's own, or the
+// test command's after compose stopped it -- is not the test command's
+// verdict. nil when the agent outlived the app, as it does on every run it
+// does not fail.
+type ComposeAgentFailureReader interface {
+	ComposeAgentFailure() error
+}
+
 // ScopePusher is an optional Instrumentation extension: Replay uses it to hand
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
