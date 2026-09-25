@@ -289,3 +289,18 @@ func TestRecordPrefersTheAdapterWindowForTheSameTest(t *testing.T) {
 	require.NoError(t, recordSet(t, instr, mapDB, nil))
 	require.Equal(t, map[string][]string{"orders/e2e.TestC": {"mock-0"}}, mappedNames(t, mapDB))
 }
+
+// A test that made no dependency call is still a flow of the suite; it gets an entry with no mocks so its cases have a home.
+func TestRecordListsAFlowWithoutMocks(t *testing.T) {
+	instr := newRunnerInstr(t, jsonSequential)
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	mapDB := mapdb.New(zap.NewNop(), t.TempDir(), "")
+	require.NoError(t, recordSet(t, instr, mapDB, nil))
+
+	got, _, err := mapDB.Get(context.Background(), "set")
+	require.NoError(t, err)
+	require.Equal(t, []string{"mock-0"}, mappedNames(t, mapDB)["orders/e2e.TestA"])
+	mocks, listed := got["orders/e2e.TestC"]
+	require.True(t, listed, "TestC ran and must be listed even though it made no call")
+	require.Empty(t, mocks)
+}

@@ -292,6 +292,11 @@ func (m *mockService) Record(ctx context.Context) error {
 					nearBoundary(windows, recorded, boundarySlack)))
 			}
 			byTest := correlateScopes(windows, recorded)
+			for _, w := range windows {
+				if _, ok := byTest[w.Name]; !ok {
+					byTest[w.Name] = nil
+				}
+			}
 			if len(byTest) > 0 {
 				if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
 					m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
