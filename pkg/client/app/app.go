@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -72,8 +73,16 @@ type App struct {
 	container       string
 	composeService  string
 	keployContainer string
-	composeFile     string // path to the temp compose file (set during SetupCompose)
-	composeContent  []byte // in-memory compose YAML; set when InMemoryCompose is used
+	// composeFiles are the -f arguments the RUN command uses, in order: every
+	// file the user passed, with the one holding the app swapped for keploy's
+	// generated copy. The teardown reuses this exact list, so it can never
+	// target fewer files than the `up` did. Empty on the in-memory path.
+	composeFiles []string
+	// composeGenerated is keploy's own copy within composeFiles — the one file
+	// the teardown can always load, used as the fallback when the full list
+	// cannot be.
+	composeGenerated string
+	composeContent   []byte // in-memory compose YAML; set when InMemoryCompose is used
 	// composeServices are the service keys of the compose source keploy actually
 	// runs — the user's services plus the injected agent. It is the set
 	// `docker compose down` targets, and the ONLY set the teardown sweep is
@@ -258,13 +267,21 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
 	}
-	a.setComposeSource(newPath, nil, compose)
+	// Every -f the user passed, in order, with the app's file swapped for the
+	// copy keploy generated — exactly the list modifyDockerComposeCommand leaves
+	// in the run command. Deriving it from the same `paths` slice is what keeps
+	// the teardown from targeting fewer files than the `up`.
 	a.logger.Debug("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
 
 	newCmd, composeFileEnv := composeLaunchPlan(a.cmd, newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName)
 
 	if newCmd != "" {
-		// Literal compose command: our file is spliced in, as before.
+		// Literal compose command: our file is spliced in among the user's own
+		// -f list, which stays in the command — so the teardown has to drive
+		// that same list, or the files it omits are orphans to `down` and never
+		// get removed.
+		files, services := a.composeSourceForRun(paths, serviceInfo.ComposePath, newPath, compose)
+		a.setComposeSource(files, newPath, nil, services)
 		a.cmd = newCmd
 		a.logger.Info(
 			"Running application using a temporary Keploy-generated Docker Compose file (will be cleaned up automatically)",
@@ -277,6 +294,13 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	// A wrapper (make up, ./start.sh, an npm script) that runs compose
 	// internally. Nothing to splice into, so leave the command alone and let
 	// the compose it eventually runs find our file through the environment.
+	//
+	// COMPOSE_FILE names the generated copy ALONE, so this run drives exactly
+	// one document however many -f flags the wrapper's own command line had.
+	// The teardown must match that, not the user's list: driving files the run
+	// never used would have `down` resolve a different project shape.
+	a.setComposeSource([]string{newPath}, newPath, nil, composeServiceNames(compose))
+
 	//
 	// This is process-global and inherited by every child keploy spawns from
 	// here on, not just the application command. That is tolerable because
@@ -352,7 +376,7 @@ func (a *App) setupComposeInMemory(extraArgs []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to serialise modified compose to YAML: %w", err)
 	}
-	a.setComposeSource("", content, &compose)
+	a.setComposeSource(nil, "", content, composeServiceNames(&compose))
 
 	// Ensure the command uses stdin ("-f -") and has the exit-code-from flags.
 	preferFailureAbort := composeHasCompletionDependency(&compose)
@@ -633,46 +657,52 @@ func (a *App) ComposeDown() {
 	downCtx, downCancel := context.WithTimeout(context.Background(), composeDownCmdBudget)
 	defer downCancel()
 
-	var downCmd *exec.Cmd
-
-	switch {
-	case len(a.composeContent) > 0:
-		// In-memory mode: pipe compose YAML via stdin, no file on disk.
-		// Preserve project-scoping flags (-p/--project-name, --project-directory)
-		// from the original command so teardown targets the correct project.
-		a.logger.Debug("Running docker compose down using in-memory compose content")
-		args := []string{"compose", "-f", "-"}
-		args = append(args, extractProjectFlags(a.cmd)...)
-		// --timeout 1: stop containers fast instead of the default 10s graceful
-		// wait PER container. Between test-sets `keploy test` restarts the whole
-		// compose stack; under loaded CI a slow `down` was exceeding the
-		// per-test-set teardown drain budget and being abandoned, leaving a
-		// half-removed agent container that the next test-set's `up` then
-		// collided with ("container name already in use" -> dependency
-		// keploy-agent failed to start -> test-set abandoned, no report).
-		args = append(args, "down", "--timeout", "1")
-		downCmd = exec.CommandContext(downCtx, "docker", args...)
-		downCmd.Stdin = bytes.NewReader(a.composeContent)
-	case a.composeFile != "":
-		a.logger.Debug("Running docker compose down to clean up containers and networks",
-			zap.String("composeFile", a.composeFile))
-		// Carry any -p/--project-name/--project-directory from the run command so
-		// the teardown targets the SAME project the `up` created (a user whose
-		// compose command sets an explicit project would otherwise have `down`
-		// resolve a different, cwd-derived project and leave this stack running).
-		args := []string{"compose", "-f", a.composeFile}
-		args = append(args, extractProjectFlags(a.cmd)...)
-		args = append(args, "down", "--timeout", "1")
-		downCmd = exec.CommandContext(downCtx, "docker", args...)
-	default:
+	// --timeout 1: stop containers fast instead of the default 10s graceful
+	// wait PER container. Between test-sets `keploy test` restarts the whole
+	// compose stack; under loaded CI a slow `down` was exceeding the
+	// per-test-set teardown drain budget and being abandoned, leaving a
+	// half-removed agent container that the next test-set's `up` then collided
+	// with ("container name already in use" -> dependency keploy-agent failed
+	// to start -> test-set abandoned, no report).
+	downArgs := a.composeCommandArgs("down", "--timeout", "1")
+	if downArgs == nil {
 		return
 	}
+	a.logger.Debug("Running docker compose down to clean up containers and networks",
+		zap.Strings("composeFiles", a.composeFiles), zap.Bool("inMemory", len(a.composeContent) > 0))
+	runDown := func(args []string) bool {
+		cmd := exec.CommandContext(downCtx, "docker", args...)
+		if len(a.composeContent) > 0 {
+			// In-memory mode: pipe compose YAML via stdin, no file on disk.
+			cmd.Stdin = bytes.NewReader(a.composeContent)
+		}
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			a.logger.Debug("docker compose down finished with error (may be expected if containers already removed, or the bounded teardown deadline elapsed under load)",
+				zap.Strings("args", args), zap.Error(err), zap.String("output", string(output)))
+			return false
+		}
+		return true
+	}
 
-	downSucceeded := true
-	if output, err := downCmd.CombinedOutput(); err != nil {
-		downSucceeded = false
-		a.logger.Debug("docker compose down finished with error (may be expected if containers already removed, or the bounded teardown deadline elapsed under load)",
-			zap.Error(err), zap.String("output", string(output)))
+	// Only the FULL-list down licenses skipping the sweep below, which is why
+	// the narrow retry's result is deliberately discarded. The gate's premise
+	// is "a down that exited 0 removed every service it targets"; the retry
+	// targets a SUBSET on purpose, so letting it set this would assert a
+	// property nothing tested and abandon exactly the dependency stragglers
+	// this file exists to remove (#4614).
+	fullDownSucceeded := runDown(downArgs)
+
+	// If the full list could not be loaded at all — one file gone since the up,
+	// a stale path — fall back to keploy's own generated file. It cannot tear
+	// down the user's dependencies, but it frees the agent and app names so the
+	// next `up` is not blocked on "container name already in use".
+	if !fullDownSucceeded && len(a.composeFiles) > 1 && a.composeGenerated != "" && downCtx.Err() == nil {
+		if narrow := a.composeCommandArgsFor([]string{a.composeGenerated}, "down", "--timeout", "1"); narrow != nil {
+			a.logger.Debug("the full compose file list could not be torn down; retrying with keploy's own file",
+				zap.String("composeFile", a.composeGenerated))
+			_ = runDown(narrow)
+		}
 	}
 
 	// Coverage safety: this runs only AFTER the app has already been stopped by
@@ -716,7 +746,7 @@ func (a *App) ComposeDown() {
 	// service it targets, so there is nothing left to finish, and skipping keeps
 	// both the extra docker calls and the risk below off the healthy path.
 	var stragglers []string
-	if !downSucceeded {
+	if !fullDownSucceeded {
 		stragglers = a.sweepStragglingProjectContainers()
 	}
 
@@ -735,10 +765,264 @@ func (a *App) ComposeDown() {
 //
 // It must be called AFTER ModifyComposeForAgent so the injected agent service
 // is in the set; the sweep is allowed to remove that one.
-func (a *App) setComposeSource(file string, content []byte, compose *docker.Compose) {
-	a.composeFile = file
+func (a *App) setComposeSource(files []string, generated string, content []byte, services []string) {
+	a.composeFiles = files
+	a.composeGenerated = generated
 	a.composeContent = content
-	a.composeServices = composeServiceNames(compose)
+	// The swept set is bounded by BOTH answers, so it can never exceed what
+	// `down` targets in either direction:
+	//
+	//   - compose's own profile-resolved list, so a service `down` deliberately
+	//     leaves standing (one behind an unenabled `profiles:`) is never in it;
+	//   - keploy's own parsed keys, so a service keploy never read — a stale
+	//     generated file, something arriving via `include:` — is never in it.
+	//
+	// Intersection rather than "prefer compose" because each side excludes a
+	// different class, and only ANDing them makes under-collection the failure
+	// direction in every branch. Asking compose is also the only correct way to
+	// resolve profiles: they can be declared indirectly through a YAML merge
+	// key or `extends:`, which the raw node walk cannot see (yaml.v3 does not
+	// expand `<<` into a yaml.Node), and `ps` carries no profile label at all.
+	a.composeServices = intersectServices(services, a.composeTargetServices(composeConfigBudget))
+}
+
+// intersectServices keeps only the names present in BOTH lists, and returns
+// nil when resolved is empty — compose could not answer, so keploy does not
+// guess. The caller's len(composeServices) == 0 branch then skips the sweep and
+// says so, which is exactly the behaviour from before the sweep existed.
+func intersectServices(static, resolved []string) []string {
+	if len(resolved) == 0 || len(static) == 0 {
+		return nil
+	}
+	keep := make(map[string]struct{}, len(resolved))
+	for _, n := range resolved {
+		keep[n] = struct{}{}
+	}
+	out := make([]string, 0, len(static))
+	for _, n := range static {
+		if _, ok := keep[n]; ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// composeTargetServices asks compose which services this run's files actually
+// define, with profiles resolved exactly as `up` and `down` resolve them.
+//
+// Best-effort and bounded: any failure returns nil, which makes the sweep skip
+// rather than guess.
+func (a *App) composeTargetServices(budget time.Duration) []string {
+	if svc := a.resolveComposeServices(budget, a.composeCommandArgs("config", "--services")); len(svc) > 0 {
+		return svc
+	}
+	// The full list could not be loaded — an unset ${VAR}, a --env-file this
+	// command does not carry, a file the app writes later. Ask about keploy's
+	// own file alone rather than giving up: the answer covers fewer services,
+	// so the sweep under-collects, which is the safe direction and still beats
+	// disabling it for the whole run.
+	if len(a.composeContent) == 0 && a.composeGenerated != "" && len(a.composeFiles) > 1 {
+		if svc := a.resolveComposeServices(budget,
+			a.composeCommandArgsFor([]string{a.composeGenerated}, "config", "--services")); len(svc) > 0 {
+			a.logger.Warn("could not resolve the full compose service list; the teardown sweep will "+
+				"only cover keploy's own compose file",
+				zap.Strings("composeFiles", a.composeFiles))
+			return svc
+		}
+	}
+	a.logger.Warn("could not resolve the compose service list at all; the teardown sweep is disabled " +
+		"for this run, so a cut-short `docker compose down` may leave containers for the next run to reuse")
+	return nil
+}
+
+// resolveComposeServices runs one bounded `compose config --services`.
+func (a *App) resolveComposeServices(budget time.Duration, args []string) []string {
+	if args == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	if len(a.composeContent) > 0 {
+		cmd.Stdin = bytes.NewReader(a.composeContent)
+	}
+	// Output(), not CombinedOutput(): compose writes its warnings to stderr and
+	// this output is parsed as a service list.
+	out, err := cmd.Output()
+	if err != nil {
+		a.logger.Debug("compose config --services failed",
+			zap.Strings("args", args), zap.Error(err), zap.String("stderr", commandStderr(err)))
+		return nil
+	}
+	var services []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if n := strings.TrimSpace(line); n != "" {
+			services = append(services, n)
+		}
+	}
+	return services
+}
+
+// composeCommandArgs builds `compose -f … [project flags] <tail…>` for whichever
+// source this run drives, or nil when there is no compose source at all.
+//
+// Every compose call the teardown makes goes through here, so they all resolve
+// the SAME project and the SAME merged set of files as the `up` did. That is
+// the property that matters: a teardown that passes fewer -f files than the run
+// silently treats the missing files' containers as orphans and leaves them for
+// the next `up` to reuse.
+func (a *App) composeCommandArgs(tail ...string) []string {
+	return a.composeCommandArgsFor(a.composeFiles, tail...)
+}
+
+// composeProjectQueryArgs builds a compose call that only needs to see the
+// PROJECT, not the merged model — the `ps` queries.
+//
+// It deliberately passes keploy's own generated file alone. `compose ps` is
+// project-scoped, not model-scoped: measured on compose v5.0.2, `-f tmp.yaml`
+// alone still lists every container of the project, including services defined
+// only in the user's other files. So the extra files buy these calls nothing
+// and cost them every one of their failure modes — one user file that compose
+// cannot load (an unset ${VAR} in an interpolation, a file written later, a
+// stricter schema) would otherwise take out the stale-agent guard and the
+// transient-dependency classifier along with the sweep, all at Debug level.
+//
+// `config --services` is the opposite and must keep the full list: it reports
+// the merged MODEL, so with one file it answers about one file.
+func (a *App) composeProjectQueryArgs(tail ...string) []string {
+	if len(a.composeContent) == 0 && a.composeGenerated != "" {
+		return a.composeCommandArgsFor([]string{a.composeGenerated}, tail...)
+	}
+	return a.composeCommandArgs(tail...)
+}
+
+// composeCommandArgsFor is composeCommandArgs over an explicit file list, so
+// the teardown can fall back to keploy's own file alone when the full list
+// cannot be loaded.
+func (a *App) composeCommandArgsFor(files []string, tail ...string) []string {
+	var args []string
+	switch {
+	case len(a.composeContent) > 0:
+		args = []string{"compose", "-f", "-"}
+	case len(files) > 0:
+		args = make([]string, 0, 2+2*len(files)+len(tail))
+		args = append(args, "compose")
+		for _, f := range files {
+			args = append(args, "-f", f)
+		}
+	default:
+		return nil
+	}
+	// Carry any -p/--project-name/--project-directory off the run command so
+	// every call resolves the project the `up` created. Without it a user whose
+	// command sets an explicit project has these resolve the default,
+	// cwd-derived one, see nothing, and read that as "already gone".
+	args = append(args, extractProjectFlags(a.cmd)...)
+	return append(args, tail...)
+}
+
+// resolveShellToken turns a token lifted out of the user's command line into
+// the value the SHELL would have produced.
+//
+// This matters because the two halves disagree about who expands what: the app
+// command runs through `sh -c`, while every compose call the teardown makes is
+// an exec with no shell. `findComposeFile` takes the raw token, so
+// `-f "deps.yml"`, `-f $COMPOSE_DIR/deps.yml` and `-f ~/deps.yml` reach docker
+// literally, it cannot open them, and the whole `down` exits 1 having removed
+// nothing — worse than the single-file teardown it replaced.
+//
+// Follows sh's own rules rather than stripping everything: single quotes
+// suppress expansion, double quotes suppress tilde but not $VAR, and a tilde
+// only expands unquoted.
+func resolveShellToken(tok string) string {
+	t := strings.TrimSpace(tok)
+	quoted, single := false, false
+	if len(t) >= 2 {
+		switch {
+		case t[0] == '\'' && t[len(t)-1] == '\'':
+			t, quoted, single = t[1:len(t)-1], true, true
+		case t[0] == '"' && t[len(t)-1] == '"':
+			t, quoted = t[1:len(t)-1], true
+		}
+	}
+	if !single {
+		t = os.ExpandEnv(t)
+	}
+	if !quoted && (t == "~" || strings.HasPrefix(t, "~/")) {
+		if home, err := os.UserHomeDir(); err == nil {
+			t = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(t, "~"), "/"))
+		}
+	}
+	return t
+}
+
+// composeSourceForRun resolves, in ONE pass, the -f list the teardown must
+// drive and the services it is allowed to sweep.
+//
+// One pass because the two must never disagree. An earlier version skipped a
+// file it could not read when building the service set but still handed that
+// path to docker as -f, so `down` failed outright and tore down NOTHING —
+// while the comment claimed the skip was safe under-coverage. A file is either
+// in both or in neither.
+//
+// The list mirrors what modifyDockerComposeCommand leaves in the run command:
+// the user's files in their original order, with the one holding the app
+// swapped for keploy's generated copy. Order is load-bearing — compose merges
+// -f left to right, later files override earlier ones, and the FIRST file also
+// decides the project directory — so the copy takes the app file's position
+// rather than being appended.
+func (a *App) composeSourceForRun(userPaths []string, appComposePath, generated string, doc *docker.Compose) (files, services []string) {
+	seen := make(map[string]struct{})
+	addServices := func(names []string) {
+		for _, n := range names {
+			if _, dup := seen[n]; dup {
+				continue
+			}
+			seen[n] = struct{}{}
+			services = append(services, n)
+		}
+	}
+
+	if len(userPaths) == 0 {
+		return []string{generated}, composeServiceNames(doc)
+	}
+
+	replaced := false
+	for _, raw := range userPaths {
+		// Compared raw, because appComposePath came out of this same slice.
+		// strings.Replace in the run command's rewrite swaps only the FIRST
+		// occurrence, so a duplicated -f must behave the same here.
+		if raw == appComposePath && !replaced {
+			files = append(files, generated)
+			addServices(composeServiceNames(doc))
+			replaced = true
+			continue
+		}
+		path := resolveShellToken(raw)
+		if path == "" {
+			continue
+		}
+		// Drop what docker could not open anyway. Keeping it makes every
+		// compose call exit 1 — the sweep, the stale-agent guard and the
+		// dependency-failure classifier all go blind at once.
+		other, err := a.docker.ReadComposeFile(path)
+		if err != nil {
+			a.logger.Warn("ignoring a compose file from the run command that cannot be read; its "+
+				"containers will not be swept if a teardown is cut short",
+				zap.String("composeFile", raw), zap.String("resolved", path), zap.Error(err))
+			continue
+		}
+		files = append(files, path)
+		addServices(composeServiceNames(other))
+	}
+
+	if !replaced {
+		// The app's file was not among the -f arguments (the default-filename
+		// discovery path), so the generated copy is the whole list.
+		return []string{generated}, composeServiceNames(doc)
+	}
+	return files, services
 }
 
 // composeServiceNames returns the service keys of a parsed compose document.
@@ -785,15 +1069,13 @@ func composeServiceNames(compose *docker.Compose) []string {
 // and environment. Best-effort and bounded throughout; on any failure the
 // teardown behaves exactly as it did before this sweep existed.
 //
-// Not covered, and a real gap: a multi-file command
-// (`docker compose -f app.yml -f deps.yml up`). SetupCompose tmp-copies only
-// the file that contains the app, so composeServices holds only that file's
-// services — and `down` on the generated file treats deps.yml's containers as
-// orphans and leaves them too. The sweep is still exactly `down`'s set, so it
-// is not WRONG, but that user's dependency containers survive every teardown
-// and the next `up` reuses them with the same rows, which is the defect this
-// function exists to fix. Closing it means making the teardown aware of every
-// -f the user passed, not widening this filter.
+// Multi-file commands are covered in the ordinary case: composeServices spans
+// every -f the run drives. Two states narrow it, both toward under-collection:
+// a compose file keploy cannot load is dropped from the -f list and the service
+// set together, and if the full list cannot be resolved at all the set falls
+// back to keploy's own file. Long-form --file/-f= spellings are not parsed
+// anywhere on this path, so a command using them fails at setup rather than
+// reaching here.
 func (a *App) sweepStragglingProjectContainers() []string {
 	if len(a.composeServices) == 0 {
 		// Not expected: both compose setup paths populate this. Said out loud
@@ -875,7 +1157,11 @@ const (
 	// projectSweepBudget bounds EACH of the two calls that clean up whatever the
 	// bounded `down` did not reach: the `compose ps` that lists them and the
 	// single `docker rm -f` that removes them.
-	projectSweepBudget  = 2 * time.Second
+	projectSweepBudget = 2 * time.Second
+	// composeConfigBudget bounds the one `docker compose config --services`
+	// call. It runs at SETUP, not on the teardown drain path, so it is not part
+	// of the 30s accounting above.
+	composeConfigBudget = 5 * time.Second
 	forceRemoveBudget   = 2 * time.Second // each `docker rm -f` in the teardown drain path
 	reapBarrierBudget   = 3 * time.Second // waitContainersRemoved poll
 	graceBudget         = 5 * time.Second // cmdCancel coverage-flush grace
@@ -1038,17 +1324,8 @@ func (a *App) removeStaleComposeAgentWithin(budget time.Duration) {
 // otherwise try to Recreate. Mirrors ComposeDown's branch selection for the
 // file-based vs in-memory compose source.
 func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
-	var args []string
-	switch {
-	case len(a.composeContent) > 0:
-		args = []string{"compose", "-f", "-"}
-		args = append(args, extractProjectFlags(a.cmd)...)
-		args = append(args, "ps", "-aq", keployAgentComposeService)
-	case a.composeFile != "":
-		args = []string{"compose", "-f", a.composeFile}
-		args = append(args, extractProjectFlags(a.cmd)...)
-		args = append(args, "ps", "-aq", keployAgentComposeService)
-	default:
+	args := a.composeProjectQueryArgs("ps", "-aq", keployAgentComposeService)
+	if args == nil {
 		return nil
 	}
 
@@ -1142,22 +1419,8 @@ func commandStderr(err error) string {
 // "not a transient dependency failure", so the run fails fast rather than
 // retrying blindly — the safe default.
 func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
-	var args []string
-	switch {
-	case len(a.composeContent) > 0:
-		args = []string{"compose", "-f", "-"}
-		args = append(args, extractProjectFlags(a.cmd)...)
-		args = append(args, "ps", "-a", "--format", "json")
-	case a.composeFile != "":
-		args = []string{"compose", "-f", a.composeFile}
-		// Carry any -p/--project-name/--project-directory from the run command so
-		// the probe resolves the SAME project the `up` created. Without this, a user
-		// whose compose command sets an explicit project would have the probe query
-		// the default (cwd-derived) project, see nothing, and the failure would be
-		// (mis)classified as non-transient — silently disabling the retry.
-		args = append(args, extractProjectFlags(a.cmd)...)
-		args = append(args, "ps", "-a", "--format", "json")
-	default:
+	args := a.composeProjectQueryArgs("ps", "-a", "--format", "json")
+	if args == nil {
 		return nil
 	}
 
@@ -1443,16 +1706,37 @@ func isDockerRunNameConflict(runErr error, errType utils.ErrType, nameOccupied b
 
 // extractProjectFlags returns any project-scoping flags (-p/--project-name,
 // --project-directory) found in the given docker compose command.
+// extractProjectFlags lifts the flags that decide WHICH project a compose call
+// resolves, and how its files are loaded, off the user's own command so every
+// call keploy makes lands on the stack the `up` created.
+//
+// --env-file is here because it is pure model-loading: without it a compose
+// file using ${VAR} interpolation loads for the `up` and fails for every
+// teardown call, which silently disables the sweep, the stale-agent guard and
+// the dependency-failure classifier at once.
+//
+// --profile is deliberately NOT here. It would WIDEN what `down` targets, and
+// the one thing the teardown must never do is remove a container `down` would
+// have left alone. Values are resolved as the shell would, because the run goes
+// through `sh -c` and these calls do not.
 func extractProjectFlags(cmd string) []string {
 	parts := strings.Fields(cmd)
+	valueFlags := map[string]bool{
+		"-p": true, "--project-name": true, "--project-directory": true, "--env-file": true,
+	}
+	joinedPrefixes := []string{"-p=", "--project-name=", "--project-directory=", "--env-file="}
 	var flags []string
 	for i := 0; i < len(parts); i++ {
-		switch {
-		case (parts[i] == "-p" || parts[i] == "--project-name" || parts[i] == "--project-directory") && i+1 < len(parts):
-			flags = append(flags, parts[i], parts[i+1])
+		if valueFlags[parts[i]] && i+1 < len(parts) {
+			flags = append(flags, parts[i], resolveShellToken(parts[i+1]))
 			i++
-		case strings.HasPrefix(parts[i], "-p=") || strings.HasPrefix(parts[i], "--project-name=") || strings.HasPrefix(parts[i], "--project-directory="):
-			flags = append(flags, parts[i])
+			continue
+		}
+		for _, pre := range joinedPrefixes {
+			if strings.HasPrefix(parts[i], pre) {
+				flags = append(flags, pre+resolveShellToken(strings.TrimPrefix(parts[i], pre)))
+				break
+			}
 		}
 	}
 	return flags
