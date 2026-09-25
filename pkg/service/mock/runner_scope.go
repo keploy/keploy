@@ -146,7 +146,7 @@ func plainElapsed(fields []string) time.Duration {
 type runnerScope struct {
 	ctx    context.Context
 	logger *zap.Logger
-	marker ScopeMarker
+	marker ScopeMarker // nil reads the runner's results without posting boundaries, as replay does
 
 	mu        sync.Mutex
 	partial   []byte
@@ -190,12 +190,12 @@ func (r *runnerScope) handle(ev scopeEvent) {
 	switch ev.kind {
 	case scopeBegin:
 		r.begin(ev, r.stamp(ev))
-		r.mark(ev, r.marker.BeginScope)
+		r.mark(ev)
 	case scopePause:
 		r.paused[ev.name()] = true
 	case scopeEnd:
 		r.end(ev, r.stamp(ev))
-		r.mark(ev, r.marker.EndScope)
+		r.mark(ev)
 	}
 }
 
@@ -286,7 +286,14 @@ func mergeWindows(adapter, agent []models.ScopeWindow) []models.ScopeWindow {
 }
 
 // mark posts one test boundary to the agent; a failure is logged, never fatal.
-func (r *runnerScope) mark(ev scopeEvent, post func(context.Context, string, int, time.Time) error) {
+func (r *runnerScope) mark(ev scopeEvent) {
+	if r.marker == nil {
+		return
+	}
+	post := r.marker.BeginScope
+	if ev.kind == scopeEnd {
+		post = r.marker.EndScope
+	}
 	ctx, cancel := context.WithTimeout(r.ctx, scopeCallTimeout)
 	defer cancel()
 	if err := post(ctx, ev.name(), 0, ev.at); err != nil {

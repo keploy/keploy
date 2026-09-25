@@ -93,12 +93,9 @@ func TestReplayOutcomeCarriesTheRunnerResults(t *testing.T) {
 				{Name: tc.prefix + "TestB", Status: "fail", Duration: 20 * time.Millisecond},
 				{Name: tc.prefix + "TestC", Status: "skip"},
 			}, got.Tests)
-			marks, _ := instr.seen()
-			require.Equal(t, []string{
-				"begin " + tc.prefix + "TestA", "end " + tc.prefix + "TestA",
-				"begin " + tc.prefix + "TestB", "end " + tc.prefix + "TestB",
-				"begin " + tc.prefix + "TestC", "end " + tc.prefix + "TestC",
-			}, marks, "replay posts the boundaries so the agent can scope the served pool per test")
+			marks, observed := instr.seen()
+			require.True(t, observed)
+			require.Empty(t, marks, "replay reads results only: a boundary read from output lags the test and would restrict the pool to the wrong test")
 		})
 	}
 }

@@ -342,6 +342,16 @@ func (m *mockService) runnerScope(ctx context.Context) *runnerScope {
 	return newRunnerScope(ctx, m.logger, marker)
 }
 
+// runnerResults builds the adapter that only reads each test's result from the output, or nil when it is off.
+// Replay never posts boundaries: a boundary read from output lags the test, and a late begin or end
+// would restrict the served pool to the wrong test while its calls are already in flight.
+func (m *mockService) runnerResults(ctx context.Context) *runnerScope {
+	if m.config.Mock.NoRunnerScope {
+		return nil
+	}
+	return newRunnerScope(ctx, m.logger, nil)
+}
+
 // agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.
 func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
 	reader, ok := m.instrumentation.(ScopeReader)

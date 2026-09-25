@@ -146,7 +146,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//
 	//    Without this the run dialled an agent that was never started and
 	//    failed before serving a single mock.
-	scope := m.runnerScope(ctx)
+	scope := m.runnerResults(ctx)
 	composeAppExit, err := m.startComposeApp(ctx, errGrp, "replay", scope.writer())
 	if err != nil {
 		if parent.Err() != nil {
