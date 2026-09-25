@@ -128,3 +128,60 @@ func TestLeaveStopOutcomeGivesUpOnAWedgedProxy(t *testing.T) {
 		t.Fatalf("left an outcome for a proxy that never answered: %v", err)
 	}
 }
+
+// The account is armed at Setup: whatever a previous run left is cleared -- a
+// restarted container keeps its /tmp, and the last run's account would stand
+// in for this one -- and this run's is written when the agent is stopped.
+func TestArmStopOutcomeClearsTheLastRunsAndLeavesThisOnes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcome.json")
+	if err := os.WriteFile(path, []byte(`{"consumed":[{"name":"last-run"}],"missed":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxy := &outcomeProxy{consumed: []models.MockState{{Name: "this-run"}}}
+	a := &Agent{Proxy: proxy, logger: zap.NewNop()}
+	var onStop []func()
+	a.armStopOutcome(path, func(fn func()) { onStop = append(onStop, fn) })
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the last run's outcome is still there to be read as this one's: %v", err)
+	}
+	if len(onStop) != 1 {
+		t.Fatalf("registered %d stop hooks, want 1", len(onStop))
+	}
+	onStop[0]()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("stopped, the agent left no outcome: %v", err)
+	}
+	var got models.MockOutcome
+	if err := json.Unmarshal(raw, &got); err != nil || len(got.Consumed) != 1 || got.Consumed[0].Name != "this-run" {
+		t.Fatalf("left %s (%v), want this run's outcome", raw, err)
+	}
+}
+
+// The outcome replaces the file at path whole -- a new file renamed into
+// place -- rather than rewriting it: an agent killed while writing in place
+// leaves half of one, which reads as a parse error at best. A second name for
+// the file already there shows which happened: a rename leaves it holding
+// what it held.
+func TestWriteStopOutcomeReplacesTheFileWhole(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "outcome.json")
+	const stale = `{"consumed":[],"missed":[]}`
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, filepath.Join(dir, "as-it-was")); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{Proxy: &outcomeProxy{consumed: []models.MockState{{Name: "mock-0"}}}, logger: zap.NewNop()}
+	if err := a.writeStopOutcome(context.Background(), path); err != nil {
+		t.Fatalf("writeStopOutcome: %v", err)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(dir, "as-it-was")); string(raw) != stale {
+		t.Fatalf("the file at path was rewritten in place (it now holds %s), not replaced", raw)
+	}
+	if raw, _ := os.ReadFile(path); !json.Valid(raw) || string(raw) == stale {
+		t.Fatalf("path holds %s, want the new outcome", raw)
+	}
+}

@@ -39,6 +39,19 @@ func stopOutcomePath(opts models.SetupOptions) string {
 	return ""
 }
 
+// armStopOutcome has this agent leave its replay's outcome at path as it is
+// stopped: onStop (utils.RegisterPreCancelHook) runs the write ahead of the
+// agent's shutdown. Whatever a previous run left there is cleared first, for
+// the same reason as the readiness file: a container that is restarted
+// rather than recreated keeps its /tmp, and the last run's account would
+// stand in for this one.
+func (a *Agent) armStopOutcome(path string, onStop func(func())) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		a.logger.Debug("failed to remove a stale replay outcome", zap.String("path", path), zap.Error(err))
+	}
+	onStop(func() { a.leaveStopOutcome(path) })
+}
+
 // leaveStopOutcome writes the replay's outcome to path, giving up after
 // stopOutcomeTimeout. A failure is only logged: the CLI that finds no file
 // reports the outcome as unknown, which is the truth.

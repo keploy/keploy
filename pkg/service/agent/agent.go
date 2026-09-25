@@ -181,14 +181,9 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	}
 
 	// A replay's outcome, left as the agent is stopped for a CLI that cannot
-	// ask for it (see stopOutcomePath). Cleared first for the same reason as
-	// the readiness file: a container that is restarted rather than recreated
-	// keeps its /tmp, and the last run's account would stand in for this one.
+	// ask for it (see stopOutcomePath).
 	if path := stopOutcomePath(a.config.Agent.SetupOptions); path != "" {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			a.logger.Debug("failed to remove a stale replay outcome", zap.String("path", path), zap.Error(err))
-		}
-		utils.RegisterPreCancelHook(func() { a.leaveStopOutcome(path) })
+		a.armStopOutcome(path, utils.RegisterPreCancelHook)
 	}
 
 	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))

@@ -98,7 +98,10 @@ func TestRunReadsTheStoppedAgentBeforeTheTeardown(t *testing.T) {
 	outcome := []byte(`{"consumed":[{"name":"mock-1"}],"missed":[]}`)
 	d := &stoppedAgentDocker{files: map[string]map[string][]byte{
 		"keploy-v3-test": {docker.AgentOutcomeFile: outcome},
+	}, states: map[string]*container.State{
+		"keploy-v3-test": ended("exited", 0, "2026-09-25T12:00:00Z", "2026-09-25T12:00:10Z"),
 	}}
+	d.removed = func() bool { return strings.Contains(recordedLog(t, argvLog), "ARG down") }
 	tornDownFirst := false
 	d.onCopy = func() {
 		tornDownFirst = tornDownFirst || strings.Contains(recordedLog(t, argvLog), "ARG down")
@@ -187,7 +190,7 @@ func TestReadStoppedAgentSkipsAnInterruptedRun(t *testing.T) {
 // older than this keploy -- is recorded as such, so the replay can say its
 // outcome is unknown and why.
 func TestReadStoppedAgentRecordsAMissingOutcome(t *testing.T) {
-	d := &stoppedAgentDocker{}
+	d := &stoppedAgentDocker{states: map[string]*container.State{"keploy-v3-test": {Status: "exited", ExitCode: 137}}}
 	a := composeReplayApp(d)
 	a.readStoppedAgent(context.Background())
 	got, ok := a.StoppedAgent()
@@ -196,6 +199,26 @@ func TestReadStoppedAgentRecordsAMissingOutcome(t *testing.T) {
 	}
 	if got.OutcomeErr == nil || !strings.Contains(got.OutcomeErr.Error(), "left no "+docker.AgentOutcomeFile) {
 		t.Fatalf("OutcomeErr = %v, want one naming the missing file", got.OutcomeErr)
+	}
+}
+
+// Docker answers "not found" for a container it does not know exactly as for
+// a file a container lacks. A keploy-agent container missing from the daemon
+// keploy asks -- the compose project ran on another one -- is not an agent
+// that left no account, and saying so sent the user to the agent's image.
+func TestReadStoppedAgentSaysWhenDockerDoesNotKnowTheAgent(t *testing.T) {
+	d := &stoppedAgentDocker{}
+	a := composeReplayApp(d)
+	a.readStoppedAgent(context.Background())
+	got, ok := a.StoppedAgent()
+	if !ok {
+		t.Fatal("an agent docker does not know was not recorded as read")
+	}
+	if got.OutcomeErr == nil || !strings.Contains(got.OutcomeErr.Error(), "could not find the keploy-agent container keploy-v3-test on the docker daemon it talks to") {
+		t.Fatalf("OutcomeErr = %v, want one saying docker does not know the agent's container", got.OutcomeErr)
+	}
+	if len(d.copied) > 0 {
+		t.Fatalf("asked for a file from a container docker does not know (copied %v)", d.copied)
 	}
 }
 
@@ -269,6 +292,11 @@ func ended(status string, code int, started, finished string) *container.State {
 
 const neverStarted = "0001-01-01T00:00:00Z"
 
+func oomKilled(s *container.State) *container.State {
+	s.OOMKilled = true
+	return s
+}
+
 // AgentFailed tells the agent failing apart from the stop compose gives it
 // once the app is done. Blaming the agent for that stop fails every compose
 // run; missing it blames the test command for the agent's death.
@@ -296,6 +324,12 @@ func TestAgentFailed(t *testing.T) {
 			name:         "the app was OOM-killed on its own, and compose stopped the agent after it",
 			agent:        ended("exited", 0, at, later),
 			app:          ended("exited", 137, at, at),
+			wantAppStart: true,
+		},
+		{
+			name:         "the app ran out of its own memory, and compose then killed an agent slow to stop",
+			agent:        ended("exited", 137, at, later),
+			app:          oomKilled(ended("exited", 137, at, at)),
 			wantAppStart: true,
 		},
 		{

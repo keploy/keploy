@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // agentLifetime says where the keploy agent lives relative to the wrapped
@@ -556,9 +557,19 @@ func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
 			utils.ErrCode = 0
 			t.Cleanup(func() { utils.ErrCode = 0 })
 
-			err := tc.run(New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg), context.Background())
+			core, logs := observer.New(zap.ErrorLevel)
+			err := tc.run(New(zap.New(core), instr, stubMockDB{}, nil, nil, nil, cfg), context.Background())
 			if !errors.Is(err, died) {
 				t.Fatalf("returned %v, want keploy's own failure naming the agent", err)
+			}
+			// Returned, and so logged by the command that receives it: logged
+			// here too, every such run said the same thing twice at ERROR.
+			if tc.name == "replay" {
+				for _, e := range logs.All() {
+					if strings.Contains(fmt.Sprint(e.ContextMap()["error"]), died.Error()) {
+						t.Fatalf("Replay logged the failure it returns: %q %v", e.Message, e.ContextMap())
+					}
+				}
 			}
 			if utils.ErrCode == 137 {
 				t.Fatal("exit 137: compose stopping the test command was mirrored as the test command's own exit")

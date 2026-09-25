@@ -74,7 +74,9 @@ func (s StoppedAgent) AppStarted() bool {
 // (137), or compose stopping it over the dead agent (143) -- rather than
 // exiting with a code of its own. An agent that exits non-zero after the app
 // has returned its own code is one compose killed for not stopping in time:
-// the app's code still stands.
+// the app's code still stands. So does an app the kernel killed for running
+// out of its own memory: that 137 is the app's, whatever became of the agent
+// afterwards.
 //
 // When docker could not say how the app ended, the agent's own exit is all
 // there is.
@@ -84,6 +86,9 @@ func (s StoppedAgent) AgentFailed() bool {
 	}
 	if s.App == nil || !s.AppStarted() || s.App.Running {
 		return true
+	}
+	if s.App.OOMKilled {
+		return false
 	}
 	return s.App.ExitCode == 128+int(syscall.SIGKILL) || s.App.ExitCode == 128+int(syscall.SIGTERM)
 }
@@ -142,12 +147,21 @@ func (a *App) readStoppedAgent(ctx context.Context) {
 	readCtx, cancel := context.WithTimeout(context.Background(), stoppedAgentReadBudget)
 	defer cancel()
 	read := &StoppedAgent{Container: a.keployContainer}
-	read.Agent = a.containerState(readCtx, a.keployContainer)
+	var agentErr error
+	read.Agent, agentErr = a.containerState(readCtx, a.keployContainer)
 	if a.container != "" {
-		read.App = a.containerState(readCtx, a.container)
+		read.App, _ = a.containerState(readCtx, a.container)
 	}
 	if a.opts.Mode == models.MODE_TEST {
-		read.Outcome, read.OutcomeErr = readContainerFile(readCtx, a.docker, a.keployContainer, docker.AgentOutcomeFile, maxAgentOutcomeBytes)
+		if agentErr != nil {
+			// Docker answers "not found" for a container it does not know
+			// exactly as for a file the container lacks, and that is not
+			// what happened: the agent's container is not on the daemon
+			// keploy asks, or that daemon could not be reached.
+			read.OutcomeErr = fmt.Errorf("keploy could not find the keploy-agent container %s on the docker daemon it talks to: %w", a.keployContainer, agentErr)
+		} else {
+			read.Outcome, read.OutcomeErr = readContainerFile(readCtx, a.docker, a.keployContainer, docker.AgentOutcomeFile, maxAgentOutcomeBytes)
+		}
 		if read.OutcomeErr != nil {
 			a.logger.Debug("could not read the replay outcome the keploy-agent container left",
 				zap.String("container", a.keployContainer), zap.Error(read.OutcomeErr))
@@ -158,14 +172,17 @@ func (a *App) readStoppedAgent(ctx context.Context) {
 	a.stopped.mu.Unlock()
 }
 
-// containerState is how name ended, or nil when docker cannot say.
-func (a *App) containerState(ctx context.Context, name string) *container.State {
+// containerState is how name ended, or why docker could not say.
+func (a *App) containerState(ctx context.Context, name string) (*container.State, error) {
 	info, err := a.docker.ContainerInspect(ctx, name)
-	if err != nil || info.ContainerJSONBase == nil || info.State == nil {
-		a.logger.Debug("could not read how a compose container ended", zap.String("container", name), zap.Error(err))
-		return nil
+	if err == nil && (info.ContainerJSONBase == nil || info.State == nil) {
+		err = errors.New("docker reported no state for it")
 	}
-	return info.State
+	if err != nil {
+		a.logger.Debug("could not read how a compose container ended", zap.String("container", name), zap.Error(err))
+		return nil, err
+	}
+	return info.State, nil
 }
 
 // readContainerFile returns the regular file at path in the container name,

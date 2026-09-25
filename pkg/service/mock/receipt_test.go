@@ -708,7 +708,8 @@ func TestAnAgentDyingMidRunFailsTheReplay(t *testing.T) {
 			utils.ErrCode = 0
 			t.Cleanup(func() { utils.ErrCode = 0 })
 
-			err := New(zap.NewNop(), &failsGroup{composeInstr: base, stage: stage}, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
+			core, logs := observer.New(zap.ErrorLevel)
+			err := New(zap.New(core), &failsGroup{composeInstr: base, stage: stage}, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
 			if utils.ErrCode == 0 {
 				t.Fatal("a replay whose agent died mid-run exits 0")
 			}
@@ -716,6 +717,14 @@ func TestAnAgentDyingMidRunFailsTheReplay(t *testing.T) {
 			// the same number, and the error is what tells them apart.
 			if err == nil || !strings.Contains(err.Error(), "keploy did not complete the run") {
 				t.Fatalf("Replay returned %v, want keploy's own failure", err)
+			}
+			// And logged by the command that receives it, not by Replay as
+			// well. (The errgroup's teardown reports its own error as it
+			// drains; that report is not Replay's verdict.)
+			for _, e := range logs.All() {
+				if e.Message != "failed to drain mock-replay goroutines" && strings.Contains(fmt.Sprint(e.ContextMap()["error"]), "the agent stopped") {
+					t.Fatalf("Replay logged the failure it returns: %q %v", e.Message, e.ContextMap())
+				}
 			}
 			// Keploy stopped the test command, so it has no exit of its own
 			// to report -- a 0 there read as a suite that passed -- and the

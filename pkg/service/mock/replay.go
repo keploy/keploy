@@ -266,12 +266,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if parent.Err() != nil { // user Ctrl+C
 		return nil
 	}
+	// Either way the cause is returned as keploy's own failure (see
+	// keployFailure below), and logged once, by the caller that receives it.
 	if cause := m.composeAgentFailure(); cause != nil {
 		// The agent died under the test command. Under compose that stops the
 		// whole project, test command included, and the exit that arrived
 		// above is compose's stop, not the suite's verdict: mirrored, it
 		// failed a suite that never finished, in the suite's name.
-		utils.LogError(m.logger, cause, "the replay did not finish")
 		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: cause}
 	} else if ctx.Err() != nil && (appErr.AppErrorType == models.ErrCtxCanceled || appErr.AppErrorType == "") {
 		// Not the user: something in the run's own errgroup failed while the
@@ -279,9 +280,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// stopped with it. That is keploy not completing the run. Left as a
 		// cancellation it mirrored nothing, and the replay exited 0 on a
 		// suite that never finished.
-		cause := context.Cause(ctx)
-		utils.LogError(m.logger, cause, "the replay did not finish")
-		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: cause}
+		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: context.Cause(ctx)}
 	}
 
 	// 9. Under --on-miss record, append any calls served live-from-upstream to
