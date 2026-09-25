@@ -26,3 +26,9 @@ jobs:
       - name: Build arm64
         run: GOARCH=arm64 go build -v ./...
 
+      # macOS has no /proc. The process-tree walk every Ctrl+C of a native run
+      # makes (utils.InterruptProcessTree) reads the kernel's process table
+      # there instead, and only a Mac can run that code: a Linux runner builds
+      # the other implementation.
+      - name: Test utils on darwin
+        run: go test -count=1 ./utils/
