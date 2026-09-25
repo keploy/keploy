@@ -1260,22 +1260,10 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	return exited, nil
 }
 
-// startNativeAgent starts the keploy agent as a native process. The process's
-// exit is sent on exited.
-func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOptions, exited chan<- error) error {
-
-	// Get the errgroup from context
-	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	if !ok {
-		return fmt.Errorf("failed to get errorgroup from the context")
-	}
-
-	keployBin, err := utils.GetCurrentBinaryPath()
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to get current keploy binary path")
-		return err
-	}
-
+// nativeAgentArgs builds the `keploy agent` argv for a natively spawned agent,
+// the control-plane token file included, and records the launch
+// (token.RecordLaunch) so the client holds that agent to the token.
+func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// Build args (binary is passed separately to utils)
 	args := []string{
 		"agent",
@@ -1376,7 +1364,29 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
 
-	args = appendTokenFileArg(a.logger, args)
+	// Recorded apart from the handoff, so an agent that did not get its token
+	// is still one this process launched, and still checked for it.
+	token.RecordLaunch(opts.AgentURI)
+	return appendTokenFileArg(a.logger, args)
+}
+
+// startNativeAgent starts the keploy agent as a native process. The process's
+// exit is sent on exited.
+func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOptions, exited chan<- error) error {
+
+	// Get the errgroup from context
+	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return fmt.Errorf("failed to get errorgroup from the context")
+	}
+
+	keployBin, err := utils.GetCurrentBinaryPath()
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to get current keploy binary path")
+		return err
+	}
+
+	args := a.nativeAgentArgs(opts)
 
 	// The PTY and the cached-credentials probe both exist for one reason: sudo
 	// may prompt for a password. On a platform where the agent is never
@@ -1995,43 +2005,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return err
 	}
 
-	// Mock mode: export the agent's scope-API address into the wrapped
-	// command's environment so a test-runner plugin / glue-code can mark
-	// per-test boundaries (POST {KEPLOY_MOCK_AGENT}/agent/scope/begin|end).
-	// The child inherits this process's environment. Native + docker-run put
-	// the child in the agent's netns, so localhost:<agentPort> reaches it;
-	// docker-compose shares the host loopback. Harmless when unused.
-	if opts.MockMode {
-		if err := os.Setenv("KEPLOY_MOCK_AGENT", fmt.Sprintf("http://localhost:%d", agentPort)); err != nil {
-			a.logger.Debug("failed to export KEPLOY_MOCK_AGENT", zap.Error(err))
-		}
-		// The scope API is guarded like every other control-plane route, and
-		// this caller is not keploy — it is the user's test runner. Without a
-		// credential the advertised integration would simply 401.
-		//
-		// os.Setenv is process-wide, so strictly every child started after
-		// this inherits it, not only the wrapped runner. That is the same
-		// trust domain: in mock mode the wrapped process is the intended API
-		// client, and the incidental children are keploy's own docker and
-		// shell teardown commands. What matters is the guard: only under
-		// MockMode, so the application under test in a record or test run is
-		// still handed nothing.
-		//
-		// A separate variable from token.Env, so a process that inherits it
-		// presents the token rather than adopting it as one to enforce.
-		if tok := token.Session(); tok != "" {
-			if err := os.Setenv(token.MockAgentTokenEnv, tok); err != nil {
-				a.logger.Debug("failed to export "+token.MockAgentTokenEnv, zap.Error(err))
-			}
-		}
-		session := "record"
-		if opts.Mode == models.MODE_TEST {
-			session = "replay"
-		}
-		if err := os.Setenv("KEPLOY_MOCK_SESSION", session); err != nil {
-			a.logger.Debug("failed to export KEPLOY_MOCK_SESSION", zap.Error(err))
-		}
-	}
+	exportMockScopeEnv(a.logger, opts, agentPort)
 
 	err = usrApp.Setup(ctx)
 	if err != nil {
@@ -2041,6 +2015,51 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	a.logger.Debug("Keploy client setup completed successfully")
 	return nil
+}
+
+// exportMockScopeEnv exports the agent's scope-API address, and the token it
+// needs, into the wrapped command's environment in mock mode, so a test-runner
+// plugin / glue-code can mark per-test boundaries
+// (POST {KEPLOY_MOCK_AGENT}/agent/scope/begin|end). The child inherits this
+// process's environment. Native + docker-run put the child in the agent's
+// netns, so localhost:<agentPort> reaches it; docker-compose shares the host
+// loopback. Harmless when unused.
+//
+// Nothing at all outside mock mode: there the wrapped command is the
+// application under test, and it is handed nothing.
+func exportMockScopeEnv(logger *zap.Logger, opts models.SetupOptions, agentPort uint32) {
+	if !opts.MockMode {
+		return
+	}
+	if err := os.Setenv("KEPLOY_MOCK_AGENT", fmt.Sprintf("http://localhost:%d", agentPort)); err != nil {
+		logger.Debug("failed to export KEPLOY_MOCK_AGENT", zap.Error(err))
+	}
+	// The scope API is guarded like every other control-plane route, and
+	// this caller is not keploy — it is the user's test runner. Without a
+	// credential the advertised integration would simply 401.
+	//
+	// os.Setenv is process-wide, so strictly every child started after
+	// this inherits it, not only the wrapped runner. That is the same
+	// trust domain: in mock mode the wrapped process is the intended API
+	// client, and the incidental children are keploy's own docker and
+	// shell teardown commands. What matters is the guard above: only in
+	// mock mode, so the application under test in a record or test run is
+	// still handed nothing.
+	//
+	// A separate variable from token.Env, so a process that inherits it
+	// presents the token rather than adopting it as one to enforce.
+	if tok := token.Session(); tok != "" {
+		if err := os.Setenv(token.MockAgentTokenEnv, tok); err != nil {
+			logger.Debug("failed to export "+token.MockAgentTokenEnv, zap.Error(err))
+		}
+	}
+	session := "record"
+	if opts.Mode == models.MODE_TEST {
+		session = "replay"
+	}
+	if err := os.Setenv("KEPLOY_MOCK_SESSION", session); err != nil {
+		logger.Debug("failed to export KEPLOY_MOCK_SESSION", zap.Error(err))
+	}
 }
 
 func (a *AgentClient) getApp() (*app.App, error) {

@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -163,14 +166,13 @@ func TestAgentHookTimeout_IsPreservedByTheAuthenticatedClient(t *testing.T) {
 }
 
 func TestAppendTokenFileArg_PassesThePathAndNeverTheToken(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup() })
 	args := appendTokenFileArg(zap.NewNop(), []string{"--port", "16789"})
 
 	require.Len(t, args, 4, "the agent was spawned without --token-file and will serve unauthenticated")
 	require.Equal(t, "--token-file", args[2])
 
 	path := args[3]
-	t.Cleanup(func() { _ = token.RemoveFile() })
-
 	got, err := token.ReadFile(path)
 	require.NoError(t, err, "--token-file points at something the agent cannot read a token from")
 	require.Equal(t, token.Session(), got)
@@ -182,10 +184,109 @@ func TestAppendTokenFileArg_PassesThePathAndNeverTheToken(t *testing.T) {
 	}
 }
 
+// TestNativeAgentArgs_HandTheAgentItsToken pins the call site. appendTokenFileArg
+// has its own test, but dropping the one line that calls it from the native
+// launcher left every unit test green while every native agent came up with no
+// token.
+func TestNativeAgentArgs_HandTheAgentItsToken(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup() })
+	const agentURI = "http://localhost:26789/agent"
+	a := New(zap.NewNop(), nil, &config.Config{})
+
+	args := a.nativeAgentArgs(models.SetupOptions{AgentPort: 26789, ProxyPort: 26790, DnsPort: 26791, AgentURI: agentURI, Mode: models.MODE_RECORD})
+
+	i := slices.Index(args, "--token-file")
+	require.GreaterOrEqual(t, i, 0, "the native agent is started without --token-file: %v", args)
+	require.Less(t, i+1, len(args))
+	got, err := token.ReadFile(args[i+1])
+	require.NoError(t, err)
+	require.Equal(t, token.Session(), got, "the native agent is handed a token the client does not send")
+	for _, arg := range args {
+		require.NotContains(t, arg, token.Session(), "the token itself is in the native agent's argv")
+	}
+	_, launched := token.Launched(agentURI)
+	require.True(t, launched, "the client does not know it launched this agent, so it will never check the agent enforces the token")
+}
+
+// TestNativeAgentArgs_AnAgentThatGotNoTokenIsStillChecked: a token file that
+// cannot be written leaves the native agent without a token, serving open. The
+// client's readiness check is what reports that, and it only checks agents
+// this process launched — so the launch has to be on record whether or not the
+// handoff went through, or the one agent that needs checking is the one that
+// is skipped.
+func TestNativeAgentArgs_AnAgentThatGotNoTokenIsStillChecked(t *testing.T) {
+	require.NoError(t, token.Cleanup()) // so the next WriteFile needs a new private directory
+	t.Cleanup(func() { _ = token.Cleanup() })
+	unwritable := filepath.Join(t.TempDir(), "does-not-exist")
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, unwritable)
+	}
+	const agentURI = "http://localhost:26792/agent"
+	a := New(zap.NewNop(), nil, &config.Config{})
+
+	args := a.nativeAgentArgs(models.SetupOptions{AgentPort: 26792, ProxyPort: 26793, DnsPort: 26794, AgentURI: agentURI, Mode: models.MODE_RECORD})
+
+	require.NotContains(t, args, "--token-file", "a token file was written to a temp directory that does not exist")
+	_, launched := token.Launched(agentURI)
+	require.True(t, launched, "an agent that got no token is not on record as launched, so nothing checks it and it serves open unreported")
+}
+
+// TestNew_BuildsClientsThatCarryTheSessionToken pins what New wires up. The
+// transport has its own tests, but New handing it an empty token left them all
+// green while every request the CLI made was a 401 — or, against an agent that
+// was handed nothing either, unauthenticated.
+func TestNew_BuildsClientsThatCarryTheSessionToken(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.URL.Path] = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(srv.Close)
+
+	a := New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv.URL}})
+	_, err := a.GetMockErrors(context.Background()) // a.client
+	require.NoError(t, err)
+	require.NoError(t, a.BeforeTestRun(context.Background(), "test-run-0")) // a.hookClient
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := "Bearer " + token.Session()
+	require.Equal(t, want, seen["/mockerrors"], "the client's requests do not carry the session token")
+	require.Equal(t, want, seen["/hooks/before-test-run"], "the hook client's requests do not carry the session token")
+}
+
+// TestExportMockScopeEnv_HandsTheTokenOnlyToAMockRunner pins the guard around
+// the one place the token leaves keploy on purpose. In mock mode the wrapped
+// command is the user's test runner, the intended client of the scope API. In
+// record and test mode it is the application under test, and moving the export
+// outside the guard would hand it a working credential for /agent/pcap/keylog,
+// /agent/stop and /agent/storemocks with no test noticing.
+func TestExportMockScopeEnv_HandsTheTokenOnlyToAMockRunner(t *testing.T) {
+	for _, name := range []string{"KEPLOY_MOCK_AGENT", token.MockAgentTokenEnv, "KEPLOY_MOCK_SESSION"} {
+		t.Setenv(name, "") // restored afterwards
+		require.NoError(t, os.Unsetenv(name))
+	}
+
+	exportMockScopeEnv(zap.NewNop(), models.SetupOptions{MockMode: false, Mode: models.MODE_RECORD}, 16789)
+	for _, name := range []string{"KEPLOY_MOCK_AGENT", token.MockAgentTokenEnv} {
+		_, set := os.LookupEnv(name)
+		require.False(t, set, "%s was exported outside mock mode, into the application under test", name)
+	}
+
+	exportMockScopeEnv(zap.NewNop(), models.SetupOptions{MockMode: true, Mode: models.MODE_RECORD}, 16789)
+	require.Equal(t, "http://localhost:16789", os.Getenv("KEPLOY_MOCK_AGENT"))
+	require.Equal(t, token.Session(), os.Getenv(token.MockAgentTokenEnv),
+		"a mock-mode runner gets no credential, so every scope call it makes is a 401")
+}
+
 func TestRedactToken_KeepsTheTokenOutOfLogs(t *testing.T) {
-	// The docker alias normally carries only a path, but the windows arm falls
-	// back to an inline -e NAME=value. Debug logs are the first thing a user
-	// pastes into a bug report.
+	// The docker alias names the token without a value, but an assignment that
+	// did reach a logged command line must not survive into it. Debug logs are
+	// the first thing a user pastes into a bug report.
 	tests := []struct {
 		name string
 		cmd  string
@@ -202,9 +303,9 @@ func TestRedactToken_KeepsTheTokenOutOfLogs(t *testing.T) {
 			want: "docker run -e " + token.MockAgentTokenEnv + "=<redacted> --rm img",
 		},
 		{
-			name: "a command with no token is untouched",
-			cmd:  "docker run --env-file /tmp/keploy-agent-token-42 --rm img",
-			want: "docker run --env-file /tmp/keploy-agent-token-42 --rm img",
+			name: "the token named without a value is untouched",
+			cmd:  "docker run -e " + token.Env + " --rm img",
+			want: "docker run -e " + token.Env + " --rm img",
 		},
 	}
 	for _, tt := range tests {

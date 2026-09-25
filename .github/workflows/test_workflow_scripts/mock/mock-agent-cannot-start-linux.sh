@@ -94,8 +94,8 @@ case "$CASE" in
         mount -o remount,bind,ro /proc/sys/kernel/perf_event_paranoid || exit 1
       fi
     fi
-    # The agent's alias is `sudo docker container run ...`; the app's command
-    # is `docker run ...`, and only runs once the agent is up.
+    # The agent's alias is `docker container run ...`; the app's command is
+    # `docker run ...`, and only runs once the agent is up.
     cat > "$D/bin/docker" <<EOD
 #!/bin/sh
 case "\$1 \${2:-}" in
@@ -104,7 +104,12 @@ case "\$1 \${2:-}" in
 esac
 exit 0
 EOD
-    printf '#!/bin/sh\nexec "$@"\n' > "$D/bin/sudo"
+    # keploy is root here, and root runs docker directly: sudo would only
+    # reset the environment that carries the agent's token, and whatever
+    # `sudo` a machine has can break that (a pass-through stand-in execs
+    # --preserve-env as the command). A sudo that fails, loudly, keeps a
+    # regression from hiding behind a stand-in that happens to cope.
+    printf '#!/bin/sh\necho "keploy ran sudo as root: sudo $*" >&2\nexit 97\n' > "$D/bin/sudo"
     chmod +x "$D/bin/docker" "$D/bin/sudo"
     export PATH="$D/bin:$PATH"
     CMD="docker run --rm --name app alpine true"

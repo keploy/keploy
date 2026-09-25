@@ -3,12 +3,12 @@ package routes
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/token"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -138,36 +138,74 @@ func tokenMatches(header, sessionToken string) bool {
 //
 // The file comes first because it is the only handoff that survives the common
 // native path: the CLI starts the agent as `sudo keploy agent`, and sudo's
-// default env_reset drops the variable. The environment still serves the
-// container modes, where there is no sudo in between.
-func ConsumeSessionToken(logger *zap.Logger, tokenFile string) string {
+// default env_reset drops the variable. The environment serves the container
+// modes, where the docker or compose client passes it straight through.
+//
+// A --token-file that yields no token is an error, and the agent must not
+// start: only a launcher that hands its agent a token passes the flag at all,
+// so when the file cannot be read the handoff has failed or something else is
+// sitting at that path. Falling back to the environment there would serve the
+// control plane open — or, with a planted file, enforce a token the real
+// client does not hold. Serving unauthenticated remains only for an agent
+// started with no handoff whatsoever, which is what a launcher that predates
+// the token does.
+//
+// isDocker is the agent's --is-docker: whether it runs in a container, which is
+// what tells an in-cluster agent apart (see inClusterAgent).
+func ConsumeSessionToken(logger *zap.Logger, tokenFile string, isDocker bool) (string, error) {
 	if tokenFile != "" {
 		tok, err := token.ReadFile(tokenFile)
-		if err == nil {
-			// Read once and then gone: it has done its job, and leaving it
-			// behind leaves the session's token on disk for the rest of the run.
-			if rmErr := os.Remove(tokenFile); rmErr != nil {
-				logger.Debug("could not remove the agent control-plane token file after reading it",
-					zap.String("path", tokenFile), zap.Error(rmErr))
-			}
-			// So that anything in this process that later asks for the
-			// session token gets the one being enforced, rather than
-			// minting an unrelated value that would look just as valid.
-			token.Adopt(tok)
-			return tok
+		if err != nil {
+			return "", fmt.Errorf("the keploy client that started this agent passed --token-file, but no control-plane token could be read from it, "+
+				"so the agent will not start with its control plane open: %w", err)
 		}
-		// Not fatal, and not silent: fall through to the environment, and if
-		// that is empty too the warning below says the control plane is open.
-		utils.LogError(logger, err, "could not read the agent control-plane token file passed by the keploy client; falling back to the environment",
-			zap.String("path", tokenFile))
+		// Read once and then gone: it has done its job, and leaving it
+		// behind leaves the session's token on disk for the rest of the run.
+		if rmErr := os.Remove(tokenFile); rmErr != nil {
+			logger.Debug("could not remove the agent control-plane token file after reading it",
+				zap.String("path", tokenFile), zap.Error(rmErr))
+		}
+		// So that anything in this process that later asks for the
+		// session token gets the one being enforced, rather than
+		// minting an unrelated value that would look just as valid.
+		token.Adopt(tok)
+		return tok, nil
 	}
 
 	tok := token.FromEnv()
 	token.Adopt(tok)
-	if tok == "" {
-		logger.Warn("agent control-plane API is running WITHOUT authentication: the process that started this agent supplied no " + token.Env +
-			" and no --token-file. Any local user or neighbouring container that can reach the port can read TLS session keys and " +
-			"captured traffic, and can stop or alter the session.")
+	if tok != "" {
+		return tok, nil
 	}
-	return tok
+	if inClusterAgent(isDocker) {
+		// In-cluster agents do not use token authentication: the cluster
+		// network is trusted, and nothing in Kubernetes hands an agent a
+		// token. So this is the state every such agent is in by design, not a
+		// handoff that broke. Said once, and at info, with no remedy: the
+		// warning below names handoffs (--token-file, the launching client's
+		// environment) that do not exist in a pod, for a state that needs no
+		// fixing.
+		logger.Info("agent control-plane API is running without authentication: this agent runs in a Kubernetes pod, " +
+			"and in-cluster agents do not use token authentication because the cluster network is trusted, so anything " +
+			"that can reach this pod's agent port can use the API")
+		return "", nil
+	}
+	logger.Warn("agent control-plane API is running WITHOUT authentication: the process that started this agent supplied no " + token.Env +
+		" and no --token-file. Any local user or neighbouring container that can reach the port can read TLS session keys and " +
+		"captured traffic, and can stop or alter the session.")
+	return "", nil
+}
+
+// inClusterAgent reports whether this agent is one Kubernetes runs, as a
+// sidecar or in a replay pod: a container (--is-docker) with
+// KUBERNETES_SERVICE_HOST set, which the kubelet puts in every container it
+// starts.
+//
+// Both, not the variable alone. keploy run natively as root inside a CI pod
+// starts its agent without sudo, so that agent inherits the variable too — and
+// a handoff that failed there is a local one like any other. A container keploy
+// launches with docker gets only the environment keploy gives it, which never
+// includes the variable.
+func inClusterAgent(isDocker bool) bool {
+	return isDocker && os.Getenv("KUBERNETES_SERVICE_HOST") != ""
 }

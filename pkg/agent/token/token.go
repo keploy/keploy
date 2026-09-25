@@ -11,8 +11,11 @@ package token
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -22,11 +25,13 @@ import (
 //
 // The token is never passed as a flag value: argv is world-readable through
 // /proc/<pid>/cmdline and `ps`, which would hand it to exactly the local users
-// it exists to keep out. In a container the environment is the vehicle, filled
-// from a private env file rather than from `-e NAME=value` for that same
-// reason. Natively the environment cannot be used at all — the CLI starts the
-// agent through sudo, which resets it — so the token goes in a 0600 file and
-// only its path travels in argv. See WriteFile.
+// it exists to keep out. In a container the environment is the vehicle, and
+// the docker or compose client is handed the variable BY NAME (`-e NAME`,
+// `environment: [NAME]`) with the value in its own environment rather than
+// `-e NAME=value` in argv, for that same reason. Natively the environment
+// cannot be used at all — the CLI starts the agent through sudo, which resets
+// it — so the token goes in a 0600 file and only its path travels in argv.
+// See WriteFile.
 const Env = "KEPLOY_AGENT_TOKEN"
 
 // ProbePath is the path the keploy CLI uses to check that an agent is really
@@ -138,11 +143,19 @@ func resolveSession(getenv func(string) string) string {
 // without a token serves its control plane unauthenticated, and says so.
 func FromEnv() string { return os.Getenv(Env) }
 
-// fileMu guards the session's token file.
+// fileMu guards the session's token file and the private directory it lives
+// in.
 var (
-	fileMu   sync.Mutex
-	filePath string
+	fileMu sync.Mutex
+	// dir is this process's private directory for the token file, created on
+	// first use.
+	dir string
 )
+
+// fileName is the token file's name inside the private directory. It can be
+// fixed because the directory is what nobody else can write into; see
+// WriteFile.
+const fileName = "agent-token"
 
 // WriteFile stores the session token in a private file and returns its path.
 //
@@ -154,51 +167,65 @@ var (
 // sent a token nothing checked. The file survives sudo because only its path
 // travels, in argv, and a path is not a secret.
 //
-// Written in docker's env-file format so the same file can be handed to
-// `docker run --env-file` and to a compose `env_file:` without a second
-// representation of the same secret.
+// It is also why the file never sits directly in the temp directory. The path
+// is in the agent's argv for every local user to read, and the agent unlinks
+// the file once it has read it. In /tmp, which is sticky but world-writable,
+// anyone could then create a file at that same name, and the next agent this
+// process started would be handed it: garbage, to fail its token check, or a
+// token of their own choosing, to enforce against the real client. So the file
+// lives in a directory created for this process by os.MkdirTemp — 0700, owned
+// by this user, under an unpredictable name — in which nobody else can create
+// anything. Inside it, re-creating the file at the same path once the agent
+// has consumed it is safe, and that is what happens. If the directory itself
+// is gone, or whatever now has its name is not private to this user (a temp
+// cleaner removed it and someone else took the name), a new one is created
+// under a new name instead.
 //
-// Once docker has read it the token is in the container's Config.Env and shows
-// up in `docker inspect`. That is not a boundary this could hold anyway —
-// membership of the docker group is equivalent to root — and what the file
-// avoids is the token appearing in argv and in a 0644 compose file, which are
-// readable without it.
-//
-// os.CreateTemp creates the file 0600 and picks an unpredictable name with
-// O_EXCL, so no other user can read it or race it into place.
-//
-// The path is reused while the file is still there, and a NEW temp file is
-// minted when it is not. A natively spawned agent unlinks the file once it has
-// read it, so a process that starts a second agent — `keploy rerecord` runs a
-// record and then a test — would otherwise hand it a path to a deleted file
-// and watch it come up unauthenticated. Re-creating at the remembered path
-// instead of a fresh one would reintroduce the symlink race that CreateTemp's
-// O_EXCL exists to avoid.
+// Cleanup removes the directory, and everything left in it, when the process
+// is done.
 func WriteFile() (string, error) {
 	fileMu.Lock()
 	defer fileMu.Unlock()
-
-	if filePath != "" {
-		if _, err := os.Stat(filePath); err == nil {
-			return filePath, nil
-		}
-	}
 
 	tok := Session()
 	if tok == "" {
 		return "", fmt.Errorf("no agent control-plane token to write")
 	}
-	f, err := os.CreateTemp("", "keploy-agent-token-*")
+	if !ownDir() {
+		d, err := os.MkdirTemp("", "keploy-agent-*")
+		if err != nil {
+			return "", fmt.Errorf("creating a private directory for the agent control-plane token: %w", err)
+		}
+		dir = d
+	}
+
+	path := filepath.Join(dir, fileName)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		// Not consumed yet — the agent it was written for never read it. It
+		// holds this process's token, and nothing else can have put it here.
+		return path, nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("creating agent control-plane token file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 	if _, err := f.WriteString(Env + "=" + tok + "\n"); err != nil {
-		_ = os.Remove(f.Name())
+		_ = os.Remove(path)
 		return "", fmt.Errorf("writing agent control-plane token file: %w", err)
 	}
-	filePath = f.Name()
-	return filePath, nil
+	return path, nil
+}
+
+// ownDir reports whether dir is still a directory only this user can enter.
+// Anyone else who took its name after it was removed cannot have made it so.
+// Must be called with fileMu held.
+func ownDir() bool {
+	if dir == "" {
+		return false
+	}
+	fi, err := os.Lstat(dir)
+	return err == nil && fi.IsDir() && isPrivate(fi)
 }
 
 // ReadFile returns the token from a file written by WriteFile.
@@ -218,24 +245,77 @@ func ReadFile(path string) (string, error) {
 	return tok, nil
 }
 
-// RemoveFile deletes the session's token file if one is still on disk.
+// Cleanup removes this process's private token directory and anything still
+// in it.
 //
-// A natively spawned agent unlinks the file itself once it has read it, but
-// the container paths cannot: `docker run --env-file` and a compose
-// `env_file:` are read by docker, not by keploy, and keploy does not get to
-// see when. So the CLI clears it on the way out, rather than leaving a session
-// token in the temp directory after the run — one more file per run, forever.
-func RemoveFile() error {
+// A natively spawned agent unlinks its token file once it has read it, but one
+// that never got that far leaves it behind, and the directory outlives both.
+// Every keploy binary whose commands are built by cli.Root gets this for free:
+// Root registers it to run when the command finishes, however it finishes. A
+// program that starts agents through pkg/platform/http without cli.Root must
+// call Cleanup itself on its way out; nothing else removes the directory.
+//
+// A directory at that name that is no longer private to this user is left
+// alone: it is not the one this process made, and removing it is not this
+// process's call to make.
+func Cleanup() error {
 	fileMu.Lock()
 	defer fileMu.Unlock()
 
-	if filePath == "" {
+	if dir == "" {
 		return nil
 	}
-	err := os.Remove(filePath)
-	filePath = ""
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing agent control-plane token file: %w", err)
+	d, ours := dir, ownDir()
+	dir = ""
+	if !ours {
+		return nil
+	}
+	if err := os.RemoveAll(d); err != nil {
+		return fmt.Errorf("removing the agent control-plane token directory: %w", err)
 	}
 	return nil
+}
+
+// launchMu guards the record of the agents this process launched.
+var (
+	launchMu  sync.Mutex
+	launches  = map[string]uint64{}
+	launchSeq uint64
+)
+
+// RecordLaunch notes that this process is starting an agent it will reach at
+// agentURI, and handing it the session token: natively through --token-file,
+// or through a docker or compose client given the token by name.
+//
+// It is what the client's check that its agent enforces the token keys on
+// (pkg.verifyControlPlaneGuarded). Recorded for the launch, not for a handoff
+// that went through: a token file that could not be written, or a launcher
+// that stopped passing one, leaves an agent this process started serving open,
+// and that is exactly what the check exists to catch. What it must not check
+// is an agent this process never launched — a Kubernetes sidecar that
+// k8s-proxy drives, an agent image that predates the token. That agent was
+// never handed anything, and checking it for the token this process minted can
+// only raise a false alarm about a handoff that never happened.
+func RecordLaunch(agentURI string) {
+	launchMu.Lock()
+	defer launchMu.Unlock()
+
+	launchSeq++
+	launches[agentURI] = launchSeq
+}
+
+// Launched reports whether this process launched the agent at agentURI, and
+// which launch that was.
+//
+// The number is new for every agent started there: a docker compose test run
+// starts a new agent for each test-set, at the same address, from the compose
+// file generated once for the session. A check that remembers per launch
+// rather than per address therefore still sees each of those agents as the
+// new agent it is.
+func Launched(agentURI string) (uint64, bool) {
+	launchMu.Lock()
+	defer launchMu.Unlock()
+
+	seq, ok := launches[agentURI]
+	return seq, ok
 }

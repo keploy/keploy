@@ -4732,7 +4732,7 @@ func (r *Replayer) executeScript(ctx context.Context, script string) error {
 		}
 	}
 
-	cmdErr := utils.ExecuteCommand(ctx, r.logger, script, utils.Empty, cmdCancel, 25*time.Second, nil)
+	cmdErr := utils.ExecuteCommand(ctx, r.logger, script, utils.Empty, cmdCancel, 25*time.Second, nil, nil)
 	if cmdErr.Err != nil {
 		return fmt.Errorf("failed to execute script: %w", cmdErr.Err)
 	}

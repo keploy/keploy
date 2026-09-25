@@ -71,10 +71,11 @@ var tokenInCommand = regexp.MustCompile(`(` + token.Env + `|` + token.MockAgentT
 // redactToken removes the control-plane token from a command line before it is
 // logged.
 //
-// The docker alias normally carries only a path to the token file, but the
-// windows arm falls back to an inline `-e NAME=value` when that path cannot
-// survive being split on spaces. Debug logs are the first thing a user pastes
-// into a bug report, so the token must not be in one even on that path.
+// The docker alias names the token without a value (`-e KEPLOY_AGENT_TOKEN`)
+// and carries it only in the environment, which a logged command line does not
+// include. But the alias also carries whatever extra arguments the caller
+// supplied, and debug logs are the first thing a user pastes into a bug report,
+// so an assignment that did end up in one is still scrubbed.
 func redactToken(cmd string) string {
 	return tokenInCommand.ReplaceAllString(cmd, "${1}=<redacted>")
 }
@@ -86,7 +87,7 @@ func redactToken(cmd string) string {
 // default env_reset drops the variable, so the token cannot ride the
 // environment here; and it must not ride argv either, where /proc/<pid>/cmdline
 // and `ps` would show it to every user on the box. So the token sits in a 0600
-// file and only its path is passed.
+// file in a directory only this user can enter, and only its path is passed.
 //
 // A failure is not fatal: the agent then starts unauthenticated and says so,
 // which is how it behaved before this existed, rather than leaving the user

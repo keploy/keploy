@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -83,6 +84,48 @@ func GenerateDockerEnvs(config DockerConfigStruct) string {
 	return strings.Join(envs, " ")
 }
 
+// AgentTokenEnv is what a docker or docker compose client that starts a keploy
+// agent must have in its environment, on top of what it inherits: the session
+// token under token.Env. The `docker run` alias (`-e KEPLOY_AGENT_TOKEN`) and
+// the generated compose service (`environment: [KEPLOY_AGENT_TOKEN]`) name the
+// variable without a value, and the client fills it in from here. Nil when
+// there is no token.
+func AgentTokenEnv() []string {
+	tok := token.Session()
+	if tok == "" {
+		return nil
+	}
+	return []string{token.Env + "=" + tok}
+}
+
+// linuxDockerClient is how the linux `docker run` alias invokes the docker
+// client that starts the agent container: as root, with the control-plane
+// token in its environment when passToken is set (see getAlias).
+//
+// A process that is already root runs docker itself, and that is every process
+// that normally gets here: utils.ReexecWithSudo re-executes keploy under sudo
+// for a docker command, and the agent client's docker-mode privilege check
+// refuses a process without the capabilities this alias grants. A sudo on top
+// would add only its env_reset, which drops the token before docker can copy
+// it, and a dependency on whatever `sudo` is on PATH: a pass-through stand-in
+// execs --preserve-env as if it were the command, and a sudoers rule without
+// SETENV refuses the whole command. Run directly, docker also sees the same
+// environment, and so the same daemon, as the app's own `docker run`
+// (utils.ExecuteCommand), the `docker stop` that tears this container down and
+// the Engine API client (FromEnv), none of which go through sudo.
+//
+// Anything else goes through sudo, told to keep that one variable and no other.
+func linuxDockerClient(root, passToken bool) string {
+	switch {
+	case root:
+		return "docker"
+	case passToken:
+		return "sudo --preserve-env=" + token.Env + " docker"
+	default:
+		return "sudo docker"
+	}
+}
+
 func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.Config, opts models.SetupOptions) (keployAlias string, err error) {
 	// Preserves your environment variable setup
 	if DockerConfig.Envs == nil {
@@ -157,35 +200,34 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	if base := GenerateDockerEnvs(DockerConfig); base != "" {
 		envParts = append(envParts, base)
 	}
-	// The control-plane token, by reference. `-e NAME=value` would put the
-	// token in the `docker run` argv, where /proc/<pid>/cmdline and `ps` show
-	// it to every user on the box — the ones the token exists to keep out of
-	// the control plane. --env-file passes a path instead, and that file is
-	// 0600.
+	// The control-plane token, by name only. `-e KEPLOY_AGENT_TOKEN` with no
+	// value makes the docker client copy the variable from its own
+	// environment, and AgentTokenEnv is what PrepareDockerCommand puts there,
+	// on the one process that runs this alias. So the value is in neither
+	// argv — where /proc/<pid>/cmdline and `ps` would show it to every user
+	// on the box, the ones the token exists to keep out of the control plane
+	// — nor in any file the docker client has to open. The latter is where
+	// --env-file fell down: a strictly confined docker (the snap) runs in a
+	// mount namespace with a private /tmp, where a host temp file does not
+	// exist, and it refused to start the agent at all. The environment
+	// reaches it on every platform, windows' cmd.exe and macOS included, and
+	// a bare name has no quoting or path to survive the windows arm's split
+	// on spaces.
 	//
-	// A failure here is not fatal: the agent starts unauthenticated and says
-	// so, which is how it behaved before this existed, rather than leaving the
-	// user unable to record at all.
-	switch tokenFile, err := token.WriteFile(); {
-	case err != nil:
-		logger.Warn("could not hand a control-plane token to the agent container; it will start without authentication",
-			zap.Error(err))
-	case osName != "windows":
-		envParts = append(envParts, "--env-file "+shellQuote(tokenFile))
-	// util_windows.go hands this alias to cmd.exe as strings.Split(alias, " ")
-	// — there is no quoting layer, so a path with a space would arrive as two
-	// arguments, and windows temp paths sit under a user profile directory
-	// that can contain one.
-	case !strings.ContainsAny(tokenFile, " \t\"^&|<>"):
-		envParts = append(envParts, "--env-file "+tokenFile)
-	default:
-		// Fall back to the value in argv. On windows another user cannot read
-		// this process's command line without administrator rights, so the
-		// exposure the env file avoids on unix does not apply in the same way
-		// — and an agent that starts unauthenticated would be worse.
-		logger.Debug("agent control-plane token file path is not splittable on windows; passing the token as a docker env instead",
-			zap.String("path", tokenFile))
-		envParts = append(envParts, "-e "+token.Env+"="+token.Session())
+	// Once docker has it the token is in the container's Config.Env and
+	// shows up in `docker inspect`. That is not a boundary this could hold
+	// anyway: membership of the docker group is equivalent to root.
+	//
+	// No token is not fatal: the agent starts unauthenticated and says so,
+	// which is how it behaved before this existed, rather than leaving the
+	// user unable to record at all. The launch is recorded either way, so the
+	// client still holds this agent to the token (see token.RecordLaunch).
+	token.RecordLaunch(opts.AgentURI)
+	passToken := token.Session() != ""
+	if passToken {
+		envParts = append(envParts, "-e "+token.Env)
+	} else {
+		logger.Warn("no control-plane token to hand to the agent container; it will start without authentication")
 	}
 	envs := strings.Join(envParts, " ")
 	if envs != "" {
@@ -270,7 +312,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	switch osName {
 	case "linux":
 
-		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+		alias := linuxDockerClient(os.Geteuid() == 0, passToken) + " container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +

@@ -61,7 +61,7 @@ func TestExecuteCommand_RunsCloudReplayShapeWithoutShell(t *testing.T) {
 	cmdStr := "tee " + capturedPath
 	noopCancel := func(_ *exec.Cmd) func() error { return func() error { return nil } }
 
-	cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), cmdStr, Empty, noopCancel, time.Second, composeDoc)
+	cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), cmdStr, Empty, noopCancel, time.Second, composeDoc, nil)
 	if cmdErr.Err != nil {
 		t.Fatalf("ExecuteCommand failed in a shell-less env (a hard `sh -c` regression?): type=%s err=%v",
 			cmdErr.Type, cmdErr.Err)
@@ -73,5 +73,36 @@ func TestExecuteCommand_RunsCloudReplayShapeWithoutShell(t *testing.T) {
 	}
 	if !bytes.Equal(got, composeDoc) {
 		t.Fatalf("stdin was not piped to the launched command: got %q want %q", got, composeDoc)
+	}
+}
+
+// TestExecuteCommand_GivesExtraEnvToThatCommandAlone: extraEnv is how the
+// docker compose command that starts the agent gets the control-plane token
+// its compose file names without a value. It must reach that command — and only
+// that command: exporting it to keploy's own environment would hand it to every
+// process keploy starts afterwards.
+func TestExecuteCommand_GivesExtraEnvToThatCommandAlone(t *testing.T) {
+	const name = "KEPLOY_TEST_EXTRA_ENV"
+	t.Setenv(name, "") // restored afterwards
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "out")
+	noopCancel := func(_ *exec.Cmd) func() error { return func() error { return nil } }
+
+	cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), `printf %s "$`+name+`" > `+out, Empty, noopCancel, time.Second, nil,
+		[]string{name + "=only-for-this-command"})
+	if cmdErr.Err != nil {
+		t.Fatalf("ExecuteCommand: %v", cmdErr.Err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "only-for-this-command" {
+		t.Fatalf("the command saw %q, not the variable it was given", got)
+	}
+	if _, exported := os.LookupEnv(name); exported {
+		t.Fatalf("%s was exported to keploy's own environment", name)
 	}
 }

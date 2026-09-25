@@ -38,10 +38,12 @@ import os, json, urllib.request, urllib.error, sys, time
 AG = os.environ["KEPLOY_MOCK_AGENT"]; PORT = sys.argv[1]; pid = os.getpid()
 def _auth():
     # The agent guards its control plane with a bearer token and exports it
-    # here for exactly this caller. Absent when recording with an older
-    # released binary, which is why this is conditional rather than required.
+    # here for exactly this caller. Required, not optional: this lane runs the
+    # PR build for record and replay (mock_linux.yml), so a missing token is
+    # the regression, not an older binary.
     t = os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
-    return {"Authorization": "Bearer " + t} if t else {}
+    assert t, "keploy exported KEPLOY_MOCK_AGENT but no KEPLOY_MOCK_AGENT_TOKEN into the wrapped command"
+    return {"Authorization": "Bearer " + t}
 def scope(path, name):
     d = json.dumps({"name": name, "pid": pid}).encode()
     h = {"Content-Type": "application/json"}; h.update(_auth())
@@ -52,20 +54,22 @@ time.sleep(3)  # let keploy warm up eBPF redirect so the FIRST call is intercept
 # The control plane must REFUSE a caller with no credential. Without this the
 # whole feature can regress to a no-op with a green pipeline: an agent that was
 # handed no token serves everything, and every other assertion here still
-# passes. Conditional on the token existing, so an older RECORD_BIN that
-# predates authentication still runs this lane.
-if os.environ.get("KEPLOY_MOCK_AGENT_TOKEN"):
-    try:
-        urllib.request.urlopen(urllib.request.Request(
-            AG + "/agent/scope/begin",
-            data=json.dumps({"name": "unauthenticated-probe", "pid": pid}).encode(),
-            headers={"Content-Type": "application/json"}, method="POST"), timeout=5).read()
-    except urllib.error.HTTPError as e:
-        assert e.code == 401, "expected 401 for an unauthenticated scope call, got %d" % e.code
-    else:
-        raise AssertionError("the agent served /agent/scope/begin to a caller with no token")
-    # And health stays reachable without one, so callers can still find the agent.
-    assert urllib.request.urlopen(AG + "/agent/health", timeout=5).status == 200
+# passes. Unconditional: record and replay both run the PR build here, and an
+# agent that came up with no token is exactly what this must catch — skipping
+# the check whenever the token is missing would skip it in the one case it
+# exists for.
+_auth()
+try:
+    urllib.request.urlopen(urllib.request.Request(
+        AG + "/agent/scope/begin",
+        data=json.dumps({"name": "unauthenticated-probe", "pid": pid}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST"), timeout=5).read()
+except urllib.error.HTTPError as e:
+    assert e.code == 401, "expected 401 for an unauthenticated scope call, got %d" % e.code
+else:
+    raise AssertionError("the agent served /agent/scope/begin to a caller with no token")
+# And health stays reachable without one, so callers can still find the agent.
+assert urllib.request.urlopen(AG + "/agent/health", timeout=5).status == 200
 scope("/agent/scope/begin", "t1"); assert call("/a") == b"AAA"; scope("/agent/scope/end", "t1")
 scope("/agent/scope/begin", "t2"); assert call("/b") == b"BBB"; scope("/agent/scope/end", "t2")
 print("RECORD_OK", flush=True)
@@ -77,10 +81,12 @@ import os, json, urllib.request, sys, time
 AG = os.environ["KEPLOY_MOCK_AGENT"]; PORT = sys.argv[1]; name = sys.argv[2]
 def _auth():
     # The agent guards its control plane with a bearer token and exports it
-    # here for exactly this caller. Absent when recording with an older
-    # released binary, which is why this is conditional rather than required.
+    # here for exactly this caller. Required, not optional: this lane runs the
+    # PR build for record and replay (mock_linux.yml), so a missing token is
+    # the regression, not an older binary.
     t = os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
-    return {"Authorization": "Bearer " + t} if t else {}
+    assert t, "keploy exported KEPLOY_MOCK_AGENT but no KEPLOY_MOCK_AGENT_TOKEN into the wrapped command"
+    return {"Authorization": "Bearer " + t}
 def scope(path):
     d = json.dumps({"name": name, "pid": os.getpid()}).encode()
     h = {"Content-Type": "application/json"}; h.update(_auth())
