@@ -50,6 +50,13 @@ function Find($id) { @($state.containers | Where-Object { $_.id -eq $id }) }
 # kill them.
 function Test-Down { $state.daemonDown -and -not (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up") }
 if (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.hang") { Start-Sleep -Seconds 120 }
+# stampOnCall counts down the calls until another runner's start or restart of
+# Docker Desktop lands: that call first writes its docker-desktop.started to
+# stampFile.
+if ($state.stampOnCall -gt 0) {
+    $state.stampOnCall--; Save
+    if ($state.stampOnCall -eq 0) { Set-Content -LiteralPath $state.stampFile -Value "$([guid]::NewGuid().ToString('N')) another runner's restart" }
+}
 switch ($args[0]) {
     'info' {
         if ($state.hangInfo -gt 0) { $state.hangInfo--; Save; Start-Sleep -Seconds 120 }
@@ -144,7 +151,7 @@ function Container($id, $name, $created, $started = $NEVER, $finished = $NEVER, 
     [pscustomobject]@{ id = $id; name = $name; created = $created; started = $started; finished = $finished; project = $project; stuck = [bool]$Stuck; removing = $RemovingFor; gone = $false }
 }
 function Set-State($containers, $systemTime = $NOW, [switch]$DaemonDown, [switch]$PsDown, [int]$FailInfo = 0, [int]$HangInfo = 0) {
-    [pscustomobject]@{ systemTime = $systemTime; daemonDown = [bool]$DaemonDown; psDown = [bool]$PsDown; failInfo = $FailInfo; hangInfo = $HangInfo; containers = @($containers); removed = @(); pruned = @() } |
+    [pscustomobject]@{ systemTime = $systemTime; daemonDown = [bool]$DaemonDown; psDown = [bool]$PsDown; failInfo = $FailInfo; hangInfo = $HangInfo; stampOnCall = 0; stampFile = ''; containers = @($containers); removed = @(); pruned = @() } |
         ConvertTo-Json -Depth 5 | Set-Content -Path $stateFile -Encoding ASCII
     Remove-Item -LiteralPath "$stateFile.up", "$stateFile.hang" -Force -ErrorAction SilentlyContinue
     $env:FAKE_DOCKER_STATE = $stateFile
@@ -834,11 +841,21 @@ try {
     # each action (THE LAST START in docker-locks.ps1). Starting Desktop brings the fake daemon back
     # unless -StaysDown; with -HangsAfterStart it comes back wedged, and every
     # docker call hangs. -StartedUnwritable puts a directory where
-    # docker-desktop.started goes, so that writing it fails. $locks and $runs are as for Invoke-Cleanup; $Extra
+    # docker-desktop.started goes, so that writing it fails. -StampOnCall N:
+    # another runner's start or restart lands on the Nth docker call (the fake
+    # docker's stampOnCall). -InLockDir runs it in a lock directory an earlier
+    # run left, instead of a new one made from $locks. $locks and $runs are as for Invoke-Cleanup; $Extra
     # overrides any parameter. Two checks before giving up rather than the
     # script's five: each docker call here starts a PowerShell process.
-    function Invoke-Ensure($locks = @{}, $runs = @{}, [switch]$DesktopDown, [switch]$StaysDown, [switch]$HangsAfterStart, [switch]$StartedUnwritable, [scriptblock]$OnAsk = $null, [hashtable]$Extra = @{}) {
-        $lockDir = New-LockDir $locks
+    function Invoke-Ensure($locks = @{}, $runs = @{}, [switch]$DesktopDown, [switch]$StaysDown, [switch]$HangsAfterStart, [switch]$StartedUnwritable, [int]$StampOnCall = 0, [string]$InLockDir = '', [scriptblock]$OnAsk = $null, [hashtable]$Extra = @{}) {
+        $lockDir = $InLockDir
+        if (-not $lockDir) { $lockDir = New-LockDir $locks }
+        if ($StampOnCall) {
+            $st = Get-State
+            $st.stampOnCall = $StampOnCall
+            $st.stampFile = Join-Path $lockDir 'docker-desktop.started'
+            $st | ConvertTo-Json -Depth 5 | Set-Content -Path $stateFile -Encoding ASCII
+        }
         if ($StartedUnwritable) { New-Item -ItemType Directory -Path (Join-Path $lockDir 'docker-desktop.started') | Out-Null }
         $events = New-Object System.Collections.ArrayList
         $markedAt = New-Object System.Collections.ArrayList
@@ -884,19 +901,24 @@ try {
         $r | Add-Member -NotePropertyName Events -NotePropertyValue @($events)
         $r | Add-Member -NotePropertyName Held -NotePropertyValue $held
         $r | Add-Member -NotePropertyName Stamps -NotePropertyValue @($stamps)
+        $r | Add-Member -NotePropertyName LockDir -NotePropertyValue $lockDir
         $r
     }
-    # What another runner's start or restart of Docker Desktop leaves behind:
-    # a new docker-desktop.started, and Docker answering (-Up) or not, maybe
-    # only after -FailInfo more failed checks while it comes up.
-    function Write-OtherStart([string]$dir, [switch]$Up, [int]$FailInfo = 0) {
-        Set-Content -LiteralPath (Join-Path $dir 'docker-desktop.started') -Value "$([guid]::NewGuid().ToString('N')) another runner's restart"
+    # Docker answering (-Up) or not, maybe only after -FailInfo more failed
+    # checks while it comes up.
+    function Set-Docker([switch]$Up, [int]$FailInfo = 0) {
         if ($FailInfo) {
             $st = Get-State
             $st.failInfo = $FailInfo
             $st | ConvertTo-Json -Depth 5 | Set-Content -Path $stateFile -Encoding ASCII
         }
         if ($Up) { Set-Content -LiteralPath "$stateFile.up" -Value 'up' }
+    }
+    # What another runner's start or restart of Docker Desktop leaves behind:
+    # a new docker-desktop.started, and Docker as Set-Docker leaves it.
+    function Write-OtherStart([string]$dir, [switch]$Up, [int]$FailInfo = 0) {
+        Set-Content -LiteralPath (Join-Path $dir 'docker-desktop.started') -Value "$([guid]::NewGuid().ToString('N')) another runner's restart"
+        Set-Docker -Up:$Up -FailInfo $FailInfo
     }
     function Events($result, [string[]]$want) {
         $got = @($result.Events) -join ','
@@ -1045,6 +1067,35 @@ try {
         (Says $r 'Docker engine is running and healthy' "the check after it"), (Locks $r @())
     )
 
+    # Another runner's restart lands during this one's check, on its first
+    # docker call, and its marker comes and goes before this one looks for
+    # markers. Docker, coming up from it, misses that check and one more
+    # call, and answers after. docker-desktop.started is read before the check, so the
+    # restart shows under this one's marker: it checks again, with every
+    # retry, and finds Docker answering. Read after the check, it would miss
+    # that restart, act on one more probe, and restart Docker Desktop again.
+    Set-State @() -FailInfo 3
+    $r = Invoke-Ensure -StampOnCall 1
+    Report "a restart by another runner during this one's check is not followed by a second restart" $r @(
+        (Ensured $r 0 @()),
+        (Says $r "started or restarted by another runner since this one checked Docker(.|\n)*attempt 1 of 2(.|\n)*Docker engine is running and healthy" "the out-of-date check, then a full check"),
+        (Locks $r @())
+    )
+
+    # A waiter compares docker-desktop.started with what it read before its
+    # check: each start or restart must write one no earlier one wrote, or a
+    # second restart by the same run on the same runner (a re-run of
+    # precheck-windows, say) would look like no restart at all.
+    Set-State @() -DaemonDown
+    $r1 = Invoke-Ensure
+    Set-State @() -DaemonDown
+    $r2 = Invoke-Ensure -InLockDir $r1.LockDir
+    $s1 = @($r1.Stamps | Select-Object -Unique); $s2 = @($r2.Stamps | Select-Object -Unique)
+    Report "each restart writes a docker-desktop.started of its own" $r2 @(
+        (Ensured $r1 0 @('stop+marker', 'start+marker')), (Ensured $r2 0 @('stop+marker', 'start+marker')),
+        $(if (($s1.Count -ne 1) -or ($s2.Count -ne 1) -or ($s1[0] -eq $s2[0])) { "the restarts left [$($s1 -join '|')] then [$($s2 -join '|')], want one stamp each, different" })
+    )
+
     # Docker can answer again by the time the marker is down with nobody
     # having started or restarted it: a prune or an operation this one waited
     # for found it answering, or it recovered. It is checked once more under
@@ -1145,18 +1196,27 @@ exit $drvCode
     function Get-Events([string]$file) { @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue | Where-Object { $_ }) }
     function Get-Markers([string]$dir) { @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $dir -Filter 'docker-prune-*.inprogress' | ForEach-Object { $_.Name } | Sort-Object) }
 
-    # A restart by another runner has its marker down, Desktop is running and
-    # the daemon does not answer yet. Restarting now would kill that restart
-    # mid-startup. The wait itself is pinned by what
+    # A restart or a prune by another runner has its marker down, Desktop is
+    # running and the daemon does not answer yet. Restarting now would kill
+    # that restart mid-startup, or the prune. The wait itself is pinned by what
     # happens meanwhile, not by timing: the fake docker logs every call
     # (FAKE_DOCKER_CALLS) and the prelude every look for markers, and the
     # other runner's marker stays down until this one has looked for it
-    # three more times without a single docker call.
-    Set-State @() -DaemonDown
-    $lockDir = New-LockDir @{ 'docker-prune-other.inprogress' = @(0, 'a Docker Desktop restart by keploy/keploy run 1 win-runner-2') }
-    $evFile = Join-Path (New-Dir 'events') 'events'
-    $callsFile = "$evFile.calls"; $listedFile = "$evFile.listed"
-    $countPrelude = @'
+    # three more times without a single docker call. Once it is gone, the
+    # check made before the wait no longer counts, whatever the other runner
+    # did: a prune writes no docker-desktop.started, and Docker here misses
+    # one more call after it. Only a full check again, with every retry,
+    # finds it answering; one probe would restart it.
+    foreach ($v in @(
+            @{ What = 'restart'; Marker = 'a Docker Desktop restart by keploy/keploy run 1 win-runner-2'; End = { param($dir) Write-OtherStart $dir -Up }
+                Says = 'Docker engine is running and healthy' },
+            @{ What = 'prune'; Marker = 'a Docker prune by keploy/keploy run 1 win-runner-2'; End = { param($dir) Set-Docker -Up -FailInfo 1 }
+                Says = 'waiting for it to finish(.|\n)*attempt 1 of 2(.|\n)*Docker engine is running and healthy' })) {
+        Set-State @() -DaemonDown
+        $lockDir = New-LockDir @{ 'docker-prune-other.inprogress' = @(0, $v.Marker) }
+        $evFile = Join-Path (New-Dir 'events') 'events'
+        $callsFile = "$evFile.calls"; $listedFile = "$evFile.listed"
+        $countPrelude = @'
 $env:FAKE_DOCKER_CALLS = '@@CALLS@@'
 function Get-ChildItem {
     $items = Microsoft.PowerShell.Management\Get-ChildItem @args
@@ -1164,46 +1224,47 @@ function Get-ChildItem {
     $items
 }
 '@ -replace '@@CALLS@@', $callsFile -replace '@@LISTED@@', $listedFile
-    $bg = Start-Ensure $lockDir $evFile -prelude $countPrelude
-    $problems = @(); $said = ''
-    try {
-        $deadline = [DateTime]::UtcNow.AddSeconds(120)
-        while ($true) {
-            $said = Read-Background $bg
-            if ($said -match 'waiting for it to finish, then checking Docker again') { break }
-            if ((Test-BackgroundDone $bg) -or (Get-Events $evFile).Count) { $problems += "did not wait for the other runner's restart"; break }
-            if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not say it was waiting within 120s"; break }
-            Start-Sleep -Milliseconds 200
-        }
-        if (-not $problems.Count) {
-            $calls0 = (Get-Events $callsFile).Count
-            $listed0 = (Get-Events $listedFile).Count
+        $bg = Start-Ensure $lockDir $evFile -prelude $countPrelude
+        $problems = @(); $said = ''
+        try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(120)
             while ($true) {
-                if ((Get-Events $callsFile).Count -gt $calls0) { $problems += "asked docker while the other runner's marker was down"; break }
-                if ((Get-Events $listedFile).Count -ge $listed0 + 3) { break }
-                if ((Test-BackgroundDone $bg) -or (Get-Events $evFile).Count) { $problems += "stopped waiting while the other runner's marker was down"; break }
-                if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not look for the marker 3 times within 120s"; break }
-                Start-Sleep -Milliseconds 100
+                $said = Read-Background $bg
+                if ($said -match 'waiting for it to finish, then checking Docker again') { break }
+                if ((Test-BackgroundDone $bg) -or (Get-Events $evFile).Count) { $problems += "did not wait for the other runner's $($v.What)"; break }
+                if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not say it was waiting within 120s"; break }
+                Start-Sleep -Milliseconds 200
             }
+            if (-not $problems.Count) {
+                $calls0 = (Get-Events $callsFile).Count
+                $listed0 = (Get-Events $listedFile).Count
+                while ($true) {
+                    if ((Get-Events $callsFile).Count -gt $calls0) { $problems += "asked docker while the other runner's marker was down"; break }
+                    if ((Get-Events $listedFile).Count -ge $listed0 + 3) { break }
+                    if ((Test-BackgroundDone $bg) -or (Get-Events $evFile).Count) { $problems += "stopped waiting while the other runner's marker was down"; break }
+                    if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not look for the marker 3 times within 120s"; break }
+                    Start-Sleep -Milliseconds 100
+                }
+            }
+            if (-not $problems.Count) {
+                # The other runner's restart or prune finishes, and its
+                # marker comes down.
+                & $v.End $lockDir
+                Remove-Item -LiteralPath (Join-Path $lockDir 'docker-prune-other.inprogress') -Force
+                if (-not (Wait-Background $bg 120)) { $problems += "still going 120s after the other runner's $($v.What) finished" }
+                $said = Read-Background $bg
+                if ((Get-BackgroundExit $bg) -ne 0) { $problems += "exit $(Get-BackgroundExit $bg), want 0" }
+                if ($said -notmatch $v.Says) { $problems += "missing '$($v.Says)'" }
+            }
+            $ev = @(Get-Events $evFile) -join ','
+            if ($ev) { $problems += "did [$ev], want nothing" }
+            $left = Get-Markers $lockDir
+            if ($left.Count) { $problems += "left $($left -join ', ')" }
+        } finally {
+            Stop-Background $bg
         }
-        if (-not $problems.Count) {
-            # The other runner's restart finishes: Docker answers, and its
-            # marker comes down.
-            Write-OtherStart $lockDir -Up
-            Remove-Item -LiteralPath (Join-Path $lockDir 'docker-prune-other.inprogress') -Force
-            if (-not (Wait-Background $bg 120)) { $problems += "still going 120s after the other runner's restart finished" }
-            $said = Read-Background $bg
-            if ((Get-BackgroundExit $bg) -ne 0) { $problems += "exit $(Get-BackgroundExit $bg), want 0" }
-            if ($said -notmatch 'Docker engine is running and healthy') { $problems += "did not find Docker healthy" }
-        }
-        $ev = @(Get-Events $evFile) -join ','
-        if ($ev) { $problems += "did [$ev], want nothing" }
-        $left = Get-Markers $lockDir
-        if ($left.Count) { $problems += "left $($left -join ', ')" }
-    } finally {
-        Stop-Background $bg
+        Report "Docker Desktop is not started or restarted while another runner's $($v.What) has its marker down; Docker is checked again after it" ([pscustomobject]@{ Output = $said }) $problems
     }
-    Report "Docker Desktop is not started or restarted while another runner's restart has its marker down; Docker is checked again after it" ([pscustomobject]@{ Output = $said }) $problems
 
     # Another runner's restart gets going just after this one looked for
     # markers: its marker comes down while this one judges the locks (the
