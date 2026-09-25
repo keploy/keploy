@@ -154,6 +154,13 @@ var RootExamples = `
 var VersionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
 var IsConfigFileFound = true
 
+// ErrNoTestSets is ValidateFlags' refusal of a `keploy test` with no keploy
+// folder: there is nothing recorded to run. It is not a flag error -- the
+// user is told to record first, and nothing is wrong with the command they
+// typed -- so Validate, and a build wrapping this configurator, match it with
+// errors.Is rather than advising them to fix their flags.
+var ErrNoTestSets = errors.New("no test-sets found")
+
 type CmdConfigurator struct {
 	logger *zap.Logger
 	cfg    *config.Config
@@ -596,6 +603,13 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	}
 	err = c.ValidateFlags(ctx, cmd)
 	if err != nil {
+		// ValidateFlags has already told the user what to do -- record first
+		// -- and nothing about their flags was wrong: "failed to validate
+		// flags" over that would send them looking for a mistake they did not
+		// make.
+		if errors.Is(err, ErrNoTestSets) {
+			return err
+		}
 		if err == c.noCommandError() {
 			utils.LogError(c.logger, nil, "missing required -c flag or appCmd in config file")
 			if c.cfg.InDocker {
@@ -1603,7 +1617,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				} else {
 					c.logger.Info(`Example: keploy record -c "./myApp serve" --delay 6`)
 				}
-				os.Exit(1)
+				// Returned, not os.Exit(1): that ended the process right here,
+				// so no deferred function ran -- main's, and those of any
+				// build wrapping this configurator, such as a writer of the
+				// run's result. The error still exits 1 (main.finalExitCode).
+				//
+				// Nothing about the flags was wrong, so no usage dump over
+				// the message above. Silenced on the ROOT, which cobra reads
+				// for every command it runs: a build wrapping this
+				// configurator may hand it a copy of its command (validating
+				// `replay` as `test`), and a flag set on the copy never
+				// reaches the command cobra reports on. The copy keeps its
+				// parent, so Root() is the tree cobra is executing.
+				cmd.Root().SilenceUsage = true
+				return fmt.Errorf("%w: %s does not exist", ErrNoTestSets, c.cfg.Path)
 			}
 
 			testSets, err := cmd.Flags().GetStringSlice("testsets")

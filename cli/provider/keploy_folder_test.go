@@ -80,8 +80,9 @@ func TestEveryCommandRefusesAFileAtTheKeployFolder(t *testing.T) {
 		{parent: "contract", name: "test", contract: true},
 	} {
 		for _, what := range []string{stale, binary, oldCopy, folder, folderSymlink, nothing} {
-			// `keploy test` exits the process when there is no keploy folder
-			// at all ("No test-sets found"), so it has no "nothing" case.
+			// `keploy test` refuses a run with no keploy folder at all ("No
+			// test-sets found"), so it has no "nothing" case here; that
+			// refusal is TestValidateFlags_TestWithNoKeployFolderReturnsInsteadOfExiting.
 			if sub.parent == "" && sub.name == "test" && what == nothing {
 				continue
 			}

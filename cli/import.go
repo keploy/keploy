@@ -41,20 +41,25 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				path = "output.json"
 			}
 			basePath, _ := cmd.Flags().GetString("base-path")
+			// Failures arm a non-zero exit and return nil: they are already
+			// logged, and an error returned to cobra would print usage over them.
 			svc, err := serviceFactory.GetService(ctx, "import")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			err = tools.Import(ctx, path, basePath)
 			if err != nil {
 				utils.LogError(logger, err, "failed to import Postman collection")
+				utils.SetFailureExitCode(utils.ExitCodeFor(err))
 			}
 			return nil
 		},

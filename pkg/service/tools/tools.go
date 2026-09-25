@@ -102,25 +102,29 @@ func (t *Tools) Update(ctx context.Context) error {
 	}
 
 	t.logger.Info("Update Successful!")
-
-	changelog = "\n" + string(changelog)
-	var renderer *glamour.TermRenderer
-
-	var termRendererOpts []glamour.TermRendererOption
-	termRendererOpts = append(termRendererOpts, glamour.WithEnvironmentConfig(), glamour.WithWordWrap(0))
-
-	renderer, err = glamour.NewTermRenderer(termRendererOpts...)
-	if err != nil {
-		utils.LogError(t.logger, err, "failed to initialize renderer")
-		return err
-	}
-	changelog, err = renderer.Render(changelog)
-	if err != nil {
-		utils.LogError(t.logger, err, "failed to render release notes")
-		return err
-	}
-	fmt.Println(changelog)
+	fmt.Println(releaseNotes(t.logger, changelog))
 	return nil
+}
+
+// releaseNotes is the changelog as the terminal shows it after an update:
+// rendered, or as it came when it cannot be.
+//
+// The update has already happened by then -- the binary is replaced -- so
+// nothing here may fail it. Returning the renderer's error did: cli/update.go
+// exits non-zero on any Update error, and a GLAMOUR_STYLE naming a missing
+// file made `keploy update` report a failed update over one that had
+// succeeded.
+func releaseNotes(logger *zap.Logger, changelog string) string {
+	changelog = "\n" + changelog
+	renderer, err := glamour.NewTermRenderer(glamour.WithEnvironmentConfig(), glamour.WithWordWrap(0))
+	if err == nil {
+		var rendered string
+		if rendered, err = renderer.Render(changelog); err == nil {
+			return rendered
+		}
+	}
+	logger.Warn("could not format the release notes; showing them unformatted", zap.Error(err))
+	return changelog
 }
 
 // updateDownloadURL picks the latest-release archive for the running
@@ -128,8 +132,10 @@ func (t *Tools) Update(ctx context.Context) error {
 // macOS is published for arm64 only, so an Intel Mac gets an error rather
 // than a download that cannot run. That refusal also sets the process exit
 // code here, at the point where the platform is judged unsupported:
-// cli/update.go logs and returns nil on every Update error, so without it
-// `keploy update` on an Intel Mac would print the refusal and exit 0.
+// cli/update.go arms utils.ExitCodeFor(err) for an Update error, which is the
+// generic 1 for every error Update returns -- none carries a tag -- so without
+// it `keploy update` on an Intel Mac could not say "no build for this
+// platform".
 func updateDownloadURL(goos, goarch string) (string, error) {
 	const base = "https://github.com/keploy/keploy/releases/latest/download/"
 	switch goos {
@@ -171,11 +177,12 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 
 	// A non-200 body is NOT an archive. Unchecked, GitHub's 404 page was
 	// io.Copy'd into the .tar.gz below and only surfaced as "failed to extract
-	// tar.gz file" -- and since cli/update.go logs every Update error and
-	// returns nil to cobra, `keploy update` reported that failure and still
-	// exited 0. That is how a release missing an asset for this platform looks
-	// to every keploy already installed, so it has to be the download's own
-	// error, named, with an exit code behind it.
+	// tar.gz file" -- and cli/update.go, which then returned nil on every
+	// Update error, exited 0 over it. That is how a release missing an asset
+	// for this platform looks to every keploy already installed, so it has to
+	// be the download's own error, named, with the exit code that says so
+	// behind it: cli/update.go's utils.ExitCodeFor(err) is the generic 1 for
+	// this untagged error.
 	if resp.StatusCode != http.StatusOK {
 		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
 		return fmt.Errorf("release asset %s is not available (HTTP %s) -- this release may not publish a binary for %s/%s",

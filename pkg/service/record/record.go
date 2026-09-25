@@ -1249,13 +1249,24 @@ func (r *Recorder) Start(ctx context.Context) error {
 		agentReadyCh := make(chan bool, 1)
 		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
 
+		// agentCtx is ctx's child, so its Done covers a stop as well as the
+		// budget running out, and the ticker closes agentReadyCh (ready ==
+		// false) on either. Which it was is decided below, in order, not by
+		// whichever case the select happens to pick when several are ready
+		// at once -- as they all are when the stop landed during setup,
+		// which App.SetupCompose, taking no context, reports as success.
+		var ready bool
 		select {
-		case <-ctx.Done():
-			// Parent context cancelled (user pressed Ctrl+C)
-			return ctx.Err()
 		case <-agentCtx.Done():
+		case ready = <-agentReadyCh:
+		}
+		if ctx.Err() != nil {
+			// Stopped (Ctrl+C, SIGTERM), not failed, whatever else was
+			// ready. Every stop returns nil -- see the final select.
+			return nil
+		}
+		if !ready {
 			return fmt.Errorf("keploy-agent did not become ready in time")
-		case <-agentReadyCh:
 		}
 	}
 
@@ -1276,7 +1287,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
 		if ctx.Err() == context.Canceled {
-			return err
+			return nil
 		}
 		return fmt.Errorf("%s", stopReason)
 	}
@@ -1341,7 +1352,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	}()
 
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return nil
 	}
 
 	// Kick off the pcap + keylog streams. GetTestAndMockChans above
@@ -1702,9 +1713,18 @@ func (r *Recorder) Start(ctx context.Context) error {
 		})
 	}
 
-	// Waiting for the error to occur in any of the go routines
+	// Waiting for the error to occur in any of the go routines.
+	//
+	// A recording that was STOPPED -- a signal, --record-timer, anything that
+	// cancels ctx -- returns nil from here and from every earlier stop check,
+	// and one that FAILED returns an error, so the caller can tell the two
+	// apart by the error alone. `keploy record` does: it exits non-zero on
+	// any error (cli/record.go), and cannot ask ctx instead, because the stop
+	// defer above cancels the root context on every other way out.
+	var stoppedBy *models.AppError
 	select {
 	case appErr := <-appErrChan:
+		stoppedBy = &appErr
 		switch appErr.AppErrorType {
 		case models.ErrCommandError:
 			stopReason = "error in running the user application, hence stopping keploy"
@@ -1733,6 +1753,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	}
 	utils.LogError(r.logger, err, stopReason)
+	if stoppedBy != nil {
+		return &appStopError{reason: stopReason, app: *stoppedBy}
+	}
 	return fmt.Errorf("%s", stopReason)
 }
 

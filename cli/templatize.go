@@ -24,19 +24,24 @@ func Templatize(ctx context.Context, logger *zap.Logger, _ *config.Config, servi
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Get the replay service.
+			// Failures arm a non-zero exit and return nil: they are already
+			// logged, and an error returned to cobra would print usage over them.
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			if err := tools.Templatize(ctx); err != nil {
 				utils.LogError(logger, err, "failed to templatize test cases")
+				utils.SetFailureExitCode(utils.ExitCodeFor(err))
 				return nil
 			}
 			return nil

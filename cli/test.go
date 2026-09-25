@@ -24,15 +24,20 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// A failure arms a non-zero exit and returns nil: it is already
+			// logged, and a returned error would have cobra print usage on top
+			// of it. `return nil` alone exited 0 over a run that never started.
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			var replay replaySvc.Service
 			var ok bool
 			if replay, ok = svc.(replaySvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			// defering the stop function to stop keploy in case of any error in test or in case of context cancellation
@@ -44,6 +49,9 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 					utils.ExecCancel()
 				}
 			}()
+			// Start arms the exit code itself, on every way out -- its error,
+			// the tests that failed, and never a user's interrupt (see the
+			// first defer in replay.Start) -- so its error is only logged here.
 			err = replay.Start(ctx)
 			if err != nil {
 				if ctx.Err() != context.Canceled {

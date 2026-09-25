@@ -23,21 +23,26 @@ func Report(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Failures arm a non-zero exit and return nil: they are already
+			// logged, and an error returned to cobra would print usage over them.
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 			var report reportSvc.Service
 			var ok bool
 			if report, ok = svc.(reportSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy report service interface")
+				utils.SetFailureExitCode(utils.ExitKeployError)
 				return nil
 			}
 
 			err = report.GenerateReport(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate report")
+				utils.SetFailureExitCode(utils.ExitCodeFor(err))
 				return nil
 			}
 

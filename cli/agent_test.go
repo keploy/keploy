@@ -136,3 +136,33 @@ func TestAgentThatIsStoppedExitsZero(t *testing.T) {
 		})
 	}
 }
+
+// A signal is a stop for the agent too, not a failure: it keeps the one rule
+// every command keeps (utils.SetFailureExitCode). That covers the window in
+// which the signal has been marked but nothing is cancelled yet -- the drain
+// utils.NewCtx's handler holds a sidecar agent in, serving, before it cancels
+// (KEPLOY_SIDECAR_DRAIN_SECONDS) -- which agentFailed, reading the context,
+// cannot see.
+func TestAgentASignalStoppedExitsZero(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		factory ServiceFactory
+	}{
+		{"failed while draining", agentSvcFactory{svc: agentSvc{setup: func(context.Context) error {
+			return errors.New("failed to hook into the app: address already in use")
+		}}}},
+		{"no service", agentSvcFactory{err: errors.New("no such service")}},
+		{"not an agent service", agentSvcFactory{svc: struct{}{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			utils.ClearInterrupted()
+			t.Cleanup(utils.ClearInterrupted)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			utils.MarkInterrupted()
+			if got := runAgent(t, ctx, tc.factory); got != 0 {
+				t.Fatalf("an agent a signal stopped exits %d", got)
+			}
+		})
+	}
+}
