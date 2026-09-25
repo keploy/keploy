@@ -125,7 +125,12 @@ if ($docker.CommandType -eq 'ExternalScript') {
 }
 
 # One docker call, $true when it exits 0 within CallTimeoutSeconds. Its output
-# is read and dropped, so a long `docker ps` cannot block on a full pipe.
+# is read and dropped, so a long `docker ps` cannot block on a full pipe. A
+# call that fails says how: its exit code and the first line of its stderr,
+# which is the daemon's own error ("error during connect: ...", say). It says
+# so whenever that differs from how the same call last failed, so that a
+# Docker that keeps failing the same way says it once, not on every poll.
+$lastFailure = @{}
 function Invoke-DockerCall([string]$Arguments) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $dockerFile
@@ -141,7 +146,7 @@ function Invoke-DockerCall([string]$Arguments) {
         return $false
     }
     [void]$p.StandardOutput.ReadToEndAsync()
-    [void]$p.StandardError.ReadToEndAsync()
+    $stderr = $p.StandardError.ReadToEndAsync()
     if (-not $p.WaitForExit($CallTimeoutSeconds * 1000)) {
         Write-Host "'docker $Arguments' did not return within $CallTimeoutSeconds s; killing it and counting the check as failed."
         try { $p.Kill() } catch { }
@@ -149,7 +154,21 @@ function Invoke-DockerCall([string]$Arguments) {
         return $false
     }
     $p.WaitForExit()
-    return ($p.ExitCode -eq 0)
+    if ($p.ExitCode -eq 0) { return $true }
+    # Its stderr ends when it does, unless a process it started still holds
+    # it: a moment for that, no more.
+    $said = 'nothing on stderr'
+    try {
+        if ($stderr.Wait(5000)) {
+            $lines = @("$($stderr.Result)" -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            if ($lines.Count) { $said = $lines[0] }
+        }
+    } catch { }
+    if ($said.Length -gt 300) { $said = $said.Substring(0, 300) + '...' }
+    $failure = "'docker $Arguments' failed (exit $($p.ExitCode)): $said"
+    if ($failure -ne $lastFailure[$Arguments]) { Write-Host $failure }
+    $lastFailure[$Arguments] = $failure
+    return $false
 }
 
 function Test-DockerHealthy {

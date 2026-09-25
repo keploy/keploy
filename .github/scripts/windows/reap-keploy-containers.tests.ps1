@@ -39,9 +39,30 @@ $stateFile = Join-Path $work 'state.json'
 # docker's semantics (the name filter is an unanchored match); anything else
 # fails loudly so a new call cannot silently get an empty answer.
 Set-Content -Path $fake -Encoding ASCII -Value @'
-# FAKE_DOCKER_CALLS, when set, gets a line per call, as it starts: the call,
-# its process, and whether <state>.up was there. A failing case can then tell
-# a call that found the daemon down from one that never got that far.
+# Every call ends in Exit-Fake, and a call that fails says why on stderr, as
+# docker does. Run in a process of its own (ensure-docker.ps1 runs it so),
+# that is the process's stderr, which the script reports; run inside the
+# calling script, an error record, which the script drops with 2>$null as it
+# drops docker's stderr. Anything that throws here ends the call the same
+# way, with exit 3.
+# FAKE_DOCKER_CALLS, when set, gets a line per call as it starts (the call,
+# its process, and whether <state>.up was there) and an indented one as it
+# ends: its exit code, and why when it failed. A failing case can then tell a
+# call that found the daemon down from one that threw, and a call with no end
+# line died on the way: killed, or its PowerShell never got that far.
+$ownProcess = $MyInvocation.CommandOrigin -eq 'Runspace'
+function Exit-Fake([int]$code, [string]$why = '') {
+    if ($env:FAKE_DOCKER_CALLS) {
+        $how = ''
+        if ($why) { $how = ": $why" }
+        Add-Content -LiteralPath $env:FAKE_DOCKER_CALLS -Value ("  -> exit {0} (pid {1} at {2:HH:mm:ss.fff}){3}" -f $code, $PID, [DateTime]::UtcNow, $how)
+    }
+    if ($why) {
+        if ($ownProcess) { [Console]::Error.WriteLine($why) } else { Write-Error $why }
+    }
+    exit $code
+}
+trap { Exit-Fake 3 "fake docker threw: $_" }
 if ($env:FAKE_DOCKER_CALLS) {
     Add-Content -LiteralPath $env:FAKE_DOCKER_CALLS -Value ("{0} (pid {1} at {2:HH:mm:ss.fff}, .up {3})" -f "$args", $PID, [DateTime]::UtcNow, (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up"))
 }
@@ -69,15 +90,15 @@ if ($state.stampOnCall -gt 0) {
 switch ($args[0]) {
     'info' {
         if ($state.hangInfo -gt 0) { $state.hangInfo--; Save; Start-Sleep -Seconds 120 }
-        if (Test-Down) { exit 1 }
+        if (Test-Down) { Exit-Fake 1 'the fake Docker daemon is down' }
         # A daemon too busy to answer the next failInfo calls.
-        if ($state.failInfo -gt 0) { $state.failInfo--; Save; exit 1 }
-        Write-Output $state.systemTime; exit 0
+        if ($state.failInfo -gt 0) { $state.failInfo--; Save; Exit-Fake 1 'the fake Docker daemon is too busy to answer' }
+        Write-Output $state.systemTime; Exit-Fake 0
     }
     'ps' {
-        if (Test-Down) { exit 1 }
+        if (Test-Down) { Exit-Fake 1 'the fake Docker daemon is down' }
         # psDown: `info` answers but `ps` does not, until Docker Desktop starts.
-        if ($state.psDown -and -not (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up")) { exit 1 }
+        if ($state.psDown -and -not (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up")) { Exit-Fake 1 "the fake Docker daemon answers 'info' but not 'ps'" }
         # A container whose removal is already under way leaves the list after
         # its countdown of `ps` calls, the way the daemon finishes it.
         # Written back only when that changed it: the background cases run
@@ -90,31 +111,31 @@ switch ($args[0]) {
         foreach ($c in @($state.containers)) {
             if ($filter -like 'name=*') { if ($c.name -notlike ("*" + $filter.Substring(5) + "*")) { continue } }
             elseif ($filter -like 'label=com.docker.compose.project=*') { if ($c.project -ne ($filter -replace '^label=com\.docker\.compose\.project=', '')) { continue } }
-            elseif ($filter) { Write-Error "fake docker: unexpected filter $filter"; exit 2 }
+            elseif ($filter) { Exit-Fake 2 "fake docker: unexpected filter $filter" }
             Write-Output $c.id
         }
-        exit 0
+        Exit-Fake 0
     }
     'inspect' {
         $format = $args[2]; $c = Find $args[3]
-        if ($null -eq $c) { exit 1 }
-        if ($format -eq '{{.Name}}') { Write-Output "/$($c.name)"; exit 0 }
+        if ($null -eq $c) { Exit-Fake 1 "Error: No such object: $($args[3])" }
+        if ($format -eq '{{.Name}}') { Write-Output "/$($c.name)"; Exit-Fake 0 }
         if ($format -eq '{{.Name}}|{{.Created}}|{{.State.StartedAt}}|{{.State.FinishedAt}}') {
-            Write-Output "/$($c.name)|$($c.created)|$($c.started)|$($c.finished)"; exit 0
+            Write-Output "/$($c.name)|$($c.created)|$($c.started)|$($c.finished)"; Exit-Fake 0
         }
-        Write-Error "fake docker: unexpected inspect format $format"; exit 2
+        Exit-Fake 2 "fake docker: unexpected inspect format $format"
     }
     'rm' {
         $id = $args[2]
         $state.removed = @($state.removed) + @($id)
         $c = Find $id
         if ($c -and $c.removing) {
-            Save; Write-Error "Error response from daemon: removal of container $id is already in progress"; exit 1
+            Save; Exit-Fake 1 "Error response from daemon: removal of container $id is already in progress"
         }
         if ($c -and -not $c.stuck) {
             $state.containers = @($state.containers | Where-Object { $_.id -ne $id })
         }
-        Save; exit 0
+        Save; Exit-Fake 0
     }
     { $_ -in 'image', 'volume', 'system' } {
         # Record each prune, and whether a cleanup's in-progress marker was
@@ -123,9 +144,9 @@ switch ($args[0]) {
         if ($env:FAKE_LOCK_DIR -and -not @(Get-ChildItem -LiteralPath $env:FAKE_LOCK_DIR -Filter 'docker-prune-*.inprogress' -ErrorAction SilentlyContinue).Count) {
             $what = "$what-unannounced"
         }
-        $state.pruned = @($state.pruned) + @($what); Save; exit 0
+        $state.pruned = @($state.pruned) + @($what); Save; Exit-Fake 0
     }
-    default { Write-Error "fake docker: unexpected command $($args -join ' ')"; exit 2 }
+    default { Exit-Fake 2 "fake docker: unexpected command $($args -join ' ')" }
 }
 '@
 
@@ -964,10 +985,18 @@ try {
     Report "a healthy Docker is left alone" $r @(Ensured $r 0 @())
 
     # A daemon too busy to answer (four jobs loading images) used to get
-    # Docker Desktop force-killed on the first failed `docker info`.
+    # Docker Desktop force-killed on the first failed `docker info`. Each
+    # failed call says why, as docker put it on stderr, but not again while
+    # the next call fails the same way.
     Set-State @() -FailInfo 2
     $r = Invoke-Ensure -Extra @{ Attempts = (Get-Default $ensure 'Attempts') }
-    Report "a Docker that misses a check or two is asked again, not restarted" $r @(Ensured $r 0 @())
+    $why = @($r.Output -split "`n" | Where-Object { $_ -like "'docker info*' failed*" })
+    Report "a Docker that misses a check or two is asked again, not restarted, and says once why the calls failed" $r @(
+        (Ensured $r 0 @()),
+        $(if (($why.Count -ne 1) -or ($why[0] -ne "'docker info --format `"{{.ServerVersion}}`"' failed (exit 1): the fake Docker daemon is too busy to answer")) {
+                "said [$($why -join ' | ')] of the failed calls, want the one line with docker's exit code and stderr"
+            })
+    )
 
     # A wedged Docker Desktop often hangs `docker info` instead of failing it.
     # The script's own CallTimeoutSeconds: the timeout counts the process
@@ -1061,7 +1090,10 @@ try {
     Set-State @() -PsDown
     $r = Invoke-Ensure
     Report "a Docker that answers 'docker info' but not 'docker ps' is asked again, then restarted under the marker" $r @(
-        (Ensured $r 0 @('stop+marker', 'start+marker')), (Says $r 'attempt 1 of 2' "the retry"), (Locks $r @())
+        (Ensured $r 0 @('stop+marker', 'start+marker')), (Says $r 'attempt 1 of 2' "the retry"), (Locks $r @()),
+        $(if (@($r.Output -split "`n" | Where-Object { $_ -eq "'docker ps -q' failed (exit 1): the fake Docker daemon answers 'info' but not 'ps'" }).Count -ne 1) {
+                "did not say once why 'docker ps' failed, though 'docker info' answered in between"
+            })
     )
 
     Set-State @() -PsDown
@@ -1214,6 +1246,8 @@ exit $drvCode
         [pscustomobject]@{ Proc = $p; Log = $log; StdOut = $p.StandardOutput.ReadToEndAsync(); Err = $p.StandardError.ReadToEndAsync() }
     }
     function Get-Events([string]$file) { @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue | Where-Object { $_ }) }
+    # The docker calls a FAKE_DOCKER_CALLS file records, without how each ended.
+    function Get-Calls([string]$file) { @(Get-Events $file | Where-Object { $_ -notlike '  -> *' }) }
     function Get-Markers([string]$dir) { @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $dir -Filter 'docker-prune-*.inprogress' | ForEach-Object { $_.Name } | Sort-Object) }
 
     # A restart or a prune by another runner has its marker down, Desktop is
@@ -1256,10 +1290,10 @@ function Get-ChildItem {
                 Start-Sleep -Milliseconds 200
             }
             if (-not $problems.Count) {
-                $calls0 = (Get-Events $callsFile).Count
+                $calls0 = (Get-Calls $callsFile).Count
                 $listed0 = (Get-Events $listedFile).Count
                 while ($true) {
-                    if ((Get-Events $callsFile).Count -gt $calls0) { $problems += "asked docker while the other runner's marker was down"; break }
+                    if ((Get-Calls $callsFile).Count -gt $calls0) { $problems += "asked docker while the other runner's marker was down"; break }
                     if ((Get-Events $listedFile).Count -ge $listed0 + 3) { break }
                     if ((Test-BackgroundDone $bg) -or (Get-Events $evFile).Count) { $problems += "stopped waiting while the other runner's marker was down"; break }
                     if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not look for the marker 3 times within 120s"; break }
@@ -1475,8 +1509,9 @@ function Set-Content {
         } finally {
             foreach ($bg in $bgs) { Stop-Background $bg }
         }
-        # When the case fails, each run's docker calls, in order, with what
-        # each found (the runs' logs above are in the same order, a then b).
+        # When the case fails, each run's docker calls, in order, each with
+        # what it found as it started and how it ended (the runs' logs above
+        # are in the same order, a then b).
         if ($problems.Count) {
             foreach ($id in 'a', 'b') { $said += "`n---- docker calls of run $id`n" + (@(Get-Events (Join-Path $barrierDir "calls-$id")) -join "`n") }
         }
@@ -1610,7 +1645,7 @@ function Set-Content {
             Refused = @(foreach ($rec in @($records | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })) {
                     if ("$($rec.Exception.Message)" -match "^$([regex]::Escape((Split-Path -Leaf $script))) run by the tests \(KEPLOY_WINDOWS_SCRIPT_TESTS\) without -(\S.*): the default") { $Matches[1] -split ', -' }
                 })
-            Calls   = $dockerCalls.Count + (Get-Events $callsFile).Count
+            Calls   = $dockerCalls.Count + (Get-Calls $callsFile).Count
             Wrote   = @(Get-ChildItem -LiteralPath $profileDir -Recurse -Force | ForEach-Object { $_.FullName.Substring($profileDir.Length) })
         }
     }
