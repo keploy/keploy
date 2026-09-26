@@ -1,6 +1,8 @@
 package integrations
 
 import (
+	"fmt"
+	"io"
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
@@ -9,22 +11,53 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// RecordConn is the connection interface exposed to parsers during
+// record mode. It deliberately omits Close and SetDeadline — the
+// proxy owns connection lifecycle, and parsers must not call either.
+//
+// In this repository, SafeConn (see pkg/agent/proxy/util) is the
+// parser-facing wrapper that satisfies this interface for record mode.
+// Some enterprise builds layer in a separate SimulatedConn type for
+// other proxy modes (e.g. a low-latency sockmap path); that type is
+// not defined in this repo, but where it exists it is expected to
+// honour the same contract — Close and the deadline setters must be
+// treated as unavailable by parsers.
+//
+// Parsers that need a full net.Conn (e.g. gRPC, HTTP/2 libraries) can
+// obtain one via RecordSession.IngressConn / RecordSession.EgressConn,
+// which return (net.Conn, error): a non-nil error is returned when the
+// session or connection is unavailable, or when the underlying
+// RecordConn implementation does not satisfy net.Conn.
+type RecordConn interface {
+	io.Reader
+	io.Writer
+	RemoteAddr() net.Addr
+	LocalAddr() net.Addr
+}
+
 // RecordSession bundles all resources a parser needs during record
 // mode. It replaces the previous pattern of passing individual
 // net.Conn parameters plus smuggling errgroup, connection IDs, and
 // other values through context.
 //
-// Connections are SafeConn wrappers where Close() and SetDeadline()
-// are no-ops. The proxy retains the real connections and manages
-// their lifecycle.
+// Connections implement RecordConn — Close and SetDeadline are not
+// part of the interface. The proxy retains the real connections and
+// manages their lifecycle. The concrete RecordConn used in this repo
+// (SafeConn) also implements net.Conn with Close as a no-op, so it
+// can be reused with libraries like gRPC and HTTP/2 that require
+// net.Conn; the IngressConn / EgressConn helpers expose that net.Conn
+// view safely, returning (net.Conn, error) so callers handle the
+// "not available" case explicitly — for example on the V2 path where
+// Ingress/Egress are unset, or when the underlying RecordConn
+// implementation does not satisfy net.Conn.
 type RecordSession struct {
-	// Ingress is the client-side connection (SafeConn).
+	// Ingress is the client-side connection.
 	// Read: client requests. Write: server responses back to client.
-	Ingress net.Conn
+	Ingress RecordConn
 
-	// Egress is the destination-side connection (SafeConn).
+	// Egress is the destination-side connection.
 	// Read: server responses. Write: client requests forwarded to server.
-	Egress net.Conn
+	Egress RecordConn
 
 	// Mocks channel for sending recorded mock objects.
 	Mocks chan<- *models.Mock
@@ -116,4 +149,53 @@ func (s *RecordSession) AddPostRecordHook(h PostRecordHook) {
 		h(m)
 		prev(m)
 	}
+}
+
+// IngressConn returns Ingress as a net.Conn for use with libraries
+// (gRPC, HTTP/2) or internal helpers that require a full net.Conn.
+//
+// Returns an error when the session is nil, Ingress was not initialized
+// (e.g. on V2-only sessions served entirely through the supervisor +
+// relay path), or the underlying RecordConn implementation does not
+// satisfy net.Conn.
+func (s *RecordSession) IngressConn() (net.Conn, error) {
+	if s == nil {
+		return nil, fmt.Errorf("record session ingress: nil session; pass a non-nil *RecordSession to IngressConn (or check for nil before calling)")
+	}
+	return s.recordNetConn("ingress", "IngressConn", s.Ingress)
+}
+
+// EgressConn is the egress counterpart of IngressConn. See IngressConn
+// for the error contract.
+func (s *RecordSession) EgressConn() (net.Conn, error) {
+	if s == nil {
+		return nil, fmt.Errorf("record session egress: nil session; pass a non-nil *RecordSession to EgressConn (or check for nil before calling)")
+	}
+	return s.recordNetConn("egress", "EgressConn", s.Egress)
+}
+
+// recordNetConn safely converts a RecordConn to net.Conn. The named
+// `which` is included in the error so callers can distinguish ingress
+// from egress without re-implementing the message; methodName is the
+// exported helper the caller invoked (IngressConn / EgressConn) so the
+// error refers to the public API surface rather than the lowercase
+// internal label. Callers guarantee a non-nil receiver before invoking
+// this helper.
+func (s *RecordSession) recordNetConn(which string, methodName string, conn RecordConn) (net.Conn, error) {
+	if conn == nil {
+		// V2/supervisor-backed sessions intentionally leave Ingress /
+		// Egress unset and route I/O through session.V2.ClientStream /
+		// DestStream instead. Tailor the diagnostic so a V2 caller is
+		// pointed at the correct API rather than misled into thinking
+		// the session was constructed wrong.
+		if s.V2 != nil {
+			return nil, fmt.Errorf("record session %s: %s is intentionally unset on V2/supervisor-backed sessions; use session.V2.ClientStream / session.V2.DestStream instead of calling %s", which, which, methodName)
+		}
+		return nil, fmt.Errorf("record session %s: connection not initialized; ensure the session is created with a live connection (or, if running under the supervisor, use session.V2 directly) before calling %s", which, methodName)
+	}
+	netConn, ok := conn.(net.Conn)
+	if !ok {
+		return nil, fmt.Errorf("record session %s: underlying RecordConn implementation does not satisfy net.Conn; use a connection type that satisfies net.Conn before calling %s", which, methodName)
+	}
+	return netConn, nil
 }
