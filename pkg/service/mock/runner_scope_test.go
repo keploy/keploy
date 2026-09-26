@@ -310,3 +310,24 @@ func TestNilRunnerScopeIsOff(t *testing.T) {
 	require.Nil(t, scope.tests())
 	require.False(t, scope.usedReadTime())
 }
+
+// The runner prints a test's start a moment after it began: a call in that gap belongs to the next test.
+func TestSealedWindowsLeaveNoGapBetweenSequentialTests(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Microsecond) }
+	ws := sealed([]models.ScopeWindow{
+		{Name: "TestGetOrder", Start: at(706293), End: at(708854)},
+		{Name: "TestCreateOrder", Start: at(635078), End: at(705971)},
+	})
+	require.Equal(t, "TestGetOrder", ws[0].Name, "the order the runner closed them in is kept")
+	require.Equal(t, at(705971), ws[0].Start, "the second test starts where the first ended")
+	require.Equal(t, at(708854), ws[0].End)
+	require.Equal(t, at(635078), ws[1].Start, "the first test keeps its own start")
+	call := at(706124)
+	require.True(t, !call.Before(ws[0].Start) && !call.After(ws[0].End), "the pricing call made in the gap now lands in TestGetOrder")
+
+	parallel := sealed([]models.ScopeWindow{
+		{Name: "TestA", Start: at(0), End: at(500)},
+		{Name: "TestB", Start: at(100), End: at(600)},
+	})
+	require.Equal(t, at(100), parallel[1].Start, "overlapping tests keep their own starts")
+}

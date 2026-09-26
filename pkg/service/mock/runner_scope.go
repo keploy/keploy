@@ -257,7 +257,25 @@ func (r *runnerScope) windows() []models.ScopeWindow {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]models.ScopeWindow(nil), r.closed...)
+	return sealed(append([]models.ScopeWindow(nil), r.closed...))
+}
+
+// sealed closes the gap between one test and the next: the runner prints a test's start a moment after the
+// test began, so a call made in that gap belongs to the test that follows, never to nobody. Windows that
+// overlap, from tests running at the same time, are left as they are.
+func sealed(windows []models.ScopeWindow) []models.ScopeWindow {
+	for i := range windows {
+		var latest time.Time
+		for j := range windows {
+			if j != i && !windows[j].End.After(windows[i].Start) && windows[j].End.After(latest) {
+				latest = windows[j].End
+			}
+		}
+		if !latest.IsZero() {
+			windows[i].Start = latest
+		}
+	}
+	return windows
 }
 
 // tests lists every result the runner printed, in the order it printed them.
