@@ -44,6 +44,7 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		return nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
+		a.openWindow(name, pid, at)
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
 		a.scopeMu.Unlock()
@@ -69,21 +70,34 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		})
 	}
 
-	// Record mode: mark the window start (agent clock), keyed by worker PID so
-	// overlapping windows from parallel workers stay distinguishable. We do NOT
-	// touch the syncMock ingress-correlation machinery here — that is driven by
-	// incoming requests, which mock mode has none of.
+	a.openWindow(name, pid, at)
+	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
+	return nil
+}
+
+// BeginScope is BeginScopeAt stamped with the agent's clock.
+// openWindow remembers when a test said it started, in either mode, so a client can read the windows later.
+func (a *Agent) openWindow(name string, pid int, at time.Time) {
 	a.scopeMu.Lock()
 	if a.workerOpen == nil {
 		a.workerOpen = make(map[scopeKey]time.Time)
 	}
 	a.workerOpen[scopeKey{pid: uint32(pid), name: name}] = boundaryTime(at)
 	a.scopeMu.Unlock()
-	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
-	return nil
 }
 
-// BeginScope is BeginScopeAt stamped with the agent's clock.
+// closeWindow turns a started test into a window once it says it ended.
+func (a *Agent) closeWindow(name string, pid int, at time.Time) {
+	a.scopeMu.Lock()
+	k := scopeKey{pid: uint32(pid), name: name}
+	start, ok := a.workerOpen[k]
+	if ok {
+		delete(a.workerOpen, k)
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid)})
+	}
+	a.scopeMu.Unlock()
+}
+
 func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
 	return a.BeginScopeAt(ctx, name, pid, time.Time{})
 }
@@ -97,6 +111,7 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		return nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
+		a.closeWindow(name, pid, at)
 		a.scopeMu.Lock()
 		_, scoped := a.scopeTable[name]
 		a.scopeMu.Unlock()
@@ -115,14 +130,7 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		})
 	}
 
-	a.scopeMu.Lock()
-	k := scopeKey{pid: uint32(pid), name: name}
-	start, ok := a.workerOpen[k]
-	if ok {
-		delete(a.workerOpen, k)
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid)})
-	}
-	a.scopeMu.Unlock()
+	a.closeWindow(name, pid, at)
 	a.logger.Debug("scope end (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
 }

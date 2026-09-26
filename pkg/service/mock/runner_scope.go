@@ -290,12 +290,14 @@ func (r *runnerScope) tests() []TestOutcome {
 
 // mergeWindows keeps the adapter's windows and adds the agent's only for tests the adapter never saw.
 func mergeWindows(adapter, agent []models.ScopeWindow) []models.ScopeWindow {
-	seen := make(map[string]struct{}, len(adapter))
-	for _, w := range adapter {
+	// A test that marked its own start and end is exact; a window read from the runner's output is late by
+	// however long the runner took to print, so it only fills in for tests that did not mark themselves.
+	seen := make(map[string]struct{}, len(agent))
+	for _, w := range agent {
 		seen[w.Name] = struct{}{}
 	}
-	out := append([]models.ScopeWindow(nil), adapter...)
-	for _, w := range agent {
+	out := append([]models.ScopeWindow(nil), agent...)
+	for _, w := range adapter {
 		if _, ok := seen[w.Name]; !ok {
 			out = append(out, w)
 		}

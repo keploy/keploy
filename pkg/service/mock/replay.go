@@ -291,7 +291,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 10. Summarise what was served and missed.
 	detail := replayDetail{
-		windows:  scope.windows(),
+		windows:  mergeWindows(scope.windows(), m.agentWindows(ctx)),
 		expected: m.expectedMocks(ctx, name),
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),

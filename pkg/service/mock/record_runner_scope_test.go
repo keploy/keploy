@@ -278,7 +278,8 @@ func TestRecordKeepsAgentWindowsForTestsTheAdapterDidNotSee(t *testing.T) {
 }
 
 // The lab's failure: the agent's windows for the same tests sat one test late; the adapter's must win.
-func TestRecordPrefersTheAdapterWindowForTheSameTest(t *testing.T) {
+// A test that marked its own start and end is trusted over the window read from the runner's output.
+func TestRecordPrefersTheTestsOwnMarksForTheSameTest(t *testing.T) {
 	instr := newRunnerInstr(t, jsonSequential)
 	instr.windows = []models.ScopeWindow{
 		{Name: "orders/e2e.TestA", Start: runnerT0.Add(8 * time.Millisecond), End: runnerT0.Add(18 * time.Millisecond)},
@@ -287,7 +288,7 @@ func TestRecordPrefersTheAdapterWindowForTheSameTest(t *testing.T) {
 	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(15*time.Millisecond))}
 	mapDB := mapdb.New(zap.NewNop(), t.TempDir(), "")
 	require.NoError(t, recordSet(t, instr, mapDB, nil))
-	require.Equal(t, map[string][]string{"orders/e2e.TestC": {"mock-0"}}, mappedNames(t, mapDB))
+	require.Equal(t, map[string][]string{"orders/e2e.TestA": {"mock-0"}}, mappedNames(t, mapDB))
 }
 
 // A test that made no dependency call is still a flow of the suite; it gets an entry with no mocks so its cases have a home.

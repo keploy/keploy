@@ -266,15 +266,16 @@ func TestRunnerScopeLeavesAnUnfinishedTestOut(t *testing.T) {
 }
 
 // The adapter's window carries the runner's clock; the agent's copy of the same test was stamped on receipt and loses.
-func TestMergeWindowsPrefersTheAdapter(t *testing.T) {
-	adapter := []models.ScopeWindow{{Name: "p.TestA", Start: ts(10), End: ts(20)}}
+func TestMergeWindowsPrefersTheTestsOwnMarks(t *testing.T) {
+	adapter := []models.ScopeWindow{{Name: "p.TestA", Start: ts(10), End: ts(20)}, {Name: "p.TestB", Start: ts(20), End: ts(30)}}
 	agent := []models.ScopeWindow{
 		{Name: "p.TestA", Start: ts(11), End: ts(21), PID: 7},
 		{Name: "fixture.Setup", Start: ts(30), End: ts(40), PID: 7},
 	}
 	sameWindows(t, []models.ScopeWindow{
-		{Name: "p.TestA", Start: ts(10), End: ts(20)},
+		{Name: "p.TestA", Start: ts(11), End: ts(21), PID: 7},
 		{Name: "fixture.Setup", Start: ts(30), End: ts(40), PID: 7},
+		{Name: "p.TestB", Start: ts(20), End: ts(30)},
 	}, mergeWindows(adapter, agent))
 	sameWindows(t, agent, mergeWindows(nil, agent))
 	sameWindows(t, adapter, mergeWindows(adapter, nil))
