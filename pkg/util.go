@@ -4247,7 +4247,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 	utils.LogError(logger, nil, "the agent is NOT enforcing control-plane authentication: it accepted a request carrying an invalid token",
 		zap.Int("probe_status", resp.StatusCode),
 		zap.String("impact", "/agent/pcap/keylog streams live TLS session keys and /agent/stop and /agent/storemocks alter this session; any local user or neighbouring container that can reach the agent port can use them"),
-		zap.String("next_step", "the token this keploy process handed to the agent did not reach it — check that the agent was started with --token-file (native), or that "+token.Env+" reached the docker or docker compose client's environment (docker), and report this if you did not change how keploy starts its agent"))
+		zap.String("next_step", "the token this keploy process handed to the agent did not reach it — check that the agent was started with --token-file (native), or that "+token.Env+" reached the docker or docker compose client's environment (docker; a doas in front of docker compose resets that environment unless its doas.conf rule has keepenv or setenv { "+token.Env+" }), and report this if you did not change how keploy starts its agent"))
 }
 
 // controlPlaneProbeTimeout bounds the check above. Generous: the agent answered
