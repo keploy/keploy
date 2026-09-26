@@ -184,8 +184,12 @@ $containerName = "dedup-go-$id"
 # network/containers. Pin the project to the per-job guid and EXPORT it
 # so every `docker compose` call in this script AND the `docker compose
 # up` that keploy spawns share the same, job-unique project.
-$env:COMPOSE_PROJECT_NAME = "keploy-$id"
-Write-Host "Using COMPOSE_PROJECT_NAME = $env:COMPOSE_PROJECT_NAME"
+#
+# register-job-compose-project.ps1 sets COMPOSE_PROJECT_NAME and records the
+# project for the job's "Remove this job's containers" step, which removes
+# exactly this project's containers (every one carries its label). It must run
+# before the first container starts.
+& (Join-Path $PSScriptRoot '..\..\..\..\scripts\windows\register-job-compose-project.ps1') -Project "keploy-$id"
 Write-Host "Allocated ports -> app:$appPort proxy:$proxyPort incoming:$incomingPort dns:$dnsPort"
 
 $dcFile = Join-Path (Get-Location) 'docker-compose.yml'
@@ -665,6 +669,25 @@ if ($REC_PID -and $REC_PID -ne 0) {
 # Stop-Job $recJob
 # Remove-Job $recJob
 
+# The agent's control plane must be guarded by the token keploy hands it. That
+# handoff fails OPEN — an agent that got no token serves everything, and the
+# recording and both replays below still pass — so a green run proves nothing
+# about it unless this is checked. Both sides say so when it breaks: the agent
+# ("running WITHOUT authentication", streamed through compose into keploy's
+# output) and keploy's own probe ("NOT enforcing control-plane authentication").
+# A targeted match rather than a blanket ERROR grep, which would trip on the
+# benign lifecycle lines docker writes to stderr; case-sensitive, like the bash
+# lanes' grep, so it matches exactly those two lines.
+function Assert-AgentGuarded {
+    param([string[]]$Paths)
+    $hits = Select-String -Path $Paths -CaseSensitive -Pattern 'running WITHOUT authentication','NOT enforcing control-plane authentication' -ErrorAction SilentlyContinue
+    if ($hits) {
+        $hits | ForEach-Object { Write-Host $_.Line }
+        Write-Error "The keploy agent ran without its control-plane token; the docker compose token handoff is broken on windows."
+        exit 1
+    }
+}
+
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
 if (-not (Test-Path $testSetPath)) {
@@ -678,6 +701,7 @@ if ($testCount -eq 0) {
 }
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
+Assert-AgentGuarded -Paths @($logPath, $errLogPath)
 
 # =========================
 # ========== REPLAY =======
@@ -758,6 +782,7 @@ if ($status -ne 'PASSED') {
   Get-Content $testLog -ErrorAction SilentlyContinue | Select-Object -Last 200
   exit 1
 }
+Assert-AgentGuarded -Paths @($testLog)
 
 # Json-format replay against the yaml-recorded fixtures (read-side
 # auto-detect path; record happens via the docker workflow once and
@@ -806,6 +831,7 @@ if ($anyJsonFailed) {
   Write-Error "Some json tests failed."
   exit 1
 }
+Assert-AgentGuarded -Paths @($testLogJson)
 
 Write-Host "All tests passed successfully (yaml + json)!"
 exit 0

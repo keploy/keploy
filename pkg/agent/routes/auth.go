@@ -3,12 +3,12 @@ package routes
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/token"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -138,36 +138,82 @@ func tokenMatches(header, sessionToken string) bool {
 //
 // The file comes first because it is the only handoff that survives the common
 // native path: the CLI starts the agent as `sudo keploy agent`, and sudo's
-// default env_reset drops the variable. The environment still serves the
-// container modes, where there is no sudo in between.
-func ConsumeSessionToken(logger *zap.Logger, tokenFile string) string {
+// default env_reset drops the variable. The environment serves the container
+// modes, where the docker or compose client passes it straight through.
+//
+// A --token-file that yields no token is an error, and the agent must not
+// start: only a launcher that hands its agent a token passes the flag at all,
+// so when the file cannot be read the handoff has failed or something else is
+// sitting at that path. Falling back to the environment there would serve the
+// control plane open — or, with a planted file, enforce a token the real
+// client does not hold. Serving unauthenticated remains only for an agent
+// started with no handoff whatsoever, which is what a launcher that predates
+// the token does.
+//
+// isDocker is the agent's --is-docker: whether it runs in a container, which is
+// what tells an in-cluster agent apart (see inClusterAgent).
+func ConsumeSessionToken(logger *zap.Logger, tokenFile string, isDocker bool) (string, error) {
 	if tokenFile != "" {
 		tok, err := token.ReadFile(tokenFile)
-		if err == nil {
-			// Read once and then gone: it has done its job, and leaving it
-			// behind leaves the session's token on disk for the rest of the run.
-			if rmErr := os.Remove(tokenFile); rmErr != nil {
-				logger.Debug("could not remove the agent control-plane token file after reading it",
-					zap.String("path", tokenFile), zap.Error(rmErr))
-			}
-			// So that anything in this process that later asks for the
-			// session token gets the one being enforced, rather than
-			// minting an unrelated value that would look just as valid.
-			token.Adopt(tok)
-			return tok
+		if err != nil {
+			return "", fmt.Errorf("the keploy client that started this agent passed --token-file, but no control-plane token could be read from it, "+
+				"so the agent will not start with its control plane open: %w", err)
 		}
-		// Not fatal, and not silent: fall through to the environment, and if
-		// that is empty too the warning below says the control plane is open.
-		utils.LogError(logger, err, "could not read the agent control-plane token file passed by the keploy client; falling back to the environment",
-			zap.String("path", tokenFile))
+		// Read once and then gone: it has done its job, and leaving it
+		// behind leaves the session's token on disk for the rest of the run.
+		if rmErr := os.Remove(tokenFile); rmErr != nil {
+			logger.Debug("could not remove the agent control-plane token file after reading it",
+				zap.String("path", tokenFile), zap.Error(rmErr))
+		}
+		// So that anything in this process that later asks for the
+		// session token gets the one being enforced, rather than
+		// minting an unrelated value that would look just as valid.
+		token.Adopt(tok)
+		return tok, nil
 	}
 
 	tok := token.FromEnv()
 	token.Adopt(tok)
-	if tok == "" {
-		logger.Warn("agent control-plane API is running WITHOUT authentication: the process that started this agent supplied no " + token.Env +
-			" and no --token-file. Any local user or neighbouring container that can reach the port can read TLS session keys and " +
-			"captured traffic, and can stop or alter the session.")
+	if tok != "" {
+		return tok, nil
 	}
-	return tok
+	if inClusterAgent(isDocker) {
+		// In a pod the token arrives in the container's environment, and only
+		// from k8s-proxy: in a sidecar install, from its per-sidecar token
+		// release on, it puts a KEPLOY_AGENT_TOKEN of its own minting on every
+		// agent it injects (recording sidecars, and the replay and ATG sandbox
+		// pods it creates), and presents it on every call it makes. An
+		// in-cluster agent without one was injected before that release, or
+		// in a DaemonSet install (whose replay and sandbox pods k8s-proxy
+		// deliberately leaves tokenless, and whose chart does not render the
+		// switch), or with proxy.keployAgentControlPlaneAuth=false. None of
+		// these is a handoff keploy broke, and nothing on this side can fix
+		// it, so it is said once, at info, and the warning below is not: its
+		// remedies (--token-file, the launching client's environment) are a
+		// local launcher's, not a pod's.
+		logger.Info("agent control-plane API is running without authentication: this in-cluster agent was started " +
+			"without a control-plane token (in a sidecar install, k8s-proxy supplies one to the recording sidecars and " +
+			"the replay and sandbox pods it injects, from its per-sidecar token release on; pods injected before that " +
+			"release, pods in a DaemonSet install, and pods injected with proxy.keployAgentControlPlaneAuth=false have " +
+			"none), so anything that can reach this pod's agent port can use the API")
+		return "", nil
+	}
+	logger.Warn("agent control-plane API is running WITHOUT authentication: the process that started this agent supplied no " + token.Env +
+		" and no --token-file. Any local user or neighbouring container that can reach the port can read TLS session keys and " +
+		"captured traffic, and can stop or alter the session.")
+	return "", nil
+}
+
+// inClusterAgent reports whether this agent is one Kubernetes runs, as a
+// sidecar or in a replay pod: a container (--is-docker) with
+// KUBERNETES_SERVICE_HOST set, which the kubelet puts in every container it
+// starts.
+//
+// Both, not the variable alone. keploy run natively as root inside a CI pod
+// starts its agent without sudo, so that agent inherits the variable too — and
+// a handoff that failed there is a local one like any other. A container keploy
+// launches with docker gets only the environment keploy gives it, which never
+// includes the variable.
+func inClusterAgent(isDocker bool) bool {
+	return isDocker && os.Getenv("KUBERNETES_SERVICE_HOST") != ""
 }

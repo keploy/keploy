@@ -230,11 +230,30 @@ func projectNameOption(projectName, absWorkingDir string) func(*loader.Options) 
 	}
 }
 
-// environmentMap is the process environment in the shape the loader wants, so
-// ${VAR} interpolation resolves the same way it did for the child process.
+// environmentMap is the environment the loader resolves the document against,
+// so ${VAR} interpolation and bare `environment: [NAME]` entries behave exactly
+// as they did for the child process that used to run compose.
+//
+// The process environment is not sufficient on its own. The injected agent
+// service carries a BARE `KEPLOY_AGENT_TOKEN` entry — compose copies such a
+// variable from its own environment rather than from the document, which is
+// what keeps the token out of a world-readable compose file. The shell-out got
+// it because ExecuteCommand set AgentTokenEnv() on the child; there is no child
+// here, so it has to be merged in explicitly or the agent starts with no token
+// and rejects the client that launched it.
+//
+// Merged here, in the same package that writes that service entry, rather than
+// threaded down from the caller: the runner is built lazily and the first
+// builder may be a teardown probe that knows nothing about tokens, so anything
+// order-dependent would silently bake a token-less project and cache it.
 func environmentMap() composetypes.Mapping {
 	env := composetypes.Mapping{}
 	for _, kv := range os.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+	for _, kv := range AgentTokenEnv() {
 		if k, v, ok := strings.Cut(kv, "="); ok {
 			env[k] = v
 		}

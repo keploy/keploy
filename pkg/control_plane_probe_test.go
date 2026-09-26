@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -66,6 +67,7 @@ func TestVerifyControlPlaneGuarded(t *testing.T) {
 			// The real AgentURI carries the /agent prefix the routes are
 			// mounted under; probing without it would exercise a URL that
 			// never occurs.
+			token.RecordLaunch(srv.URL + "/agent")
 			verifyControlPlaneGuarded(context.Background(), zap.New(core), srv.URL+"/agent")
 
 			mu.Lock()
@@ -100,27 +102,72 @@ func TestVerifyControlPlaneGuarded_DoesNotReportAProbeThatCouldNotComplete(t *te
 	dead.Close()
 
 	core, logs := observer.New(zap.ErrorLevel)
+	token.RecordLaunch(deadURL + "/agent")
 	verifyControlPlaneGuarded(context.Background(), zap.New(core), deadURL+"/agent")
 
 	require.Zero(t, logs.Len(), "a probe that never reached the agent was reported as an unauthenticated agent")
 }
 
-func TestVerifyControlPlaneGuarded_RunsOncePerProcess(t *testing.T) {
-	// Six readiness gates call AgentHealthTicker across record, replay, mock
-	// and the runner; the agent should not be probed once per gate.
+// TestVerifyControlPlaneGuarded_LeavesAgentsItNeverStartedAlone is the
+// regression test for a false alarm. A process that drives an agent something
+// else started — a sidecar k8s-proxy injected, a pinned agent image that
+// predates the token — made no token handoff of its own, and the check
+// reported a broken handoff at ERROR, which keploy's CI lanes treat as fatal.
+// A sidecar with no token says for itself that it runs unauthenticated.
+func TestVerifyControlPlaneGuarded_LeavesAgentsItNeverStartedAlone(t *testing.T) {
 	resetProbeOnce(t)
 
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
-		w.WriteHeader(http.StatusUnauthorized)
+		w.WriteHeader(http.StatusNotFound) // a token-less agent: the probe falls through to chi
 	}))
 	t.Cleanup(srv.Close)
 
-	for i := 0; i < 3; i++ {
-		verifyControlPlaneGuarded(context.Background(), zap.NewNop(), srv.URL+"/agent")
+	core, logs := observer.New(zap.ErrorLevel)
+	verifyControlPlaneGuarded(context.Background(), zap.New(core), srv.URL+"/agent")
+
+	require.Zero(t, logs.Len(), "blamed a token handoff this process never made")
+	require.Zero(t, hits.Load(), "probed an agent this process never launched")
+}
+
+func TestVerifyControlPlaneGuarded_RunsOncePerAgent(t *testing.T) {
+	// Six readiness gates call AgentHealthTicker across record, replay, mock
+	// and the runner; one agent should not be probed once per gate. But every
+	// agent must be: a compose `keploy test` starts a new agent for each
+	// test-set, at the same address, and a handoff that breaks on a later
+	// agent would otherwise go unseen.
+	resetProbeOnce(t)
+
+	var mu sync.Mutex
+	hits := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits[r.URL.Path]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	first, second := srv.URL+"/first/agent", srv.URL+"/second/agent"
+	probes := func(uri string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return hits[strings.TrimPrefix(uri, srv.URL)+token.ProbePath]
 	}
-	require.EqualValues(t, 1, hits.Load())
+
+	token.RecordLaunch(first)
+	token.RecordLaunch(second)
+	for i := 0; i < 3; i++ {
+		verifyControlPlaneGuarded(context.Background(), zap.NewNop(), first)
+		verifyControlPlaneGuarded(context.Background(), zap.NewNop(), second)
+	}
+	require.Equal(t, 1, probes(first), "one agent was probed more than once, or not at all")
+	require.Equal(t, 1, probes(second), "a second agent was never checked")
+
+	// The next test-set's agent, at the first one's address.
+	token.RecordLaunch(first)
+	verifyControlPlaneGuarded(context.Background(), zap.NewNop(), first)
+	require.Equal(t, 2, probes(first), "a new agent on a reused port inherited its predecessor's answer and was never checked")
 }
 
 // TestAgentHealthTicker_ChecksTheGuardWhenTheAgentBecomesReady pins the call
@@ -149,6 +196,7 @@ func TestAgentHealthTicker_ChecksTheGuardWhenTheAgentBecomesReady(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	token.RecordLaunch(srv.URL + "/agent")
 	readyCh := make(chan bool, 1)
 	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh, 10*time.Millisecond)
 
@@ -192,6 +240,7 @@ func TestAgentHealthTicker_ReadinessDoesNotWaitOnTheCheck(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	token.RecordLaunch(srv.URL + "/agent")
 	readyCh := make(chan bool, 1)
 	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh, 10*time.Millisecond)
 

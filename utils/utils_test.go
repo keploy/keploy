@@ -296,3 +296,22 @@ func TestNetworkNameFromDockerRun(t *testing.T) {
 		})
 	}
 }
+
+// uniqueProcessGroups returns each process's group, as read, once: the
+// interrupt signals groups, and a group signalled twice is waited on twice.
+func TestUniqueProcessGroups(t *testing.T) {
+	groups := map[int]int{10: 10, 11: 10, 12: 12, 13: 10}
+	got, err := uniqueProcessGroups([]int{11, 12, 13, 10}, func(pid int) (int, error) { return groups[pid], nil })
+	if err != nil || fmt.Sprint(got) != "[10 12]" {
+		t.Fatalf("uniqueProcessGroups = %v, %v; want [10 12]", got, err)
+	}
+	failed := fmt.Errorf("process 12 is not in the process table")
+	if _, err := uniqueProcessGroups([]int{10, 12}, func(pid int) (int, error) {
+		if pid == 12 {
+			return 0, failed
+		}
+		return groups[pid], nil
+	}); err != failed {
+		t.Fatalf("uniqueProcessGroups with an unreadable group returned %v, want %v", err, failed)
+	}
+}

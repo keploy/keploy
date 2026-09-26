@@ -38,6 +38,14 @@ const (
 	// on agent startup to prevent stale state from passing the healthcheck.
 	AgentReadyFile = "/tmp/agent.ready"
 
+	// AgentOutcomeFile is where a containerised agent serving a mock replay
+	// leaves what it served and what it could not match (models.MockOutcome)
+	// as it is stopped. Under docker compose that is the only account of the
+	// run there is: compose stops the agent service the moment the app exits,
+	// before keploy can ask the agent anything, so keploy reads this file out
+	// of the stopped container instead, before its teardown removes it.
+	AgentOutcomeFile = "/tmp/keploy-mock-outcome.json"
+
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
@@ -767,6 +775,30 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		envVars = append(envVars, fmt.Sprintf("INSTALLATION_ID=%s", installationID))
 	}
 
+	// The control-plane token, by name only: a bare `KEPLOY_AGENT_TOKEN` entry
+	// makes compose copy the variable from its own environment, and the app
+	// command that runs compose is given it there (see AgentTokenEnv). Never
+	// the value: this compose file is written 0644 into the user's project,
+	// so an embedded token would be readable by every local user — the ones
+	// the token exists to keep out of the control plane. And not an
+	// env_file: compose reads that itself, and a strictly confined docker
+	// (the snap) cannot see a host temp file from its private /tmp, so the
+	// agent would never start.
+	//
+	// The agent needs it because publishing its port to the host's loopback
+	// narrows who can route to it but not who can reach it: every container on
+	// this network can, and so can the application under test, which runs in
+	// the agent's own network namespace.
+	//
+	// The launch is recorded by the app, which starts this service every time
+	// it runs compose, whether or not there is a token to hand over (see
+	// App.withAgentToken in pkg/client/app).
+	if token.Session() == "" {
+		idc.logger.Warn("no control-plane token to hand to the agent container; it will start without authentication")
+	} else {
+		envVars = append(envVars, token.Env)
+	}
+
 	// When the operator's keploy folder is resolved, bind-mount it into
 	// the agent container at /keploy-host and point KEPLOY_DEBUG_FILE at
 	// a file inside it. The agent process honors that env var (see
@@ -951,28 +983,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 				"Review and allow only what your security policy permits."},
 			{Kind: yaml.SequenceNode, Content: capAdd},
 		},
-	}
-
-	// The control-plane token, by reference. Not an inline `environment:`
-	// entry: this compose file is written 0644 into the user's project, so an
-	// embedded token would be readable by every local user — the ones the
-	// token exists to keep out of the control plane. The env file itself is
-	// 0600 and lives outside the project.
-	//
-	// The agent needs it because publishing its port to the host's loopback
-	// narrows who can route to it but not who can reach it: every container on
-	// this network can, and so can the application under test, which runs in
-	// the agent's own network namespace.
-	if tokenFile, err := token.WriteFile(); err != nil {
-		idc.logger.Warn("could not hand a control-plane token to the agent container; it will start without authentication",
-			zap.Error(err))
-	} else {
-		serviceNode.Content = append(serviceNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "env_file"},
-			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: tokenFile},
-			}},
-		)
 	}
 
 	if needsCgroupV2Mount {

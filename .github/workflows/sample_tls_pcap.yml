@@ -176,3 +176,17 @@ jobs:
         run: |
           cd sample-tls-app
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/sample-tls-pcap.sh
+
+      # The capture, keylog and recorder log are the only evidence of why a
+      # decrypt or round-trip assertion failed, and the runner is gone after
+      # the job. The keylog only holds secrets for this job's throwaway CI CA.
+      - name: Upload capture artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tls-pcap-${{ matrix.config.job }}-${{ matrix.mode.name }}
+          path: |
+            sample-tls-app/keploy-record.log
+            sample-tls-app/keploy/test-set-0/traffic.pcap
+            sample-tls-app/keploy/test-set-0/sslkeys.log
+          if-no-files-found: ignore

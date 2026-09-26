@@ -4162,44 +4162,56 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 }
 
 // controlPlaneProbed records the agents that have already given a conclusive
-// answer to the check below, keyed by their address.
+// answer to the check below, keyed by the launch that started each one.
 //
 // Per agent, not per process: a docker-compose `keploy test` restarts the agent
-// for each test-set, and each one gets its own port. A process-wide latch would
-// check the first agent and none of the others — and the one handoff failure
-// that breaks on the SECOND agent and not the first is the token file being
-// consumed and not re-created, which is the specific regression
-// token.WriteFile documents itself as preventing.
+// for each test-set. A process-wide latch would check the first agent and none
+// of the others, and a handoff that breaks on a later agent and not the first
+// would go unseen. Per launch rather than per address, because those agents
+// share one: the port is fixed in the compose file generated once for the
+// session, so keyed by address alone each later agent would inherit its
+// predecessor's answer and never be checked. The app records a launch every
+// time it runs compose (App.withAgentToken in pkg/client/app).
 var controlPlaneProbed sync.Map
 
-// verifyControlPlaneGuarded checks that the agent this process is about to use
-// is really enforcing the control-plane token it was handed.
+// verifyControlPlaneGuarded checks that an agent this process launched is
+// really enforcing the control-plane token it was handed.
 //
-// Every handoff of that token fails OPEN rather than closed: the 0600 file and
-// --token-file natively, --env-file for `docker run`, and a compose `env_file:`
-// key in a compose file keploy rewrites heavily. If any of them breaks, the
-// agent starts with no token and serves its whole control plane — live TLS
-// session keys included — to anything that can reach the port, while this
-// process keeps sending a header nothing checks. Every request still succeeds,
-// so nothing downstream notices and no test of a working flow can tell.
+// A token that never reaches the agent fails OPEN rather than closed: an agent
+// started with no --token-file natively, or whose docker or compose client did
+// not pass the variable through to the container, has no token, and serves its
+// whole control plane — live TLS session keys included — to anything that can
+// reach the port, while this process keeps sending a header nothing checks.
+// Every request still succeeds, so nothing downstream notices and no test of a
+// working flow can tell.
 //
 // One request settles it: a token that is wrong by construction must be
 // refused. It runs here, at the readiness gate, because this is the one point
 // every mode passes through — native, `docker run` and docker compose, where
-// the agent is started by the user's own `docker compose up` and this process
-// never launches it at all.
+// the agent is a service in the compose project keploy rewrites and is started
+// by the user's own `docker compose up`, not by this process directly.
+//
+// Only for an agent this process launched (token.Launched). A process that
+// drives an agent something else started — a sidecar k8s-proxy injected, whose
+// token (if it has one) k8s-proxy put in its pod spec, or a pinned agent image
+// that predates the token — made no handoff of its own, and blaming one that
+// never happened is a false alarm at error level. A sidecar without a token
+// says for itself that it is running unauthenticated; an image that predates
+// the token says nothing, as it checks nothing.
 //
 // Reported rather than fatal: an agent that could not be given a token still
 // records and replays, and refusing to run would be the worse outcome. It is
 // logged at error level so that it reaches the operator and fails keploy's own
 // CI, which treats any ERROR in a run as fatal.
 func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI string) {
-	if token.Session() == "" {
-		// This process never had a token to hand over, so there is nothing to
-		// hold the agent to. The agent says so on its own side.
+	launch, launched := token.Launched(agentURI)
+	if !launched {
+		logger.Debug("not checking the control-plane authentication of an agent this process did not launch",
+			zap.String("agent", agentURI))
 		return
 	}
-	if _, done := controlPlaneProbed.Load(agentURI); done {
+	key := fmt.Sprintf("%s#%d", agentURI, launch)
+	if _, done := controlPlaneProbed.Load(key); done {
 		return
 	}
 
@@ -4225,7 +4237,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 
 	// Only an answer counts. Marking earlier would let an attempt that proved
 	// nothing retire the check for this agent.
-	controlPlaneProbed.Store(agentURI, struct{}{})
+	controlPlaneProbed.Store(key, struct{}{})
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		logger.Debug("agent control-plane authentication verified", zap.String("agent", agentURI))
@@ -4235,7 +4247,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 	utils.LogError(logger, nil, "the agent is NOT enforcing control-plane authentication: it accepted a request carrying an invalid token",
 		zap.Int("probe_status", resp.StatusCode),
 		zap.String("impact", "/agent/pcap/keylog streams live TLS session keys and /agent/stop and /agent/storemocks alter this session; any local user or neighbouring container that can reach the agent port can use them"),
-		zap.String("next_step", "the token this keploy process generated did not reach the agent — check that the agent was started with --token-file (native) or with the "+token.Env+" env file (docker), and report this if you did not change how keploy starts its agent"))
+		zap.String("next_step", "the token this keploy process handed to the agent did not reach it — check that the agent was started with --token-file (native), or that "+token.Env+" reached the docker or docker compose client's environment (docker), and report this if you did not change how keploy starts its agent"))
 }
 
 // controlPlaneProbeTimeout bounds the check above. Generous: the agent answered

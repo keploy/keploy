@@ -31,9 +31,12 @@ var cancel context.CancelFunc
 // gives a definitive answer to "did the agent have unsent mocks at
 // the moment of shutdown" without depending on the structured logger.
 //
-// Hooks MUST be fast (no blocking I/O, no network calls) — they run
-// on the signal-delivery goroutine and any blocking work delays the
-// cancellation and increases the chance of SIGKILL truncation.
+// Hooks MUST be bounded, and well inside the stop grace the process is
+// given before it is killed (10s under docker and compose) — they run on
+// the signal-delivery goroutine and any blocking work delays the
+// cancellation and increases the chance of SIGKILL truncation. A hook
+// that has to do I/O bounds it itself, as the agent's replay-outcome
+// write does (pkg/service/agent, leaveStopOutcome: 3s).
 var (
 	preCancelMu    sync.Mutex
 	preCancelHooks []func()
@@ -64,7 +67,9 @@ func RegisterPreCancelHook(fn func()) {
 // had been cut short over a recording that had just succeeded.
 var interrupted atomic.Bool
 
-// Interrupted reports whether SIGINT or SIGTERM reached this process.
+// Interrupted reports whether NewCtx's handler stopped this run on a signal:
+// SIGINT, SIGTERM, or SIGHUP where NewCtx listens for it (see notifyHangups
+// and DieOnHangup).
 func Interrupted() bool { return interrupted.Load() }
 
 // MarkInterrupted records that a signal ended this run. The signal handler
@@ -86,12 +91,37 @@ func NewCtx() context.Context {
 	// os.Interrupt is more portable than syscall.SIGINT
 	// there is no equivalent for syscall.SIGTERM in os.Signal
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	hangups := notifyHangups()
 
 	// Start a goroutine that will cancel the context when a signal is received
 	go func() {
-		sig := <-sigs // this received signal will be inside keploy docker container if running in docker else on the host.
+		var sig os.Signal // this received signal will be inside keploy docker container if running in docker else on the host.
+		select {
+		case sig = <-sigs:
+		case sig = <-hangups:
+		}
 		MarkInterrupted()
 		fmt.Printf("Signal received: %s, canceling context...\n", sig)
+
+		// Where NewCtx listens for SIGHUP (not under nohup: see
+		// notifyHangups), every SIGHUP from here on changes nothing, and
+		// says so, unless DieOnHangup has given SIGHUP its default action
+		// back. One hang-up can deliver two. VS Code's Stop sends one to
+		// the process on the task's terminal and then closes the terminal,
+		// which has the kernel send another to its session leader: both
+		// reach keploy when the shell ran it in its own place, as `zsh -c`
+		// does. Closing the window of an interactive shell has the shell
+		// forward one to its job and the kernel send the job another as the
+		// shell exits. SIGHUP stays registered, so none of them is the
+		// default action -- death, half way through the shutdown the first
+		// one started.
+		if hangups != nil {
+			go func() {
+				for hup := range hangups {
+					fmt.Printf("Signal received: %s, ignored: Keploy is already handling %s\n", hup, sig)
+				}
+			}()
+		}
 
 		// App-managed graceful-shutdown drain (Kubernetes sidecar path).
 		// When the injecting webhook runs in app-managed-drain mode it sets
@@ -155,6 +185,42 @@ func NewCtx() context.Context {
 	}()
 
 	return ctx
+}
+
+// notifyHangups has a hang-up stop keploy as SIGTERM does: NewCtx takes the
+// same path for it -- marks the run interrupted, runs the pre-cancel hooks and
+// cancels the root context -- so the command stops what it started and
+// reports the run as it reports one ended by SIGTERM, and main's deferred
+// cleanup runs. It returns the channel SIGHUP arrives on, or nil, on which
+// nothing ever arrives, when SIGHUP was ignored as this process started:
+// `nohup keploy record ...` asked to outlive its terminal, and a Notify would
+// undo that.
+//
+// A hang-up is how the VS Code extension's Stop ends a run: it terminates
+// the task, which sends the process on the task's terminal SIGHUP (node-pty's
+// kill()). Closing a terminal, or losing an ssh session, sends the same.
+// keploy listened for SIGINT and SIGTERM only, so SIGHUP killed it where it
+// stood: the test command it had started ran on, and none of the cleanup it
+// defers ran.
+func notifyHangups() chan os.Signal {
+	if signal.Ignored(syscall.SIGHUP) {
+		return nil
+	}
+	hangups := make(chan os.Signal, 1)
+	signal.Notify(hangups, syscall.SIGHUP)
+	return hangups
+}
+
+// DieOnHangup gives SIGHUP back the action it had before NewCtx heard it:
+// death, or nothing if it was ignored as this process started. It is for a
+// process whose owner counts on a hang-up killing it: `keploy agent`. The CLI
+// closes the terminal it started an agent on to stop it
+// (startNativeAgentWithPTY in pkg/platform/http), and the enterprise
+// self-update supervisor hands its agent the SIGHUPs it gets and counts a
+// death by one as a deliberate stop. A SIGHUP that arrives between NewCtx and
+// this call takes NewCtx's path, and stops the process gracefully instead.
+func DieOnHangup() {
+	signal.Reset(syscall.SIGHUP)
 }
 
 // Stop requires a reason to stop the server.

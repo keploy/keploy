@@ -18,7 +18,6 @@ import (
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/agent/token"
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -186,15 +185,6 @@ func start(ctx context.Context) {
 			}
 		}()
 	}
-
-	// Before the block below, and outside its KEPLOY_INDOCKER guard and its
-	// early returns: the session's control-plane token must not outlive the
-	// run in any mode.
-	defer func() {
-		if err := token.RemoveFile(); err != nil {
-			utils.LogError(logger, err, "failed to remove the agent control-plane token file")
-		}
-	}()
 
 	defer func() {
 		inDocker := os.Getenv("KEPLOY_INDOCKER")
