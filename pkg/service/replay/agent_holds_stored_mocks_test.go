@@ -562,6 +562,39 @@ func TestSendMockFilterParamsKeepsAgentOwnsConsumedOnTheNormalPath(t *testing.T)
 	}
 }
 
+// --retry-passing-test rewinds the CLI's own totalConsumedMocks between
+// cycles so per-test single-use mocks are servable again; the agent's
+// consumedPersistent has no rewind point. Handing filtering to the agent
+// under RetryPassing would fail every retried test that touches a per-test
+// mock with match_phase=no_mocks, so the flag must stand down here even
+// though KEPLOY_AGENT_OWNS_CONSUMED is set.
+func TestSendMockFilterParamsStandsDownAgentOwnsConsumedUnderRetryPassing(t *testing.T) {
+	t.Setenv("KEPLOY_AGENT_OWNS_CONSUMED", "1")
+
+	f := &rearmInstr{}
+	r := newRearmReplayer(f)
+	r.config.RetryPassing = true
+	consumed := map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}}
+
+	if err := r.SendMockFilterParamsToAgent(context.Background(), []string{}, models.BaseTime, time.Now(),
+		consumed, false, time.Time{}); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	f.mu.Lock()
+	p := f.lastParams
+	f.mu.Unlock()
+
+	if p.AgentOwnsConsumed {
+		t.Fatal("RetryPassing needs the CLI's rewindable consumed-mock map; the agent's own " +
+			"history is never rewound between retry cycles")
+	}
+	if len(p.TotalConsumedMocks) != 1 {
+		t.Fatalf("got %d consumed entries under RetryPassing; want the CLI's own map (1) sent through",
+			len(p.TotalConsumedMocks))
+	}
+}
+
 // The rebuild has to STICK. The agent evaluates AgentOwnsConsumed per request,
 // so seeding the replacement on the repair call and then reverting on every
 // later per-test call puts it straight back to filtering against an empty
