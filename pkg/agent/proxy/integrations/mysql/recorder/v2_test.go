@@ -499,7 +499,19 @@ func TestRecordV2_PostTLS_PooledConnSeq0(t *testing.T) {
 	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base.Add(20*time.Millisecond))
 	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
 
-	got := runPostTLS(t, h, postTLSCtx(t, handshakeBuf, sslReq, base, 3306), 2)
+	// The raw leg caches what it pushes (storePreTLSHandshakeV2); a connection
+	// joined mid-stream borrows that, never a queued entry not provably its own.
+	// The destination is a loopback server, which the cache keys by the
+	// connection's network namespace.
+	h.sess.Opts.NetNS = testNetNS
+	ctx := postTLSCtx(t, handshakeBuf, sslReq, base, 3306)
+	store, _ := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+	store.RememberLast(lastGreetingKey(h.sess.Opts.PassThroughScope, h.sess.Opts.NetNS, h.sess.Opts.DstCfg), models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{handshakeBuf},
+		ReqPackets:   [][]byte{sslReq},
+		ReqTimestamp: base,
+	})
+	got := runPostTLS(t, h, ctx, 2)
 
 	if got[0].Name != "config" {
 		t.Errorf("first mock = %q, want config", got[0].Name)

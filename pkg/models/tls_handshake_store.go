@@ -2,6 +2,8 @@ package models
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -10,8 +12,14 @@ import (
 const (
 	// tlsHandshakeEntryTTL bounds how long an unconsumed handshake entry is kept.
 	tlsHandshakeEntryTTL = 30 * time.Second
-	// tlsHandshakeMaxQueuePerKey bounds queue growth for a single key.
-	tlsHandshakeMaxQueuePerKey = 128
+	// tlsHandshakeMaxQueuePerKey bounds queue growth for a single key. An entry
+	// waits here until its own decrypted stream takes it, and a raw leg whose
+	// decrypted stream never comes (a TLS library the uprobes cannot see, an
+	// aborted handshake) leaves its entry for the whole tlsHandshakeEntryTTL.
+	// At R new connections per second to one port, a full queue keeps an entry
+	// for about max/R seconds, so the bound must leave a late decrypted stream
+	// time to arrive: 512 is ~17s at 30 connections/s, at ~200 bytes an entry.
+	tlsHandshakeMaxQueuePerKey = 512
 )
 
 // TLSHandshakeEntry holds the raw MySQL handshake packets captured by the
@@ -23,11 +31,11 @@ type TLSHandshakeEntry struct {
 	ReqTimestamp time.Time // timestamp from the start of the relay handshake
 }
 
-// TLSHandshakeStore is a keyed store of handshake entries. Each key
-// identifies a unique connection (e.g. "conn:<srcPort>:<dstPort>" or
-// a port-only fallback "port:<dstPort>"). The relay path pushes entries
-// when it finishes TLSOnly handshake capture; the post-TLS path pops
-// them to merge with auth exchange data.
+// TLSHandshakeStore is a keyed store of handshake entries. The raw (pre-TLS)
+// leg of a connection pushes its greeting and SSLRequest under the
+// destination's port key ("port:<dstPort>"), tagged with the connection that
+// produced it (HandshakeOwner); the decrypted (post-TLS) leg of the same
+// connection pops it by that owner to merge with its auth exchange.
 type TLSHandshakeStore struct {
 	mu   sync.Mutex
 	cond *sync.Cond
@@ -53,7 +61,8 @@ type TLSHandshakeStore struct {
 	// capability flags, version and auth plugin into another's config mock is
 	// silent corruption — strictly worse than the missing mock it would replace.
 	//
-	// Two kinds of key are cached here, and they earn that guarantee differently:
+	// Two kinds of key are cached here, and they earn that guarantee differently
+	// (a third, the server key, is kept apart in servers):
 	//
 	//   - DESTINATION keys (HandshakeLastKey) name the server directly, in the
 	//     address. Note they do NOT drop a synthesized address: the key also
@@ -77,7 +86,16 @@ type TLSHandshakeStore struct {
 	//     replayer already serves one recorded greeting to every connection, so
 	//     the trade is deliberate; it is not a proof of isolation.
 	//
-	// Residual, shared by both and deliberately accepted: within ONE scope, two
+	//   - SERVER keys (HandshakeServerKey), kept in servers, also name the
+	//     server in the address, but hold ONLY its bare greeting: no SSLRequest,
+	//     no timing, nothing any one client contributed. That is what lets them
+	//     drop the app/session scope for a routable address and be shared by
+	//     every app and every recording session that reaches the server, and it
+	//     is enforced: RememberLast and RememberLastForPort refuse them, and
+	//     RememberServerGreeting stores only greeting bytes. A namespace-local
+	//     address keeps a namespace qualifier (see AddrIsNetnsLocal).
+	//
+	// Residual, shared by the first two and deliberately accepted: within ONE scope, two
 	// different servers whose addresses BOTH had to be synthesized are
 	// indistinguishable to the capture layer, so they can collapse onto one
 	// destination key. Resolving that needs real destination resolution, not a
@@ -96,6 +114,41 @@ type TLSHandshakeStore struct {
 	// lastPruned is when the last-greeting cache was last swept, so the sweep is
 	// not repeated on every write while the map is under budget.
 	lastPruned time.Time
+
+	// servers remembers, per server key (HandshakeServerKey), that server's bare
+	// greeting. It has its own lock: every recorded MySQL handshake refreshes
+	// it, and none of them should contend with the queue's Push/PopWait (mu),
+	// on which post-TLS streams wait. Refreshes of a greeting already known are
+	// mostly skipped under the read lock (RememberServerGreeting).
+	//
+	// Staleness. A remembered greeting goes stale only when the server behind
+	// the address changes: a pod IP or Service reused by another MySQL, or an
+	// in-place upgrade. Either ends every connection to the old server, so the
+	// first connection to the new one made while anything records is FRESH,
+	// and its raw leg replaces the memo at once (a live greeting always
+	// replaces). What remains is a connection made while nothing recorded, to a
+	// server replaced within lastGreetingTTL of the memo's last refresh. A
+	// shorter lifetime for fetched entries would narrow that window at the
+	// price of one dial per lifetime for exactly the apps the memo serves
+	// (pools that open no fresh connections), each an aborted handshake counted
+	// against the dialling host (the node, for a DaemonSet agent), which only
+	// a successful connection from that same host resets. So fetched and live
+	// entries share lastGreetingTTL.
+	srvMu   sync.RWMutex
+	servers map[string]serverGreeting
+}
+
+// serverGreeting is one server's remembered greeting.
+type serverGreeting struct {
+	greeting []byte
+	// identity fingerprints the greeting's server-stable fields (the caller's
+	// choice; the MySQL recorder uses protocol and server version, capability
+	// flags, charset and auth plugin). Empty for a fetched greeting.
+	identity string
+	// live: a raw leg captured it on a live connection. A fetched one only
+	// fills a key that holds nothing servable.
+	live bool
+	seen time.Time
 }
 
 // lastGreeting is a cached greeting plus the identity of the server that
@@ -157,28 +210,89 @@ const (
 
 type timedTLSHandshakeEntry struct {
 	entry    TLSHandshakeEntry
+	owner    HandshakeOwner
 	pushedAt time.Time
 }
+
+const (
+	// maxServerGreetings caps the per-server greeting memo. Its cardinality is
+	// distinct servers (plus, for namespace-local addresses, namespaces), far
+	// below the per-app x session x destination cache above.
+	maxServerGreetings = 512
+	// serverGreetingRefresh is how stale a live greeting may get before a raw
+	// leg carrying the same server identity refreshes it. Refreshing on every
+	// handshake would take the memo's write lock on every recorded connection;
+	// refreshing this often keeps a busy server's greeting well inside
+	// lastGreetingTTL.
+	serverGreetingRefresh = lastGreetingTTL / 6
+)
 
 // NewTLSHandshakeStore creates a new store.
 func NewTLSHandshakeStore() *TLSHandshakeStore {
 	s := &TLSHandshakeStore{
-		m:    make(map[string][]timedTLSHandshakeEntry),
-		last: make(map[string]lastGreeting),
+		m:       make(map[string][]timedTLSHandshakeEntry),
+		last:    make(map[string]lastGreeting),
+		servers: make(map[string]serverGreeting),
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
 
-// HandshakeStoreKey builds a store key from a ConnKey (connection-level
-// identifier) and a destination port fallback.
-// When ConnKey is set, the key is connection-specific, eliminating FIFO
-// ordering issues across concurrent connections to the same port.
+// HandshakeStoreKey builds a queue key. With an empty connKey it is the
+// destination port's key ("port:<dstPort>"), under which a raw leg pushes its
+// entry tagged with its HandshakeOwner (PushFor) and a decrypted leg pops by
+// its own (PopWaitFor). A non-empty connKey gives a key of its own, which
+// nothing in the recorder pushes to any more: pairing by connection happens
+// through the owner on the port key, so one capture is never queued twice.
 func HandshakeStoreKey(connKey string, dstPort uint16) string {
 	if connKey != "" {
 		return "conn:" + connKey
 	}
 	return fmt.Sprintf("port:%d", dstPort)
+}
+
+// HandshakeOwner identifies the connection a queued handshake entry was
+// captured from, as far as the capture layer can tell, so each decrypted
+// stream is stitched with its OWN connection's greeting.
+//
+// The two legs of one TLS connection reach the recorder separately, and a
+// port's queue is shared by every connection to that port on the agent. By
+// arrival order alone, a stream takes whichever entry is oldest: under
+// concurrency that is often another connection's, whose salt, SSLRequest and
+// timestamp then land in this connection's config mock. Its connection may be
+// in another app, talking to another server.
+type HandshakeOwner struct {
+	// Conn names the connection's socket (OutgoingOptions.ConnKey). When both
+	// the entry and the consumer have one, they pair only if equal.
+	Conn string
+	// Proc names the process that made the connection
+	// (OutgoingOptions.ConnProc). It decides when either side lacks Conn: a
+	// stream then takes only an entry from its own process.
+	Proc string
+}
+
+// HandshakeOwnerOf is the owner identity a connection's options carry.
+func HandshakeOwnerOf(opts OutgoingOptions) HandshakeOwner {
+	return HandshakeOwner{Conn: opts.ConnKey, Proc: opts.ConnProc}
+}
+
+// Is reports whether e names the same connection as o: both know it, and agree.
+func (o HandshakeOwner) Is(e HandshakeOwner) bool {
+	return o.Conn != "" && o.Conn == e.Conn
+}
+
+// mayTake reports whether a consumer o may take an entry owned by e when it
+// has not found its own: never another connection's (both know their
+// connection, and they differ), never another process's (both know theirs, and
+// they differ), and otherwise yes, as the best the capture layer can tell.
+func (o HandshakeOwner) mayTake(e HandshakeOwner) bool {
+	if o.Conn != "" && e.Conn != "" {
+		return o.Conn == e.Conn
+	}
+	if o.Proc != "" && e.Proc != "" {
+		return o.Proc == e.Proc
+	}
+	return true
 }
 
 // HandshakeLastKey builds the key for the last-greeting cache.
@@ -252,6 +366,191 @@ func HandshakeLastPortKey(scope string, dstPort uint16) string {
 	return fmt.Sprintf("%s%s|%d", lastPortKeyPrefix, scope, dstPort)
 }
 
+// serverKeyPrefix marks keys built by HandshakeServerKey, which may only ever
+// hold a bare server greeting (see RememberServerGreeting).
+const serverKeyPrefix = "srv:"
+
+// AddrIsNetnsLocal reports whether host (an IP literal or a name, without a
+// port) can name a DIFFERENT server in every network namespace, so the same
+// spelling from two pods is not evidence of one server:
+//
+//   - loopback (127.0.0.0/8, ::1) and the unspecified address, which connects
+//     to the local host: every netns has its own;
+//   - link-local unicast and multicast (169.254.0.0/16, fe80::/10), and any
+//     address carrying an IPv6 zone: scoped to one link of one netns;
+//   - a hostname: resolution is per pod (search domains, /etc/hosts), so
+//     "mysql" in two namespaces is two services.
+//
+// Every other IP address, private ranges included, is taken to name the same
+// destination from every namespace a single agent can see: a pod IP one pod, a
+// ClusterIP one Service (whichever of its backends answers), an external
+// address one host. The exception it cannot see is a network private to a
+// namespace that reuses a range used elsewhere, such as a docker bridge inside
+// a Docker-in-Docker pod, or overlapping secondary networks: connections there
+// are treated as reaching the same server as any other with that address.
+//
+// An empty host counts as local: it names nothing portable.
+func AddrIsNetnsLocal(host string) bool {
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return true
+	}
+	return ipIsNetnsLocal(ip)
+}
+
+// ipIsNetnsLocal is AddrIsNetnsLocal for a parsed IP.
+func ipIsNetnsLocal(ip netip.Addr) bool {
+	if ip.Zone() != "" {
+		return true
+	}
+	ip = ip.Unmap()
+	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast()
+}
+
+// HandshakeServerKey names the SERVER behind a connection's destination, for
+// state that belongs to the server rather than to one connection, app or
+// recording session. Today that is a bare greeting: protocol version, server
+// version, capability flags and auth plugin, all properties of the server, with
+// the per-connection salt never verified on the record or replay path.
+//
+// It differs from HandshakeLastKey on purpose. That key also carries the
+// app/session scope, because what it caches includes the CLIENT's SSLRequest and
+// timing, which belong to one app. A server key carries neither, so for a
+// routable address it carries no scope at all: the enterprise scope is
+// "<ns>/<deployment>/<test-set>", and keying server state on it re-learned the
+// same server's greeting in every recording session. For a Service's ClusterIP
+// the greeting is that of whichever backend answered last; a live greeting from
+// any of them replaces it.
+//
+// A namespace-local address (AddrIsNetnsLocal) names a different server in every
+// network namespace, so it is qualified by netNS, the connection's namespace
+// (OutgoingOptions.NetNS). Without one it gets no key: no app/session scope
+// names a namespace (every replica of a deployment shares one), so sharing by
+// scope would hand one pod's loopback server's greeting to its sibling pod.
+//
+// Returns "", meaning do not remember, do not look up and do not share a fetch,
+// when dst names no server this way: no address, a fabricated stand-in
+// (ConditionalDstCfg.AddrFabricated), an address that does not parse, or a
+// namespace-local address with no namespace. A port alone is never a key.
+func HandshakeServerKey(netNS string, dst *ConditionalDstCfg) string {
+	if dst == nil || dst.Addr == "" || dst.AddrFabricated {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(dst.Addr)
+	if err != nil || host == "" || port == "" {
+		return ""
+	}
+	ip, perr := netip.ParseAddr(host)
+	if perr == nil && !ipIsNetnsLocal(ip) {
+		if ip.Is4() && ip.String() == host {
+			return serverKeyPrefix + dst.Addr // already canonical: "a.b.c.d:port"
+		}
+		return serverKeyPrefix + net.JoinHostPort(ip.Unmap().String(), port)
+	}
+	if netNS == "" {
+		return ""
+	}
+	if perr == nil {
+		host = ip.Unmap().String() // keeps any zone
+	}
+	return serverKeyPrefix + "netns=" + netNS + "|" + net.JoinHostPort(host, port)
+}
+
+// RememberServerGreeting records greeting, a raw server greeting packet the
+// caller CAPTURED on a live connection, under a server key (HandshakeServerKey).
+// identity fingerprints the greeting's server-stable fields.
+//
+// A live greeting is the server as it is now, so it replaces whatever the key
+// held, a fetched greeting included. When the key already holds a live greeting
+// of the same identity it is only refreshed, and at most every
+// serverGreetingRefresh: the salt and connection id change on every connection,
+// nothing a borrower uses does. Callers must pass only a greeting that decodes;
+// this package cannot decode one. Keys that are not server keys are ignored, so
+// no client data can be written where every app reads.
+func (s *TLSHandshakeStore) RememberServerGreeting(key string, greeting []byte, identity string) {
+	if !strings.HasPrefix(key, serverKeyPrefix) || len(greeting) == 0 {
+		return
+	}
+	now := time.Now()
+	s.srvMu.RLock()
+	cur, ok := s.servers[key]
+	s.srvMu.RUnlock()
+	if ok && cur.live && identity != "" && cur.identity == identity && now.Sub(cur.seen) < serverGreetingRefresh {
+		return
+	}
+	s.srvMu.Lock()
+	defer s.srvMu.Unlock()
+	s.putServerGreetingLocked(key, serverGreeting{
+		greeting: append([]byte(nil), greeting...), // often a slice of a read buffer
+		identity: identity,
+		live:     true,
+		seen:     now,
+	}, now)
+}
+
+// RememberServerGreetingIfAbsent records a greeting the caller FETCHED from the
+// server, under a server key, only when the key holds no servable greeting, and
+// reports whether it wrote. The check and the write are one acquisition of the
+// lock: a live greeting a raw leg records while the fetch is in flight is newer
+// evidence and must not be overwritten by the fetch.
+func (s *TLSHandshakeStore) RememberServerGreetingIfAbsent(key string, greeting []byte) bool {
+	if !strings.HasPrefix(key, serverKeyPrefix) || len(greeting) == 0 {
+		return false
+	}
+	now := time.Now()
+	s.srvMu.Lock()
+	defer s.srvMu.Unlock()
+	if cur, ok := s.servers[key]; ok && now.Sub(cur.seen) <= lastGreetingTTL {
+		return false
+	}
+	s.putServerGreetingLocked(key, serverGreeting{greeting: append([]byte(nil), greeting...), seen: now}, now)
+	return true
+}
+
+// ServerGreeting returns the greeting remembered under a server key, if one is
+// still within lastGreetingTTL. The bytes are the store's own: callers must not
+// modify them.
+func (s *TLSHandshakeStore) ServerGreeting(key string) ([]byte, bool) {
+	if !strings.HasPrefix(key, serverKeyPrefix) {
+		return nil, false
+	}
+	s.srvMu.RLock()
+	defer s.srvMu.RUnlock()
+	cur, ok := s.servers[key]
+	if !ok || time.Since(cur.seen) > lastGreetingTTL {
+		return nil, false
+	}
+	return cur.greeting, true
+}
+
+// putServerGreetingLocked stores g under key and keeps the memo within
+// maxServerGreetings: expired entries go first, then the least recently seen.
+// Callers hold srvMu for writing.
+func (s *TLSHandshakeStore) putServerGreetingLocked(key string, g serverGreeting, now time.Time) {
+	if s.servers == nil {
+		s.servers = make(map[string]serverGreeting)
+	}
+	s.servers[key] = g
+	if len(s.servers) <= maxServerGreetings {
+		return
+	}
+	for k, v := range s.servers {
+		if now.Sub(v.seen) > lastGreetingTTL {
+			delete(s.servers, k)
+		}
+	}
+	for len(s.servers) > maxServerGreetings {
+		oldestKey, oldest := "", now
+		for k, v := range s.servers {
+			if oldestKey == "" || v.seen.Before(oldest) {
+				oldestKey, oldest = k, v.seen
+			}
+		}
+		delete(s.servers, oldestKey)
+	}
+}
+
 // RememberLast records entry as the most recent greeting seen for a
 // destination. A empty key is ignored, so callers may pass
 // HandshakeLastKey's result unconditionally.
@@ -264,6 +563,12 @@ func (s *TLSHandshakeStore) RememberLast(key string, entry TLSHandshakeEntry) {
 	// untagged write here would blank that tag and permanently disable the
 	// ambiguity latch for that key, so refuse it rather than silently weaken it.
 	if strings.HasPrefix(key, lastPortKeyPrefix) {
+		return
+	}
+	// A server key is read by every app and session that reaches the server,
+	// so it may hold only the server's own greeting, never an entry carrying
+	// one client's SSLRequest and timing. RememberServerGreeting writes it.
+	if strings.HasPrefix(key, serverKeyPrefix) {
 		return
 	}
 	s.rememberLast(key, "", entry)
@@ -298,7 +603,7 @@ func (s *TLSHandshakeStore) IsAmbiguous(key string) bool {
 // proven not to identify one server, and a cross-server greeting would corrupt
 // the borrower's config mock rather than merely fail to fill it.
 func (s *TLSHandshakeStore) RememberLastForPort(key string, serverID string, entry TLSHandshakeEntry) {
-	if key == "" || serverID == "" {
+	if key == "" || serverID == "" || strings.HasPrefix(key, serverKeyPrefix) {
 		return
 	}
 	s.rememberLast(key, serverID, entry)
@@ -311,6 +616,11 @@ func (s *TLSHandshakeStore) rememberLast(key string, serverID string, entry TLSH
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.rememberLastLocked(key, serverID, entry, now)
+}
+
+// rememberLastLocked is the body of rememberLast. Callers hold s.mu.
+func (s *TLSHandshakeStore) rememberLastLocked(key string, serverID string, entry TLSHandshakeEntry, now time.Time) {
 	if s.last == nil {
 		s.last = make(map[string]lastGreeting)
 	}
@@ -475,20 +785,30 @@ func (s *TLSHandshakeStore) pruneLastLocked(now time.Time) {
 	evictOldest(isTomb, maxLastGreetings, false)
 }
 
-// Push adds a handshake entry for the given key.
+// Push adds a handshake entry for the given key, with no owner: any consumer
+// may take it.
 func (s *TLSHandshakeStore) Push(key string, entry TLSHandshakeEntry) {
+	s.PushFor(key, HandshakeOwner{}, entry)
+}
+
+// PushFor adds a handshake entry for the given key, captured from the
+// connection owner names. Each capture is pushed ONCE: pairing by connection
+// goes through the owner (PopWaitFor), so no copy of it can be left behind for
+// another stream to take as its own.
+func (s *TLSHandshakeStore) PushFor(key string, owner HandshakeOwner, entry TLSHandshakeEntry) {
 	s.mu.Lock()
 	s.pruneExpiredLocked(time.Now())
 	q := s.m[key]
 	if len(q) >= tlsHandshakeMaxQueuePerKey {
-		// Drop the oldest. This MUST append to the trimmed q, not to s.m[key]:
+		// Make room. This MUST append to the trimmed q, not to s.m[key]:
 		// appending to the untrimmed slice discarded the trim entirely and the
 		// cap never applied, so a key with a producer and no matching consumer
 		// grew without bound.
-		q = q[1:]
+		q = evictForRoom(q)
 	}
 	s.m[key] = append(q, timedTLSHandshakeEntry{
 		entry:    entry,
+		owner:    owner,
 		pushedAt: time.Now(),
 	})
 	// The last-greeting cache is NOT populated from the queue key. A queue key
@@ -556,25 +876,59 @@ func (s *TLSHandshakeStore) LastForPort(key string) (entry TLSHandshakeEntry, ok
 	return e, found, false
 }
 
+// evictForRoom removes one entry from a full queue: the oldest entry of the
+// process (HandshakeOwner.Proc) that holds the most. A process whose entries
+// are never taken (its decrypted streams are not captured) is the one that
+// fills a queue, and evicting plain oldest-first would push every other app's
+// live entries out ahead of its own. Entries with no known process count as
+// one process, so without identities this is oldest-first, as it always was.
+func evictForRoom(q []timedTLSHandshakeEntry) []timedTLSHandshakeEntry {
+	counts := make(map[string]int)
+	for _, e := range q {
+		counts[e.owner.Proc]++
+	}
+	top, most := "", -1
+	for p, n := range counts {
+		if n > most || (n == most && p < top) {
+			top, most = p, n
+		}
+	}
+	for i := range q {
+		if q[i].owner.Proc == top {
+			return append(append(make([]timedTLSHandshakeEntry, 0, len(q)), q[:i]...), q[i+1:]...)
+		}
+	}
+	return q[1:]
+}
+
 // PopWait pops the oldest handshake entry for the given key, waiting up
 // to timeout for one to appear. Returns false if no entry arrived in time.
 func (s *TLSHandshakeStore) PopWait(key string, timeout time.Duration) (TLSHandshakeEntry, bool) {
+	e, _, ok := s.PopWaitFor(key, HandshakeOwner{}, false, timeout)
+	return e, ok
+}
+
+// PopWaitFor pops a handshake entry for the consumer owner, waiting up to
+// timeout for one to appear, and returns the entry with the owner it was
+// pushed with.
+//
+// The consumer's OWN entry (HandshakeOwner.Is) is taken first, wherever it sits
+// in the queue. Otherwise, unless ownOnly, the oldest entry the consumer may
+// take (never another known connection's, never another known process's; see
+// HandshakeOwner). A consumer with no owner at all may take any entry, which is
+// arrival order on the key, as Pop always was.
+func (s *TLSHandshakeStore) PopWaitFor(key string, owner HandshakeOwner, ownOnly bool, timeout time.Duration) (TLSHandshakeEntry, HandshakeOwner, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneExpiredLocked(time.Now())
 
 	// Fast path: already available.
-	if q := s.m[key]; len(q) > 0 {
-		entry := q[0].entry
-		s.m[key] = q[1:]
-		if len(s.m[key]) == 0 {
-			delete(s.m, key)
-		}
-		return entry, true
+	if e, o, ok := s.takeLocked(key, owner, ownOnly, time.Time{}); ok {
+		return e, o, true
 	}
 
 	if timeout <= 0 {
-		return TLSHandshakeEntry{}, false
+		return TLSHandshakeEntry{}, HandshakeOwner{}, false
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -589,22 +943,46 @@ func (s *TLSHandshakeStore) PopWait(key string, timeout time.Duration) (TLSHands
 
 	for {
 		s.pruneExpiredLocked(time.Now())
-		if q := s.m[key]; len(q) > 0 {
-			if q[0].pushedAt.After(deadline) {
-				return TLSHandshakeEntry{}, false
-			}
-			entry := q[0].entry
-			s.m[key] = q[1:]
-			if len(s.m[key]) == 0 {
-				delete(s.m, key)
-			}
-			return entry, true
+		if e, o, ok := s.takeLocked(key, owner, ownOnly, deadline); ok {
+			return e, o, true
 		}
 		if timedOut || time.Now().After(deadline) {
-			return TLSHandshakeEntry{}, false
+			return TLSHandshakeEntry{}, HandshakeOwner{}, false
 		}
 		s.cond.Wait()
 	}
+}
+
+// takeLocked removes and returns the entry PopWaitFor would take from key's
+// queue, if any. An entry pushed after a non-zero notAfter is not taken: it
+// arrived after the waiter's deadline. Callers hold s.mu.
+func (s *TLSHandshakeStore) takeLocked(key string, owner HandshakeOwner, ownOnly bool, notAfter time.Time) (TLSHandshakeEntry, HandshakeOwner, bool) {
+	q := s.m[key]
+	pick := -1
+	for i := range q {
+		if owner.Is(q[i].owner) {
+			pick = i
+			break
+		}
+	}
+	if pick < 0 && !ownOnly {
+		for i := range q {
+			if owner.mayTake(q[i].owner) {
+				pick = i
+				break
+			}
+		}
+	}
+	if pick < 0 || (!notAfter.IsZero() && q[pick].pushedAt.After(notAfter)) {
+		return TLSHandshakeEntry{}, HandshakeOwner{}, false
+	}
+	taken := q[pick]
+	if len(q) == 1 {
+		delete(s.m, key)
+	} else {
+		s.m[key] = append(append(make([]timedTLSHandshakeEntry, 0, len(q)-1), q[:pick]...), q[pick+1:]...)
+	}
+	return taken.entry, taken.owner, true
 }
 
 func (s *TLSHandshakeStore) pruneExpiredLocked(now time.Time) {
