@@ -280,6 +280,19 @@ func ReadUint24(b []byte) uint32 {
 func ReadLengthEncodedString(b []byte) ([]byte, bool, int, error) {
 	// Get length
 	num, isNull, n := ReadLengthEncodedInteger(b)
+	// n == 0 means ReadLengthEncodedInteger could not even read the length
+	// prefix (e.g. a 0xfc/0xfd/0xfe marker with its follow-up bytes cut off).
+	// That is a truncated buffer, not a real NULL or empty string — both of
+	// those always consume at least 1 byte — so it must not be accepted
+	// silently as a zero-length value.
+	if n == 0 {
+		// io.ErrUnexpectedEOF, not io.EOF. record_v2.go treats a bare io.EOF as
+		// a clean connection close (errors.Is(err, io.EOF) -> return nil), so
+		// returning the sentinel here would make a malformed packet look like
+		// the client hanging up: no warning, and the recording ends quietly
+		// instead of falling through to passthrough.
+		return nil, false, 0, io.ErrUnexpectedEOF
+	}
 	if num < 1 {
 		return b[n:n], isNull, n, nil
 	}
@@ -290,14 +303,21 @@ func ReadLengthEncodedString(b []byte) ([]byte, bool, int, error) {
 	if len(b) >= n {
 		return b[n-int(num) : n : n], false, n, nil
 	}
-	return nil, false, n, io.EOF
+	// Same reasoning as the n == 0 branch above: this is a string whose body
+	// runs past the end of the packet, which is malformed input, not a clean
+	// close. Pre-existing on main, corrected here so both truncation paths out
+	// of this function classify the same way.
+	return nil, false, n, io.ErrUnexpectedEOF
 }
 
 // ReadNullTerminatedString reads a null-terminated string from a byte slice
 func ReadNullTerminatedString(b []byte) ([]byte, int, error) {
 	i := bytes.IndexByte(b, 0x00)
 	if i == -1 {
-		return nil, 0, io.EOF
+		// Same reasoning as ReadLengthEncodedString: a string with no
+		// terminator is a malformed packet, and the bare io.EOF sentinel is
+		// read as a clean connection close by the record loop.
+		return nil, 0, io.ErrUnexpectedEOF
 	}
 	return b[:i], i + 1, nil
 }
@@ -385,9 +405,51 @@ func ParseBinaryDate(b []byte) (interface{}, int, error) {
 		// Non-NULL zero DATE (length byte present, payload length=0)
 		return ZeroDateString, 1, nil
 	}
+	// MYSQL_TYPE_DATE shares the DATETIME binary encoding, so its valid
+	// payload lengths are 0, 4, 7 and 11 - not just 4.
+	//
+	// A server-sent binary resultset row only ever carries 0 or 4
+	// (Protocol_binary::store_date), which is what makes "4" look sufficient.
+	// But this function also decodes bytes written by the CLIENT: it is called
+	// from preparedstmt/stmtExecutePacket.go for COM_STMT_EXECUTE parameters
+	// and from queryPacket.go for query attributes, and several mainstream
+	// drivers bind a DATE parameter using the 7-byte form:
+	//
+	//	MariaDB Connector/J 2.x  DateParameter.writeBinary          -> 7
+	//	MariaDB Connector/J 3.x  LocalDateCodec.encodeBinary        -> 7
+	//	                         (DateCodec, for java.sql.Date, writes 4)
+	//	MySQL Connector/J 5.1.x  storeDateTime413AndNewer (setDate) -> 7
+	//	MySQL Connector/J 8.0.x  storeDate, up to and incl. 8.0.22  -> 7
+	//	MySQL Connector/J 8.0.29+ StringValueEncoder.encodeAsBinary
+	//	                         (setObject(String, MysqlType.DATE)
+	//	                          -> writeDateTime)                 -> 7, or 11
+	//	                                              with microseconds
+	//
+	// The server accepts all of them: sql/sql_prepare.cc's MYSQL_TYPE_DATE
+	// case takes any len >= 4 and ignores the trailing bytes. Rejecting them
+	// here breaks recording for those applications.
+	//
+	// Only the date part is read regardless of length, exactly as the server
+	// does. Returning int(length)+1 is what keeps the caller's offset aligned
+	// across the bytes that were skipped.
+	if length != 4 && length != 7 && length != 11 {
+		return nil, 0, fmt.Errorf("invalid DATE length %d (expected 0|4|7|11) - likely misaligned buffer", length)
+	}
+	if len(b) < 1+int(length) {
+		return nil, 0, fmt.Errorf("unexpected end of buffer while reading DATE value, len(b)=%d, expected at least %d", len(b), 1+int(length))
+	}
 	year := binary.LittleEndian.Uint16(b[1:3])
 	month := b[3]
 	day := b[4]
+	// Widening the accepted lengths from one value to three also triples the
+	// chance that a garbage length byte is trusted, and unlike its sibling this
+	// function had no field validation at all - 07ffff636363... decoded happily
+	// to "65535-99-99". ParseBinaryDateTime guards the same way via
+	// validYMDHMS. An all-zero Y/M/D is the zero date some drivers send with a
+	// non-zero length, so it stays valid.
+	if !(year == 0 && month == 0 && day == 0) && (month < 1 || month > 12 || day < 1 || day > 31) {
+		return nil, 0, fmt.Errorf("invalid DATE %04d-%02d-%02d (misaligned?)", year, month, day)
+	}
 	return fmt.Sprintf("%04d-%02d-%02d", year, month, day), int(length) + 1, nil
 }
 
@@ -461,6 +523,16 @@ func ParseBinaryTime(b []byte) (interface{}, int, error) {
 		// Non-NULL zero TIME
 		return ZeroTimeString, 1, nil
 	}
+	// TIME valid lengths in MySQL binary row: 8 (no microseconds) or 12
+	// (with microseconds). Rejecting anything else here stops a garbage
+	// length byte from being trusted as the bytes-consumed count the
+	// caller advances its read offset by.
+	if length != 8 && length != 12 {
+		return nil, 0, fmt.Errorf("invalid TIME length %d (expected 0|8|12) - likely misaligned buffer", length)
+	}
+	if len(b) < 9 {
+		return nil, 0, fmt.Errorf("unexpected end of buffer while reading TIME value, len(b)=%d, expected at least 9", len(b))
+	}
 	isNegative := b[1] == 1
 	days := binary.LittleEndian.Uint32(b[2:6])
 	hours := b[6]
@@ -468,6 +540,9 @@ func ParseBinaryTime(b []byte) (interface{}, int, error) {
 	seconds := b[8]
 	var microseconds uint32
 	if length > 8 {
+		if len(b) < 13 {
+			return nil, 0, fmt.Errorf("unexpected end of buffer while reading TIME microseconds, len(b)=%d, expected at least 13", len(b))
+		}
 		microseconds = binary.LittleEndian.Uint32(b[9:13])
 	}
 	timeString := fmt.Sprintf("%d %02d:%02d:%02d.%06d", days, hours, minutes, seconds, microseconds)
