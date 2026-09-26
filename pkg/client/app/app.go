@@ -114,6 +114,11 @@ func (a *App) Setup(ctx context.Context) error {
 			return err
 		}
 	case utils.DockerCompose:
+		// Before anything else: compose starts the agent, and a sudo that
+		// cannot hand it the token would start it unauthenticated.
+		if err := a.checkAgentTokenHandoff(ctx); err != nil {
+			return err
+		}
 		extraArgs := agent.StartupAgentHook.GetArgs(ctx)
 		err := a.SetupCompose(extraArgs)
 		if err != nil {
@@ -1467,10 +1472,11 @@ func extractProjectFlags(cmd string) []string {
 //
 // Under docker compose that command is what starts the agent: the generated
 // keploy-agent service names the control-plane token without a value, and
-// compose fills it in from the environment given here. A leading sudo would
-// reset that environment first, so it is told to keep the one variable
-// (keepAgentTokenThroughSudo). Every other kind starts its agent some other
-// way, and the application under test is handed nothing.
+// compose fills it in from the environment given here. A leading sudo or doas
+// would reset that environment first, so a root keploy drops it and any other
+// keploy tells sudo to keep the one variable (agentTokenCommand). Every other
+// kind starts its agent some other way, and the application under test is
+// handed nothing.
 //
 // One place for both, whichever way the compose command was put together —
 // rewritten around a generated file, piped in memory, or a wrapper keploy
@@ -1486,7 +1492,8 @@ func (a *App) withAgentToken(cmd string) (string, []string) {
 		return cmd, nil
 	}
 	token.RecordLaunch(a.opts.AgentURI)
-	return keepAgentTokenThroughSudo(cmd), docker.AgentTokenEnv()
+	cmd, _ = agentTokenCommand(cmd, effectiveUID() == 0)
+	return cmd, docker.AgentTokenEnv()
 }
 
 func (a *App) run(ctx context.Context) models.AppError {

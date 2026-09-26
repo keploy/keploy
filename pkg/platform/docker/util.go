@@ -114,13 +114,14 @@ func AgentTokenEnv() []string {
 // (utils.ExecuteCommand), the `docker stop` that tears this container down and
 // the Engine API client (FromEnv), none of which go through sudo.
 //
-// Anything else goes through sudo, told to keep that one variable and no other.
+// Anything else goes through sudo, told to keep that one variable and no other
+// (sudoKeepingToken). PrepareDockerCommand refuses a sudo that would not.
 func linuxDockerClient(root, passToken bool) string {
 	switch {
 	case root:
 		return "docker"
 	case passToken:
-		return "sudo --preserve-env=" + token.Env + " docker"
+		return sudoKeepingToken + " docker"
 	default:
 		return "sudo docker"
 	}

@@ -82,6 +82,12 @@ func TestVerifyControlPlaneGuarded(t *testing.T) {
 			if tt.wantErrLog {
 				require.Equal(t, 1, logs.Len(), "a control plane serving without authentication was not reported")
 				require.Contains(t, logs.All()[0].Message, "NOT enforcing control-plane authentication")
+				// It is the only word a doas in front of docker compose gets
+				// when it resets the environment the token is in: keploy
+				// cannot tell beforehand whether doas.conf keeps it.
+				nextStep, _ := logs.All()[0].ContextMap()["next_step"].(string)
+				require.Contains(t, nextStep, "keepenv", "the ERROR does not say how a doas can keep the token")
+				require.Contains(t, nextStep, "setenv { "+token.Env+" }", "the ERROR does not say how a doas can keep the token")
 			} else {
 				require.Zero(t, logs.Len(), "reported an unguarded control plane for an agent that refused the probe")
 			}
