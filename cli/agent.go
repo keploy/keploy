@@ -55,6 +55,9 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 		Short: "starts keploy agent for hooking and starting proxy",
 		// Hidden: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			// A hang-up kills the agent, as it did before NewCtx made one
+			// stop keploy gracefully: see utils.DieOnHangup.
+			utils.DieOnHangup()
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
