@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // Keploy's configuration is keploy.yml (what CreateConfigFile writes), or
@@ -81,3 +82,75 @@ func TestConfigLookupReadsOnlyKeployYAML(t *testing.T) {
 }
 
 const verifyYAML = "record:\n  upstreamTls:\n    verify: true\n"
+
+// preProcessIn runs PreProcessFlags for a record command whose --config-path
+// is configDir, from appDir -- where the <appDir>.keploy.yml override is
+// looked for -- logging to an observer.
+func preProcessIn(t *testing.T, configDir, appDir string) (*config.Config, *observer.ObservedLogs, error) {
+	t.Helper()
+	viper.Reset()
+	saved := IsConfigFileFound
+	t.Cleanup(func() { IsConfigFileFound = saved; viper.Reset() })
+	t.Chdir(appDir)
+	core, logs := observer.New(zap.InfoLevel)
+	cfg := config.New()
+	cmd := newRecordCmdForTest(t, cfg)
+	if err := cmd.Flags().Set("configPath", configDir); err != nil {
+		t.Fatalf("set configPath: %v", err)
+	}
+	return cfg, logs, NewCmdConfigurator(zap.New(core), cfg).PreProcessFlags(cmd)
+}
+
+// The <dir>.keploy.yml override in the directory keploy runs in is merged over
+// keploy.yml, and said so; one that cannot be read is named, not blamed on
+// keploy.yml.
+func TestPreProcessFlagsMergesTheOverride(t *testing.T) {
+	configDir := writeKeployYML(t, "record:\n  upstreamTls:\n    verify: false\n")
+	appDir := t.TempDir()
+	override := filepath.Join(appDir, filepath.Base(appDir)+".keploy.yml")
+	if err := os.WriteFile(override, []byte(verifyYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, logs, err := preProcessIn(t, configDir, appDir)
+	if err != nil {
+		t.Fatalf("PreProcessFlags: %v", err)
+	}
+	if !cfg.Record.UpstreamTLS.Verify {
+		t.Errorf("record.upstreamTls.verify = false, want the override's true")
+	}
+	if got := logs.FilterMessage("merged override config file").All(); len(got) != 1 || got[0].ContextMap()["file"] != override {
+		t.Errorf("logged %v, want the merged override named", got)
+	}
+
+	if err := os.WriteFile(override, []byte("record: [1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, logs, err = preProcessIn(t, configDir, appDir)
+	want := "failed to merge override config file: " + override
+	if err == nil || err.Error() != want {
+		t.Fatalf("PreProcessFlags = %v, want %q", err, want)
+	}
+	if got := logs.FilterMessage(want).All(); len(got) != 1 {
+		t.Errorf("logged %v, want %q once", got, want)
+	}
+}
+
+// An override keploy cannot even stat -- here a symlink to itself -- stops
+// the command in the CLI's own words, naming it. Mutation: report it as a
+// failed merge, or as no override at all.
+func TestPreProcessFlagsNamesAnOverrideItCannotStat(t *testing.T) {
+	configDir := writeKeployYML(t, verifyYAML)
+	appDir := t.TempDir()
+	override := filepath.Join(appDir, filepath.Base(appDir)+".keploy.yml")
+	if err := os.Symlink(override, override); err != nil {
+		t.Skipf("no symlink: %v", err)
+	}
+	_, logs, err := preProcessIn(t, configDir, appDir)
+	want := "failed to stat override config file: " + override
+	if err == nil || err.Error() != want {
+		t.Fatalf("PreProcessFlags = %v, want %q", err, want)
+	}
+	if got := logs.FilterMessage(want).All(); len(got) != 1 {
+		t.Errorf("logged %v, want %q once", got, want)
+	}
+}

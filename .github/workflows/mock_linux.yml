@@ -6,10 +6,15 @@ name: Mock Mode Regression (Linux)
 # and asserts (a) the suite still passes entirely from mocks, (b) per-test
 # mappings are written via the scope API, and (c) a failing runner propagates a
 # non-zero exit code. Runs the PR `build` binary for both record and replay.
-# Another step replays with the network off (loopback only), as on a laptop
-# with its Wi-Fi off, and records a dependency on loopback the same way. The
-# last runs the same binary where its agent cannot start, and asserts the run
-# fails at once with the code that names why, the test never run.
+# Another replays two concurrent workers under different named scopes and
+# asserts each is served only its own scope's mocks. Another replays with the
+# network off (loopback only), as on a laptop with its Wi-Fi off, and records a
+# dependency on loopback the same way. Another runs the same binary where its
+# agent cannot start, and asserts the run fails at once with the code that
+# names why, the test never run. The last gives it a keploy.yml, an override
+# and reports that are not regular files (a FIFO, or a symlink to /dev/zero:
+# git stores the symlink, not a FIFO) and asserts each is refused fast, saying
+# why.
 on:
   workflow_call:
     inputs:
@@ -71,3 +76,13 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-agent-cannot-start-linux.sh"
+
+      # `keploy report` against keploy.yml files, overrides and reports that
+      # keploy must refuse -- fast, naming the file and why, never blocking or
+      # running out of memory -- and ones it must still read. The script lists
+      # each case.
+      - name: Run mock-mode config-guard e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-config-guard-linux.sh"

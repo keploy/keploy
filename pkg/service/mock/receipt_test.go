@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -513,6 +514,69 @@ func TestReadReceiptRejectsANonReceipt(t *testing.T) {
 		if r, err := ReadReceipt(keployDir, "set"); err == nil {
 			t.Fatalf("read %q as a receipt: %+v", body, r)
 		}
+	}
+}
+
+// A receipt in a cloned repo can be a symlink to /dev/zero or a FIFO. Reading
+// it to EOF, as ReadReceipt once did, ran keploy out of memory or blocked it;
+// it must now be refused AT ONCE. `keploy status`, which the VS Code extension
+// runs on every sidebar render, reads receipts, so a block here freezes the
+// panel.
+func TestReadReceiptRefusesNonRegular(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no FIFOs or /dev/zero on windows")
+	}
+	cases := map[string]func(t *testing.T, path string){
+		"fifo": func(t *testing.T, path string) { mkfifo(t, path) },
+		"devzero": func(t *testing.T, path string) {
+			if _, err := os.Stat("/dev/zero"); err != nil {
+				t.Skip("no /dev/zero")
+			}
+			if err := os.Symlink("/dev/zero", path); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, plant := range cases {
+		t.Run(name, func(t *testing.T) {
+			keployDir := filepath.Join(t.TempDir(), "keploy")
+			if err := os.MkdirAll(filepath.Join(keployDir, "set"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			plant(t, filepath.Join(keployDir, "set", ReceiptFile))
+			done := make(chan error, 1)
+			go func() {
+				_, err := ReadReceipt(keployDir, "set")
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if !errors.Is(err, safeyaml.ErrNotRegular) {
+					t.Fatalf("ReadReceipt on a %s receipt = %v, want ErrNotRegular", name, err)
+				}
+				if !strings.Contains(err.Error(), ReceiptFile) {
+					t.Errorf("error %q does not name the receipt", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("ReadReceipt blocked on a %s receipt", name)
+			}
+		})
+	}
+}
+
+// A receipt is a handful of scalar fields; one larger than the bound is refused
+// rather than read.
+func TestReadReceiptRefusesOversized(t *testing.T) {
+	keployDir := filepath.Join(t.TempDir(), "keploy")
+	if err := os.MkdirAll(filepath.Join(keployDir, "set"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	big := make([]byte, ReceiptBytes+1)
+	if err := os.WriteFile(filepath.Join(keployDir, "set", ReceiptFile), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadReceipt(keployDir, "set"); !safeyaml.IsRefused(err) {
+		t.Fatalf("ReadReceipt of a receipt past %d bytes = %v, want refused", ReceiptBytes, err)
 	}
 }
 
