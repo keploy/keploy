@@ -1,11 +1,13 @@
 package http
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
 	"errors"
 
+	"github.com/k0kubun/pp/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
@@ -152,6 +154,80 @@ func TestMatch_RedirectToAssertionMatch_567(t *testing.T) {
 	require.NotNil(t, result)
 	assert.True(t, result.StatusCode.Normal)
 	assert.True(t, result.BodyResult[0].Normal)
+}
+
+// withCapturedPPOutput swaps ppNew234 for the duration of fn so every
+// PrettyPrinter Match creates writes into a buffer instead of stdout, and
+// returns what was printed.
+func withCapturedPPOutput(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	original := ppNew234
+	ppNew234 = func() *pp.PrettyPrinter {
+		p := original()
+		p.SetOutput(&buf)
+		return p
+	}
+	defer func() { ppNew234 = original }()
+	fn()
+	return buf.String()
+}
+
+// TestMatch_PassFailBannerMatchesAssertionVerdict_4636 ensures the printed
+// "Testrun passed"/"Testrun failed" banner always agrees with the bool Match
+// returns. Previously the banner was derived from the raw response
+// comparison and printed before assertions were ever consulted, so a test
+// case whose assertion disagreed with the response comparison could print
+// "Testrun passed" while being reported as failed, or vice versa.
+func TestMatch_PassFailBannerMatchesAssertionVerdict_4636(t *testing.T) {
+	logger := zap.NewNop()
+	noiseConfig := map[string]map[string][]string{}
+
+	t.Run("response matches but assertion fails", func(t *testing.T) {
+		tc := &models.TestCase{
+			Name: "response-ok-assertion-fails",
+			HTTPResp: models.HTTPResp{
+				StatusCode: 200,
+				Body:       `{"a":1}`,
+			},
+			Assertions: map[models.AssertionType]interface{}{
+				models.StatusCode: 500,
+			},
+		}
+		actualResponse := &models.HTTPResp{StatusCode: 200, Body: `{"a":1}`}
+
+		var pass bool
+		output := withCapturedPPOutput(t, func() {
+			pass, _ = Match(tc, actualResponse, noiseConfig, false, false, logger, true)
+		})
+
+		assert.False(t, pass, "assertion on status_code should fail the test case")
+		assert.Contains(t, output, "Testrun failed", "banner must report failure, matching the returned verdict")
+		assert.NotContains(t, output, "Testrun passed", "banner must not claim a pass when the assertion failed")
+	})
+
+	t.Run("response drifts but assertion passes", func(t *testing.T) {
+		tc := &models.TestCase{
+			Name: "response-drifts-assertion-passes",
+			HTTPResp: models.HTTPResp{
+				StatusCode: 200,
+				Body:       `{"a":1}`,
+			},
+			Assertions: map[models.AssertionType]interface{}{
+				models.StatusCode: 200,
+			},
+		}
+		actualResponse := &models.HTTPResp{StatusCode: 200, Body: `{"a":2}`}
+
+		var pass bool
+		output := withCapturedPPOutput(t, func() {
+			pass, _ = Match(tc, actualResponse, noiseConfig, false, false, logger, true)
+		})
+
+		assert.True(t, pass, "assertion on status_code should pass the test case regardless of body drift")
+		assert.Contains(t, output, "Testrun passed", "banner must report a pass, matching the returned verdict")
+		assert.NotContains(t, output, "Testrun failed", "banner must not claim a failure when the assertion passed")
+	})
 }
 
 // TestMatch_InvalidJSONBody_321 ensures that when the actual response body is not valid JSON,

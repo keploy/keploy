@@ -49,6 +49,35 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	for _, opt := range opts {
 		opt(&mo)
 	}
+
+	// When assertions are present, they alone decide the verdict (see
+	// AssertionMatch's doc comment) - handle that here, before any of the
+	// response-comparison logic below, so the printed "Testrun passed"/
+	// "Testrun failed" banner always matches the value actually returned.
+	// Previously the banner was printed from the response-comparison result
+	// and the assertion-based verdict was only applied afterwards, so a test
+	// case could print "passed" and still be reported as failed (or vice
+	// versa) whenever the two disagreed.
+	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
+		pass, res := AssertionMatch(tc, actualResponse, logger)
+		if emitFailureLogs {
+			newLogger := ppNew234()
+			newLogger.WithLineInfo = false
+			var banner string
+			if pass {
+				newLogger.SetColorScheme(models.GetPassingColorScheme())
+				banner = newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+			} else {
+				newLogger.SetColorScheme(models.GetFailingColorScheme())
+				banner = newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+			}
+			if _, err := newLogger.Printf(banner); err != nil {
+				utils.LogError(logger, err, "failed to print the logs")
+			}
+		}
+		return pass, res
+	}
+
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
 	var bodySizeResult models.IntResult
@@ -615,10 +644,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if err != nil {
 			utils.LogError(logger, err, "failed to print the logs")
 		}
-	}
-
-	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
-		return AssertionMatch(tc, actualResponse, logger)
 	}
 
 	return pass, res
