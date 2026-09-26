@@ -202,6 +202,28 @@ func (m *Mock) DeriveLifetime() {
 	if m.Spec.Metadata != nil {
 		tag = m.Spec.Metadata["type"]
 	}
+	// Ambient background polls: promote to session lifetime so they are NOT
+	// consumed on match.
+	//
+	// A per-test mock is deleted once it matches. An endpoint the app SHELL
+	// polls on a timer therefore starves: a browser test that idles on a page
+	// for longer than the recording captured exhausts its scope's copies and
+	// every later poll misses. Measured on integration-tests/onboarding-gate:
+	// each test owned ~3 /cluster/proxy-origins mocks, served 3 and then missed
+	// 2,315 times. One of those misses answered 401, whose
+	//   Set-Cookie: refresh_token_staging=; Expires=Thu, 01 Jan 1970
+	// deleted the session cookie, so middleware.ts bounced every later
+	// navigation to /signin and 10 tests died on a 30s waitForURL.
+	//
+	// These carry no assertion -- nothing checks the poll's response -- so one
+	// recorded reply serving every poll is correct, not a loss of fidelity.
+	// Same rationale as the recorder's "config" tag, applied to paths the
+	// recorder had no way to know were ambient.
+	if m.Kind == HTTP && isAmbientPollPath(m) {
+		m.TestModeInfo.Lifetime = LifetimeSession
+		return
+	}
+
 	switch tag {
 	case "config":
 		m.TestModeInfo.Lifetime = LifetimeSession
@@ -582,4 +604,25 @@ func IsCORSPreflightRequest(method Method, header map[string]string) bool {
 		}
 	}
 	return false
+}
+
+// ambientPollPaths are request paths the app shell polls on a timer, with no
+// test asserting on the response. Kept as an explicit allowlist rather than a
+// heuristic: promoting the wrong path would let one test's recorded response
+// answer another's request, which is the exact bleed per-test lifetime exists
+// to prevent. Add a path here only after confirming nothing asserts on it.
+var ambientPollPaths = map[string]struct{}{
+	"/cluster/proxy-origins": {},
+}
+
+func isAmbientPollPath(m *Mock) bool {
+	if m == nil || m.Spec.HTTPReq == nil {
+		return false
+	}
+	u := m.Spec.HTTPReq.URL
+	if i := strings.IndexByte(u, '?'); i >= 0 {
+		u = u[:i]
+	}
+	_, ok := ambientPollPaths[u]
+	return ok
 }
