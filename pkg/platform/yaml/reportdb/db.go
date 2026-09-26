@@ -19,11 +19,14 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-// reportBytes bounds the size of a test-set report keploy reads back. A report
-// holds every test's request, response and body results, and keploy writes it
-// whatever its size: the largest measured is 19 MB (34 MB as JSON), and 1,200
-// tests with 20 KB bodies come to 75 MB. 128 MiB is past both with room.
-const reportBytes = 128 << 20
+// reportBytes bounds the size of a test-set report keploy reads back: a
+// regular file past it is refused ("larger than the 512 MiB keploy reads"), as
+// a report that is not a regular file is whatever its size. keploy's writer
+// does not keep this bound -- a report holds every test's bodies, with no cap
+// on how many tests a set has -- so a large enough run can write a report its
+// own reads refuse. The largest report keploy wrote on the development
+// machine is 19 MB.
+const reportBytes = 512 << 20
 
 type TestReport struct {
 	tests  map[string]map[string][]models.TestResult

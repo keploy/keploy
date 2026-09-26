@@ -106,9 +106,9 @@ func TestGetReportRefusesOversized(t *testing.T) {
 	}
 }
 
-// keploy reads back a report it wrote, however large: one of 1,200 tests
+// keploy reads back a large report of the shape it writes: one of 1,200 tests
 // with 20 KB JSON bodies, which the matcher records as expected and actual
-// too, comes to 75 MB, within reportBytes (128 MiB); a 64 MiB limit once
+// too, comes to 75 MB, within reportBytes (512 MiB); a 64 MiB limit once
 // refused it. Mutation: bound reports at 64 MiB again.
 func TestGetReportReadsALargeReportKeployWrites(t *testing.T) {
 	if raceEnabled {
@@ -152,6 +152,46 @@ func TestGetReportReadsALargeReportKeployWrites(t *testing.T) {
 		t.Fatalf("GetReport of a %d-byte report keploy wrote: %v", st.Size(), err)
 	}
 	if len(got.Tests) != tests || got.Tests[tests-1].Res.Body != js || got.Tests[0].Result.BodyResult[0].Actual != js {
+		t.Fatalf("GetReport read %d tests, not the %d written", len(got.Tests), tests)
+	}
+}
+
+// keploy reads back a report past 128 MiB: this one, 46 tests each with a 1 MB
+// response body that the body result holds as expected and actual too, is
+// 138 MiB. Mutation: bound reports at 128 MiB again.
+func TestGetReportReadsAReportPast128MiB(t *testing.T) {
+	if raceEnabled {
+		t.Skip("too slow under the race runtime, and it races nothing")
+	}
+	body := strings.Repeat("a", 1<<20)
+	const tests = 46
+	rep := &models.TestReport{Version: "api.keploy.io/v1beta1", Status: "PASSED", Total: tests, Success: tests, TestSet: "test-set-0"}
+	for i := 0; i < tests; i++ {
+		rep.Tests = append(rep.Tests, models.TestResult{
+			Kind: models.HTTP, Name: "test-set-0", Status: models.TestStatusPassed, TestCaseID: fmt.Sprintf("test-%d", i),
+			Req:    models.HTTPReq{Method: "GET", URL: fmt.Sprintf("http://localhost:8080/blob?page=%d", i)},
+			Res:    models.HTTPResp{StatusCode: 200, Body: body},
+			Result: models.Result{BodyResult: []models.BodyResult{{Normal: true, Type: models.Plain, Expected: body, Actual: body}}},
+		})
+	}
+	dir := t.TempDir()
+	db := New(zap.NewNop(), dir)
+	if err := db.InsertReport(context.Background(), "test-run-0", "test-set-0", rep); err != nil {
+		t.Fatal(err)
+	}
+	rep = nil
+	st, err := os.Stat(filepath.Join(dir, "test-run-0", "test-set-0-report.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() <= 128<<20 {
+		t.Fatalf("the report is %d bytes; this test needs one past 128 MiB", st.Size())
+	}
+	got, err := db.GetReport(context.Background(), "test-run-0", "test-set-0")
+	if err != nil {
+		t.Fatalf("GetReport of a %d-byte report keploy wrote: %v", st.Size(), err)
+	}
+	if len(got.Tests) != tests || got.Tests[tests-1].Res.Body != body || got.Tests[0].Result.BodyResult[0].Actual != body {
 		t.Fatalf("GetReport read %d tests, not the %d written", len(got.Tests), tests)
 	}
 }
