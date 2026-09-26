@@ -4192,10 +4192,12 @@ var controlPlaneProbed sync.Map
 // by the user's own `docker compose up`, not by this process directly.
 //
 // Only for an agent this process launched (token.Launched). A process that
-// drives an agent something else started — k8s-proxy with an in-cluster
-// sidecar, a pinned agent image that predates the token — never handed it
-// anything, and blaming a handoff that never happened is a false alarm at error
-// level. Such an agent says for itself that it is running unauthenticated.
+// drives an agent something else started — a sidecar k8s-proxy injected, whose
+// token (if it has one) k8s-proxy put in its pod spec, or a pinned agent image
+// that predates the token — made no handoff of its own, and blaming one that
+// never happened is a false alarm at error level. A sidecar without a token
+// says for itself that it is running unauthenticated; an image that predates
+// the token says nothing, as it checks nothing.
 //
 // Reported rather than fatal: an agent that could not be given a token still
 // records and replays, and refusing to run would be the worse outcome. It is

@@ -293,9 +293,10 @@ var (
 // that stopped passing one, leaves an agent this process started serving open,
 // and that is exactly what the check exists to catch. What it must not check
 // is an agent this process never launched — a Kubernetes sidecar that
-// k8s-proxy drives, an agent image that predates the token. That agent was
-// never handed anything, and checking it for the token this process minted can
-// only raise a false alarm about a handoff that never happened.
+// k8s-proxy injected (with a token of k8s-proxy's own, or none), an agent
+// image that predates the token. This process handed that agent nothing, and
+// checking it for the token this process minted can only raise a false alarm
+// about a handoff that never happened.
 func RecordLaunch(agentURI string) {
 	launchMu.Lock()
 	defer launchMu.Unlock()

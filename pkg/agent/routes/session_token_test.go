@@ -108,28 +108,38 @@ func TestConsumeSessionToken_MakesTheProcessAgreeWithWhatItEnforces(t *testing.T
 
 // TestConsumeSessionToken_SaysWhatIsTrueForTheAgentItIs pins the startup
 // message for an agent with no token. On a laptop or CI runner that is a
-// handoff that did not happen, and a warning naming the handoffs is right. A
-// container Kubernetes runs is never handed a token, by design: in-cluster
-// agents do not use token authentication, because the cluster network is
-// trusted. The same warning there, naming remedies that do not exist in a pod
-// for a state that needs none, was a false alarm — and so is any message that
-// offers one. keploy running natively as root in a CI pod starts its agent
-// without sudo, so that agent sees the pod's environment too, and it must still
-// get the warning.
+// handoff that did not happen, and a warning naming the handoffs is right. In a
+// pod, only k8s-proxy hands an agent its token, and only in a sidecar install:
+// a sidecar, replay or sandbox pod it injected before its per-sidecar token
+// release, any such pod in a DaemonSet install, or one injected with
+// proxy.keployAgentControlPlaneAuth=false, has none. The local warning there
+// names remedies that do not exist in a pod, so the in-cluster agent says, once
+// and at info, which pods have no token and why — and must not give the old
+// reason, a trusted cluster network, which k8s-proxy's tokens made false.
+// keploy running natively as root in a CI pod starts its agent without sudo,
+// so that agent sees the pod's environment too, and it must still get the
+// warning.
 func TestConsumeSessionToken_SaysWhatIsTrueForTheAgentItIs(t *testing.T) {
-	const warning, inCluster = "no --token-file", "in-cluster agents do not use token authentication because the cluster network is trusted"
+	const warning = "no --token-file"
+	// In full: a substring and a list of forbidden words would let any other
+	// explanation through, the old "the cluster network is trusted" included.
+	const inCluster = "agent control-plane API is running without authentication: this in-cluster agent was started " +
+		"without a control-plane token (in a sidecar install, k8s-proxy supplies one to the recording sidecars and " +
+		"the replay and sandbox pods it injects, from its per-sidecar token release on; pods injected before that " +
+		"release, pods in a DaemonSet install, and pods injected with proxy.keployAgentControlPlaneAuth=false have " +
+		"none), so anything that can reach this pod's agent port can use the API"
 	for _, tc := range []struct {
 		name      string
 		isDocker  bool
 		k8sHost   string
 		wantLevel zapcore.Level
-		wantText  string
-		wantNot   []string
+		wantText  string // contained in the message
+		wantExact bool   // and is the whole of it
 	}{
-		{"native agent", false, "", zapcore.WarnLevel, warning, nil},
-		{"docker agent keploy launched", true, "", zapcore.WarnLevel, warning, nil},
-		{"native agent keploy launched inside a CI pod", false, "10.96.0.1", zapcore.WarnLevel, warning, nil},
-		{"in-cluster agent", true, "10.96.0.1", zapcore.InfoLevel, inCluster, []string{"--token-file", token.Env, "yet"}},
+		{"native agent", false, "", zapcore.WarnLevel, warning, false},
+		{"docker agent keploy launched", true, "", zapcore.WarnLevel, warning, false},
+		{"native agent keploy launched inside a CI pod", false, "10.96.0.1", zapcore.WarnLevel, warning, false},
+		{"in-cluster agent", true, "10.96.0.1", zapcore.InfoLevel, inCluster, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(token.Env, "")
@@ -142,10 +152,30 @@ func TestConsumeSessionToken_SaysWhatIsTrueForTheAgentItIs(t *testing.T) {
 			require.Equal(t, 1, logs.Len(), "the agent must say, once, that its control plane is unauthenticated")
 			entry := logs.All()[0]
 			require.Equal(t, tc.wantLevel, entry.Level)
-			require.Contains(t, entry.Message, tc.wantText)
-			for _, phrase := range tc.wantNot {
-				require.NotContains(t, entry.Message, phrase)
+			if tc.wantExact {
+				require.Equal(t, tc.wantText, entry.Message)
+			} else {
+				require.Contains(t, entry.Message, tc.wantText)
 			}
 		})
 	}
+}
+
+// TestConsumeSessionToken_InClusterAgentKeepsTheTokenItWasGiven: in a sidecar
+// install k8s-proxy puts a KEPLOY_AGENT_TOKEN on every agent it injects (the
+// recording sidecars, and the replay and sandbox pods it creates), and that
+// agent is in-cluster by every test ConsumeSessionToken applies. It must
+// enforce that token and say nothing, not take the tokenless in-cluster path:
+// checking for the pod before reading the environment would serve every such
+// agent open while k8s-proxy went on presenting a token nothing checks.
+func TestConsumeSessionToken_InClusterAgentKeepsTheTokenItWasGiven(t *testing.T) {
+	t.Setenv(token.Env, "token-k8s-proxy-minted")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+	core, logs := observer.New(zapcore.DebugLevel)
+
+	got, err := ConsumeSessionToken(zap.New(core), "", true)
+	require.NoError(t, err)
+	require.Equal(t, "token-k8s-proxy-minted", got)
+	require.Equal(t, got, token.Session())
+	require.Zero(t, logs.Len(), "an agent enforcing its token has nothing to say about running without one")
 }

@@ -110,10 +110,10 @@ func TestVerifyControlPlaneGuarded_DoesNotReportAProbeThatCouldNotComplete(t *te
 
 // TestVerifyControlPlaneGuarded_LeavesAgentsItNeverStartedAlone is the
 // regression test for a false alarm. A process that drives an agent something
-// else started — k8s-proxy with an in-cluster sidecar, a pinned agent image
-// that predates the token — never handed that agent a token, and the check
+// else started — a sidecar k8s-proxy injected, a pinned agent image that
+// predates the token — made no token handoff of its own, and the check
 // reported a broken handoff at ERROR, which keploy's CI lanes treat as fatal.
-// The agent says for itself that it runs unauthenticated.
+// A sidecar with no token says for itself that it runs unauthenticated.
 func TestVerifyControlPlaneGuarded_LeavesAgentsItNeverStartedAlone(t *testing.T) {
 	resetProbeOnce(t)
 

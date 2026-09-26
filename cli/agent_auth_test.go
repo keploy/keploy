@@ -220,10 +220,13 @@ func TestAgent_DaemonSetSaysNothingAboutAServerItNeverStarts(t *testing.T) {
 }
 
 // TestAgent_InClusterAgentSaysPlainlyWhyItIsUnauthenticated starts the agent
-// the way Kubernetes runs a sidecar: a container (--is-docker) in a pod, handed
-// no token, because in-cluster agents do not use token authentication — the
-// cluster network is trusted. It still serves, and says so once, plainly — not
-// with the local-handoff warning, whose remedies do not exist in a pod.
+// the way Kubernetes runs a pod agent that k8s-proxy handed no token: a
+// container (--is-docker) in a pod, with no KEPLOY_AGENT_TOKEN and no
+// KEPLOY_DAEMONSET_ENABLED, as one injected before k8s-proxy's per-sidecar
+// token release, a replay or sandbox pod in a DaemonSet install, or one
+// injected with proxy.keployAgentControlPlaneAuth=false is. It still serves,
+// and says so once, plainly, naming those three causes — not with the
+// local-handoff warning, whose remedies do not exist in a pod.
 func TestAgent_InClusterAgentSaysPlainlyWhyItIsUnauthenticated(t *testing.T) {
 	t.Setenv(token.Env, "")
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
@@ -235,8 +238,39 @@ func TestAgent_InClusterAgentSaysPlainlyWhyItIsUnauthenticated(t *testing.T) {
 	if len(said) != 1 {
 		t.Fatalf("the in-cluster agent said %d things about its authentication, want exactly one", len(said))
 	}
-	if said[0].Level != zapcore.InfoLevel || !strings.Contains(said[0].Message, "in-cluster agents do not use token authentication because the cluster network is trusted") {
+	if said[0].Level != zapcore.InfoLevel ||
+		!strings.Contains(said[0].Message, "this in-cluster agent was started without a control-plane token") ||
+		!strings.Contains(said[0].Message, "pods injected before that release") ||
+		!strings.Contains(said[0].Message, "pods in a DaemonSet install") ||
+		!strings.Contains(said[0].Message, "proxy.keployAgentControlPlaneAuth=false") ||
+		strings.Contains(said[0].Message, "trusted") {
 		t.Errorf("the in-cluster agent said, at %s: %s", said[0].Level, said[0].Message)
+	}
+}
+
+// TestAgent_InClusterAgentEnforcesTheTokenK8sProxyHandedIt starts the agent the
+// way Kubernetes runs a sidecar k8s-proxy injected with a token: a container
+// (--is-docker) in a pod, with KEPLOY_AGENT_TOKEN in its environment. It must
+// guard every route with that token and say nothing about authentication.
+func TestAgent_InClusterAgentEnforcesTheTokenK8sProxyHandedIt(t *testing.T) {
+	const tok = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	t.Setenv(token.Env, tok)
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := startAgent(t, zap.New(core), "--is-docker")
+	a.waitServing(t)
+
+	if got := a.get(t, "/mock/stats", ""); got != http.StatusUnauthorized {
+		t.Errorf("no token got %d on a registered route, want 401", got)
+	}
+	if got := a.get(t, token.ProbePath, "not-the-token"); got != http.StatusUnauthorized {
+		t.Errorf("a wrong token got %d, want 401", got)
+	}
+	if got := a.get(t, token.ProbePath, tok); got != http.StatusNotFound {
+		t.Errorf("the token k8s-proxy handed over got %d, want the router's 404", got)
+	}
+	if said := logs.FilterMessageSnippet("authentication").All(); len(said) != 0 {
+		t.Errorf("the in-cluster agent enforcing its token said, at %s: %s", said[0].Level, said[0].Message)
 	}
 }
 

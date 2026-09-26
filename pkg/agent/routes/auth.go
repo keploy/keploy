@@ -178,16 +178,24 @@ func ConsumeSessionToken(logger *zap.Logger, tokenFile string, isDocker bool) (s
 		return tok, nil
 	}
 	if inClusterAgent(isDocker) {
-		// In-cluster agents do not use token authentication: the cluster
-		// network is trusted, and nothing in Kubernetes hands an agent a
-		// token. So this is the state every such agent is in by design, not a
-		// handoff that broke. Said once, and at info, with no remedy: the
-		// warning below names handoffs (--token-file, the launching client's
-		// environment) that do not exist in a pod, for a state that needs no
-		// fixing.
-		logger.Info("agent control-plane API is running without authentication: this agent runs in a Kubernetes pod, " +
-			"and in-cluster agents do not use token authentication because the cluster network is trusted, so anything " +
-			"that can reach this pod's agent port can use the API")
+		// In a pod the token arrives in the container's environment, and only
+		// from k8s-proxy: in a sidecar install, from its per-sidecar token
+		// release on, it puts a KEPLOY_AGENT_TOKEN of its own minting on every
+		// agent it injects (recording sidecars, and the replay and ATG sandbox
+		// pods it creates), and presents it on every call it makes. An
+		// in-cluster agent without one was injected before that release, or
+		// in a DaemonSet install (whose replay and sandbox pods k8s-proxy
+		// deliberately leaves tokenless, and whose chart does not render the
+		// switch), or with proxy.keployAgentControlPlaneAuth=false. None of
+		// these is a handoff keploy broke, and nothing on this side can fix
+		// it, so it is said once, at info, and the warning below is not: its
+		// remedies (--token-file, the launching client's environment) are a
+		// local launcher's, not a pod's.
+		logger.Info("agent control-plane API is running without authentication: this in-cluster agent was started " +
+			"without a control-plane token (in a sidecar install, k8s-proxy supplies one to the recording sidecars and " +
+			"the replay and sandbox pods it injects, from its per-sidecar token release on; pods injected before that " +
+			"release, pods in a DaemonSet install, and pods injected with proxy.keployAgentControlPlaneAuth=false have " +
+			"none), so anything that can reach this pod's agent port can use the API")
 		return "", nil
 	}
 	logger.Warn("agent control-plane API is running WITHOUT authentication: the process that started this agent supplied no " + token.Env +
