@@ -14,11 +14,17 @@ import (
 	"testing"
 	"time"
 
+	"net"
+	"net/http"
+
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestIsDaemonSetAgent(t *testing.T) {
@@ -208,5 +214,103 @@ func TestAgentDiesOfAHangUp(t *testing.T) {
 	}
 	if st := agent.ProcessState.Sys().(syscall.WaitStatus); !st.Signaled() || st.Signal() != syscall.SIGHUP {
 		t.Fatalf("the agent ended with %v, want it dead of SIGHUP\n%s", agent.ProcessState, out.String())
+	}
+}
+
+// A DaemonSet agent binds no control-plane server, so it has no API to
+// authenticate, and must not warn that one runs without authentication: that
+// warning fired on every DaemonSet start, about a server that never listens.
+// Any other agent started without a token still warns.
+func TestOnlyAnAgentWithAnAPIWarnsItIsUnauthenticated(t *testing.T) {
+	t.Setenv(token.Env, "")
+	for _, tc := range []struct {
+		name      string
+		daemonSet string
+		wantWarn  bool
+	}{
+		{"DaemonSet agent", "true", false},
+		{"sidecar or local agent", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KEPLOY_DAEMONSET_ENABLED", tc.daemonSet)
+			core, logs := observer.New(zapcore.WarnLevel)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			factory := agentSvcFactory{svc: agentSvc{setup: func(context.Context) error { return nil }}}
+			cmd := Agent(ctx, zap.New(core), &config.Config{}, factory, noFlags{})
+			if err := cmd.RunE(cmd, nil); err != nil {
+				t.Fatalf("RunE returned %v", err)
+			}
+			warned := logs.FilterMessageSnippet("running WITHOUT authentication").Len() > 0
+			if warned != tc.wantWarn {
+				t.Fatalf("warned the control-plane API is unauthenticated: %v, want %v", warned, tc.wantWarn)
+			}
+		})
+	}
+}
+
+// servingAgentSvc hands the agent a free port, as Agent.Setup does, then asks
+// the control plane for an arbitrary path without a token and records how it
+// answered: an HTTP status, or 0 when nothing ever listened.
+type servingAgentSvc struct {
+	agent.Service
+	status *int
+}
+
+func (s servingAgentSvc) Setup(ctx context.Context, startAgentCh chan int) error {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	select {
+	case startAgentCh <- port:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	client := &http.Client{Timeout: time.Second}
+	url := fmt.Sprintf("http://127.0.0.1:%d/agent/__keploy_auth_probe", port)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if resp, err := client.Get(url); err == nil {
+			*s.status = resp.StatusCode
+			_ = resp.Body.Close()
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	*s.status = 0
+	return nil
+}
+
+// The property the DaemonSet branch controls: an agent that serves its control
+// plane serves it behind the token check, and a DaemonSet agent serves nothing.
+// A request without the token must be refused by a serving agent (401), and
+// must find no listener at all on a DaemonSet one.
+func TestAgentControlPlaneIsGuardedOrAbsent(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		daemonSet  string
+		wantStatus int
+	}{
+		{"sidecar or local agent", "", http.StatusUnauthorized},
+		{"DaemonSet agent", "true", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(token.Env, "x")
+			t.Setenv("KEPLOY_DAEMONSET_ENABLED", tc.daemonSet)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			status := -1
+			factory := agentSvcFactory{svc: servingAgentSvc{status: &status}}
+			cmd := Agent(ctx, zap.NewNop(), &config.Config{}, factory, noFlags{})
+			if err := cmd.RunE(cmd, nil); err != nil {
+				t.Fatalf("RunE returned %v", err)
+			}
+			if status != tc.wantStatus {
+				t.Fatalf("an unauthenticated control-plane request got %d, want %d (0 = nothing listening)", status, tc.wantStatus)
+			}
+		})
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/routes"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -110,21 +111,39 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
-			// Guard every route before any of them are registered. The
-			// control plane streams live TLS session keys and captured
-			// traffic and accepts session-mutating POSTs, and loopback is
-			// not a privilege boundary: other local users, neighbouring
-			// containers, and the application under test (which shares this
-			// agent's network namespace) can all reach it.
-			// Read directly, like client-pid above, so this never depends on
-			// config wiring. An unreadable flag is not a reason to refuse to
-			// start; SessionToken falls back to the environment and warns if
-			// that is empty too.
-			tokenFile, tfErr := cmd.Flags().GetString("token-file")
-			if tfErr != nil {
-				logger.Debug("could not read the token-file flag", zap.Error(tfErr))
+			// Read ONCE: whether the control plane is guarded and whether it
+			// binds at all must come from the same answer. Two reads with
+			// Setup's hooks in between could disagree, and a server bound
+			// without the middleware installed would serve the whole control
+			// plane unauthenticated, silently.
+			daemonSet := isDaemonSetAgent()
+			if daemonSet {
+				// A DaemonSet agent binds no control-plane server (see below),
+				// so it has no API to authenticate. Consuming a session token
+				// here only produced the "running WITHOUT authentication"
+				// warning on every DaemonSet start, about a server that never
+				// listens -- a false alarm in exactly the logs operators read
+				// for real ones. The token is still fixed, to whatever the
+				// environment gave, so nothing in this process later mints one
+				// that matches nothing.
+				token.Adopt(token.FromEnv())
+			} else {
+				// Guard every route before any of them are registered. The
+				// control plane streams live TLS session keys and captured
+				// traffic and accepts session-mutating POSTs, and loopback is
+				// not a privilege boundary: other local users, neighbouring
+				// containers, and the application under test (which shares
+				// this agent's network namespace) can all reach it.
+				// Read directly, like client-pid above, so this never depends
+				// on config wiring. An unreadable flag is not a reason to
+				// refuse to start; SessionToken falls back to the environment
+				// and warns if that is empty too.
+				tokenFile, tfErr := cmd.Flags().GetString("token-file")
+				if tfErr != nil {
+					logger.Debug("could not read the token-file flag", zap.Error(tfErr))
+				}
+				router.Use(routes.Authenticate(logger, routes.ConsumeSessionToken(logger, tokenFile)))
 			}
-			router.Use(routes.Authenticate(logger, routes.ConsumeSessionToken(logger, tokenFile)))
 
 			routes.ActiveHooks.New(router, a, logger)
 			go func() {
@@ -151,7 +170,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					// (/agent/stop, /agent/storemocks, …). Skip it. We still
 					// receive on startAgentCh above so Agent.Setup's unbuffered
 					// port handoff never blocks.
-					if isDaemonSetAgent() {
+					if daemonSet {
 						logger.Info("running as a Kubernetes DaemonSet agent; not starting the control-plane HTTP server (push architecture has no inbound HTTP consumers)")
 						return
 					}
