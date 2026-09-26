@@ -13,6 +13,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
+	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -145,15 +146,24 @@ func bypassList(rules []models.BypassRule) []string {
 	return out
 }
 
+// ReceiptBytes bounds a receipt read. A receipt is a handful of scalar fields
+// and a coverage summary; the largest keploy writes is well under a kilobyte.
+const ReceiptBytes = 1 << 20
+
 // ReadReceipt reads keploy/<set>/last-replay.yaml. A missing file is
 // (nil, nil): the set has simply never been replayed here.
+//
+// The set directory comes from the repository keploy runs in, so the receipt
+// can be a symlink to /dev/zero or a FIFO in a cloned repo. It is read through
+// safeyaml, which refuses anything but a regular file of at most ReceiptBytes,
+// rather than reading to EOF as it once did.
 func ReadReceipt(keployDir, set string) (*Receipt, error) {
-	raw, err := os.ReadFile(filepath.Join(keployDir, set, ReceiptFile))
+	raw, err := safeyaml.ReadFile(filepath.Join(keployDir, set, ReceiptFile), ReceiptBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", filepath.Join(set, ReceiptFile), safeyaml.StripPath(err))
 	}
 	var r Receipt
 	if err := yaml.Unmarshal(raw, &r); err != nil {

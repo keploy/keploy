@@ -38,6 +38,14 @@ const (
 	// on agent startup to prevent stale state from passing the healthcheck.
 	AgentReadyFile = "/tmp/agent.ready"
 
+	// AgentOutcomeFile is where a containerised agent serving a mock replay
+	// leaves what it served and what it could not match (models.MockOutcome)
+	// as it is stopped. Under docker compose that is the only account of the
+	// run there is: compose stops the agent service the moment the app exits,
+	// before keploy can ask the agent anything, so keploy reads this file out
+	// of the stopped container instead, before its teardown removes it.
+	AgentOutcomeFile = "/tmp/keploy-mock-outcome.json"
+
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 

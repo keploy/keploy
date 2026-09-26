@@ -1638,7 +1638,9 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 // a readiness timeout five and a half minutes later.
 func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) error {
 	var cause error
-	var ee *exec.ExitError
+	// An *exec.ExitError for an agent keploy started itself, an
+	// *agentContainerExit for one compose started.
+	var ee interface{ ExitCode() int }
 	if errors.As(exitErr, &ee) {
 		switch ee.ExitCode() {
 		case utils.ExitPrivilegeRequired:
@@ -1671,9 +1673,15 @@ func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) e
 // the agent's exit status, which does not say which of those refused it, so
 // the remedy names the candidates rather than picking one.
 //
-// Tracefs is a Linux agent's to need. Elsewhere, the only thing a native
-// agent reports missing is a non-loopback IPv4 address, so that is all its
-// remedy (goos, the runtime.GOOS it ran on) may talk about.
+// Tracefs is a Linux agent's to need, and all a native one can report
+// missing: it is reached over loopback, so it needs no network, and no remedy
+// may send the user to connect one. No macOS or Windows agent reports anything
+// missing today; the branch for them (goos, the runtime.GOOS it ran on) is
+// there so that one that ever does is not told to mount tracefs, and can only
+// point at its log. The agent container is the one agent that needs a
+// network address, because its hooks send the application's connections to
+// its container's own address: keploy starts it on the network the
+// application's command names, and --network none leaves it none.
 func agentStartRemedy(cause error, isDockerCmd bool, goos string) string {
 	switch {
 	case errors.Is(cause, utils.ErrPrivilegeRequired) && isDockerCmd:
@@ -1681,11 +1689,11 @@ func agentStartRemedy(cause error, isDockerCmd bool, goos string) string {
 	case errors.Is(cause, utils.ErrPrivilegeRequired):
 		return "the agent already ran as root and the kernel still refused it eBPF, as it does inside a container that does not grant it: start that container with --privileged, or with --cap-add BPF --cap-add PERFMON --cap-add NET_ADMIN --cap-add SYS_RESOURCE --cap-add SYS_PTRACE, and with tracefs mounted into it (-v /sys/kernel/tracing:/sys/kernel/tracing). A rootless container runtime cannot grant these at all. Outside a container, look for what denies root eBPF: kernel lockdown, or an SELinux or AppArmor policy. The agent's log above names the operation the kernel refused"
 	case isDockerCmd:
-		return "mount debugfs on the machine Docker runs on (mount -t debugfs nodev /sys/kernel/debug): keploy's agent container reaches tracefs through it. The agent's log above names what is missing"
+		return "mount debugfs on the machine Docker runs on (mount -t debugfs nodev /sys/kernel/debug): keploy's agent container reaches tracefs through it. Or, if the log says it found no non-loopback IP: keploy starts its agent container on the network the application's command names, and --network none leaves it no address. The agent's log above names which one is missing"
 	case goos != "linux":
-		return "connect the machine to a network, so that it has a non-loopback IPv4 address. The agent's log above names what is missing"
+		return "the agent's log above names what is missing"
 	default:
-		return "mount tracefs (mount -t tracefs nodev /sys/kernel/tracing; into a container, -v /sys/kernel/tracing:/sys/kernel/tracing), or give the machine or container a non-loopback IPv4 address. The agent's log above names which one is missing"
+		return "mount tracefs (mount -t tracefs nodev /sys/kernel/tracing; into a container, -v /sys/kernel/tracing:/sys/kernel/tracing). The agent's log above names what is missing"
 	}
 }
 
@@ -2048,6 +2056,83 @@ func (a *AgentClient) getApp() (*app.App, error) {
 	}
 
 	return h, nil
+}
+
+// ComposeAgentOutcome is what the keploy-agent compose service served and
+// missed in a mock replay, as it wrote it on being stopped.
+//
+// Under docker compose it is the only way to learn either: compose stops the
+// agent service the moment the app exits, so the agent is gone before
+// GetConsumedMocks or GetMockErrors could reach it. The App reads the account
+// out of the stopped container before keploy's teardown removes it.
+func (a *AgentClient) ComposeAgentOutcome() (models.MockOutcome, error) {
+	ap, err := a.getApp()
+	if err != nil {
+		return models.MockOutcome{}, err
+	}
+	stopped, ok := ap.StoppedAgent()
+	if !ok {
+		return models.MockOutcome{}, errors.New("keploy did not read the keploy-agent container before it was removed")
+	}
+	return stopped.MockOutcome()
+}
+
+// agentContainerExit is a keploy-agent container that stopped, as docker
+// reports it. Its ExitCode is the agent's own status: the agent is the
+// container's process.
+type agentContainerExit struct {
+	container string
+	code      int
+	oomKilled bool
+}
+
+func (e *agentContainerExit) Error() string {
+	msg := fmt.Sprintf("the keploy-agent container %s exited with code %d", e.container, e.code)
+	if e.oomKilled {
+		msg += ", killed for running out of memory"
+	}
+	return msg
+}
+
+func (e *agentContainerExit) ExitCode() int { return e.code }
+
+// ComposeAgentFailure is the keploy-agent compose service stopping while the
+// app still needed it, as keploy's own failure -- and nil when it did not,
+// which is every run in which compose stopped the agent after the app exited.
+//
+// Under compose the agent is a service in the project, and when it stops
+// first, compose aborts the project over it: the exit that reaches keploy is
+// compose reporting the dependency it lost, or the test command's code after
+// compose stopped it, and neither is the test command's verdict. The agent's
+// container, read before keploy's teardown removes it, says which it was.
+//
+// An agent that stopped before the app ever started could not start at all,
+// and its exit status says why, exactly as a native agent's does
+// (agentStoppedBeforeReady): the specific code is armed, and the remedy
+// logged.
+func (a *AgentClient) ComposeAgentFailure() error {
+	ap, err := a.getApp()
+	if err != nil {
+		return nil
+	}
+	stopped, ok := ap.StoppedAgent()
+	if !ok {
+		return nil
+	}
+	return a.composeAgentFailure(stopped)
+}
+
+// composeAgentFailure is ComposeAgentFailure for what keploy read from the
+// stopped agent's container.
+func (a *AgentClient) composeAgentFailure(stopped app.StoppedAgent) error {
+	if !stopped.AgentFailed() {
+		return nil
+	}
+	exit := &agentContainerExit{container: stopped.Container, code: stopped.Agent.ExitCode, oomKilled: stopped.Agent.OOMKilled}
+	if !stopped.AppStarted() {
+		return a.agentStoppedBeforeReady(exit, true)
+	}
+	return fmt.Errorf("the keploy agent stopped while the test command was running: %w", exit)
 }
 
 // ComposeDownOnSetupFailure tears down the managed docker-compose stack so a

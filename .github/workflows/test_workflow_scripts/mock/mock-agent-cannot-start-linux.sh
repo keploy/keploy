@@ -3,9 +3,9 @@
 # with the exit code that names why, and the test command never runs.
 #
 # The failure this guards is a false green. A CI step that ran keploy where its
-# agent could not start (an unprivileged job container, no tracefs, no network)
-# exited 0 with the tests never run, or waited out the agent's whole ready
-# budget first. The reason crosses two process boundaries on the way out: the
+# agent could not start (an unprivileged job container, no tracefs) exited 0
+# with the tests never run, or waited out the agent's whole ready budget
+# first. The reason crosses two process boundaries on the way out: the
 # agent's own exit status, then the CLI's. Unit tests can only model those, so
 # this runs the real binary in the real environments.
 #
@@ -13,7 +13,15 @@
 # so nothing it loads or starts outlives the case:
 #   unprivileged   a default container: the kernel refuses eBPF          -> 3
 #   no-tracefs     --privileged, but neither debugfs nor tracefs mounted -> 6
-#   no-ipv4        --privileged, tracefs mounted, loopback only          -> 6
+# No network is not a reason: a native agent is reached over loopback, and
+# mock-offline-linux.sh runs it with nothing but loopback. An agent started
+# with --is-docker still needs a non-loopback address, because its hooks send
+# the connections of the applications it serves to its container's own one.
+#   agent-no-ipv4  `keploy agent --is-docker` in record and test mode, as
+#                  the agent container runs it: --privileged, tracefs
+#                  mounted, no network                                 -> 6
+#                  The agent runs alone, with no test command; docker-6
+#                  checks how the CLI passes an agent container's 6 on.
 # The docker-* cases run keploy's docker mode with a stand-in `docker` whose
 # agent container exits with AGENT_EXIT, as `docker run` does with its
 # container's status. Docker mode lowers kernel.perf_event_paranoid, which is
@@ -68,7 +76,16 @@ cd "$D/app" || exit 1
 CMD="sh -c 'touch $D/ran'"
 EXTRA=""
 case "$CASE" in
-  no-ipv4) mount -t tracefs nodev /sys/kernel/tracing || exit 1 ;;
+  agent-no-ipv4)
+    mount -t tracefs nodev /sys/kernel/tracing || exit 1
+    for sub in record replay; do
+      mode=record
+      [ "$sub" = replay ] && mode=test
+      timeout -s INT -k 30 120 /work/keploy agent --is-docker --mode "$mode" --client-pid 1 > "$D/$sub.log" 2>&1
+      echo $? > "$D/$sub.exit"
+    done
+    exit 0
+    ;;
   docker-*)
     if [ -n "${PIN_PARANOID:-}" ]; then
       echo "$PIN_PARANOID" > "$D/perf_event_paranoid"
@@ -103,28 +120,30 @@ SH
 chmod +x "$WORK/inside.sh"
 
 # check <case> <record/replay exit code> <what the log has to say> <docker flags...>
+# The runs are `keploy mock record` and `keploy mock replay`, except for
+# agent-no-ipv4, whose are the agent's own record and test modes.
 check() {
   local name=$1 want=$2 says=$3
   shift 3
-  echo "--- $name: expecting exit $want from mock record and mock replay ---"
+  echo "--- $name: expecting exit $want from its record and replay runs ---"
   docker run --rm --network none "$@" -e HOSTUID="$(id -u):$(id -g)" \
     -v "$WORK:/work" "$IMAGE" /work/inside.sh "$name" || fail "$name: the container itself failed"
   for sub in record replay; do
     local got
     got="$(cat "$WORK/$name/$sub.exit" 2>/dev/null)"
     if [ "$got" != "$want" ]; then
-      fail "$name: mock $sub exited ${got:-nothing}, want $want"
+      fail "$name: the $sub run exited ${got:-nothing}, want $want"
       tail -n 30 "$WORK/$name/$sub.log" 2>/dev/null
     fi
     grep -aqF "$says" "$WORK/$name/$sub.log" 2>/dev/null ||
-      fail "$name: mock $sub's log does not say \"$says\""
+      fail "$name: the $sub run's log does not say \"$says\""
   done
   [ -e "$WORK/$name/ran" ] && fail "$name: the test command ran, with no agent to record or replay it"
 }
 
 check unprivileged 3 "keploy does not have the kernel privileges it needs"
 check no-tracefs 6 "neither debugfs nor tracefs are mounted" --privileged
-check no-ipv4 6 "could not find a non-loopback IP" --privileged
+check agent-no-ipv4 6 "could not find a non-loopback IP for the container" --privileged
 # Mounting over the knob takes CAP_SYS_ADMIN, and a mount AppArmor allows.
 CAPS=(--cap-add BPF --cap-add PERFMON --cap-add NET_ADMIN --cap-add SYS_RESOURCE --cap-add SYS_PTRACE
   --cap-add SYS_ADMIN --security-opt apparmor=unconfined)

@@ -31,9 +31,12 @@ var cancel context.CancelFunc
 // gives a definitive answer to "did the agent have unsent mocks at
 // the moment of shutdown" without depending on the structured logger.
 //
-// Hooks MUST be fast (no blocking I/O, no network calls) — they run
-// on the signal-delivery goroutine and any blocking work delays the
-// cancellation and increases the chance of SIGKILL truncation.
+// Hooks MUST be bounded, and well inside the stop grace the process is
+// given before it is killed (10s under docker and compose) — they run on
+// the signal-delivery goroutine and any blocking work delays the
+// cancellation and increases the chance of SIGKILL truncation. A hook
+// that has to do I/O bounds it itself, as the agent's replay-outcome
+// write does (pkg/service/agent, leaveStopOutcome: 3s).
 var (
 	preCancelMu    sync.Mutex
 	preCancelHooks []func()

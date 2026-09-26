@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"sort"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -385,6 +387,33 @@ func ReadFileAny(ctx context.Context, logger *zap.Logger, path, name string, pre
 	return nil, "", fs.ErrNotExist
 }
 
+// ReadFileAnyBounded is ReadFileAny within a size bound and without blocking:
+// the file must be a regular file (not a FIFO, a socket, or a symlink to a
+// device such as /dev/zero) of at most limit bytes, read through safeyaml
+// rather than to EOF. It is for a file keploy reads out of the repository it
+// runs in -- a run's report -- which a cloned repo could otherwise point at a
+// device to run the command out of memory, or a FIFO to block it. A file of the
+// preferred format that is not a regular file is refused, not passed over for
+// the other format, matching the CLI's config lookup.
+func ReadFileAnyBounded(ctx context.Context, path, name string, preferred Format, limit int64) ([]byte, Format, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	other := otherFormat(preferred)
+	for _, f := range [2]Format{preferred, other} {
+		filePath := filepath.Join(path, name+"."+f.FileExtension())
+		data, err := safeyaml.ReadFile(filePath, limit)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return data, f, nil
+	}
+	return nil, "", fs.ErrNotExist
+}
+
 func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
 	return CreateFileF(ctx, Logger, path, fileName, FormatYAML)
 }
@@ -443,10 +472,15 @@ func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, m
 	var indices []string
 
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
+	if errors.Is(err, safeyaml.ErrNotDir) {
+		// There, and not a directory: an error, as listing it always was.
+		return indices, err
+	}
 	if err != nil {
 		logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
 		return indices, nil
 	}
+	defer func() { _ = dir.Close() }()
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
@@ -488,10 +522,15 @@ func ReadSessionIndicesAny(ctx context.Context, path string, logger *zap.Logger,
 	var indices []string
 
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
+	if errors.Is(err, safeyaml.ErrNotDir) {
+		// There, and not a directory: an error, as listing it always was.
+		return indices, err
+	}
 	if err != nil {
 		logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
 		return indices, nil
 	}
+	defer func() { _ = dir.Close() }()
 
 	files, err := dir.ReadDir(0)
 	if err != nil {

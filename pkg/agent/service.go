@@ -26,6 +26,18 @@ type HookCfg struct {
 	Port     uint32
 }
 
+// ProxyAddressReporter is the optional extension implemented by hooks that
+// know the IPv4 address the application reaches the proxy at. The agent hands
+// it to the proxy's DNS server, which answers with it for a name it has no
+// recorded answer for.
+//
+// Optional in the same style as WindowedProxy: the agent type-asserts for it,
+// and hooks that do not implement it keep the proxy's loopback default.
+type ProxyAddressReporter interface {
+	// ProxyIPv4 is only meaningful once Load has returned.
+	ProxyIPv4() string
+}
+
 type AuxiliaryProxyHook interface {
 	AfterStart(ctx context.Context, proxy Proxy) error
 }

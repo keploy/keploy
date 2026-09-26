@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"sigs.k8s.io/kustomize/kyaml/yaml"
@@ -297,12 +298,17 @@ func FindLastIndexAny(path string, _ *zap.Logger) (int, error) {
 	return lastIndex, nil
 }
 
-func ReadDir(path string, fileMode fs.FileMode) (*os.File, error) {
-	dir, err := os.OpenFile(path, os.O_RDONLY, fileMode)
-	if err != nil {
-		return nil, err
+// ReadDir opens the directory path for listing. The path is in the repository
+// keploy runs in, so it can be anything: it is opened without blocking, and
+// anything but a directory is refused (safeyaml.ErrNotDir). Opened as a file,
+// a FIFO in a directory's place -- keploy/reports, a test set -- blocked the
+// command for good.
+func ReadDir(path string, _ fs.FileMode) (*os.File, error) {
+	dir, err := safeyaml.OpenDir(path)
+	if errors.Is(err, safeyaml.ErrNotDir) {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
-	return dir, nil
+	return dir, err
 }
 
 // CreateDir to create a directory if it doesn't exist
