@@ -48,53 +48,69 @@ func ComputeDiff(report1, report2 *models.TestReport) *DiffResult {
 		StatusTransitions: make([]StatusChange, 0),
 		Unchanged:         make([]StatusChange, 0),
 	}
-	if report1 == nil || report2 == nil {
+	if report1 == nil && report2 == nil {
 		return result
 	}
 
-	left := make(map[string]models.TestStatus, len(report1.Tests))
-	for _, test := range report1.Tests {
-		id := strings.TrimSpace(test.TestCaseID)
-		if id == "" {
-			continue
+	left := make(map[string]models.TestStatus)
+	if report1 != nil {
+		for _, test := range report1.Tests {
+			id := strings.TrimSpace(test.TestCaseID)
+			if id != "" {
+				left[id] = test.Status
+			}
 		}
-		left[id] = test.Status
 	}
 
-	right := make(map[string]models.TestStatus, len(report2.Tests))
-	for _, test := range report2.Tests {
-		id := strings.TrimSpace(test.TestCaseID)
-		if id == "" {
-			continue
+	right := make(map[string]models.TestStatus)
+	if report2 != nil {
+		for _, test := range report2.Tests {
+			id := strings.TrimSpace(test.TestCaseID)
+			if id != "" {
+				right[id] = test.Status
+			}
 		}
-		right[id] = test.Status
 	}
 
-	commonIDs := make([]string, 0, len(left))
+	allIDsMap := make(map[string]struct{}, len(left)+len(right))
 	for id := range left {
-		if _, ok := right[id]; ok {
-			commonIDs = append(commonIDs, id)
-		}
+		allIDsMap[id] = struct{}{}
 	}
-	sort.Strings(commonIDs)
+	for id := range right {
+		allIDsMap[id] = struct{}{}
+	}
 
-	for _, id := range commonIDs {
-		before := left[id]
-		after := right[id]
+	allIDs := make([]string, 0, len(allIDsMap))
+	for id := range allIDsMap {
+		allIDs = append(allIDs, id)
+	}
+	sort.Strings(allIDs)
+
+	for _, id := range allIDs {
+		before, inLeft := left[id]
+		after, inRight := right[id]
+
+		if !inLeft {
+			before = "ABSENT"
+		}
+		if !inRight {
+			after = "ABSENT"
+		}
+
 		change := StatusChange{
 			TestCaseID: id,
 			Before:     before,
 			After:      after,
 		}
 		switch {
-		case before == after:
+		case inLeft && inRight && before == after:
 			result.Unchanged = append(result.Unchanged, change)
-		case before == models.TestStatusPassed && after == models.TestStatusFailed:
+		case inLeft && inRight && before == models.TestStatusPassed && after == models.TestStatusFailed:
 			result.Regressions = append(result.Regressions, change)
-		case before == models.TestStatusFailed && after == models.TestStatusPassed:
+		case inLeft && inRight && before == models.TestStatusFailed && after == models.TestStatusPassed:
 			result.Fixes = append(result.Fixes, change)
 		default:
-			// Non-binary transitions such as IGNORED->PASSED, PASSED->OBSOLETE, etc.
+			// Non-binary transitions such as IGNORED->PASSED, PASSED->OBSOLETE, ABSENT->PASSED, PASSED->ABSENT, etc.
 			result.StatusTransitions = append(result.StatusTransitions, change)
 		}
 	}
@@ -116,14 +132,10 @@ func (d *Diff) Compare(ctx context.Context, run1 string, run2 string, testSets [
 	}
 
 	for _, testSetID := range selectedTestSets {
-		report1, err := d.reportDB.GetReport(ctx, run1, testSetID)
-		if err != nil {
-			return fmt.Errorf("%s failed to load report for run %q and test-set %q: %w", utils.Emoji, run1, testSetID, err)
-		}
-
-		report2, err := d.reportDB.GetReport(ctx, run2, testSetID)
-		if err != nil {
-			return fmt.Errorf("%s failed to load report for run %q and test-set %q: %w", utils.Emoji, run2, testSetID, err)
+		report1, err1 := d.reportDB.GetReport(ctx, run1, testSetID)
+		report2, err2 := d.reportDB.GetReport(ctx, run2, testSetID)
+		if err1 != nil && err2 != nil {
+			return fmt.Errorf("%s failed to load report for test-set %q in both runs %q and %q", utils.Emoji, testSetID, run1, run2)
 		}
 
 		diff := ComputeDiff(report1, report2)
@@ -155,21 +167,22 @@ func (d *Diff) resolveTestSets(ctx context.Context, run1 string, run2 string, te
 		return nil, fmt.Errorf("%s failed to get test-sets for run %q: %w", utils.Emoji, run2, err)
 	}
 
-	run1SetMap := make(map[string]struct{})
+	allSetsMap := make(map[string]struct{})
 	for _, setID := range normalizeTestSets(run1Sets) {
-		run1SetMap[setID] = struct{}{}
+		allSetsMap[setID] = struct{}{}
 	}
-	common := make([]string, 0)
 	for _, setID := range normalizeTestSets(run2Sets) {
-		if _, ok := run1SetMap[setID]; ok {
-			common = append(common, setID)
-		}
+		allSetsMap[setID] = struct{}{}
 	}
-	sort.Strings(common)
-	if len(common) == 0 {
-		return nil, fmt.Errorf("%s no common test-sets found between %q and %q", utils.Emoji, run1, run2)
+	allSets := make([]string, 0, len(allSetsMap))
+	for setID := range allSetsMap {
+		allSets = append(allSets, setID)
 	}
-	return common, nil
+	sort.Strings(allSets)
+	if len(allSets) == 0 {
+		return nil, fmt.Errorf("%s no test-sets found for %q or %q", utils.Emoji, run1, run2)
+	}
+	return allSets, nil
 }
 
 func normalizeTestSets(testSets []string) []string {
