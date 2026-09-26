@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	cli "github.com/docker/cli/cli"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -81,6 +82,17 @@ type App struct {
 	// allowed to remove. See sweepStragglingProjectContainers for why the
 	// project label is not a substitute.
 	composeServices []string
+	// composeRunner drives the in-memory compose stack through the compose
+	// library instead of a `docker` binary. Built lazily on first use (the
+	// engine must be reachable) and reset by setComposeSource, because the
+	// per-test-set replay loop re-generates the document between rounds and a
+	// cached project would then address the previous stack.
+	composeRunnerMu  sync.Mutex
+	composeRunnerVal composeStack
+	// newComposeStack overrides how the runner is built. Production leaves it
+	// nil and gets the compose library; tests substitute a fake so the
+	// in-memory path keeps unit coverage without a docker daemon.
+	newComposeStack func(context.Context) (composeStack, error)
 	// --from-container only. sourceContainer is the user's own container, which
 	// the agent client stops for the session and starts again on teardown;
 	// replacementID is the copy keploy created and runs in its place.
@@ -637,26 +649,38 @@ func (a *App) ComposeDown() {
 	downCtx, downCancel := context.WithTimeout(context.Background(), composeDownCmdBudget)
 	defer downCancel()
 
+	downSucceeded := true
+
 	var downCmd *exec.Cmd
 
 	switch {
 	case len(a.composeContent) > 0:
-		// In-memory mode: pipe compose YAML via stdin, no file on disk.
-		// Preserve project-scoping flags (-p/--project-name, --project-directory)
-		// from the original command so teardown targets the correct project.
-		a.logger.Debug("Running docker compose down using in-memory compose content")
-		args := []string{"compose", "-f", "-"}
-		args = append(args, extractProjectFlags(a.cmd)...)
-		// --timeout 1: stop containers fast instead of the default 10s graceful
-		// wait PER container. Between test-sets `keploy test` restarts the whole
-		// compose stack; under loaded CI a slow `down` was exceeding the
-		// per-test-set teardown drain budget and being abandoned, leaving a
-		// half-removed agent container that the next test-set's `up` then
-		// collided with ("container name already in use" -> dependency
-		// keploy-agent failed to start -> test-set abandoned, no report).
-		args = append(args, "down", "--timeout", "1")
-		downCmd = exec.CommandContext(downCtx, "docker", args...)
-		downCmd.Stdin = bytes.NewReader(a.composeContent)
+		// In-memory mode: the stack keploy generated itself, so tear it down
+		// through the compose library — no `docker` binary, no stdin pipe. The
+		// project is resolved from the same -p/--project-directory the `up`
+		// used, so this targets exactly the stack that was started.
+		//
+		// composeDownStopGrace is the library form of `--timeout 1`: stop
+		// containers fast instead of the default 10s graceful wait PER
+		// container. Between test-sets `keploy test` restarts the whole compose
+		// stack; under loaded CI a slow `down` was exceeding the per-test-set
+		// teardown drain budget and being abandoned, leaving a half-removed
+		// agent container that the next test-set's `up` then collided with
+		// ("container name already in use" -> dependency keploy-agent failed to
+		// start -> test-set abandoned, no report).
+		a.logger.Debug("Running compose down (in-process) using in-memory compose content")
+		runner, err := a.composeRunner(downCtx)
+		if err != nil {
+			a.logger.Debug("could not build the compose runner for teardown; falling through to the force-remove below",
+				zap.Error(err))
+			downSucceeded = false
+			break
+		}
+		if err := runner.Down(downCtx, composeDownStopGrace); err != nil {
+			downSucceeded = false
+			a.logger.Debug("compose down finished with error (may be expected if containers already removed, or the bounded teardown deadline elapsed under load)",
+				zap.Error(err))
+		}
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
 			zap.String("composeFile", a.composeFile))
@@ -672,11 +696,12 @@ func (a *App) ComposeDown() {
 		return
 	}
 
-	downSucceeded := true
-	if output, err := downCmd.CombinedOutput(); err != nil {
-		downSucceeded = false
-		a.logger.Debug("docker compose down finished with error (may be expected if containers already removed, or the bounded teardown deadline elapsed under load)",
-			zap.Error(err), zap.String("output", string(output)))
+	if downCmd != nil {
+		if output, err := downCmd.CombinedOutput(); err != nil {
+			downSucceeded = false
+			a.logger.Debug("docker compose down finished with error (may be expected if containers already removed, or the bounded teardown deadline elapsed under load)",
+				zap.Error(err), zap.String("output", string(output)))
+		}
 	}
 
 	// Coverage safety: this runs only AFTER the app has already been stopped by
@@ -743,6 +768,12 @@ func (a *App) setComposeSource(file string, content []byte, compose *docker.Comp
 	a.composeFile = file
 	a.composeContent = content
 	a.composeServices = composeServiceNames(compose)
+
+	// Drop any runner built from the PREVIOUS document. Keeping it would point
+	// `down`/`ps` at the stack of the last test-set.
+	a.composeRunnerMu.Lock()
+	a.composeRunnerVal = nil
+	a.composeRunnerMu.Unlock()
 }
 
 // composeServiceNames returns the service keys of a parsed compose document.
@@ -845,12 +876,24 @@ func (a *App) forceRemoveContainers(ids []string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), projectSweepBudget)
 	defer cancel()
-	args := append([]string{"rm", "-f"}, ids...)
-	if output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil {
-		a.logger.Debug("force-remove of the remaining project containers finished "+
-			"(some may already be gone, or the bounded deadline elapsed)",
-			zap.Error(err), zap.String("output", string(output)))
+
+	// Concurrent, not sequential: the Engine API removes one container per
+	// call, and N sequential removals against a saturated daemon is exactly the
+	// unbounded teardown the per-call budgets exist to prevent. Issuing them
+	// together under ONE deadline keeps the original single-call bound.
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			if err := a.docker.ContainerRemove(ctx, id, container.RemoveOptions{Force: true}); err != nil {
+				a.logger.Debug("force-remove of a remaining project container finished "+
+					"(it may already be gone, or the bounded deadline elapsed)",
+					zap.String("container", id), zap.Error(err))
+			}
+		}(id)
 	}
+	wg.Wait()
 }
 
 // Teardown budgets. The record/replay teardown drains the app-runner goroutine
@@ -876,6 +919,10 @@ func (a *App) forceRemoveContainers(ids []string) {
 // returns before recentAppLogs — comfortably under 30s.
 const (
 	composeDownCmdBudget = 8 * time.Second // `docker compose down`
+	// composeDownStopGrace is the library form of the shell-out's `--timeout 1`:
+	// the per-container stop grace `down` allows before killing. It bounds the
+	// containers, NOT the down call itself — composeDownCmdBudget does that.
+	composeDownStopGrace = 1 * time.Second
 	// projectSweepBudget bounds EACH of the two calls that clean up whatever the
 	// bounded `down` did not reach: the `compose ps` that lists them and the
 	// single `docker rm -f` that removes them.
@@ -975,9 +1022,9 @@ func (a *App) forceRemoveContainerByNameWithin(name string, budget time.Duration
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	if output, err := exec.CommandContext(ctx, "docker", "rm", "-f", name).CombinedOutput(); err != nil {
+	if err := a.docker.ContainerRemove(ctx, name, container.RemoveOptions{Force: true}); err != nil {
 		a.logger.Debug("force-remove container finished (may already be gone, or the bounded deadline elapsed)",
-			zap.String("container", name), zap.Error(err), zap.String("output", string(output)))
+			zap.String("container", name), zap.Error(err))
 	}
 }
 
@@ -1042,12 +1089,30 @@ func (a *App) removeStaleComposeAgentWithin(budget time.Duration) {
 // otherwise try to Recreate. Mirrors ComposeDown's branch selection for the
 // file-based vs in-memory compose source.
 func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
+	// In-memory mode: ask the compose library directly. It resolves the project
+	// from the same -p/--project-directory the upcoming `up` will use, which is
+	// what makes the result line up with the container compose would otherwise
+	// try to Recreate.
+	if len(a.composeContent) > 0 {
+		runner, err := a.composeRunner(ctx)
+		if err != nil {
+			a.logger.Debug("could not build the compose runner to list the prior keploy-agent container",
+				zap.Error(err))
+			return nil
+		}
+		ids, err := runner.ContainerIDsForService(ctx, keployAgentComposeService)
+		if err != nil {
+			// A non-existent project / no such service is the common "first up"
+			// case; treat it as "nothing to clean up" rather than failing the run.
+			a.logger.Debug("could not list the prior keploy-agent compose container (likely the first up of this project)",
+				zap.Error(err))
+			return nil
+		}
+		return ids
+	}
+
 	var args []string
 	switch {
-	case len(a.composeContent) > 0:
-		args = []string{"compose", "-f", "-"}
-		args = append(args, extractProjectFlags(a.cmd)...)
-		args = append(args, "ps", "-aq", keployAgentComposeService)
 	case a.composeFile != "":
 		args = []string{"compose", "-f", a.composeFile}
 		args = append(args, extractProjectFlags(a.cmd)...)
@@ -1057,9 +1122,6 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	if len(a.composeContent) > 0 {
-		cmd.Stdin = bytes.NewReader(a.composeContent)
-	}
 	// Output(), NOT CombinedOutput(): compose writes warnings to stderr, and
 	// this output is parsed as a list of container ids. An obsolete `version:`
 	// key or an unset ${VAR} — both of which survive into keploy's generated
@@ -1146,12 +1208,37 @@ func commandStderr(err error) string {
 // "not a transient dependency failure", so the run fails fast rather than
 // retrying blindly — the safe default.
 func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
+	// In-memory mode: ask the compose library directly, with the same project
+	// scoping the `up`/`down` use so it sees exactly this stack.
+	if len(a.composeContent) > 0 {
+		runner, err := a.composeRunner(ctx)
+		if err != nil {
+			a.logger.Debug("could not build the compose runner to read service states", zap.Error(err))
+			return nil
+		}
+		rows, err := runner.Ps(ctx)
+		if err != nil {
+			a.logger.Debug("could not read compose service states", zap.Error(err))
+			return nil
+		}
+		states := make([]composeServiceState, 0, len(rows))
+		for _, r := range rows {
+			states = append(states, composeServiceState{
+				Service:  r.Service,
+				State:    r.State,
+				ExitCode: r.ExitCode,
+				ID:       r.ID,
+				// Re-join to the comma-separated "k=v,k=v" form `docker compose
+				// ps --format json` prints, so isComposeOneOff stays the single
+				// classifier for both the library and the shell-out path.
+				Labels: joinComposeLabels(r.Labels),
+			})
+		}
+		return states
+	}
+
 	var args []string
 	switch {
-	case len(a.composeContent) > 0:
-		args = []string{"compose", "-f", "-"}
-		args = append(args, extractProjectFlags(a.cmd)...)
-		args = append(args, "ps", "-a", "--format", "json")
 	case a.composeFile != "":
 		args = []string{"compose", "-f", a.composeFile}
 		// Carry any -p/--project-name/--project-directory from the run command so
@@ -1166,9 +1253,6 @@ func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	if len(a.composeContent) > 0 {
-		cmd.Stdin = bytes.NewReader(a.composeContent)
-	}
 	// Output(), NOT CombinedOutput(). Compose writes its warnings to stderr —
 	//
 	//	level=warning msg="The \"TAG\" variable is not set. Defaulting to a blank string."
@@ -1391,26 +1475,23 @@ func (a *App) ensureContainerNameFreeWithin(name string, budget time.Duration) {
 func (a *App) containerNameFree(name string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	// Output(), NOT CombinedOutput(). The verdict below is "stdout is empty",
-	// so ANY byte docker writes to stderr reads as "the name is taken" — for
-	// every name, permanently. Docker writes plenty there on a healthy exit-0
-	// run: a malformed ~/.docker/config.json, a credential-helper warning, a
-	// deprecation notice. The two consequences are both expensive:
+	// The anchored regex is the daemon's own name filter, identical to the
+	// `--filter name=^/<name>$` the CLI passed: an unanchored match would report
+	// "taken" for any container whose name merely CONTAINS this one.
 	//
-	//   - ensureContainerNameFree polls to the full preRunRemoveBudget (90s)
-	//     and then proceeds anyway, adding 90s to every docker-run start.
-	//   - isDockerRunNameConflict sees nameOccupied permanently true, so EVERY
-	//     exit-125 is retried dockerRunNameConflictRetries times with a 90s
-	//     removal between attempts. A genuinely broken run — a bad image, an
-	//     unsatisfiable mount — takes minutes to surface its real error, which
-	//     is exactly what the comment on that retry says must not happen.
-	out, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "name=^/"+name+"$").Output()
+	// A query error is deliberately read as "still in use" rather than "free":
+	// treating an unreachable daemon as a free name would let the caller race
+	// straight into a create that then fails on the conflict.
+	list, err := a.docker.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: filters.NewArgs(filters.Arg("name", "^/"+name+"$")),
+	})
 	if err != nil {
 		a.logger.Debug("could not query container-name availability; treating as still-in-use",
-			zap.String("container", name), zap.Error(err), zap.String("stderr", commandStderr(err)))
+			zap.String("container", name), zap.Error(err))
 		return false
 	}
-	return len(bytes.TrimSpace(out)) == 0
+	return len(list) == 0
 }
 
 // isExit125 reports whether a finished user-app command failed at runtime with
@@ -1680,9 +1761,31 @@ func (a *App) run(ctx context.Context) models.AppError {
 		}
 	}
 
+	// executeApp starts the application once.
+	//
+	// For a compose document keploy generated ITSELF (composeContent set) the
+	// stack is brought up in-process through the compose library, so no `docker`
+	// binary is needed on PATH. Every other kind — an on-disk compose file, a
+	// `docker run`, a native command — is the USER's command and keeps the
+	// existing shell-out: it may carry flags and shell syntax keploy does not
+	// model, and it is not keploy's to reinterpret.
+	executeApp := func(runCmd string, runEnv []string) utils.CmdError {
+		if len(a.composeContent) > 0 {
+			return a.runComposeInProcess(ctx, composeDown)
+		}
+		return utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
+	}
+
 	var err error
+	// withAgentToken also records the launch (token.RecordLaunch), which the
+	// client's "does my agent enforce the token" check depends on seeing for
+	// EVERY run — so it must happen on the in-process path too, not only on the
+	// shell-out. The rewritten command and the env it returns are consumed by
+	// the shell-out branch inside executeApp; the in-process branch needs
+	// neither (there is no child process and no sudo to survive), and reads the
+	// token straight from the session when it loads the project.
 	runCmd, runEnv := a.withAgentToken(userCmd)
-	cmdErr := utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
+	cmdErr := executeApp(runCmd, runEnv)
 	// A user-app `docker run --name X` can still lose the container-name race to
 	// the prior test-set's --rm reaper on a saturated CI daemon even after the
 	// pre-run ensureContainerNameFreeWithin verified the name was free — the
@@ -1702,7 +1805,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		a.logger.Warn("docker run exited 125 with the --name still in use (container-name conflict); force-removing the name and retrying",
 			zap.String("container", dockerRunName), zap.Int("attempt", attempt))
 		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
-		cmdErr = utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
+		cmdErr = executeApp(runCmd, runEnv)
 	}
 
 	// Compose mode: a `docker compose up` can fail not because the user's app is
@@ -1775,7 +1878,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 			a.ensureContainerNameFreeWithin(a.keployContainer, preRunRemoveBudget)
 		}
 
-		cmdErr = utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
+		cmdErr = executeApp(runCmd, runEnv)
 	}
 
 	if cmdErr.Err != nil {
@@ -1838,6 +1941,15 @@ func exitCodeFromErr(err error) int {
 			return 128 + int(ws.Signal())
 		}
 		return 1
+	}
+	// The in-process compose path never runs a child process, so it cannot
+	// produce an *exec.ExitError. Compose reports the --exit-code-from status
+	// as cli.StatusError instead; without this branch every compose exit code
+	// would silently collapse to -1 and the wrapped runner's status would stop
+	// propagating.
+	var statusErr cli.StatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode
 	}
 	return -1
 }

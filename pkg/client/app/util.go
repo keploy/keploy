@@ -8,7 +8,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/docker/compose/v2/pkg/api"
 	"go.keploy.io/server/v3/pkg/agent/token"
+	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -271,4 +273,57 @@ func ensureComposeExitOnAppFailure(appCmd, serviceName string, preferFailureAbor
 
 	// Fallback: no explicit "up" token detected — do not append flags.
 	return appCmd
+}
+
+// composeUpSemantics reads the `up` flags that change what the run MEANS out of
+// the resolved command string.
+//
+// It parses the same string the shell-out would have executed rather than
+// re-deriving the flags from the compose document, so the in-process path and
+// the shell-out can never disagree: ensureComposeExitOnAppFailure leaves a
+// user-supplied --exit-code-from / --abort-* untouched, and only the final
+// string records which of the two decided them.
+func composeUpSemantics(cmd string) docker.ComposeUpOptions {
+	opts := docker.ComposeUpOptions{OnExit: api.CascadeIgnore}
+	parts := strings.Fields(cmd)
+	for i := 0; i < len(parts); i++ {
+		switch {
+		case parts[i] == "--abort-on-container-exit":
+			opts.OnExit = api.CascadeStop
+		case parts[i] == "--abort-on-container-failure":
+			opts.OnExit = api.CascadeFail
+		case parts[i] == "--exit-code-from" && i+1 < len(parts):
+			opts.ExitCodeFrom = parts[i+1]
+			i++
+		case strings.HasPrefix(parts[i], "--exit-code-from="):
+			opts.ExitCodeFrom = strings.TrimPrefix(parts[i], "--exit-code-from=")
+		}
+	}
+	return opts
+}
+
+// composeProjectScope returns the -p/--project-name and --project-directory
+// values from the command, so the library resolves the SAME project the
+// shell-out would have. Both are empty when the command sets neither, which is
+// the normal case: compose then derives the name from the document or the
+// working directory.
+func composeProjectScope(cmd string) (projectName, projectDir string) {
+	parts := strings.Fields(cmd)
+	for i := 0; i < len(parts); i++ {
+		switch {
+		case (parts[i] == "-p" || parts[i] == "--project-name") && i+1 < len(parts):
+			projectName = parts[i+1]
+			i++
+		case strings.HasPrefix(parts[i], "-p="):
+			projectName = strings.TrimPrefix(parts[i], "-p=")
+		case strings.HasPrefix(parts[i], "--project-name="):
+			projectName = strings.TrimPrefix(parts[i], "--project-name=")
+		case parts[i] == "--project-directory" && i+1 < len(parts):
+			projectDir = parts[i+1]
+			i++
+		case strings.HasPrefix(parts[i], "--project-directory="):
+			projectDir = strings.TrimPrefix(parts[i], "--project-directory=")
+		}
+	}
+	return projectName, projectDir
 }

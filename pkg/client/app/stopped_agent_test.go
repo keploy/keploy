@@ -58,6 +58,22 @@ func (d *stoppedAgentDocker) CopyFromContainer(_ context.Context, name, path str
 
 // A container with no state is gone -- which is also what ends the teardown's
 // reap barrier at once.
+// ContainerRemove answers the teardown's force-remove. The teardown reaches the
+// daemon through the Engine API rather than a `docker rm -f` subprocess, so the
+// fake has to implement it or ComposeDown nil-derefs the embedded interface.
+// Removal is a no-op here: `removed` is what this fixture uses to say the
+// containers are gone.
+func (d *stoppedAgentDocker) ContainerRemove(context.Context, string, container.RemoveOptions) error {
+	return nil
+}
+
+// ContainerList answers the container-name availability probe, for the same
+// reason. An empty list means "the name is free", which is what a torn-down
+// project should look like.
+func (d *stoppedAgentDocker) ContainerList(context.Context, container.ListOptions) ([]container.Summary, error) {
+	return nil, nil
+}
+
 func (d *stoppedAgentDocker) ContainerInspect(_ context.Context, name string) (container.InspectResponse, error) {
 	st, ok := d.states[name]
 	if !ok || (d.removed != nil && d.removed()) {

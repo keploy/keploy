@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -31,12 +33,10 @@ func stubDockerCLI(t *testing.T, psJSON string, downCode int) (argvLog string) {
 
 // stubDockerCLIOpts additionally lets a test put text on the stub's STDERR (the
 // shape compose warnings take) or make `ps` hang forever.
+//
+// There is no `rm` hang knob any more: force-removal moved to the Engine API,
+// so a hanging daemon is simulated with inspectRecorder.hangRemove instead.
 func stubDockerCLIOpts(t *testing.T, psJSON string, downCode int, stderrText string, hangOnPS bool) (argvLog string) {
-	return stubDockerCLIHang(t, psJSON, downCode, stderrText, hangOnPS, false)
-}
-
-// stubDockerCLIHang additionally lets `rm` hang.
-func stubDockerCLIHang(t *testing.T, psJSON string, downCode int, stderrText string, hangOnPS, hangOnRM bool) (argvLog string) {
 	t.Helper()
 	dir := t.TempDir()
 	argvLog = filepath.Join(dir, "argv.log")
@@ -51,10 +51,6 @@ func stubDockerCLIHang(t *testing.T, psJSON string, downCode int, stderrText str
 	hang := "0"
 	if hangOnPS {
 		hang = "1"
-	}
-	hangRM := "0"
-	if hangOnRM {
-		hangRM = "1"
 	}
 	// Strict POSIX sh: identical under dash and bash. Paths are quoted so a
 	// temp dir containing a space cannot break the stub.
@@ -73,9 +69,6 @@ for a in "$@"; do
     cat "` + psFile + `"
     exit 0
   fi
-done
-for a in "$@"; do
-  if [ "$a" = "rm" ] && [ "` + hangRM + `" = "1" ]; then while : ; do sleep 1; done; fi
 done
 for a in "$@"; do
   if [ "$a" = "down" ]; then exit ` + itoa(downCode) + `; fi
@@ -105,17 +98,6 @@ func recordedLog(t *testing.T, path string) string {
 	return string(b)
 }
 
-func recordedArgv(t *testing.T, path string) []string {
-	t.Helper()
-	var out []string
-	for _, l := range strings.Split(recordedLog(t, path), "\n") {
-		if strings.HasPrefix(l, "ARG ") {
-			out = append(out, strings.TrimPrefix(l, "ARG "))
-		}
-	}
-	return out
-}
-
 // inspectRecorder answers ContainerInspect as "no such container" so the reap
 // barrier returns on its first poll, and records what it was asked about. The
 // embedded interface is nil, so any other call panics rather than quietly
@@ -124,6 +106,50 @@ type inspectRecorder struct {
 	docker.Client
 	mu    sync.Mutex
 	asked []string
+	// removed records every ContainerRemove. Removal moved from `docker rm -f`
+	// to the Engine API, so the argv log no longer sees it.
+	removed []string
+	// listed records the name filters ContainerList was asked about.
+	listed []string
+	// hangRemove makes ContainerRemove block until its context expires, which
+	// is how a saturated daemon presents.
+	hangRemove bool
+}
+
+func (r *inspectRecorder) ContainerRemove(ctx context.Context, name string, _ container.RemoveOptions) error {
+	if r.hangRemove {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	r.mu.Lock()
+	r.removed = append(r.removed, name)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *inspectRecorder) ContainerList(_ context.Context, options container.ListOptions) ([]container.Summary, error) {
+	r.mu.Lock()
+	r.listed = append(r.listed, options.Filters.Get("name")...)
+	r.mu.Unlock()
+	return nil, nil
+}
+
+// didRemove reports whether the given container was force-removed.
+func (r *inspectRecorder) didRemove(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, n := range r.removed {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *inspectRecorder) removedIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.removed...)
 }
 
 func (r *inspectRecorder) ContainerInspect(_ context.Context, name string) (container.InspectResponse, error) {
@@ -182,7 +208,7 @@ func TestSweepLeavesOrphansAlone(t *testing.T) {
 {"ID":"id-db","Service":"db","State":"exited"}
 {"ID":"id-user-postgres","Service":"postgres","State":"running"}
 `
-	a, _, argvLog := keployStack(t, ps, 1)
+	a, rec, _ := keployStack(t, ps, 1)
 
 	ids := a.sweepStragglingProjectContainers()
 
@@ -192,11 +218,11 @@ func TestSweepLeavesOrphansAlone(t *testing.T) {
 				"of keploy's compose services, and `down` would have left it alone")
 		}
 	}
-	if !strings.Contains(recordedLog(t, argvLog), "id-app") {
-		t.Fatal("the sweep did not remove keploy's own leftover container")
+	if !rec.didRemove("id-app") {
+		t.Fatalf("the sweep did not remove keploy's own leftover container; removed %v", rec.removedIDs())
 	}
-	if strings.Contains(recordedLog(t, argvLog), "id-user-postgres") {
-		t.Fatal("the user's orphan was passed to `docker rm -f`")
+	if rec.didRemove("id-user-postgres") {
+		t.Fatalf("the user's orphan was force-removed; removed %v", rec.removedIDs())
 	}
 }
 
@@ -228,15 +254,15 @@ func TestComposeDownSweepsAfterAFailedDown(t *testing.T) {
 		t.Fatalf("ComposeDown never asked compose what was left standing after a failed down, so the "+
 			"next `up` still reuses it.\n%s", log)
 	}
-	if !strings.Contains(log, "id-db") {
-		t.Fatalf("the leftover container was listed but never removed.\n%s", log)
+	if !rec.didRemove("id-db") {
+		t.Fatalf("the leftover container was listed but never removed; removed %v", rec.removedIDs())
 	}
 	// The original two-name removal must survive alongside the sweep: it is the
 	// fallback for when `compose ps` itself fails, which is exactly when the
 	// daemon is struggling.
 	for _, name := range []string{"keploy-v3", "user-app"} {
-		if !strings.Contains(log, name) {
-			t.Fatalf("the agent/app force-remove was lost (%s missing).\n%s", name, log)
+		if !rec.didRemove(name) {
+			t.Fatalf("the agent/app force-remove was lost (%s missing); removed %v", name, rec.removedIDs())
 		}
 	}
 	// And the reap barrier has to cover the swept ids, not just the two names —
@@ -247,31 +273,71 @@ func TestComposeDownSweepsAfterAFailedDown(t *testing.T) {
 	}
 }
 
-// TestSweepSendsTheComposeYAMLOnStdinForInMemoryProjects covers the in-memory
-// path (the enterprise cloud flow), where the compose document is piped rather
-// than written to disk. `docker compose -f -` with nothing on stdin fails with
-// "empty compose file", the sweep logs at Debug and returns nothing, and the
-// whole fix is silently a no-op on that path.
-func TestSweepSendsTheComposeYAMLOnStdinForInMemoryProjects(t *testing.T) {
-	ps := `{"ID":"id-app","Service":"app","State":"exited"}` + "\n"
-	argvLog := stubDockerCLI(t, ps, 1)
+// TestSweepUsesTheComposeLibraryForInMemoryProjects covers the in-memory path
+// (the enterprise cloud flow), where the compose document is never written to
+// disk. That path no longer shells out at all — it drives the compose library —
+// so the failure this guards is that the sweep enumerates NOTHING and silently
+// becomes a no-op on the very path it was written for.
+//
+// It also pins that no `docker` binary is invoked: the whole point of the
+// library path is that the runner image needs no docker CLI.
+func TestSweepUsesTheComposeLibraryForInMemoryProjects(t *testing.T) {
+	argvLog := stubDockerCLI(t, "", 0)
+	stack := &fakeComposeStack{
+		ps: []docker.ServiceState{{ID: "id-app", Service: "app", State: "exited"}},
+	}
 	a := &App{
 		logger:          zap.NewNop(),
 		docker:          &inspectRecorder{},
 		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
 		cmd:             "docker compose -f - up",
 		composeServices: []string{"app"},
+		newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
 	}
 
-	a.sweepStragglingProjectContainers()
+	ids := a.sweepStragglingProjectContainers()
 
-	log := recordedLog(t, argvLog)
-	if !strings.Contains(log, "ARG -\n") {
-		t.Fatalf("the in-memory sweep did not pass `-f -`.\n%s", log)
+	if stack.psCalls == 0 {
+		t.Fatal("the in-memory sweep never asked the compose library what was left standing, " +
+			"so it silently removes nothing on the path it exists for")
 	}
-	if !strings.Contains(log, "STDIN services:") {
-		t.Fatalf("the compose YAML never reached the child's stdin, so `docker compose -f -` sees an "+
-			"empty compose file and the sweep silently does nothing.\n%s", log)
+	if len(ids) != 1 || ids[0] != "id-app" {
+		t.Fatalf("sweep returned %v, want [id-app]", ids)
+	}
+	if log := recordedLog(t, argvLog); strings.Contains(log, "ARG") {
+		t.Fatalf("the in-memory sweep shelled out to a `docker` binary; the library path must not.\n%s", log)
+	}
+}
+
+// TestSweepSkipsComposeRunOneOffsOnTheLibraryPath pins that the label carried
+// through the library is still read. A `compose run` container shares the
+// service label with a `compose up` one, so without the oneoff label the sweep
+// would remove a container that is the user's, not keploy's.
+func TestSweepSkipsComposeRunOneOffsOnTheLibraryPath(t *testing.T) {
+	stubDockerCLI(t, "", 0)
+	stack := &fakeComposeStack{ps: []docker.ServiceState{
+		{ID: "id-oneoff", Service: "app", State: "exited",
+			Labels: map[string]string{"com.docker.compose.oneoff": "True"}},
+		{ID: "id-real", Service: "app", State: "exited"},
+	}}
+	a := &App{
+		logger:          zap.NewNop(),
+		docker:          &inspectRecorder{},
+		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+		cmd:             "docker compose -f - up",
+		composeServices: []string{"app"},
+		newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
+	}
+
+	ids := a.sweepStragglingProjectContainers()
+
+	for _, id := range ids {
+		if id == "id-oneoff" {
+			t.Fatalf("the sweep removed a `compose run` one-off, which is the user's container: %v", ids)
+		}
+	}
+	if len(ids) != 1 || ids[0] != "id-real" {
+		t.Fatalf("sweep returned %v, want [id-real]", ids)
 	}
 }
 
@@ -280,14 +346,15 @@ func TestSweepSendsTheComposeYAMLOnStdinForInMemoryProjects(t *testing.T) {
 // guessing is what the orphan test above forbids.
 func TestSweepWithNoKnownServicesDoesNothing(t *testing.T) {
 	ps := `{"ID":"id-app","Service":"app","State":"exited"}` + "\n"
-	argvLog := stubDockerCLI(t, ps, 1)
-	a := &App{logger: zap.NewNop(), composeFile: "/tmp/c.yaml", cmd: "docker compose up"}
+	stubDockerCLI(t, ps, 1)
+	rec := &inspectRecorder{}
+	a := &App{logger: zap.NewNop(), docker: rec, composeFile: "/tmp/c.yaml", cmd: "docker compose up"}
 
 	if ids := a.sweepStragglingProjectContainers(); len(ids) != 0 {
 		t.Fatalf("swept %v with no known service list", ids)
 	}
-	if strings.Contains(recordedLog(t, argvLog), "ARG rm") {
-		t.Fatal("docker rm was called with no way to know which containers are keploy's")
+	if got := rec.removedIDs(); len(got) != 0 {
+		t.Fatalf("containers were force-removed with no way to know which are keploy's: %v", got)
 	}
 }
 
@@ -295,19 +362,21 @@ func TestSweepWithNoKnownServicesDoesNothing(t *testing.T) {
 // looks like it works: hand `docker rm -f` a single space-joined string and it
 // reports "No such container: <id1> <id2> ...", exits 0, and removes NOTHING,
 // while the caller's logs show a removal was attempted.
-func TestForceRemoveContainersPassesEachIDAsItsOwnArgument(t *testing.T) {
-	argvLog := stubDockerCLI(t, "", 0)
-	a := &App{logger: zap.NewNop()}
+func TestForceRemoveContainersRemovesEachIDIndividually(t *testing.T) {
+	rec := &inspectRecorder{}
+	a := &App{logger: zap.NewNop(), docker: rec}
 
 	a.forceRemoveContainers([]string{"id-one", "id-two", "id-three"})
 
-	argv := recordedArgv(t, argvLog)
-	if len(argv) != 5 { // rm, -f, and one entry per id
-		t.Fatalf("docker received %d arguments (%v); want 5 — one per id, not a joined string", len(argv), argv)
+	got := rec.removedIDs()
+	sort.Strings(got)
+	want := []string{"id-one", "id-three", "id-two"}
+	if len(got) != len(want) {
+		t.Fatalf("removed %v; want one call per id (%v), not a single joined operand", got, want)
 	}
-	for i, want := range []string{"rm", "-f", "id-one", "id-two", "id-three"} {
-		if argv[i] != want {
-			t.Fatalf("argv[%d] = %q; want %q (full argv: %v)", i, argv[i], want, argv)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("removed %v; want %v", got, want)
 		}
 	}
 }
@@ -315,13 +384,13 @@ func TestForceRemoveContainersPassesEachIDAsItsOwnArgument(t *testing.T) {
 // TestForceRemoveContainersWithNothingToRemoveDoesNotCallDocker keeps the
 // teardown from issuing a `docker rm -f` with no operands, which errors.
 func TestForceRemoveContainersWithNothingToRemoveDoesNotCallDocker(t *testing.T) {
-	argvLog := stubDockerCLI(t, "", 0)
-	a := &App{logger: zap.NewNop()}
+	rec := &inspectRecorder{}
+	a := &App{logger: zap.NewNop(), docker: rec}
 
 	a.forceRemoveContainers(nil)
 
-	if recordedLog(t, argvLog) != "" {
-		t.Fatal("docker was invoked with an empty id list")
+	if got := rec.removedIDs(); len(got) != 0 {
+		t.Fatalf("the daemon was called with an empty id list: %v", got)
 	}
 }
 
@@ -373,10 +442,11 @@ func TestSweepSurvivesComposeWarningsOnStderr(t *testing.T) {
 	ps := `{"ID":"id-app","Service":"app","State":"exited"}` + "\n"
 	warnings := "level=warning msg=\"The \\\"TAG\\\" variable is not set. Defaulting to a blank string.\"\n" +
 		"level=warning msg=\"the attribute `version` is obsolete, it will be ignored\"\n"
-	argvLog := stubDockerCLIOpts(t, ps, 1, warnings, false)
+	stubDockerCLIOpts(t, ps, 1, warnings, false)
+	rec := &inspectRecorder{}
 	a := &App{
 		logger:          zap.NewNop(),
-		docker:          &inspectRecorder{},
+		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
 		cmd:             "docker compose up",
 		composeServices: []string{"app"},
@@ -388,8 +458,8 @@ func TestSweepSurvivesComposeWarningsOnStderr(t *testing.T) {
 		t.Fatalf("the sweep found %v; a compose warning on stderr blinded it, so the teardown silently "+
 			"leaves every container behind for anyone whose compose file emits one", ids)
 	}
-	if !strings.Contains(recordedLog(t, argvLog), "id-app") {
-		t.Fatal("the leftover container was never removed")
+	if !rec.didRemove("id-app") {
+		t.Fatalf("the leftover container was never removed; removed %v", rec.removedIDs())
 	}
 }
 
@@ -406,10 +476,11 @@ func TestSweepLeavesComposeRunOneOffsAlone(t *testing.T) {
 	ps := `{"ID":"id-app","Service":"app","State":"exited","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=app"}
 {"ID":"id-oneoff","Service":"app","State":"running","Labels":"com.docker.compose.oneoff=True,com.docker.compose.service=app"}
 `
-	argvLog := stubDockerCLIOpts(t, ps, 1, "", false)
+	stubDockerCLIOpts(t, ps, 1, "", false)
+	rec := &inspectRecorder{}
 	a := &App{
 		logger:          zap.NewNop(),
-		docker:          &inspectRecorder{},
+		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
 		cmd:             "docker compose up",
 		composeServices: []string{"app"},
@@ -426,8 +497,8 @@ func TestSweepLeavesComposeRunOneOffsAlone(t *testing.T) {
 	if len(ids) != 1 || ids[0] != "id-app" {
 		t.Fatalf("the sweep should still remove keploy's own leftover; got %v", ids)
 	}
-	if strings.Contains(recordedLog(t, argvLog), "id-oneoff") {
-		t.Fatal("the one-off was passed to `docker rm -f`")
+	if rec.didRemove("id-oneoff") {
+		t.Fatalf("the one-off was force-removed; removed %v", rec.removedIDs())
 	}
 }
 
@@ -486,8 +557,7 @@ func TestParseComposeServiceStatesReadsTheOneOffLabel(t *testing.T) {
 // containers against a wedged daemon is the original unbounded-teardown bug,
 // the one the whole budget block was written to remove.
 func TestForceRemoveContainersIsBoundedWhenDockerHangs(t *testing.T) {
-	stubDockerCLIHang(t, "", 0, "", false, true) // `rm` never returns
-	a := &App{logger: zap.NewNop()}
+	a := &App{logger: zap.NewNop(), docker: &inspectRecorder{hangRemove: true}} // removal never returns
 
 	done := make(chan struct{})
 	go func() {
@@ -552,4 +622,48 @@ func TestSetComposeSourceKeepsTheServiceListWithTheSource(t *testing.T) {
 		t.Fatal("the injected keploy-agent service is not in the set; the service list was captured " +
 			"before ModifyComposeForAgent")
 	}
+}
+
+// fakeComposeStack is a composeStack that answers from canned data, so the
+// in-memory compose path keeps unit coverage without a docker daemon.
+type fakeComposeStack struct {
+	ps       []docker.ServiceState
+	psCalls  int
+	downCall int
+	upErr    error
+	// upBlocksUntil, when non-nil, makes Up block until it is closed or the
+	// context ends — the shape a foreground `up` has.
+	upBlocksUntil chan struct{}
+}
+
+func (f *fakeComposeStack) ProjectName() string { return "fake" }
+
+func (f *fakeComposeStack) Up(ctx context.Context, _ docker.ComposeUpOptions, _, _ io.Writer) error {
+	if f.upBlocksUntil != nil {
+		select {
+		case <-f.upBlocksUntil:
+		case <-ctx.Done():
+		}
+	}
+	return f.upErr
+}
+
+func (f *fakeComposeStack) Down(context.Context, time.Duration) error {
+	f.downCall++
+	return nil
+}
+
+func (f *fakeComposeStack) Ps(context.Context) ([]docker.ServiceState, error) {
+	f.psCalls++
+	return f.ps, nil
+}
+
+func (f *fakeComposeStack) ContainerIDsForService(_ context.Context, service string) ([]string, error) {
+	var ids []string
+	for _, s := range f.ps {
+		if s.Service == service {
+			ids = append(ids, s.ID)
+		}
+	}
+	return ids, nil
 }

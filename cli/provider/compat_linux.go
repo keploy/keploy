@@ -5,7 +5,7 @@ package provider
 import (
 	"errors"
 
-	"github.com/moby/moby/pkg/parsers/kernel"
+	"github.com/docker/docker/pkg/parsers/kernel"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.uber.org/zap"
 )
