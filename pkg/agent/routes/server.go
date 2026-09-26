@@ -49,25 +49,7 @@ const bindRetryInterval = 500 * time.Millisecond
 func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocker bool, router http.Handler) {
 	addr := agentBindAddr(port, isDocker)
 	logger.Info("Starting Agent's HTTP server", zap.String("addr", addr))
-	srv := &http.Server{
-		Handler: router,
-		// A connection that is opened and then never finishes its request
-		// line, or that completes a request and then goes quiet, would
-		// otherwise hold a goroutine indefinitely - on a port any local
-		// process can reach. These two cover both, and neither touches a
-		// request already in flight.
-		//
-		// Deliberately no ReadTimeout or WriteTimeout: /agent/pcap/keylog and
-		// /agent/pcap/traffic are long-lived streams that either would cut.
-		// IdleTimeout applies only BETWEEN requests on a keep-alive
-		// connection, so it leaves those streams alone; a client that finds a
-		// reused connection closed simply dials again.
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       5 * time.Minute,
-		// The net/http default, pinned rather than changed, so the bound on
-		// header memory is stated here rather than inherited silently.
-		MaxHeaderBytes: 1 << 20,
-	}
+	srv := newAgentHTTPServer(router)
 
 	// Derive a context tied to both the parent context and the lifetime of this function,
 	// so the shutdown goroutine will always terminate when the server stops or fails to start.
@@ -101,6 +83,29 @@ func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocke
 		return
 	}
 	logger.Info("HTTP server stopped")
+}
+
+// newAgentHTTPServer builds the control-plane HTTP server around router.
+func newAgentHTTPServer(router http.Handler) *http.Server {
+	return &http.Server{
+		Handler: router,
+		// A connection that is opened and then never finishes its request
+		// line, or that completes a request and then goes quiet, would
+		// otherwise hold a goroutine indefinitely - on a port any local
+		// process can reach. These two cover both, and neither touches a
+		// request already in flight.
+		//
+		// Deliberately no ReadTimeout or WriteTimeout: /agent/pcap/keylog and
+		// /agent/pcap/traffic are long-lived streams that either would cut.
+		// IdleTimeout applies only BETWEEN requests on a keep-alive
+		// connection, so it leaves those streams alone; a client that finds a
+		// reused connection closed simply dials again.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       5 * time.Minute,
+		// The net/http default, pinned rather than changed, so the bound on
+		// header memory is stated here rather than inherited silently.
+		MaxHeaderBytes: 1 << 20,
+	}
 }
 
 // agentBindAddr picks the agent control-plane server's bind address. Native

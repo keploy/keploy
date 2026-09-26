@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/pkg/stdcopy"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 
@@ -1461,6 +1462,33 @@ func extractProjectFlags(cmd string) []string {
 	return flags
 }
 
+// withAgentToken returns the app command as it must run, and what it needs in
+// its environment on top of what it inherits from keploy.
+//
+// Under docker compose that command is what starts the agent: the generated
+// keploy-agent service names the control-plane token without a value, and
+// compose fills it in from the environment given here. A leading sudo would
+// reset that environment first, so it is told to keep the one variable
+// (keepAgentTokenThroughSudo). Every other kind starts its agent some other
+// way, and the application under test is handed nothing.
+//
+// One place for both, whichever way the compose command was put together —
+// rewritten around a generated file, piped in memory, or a wrapper keploy
+// could not rewrite at all.
+//
+// And the one place a compose agent is launched, so it is recorded here
+// (token.RecordLaunch), once for every run: a docker compose `keploy test`
+// runs the app again for each test-set, and with it a new agent at the same
+// address, which the client's check that its agent enforces the token has to
+// see as the new agent it is.
+func (a *App) withAgentToken(cmd string) (string, []string) {
+	if a.kind != utils.DockerCompose {
+		return cmd, nil
+	}
+	token.RecordLaunch(a.opts.AgentURI)
+	return keepAgentTokenThroughSudo(cmd), docker.AgentTokenEnv()
+}
+
 func (a *App) run(ctx context.Context) models.AppError {
 	// --from-container never reaches a shell: the app is started, streamed and
 	// waited on through the Engine API, so none of the command-string handling
@@ -1653,7 +1681,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	var err error
-	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent)
+	runCmd, runEnv := a.withAgentToken(userCmd)
+	cmdErr := utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
 	// A user-app `docker run --name X` can still lose the container-name race to
 	// the prior test-set's --rm reaper on a saturated CI daemon even after the
 	// pre-run ensureContainerNameFreeWithin verified the name was free — the
@@ -1673,7 +1702,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		a.logger.Warn("docker run exited 125 with the --name still in use (container-name conflict); force-removing the name and retrying",
 			zap.String("container", dockerRunName), zap.Int("attempt", attempt))
 		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
-		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent)
+		cmdErr = utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
 	}
 
 	// Compose mode: a `docker compose up` can fail not because the user's app is
@@ -1746,7 +1775,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 			a.ensureContainerNameFreeWithin(a.keployContainer, preRunRemoveBudget)
 		}
 
-		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent)
+		cmdErr = utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
 	}
 
 	if cmdErr.Err != nil {

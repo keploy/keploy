@@ -35,6 +35,34 @@ func isDaemonSetAgent() bool {
 	return os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true"
 }
 
+// newAgentRouter builds the control-plane router with every route behind the
+// token guard. The guard goes in before any route is registered: the control
+// plane streams live TLS session keys and captured traffic and accepts
+// session-mutating POSTs, and loopback is not a privilege boundary — other
+// local users, neighbouring containers, and the application under test (which
+// shares the agent's network namespace) can all reach it.
+//
+// An error means the agent was handed a token it cannot read, and must not
+// start; see routes.ConsumeSessionToken.
+//
+// A DaemonSet agent never serves this router (see the gate in Agent), so it
+// neither consumes a token nor says anything about one: telling every node's
+// log that a server it never starts is unauthenticated would be a false alarm.
+func newAgentRouter(logger *zap.Logger, a agent.Service, tokenFile string, isDocker, daemonSet bool) (chi.Router, error) {
+	sessionToken := ""
+	if !daemonSet {
+		tok, err := routes.ConsumeSessionToken(logger, tokenFile, isDocker)
+		if err != nil {
+			return nil, err
+		}
+		sessionToken = tok
+	}
+	router := chi.NewRouter()
+	router.Use(routes.Authenticate(logger, sessionToken))
+	routes.ActiveHooks.New(router, a, logger)
+	return router, nil
+}
+
 func init() {
 	Register("agent", Agent)
 }
@@ -109,24 +137,21 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			}
 
 			startAgentCh := make(chan int)
-			router := chi.NewRouter()
-			// Guard every route before any of them are registered. The
-			// control plane streams live TLS session keys and captured
-			// traffic and accepts session-mutating POSTs, and loopback is
-			// not a privilege boundary: other local users, neighbouring
-			// containers, and the application under test (which shares this
-			// agent's network namespace) can all reach it.
+			daemonSet := isDaemonSetAgent()
 			// Read directly, like client-pid above, so this never depends on
 			// config wiring. An unreadable flag is not a reason to refuse to
-			// start; SessionToken falls back to the environment and warns if
-			// that is empty too.
+			// start: it means no launcher passed a file, and the environment
+			// is consulted instead.
 			tokenFile, tfErr := cmd.Flags().GetString("token-file")
 			if tfErr != nil {
 				logger.Debug("could not read the token-file flag", zap.Error(tfErr))
 			}
-			router.Use(routes.Authenticate(logger, routes.ConsumeSessionToken(logger, tokenFile)))
-
-			routes.ActiveHooks.New(router, a, logger)
+			router, err := newAgentRouter(logger, a, tokenFile, isDocker, daemonSet)
+			if err != nil {
+				utils.LogError(logger, err, "refusing to start the agent")
+				utils.SetExitCodeOnce(utils.ExitKeployError)
+				return nil
+			}
 			go func() {
 				select {
 				case <-ctx.Done():
@@ -151,7 +176,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					// (/agent/stop, /agent/storemocks, …). Skip it. We still
 					// receive on startAgentCh above so Agent.Setup's unbuffered
 					// port handoff never blocks.
-					if isDaemonSetAgent() {
+					if daemonSet {
 						logger.Info("running as a Kubernetes DaemonSet agent; not starting the control-plane HTTP server (push architecture has no inbound HTTP consumers)")
 						return
 					}
