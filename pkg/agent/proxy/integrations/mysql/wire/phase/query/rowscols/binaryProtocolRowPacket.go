@@ -21,6 +21,12 @@ import (
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row
 
 func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mysql.ColumnDefinition41) (*mysql.BinaryRow, int, error) {
+	// A truncated or fuzzed packet shorter than the header + OK byte would
+	// otherwise slice out of range below and panic the connection handler
+	// instead of surfacing a decode error.
+	if len(data) < 5 {
+		return nil, 0, fmt.Errorf("malformed binary row packet: need at least 5 bytes for header and OK byte, got %d", len(data))
+	}
 
 	offset := 0
 	row := &mysql.BinaryRow{
@@ -38,6 +44,9 @@ func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*m
 	offset++
 
 	nullBitmapLen := (len(columns) + 7 + 2) / 8
+	if len(data) < offset+nullBitmapLen {
+		return nil, offset, fmt.Errorf("malformed binary row packet: need %d bytes for null bitmap, have %d", nullBitmapLen, len(data)-offset)
+	}
 	nullBitmap := data[offset : offset+nullBitmapLen]
 	row.RowNullBuffer = nullBitmap
 
@@ -51,6 +60,16 @@ func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*m
 				Value: nil,
 			})
 			continue
+		}
+
+		// The null bitmap says this column has a value, so at least one more
+		// byte must remain. Without this, a packet truncated right after the
+		// bitmap hands readBinaryValue an empty slice; ParseBinaryDate/
+		// ParseBinaryDateTime/ParseBinaryTime treat an empty slice as "no
+		// value yet" and return (nil, 0, nil), so the truncated row would be
+		// accepted instead of rejected.
+		if offset >= len(data) {
+			return nil, offset, fmt.Errorf("malformed binary row packet: unexpected end of data at column %q", col.Name)
 		}
 
 		res, n, err := readBinaryValue(data[offset:], col)
@@ -110,6 +129,9 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 		return res, n, err
 
 	case mysql.FieldTypeTiny:
+		if len(data) < 1 {
+			return nil, 0, errors.New("malformed FieldTypeTiny value")
+		}
 		if isUnsigned {
 			res.value = uint8(data[0])
 			return res, 1, nil
