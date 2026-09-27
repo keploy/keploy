@@ -1,3 +1,10 @@
+//go:build composelib && !darwin
+
+// Tagged, because every test here drives the compose library itself —
+// NewComposeRunner and the api.Compose backend behind it. Without the tag
+// that backend is the refusal stub, so these would fail for the absence of
+// the thing they exist to pin rather than for anything about its behaviour.
+
 package docker
 
 import (

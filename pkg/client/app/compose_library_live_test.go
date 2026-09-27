@@ -1,3 +1,9 @@
+//go:build composelib && !darwin
+
+// Tagged: these drive the compose LIBRARY path (App.useComposeLibrary).
+// Without the tag that path is never taken, so they would be failing for
+// the absence of the thing they pin rather than for its behaviour.
+
 package app
 
 import (

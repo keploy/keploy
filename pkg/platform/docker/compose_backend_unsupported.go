@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build !composelib || darwin
 
 package docker
 
@@ -9,8 +9,24 @@ import (
 	"github.com/docker/compose/v2/pkg/api"
 )
 
-// ComposeLibrarySupported is false on darwin, and callers must fall back to
-// shelling out to `docker compose`.
+// ComposeLibrarySupported is false here, and callers fall back to shelling out
+// to `docker compose` — which is exactly what keploy did before the library
+// existed, so nothing is lost by it.
+//
+// TWO reasons this file gets built.
+//
+//  1. No `composelib` tag. The library is reachable only through
+//     Config.InMemoryCompose, which is tagged `json:"-" yaml:"-"
+//     mapstructure:"-"` — it cannot be set from a config file, a flag or an env
+//     var, and nothing in THIS repo sets it. Only enterprise does, for its cloud
+//     replay and its in-pod compose runner. So an OSS build links ~77 MiB it can
+//     never execute (measured: a probe importing this package went 9.4 MiB ->
+//     86.4 MiB), and that binary also ships inside the agent image injected into
+//     every recorded application pod. Enterprise builds with -tags composelib
+//     and gets the library; everyone else keeps today's size.
+//
+//  2. darwin, tag or not. See below: the backend reaches a cgo-only package, and
+//     keploy's darwin binaries are cross-compiled from Linux with CGO_ENABLED=0.
 //
 // github.com/docker/compose/v2/pkg/compose imports pkg/watch, which on darwin
 // imports github.com/fsnotify/fsevents — a cgo-only package (watcher_darwin.go

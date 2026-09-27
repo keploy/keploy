@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build composelib && !darwin
 
 package docker
 
@@ -9,7 +9,8 @@ import (
 )
 
 // ComposeLibrarySupported reports whether this build can drive compose
-// in-process. See compose_backend_darwin.go for why darwin cannot.
+// in-process. Requires the `composelib` build tag; see
+// compose_backend_unsupported.go for why it is opt-in and why darwin is out.
 const ComposeLibrarySupported = true
 
 // newComposeBackend returns the compose library's own implementation of the
