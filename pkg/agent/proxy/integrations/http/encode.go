@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -158,16 +157,14 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return nil
 			}
 
-			// Check if expect: 100-continue header is present.
-			lines := strings.Split(string(finalReq), "\n")
-			var expectHeader string
-			for _, line := range lines {
-				if strings.HasPrefix(line, "Expect:") {
-					expectHeader = strings.TrimSpace(strings.TrimPrefix(line, "Expect:"))
-					break
-				}
+			// The whole header section first (relayed as it is read): only
+			// then is it known whether the client is waiting for a 100
+			// (Continue) before its body.
+			if _, _, err := h.readRequestHead(ctx, &finalReq, clientConn, destConn); err != nil {
+				errCh <- err
+				return nil
 			}
-			if expectHeader == "100-continue" {
+			if awaitsContinue(finalReq) {
 				resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to read the response message from the server after 100-continue request")
@@ -192,22 +189,8 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					errCh <- err
 					return nil
 				}
-				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to read the request buffer from the user client")
-					errCh <- err
-					return nil
-				}
-				_, err = destConn.Write(reqBuf)
-				if err != nil {
-					if ctx.Err() != nil {
-						return ctx.Err()
-					}
-					utils.LogError(h.Logger, err, "failed to write request message to the destination server")
-					errCh <- err
-					return nil
-				}
-				finalReq = append(finalReq, reqBuf...)
+				// HandleChunkedRequests relays and records the body the
+				// client now sends, by its framing.
 			}
 
 			// Capture the request timestamp.

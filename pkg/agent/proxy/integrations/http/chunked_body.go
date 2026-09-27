@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 )
 
 // errMalformedChunkedBody is returned when a chunked message body does not
@@ -281,4 +282,43 @@ func dropEmptyLinesBeforeRequest(req *[]byte) int {
 	n := len(*req) - len(bytes.TrimLeft(*req, "\r\n"))
 	*req = (*req)[n:]
 	return n
+}
+
+// awaitsContinue reports whether the client that sent req is waiting for a 100
+// (Continue) before it sends the request's body (RFC 9110 §10.1.1): req holds
+// the request's whole header section, which carries "Expect: 100-continue"
+// (expectsContinue) and frames a body, and none of that body has arrived. A
+// client that sends its body without waiting for the 100 — many do, and the
+// RFC lets them — is not waiting for one, and a proxy that answers it anyway
+// and then blocks for more bytes waits for bytes that are already in req.
+func awaitsContinue(req []byte) bool {
+	head, bodyStart, _, ok := messageHead(req, false)
+	if !ok || bodyStart < len(req) || !expectsContinue(head) {
+		return false
+	}
+	contentLength, transferEncoding := parseHeaders(head)
+	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+		return true
+	}
+	n, err := strconv.Atoi(contentLength)
+	return err == nil && n > 0
+}
+
+// expectsContinue reports whether the request's header section carries
+// "Expect: 100-continue" — the field name and the expectation compared without
+// regard to case (RFC 9110 §5.1, §10.1.1), and only in the header section, not
+// in a body line that happens to read like one.
+func expectsContinue(req []byte) bool {
+	head, _, _, ok := messageHead(req, false)
+	if !ok {
+		head = req // the header section so far
+	}
+	for _, line := range bytes.Split(head, []byte("\n")) {
+		name, value, found := bytes.Cut(bytes.TrimRight(line, "\r"), []byte(":"))
+		if found && bytes.EqualFold(bytes.TrimSpace(name), []byte("Expect")) &&
+			bytes.EqualFold(bytes.TrimSpace(value), []byte("100-continue")) {
+			return true
+		}
+	}
+	return false
 }

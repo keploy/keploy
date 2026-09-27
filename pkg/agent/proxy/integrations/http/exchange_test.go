@@ -104,6 +104,97 @@ func wantMockMiss(t *testing.T, done <-chan error) {
 	}
 }
 
+// A client that sends "Expect: 100-continue" either waits for the 100 before
+// its body or, as the RFC allows (RFC 9110 §10.1.1) and many clients do, sends
+// the body anyway. Replay answered every such request with a 100 and then
+// blocked reading more bytes, so a client whose body had already arrived was
+// left waiting until it gave up; and it answered only the exact spelling
+// "Expect: 100-continue", so a client sending "expect: 100-continue" (Node)
+// that DID wait was never answered.
+func TestDecodeHTTPAnswersExpectContinueOnlyWhenTheClientWaits(t *testing.T) {
+	for _, c := range []struct{ expect, chunked string }{
+		{"Expect: 100-continue", "Transfer-Encoding: chunked"},
+		{"expect: 100-continue", "transfer-encoding: Chunked"},
+	} {
+		expect := c.expect
+		head := "POST /u HTTP/1.1\r\nHost: up\r\n" + expect + "\r\nContent-Length: 3\r\n\r\n"
+		// A chunked body has no length to wait for, only its framing: Java's
+		// HttpURLConnection in chunked streaming mode and Node's http both
+		// wait for the 100 before sending one.
+		chunkedHead := "POST /u HTTP/1.1\r\nHost: up\r\n" + expect + "\r\n" + c.chunked + "\r\n\r\n"
+		const chunkedBody = "3\r\nabc\r\n0\r\n\r\n"
+		t.Run(expect+"/chunked body sent after the 100", func(t *testing.T) {
+			app, proxy := tcpPair(t)
+			done := startDecode(t, chunkedHead, proxy)
+			if got := readFor(app, 500*time.Millisecond); got != "HTTP/1.1 100 Continue\r\n\r\n" {
+				t.Fatalf("the app waiting for a 100 Continue got %q", got)
+			}
+			if _, err := app.Write([]byte(chunkedBody)); err != nil {
+				t.Fatal(err)
+			}
+			if got := readUntil(app, noMockAnswer, 2*time.Second); !strings.HasPrefix(got, noMockAnswer) {
+				t.Fatalf("the app got %q after its body, want the answer to its request", got)
+			}
+			wantMockMiss(t, done)
+		})
+		t.Run(expect+"/chunked body sent with the headers", func(t *testing.T) {
+			app, proxy := tcpPair(t)
+			done := startDecode(t, chunkedHead+chunkedBody, proxy)
+			if got := readUntil(app, noMockAnswer, 2*time.Second); !strings.HasPrefix(got, noMockAnswer) {
+				t.Fatalf("the app got %q, want the answer to its request and no 100 Continue", got)
+			}
+			wantMockMiss(t, done)
+		})
+		t.Run(expect+"/body sent with the headers", func(t *testing.T) {
+			app, proxy := tcpPair(t)
+			done := startDecode(t, head+"abc", proxy)
+			if got := readUntil(app, noMockAnswer, 2*time.Second); !strings.HasPrefix(got, noMockAnswer) {
+				t.Fatalf("the app got %q, want the answer to its request and no 100 Continue", got)
+			}
+			wantMockMiss(t, done)
+		})
+		t.Run(expect+"/body sent after the 100", func(t *testing.T) {
+			app, proxy := tcpPair(t)
+			done := startDecode(t, head, proxy)
+			if got := readFor(app, 500*time.Millisecond); got != "HTTP/1.1 100 Continue\r\n\r\n" {
+				t.Fatalf("the app waiting for a 100 Continue got %q", got)
+			}
+			if _, err := app.Write([]byte("abc")); err != nil {
+				t.Fatal(err)
+			}
+			if got := readUntil(app, noMockAnswer, 2*time.Second); !strings.HasPrefix(got, noMockAnswer) {
+				t.Fatalf("the app got %q after its body, want the answer to its request", got)
+			}
+			wantMockMiss(t, done)
+		})
+		t.Run(expect+"/header section in two reads", func(t *testing.T) {
+			app, proxy := tcpPair(t)
+			done := startDecode(t, head[:20], proxy)
+			if _, err := app.Write([]byte(head[20:])); err != nil {
+				t.Fatal(err)
+			}
+			if got := readFor(app, 500*time.Millisecond); got != "HTTP/1.1 100 Continue\r\n\r\n" {
+				t.Fatalf("the app waiting for a 100 Continue got %q", got)
+			}
+			if _, err := app.Write([]byte("abc")); err != nil {
+				t.Fatal(err)
+			}
+			if got := readUntil(app, noMockAnswer, 2*time.Second); !strings.HasPrefix(got, noMockAnswer) {
+				t.Fatalf("the app got %q after its body, want the answer to its request", got)
+			}
+			wantMockMiss(t, done)
+		})
+	}
+	t.Run("no body", func(t *testing.T) {
+		app, proxy := tcpPair(t)
+		done := startDecode(t, "POST /u HTTP/1.1\r\nHost: up\r\nExpect: 100-continue\r\nContent-Length: 0\r\n\r\n", proxy)
+		if got := readUntil(app, noMockAnswer, 2*time.Second); !strings.HasPrefix(got, noMockAnswer) {
+			t.Fatalf("the app got %q, want the answer to its request and no 100 Continue", got)
+		}
+		wantMockMiss(t, done)
+	})
+}
+
 // Empty lines in front of a request line are skipped when framing it (RFC 9112
 // §2.2) and are not part of the request: net/http.ReadRequest, which replay
 // and both record paths parse the framed request with, fails on them with
@@ -271,4 +362,56 @@ func TestEncodeHTTPTimesAMockByItsFinalResponse(t *testing.T) {
 		t.Fatalf("mock response time %v is before the final response was sent (%v): it is the interim response's",
 			m.Spec.ResTimestampMock, finalSent)
 	}
+}
+
+// The legacy record path relays the 100 Continue a waiting client needs from
+// the upstream, and does not wait for one when the client sent its body with
+// its headers.
+func TestEncodeHTTPRelaysExpectContinueOnlyWhenTheClientWaits(t *testing.T) {
+	upstream := func(send100 bool) func(net.Conn) {
+		return func(up net.Conn) {
+			got := readUntil(up, "\r\n\r\n", 2*time.Second)
+			if send100 {
+				_, _ = up.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
+			}
+			if !strings.HasSuffix(got, "abc") {
+				_ = readUntil(up, "abc", 2*time.Second)
+			}
+			_, _ = up.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+		}
+	}
+	head := "POST /u HTTP/1.1\r\nHost: up\r\nexpect: 100-continue\r\nContent-Length: 3\r\n\r\n"
+	recorded := func(t *testing.T, mocks <-chan *models.Mock) {
+		t.Helper()
+		select {
+		case m := <-mocks:
+			if m.Spec.HTTPReq == nil || m.Spec.HTTPReq.Body != "abc" || m.Spec.HTTPResp == nil || m.Spec.HTTPResp.StatusCode != 200 {
+				t.Fatalf("recorded %+v / %+v, want the upload and its 200", m.Spec.HTTPReq, m.Spec.HTTPResp)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("the exchange was not recorded")
+		}
+	}
+	t.Run("client waits", func(t *testing.T) {
+		app, done, mocks := encodeHarness(t, head, upstream(true))
+		if got := readFor(app, 500*time.Millisecond); got != "HTTP/1.1 100 Continue\r\n\r\n" {
+			t.Fatalf("the app waiting for a 100 Continue got %q", got)
+		}
+		_, _ = app.Write([]byte("abc"))
+		if got := readUntil(app, "\r\n\r\nok", 2*time.Second); !strings.HasSuffix(got, "\r\n\r\nok") {
+			t.Fatalf("the app got %q", got)
+		}
+		recorded(t, mocks)
+		_ = app.Close()
+		<-done
+	})
+	t.Run("client does not wait", func(t *testing.T) {
+		app, done, mocks := encodeHarness(t, head+"abc", upstream(false))
+		if got := readUntil(app, "\r\n\r\nok", 2*time.Second); !strings.HasSuffix(got, "\r\n\r\nok") {
+			t.Fatalf("the app got %q", got)
+		}
+		recorded(t, mocks)
+		_ = app.Close()
+		<-done
+	})
 }

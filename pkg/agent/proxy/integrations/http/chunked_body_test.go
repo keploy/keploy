@@ -714,3 +714,20 @@ func TestStartsWithInterimResponse(t *testing.T) {
 		}
 	}
 }
+
+// Header names are case-insensitive, and so is the 100-continue expectation
+// (RFC 9110 5.1, 10.1.1): a lowercase "expect: 100-continue" (Node's http
+// client sends it so) must get its 100 Continue, or the client waits for it
+// while the proxy waits for the body.
+func TestExpectsContinueIgnoresCase(t *testing.T) {
+	for req, want := range map[string]bool{
+		"POST /u HTTP/1.1\r\nHost: a\r\nExpect: 100-continue\r\n\r\n":                  true,
+		"POST /u HTTP/1.1\r\nhost: a\r\nexpect: 100-Continue\r\n\r\n":                  true,
+		"POST /u HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nExpect: 100-continue": false, // a body line
+		"POST /u HTTP/1.1\r\nHost: a\r\n\r\n":                                          false,
+	} {
+		if got := expectsContinue([]byte(req)); got != want {
+			t.Errorf("expectsContinue(%q) = %v, want %v", req, got, want)
+		}
+	}
+}
