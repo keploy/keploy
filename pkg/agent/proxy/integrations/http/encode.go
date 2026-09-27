@@ -356,11 +356,18 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			h.Logger.Debug("This is the initial response: " + string(resp))
 
 			chunkedRespStart := time.Now()
-			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp)
+			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp, requestMethod(finalReq))
 			probeHTTP(ctx, h.Logger, "encode-chunked-resp-done",
 				zap.Int64("dur_ns", time.Since(chunkedRespStart).Nanoseconds()),
 				zap.Int("finalRespLen", len(finalResp)),
 				zap.Error(err))
+			if startsWithInterimResponse(resp) {
+				// The mock is the FINAL response (parseFinalHTTP skips the
+				// interim 1xx this first read began with): time it by the
+				// final response's bytes, as the V2 record path does, not by
+				// a 100 Continue that came long before it.
+				resTimestampMock = models.CapturedRespTime(ctx)
+			}
 			if err != nil {
 				if err == io.EOF {
 					h.Logger.Debug("conn closed by the server", zap.Error(err))

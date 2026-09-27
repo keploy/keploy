@@ -137,7 +137,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		finalResp := append([]byte(nil), firstRespChunk.Bytes...)
 		resTs := firstRespChunk.WrittenAt
 
-		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp)
+		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, requestMethod(finalReq))
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// Legacy encodeHTTP treats EOF after some bytes as
@@ -187,8 +187,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 // Returns io.EOF if stream closes before the body is fully consumed.
 // Returns a decode error for malformed Content-Length / body framing.
 func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, finalReq *[]byte) error {
-	// 1. Complete headers.
-	for !hasCompleteHeaders(*finalReq) {
+	// 1. Complete headers: complete when messageHead finds the header section,
+	// not at the first "\r\n\r\n", which can be empty lines in front of the
+	// request line. Those are dropped (dropEmptyLinesBeforeRequest).
+	head, bodyStart, _, ok := messageHead(*finalReq, false)
+	for ; !ok; head, bodyStart, _, ok = messageHead(*finalReq, false) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -201,20 +204,16 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 		}
 		*finalReq = append(*finalReq, chunk.Bytes...)
 	}
+	bodyStart -= dropEmptyLinesBeforeRequest(finalReq)
 
-	contentLengthHeader, transferEncodingHeader := parseHeaders(*finalReq)
+	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
 			return fmt.Errorf("invalid content-length: %w", err)
 		}
-		headerEnd := bytes.Index(*finalReq, []byte("\r\n\r\n"))
-		if headerEnd < 0 {
-			return fmt.Errorf("header terminator missing")
-		}
-		bodyLength := len(*finalReq) - headerEnd - 4
-		remaining := contentLength - bodyLength
+		remaining := contentLength - (len(*finalReq) - bodyStart)
 		for remaining > 0 {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -234,7 +233,18 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 
 	if transferEncodingHeader != "" &&
 		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-		for !bytes.HasSuffix(*finalReq, chunkedTerminator) {
+		// Frame the chunks (see chunkedBody): a suffix test on the buffer ended
+		// a body whose data ends like "0\r\n\r\n" at a chunk boundary, and
+		// never ended one that carries trailers.
+		var body chunkedBody
+		for {
+			done, err := body.complete(*finalReq)
+			if err != nil {
+				return err
+			}
+			if done {
+				return nil
+			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -247,7 +257,6 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 			}
 			*finalReq = append(*finalReq, chunk.Bytes...)
 		}
-		return nil
 	}
 
 	// No body framing: the request is headers-only (e.g. GET / HTTP/1.1
@@ -265,17 +274,20 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 //   - Pull more chunks until response headers are complete.
 //   - Parse Content-Length / Transfer-Encoding from headers.
 //   - If Content-Length, read until the declared body length is met.
-//   - If Transfer-Encoding chunked, read until the last-chunk marker
-//     "0\r\n\r\n" appears as a suffix (the fix in SAP bug #4110).
+//   - If Transfer-Encoding chunked, read until the chunked framing ends
+//     (last-chunk, trailer section, final CRLF).
 //
 // Returns (lastWrittenAt, err). err may be io.EOF for the legitimate
 // "server closed after sending a full response" case; the caller
 // decides whether to emit a mock.
-func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte) (time.Time, error) {
+func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string) (time.Time, error) {
 	var lastWr time.Time
 
-	// 1. Complete headers.
-	for !hasCompleteHeaders(*finalResp) {
+	// 1. Complete headers: the final response's, past any interim 1xx.
+	for {
+		if _, _, _, ok := messageHead(*finalResp, true); ok {
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			return lastWr, err
 		}
@@ -292,20 +304,20 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		*finalResp = append(*finalResp, chunk.Bytes...)
 	}
 
-	// 2. Parse headers for body framing.
-	contentLengthHeader, transferEncodingHeader := parseHeaders(*finalResp)
+	// 2. Parse the final response's headers for body framing. The answer to
+	// a HEAD, a 204 and a 304 have no body whatever the headers say.
+	head, bodyStart, status, _ := messageHead(*finalResp, true)
+	if responseHasNoBody(reqMethod, status) {
+		return lastWr, nil
+	}
+	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
 			return lastWr, fmt.Errorf("invalid content-length: %w", err)
 		}
-		headerEnd := bytes.Index(*finalResp, []byte("\r\n\r\n"))
-		if headerEnd < 0 {
-			return lastWr, fmt.Errorf("header terminator missing")
-		}
-		bodyLength := len(*finalResp) - headerEnd - 4
-		remaining := contentLength - bodyLength
+		remaining := contentLength - (len(*finalResp) - bodyStart)
 		for remaining > 0 {
 			if err := ctx.Err(); err != nil {
 				return lastWr, err
@@ -328,11 +340,17 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 
 	if transferEncodingHeader != "" &&
 		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-		// Chunked: read until we see the last-chunk terminator as a
-		// suffix of finalResp. pUtil terminator detection (see chunk.go
-		// chunkedTerminator) uses HasSuffix so a body chunk that shares
-		// a TLS record with the terminator still exits cleanly.
-		for !bytes.HasSuffix(*finalResp, chunkedTerminator) {
+		// Chunked: read until the body's chunked framing ends (see
+		// chunkedBody), not until finalResp ends in "0\r\n\r\n".
+		body := chunkedBody{response: true}
+		for {
+			done, err := body.complete(*finalResp)
+			if err != nil {
+				return lastWr, err
+			}
+			if done {
+				return lastWr, nil
+			}
 			if err := ctx.Err(); err != nil {
 				return lastWr, err
 			}
@@ -348,7 +366,6 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 			}
 			*finalResp = append(*finalResp, chunk.Bytes...)
 		}
-		return lastWr, nil
 	}
 
 	// Neither Content-Length nor chunked: read until EOF (RFC 7230
@@ -372,10 +389,14 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 	}
 }
 
-// parseHeaders extracts Content-Length and Transfer-Encoding header
-// values (if any) from an HTTP message whose headers end with CRLFCRLF.
-// The parse is the same loose style the chunk.go helpers use: split on
-// '\n', trim '\r', skip malformed lines.
+// parseHeaders extracts the body-framing Content-Length and
+// Transfer-Encoding header values (if any) from an HTTP message whose
+// headers end with CRLFCRLF. The parse is the same loose style the chunk.go
+// helpers use: split on '\n', trim '\r', skip malformed lines.
+//
+// A chunked Transfer-Encoding overrides a Content-Length sent with it (RFC
+// 9112 §6.3), so contentLength is "" then: framing such a message by its
+// Content-Length would end it where its peer does not.
 func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 	lines := strings.Split(string(msg), "\n")
 	for _, line := range lines {
@@ -395,6 +416,9 @@ func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 		case "transfer-encoding":
 			transferEncoding = val
 		}
+	}
+	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+		contentLength = ""
 	}
 	return contentLength, transferEncoding
 }
@@ -485,7 +509,8 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 	}
 
-	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(m.Resp)), req)
+	// The final response: net/http does not skip interim 1xx responses.
+	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResponse(m.Resp))), req)
 	if err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
