@@ -145,10 +145,14 @@ func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clien
 				return err
 			}
 
-			// Check for Timeout
+			// A timeout only bounds this read, so a cancelled ctx is noticed:
+			// a client may pause mid-body, and the rest of the body follows.
+			// Ending the request here answered (or relayed) it cut short and
+			// read the rest of its body as the next request.
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				h.Logger.Info("Stopped getting data from the conn (Timeout)", zap.Error(err))
-				break
+				h.Logger.Debug("no request body bytes before the read deadline; reading on",
+					zap.Int("remaining", contentLength), zap.Error(err))
+				continue
 			}
 
 			// Check for Context Cancel (if Read failed due to context closure wrapped in net error)

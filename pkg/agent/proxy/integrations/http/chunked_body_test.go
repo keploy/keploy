@@ -414,6 +414,29 @@ func TestHandleChunkedRequestsKeepsBytesReadBeforeATimeout(t *testing.T) {
 	}
 }
 
+// A client that pauses past the per-read deadline in the middle of a
+// Content-Length body has not ended its request: the rest of the body follows.
+// Taking the bytes read so far for the whole request answered (or, recording,
+// forwarded) a request cut short, and the rest of its body was read as the
+// next request.
+func TestContentLengthRequestReadsOnAfterATimeout(t *testing.T) {
+	const head = "POST /v1/echo HTTP/1.1\r\nHost: tlsup\r\nContent-Length: 10\r\n\r\n"
+	for _, c := range []struct {
+		name  string
+		steps []readStep
+	}{
+		{"timeout after bytes", []readStep{{data: []byte("01234"), err: timeoutErr{}}, {data: []byte("56789")}}},
+		{"timeout with no bytes", []readStep{{data: []byte("01234")}, {err: timeoutErr{}}, {data: []byte("56789")}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := runChunkedRequest(t, head, newScriptedConn(c.steps...))
+			if err != nil || got != head+"0123456789" {
+				t.Fatalf("HandleChunkedRequests = (%q, %v), want the whole body: %q", got, err, head+"0123456789")
+			}
+		})
+	}
+}
+
 // Record-mode relay of a chunked RESPONSE: the same split terminator must end
 // the response, and every byte must have been relayed to the client.
 func TestChunkedResponseTerminatorSplitAcrossReads(t *testing.T) {
