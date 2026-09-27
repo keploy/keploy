@@ -299,6 +299,20 @@ func composeUpSemantics(cmd string) docker.ComposeUpOptions {
 			opts.ExitCodeFrom = strings.TrimPrefix(parts[i], "--exit-code-from=")
 		}
 	}
+	// --exit-code-from IMPLIES --abort-on-container-exit. The CLI does this
+	// itself (compose v2.40.3 cmd/compose/up.go), and without it a command
+	// carrying only --exit-code-from would leave Up blocking after the app
+	// exited, where the shell-out returns. --abort-on-container-failure is the
+	// documented exception and keeps precedence.
+	//
+	// keploy's own generated commands always carry both flags
+	// (ensureComposeExitOnAppFailure), so nothing reaches this today — which is
+	// exactly why it is worth stating: the claim above is that the two paths
+	// cannot disagree, and that has to hold for inputs keploy does not
+	// currently produce, not only for the ones it does.
+	if opts.ExitCodeFrom != "" && opts.OnExit == api.CascadeIgnore {
+		opts.OnExit = api.CascadeStop
+	}
 	return opts
 }
 

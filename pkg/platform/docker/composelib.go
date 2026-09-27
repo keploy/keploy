@@ -256,6 +256,15 @@ func environmentMap() composetypes.Mapping {
 			env[k] = v
 		}
 	}
+	// The agent this stack starts is NOT necessarily talked to by this process.
+	//
+	// On a laptop it is: the CLI that minted the token is the agent's only
+	// client. The in-pod compose runner is the other shape — there the agent's
+	// real client is k8s-proxy, in a different pod, which cannot learn a token
+	// minted here. That caller therefore passes KEPLOY_AGENT_TOKEN in, and
+	// token.resolveSession prefers an inherited value over minting one, so the
+	// control plane and the agent end up on the same secret. Minting is the
+	// fallback for the single-client case, not the contract.
 	for _, kv := range AgentTokenEnv() {
 		if k, v, ok := strings.Cut(kv, "="); ok {
 			env[k] = v
