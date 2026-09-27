@@ -22,7 +22,6 @@ import (
 	"github.com/docker/cli/cli/command"
 	cliflags "github.com/docker/cli/cli/flags"
 	"github.com/docker/compose/v2/pkg/api"
-	"github.com/docker/compose/v2/pkg/compose"
 	"github.com/docker/docker/client"
 )
 
@@ -162,7 +161,11 @@ func NewComposeRunner(ctx context.Context, apiClient client.APIClient, opts Comp
 		return nil, fmt.Errorf("prepare compose project: %w", err)
 	}
 
-	return &ComposeRunner{svc: compose.NewComposeService(dockerCli), project: project}, nil
+	svc, err := newComposeBackend(dockerCli)
+	if err != nil {
+		return nil, err
+	}
+	return &ComposeRunner{svc: svc, project: project}, nil
 }
 
 // syntheticComposeFilename names the in-memory document. It is never read from

@@ -654,7 +654,7 @@ func (a *App) ComposeDown() {
 	var downCmd *exec.Cmd
 
 	switch {
-	case len(a.composeContent) > 0:
+	case a.useComposeLibrary():
 		// In-memory mode: the stack keploy generated itself, so tear it down
 		// through the compose library — no `docker` binary, no stdin pipe. The
 		// project is resolved from the same -p/--project-directory the `up`
@@ -681,6 +681,15 @@ func (a *App) ComposeDown() {
 			a.logger.Debug("compose down finished with error (may be expected if containers already removed, or the bounded teardown deadline elapsed under load)",
 				zap.Error(err))
 		}
+	// Reached only where the library is not linked (darwin): same teardown,
+	// through `docker compose -f -` with the generated document on stdin.
+	case len(a.composeContent) > 0:
+		a.logger.Debug("Running docker compose down using in-memory compose content")
+		args := []string{"compose", "-f", "-"}
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "down", "--timeout", "1")
+		downCmd = exec.CommandContext(downCtx, "docker", args...)
+		downCmd.Stdin = bytes.NewReader(a.composeContent)
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
 			zap.String("composeFile", a.composeFile))
@@ -1087,13 +1096,29 @@ func (a *App) removeStaleComposeAgentWithin(budget time.Duration) {
 // EXACTLY as the upcoming `up` will (same -f/-p/project-directory flags and same
 // cwd), which is what makes the result line up with the container compose would
 // otherwise try to Recreate. Mirrors ComposeDown's branch selection for the
+// useComposeLibrary reports whether THIS build drives keploy's own generated
+// stack in-process.
+//
+// Two conditions, and both matter. composeContent is the seam: only a document
+// keploy generated itself is ever driven by the library. ComposeLibrarySupported
+// is false on darwin, where the library cannot be linked at all — keploy's
+// darwin binaries are cross-compiled from Linux with CGO_ENABLED=0 and the
+// compose backend reaches fsevents, which is cgo-only (see
+// pkg/platform/docker/compose_backend_darwin.go). Every site that would use the
+// library asks this first and otherwise keeps the `docker compose -f -`
+// shell-out, which is what keploy did before the library existed and is always
+// available on a laptop.
+func (a *App) useComposeLibrary() bool {
+	return len(a.composeContent) > 0 && docker.ComposeLibrarySupported
+}
+
 // file-based vs in-memory compose source.
 func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 	// In-memory mode: ask the compose library directly. It resolves the project
 	// from the same -p/--project-directory the upcoming `up` will use, which is
 	// what makes the result line up with the container compose would otherwise
 	// try to Recreate.
-	if len(a.composeContent) > 0 {
+	if a.useComposeLibrary() {
 		runner, err := a.composeRunner(ctx)
 		if err != nil {
 			a.logger.Debug("could not build the compose runner to list the prior keploy-agent container",
@@ -1113,6 +1138,12 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 
 	var args []string
 	switch {
+	// Reached only where the library is not linked (darwin): the generated
+	// document goes to `docker compose -f -` on stdin, exactly as before.
+	case len(a.composeContent) > 0:
+		args = []string{"compose", "-f", "-"}
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "ps", "-aq", keployAgentComposeService)
 	case a.composeFile != "":
 		args = []string{"compose", "-f", a.composeFile}
 		args = append(args, extractProjectFlags(a.cmd)...)
@@ -1122,6 +1153,9 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	if len(a.composeContent) > 0 {
+		cmd.Stdin = bytes.NewReader(a.composeContent)
+	}
 	// Output(), NOT CombinedOutput(): compose writes warnings to stderr, and
 	// this output is parsed as a list of container ids. An obsolete `version:`
 	// key or an unset ${VAR} — both of which survive into keploy's generated
@@ -1210,7 +1244,7 @@ func commandStderr(err error) string {
 func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
 	// In-memory mode: ask the compose library directly, with the same project
 	// scoping the `up`/`down` use so it sees exactly this stack.
-	if len(a.composeContent) > 0 {
+	if a.useComposeLibrary() {
 		runner, err := a.composeRunner(ctx)
 		if err != nil {
 			a.logger.Debug("could not build the compose runner to read service states", zap.Error(err))
@@ -1239,6 +1273,11 @@ func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
 
 	var args []string
 	switch {
+	// Reached only where the library is not linked (darwin).
+	case len(a.composeContent) > 0:
+		args = []string{"compose", "-f", "-"}
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "ps", "-a", "--format", "json")
 	case a.composeFile != "":
 		args = []string{"compose", "-f", a.composeFile}
 		// Carry any -p/--project-name/--project-directory from the run command so
@@ -1253,6 +1292,9 @@ func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	if len(a.composeContent) > 0 {
+		cmd.Stdin = bytes.NewReader(a.composeContent)
+	}
 	// Output(), NOT CombinedOutput(). Compose writes its warnings to stderr —
 	//
 	//	level=warning msg="The \"TAG\" variable is not set. Defaulting to a blank string."
@@ -1770,7 +1812,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// existing shell-out: it may carry flags and shell syntax keploy does not
 	// model, and it is not keploy's to reinterpret.
 	executeApp := func(runCmd string, runEnv []string) utils.CmdError {
-		if len(a.composeContent) > 0 {
+		if a.useComposeLibrary() {
 			return a.runComposeInProcess(ctx, composeDown)
 		}
 		return utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
