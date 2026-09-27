@@ -285,6 +285,11 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		unfiltered = NewTreeDb(customComparator)
 	}
 	mm := &MockManager{
+		// A fresh manager IS awaiting its first set: proxy.go:3626 builds one
+		// instead of calling ResetForReplaySession on the first replay session,
+		// so without this the first (genuine) staging call would not be
+		// recognised as a set boundary now that isInitialStaging requires it.
+		boundaryPending:     true,
 		filtered:            filtered,
 		unfiltered:          unfiltered,
 		startup:             NewTreeDb(customComparator),
@@ -781,7 +786,22 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// to filtered; mocks with req < firstWindowStart stay in startup;
 	// mocks with firstWindowStart <= req < start are stale previous-
 	// test bleed and get dropped.
-	isInitialStaging := start.Equal(models.BaseTime)
+	// A BaseTime start alone does NOT mean set staging. Every per-test
+	// scope/begin also sends AfterTime: models.BaseTime (see
+	// pkg/service/agent/scope.go, both the strict and the mapping branch),
+	// so keying staging on the timestamp made EVERY scope look like a set
+	// boundary: all filtered mocks were routed into startupInit and
+	// filteredForTree was nilled, leaving the per-test tree permanently
+	// empty. Measured: filteredIn 4,649 -> filteredForTree 0, startupInit
+	// 5,043, and GetPerTestMocksInWindow returned 0 in all 10,576 samples
+	// of a 118-test run. Per-test scoping never engaged for ANY test, so a
+	// negative test's recorded 401 could answer a sibling's byte-identical
+	// request -- the exact bleed per-test lifetime exists to prevent.
+	//
+	// boundaryPending is the real signal: ResetForReplaySession sets it, and
+	// its own comment already names this hazard -- "without a stray BaseTime
+	// call mid-set being able to deactivate a live test's window".
+	isInitialStaging := start.Equal(models.BaseTime) && m.boundaryPending
 	if isInitialStaging {
 		// Staging is the set boundary as far as routing is concerned: this is
 		// where the previous set's window bits and startup-init cutoff go, so
@@ -1041,6 +1061,9 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// window: any revision a consumer can observe now corresponds to a state
 	// where all three tiers agree. Suppression is per-call, not a flag on the
 	// manager, so it cannot swallow a concurrent consumer's own bump.
+	// same tree via GetFilteredMocksInWindow and reports 0 in every sample, while
+	// the disk reload reports loading 12-4649 mocks. One of the two is wrong;
+	// this logs what actually goes in, plus what was filtered out on the way.
 	m.setFilteredMocks(filteredForTree, false)
 	m.setUnFilteredMocks(unfilteredForTree, false)
 
