@@ -1096,22 +1096,6 @@ func (a *App) removeStaleComposeAgentWithin(budget time.Duration) {
 // EXACTLY as the upcoming `up` will (same -f/-p/project-directory flags and same
 // cwd), which is what makes the result line up with the container compose would
 // otherwise try to Recreate. Mirrors ComposeDown's branch selection for the
-// useComposeLibrary reports whether THIS build drives keploy's own generated
-// stack in-process.
-//
-// Two conditions, and both matter. composeContent is the seam: only a document
-// keploy generated itself is ever driven by the library. ComposeLibrarySupported
-// is false on darwin, where the library cannot be linked at all — keploy's
-// darwin binaries are cross-compiled from Linux with CGO_ENABLED=0 and the
-// compose backend reaches fsevents, which is cgo-only (see
-// pkg/platform/docker/compose_backend_darwin.go). Every site that would use the
-// library asks this first and otherwise keeps the `docker compose -f -`
-// shell-out, which is what keploy did before the library existed and is always
-// available on a laptop.
-func (a *App) useComposeLibrary() bool {
-	return len(a.composeContent) > 0 && docker.ComposeLibrarySupported
-}
-
 // file-based vs in-memory compose source.
 func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 	// In-memory mode: ask the compose library directly. It resolves the project
@@ -1171,6 +1155,23 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 		return nil
 	}
 	return parseComposePSIDs(string(out))
+}
+
+// useComposeLibrary reports whether THIS build drives keploy's own generated
+// stack in-process.
+//
+// Two conditions, and both matter. composeContent is the seam: only a document
+// keploy generated itself is ever driven by the library. ComposeLibrarySupported
+// is false on darwin, where the library cannot be linked at all — keploy's
+// darwin binaries are cross-compiled from Linux with CGO_ENABLED=0 and the
+// compose backend reaches fsevents, which is cgo-only (see
+// pkg/platform/docker/compose_backend_unsupported.go, which also covers every
+// build made WITHOUT -tags composelib). Every site that would use the
+// library asks this first and otherwise keeps the `docker compose -f -`
+// shell-out, which is what keploy did before the library existed and is always
+// available on a laptop.
+func (a *App) useComposeLibrary() bool {
+	return len(a.composeContent) > 0 && docker.ComposeLibrarySupported
 }
 
 // parseComposePSIDs extracts the container ids from `docker compose ps -aq`

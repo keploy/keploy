@@ -108,6 +108,19 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 	upCtx, cancelUp := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelUp()
 
+	// RESIDUAL RACE, stated rather than papered over. If ctx ends while Up is
+	// still CREATING or PULLING, this `down` lists what exists at that instant
+	// and removes it, and Up can create another container immediately after —
+	// which nothing then removes, because downOnce has already fired and makes
+	// the deferred composeDown a no-op. cancelUp() below stops Up as fast as it
+	// can, so the window is the gap between the listing and the cancel taking
+	// effect, but it is not zero.
+	//
+	// The alternative — cancel first, then down — is worse in the case that
+	// actually happens: cancelling Up mid-run kills the application before its
+	// coverage flush, which is the whole reason the grace exists. A correct fix
+	// needs compose to tell us when creation has finished, which its API does
+	// not expose. Left as the smaller hole, deliberately.
 	upDone := make(chan struct{})
 	teardownDone := make(chan struct{})
 	go func() {

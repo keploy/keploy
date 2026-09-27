@@ -355,6 +355,23 @@ func (r *ComposeRunner) attachTo() []string {
 // RecreateDependencies are "diverged" — NOT force, which would needlessly
 // recreate containers compose would otherwise reuse — Inherit is true,
 // RemoveOrphans is false, and Timeout is nil.
+//
+// Build is the ONE deliberate departure: it stays nil, so a service carrying
+// `build:` is not built here, where the CLI would build it. Nothing keploy
+// generates carries `build:` — the app compose is projected from a running
+// container's image and the agent service is pinned to an image reference — so
+// there is nothing to build, and wiring a builder into this path would pull the
+// whole buildx surface into a binary that ships inside the agent image. A
+// generated document that ever grows a `build:` section has to set this.
+//
+// SIGNALS ARE NOT OURS ALONE while Up runs. Because Attach is non-nil, compose
+// takes the attached path and registers its own handler —
+// signal.Notify(SIGINT, SIGTERM), compose v2.40.3 pkg/compose/up.go:70 — for
+// the duration of the call. So a Ctrl+C or a pod SIGTERM starts compose's
+// graceful stop, with its own per-service grace, at the same time as keploy's
+// bounded teardown. The two do not conflict (both are stopping the same
+// project) but the total teardown time is the slower of them, not keploy's
+// bound alone.
 func (r *ComposeRunner) Up(ctx context.Context, opts ComposeUpOptions, out, errW io.Writer) error {
 	return r.svc.Up(ctx, r.project, api.UpOptions{
 		Create: api.CreateOptions{
