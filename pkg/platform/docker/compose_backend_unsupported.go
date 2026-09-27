@@ -47,7 +47,8 @@ import (
 const ComposeLibrarySupported = false
 
 var errComposeLibraryUnsupported = errors.New(
-	"the compose library is not linked into darwin builds (fsevents needs cgo); use the docker CLI path")
+	"the compose library is not linked into this build: rebuild with -tags composelib " +
+		"(darwin cannot link it at all — compose/v2's watcher needs cgo fsevents); use the docker CLI path")
 
 func newComposeBackend(command.Cli) (api.Compose, error) {
 	return nil, errComposeLibraryUnsupported
