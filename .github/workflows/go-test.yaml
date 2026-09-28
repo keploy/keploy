@@ -108,6 +108,17 @@ jobs:
       - name: Running Unit Tests
         run: go test ./...
 
+      # The compose library is behind the `composelib` build tag, so the plain
+      # run above exercises the SHELL-OUT path and never the library. Its own
+      # tests — and the App call sites that choose between the two — would go
+      # uncovered on every PR without this second run.
+      #
+      # Scoped to the two packages that have tagged tests rather than ./... ,
+      # because everything else is identical in both shapes and would just be
+      # run twice.
+      - name: Running Unit Tests (compose library)
+        run: go test -tags composelib -count=1 ./pkg/client/app/... ./pkg/platform/docker/...
+
       # The mock-manager's concurrency guards — the tier-key/HitCount race and
       # the hitMu/treesMu lock order — are only meaningful under -race: without
       # it their tests pass on a build that races, so they read as coverage

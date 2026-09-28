@@ -14,26 +14,26 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestExecuteCommand_RunsCloudReplayShapeWithoutShell is the regression guard
-// for the cloud-replay shell dependency.
+// TestExecuteCommand_RunsPipedStdinShapeWithoutShell is the regression guard for
+// the shell dependency on the command-execution path.
 //
-// The cloud replay launches the user's app the same way every replay does — via
-// ExecuteCommand — with the command `docker compose -f - up ...` and the compose
-// document piped in on stdin (that is what `-f -` reads). On a distroless cloud
-// image with no /bin/sh the old `sh -c <cmd>` wrapper died with
+// A compose document keploy generates ITSELF no longer comes through here at
+// all — that path drives the compose library in-process (see
+// App.runComposeInProcess), which is what removed the `docker` binary
+// requirement. What still comes through here is the USER's own command, and on
+// a distroless image with no /bin/sh the old `sh -c <cmd>` wrapper died with
 // `exec: "sh": executable file not found`.
 //
 // This test drives the *real* ExecuteCommand in an environment where `sh` is not
 // resolvable (PATH points at a directory that contains only the target binary),
-// using the same shape as cloud replay: a multi-token command plus stdin. It
-// asserts the command runs directly (no shell) and actually receives the piped
-// stdin. If anyone reintroduces a hard `sh -c` on this path, `sh` won't be found
-// and this test fails.
+// with a multi-token command plus piped stdin. It asserts the command runs
+// directly (no shell) and actually receives the stdin. If anyone reintroduces a
+// hard `sh -c` on this path, `sh` won't be found and this test fails.
 //
 // `tee <file>` stands in for the app command: it is a real, shell-free binary
 // that echoes its stdin to a file, letting us prove the piped compose document
 // reached the launched process.
-func TestExecuteCommand_RunsCloudReplayShapeWithoutShell(t *testing.T) {
+func TestExecuteCommand_RunsPipedStdinShapeWithoutShell(t *testing.T) {
 	teePath, err := exec.LookPath("tee")
 	if err != nil {
 		t.Skipf("tee not available: %v", err)
@@ -56,8 +56,8 @@ func TestExecuteCommand_RunsCloudReplayShapeWithoutShell(t *testing.T) {
 	capturedPath := filepath.Join(t.TempDir(), "captured-compose.yaml")
 	composeDoc := []byte("services:\n  app:\n    image: demo:latest\n")
 
-	// Same shape as the cloud replay command: multi-token argv + document on
-	// stdin (the `-f -` mechanism).
+	// Multi-token argv + a document on stdin, the shape a user command that
+	// reads from stdin takes.
 	cmdStr := "tee " + capturedPath
 	noopCancel := func(_ *exec.Cmd) func() error { return func() error { return nil } }
 
