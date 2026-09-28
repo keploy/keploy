@@ -261,7 +261,21 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	}
 
 	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
-		return AssertionMatch(tc, actualResponse, logger)
+		assertionPass, assertionRes := AssertionMatch(tc, actualResponse, logger)
+		if emitFailureLogs {
+			newLogger := ppNew234()
+			newLogger.WithLineInfo = false
+			banner := "Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n"
+			newLogger.SetColorScheme(models.GetFailingColorScheme())
+			if assertionPass {
+				banner = "Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n"
+				newLogger.SetColorScheme(models.GetPassingColorScheme())
+			}
+			if _, err := newLogger.Printf(banner, tc.Name); err != nil {
+				utils.LogError(logger, err, "failed to print the logs")
+			}
+		}
+		return assertionPass, assertionRes
 	}
 
 	skipSuccessMsg := false

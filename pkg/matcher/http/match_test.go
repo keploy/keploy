@@ -156,18 +156,20 @@ func TestMatch_RedirectToAssertionMatch_567(t *testing.T) {
 	assert.True(t, result.BodyResult[0].Normal)
 }
 
-// TestMatch_AssertionsSkipResponseBanner ensures a test case decided by its
-// assertions does not print the response comparison's banner, which can
-// contradict the verdict Match returns.
-func TestMatch_AssertionsSkipResponseBanner(t *testing.T) {
+// TestMatch_AssertionsDecideBanner ensures a test case decided by its
+// assertions prints the banner for the verdict Match returns, not for the
+// response comparison.
+func TestMatch_AssertionsDecideBanner(t *testing.T) {
 	tests := []struct {
 		name           string
 		assertedStatus int
 		actualBody     string
 		wantPass       bool
+		wantBanner     string
+		wrongBanner    string
 	}{
-		{name: "failing assertion, matching response", assertedStatus: 500, actualBody: `{"a":1}`, wantPass: false},
-		{name: "passing assertion, drifted response", assertedStatus: 200, actualBody: `{"a":2}`, wantPass: true},
+		{name: "failing assertion, matching response", assertedStatus: 500, actualBody: `{"a":1}`, wantPass: false, wantBanner: "Testrun failed", wrongBanner: "Testrun passed"},
+		{name: "passing assertion, drifted response", assertedStatus: 200, actualBody: `{"a":2}`, wantPass: true, wantBanner: "Testrun passed", wrongBanner: "Testrun failed"},
 	}
 
 	for _, tt := range tests {
@@ -185,8 +187,8 @@ func TestMatch_AssertionsSkipResponseBanner(t *testing.T) {
 			})
 
 			require.Equal(t, tt.wantPass, pass)
-			require.NotContains(t, out, "Testrun passed")
-			require.NotContains(t, out, "Testrun failed")
+			require.Contains(t, out, tt.wantBanner)
+			require.NotContains(t, out, tt.wrongBanner)
 		})
 	}
 }
