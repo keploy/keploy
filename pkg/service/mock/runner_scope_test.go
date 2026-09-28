@@ -1,15 +1,13 @@
 package mock
 
 import (
-	"context"
+	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.uber.org/zap"
 )
 
 func TestParseRunnerLine(t *testing.T) {
@@ -68,36 +66,9 @@ func TestScopeEventName(t *testing.T) {
 	require.Equal(t, "TestAdd", scopeEvent{test: "TestAdd"}.name())
 }
 
-// fakeMarker records the scope calls in order, and the time each one carried.
-type fakeMarker struct {
-	mu    sync.Mutex
-	calls []string
-	ats   []time.Time
-}
-
-func (f *fakeMarker) BeginScope(_ context.Context, name string, pid int, at time.Time) error {
-	return f.add("begin", name, pid, at)
-}
-
-func (f *fakeMarker) EndScope(_ context.Context, name string, pid int, at time.Time) error {
-	return f.add("end", name, pid, at)
-}
-
-func (f *fakeMarker) add(mark, name string, pid int, at time.Time) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if pid != 0 {
-		f.calls = append(f.calls, "unexpected pid")
-	}
-	f.calls = append(f.calls, mark+" "+name)
-	f.ats = append(f.ats, at)
-	return nil
-}
-
-func feed(t *testing.T, output string) (*fakeMarker, *runnerScope) {
+func feed(t *testing.T, output string) *runnerScope {
 	t.Helper()
-	marker := &fakeMarker{}
-	scope := newRunnerScope(context.Background(), zap.NewNop(), marker)
+	scope := newRunnerScope()
 	// Written in odd-sized pieces so a line split across writes is exercised.
 	for len(output) > 0 {
 		n := min(7, len(output))
@@ -106,7 +77,7 @@ func feed(t *testing.T, output string) (*fakeMarker, *runnerScope) {
 		require.Equal(t, n, wrote)
 		output = output[n:]
 	}
-	return marker, scope
+	return scope
 }
 
 // What a compiled test binary prints with -test.v: subtest results come only after the parent's.
@@ -122,18 +93,14 @@ const plainSequential = `=== RUN   TestA
 PASS
 `
 
-func TestRunnerScopePostsEachBoundaryOnce(t *testing.T) {
-	marker, scope := feed(t, plainSequential)
-	require.Equal(t, []string{
-		"begin TestA", "begin TestA/one", "begin TestA/two",
-		"end TestA", "end TestA/one", "end TestA/two",
-		"begin TestC", "end TestC",
-	}, marker.calls)
+func TestRunnerScopeClosesEachTestOnce(t *testing.T) {
+	scope := feed(t, plainSequential)
+	require.Len(t, scope.windows(), 4)
 	require.Empty(t, scope.overlapping())
 }
 
 func TestRunnerScopeSeesNoOverlapInSequentialSubtests(t *testing.T) {
-	_, scope := feed(t, `{"Action":"run","Package":"p","Test":"TestA"}
+	scope := feed(t, `{"Action":"run","Package":"p","Test":"TestA"}
 {"Action":"run","Package":"p","Test":"TestA/one"}
 {"Action":"pass","Package":"p","Test":"TestA/one"}
 {"Action":"run","Package":"p","Test":"TestA/two"}
@@ -147,7 +114,7 @@ func TestRunnerScopeSeesNoOverlapInSequentialSubtests(t *testing.T) {
 }
 
 func TestRunnerScopeFlagsParallelSubtests(t *testing.T) {
-	_, scope := feed(t, `=== RUN   TestB
+	scope := feed(t, `=== RUN   TestB
 === RUN   TestB/p1
 === PAUSE TestB/p1
 === RUN   TestB/p2
@@ -162,7 +129,7 @@ func TestRunnerScopeFlagsParallelSubtests(t *testing.T) {
 }
 
 func TestRunnerScopeFlagsParallelTopLevelTests(t *testing.T) {
-	_, scope := feed(t, `{"Action":"run","Package":"p","Test":"TestA"}
+	scope := feed(t, `{"Action":"run","Package":"p","Test":"TestA"}
 {"Action":"pause","Package":"p","Test":"TestA"}
 {"Action":"run","Package":"p","Test":"TestB"}
 {"Action":"pause","Package":"p","Test":"TestB"}
@@ -175,7 +142,7 @@ func TestRunnerScopeFlagsParallelTopLevelTests(t *testing.T) {
 }
 
 func TestRunnerScopeFlagsPackagesRunningTogether(t *testing.T) {
-	_, scope := feed(t, `{"Action":"run","Package":"github.com/acme/a","Test":"TestX"}
+	scope := feed(t, `{"Action":"run","Package":"github.com/acme/a","Test":"TestX"}
 {"Action":"run","Package":"github.com/acme/b","Test":"TestY"}
 {"Action":"pass","Package":"github.com/acme/a","Test":"TestX"}
 {"Action":"pass","Package":"github.com/acme/b","Test":"TestY"}
@@ -185,29 +152,30 @@ func TestRunnerScopeFlagsPackagesRunningTogether(t *testing.T) {
 
 // go test -json carries the runner's own clock; plain output has none, so those boundaries get stamped on read.
 func TestRunnerScopePassesTheRunnerTime(t *testing.T) {
-	marker, scope := feed(t, `{"Time":"2026-09-24T10:00:00.000123456Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+	before := time.Now()
+	scope := feed(t, `{"Time":"2026-09-24T10:00:00.000123456Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
 {"Time":"2026-09-24T10:00:00.5Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
 === RUN   TestB
 --- PASS: TestB (0.00s)
 `)
-	require.Equal(t, []string{"begin orders/e2e.TestA", "end orders/e2e.TestA", "begin TestB", "end TestB"}, marker.calls)
-	require.True(t, marker.ats[0].Equal(time.Date(2026, 9, 24, 10, 0, 0, 123456, time.UTC)))
-	require.True(t, marker.ats[1].Equal(time.Date(2026, 9, 24, 10, 0, 0, 500000000, time.UTC)))
-	require.True(t, marker.ats[2].IsZero())
-	require.True(t, marker.ats[3].IsZero())
+	ws := scope.windows()
+	require.Len(t, ws, 2)
+	require.True(t, ws[0].Start.Equal(time.Date(2026, 9, 24, 10, 0, 0, 123456, time.UTC)))
+	require.True(t, ws[0].End.Equal(time.Date(2026, 9, 24, 10, 0, 0, 500000000, time.UTC)))
+	require.False(t, ws[1].End.Before(before), "TestB was stamped when its lines were read")
 	require.True(t, scope.usedReadTime())
 }
 
 func TestRunnerScopeWithTimedEventsNeverUsesReadTime(t *testing.T) {
-	_, scope := feed(t, `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"p","Test":"TestA"}
+	scope := feed(t, `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"p","Test":"TestA"}
 {"Time":"2026-09-24T10:00:01Z","Action":"pass","Package":"p","Test":"TestA"}
 `)
 	require.False(t, scope.usedReadTime())
 }
 
 func TestRunnerScopeIgnoresUnrelatedOutput(t *testing.T) {
-	marker, scope := feed(t, "collected 3 items\n\ntest_cart.py::test_add PASSED\n=== something else\n")
-	require.Empty(t, marker.calls)
+	scope := feed(t, "collected 3 items\n\ntest_cart.py::test_add PASSED\n=== something else\n")
+	require.Empty(t, scope.windows())
 	require.Empty(t, scope.overlapping())
 }
 
@@ -226,7 +194,7 @@ func sameWindows(t *testing.T, want, got []models.ScopeWindow) {
 
 // go test -json events carry the runner's clock, so the windows are the runner's, not the moment keploy read them.
 func TestRunnerScopeBuildsWindowsFromTheRunnerClock(t *testing.T) {
-	_, scope := feed(t, `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+	scope := feed(t, `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
 {"Time":"2026-09-24T10:00:00.002Z","Action":"run","Package":"orders/e2e","Test":"TestA/one"}
 {"Time":"2026-09-24T10:00:00.004Z","Action":"pass","Package":"orders/e2e","Test":"TestA/one"}
 {"Time":"2026-09-24T10:00:00.01Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
@@ -244,7 +212,7 @@ func TestRunnerScopeBuildsWindowsFromTheRunnerClock(t *testing.T) {
 // Plain output has no clock, so windows are stamped on read; a subtest's result prints only after its parent's, so its window closes when the next sibling starts.
 func TestRunnerScopeStampsPlainWindowsOnRead(t *testing.T) {
 	before := time.Now()
-	_, scope := feed(t, plainSequential)
+	scope := feed(t, plainSequential)
 	after := time.Now()
 
 	ws := scope.windows()
@@ -261,7 +229,7 @@ func TestRunnerScopeStampsPlainWindowsOnRead(t *testing.T) {
 }
 
 func TestRunnerScopeLeavesAnUnfinishedTestOut(t *testing.T) {
-	_, scope := feed(t, "=== RUN   TestA\n=== RUN   TestA/one\n")
+	scope := feed(t, "=== RUN   TestA\n=== RUN   TestA/one\n")
 	require.Empty(t, scope.windows())
 }
 
@@ -318,7 +286,7 @@ func TestSealedWindowsLeaveNoGapBetweenSequentialTests(t *testing.T) {
 	ws := sealed([]models.ScopeWindow{
 		{Name: "TestGetOrder", Start: at(706293), End: at(708854)},
 		{Name: "TestCreateOrder", Start: at(635078), End: at(705971)},
-	})
+	}, nil)
 	require.Equal(t, "TestGetOrder", ws[0].Name, "the order the runner closed them in is kept")
 	require.Equal(t, at(705971), ws[0].Start, "the second test starts where the first ended")
 	require.Equal(t, at(708854), ws[0].End)
@@ -329,12 +297,12 @@ func TestSealedWindowsLeaveNoGapBetweenSequentialTests(t *testing.T) {
 	parallel := sealed([]models.ScopeWindow{
 		{Name: "TestA", Start: at(0), End: at(500)},
 		{Name: "TestB", Start: at(100), End: at(600)},
-	})
+	}, nil)
 	require.Equal(t, at(100), parallel[1].Start, "overlapping tests keep their own starts")
 }
 
 func TestRunnerScopeStepWindows(t *testing.T) {
-	_, scope := feed(t, `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+	scope := feed(t, `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
 {"Time":"2026-09-24T10:00:00.01Z","Action":"run","Package":"orders/e2e","Test":"TestA/create"}
 {"Time":"2026-09-24T10:00:00.02Z","Action":"run","Package":"orders/e2e","Test":"TestA/create/nested"}
 {"Time":"2026-09-24T10:00:00.03Z","Action":"pass","Package":"orders/e2e","Test":"TestA/create/nested"}
@@ -349,7 +317,7 @@ func TestRunnerScopeStepWindows(t *testing.T) {
 		{Name: "delete", Start: runnerT0.Add(40 * time.Millisecond), End: runnerT0.Add(90 * time.Millisecond)},
 	}, scope.stepWindows())
 
-	_, plain := feed(t, plainSequential)
+	plain := feed(t, plainSequential)
 	var steps []string
 	for _, w := range plain.stepWindows() {
 		steps = append(steps, w.Name)
@@ -374,9 +342,8 @@ func TestRunnerScopeRefusesATestThatRanTwice(t *testing.T) {
 			want: "TestX ran 2 times in example.com/dup/orders; test names must be unique within a folder (check -count, or package orders and orders_test both defining it)",
 		},
 		{
-			name:   "plain",
-			output: "=== RUN   TestX\n--- PASS: TestX (0.00s)\n=== RUN   TestX\n--- PASS: TestX (0.00s)\n=== RUN   TestX\n--- PASS: TestX (0.00s)\n",
-			want:   "TestX ran 3 times in one package; test names must be unique within a folder (check -count, or package <p> and <p>_test both defining it)",
+			name:   "plain output cannot tell packages apart, so it is never refused",
+			output: "=== RUN   TestHealth\n--- PASS: TestHealth (0.01s)\nPASS\nok  \texample.com/probe/a\t0.2s\n=== RUN   TestHealth\n--- PASS: TestHealth (0.00s)\nPASS\nok  \texample.com/probe/b\t0.2s\n",
 		},
 		{
 			name:   "the same name in two packages is fine",
@@ -388,7 +355,7 @@ func TestRunnerScopeRefusesATestThatRanTwice(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, scope := feed(t, tc.output)
+			scope := feed(t, tc.output)
 			err := scope.repeated()
 			if tc.want == "" {
 				require.NoError(t, err)
@@ -398,4 +365,64 @@ func TestRunnerScopeRefusesATestThatRanTwice(t *testing.T) {
 		})
 	}
 	require.NoError(t, (*runnerScope)(nil).repeated())
+}
+
+func jsonEvent(action, test string, sec float64) string {
+	at := runnerT0.Add(time.Duration(sec * float64(time.Second))).Format(time.RFC3339Nano)
+	return `{"Time":"` + at + `","Action":"` + action + `","Package":"e2e/orders","Test":"` + test + `"}` + "\n"
+}
+
+const flowSetupAt = 2500 * time.Millisecond
+
+func flowRun() string {
+	return jsonEvent("run", "TestZ", 0) + jsonEvent("pass", "TestZ", 1) +
+		jsonEvent("run", "TestFlow", 2) +
+		jsonEvent("run", "TestFlow/create", 3) + jsonEvent("pass", "TestFlow/create", 4) +
+		jsonEvent("run", "TestFlow/delete", 6) + jsonEvent("pass", "TestFlow/delete", 7) +
+		jsonEvent("pass", "TestFlow", 8)
+}
+
+func TestSealedStaysWithinSiblingsAndTheParent(t *testing.T) {
+	scope := feed(t, flowRun())
+	at := func(sec float64) time.Time { return runnerT0.Add(time.Duration(sec * float64(time.Second))) }
+	for _, tc := range []struct {
+		at         time.Time
+		test, step string
+	}{
+		{at(1.5), "e2e/orders.TestFlow", ""},
+		{runnerT0.Add(flowSetupAt), "e2e/orders.TestFlow", ""},
+		{at(3.5), "e2e/orders.TestFlow/create", "create"},
+		{at(5), "e2e/orders.TestFlow/delete", "delete"},
+		{at(7.5), "e2e/orders.TestFlow", ""},
+	} {
+		require.Equal(t, tc.test, containing(scope.windows(), tc.at), tc.at)
+		require.Equal(t, tc.step, containing(scope.stepWindows(), tc.at), tc.at)
+	}
+}
+
+func TestSealedIsNotQuadratic(t *testing.T) {
+	var ws []models.ScopeWindow
+	for i := range 20000 {
+		ws = append(ws, models.ScopeWindow{Name: strconv.Itoa(i), Start: runnerT0.Add(time.Duration(2*i) * time.Millisecond), End: runnerT0.Add(time.Duration(2*i+1) * time.Millisecond)})
+	}
+	started := time.Now()
+	ws = sealed(ws, map[string]string{})
+	require.Less(t, time.Since(started), time.Second)
+	require.Equal(t, runnerT0.Add(3*time.Millisecond), ws[2].Start)
+}
+
+func TestRunnerScopeDropsAnOverlongLine(t *testing.T) {
+	scope := newRunnerScope()
+	chunk := []byte(strings.Repeat("x", 1<<20))
+	for range 8 {
+		_, _ = scope.Write(chunk)
+	}
+	require.LessOrEqual(t, cap(scope.partial), 3<<20)
+	_, _ = scope.Write([]byte("tail of the long line\n=== RUN   TestA\n--- PASS: TestA (0.00s)\n"))
+	require.Len(t, scope.windows(), 1)
+	require.Empty(t, scope.partial)
+}
+
+func TestTeeableWhenStdoutIsNotATerminal(t *testing.T) {
+	require.True(t, teeable("pytest -q"), "a test run's stdout is not a terminal, so teeing it changes nothing")
 }

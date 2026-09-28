@@ -2,7 +2,6 @@ package mock
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,21 +20,31 @@ type caseCapture struct {
 	cases []capturedMock
 }
 
-// captureCases starts storing incoming requests under --record-requests; nil when the flag is off.
-func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name string, seen *atomic.Int64) (*caseCapture, error) {
+func (m *mockService) requests() bool {
 	if !m.config.Mock.RecordRequests {
-		return nil, nil
+		return false
 	}
-	reader, ok := m.instrumentation.(IncomingReader)
-	if !ok || m.testDB == nil {
-		return nil, errors.New("--record-requests needs a test-case store and an agent that streams incoming requests")
+	_, ok := m.instrumentation.(IncomingReader)
+	switch {
+	case !ok || m.testDB == nil:
+		m.logger.Warn("the app's incoming requests are not recorded: this build has no test-case store or incoming stream for them")
+	case len(config.GetByPassPorts(m.config)) == 0:
+		m.logger.Warn("the app's incoming requests are not recorded: pass the app's port with --pass-through-ports so the tests' calls reach the app and are recorded as requests, not as mocks")
+	default:
+		return true
 	}
-	if len(config.GetByPassPorts(m.config)) == 0 {
-		m.logger.Warn("--record-requests without --pass-through-ports <app port>: the test's calls to the app will be recorded as mocks, not as requests")
+	return false
+}
+
+// captureCases starts storing incoming requests when on; nil when requests are off or their stream cannot be read.
+func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name string, seen *atomic.Int64, on bool) *caseCapture {
+	if !on {
+		return nil
 	}
-	incoming, err := reader.GetIncoming(captureCtx, models.IncomingOptions{Filters: m.config.Record.Filters})
+	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(captureCtx, models.IncomingOptions{Filters: m.config.Record.Filters})
 	if err != nil {
-		return nil, err
+		m.logger.Warn("the app's incoming requests are not recorded: could not read them from the agent", zap.Error(err))
+		return nil
 	}
 	c := &caseCapture{done: make(chan struct{})}
 	go func() {
@@ -56,7 +65,7 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 			c.add(tc)
 		}
 	}()
-	return c, nil
+	return c
 }
 
 func (c *caseCapture) add(tc *models.TestCase) {

@@ -32,14 +32,14 @@ FAIL
 `
 
 func TestRunnerScopeCollectsTheRunnerResults(t *testing.T) {
-	_, scope := feed(t, jsonResults)
+	scope := feed(t, jsonResults)
 	require.Equal(t, []TestOutcome{
 		{Name: "orders/e2e.TestA", Status: "pass", Duration: 10 * time.Millisecond},
 		{Name: "orders/e2e.TestB", Status: "fail", Duration: 20 * time.Millisecond},
 		{Name: "orders/e2e.TestC", Status: "skip"},
 	}, scope.tests())
 
-	_, scope = feed(t, plainResults)
+	scope = feed(t, plainResults)
 	require.Equal(t, []TestOutcome{
 		{Name: "TestA", Status: "pass", Duration: 10 * time.Millisecond},
 		{Name: "TestB", Status: "fail", Duration: 20 * time.Millisecond},
@@ -49,7 +49,7 @@ func TestRunnerScopeCollectsTheRunnerResults(t *testing.T) {
 
 // Subtests report too, in the order the runner printed their results.
 func TestRunnerScopeCollectsSubtestResults(t *testing.T) {
-	_, scope := feed(t, plainSequential)
+	scope := feed(t, plainSequential)
 	names := make([]string, 0)
 	for _, r := range scope.tests() {
 		names = append(names, r.Name+":"+r.Status)

@@ -16,6 +16,7 @@ import (
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // memTestDB is an in-memory test-case store that remembers what was inserted and deleted.
@@ -108,10 +109,27 @@ func TestRecordRequestsStoresCasesAndListsThemPerFlow(t *testing.T) {
 	}, mappedCases(t, dir))
 }
 
-func TestRecordRequestsNeedsATestStore(t *testing.T) {
-	instr := newRunnerInstr(t, "")
-	err := recordSetWith(t, zap.NewNop(), instr, nil, nil, withRequests)
-	require.ErrorContains(t, err, "test-case store")
+func TestRecordRequestsTurnOffWhenTheyCannotBeRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		db    TestDB
+		tweak func(*config.Config)
+		warn  string
+	}{
+		{"no test-case store", nil, withRequests, "no test-case store"},
+		{"no app port", &memTestDB{}, func(cfg *config.Config) { cfg.Mock.RecordRequests = true }, "--pass-through-ports"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			instr := newRunnerInstr(t, jsonSequential)
+			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+			require.NoError(t, recordSetWith(t, zap.New(core), instr, mapdb.New(zap.NewNop(), t.TempDir(), ""), tc.db, tc.tweak))
+			opts, read := instr.setup()
+			require.False(t, opts.RecordRequests, "the ingress hooks stay off")
+			require.False(t, read)
+			require.Equal(t, 1, logs.FilterMessageSnippet(tc.warn).Len())
+		})
+	}
 }
 
 func TestCorrelateCases(t *testing.T) {
@@ -359,4 +377,53 @@ func TestCorrelateCasesPairsAMockWithACaseOfTheSameFlowAcrossEntries(t *testing.
 			}
 			return out
 		}(), "mock-27 stays in the subtest's mock_entries")
+}
+
+func TestRecordAndReplayPutASetupCallInTheParentTest(t *testing.T) {
+	setup := runnerT0.Add(flowSetupAt)
+	instr := newRunnerInstr(t, flowRun())
+	instr.incoming = []*models.TestCase{httpCase("test-1", "POST", "/apps", 201, "{}", setup)}
+	instr.mocks = []*models.Mock{
+		mockAt("mock-0", runnerT0.Add(1500*time.Millisecond)),
+		mockAt("mock-1", setup.Add(100*time.Microsecond)),
+	}
+	dir := t.TempDir()
+	require.NoError(t, recordSetWith(t, zap.NewNop(), instr, mapdb.New(zap.NewNop(), dir, ""), &memTestDB{}, withRequests))
+	marks, _ := instr.seen()
+	require.Empty(t, marks)
+
+	data, err := os.ReadFile(filepath.Join(dir, "set", "mappings.yaml"))
+	require.NoError(t, err)
+	mapping, err := mapdb.DecodeMapping(data, zap.NewNop())
+	require.NoError(t, err)
+	require.Len(t, mapping.TestCases, 4)
+	var flow models.MappedTestCase
+	for _, tc := range mapping.TestCases {
+		if tc.ID == "e2e/orders.TestFlow" {
+			flow = tc
+		}
+	}
+	require.Equal(t, []string{"test-1"}, flow.Cases)
+	require.Equal(t, map[string]string{"test-1": ""}, flow.CaseSteps, "the call before the first subtest is the parent's")
+	require.Equal(t, map[string][]string{"test-1": {"mock-1"}}, flow.CaseMocks)
+	require.Equal(t, []string{"mock-0", "mock-1"}, flow.MockNames(), "the call in the gap before TestFlow belongs to TestFlow")
+	require.Empty(t, mapping.Startup)
+
+	replay := feed(t, flowRun())
+	recorded := map[string][]*models.TestCase{"e2e/orders.TestFlow": {httpCase("test-1", "POST", "/apps", 201, "{}", setup)}}
+	actual := []*models.TestCase{httpCase("", "POST", "/apps", 201, "{}", setup.Add(time.Millisecond))}
+	out := pairCases(mergeWindows(replay.windows(), nil), recorded, actual, func(*models.TestCase, *models.HTTPResp) (bool, *models.Result) { return true, nil })
+	require.Len(t, out, 1)
+	require.NotNil(t, out[0].Actual, "replay sees the request where record put it")
+	require.True(t, out[0].Passed)
+}
+
+func TestARefusedRecordKeepsTheOldCases(t *testing.T) {
+	instr := newRunnerInstr(t, jsonSequential+`{"Time":"2026-09-24T10:00:00.03Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.04Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
+`)
+	db := &memTestDB{existing: []*models.TestCase{caseAt("test-9", runnerT0)}}
+	err := recordSetWith(t, zap.NewNop(), instr, mapdb.New(zap.NewNop(), t.TempDir(), ""), db, withRequests)
+	require.ErrorContains(t, err, "TestA ran 2 times")
+	require.Empty(t, db.deleted)
 }

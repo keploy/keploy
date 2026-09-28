@@ -168,8 +168,8 @@ disableMapping: false
 mock:
   name: "default"
   onMiss: "fail"
-  # Record the app's incoming requests and responses as test cases alongside the mocks; the tests'
-  # calls must reach the app through --pass-through-ports <app port>. Turn off with --record-requests=false.
+  # Record the app's incoming requests and responses as test cases alongside the mocks, once the app's
+  # port is given with --pass-through-ports <app port>; without it none are recorded. Turn off with --record-requests=false.
   recordRequests: true
   strict: false
   local: false

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
@@ -17,11 +18,12 @@ import (
 
 // CaseOutcome is one recorded request replayed: what the app answered this run, compared with the recording.
 type CaseOutcome struct {
-	Flow   string
-	Case   *models.TestCase
-	Actual *models.HTTPResp // nil when the runner did not make this request
-	Passed bool
-	Result *models.Result
+	Flow    string
+	Case    *models.TestCase
+	Actual  *models.HTTPResp // nil when the runner did not make this request
+	Passed  bool
+	Result  *models.Result
+	Skipped bool
 }
 
 // FlowMocks is what one test used and missed this run, next to what its recording lists.
@@ -48,20 +50,17 @@ type replayDetail struct {
 // actualCapture keeps the app's incoming requests during a replay, in memory only.
 type actualCapture struct {
 	done  chan struct{}
+	seen  atomic.Int64
 	mu    sync.Mutex
 	cases []*models.TestCase
 }
 
 // watchIncoming starts keeping the app's incoming requests when requests are on; nil when they are off.
-func (m *mockService) watchIncoming(ctx context.Context) *actualCapture {
-	if !m.config.Mock.RecordRequests {
+func (m *mockService) watchIncoming(ctx context.Context, on bool) *actualCapture {
+	if !on {
 		return nil
 	}
-	reader, ok := m.instrumentation.(IncomingReader)
-	if !ok {
-		return nil
-	}
-	incoming, err := reader.GetIncoming(ctx, models.IncomingOptions{Filters: m.config.Record.Filters})
+	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(ctx, models.IncomingOptions{Filters: m.config.Record.Filters})
 	if err != nil {
 		m.logger.Warn("the app's responses will not be compared with the recording: could not read its incoming requests", zap.Error(err))
 		return nil
@@ -71,6 +70,7 @@ func (m *mockService) watchIncoming(ctx context.Context) *actualCapture {
 		defer utils.Recover(m.logger)
 		defer close(c.done)
 		for tc := range incoming {
+			c.seen.Add(1)
 			c.mu.Lock()
 			c.cases = append(c.cases, tc)
 			c.mu.Unlock()
@@ -130,6 +130,9 @@ func flowAt(windows []models.ScopeWindow, at time.Time) (string, bool) {
 func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestCase, actual []*models.TestCase, compare func(*models.TestCase, *models.HTTPResp) (bool, *models.Result)) []CaseOutcome {
 	byFlow := make(map[string][]*models.TestCase)
 	for _, a := range actual {
+		if a.Kind == models.GRPC_EXPORT {
+			continue
+		}
 		if flow, ok := flowAt(windows, caseTime(a)); ok {
 			byFlow[flow] = append(byFlow[flow], a)
 		}
@@ -146,7 +149,11 @@ func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestC
 		used := make([]bool, len(seen))
 		for _, rc := range recorded[flow] {
 			key := requestKey(string(rc.HTTPReq.Method), rc.HTTPReq.URL)
-			o := CaseOutcome{Flow: flow, Case: rc}
+			o := CaseOutcome{Flow: flow, Case: rc, Skipped: rc.Kind == models.GRPC_EXPORT}
+			if o.Skipped {
+				out = append(out, o)
+				continue
+			}
 			for i, a := range seen {
 				if used[i] || requestKey(string(a.HTTPReq.Method), a.HTTPReq.URL) != key {
 					continue

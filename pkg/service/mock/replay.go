@@ -28,6 +28,7 @@ import (
 // to verify it -- which a failing test command never is.
 func (m *mockService) Replay(ctx context.Context) (err error) {
 	name := m.setName()
+	requests := m.requests()
 	started := time.Now()
 	parent := ctx
 	// A replay that could not start leaves a receipt saying so. Without it
@@ -122,7 +123,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		BuildDelay:       m.config.BuildDelay,
 		Mode:             models.MODE_TEST,
 		MockMode:         true,
-		RecordRequests:   m.config.Mock.RecordRequests,
+		RecordRequests:   requests,
 		ConfigPath:       m.config.ConfigPath,
 		PassThroughPorts: config.GetByPassPorts(m.config),
 	}); err != nil {
@@ -150,7 +151,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//
 	//    Without this the run dialled an agent that was never started and
 	//    failed before serving a single mock.
-	scope := m.runnerResults(ctx)
+	scope := m.runnerScope()
 	composeAppExit, err := m.startComposeApp(ctx, errGrp, "replay", scope.writer())
 	if err != nil {
 		if parent.Err() != nil {
@@ -193,7 +194,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// 4. Load the whole set and push it into the proxy.
 	watchCtx, stopWatch := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopWatch()
-	actual := m.watchIncoming(watchCtx)
+	actual := m.watchIncoming(watchCtx, requests)
 	empty := map[string]bool{}
 	filtered, err := m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), empty, empty)
 	if err != nil {
@@ -289,6 +290,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// suite that never finished.
 		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: context.Cause(ctx)}
 	}
+	if actual != nil {
+		m.drainTrailingMocks(ctx, actual.done, &actual.seen)
+	}
 	stopWatch()
 	actual.wait(mockDrainGrace)
 
@@ -300,7 +304,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 10. Summarise what was served and missed.
 	detail := replayDetail{
-		windows:  mergeWindows(scope.windows(), m.agentWindows(ctx)),
+		windows:  m.testWindows(ctx, scope),
 		expected: m.expectedMocks(ctx, name),
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),

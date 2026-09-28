@@ -27,6 +27,8 @@ type runnerInstr struct {
 
 	mu           sync.Mutex
 	marks        []string
+	opened       map[string]time.Time
+	echoed       []models.ScopeWindow
 	observed     bool
 	setupOpts    models.SetupOptions
 	incomingRead bool
@@ -85,14 +87,27 @@ func (r *runnerInstr) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 }
 
 func (r *runnerInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, error) {
-	return r.windows, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append(append([]models.ScopeWindow(nil), r.windows...), r.echoed...), nil
 }
 
-func (r *runnerInstr) BeginScope(_ context.Context, name string, _ int, _ time.Time) error {
+func (r *runnerInstr) BeginScope(_ context.Context, name string, _ int, at time.Time) error {
+	r.mu.Lock()
+	if r.opened == nil {
+		r.opened = map[string]time.Time{}
+	}
+	r.opened[name] = at
+	r.mu.Unlock()
 	return r.mark("begin " + name)
 }
 
-func (r *runnerInstr) EndScope(_ context.Context, name string, _ int, _ time.Time) error {
+func (r *runnerInstr) EndScope(_ context.Context, name string, _ int, at time.Time) error {
+	r.mu.Lock()
+	if start, ok := r.opened[name]; ok {
+		r.echoed = append(r.echoed, models.ScopeWindow{Name: name, Start: start, End: at})
+	}
+	r.mu.Unlock()
 	return r.mark("end " + name)
 }
 
@@ -175,11 +190,7 @@ func TestRecordReadsTestBoundariesFromRunnerOutput(t *testing.T) {
 	require.NoError(t, recordSet(t, instr, mapdb.New(zap.NewNop(), t.TempDir(), ""), nil))
 	marks, observed := instr.seen()
 	require.True(t, observed)
-	require.Equal(t, []string{
-		"begin TestA", "begin TestA/one", "begin TestA/two",
-		"end TestA", "end TestA/one", "end TestA/two",
-		"begin TestC", "end TestC",
-	}, marks)
+	require.Empty(t, marks, "boundaries read from output are never posted to the agent")
 }
 
 const plainParallel = `=== RUN   TestA

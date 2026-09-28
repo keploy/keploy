@@ -39,6 +39,7 @@ const mockDrainQuiet = 500 * time.Millisecond
 // pushes the set to the store, and propagates the runner's exit code.
 func (m *mockService) Record(ctx context.Context) error {
 	name := m.setName()
+	requests := m.requests()
 	m.logger.Info("Recording mocks for your test command",
 		zap.String("mock-set", name),
 		zap.String("command", m.userCommand))
@@ -80,7 +81,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		MockMode:         true,
 		ConfigPath:       m.config.ConfigPath,
 		PassThroughPorts: config.GetByPassPorts(m.config),
-		RecordRequests:   m.config.Mock.RecordRequests,
+		RecordRequests:   requests,
 	}); err != nil {
 		if parent.Err() != nil {
 			return nil
@@ -104,7 +105,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	//    itself never came up at all.
 	var scope *runnerScope
 	if m.mappingDB != nil {
-		scope = m.runnerScope(ctx)
+		scope = m.runnerScope()
 	}
 	composeAppExit, err := m.startComposeApp(ctx, errGrp, "record", scope.writer())
 	if err != nil {
@@ -123,10 +124,16 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	m.mockDB.ResetCounterID()
 	m.deleteMappings(persistCtx, name)
-	if m.config.Mock.RecordRequests {
+	refused := false
+	if requests {
 		// The old cases stay until the run has ended so the new ones are numbered after them: a flow
 		// re-recorded on its own must not reuse the names of the flows the set carries.
-		defer m.deleteCases(persistCtx, name, m.caseNames(persistCtx, name))
+		old := m.caseNames(persistCtx, name)
+		defer func() {
+			if !refused {
+				m.deleteCases(persistCtx, name, old)
+			}
+		}()
 	}
 
 	// 4. Arm the record proxy and stream captured mocks.
@@ -189,15 +196,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}()
 
 	// 4b. With --record-requests, also store the app's incoming requests as test cases.
-	capture, err := m.captureCases(captureCtx, persistCtx, name, &mocksSeen)
-	if err != nil {
-		if parent.Err() != nil {
-			return nil
-		}
-		stopReason = "failed to start capturing incoming requests"
-		utils.LogError(m.logger, err, stopReason)
-		return fmt.Errorf("%s: %w", stopReason, err)
-	}
+	capture := m.captureCases(captureCtx, persistCtx, name, &mocksSeen, requests)
 
 	// 5. Release the compose app now that the capture is armed and draining.
 	//    This is the post-arm half of step 2 — see releaseComposeApp.
@@ -283,12 +282,14 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
 	if err := scope.repeated(); err != nil {
+		refused = true
 		m.propagateExit(appErr, "record")
 		utils.LogError(m.logger, err, "a test ran more than once")
 		return err
 	}
 	if overlaps := scope.overlapping(); len(overlaps) > 0 {
 		if !m.config.Mock.AllowParallelTests {
+			refused = true
 			m.propagateExit(appErr, "record")
 			stopReason = "tests ran at the same time, so their mocks cannot be mapped per test"
 			err := fmt.Errorf("%s (%s); run them one at a time (go test -p 1, no t.Parallel()) or pass --allow-parallel-tests", stopReason, firstFew(overlaps, 10))
@@ -298,7 +299,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Warn("tests ran at the same time; per-test mappings are best-effort", zap.Strings("overlaps", overlaps))
 	}
 	if m.mappingDB != nil {
-		windows := mergeWindows(scope.windows(), m.agentWindows(persistCtx))
+		windows := m.testWindows(persistCtx, scope)
 		if len(windows) > 0 {
 			if scope.usedReadTime() {
 				m.logger.Warn(fmt.Sprintf("test boundaries taken from output timing; %d mocks fell within 20 ms of a boundary — use `go test -json` (or `go tool test2json -t`) for exact attribution",
@@ -355,26 +356,18 @@ func runnerPassed(appErr models.AppError) bool {
 	return false
 }
 
-// runnerScope builds the adapter that turns test output into scope calls, or nil when it is off.
-func (m *mockService) runnerScope(ctx context.Context) *runnerScope {
-	if m.config.Mock.NoRunnerScope {
+// runnerScope builds the adapter that reads each test's boundaries and result from the runner's output, or nil when it is off.
+// Nothing it reads is posted to the agent: a boundary read from output lags the test, so the agent keeps only the marks
+// a test makes itself, and record and replay build their windows the same way (testWindows).
+func (m *mockService) runnerScope() *runnerScope {
+	if m.config.Mock.NoRunnerScope || !teeable(m.config.Command) {
 		return nil
 	}
-	marker, ok := m.instrumentation.(ScopeMarker)
-	if !ok {
-		return nil
-	}
-	return newRunnerScope(ctx, m.logger, marker)
+	return newRunnerScope()
 }
 
-// runnerResults builds the adapter that only reads each test's result from the output, or nil when it is off.
-// Replay never posts boundaries: a boundary read from output lags the test, and a late begin or end
-// would restrict the served pool to the wrong test while its calls are already in flight.
-func (m *mockService) runnerResults(ctx context.Context) *runnerScope {
-	if m.config.Mock.NoRunnerScope {
-		return nil
-	}
-	return newRunnerScope(ctx, m.logger, nil)
+func (m *mockService) testWindows(ctx context.Context, scope *runnerScope) []models.ScopeWindow {
+	return mergeWindows(scope.windows(), m.agentWindows(ctx))
 }
 
 // agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.

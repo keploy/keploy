@@ -75,12 +75,6 @@ type ScopeReader interface {
 	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
 }
 
-// ScopeMarker is an optional Instrumentation extension: Record posts the test boundaries it reads from the runner's output through it.
-type ScopeMarker interface {
-	BeginScope(ctx context.Context, name string, pid int, at time.Time) error
-	EndScope(ctx context.Context, name string, pid int, at time.Time) error
-}
-
 // MissCapturer is an optional Instrumentation extension: under `--on-miss
 // record`, Replay drains the calls the proxy served live-from-upstream on a miss
 // and appends them to the set (VCR new_episodes).

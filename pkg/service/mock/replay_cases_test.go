@@ -159,3 +159,65 @@ func TestPairCasesAndAttributeMocksPickTheInnermostWindow(t *testing.T) {
 	require.Equal(t, "pkg.TestA/create/nested", out[0].Flow)
 	require.Equal(t, "mock-0", out[0].Consumed[0].Name)
 }
+
+type lateIncoming struct {
+	*runnerInstr
+	after time.Duration
+	tc    *models.TestCase
+}
+
+func (l lateIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
+	out := make(chan *models.TestCase)
+	go func() {
+		defer close(out)
+		select {
+		case <-time.After(l.after):
+			out <- l.tc
+		case <-ctx.Done():
+			return
+		}
+		<-ctx.Done()
+	}()
+	return out, nil
+}
+
+func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
+	instr := newRunnerInstr(t, jsonSequential)
+	late := lateIncoming{runnerInstr: instr, after: 200 * time.Millisecond, tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
+	dir := t.TempDir()
+	mapDB := mapdb.New(zap.NewNop(), dir, "")
+	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil))
+	db := &memTestDB{existing: []*models.TestCase{httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0)}}
+	var got ReplayOutcome
+	RegisterReplayOutcomeReporter(func(_ context.Context, o ReplayOutcome) { got = o })
+	t.Cleanup(func() { RegisterReplayOutcomeReporter(nil) })
+	cfg := instrConfig(instr.composeInstr, utils.Native, "./shop.test -test.v")
+	cfg.Path = dir
+	withRequests(cfg)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.NewNop(), late, stubMockDB{}, mapDB, nil, nil, cfg)
+	svc.(TestDBSetter).SetTestDB(db)
+	require.NoError(t, svc.Replay(context.Background()))
+	require.Len(t, got.Cases, 1)
+	require.NotNil(t, got.Cases[0].Actual, "the request that arrived after the runner exited is still compared")
+	require.True(t, got.Cases[0].Passed)
+}
+
+func TestPairCasesDoesNotCompareGRPCAsHTTP(t *testing.T) {
+	grpc := &models.TestCase{Name: "grpc-1", Kind: models.GRPC_EXPORT, GrpcReq: models.GrpcReq{Timestamp: runnerT0.Add(10 * time.Millisecond)}}
+	recorded := map[string][]*models.TestCase{"pkg.TestA": {grpc, httpCase("get-1", "GET", "/orders", 200, `[]`, runnerT0)}}
+	actual := []*models.TestCase{
+		{Kind: models.GRPC_EXPORT, GrpcReq: models.GrpcReq{Timestamp: runnerT0.Add(20 * time.Millisecond)}},
+		httpCase("", "GET", "/orders", 200, `[]`, runnerT0.Add(30*time.Millisecond)),
+	}
+	calls := 0
+	out := pairCases(replayWindows, recorded, actual, func(*models.TestCase, *models.HTTPResp) (bool, *models.Result) { calls++; return true, nil })
+	require.Len(t, out, 2)
+	require.True(t, out[0].Skipped)
+	require.False(t, out[0].Passed)
+	require.Nil(t, out[0].Actual)
+	require.False(t, out[1].Skipped)
+	require.True(t, out[1].Passed)
+	require.Equal(t, 1, calls)
+}

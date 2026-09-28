@@ -114,6 +114,78 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	return nil
 }
 
+func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
+	h.BindEvents = objs.BindEvents
+	cg4, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupInet4Bind,
+		Program: objs.K_bind4,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the bind4 cgroup hook")
+		return err
+	}
+	h.cgBind4 = cg4
+
+	cg6, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupInet6Bind,
+		Program: objs.K_bind6,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the bind6 cgroup hook")
+		return err
+	}
+	h.cgBind6 = cg6
+
+	// post_bind4/6 are what make the kernel-allocated relocation port
+	// usable: bind4/6 set user_port = 0 so the kernel's allocator picks a
+	// port that is genuinely free (BPF cannot determine that — see
+	// find_free_port's comment in keploy/ebpf), and these hooks read the
+	// assigned port back out and publish the bind event.
+	//
+	// Non-fatal on purpose, and both-or-nothing: the flag below is only
+	// set when both attach, and without the flag bind4/6 keep their old
+	// guess-a-port behaviour. So a cgroup setup that rejects them records
+	// exactly as it did before rather than failing startup, while everyone
+	// else stops hitting "That port is already in use" on the relocated
+	// port. This covers ATTACH failure only — a program the kernel refuses
+	// to LOAD already fails LoadAndAssign above and aborts the agent, the
+	// same as every other program in this object.
+	pb4, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupInet4PostBind,
+		Program: objs.K_postBind4,
+	})
+	if err != nil {
+		h.logger.Warn("failed to attach the post_bind4 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
+	} else {
+		pb6, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupInet6PostBind,
+			Program: objs.K_postBind6,
+		})
+		if err != nil {
+			// Detach the v4 half too. With the flag off it would never do
+			// any work, and leaving it attached runs a guaranteed no-op
+			// program on every AF_INET bind on the machine for the whole
+			// session.
+			if cerr := pb4.Close(); cerr != nil {
+				h.logger.Debug("failed to detach post_bind4 after post_bind6 failed", zap.Error(cerr))
+			}
+			h.logger.Warn("failed to attach the post_bind6 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
+		} else {
+			h.cgPostBind4 = pb4
+			h.cgPostBind6 = pb6
+			h.kernelPortAlloc = true
+		}
+	}
+
+	h.logger.Debug("Attached ingress redirection hooks.",
+		zap.Bool("kernel_port_alloc", h.kernelPortAlloc))
+	return nil
+}
+
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -253,82 +325,16 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.sockops = sockops
 
 	// Ingress is captured while recording, and in mock mode whenever requests are on, so a replay can
-	// compare the app's actual responses with the recorded cases.
+	// compare the app's actual responses with the recorded cases. In mock mode the wrapped process is a
+	// test runner, so a failure to attach here only means no requests are recorded; the egress capture
+	// the run depends on goes ahead.
 	if (opts.Mode == models.MODE_RECORD && !setupOpts.MockMode) || (setupOpts.MockMode && setupOpts.RecordRequests) {
-
-		// Skipped in mock mode (--mock-mode): the wrapped process is a test
-		// runner, not a server. Relocating any port it binds (a pytest
-		// live_server, a Playwright webServer, an httptest.NewServer) would
-		// double-record the runner's own loopback traffic and can crash it on a
-		// startup race. Mock mode captures ONLY egress, so no bind/ingress hooks.
-		h.BindEvents = objs.BindEvents
-		cg4, err := link.AttachCgroup(link.CgroupOptions{
-			Path:    cGroupPath,
-			Attach:  ebpf.AttachCGroupInet4Bind,
-			Program: objs.K_bind4,
-		})
-		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the bind4 cgroup hook")
-			return err
-		}
-		h.cgBind4 = cg4
-
-		cg6, err := link.AttachCgroup(link.CgroupOptions{
-			Path:    cGroupPath,
-			Attach:  ebpf.AttachCGroupInet6Bind,
-			Program: objs.K_bind6,
-		})
-		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the bind6 cgroup hook")
-			return err
-		}
-		h.cgBind6 = cg6
-
-		// post_bind4/6 are what make the kernel-allocated relocation port
-		// usable: bind4/6 set user_port = 0 so the kernel's allocator picks a
-		// port that is genuinely free (BPF cannot determine that — see
-		// find_free_port's comment in keploy/ebpf), and these hooks read the
-		// assigned port back out and publish the bind event.
-		//
-		// Non-fatal on purpose, and both-or-nothing: the flag below is only
-		// set when both attach, and without the flag bind4/6 keep their old
-		// guess-a-port behaviour. So a cgroup setup that rejects them records
-		// exactly as it did before rather than failing startup, while everyone
-		// else stops hitting "That port is already in use" on the relocated
-		// port. This covers ATTACH failure only — a program the kernel refuses
-		// to LOAD already fails LoadAndAssign above and aborts the agent, the
-		// same as every other program in this object.
-		pb4, err := link.AttachCgroup(link.CgroupOptions{
-			Path:    cGroupPath,
-			Attach:  ebpf.AttachCGroupInet4PostBind,
-			Program: objs.K_postBind4,
-		})
-		if err != nil {
-			h.logger.Warn("failed to attach the post_bind4 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
-		} else {
-			pb6, err := link.AttachCgroup(link.CgroupOptions{
-				Path:    cGroupPath,
-				Attach:  ebpf.AttachCGroupInet6PostBind,
-				Program: objs.K_postBind6,
-			})
-			if err != nil {
-				// Detach the v4 half too. With the flag off it would never do
-				// any work, and leaving it attached runs a guaranteed no-op
-				// program on every AF_INET bind on the machine for the whole
-				// session.
-				if cerr := pb4.Close(); cerr != nil {
-					h.logger.Debug("failed to detach post_bind4 after post_bind6 failed", zap.Error(cerr))
-				}
-				h.logger.Warn("failed to attach the post_bind6 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
-			} else {
-				h.cgPostBind4 = pb4
-				h.cgPostBind6 = pb6
-				h.kernelPortAlloc = true
+		if err := h.attachIngress(cGroupPath, objs); err != nil {
+			if !setupOpts.MockMode {
+				return err
 			}
+			h.logger.Warn("the ingress hooks did not attach; the app's incoming requests will not be recorded as test cases", zap.Error(err))
 		}
-
-		h.logger.Debug("Attached ingress redirection hooks.",
-			zap.Bool("kernel_port_alloc", h.kernelPortAlloc))
 	}
 
 	c4, err := link.AttachCgroup(link.CgroupOptions{

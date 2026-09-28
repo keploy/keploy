@@ -2,23 +2,23 @@ package mock
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
-	"go.uber.org/zap"
+	"golang.org/x/term"
 )
 
-// scopeCallTimeout bounds one scope call so a stuck agent cannot stall the runner's stdout.
-const scopeCallTimeout = 2 * time.Second
+const maxRunnerLine = 1 << 20
 
 // boundarySlack is how close to a window edge a mock has to be to count as at risk of landing in the wrong test.
 const boundarySlack = 20 * time.Millisecond
@@ -144,12 +144,8 @@ func plainElapsed(fields []string) time.Duration {
 	return d
 }
 
-// runnerScope turns the wrapped test runner's output into per-test windows, and posts the same boundaries to the agent.
+// runnerScope turns the wrapped test runner's output into per-test windows and results, the same way for record and replay.
 type runnerScope struct {
-	ctx    context.Context
-	logger *zap.Logger
-	marker ScopeMarker // nil reads the runner's results without posting boundaries, as replay does
-
 	mu        sync.Mutex
 	partial   []byte
 	open      []scopeEvent
@@ -162,10 +158,12 @@ type runnerScope struct {
 	runs      map[string]int
 	tops      []scopeEvent
 	steps     map[string]string
+	parents   map[string]string
+	overlong  bool
 }
 
-func newRunnerScope(ctx context.Context, logger *zap.Logger, marker ScopeMarker) *runnerScope {
-	return &runnerScope{ctx: ctx, logger: logger, marker: marker, paused: map[string]bool{}, starts: map[string]time.Time{}, runs: map[string]int{}, steps: map[string]string{}}
+func newRunnerScope() *runnerScope {
+	return &runnerScope{paused: map[string]bool{}, starts: map[string]time.Time{}, runs: map[string]int{}, steps: map[string]string{}, parents: map[string]string{}}
 }
 
 // writer is the stdout observer to hand the app runner; nil when the adapter is off.
@@ -184,9 +182,15 @@ func (r *runnerScope) Write(p []byte) (int, error) {
 	for {
 		i := bytes.IndexByte(r.partial, '\n')
 		if i < 0 {
+			if len(r.partial) > maxRunnerLine {
+				r.partial, r.overlong = r.partial[:0], true
+			}
 			return len(p), nil
 		}
-		r.handle(parseRunnerLine(string(r.partial[:i])))
+		if !r.overlong {
+			r.handle(parseRunnerLine(string(r.partial[:i])))
+		}
+		r.overlong = false
 		r.partial = r.partial[i+1:]
 	}
 }
@@ -195,12 +199,10 @@ func (r *runnerScope) handle(ev scopeEvent) {
 	switch ev.kind {
 	case scopeBegin:
 		r.begin(ev, r.stamp(ev))
-		r.mark(ev)
 	case scopePause:
 		r.paused[ev.name()] = true
 	case scopeEnd:
 		r.end(ev, r.stamp(ev))
-		r.mark(ev)
 	}
 }
 
@@ -229,6 +231,10 @@ func (r *runnerScope) begin(ev scopeEvent, at time.Time) {
 	}
 	r.open = append(kept, ev)
 	r.starts[ev.name()] = at
+	r.parents[ev.name()] = ev.pkg + "."
+	if i := strings.LastIndexByte(ev.test, '/'); i >= 0 {
+		r.parents[ev.name()] = scopeEvent{pkg: ev.pkg, test: ev.test[:i]}.name()
+	}
 	if _, sub, ok := strings.Cut(ev.test, "/"); ok {
 		r.steps[ev.name()], _, _ = strings.Cut(sub, "/")
 		return
@@ -270,22 +276,43 @@ func (r *runnerScope) windows() []models.ScopeWindow {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return sealed(append([]models.ScopeWindow(nil), r.closed...))
+	return sealed(append([]models.ScopeWindow(nil), r.closed...), r.parents)
 }
 
-// sealed closes the gap between one test and the next: the runner prints a test's start a moment after the
-// test began, so a call made in that gap belongs to the test that follows, never to nobody. Windows that
-// overlap, from tests running at the same time, are left as they are.
-func sealed(windows []models.ScopeWindow) []models.ScopeWindow {
-	for i := range windows {
-		var latest time.Time
-		for j := range windows {
-			if j != i && !windows[j].End.After(windows[i].Start) && windows[j].End.After(latest) {
-				latest = windows[j].End
-			}
+// sealed closes the gap between one test and its next sibling: the runner prints a test's start a moment after
+// the test began, so a call made in that gap belongs to the test that follows, never to nobody. A subtest never
+// starts before its parent, and windows that overlap, from tests running at the same time, are left as they are.
+func sealed(windows []models.ScopeWindow, parents map[string]string) []models.ScopeWindow {
+	starts := make(map[string]time.Time, len(windows))
+	for _, w := range windows {
+		starts[w.Name] = w.Start
+	}
+	order := make([]int, len(windows))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		wa, wb := windows[order[a]], windows[order[b]]
+		if pa, pb := parents[wa.Name], parents[wb.Name]; pa != pb {
+			return pa < pb
 		}
-		if !latest.IsZero() {
+		return wa.Start.Before(wb.Start)
+	})
+	var latest time.Time
+	for k, i := range order {
+		p := parents[windows[i].Name]
+		if k > 0 && parents[windows[order[k-1]].Name] != p {
+			latest = time.Time{}
+		}
+		end := windows[i].End
+		if !latest.IsZero() && !latest.After(windows[i].Start) {
+			if ps, ok := starts[p]; ok && latest.Before(ps) {
+				latest = ps
+			}
 			windows[i].Start = latest
+		}
+		if end.After(latest) {
+			latest = end
 		}
 	}
 	return windows
@@ -316,14 +343,11 @@ func (r *runnerScope) repeated() error {
 	defer r.mu.Unlock()
 	for _, ev := range r.tops {
 		n := r.runs[ev.name()]
-		if n < 2 {
+		if n < 2 || ev.pkg == "" {
 			continue
 		}
-		pkg, p := ev.pkg, path.Base(ev.pkg)
-		if pkg == "" {
-			pkg, p = "one package", "<p>"
-		}
-		return fmt.Errorf("%s ran %d times in %s; test names must be unique within a folder (check -count, or package %s and %s_test both defining it)", ev.test, n, pkg, p, p)
+		p := path.Base(ev.pkg)
+		return fmt.Errorf("%s ran %d times in %s; test names must be unique within a folder (check -count, or package %s and %s_test both defining it)", ev.test, n, ev.pkg, p, p)
 	}
 	return nil
 }
@@ -336,6 +360,18 @@ func (r *runnerScope) tests() []TestOutcome {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]TestOutcome(nil), r.results...)
+}
+
+func teeable(command string) bool {
+	if !term.IsTerminal(int(os.Stdout.Fd())) || strings.Contains(command, "go test") {
+		return true
+	}
+	for _, f := range strings.Fields(command) {
+		if strings.HasSuffix(f, ".test") || strings.HasSuffix(f, "test2json") || strings.HasSuffix(f, "gotestsum") {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeWindows keeps the adapter's windows and adds the agent's only for tests the adapter never saw.
@@ -353,22 +389,6 @@ func mergeWindows(adapter, agent []models.ScopeWindow) []models.ScopeWindow {
 		}
 	}
 	return out
-}
-
-// mark posts one test boundary to the agent; a failure is logged, never fatal.
-func (r *runnerScope) mark(ev scopeEvent) {
-	if r.marker == nil {
-		return
-	}
-	post := r.marker.BeginScope
-	if ev.kind == scopeEnd {
-		post = r.marker.EndScope
-	}
-	ctx, cancel := context.WithTimeout(r.ctx, scopeCallTimeout)
-	defer cancel()
-	if err := post(ctx, ev.name(), 0, ev.at); err != nil {
-		r.logger.Debug("failed to report a test boundary to the agent", zap.String("test", ev.name()), zap.Error(err))
-	}
 }
 
 // usedReadTime reports whether any boundary had to be stamped when keploy read it, for want of a runner time.
