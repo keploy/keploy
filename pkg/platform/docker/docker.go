@@ -1466,7 +1466,9 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 			idc.addServiceEnvVar(serviceContentNode, "NODE_EXTRA_CA_CERTS", certPath)
 			if idc.mockAgentURL != "" {
 				idc.addServiceEnvVar(serviceContentNode, "KEPLOY_MOCK_AGENT", idc.mockAgentURL)
-				idc.addServiceEnvVar(serviceContentNode, token.MockAgentTokenEnv, "${"+token.MockAgentTokenEnv+"}")
+				if token.Session() != "" {
+					idc.addServiceEnvVar(serviceContentNode, token.MockAgentTokenEnv, "${"+token.MockAgentTokenEnv+"}")
+				}
 			}
 			idc.addServiceEnvVar(serviceContentNode, "REQUESTS_CA_BUNDLE", certPath)
 			idc.addServiceEnvVar(serviceContentNode, "SSL_CERT_FILE", certPath)

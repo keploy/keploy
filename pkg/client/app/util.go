@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/docker/compose/v2/pkg/api"
-	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -143,18 +142,18 @@ func composeLaunchPlan(appCmd, newComposeFile, appComposePath, appServiceName st
 // (see App.withAgentToken), but sudo's env_reset drops every variable it is
 // not told to keep — and `sudo docker compose up` is a spelling keploy
 // recognises as compose (utils.FindDockerCmd), so without this the agent would
-// come up with no token at all. --preserve-env names that one variable and
-// nothing else.
+// come up with no token at all. --preserve-env names the given variables
+// (and, in mock mode, the token handed to the tests) and nothing else.
 //
 // Only a leading sudo is handled: that is the form keploy detects, and a
 // wrapper that calls sudo inside itself cannot be rewritten anyway.
-func keepAgentTokenThroughSudo(appCmd string) string {
+func keepAgentTokenThroughSudo(appCmd string, names ...string) string {
 	trimmed := strings.TrimLeft(appCmd, " \t")
 	rest, ok := strings.CutPrefix(trimmed, "sudo ")
-	if !ok {
+	if !ok || len(names) == 0 {
 		return appCmd
 	}
-	return appCmd[:len(appCmd)-len(trimmed)] + "sudo --preserve-env=" + token.Env + " " + rest
+	return appCmd[:len(appCmd)-len(trimmed)] + "sudo --preserve-env=" + strings.Join(names, ",") + " " + rest
 }
 
 func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName string) string {

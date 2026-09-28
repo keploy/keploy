@@ -209,7 +209,9 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	if a.opts.MockMode && a.opts.AgentPort != 0 {
 		// The app shares the agent's network namespace, so a test can mark its own start and end here.
 		tlsFlags += fmt.Sprintf("-e KEPLOY_MOCK_AGENT=http://localhost:%d ", a.opts.AgentPort)
-		tlsFlags += "-e " + token.MockAgentTokenEnv + " "
+		if token.Session() != "" {
+			tlsFlags += "-e " + token.MockAgentTokenEnv + " "
+		}
 	}
 	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
 	if len(parts) < 3 {
@@ -1618,11 +1620,18 @@ func extractProjectFlags(cmd string) []string {
 // address, which the client's check that its agent enforces the token has to
 // see as the new agent it is.
 func (a *App) withAgentToken(cmd string) (string, []string) {
+	var mock []string
+	if a.opts.MockMode && token.Session() != "" {
+		mock = []string{token.MockAgentTokenEnv}
+	}
 	if a.kind != utils.DockerCompose {
+		if a.kind == utils.DockerRun {
+			return keepAgentTokenThroughSudo(cmd, mock...), nil
+		}
 		return cmd, nil
 	}
 	token.RecordLaunch(a.opts.AgentURI)
-	return keepAgentTokenThroughSudo(cmd), docker.AgentTokenEnv()
+	return keepAgentTokenThroughSudo(cmd, append([]string{token.Env}, mock...)...), docker.AgentTokenEnv()
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
