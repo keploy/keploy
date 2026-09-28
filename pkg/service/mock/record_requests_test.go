@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +14,8 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -418,12 +421,92 @@ func TestRecordAndReplayPutASetupCallInTheParentTest(t *testing.T) {
 	require.True(t, out[0].Passed)
 }
 
-func TestARefusedRecordKeepsTheOldCases(t *testing.T) {
-	instr := newRunnerInstr(t, jsonSequential+`{"Time":"2026-09-24T10:00:00.03Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+func TestRecordLeavesASkippedTestWithoutRequestsOutOfTheMapping(t *testing.T) {
+	instr := newRunnerInstr(t, jsonEvent("run", "TestA", 0)+jsonEvent("pass", "TestA", 1)+
+		jsonEvent("run", "TestSkipped", 1)+jsonEvent("skip", "TestSkipped", 1.1)+
+		jsonEvent("run", "TestEmpty", 2)+jsonEvent("pass", "TestEmpty", 3))
+	instr.incoming = []*models.TestCase{caseAt("test-1", runnerT0.Add(500*time.Millisecond))}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(-time.Second))}
+	dir := t.TempDir()
+	require.NoError(t, recordSetWith(t, zap.NewNop(), instr, mapdb.New(zap.NewNop(), dir, ""), &memTestDB{}, withRequests))
+	data, err := os.ReadFile(filepath.Join(dir, "set", "mappings.yaml"))
+	require.NoError(t, err)
+	mapping, err := mapdb.DecodeMapping(data, zap.NewNop())
+	require.NoError(t, err)
+	var ids []string
+	for _, tc := range mapping.TestCases {
+		ids = append(ids, tc.ID)
+	}
+	require.ElementsMatch(t, []string{"e2e/orders.TestA", "e2e/orders.TestEmpty"}, ids)
+}
+
+func snapshotTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	require.NoError(t, filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		rel, _ := filepath.Rel(root, p)
+		out[rel] = string(data)
+		return err
+	}))
+	return out
+}
+
+func TestARefusedRecordLeavesTheSetExactlyAsItWas(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+		err    string
+	}{
+		{"a test ran twice", jsonSequential + `{"Time":"2026-09-24T10:00:00.03Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
 {"Time":"2026-09-24T10:00:00.04Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
-`)
-	db := &memTestDB{existing: []*models.TestCase{caseAt("test-9", runnerT0)}}
-	err := recordSetWith(t, zap.NewNop(), instr, mapdb.New(zap.NewNop(), t.TempDir(), ""), db, withRequests)
-	require.ErrorContains(t, err, "TestA ran 2 times")
-	require.Empty(t, db.deleted)
+`, "TestA ran 2 times"},
+		{"tests overlapped", plainParallel, "TestA and TestB"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			set := filepath.Join(dir, "set")
+			require.NoError(t, os.MkdirAll(filepath.Join(set, "tests"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(set, "mocks.yaml"), []byte("# old mocks\nversion: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(set, "mappings.yaml"), []byte("# old mappings\ntests: []\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(set, "tests", "test-1.yaml"), []byte("# old case\nname: test-1\n"), 0o644))
+			before := snapshotTree(t, dir)
+
+			instr := newRunnerInstr(t, tc.output)
+			instr.incoming = []*models.TestCase{caseAt("", runnerT0.Add(5*time.Millisecond))}
+			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+			cfg.Path = dir
+			withRequests(cfg)
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+			svc.(TestDBSetter).SetTestDB(testdb.New(zap.NewNop(), dir))
+			require.ErrorContains(t, svc.Record(context.Background()), tc.err)
+			require.Equal(t, before, snapshotTree(t, dir))
+		})
+	}
+}
+
+func TestAnAcceptedRecordReplacesTheSetAndLeavesNoCopy(t *testing.T) {
+	dir := t.TempDir()
+	set := filepath.Join(dir, "set")
+	require.NoError(t, os.MkdirAll(set, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(set, "mocks.yaml"), []byte("# old mocks\n"), 0o644))
+	instr := newRunnerInstr(t, jsonSequential)
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = dir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg).Record(context.Background()))
+	data, err := os.ReadFile(filepath.Join(set, "mocks.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "# old mocks")
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "only the set itself remains")
 }

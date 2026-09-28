@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"go.keploy.io/server/v3/config"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -119,21 +122,18 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 3. Overwrite the named set in place: drop the previous mocks so the
 	//    re-record is a clean rewrite, not an append.
+	restore := m.saveSet(name)
+	keep := false
+	defer func() { restore(keep) }()
 	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
 		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
 	}
 	m.mockDB.ResetCounterID()
 	m.deleteMappings(persistCtx, name)
-	refused := false
 	if requests {
 		// The old cases stay until the run has ended so the new ones are numbered after them: a flow
 		// re-recorded on its own must not reuse the names of the flows the set carries.
-		old := m.caseNames(persistCtx, name)
-		defer func() {
-			if !refused {
-				m.deleteCases(persistCtx, name, old)
-			}
-		}()
+		defer m.deleteCases(persistCtx, name, m.caseNames(persistCtx, name))
 	}
 
 	// 4. Arm the record proxy and stream captured mocks.
@@ -261,6 +261,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	capture.wait(mockDrainGrace)
 
 	if parent.Err() != nil { // user Ctrl+C
+		keep = true
 		m.logger.Info("recording stopped", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return nil
 	}
@@ -282,14 +283,12 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
 	if err := scope.repeated(); err != nil {
-		refused = true
 		m.propagateExit(appErr, "record")
 		utils.LogError(m.logger, err, "a test ran more than once")
 		return err
 	}
 	if overlaps := scope.overlapping(); len(overlaps) > 0 {
 		if !m.config.Mock.AllowParallelTests {
-			refused = true
 			m.propagateExit(appErr, "record")
 			stopReason = "tests ran at the same time, so their mocks cannot be mapped per test"
 			err := fmt.Errorf("%s (%s); run them one at a time (go test -p 1, no t.Parallel()) or pass --allow-parallel-tests", stopReason, firstFew(overlaps, 10))
@@ -298,6 +297,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 		m.logger.Warn("tests ran at the same time; per-test mappings are best-effort", zap.Strings("overlaps", overlaps))
 	}
+	keep = true
 	if m.mappingDB != nil {
 		windows := m.testWindows(persistCtx, scope)
 		if len(windows) > 0 {
@@ -306,8 +306,13 @@ func (m *mockService) Record(ctx context.Context) error {
 					nearBoundary(windows, recorded, boundarySlack)))
 			}
 			byTest := correlateScopes(windows, recorded)
+			byCase := correlateCases(windows, recorded, capture.list(), scope.stepWindows())
+			skipped := map[string]bool{}
+			for _, o := range scope.tests() {
+				skipped[o.Name] = o.Status == "skip"
+			}
 			for _, w := range windows {
-				if _, ok := byTest[w.Name]; !ok {
+				if _, ok := byTest[w.Name]; !ok && !(skipped[w.Name] && len(byCase[w.Name].Cases) == 0) {
 					byTest[w.Name] = nil
 				}
 			}
@@ -318,7 +323,7 @@ func (m *mockService) Record(ctx context.Context) error {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
 				}
 			}
-			m.upsertCases(persistCtx, name, correlateCases(windows, recorded, capture.list(), scope.stepWindows()), startupMocks(windows, recorded))
+			m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded))
 		}
 	}
 
@@ -384,6 +389,39 @@ func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
 		return nil
 	}
 	return windows
+}
+
+func (m *mockService) saveSet(name string) func(keep bool) {
+	if m.config.Path == "" {
+		return func(bool) {}
+	}
+	set := filepath.Join(m.config.Path, name)
+	saved := filepath.Join(m.config.Path, "."+name+".previous")
+	_ = os.RemoveAll(saved)
+	err := os.CopyFS(saved, os.DirFS(set))
+	absent := errors.Is(err, fs.ErrNotExist)
+	if err != nil {
+		_ = os.RemoveAll(saved)
+		if !absent {
+			m.logger.Warn("could not keep a copy of the set before re-recording it; a refused recording cannot be undone", zap.String("mock-set", name), zap.Error(err))
+		}
+	}
+	return func(keep bool) {
+		switch {
+		case keep:
+			_ = os.RemoveAll(saved)
+		case absent:
+			_ = os.RemoveAll(set)
+		case err == nil:
+			if rmErr := os.RemoveAll(set); rmErr != nil {
+				m.logger.Warn("could not put the previous recording back", zap.String("mock-set", name), zap.Error(rmErr))
+				return
+			}
+			if mvErr := os.Rename(saved, set); mvErr != nil {
+				m.logger.Warn("could not put the previous recording back; it is kept at "+saved, zap.String("mock-set", name), zap.Error(mvErr))
+			}
+		}
+	}
 }
 
 // caseNames lists the test cases the set holds before a re-record.
