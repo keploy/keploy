@@ -148,19 +148,20 @@ func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
 func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
-	if err := node.Decode(&persisted); err == nil && (nodeHasField(node, "mock_entries") || nodeHasField(node, "cases")) {
+	if err := node.Decode(&persisted); err == nil && (nodeHasField(node, "mock_entries") || (nodeHasField(node, "cases") && !nodeHasField(node, "mocks"))) {
 		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
 		tc.CaseMocks, tc.CaseSteps = persisted.CaseMocks, persisted.CaseSteps
 		return nil
 	}
 
 	type legacyTestFormat struct {
-		ID    string `yaml:"id"`
-		Mocks string `yaml:"mocks"`
+		ID    string   `yaml:"id"`
+		Mocks string   `yaml:"mocks"`
+		Cases []string `yaml:"cases"`
 	}
 	var legacy legacyTestFormat
 	if err := node.Decode(&legacy); err == nil {
-		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, nil)
+		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, legacy.Cases)
 		return nil
 	}
 
@@ -184,19 +185,20 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 // string format while supporting the structured formats used by newer builds.
 func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	var persisted persistedTestFormat
-	if err := json.Unmarshal(data, &persisted); err == nil && (jsonContainsField(data, "mock_entries") || jsonContainsField(data, "cases")) {
+	if err := json.Unmarshal(data, &persisted); err == nil && (jsonContainsField(data, "mock_entries") || (jsonContainsField(data, "cases") && !jsonContainsField(data, "mocks"))) {
 		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
 		tc.CaseMocks, tc.CaseSteps = persisted.CaseMocks, persisted.CaseSteps
 		return nil
 	}
 
 	type legacyTestFormat struct {
-		ID    string `json:"id"`
-		Mocks string `json:"mocks"`
+		ID    string   `json:"id"`
+		Mocks string   `json:"mocks"`
+		Cases []string `json:"cases"`
 	}
 	var legacy legacyTestFormat
 	if err := json.Unmarshal(data, &legacy); err == nil {
-		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, nil)
+		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, legacy.Cases)
 		return nil
 	}
 

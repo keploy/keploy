@@ -118,3 +118,38 @@ func TestMappedTestCaseCaseMocksAndStepsRoundTrip(t *testing.T) {
 		t.Fatalf("an older reader read %+v, %v", old, err)
 	}
 }
+
+func TestMappedTestCaseKeepsMocksBesideCases(t *testing.T) {
+	for _, tc := range []struct {
+		name, doc string
+		json      bool
+		mocks     []string
+	}{
+		{"json structured mocks", `{"id":"t","mocks":[{"name":"m1","kind":"Http"}],"cases":["c1"]}`, true, []string{"m1"}},
+		{"yaml structured mocks", "id: t\nmocks:\n  - name: m1\n    kind: Http\ncases: [c1]\n", false, []string{"m1"}},
+		{"yaml legacy string", "id: t\nmocks: \"m1,m2\"\ncases: [c1]\n", false, []string{"m1", "m2"}},
+		{"json legacy string", `{"id":"t","mocks":"m1,m2","cases":["c1"]}`, true, []string{"m1", "m2"}},
+		{"yaml persisted", "id: t\nmock_entries:\n  - name: m1\ncases: [c1]\n", false, []string{"m1"}},
+		{"yaml cases only", "id: t\ncases: [c1]\n", false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got MappedTestCase
+			var err error
+			if tc.json {
+				err = json.Unmarshal([]byte(tc.doc), &got)
+			} else {
+				err = yaml.Unmarshal([]byte(tc.doc), &got)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			if len(got.Mocks) > 0 {
+				names = got.MockNames()
+			}
+			if got.ID != "t" || !reflect.DeepEqual(names, tc.mocks) || !reflect.DeepEqual(got.Cases, []string{"c1"}) {
+				t.Fatalf("came back as %+v", got)
+			}
+		})
+	}
+}
