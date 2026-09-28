@@ -71,7 +71,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		svc:    agent,
 	}
 
-	r.Route("/agent", func(r chi.Router) {
+	r.Route(agentRoutePrefix, func(r chi.Router) {
 		r.Get("/health", a.Health)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)

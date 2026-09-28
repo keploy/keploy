@@ -111,6 +111,16 @@ runs:
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
 
+        # Bounded retry for the go commands below — both speculative fetches
+        # and the authoritative one. These are the most failure-prone network
+        # calls in CI: they reach github.com over SSH for every build and lint
+        # job, and github.com sheds SSH sessions under load with a rejection
+        # that reads as permanent (see go-retry.sh's GO_RETRY_RE). The
+        # authoritative fetch was the one `go get` in the repo with no retry at
+        # all, so a shed session failed the lane outright.
+        # shellcheck source=/dev/null
+        source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/go-retry.sh"
+
         # Cross-repo integrations-ref resolution order (first hit wins):
         #
         #   1. `Integration-Ref: <branch-or-sha>` line in the PR body —
@@ -148,7 +158,22 @@ runs:
             return 1
           fi
           echo "Trying integrations@${ref} (from ${source})"
-          if GOPRIVATE=github.com/keploy/integrations go get "github.com/keploy/integrations@${ref}" 2>/dev/null; then
+          # Retried too, and for a sharper reason than the authoritative fetch
+          # below. A shed SSH session here is indistinguishable from "that
+          # branch does not exist", so it falls through and builds
+          # integrations@main — the WRONG ref, silently, on a PR that was
+          # deliberately paired with a cross-repo branch. go_retry only retries
+          # the transient patterns, so a ref that genuinely is not there still
+          # fails on the first attempt and costs nothing.
+          #
+          # stderr stays suppressed: a missing ref is the ordinary case and its
+          # error is noise. go_retry matches on its own captured copy, not on
+          # this stream, so the retry still works.
+          # A 1s backoff, not go_retry's default 5s: stderr is suppressed here,
+          # so a retry is invisible, and a speculative fetch should not stall
+          # the step for seconds with nothing in the log to explain it.
+          if GOPRIVATE=github.com/keploy/integrations GO_RETRY_MAX_ATTEMPTS=2 GO_RETRY_BACKOFF=1 GO_RETRY_DIRECT_FROM=99 \
+            go_retry get "github.com/keploy/integrations@${ref}" 2>/dev/null; then
             echo "✓ Fetched integrations@${ref}"
             FETCHED=1
             return 0
@@ -189,7 +214,14 @@ runs:
             exit 1
           fi
           echo "Fetching private integrations dependency via SSH (INTEGRATION_REF=${INTEGRATION_REF})..."
-          GOPRIVATE=github.com/keploy/integrations go get "github.com/keploy/integrations@${INTEGRATION_REF}"
+          # GO_RETRY_DIRECT_FROM=99 pins every attempt to the default GOPROXY.
+          # The module itself is GOPRIVATE and always comes from git, so the
+          # proxy schedule cannot help it — but attempts 3-4 would otherwise
+          # flip its TRANSITIVE dependencies to `direct`, which is strictly
+          # riskier (a renamed or retagged upstream fails permanently direct
+          # where the proxy still serves it).
+          GOPRIVATE=github.com/keploy/integrations GO_RETRY_DIRECT_FROM=99 \
+            go_retry get "github.com/keploy/integrations@${INTEGRATION_REF}"
         fi
 
         echo "Creating extraparsers.go (platform-independent)..."
@@ -245,6 +277,10 @@ runs:
         # `v3.5.3+incompatible`) pass on Windows just like on Linux.
         $SafeRefRe = '^[A-Za-z0-9._/+-]+$'
 
+        # Bounded retry for every go command below. See go-retry.ps1, and
+        # go-retry.sh for why only certain failures are treated as transient.
+        . "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.ps1"
+
         function Try-Fetch([string]$Ref, [string]$Source) {
           if ([string]::IsNullOrWhiteSpace($Ref)) { return $false }
           if ($Ref -eq $env:INTEGRATION_REF) { return $false }
@@ -253,8 +289,14 @@ runs:
             return $false
           }
           Write-Host "Trying integrations@$Ref (from $Source)"
-          go get "github.com/keploy/integrations@$Ref" 2>$null
-          if ($LASTEXITCODE -eq 0) {
+          # Retried for the same reason as the bash arm's try_fetch: a shed
+          # SSH session here is indistinguishable from "that branch does not
+          # exist", so it falls through and builds integrations@main — the
+          # WRONG ref, silently, on a PR deliberately paired with a cross-repo
+          # branch. -Quiet because a missing ref is the ordinary case and its
+          # error is noise; only the transient patterns retry, so a ref that
+          # genuinely is not there still costs one attempt.
+          if (Invoke-GoWithRetry -GoArgs @("get", "github.com/keploy/integrations@$Ref") -MaxAttempts 2 -BackoffSeconds 1 -What "integrations@$Ref" -Quiet) {
             Write-Host "Fetched integrations@$Ref"
             return $true
           }
@@ -293,8 +335,12 @@ runs:
             exit 1
           }
           Write-Host "Fetching private integrations dependency via SSH (INTEGRATION_REF=$env:INTEGRATION_REF)..."
-          go get "github.com/keploy/integrations@$env:INTEGRATION_REF"
-          if ($LASTEXITCODE -ne 0) { throw "go get failed for $env:INTEGRATION_REF" }
+          # Assigned and checked, because this is the authoritative fetch and a
+          # failure has to fail the step. Named $authFetched rather than
+          # $fetched: PowerShell identifiers are case-insensitive, so the latter
+          # would be the $Fetched flag above.
+          $authFetched = Invoke-GoWithRetry -GoArgs @("get", "github.com/keploy/integrations@$env:INTEGRATION_REF") -MaxAttempts 4 -What "integrations@$env:INTEGRATION_REF"
+          if (-not $authFetched) { throw "go get failed for integrations@$env:INTEGRATION_REF" }
         }
 
         Write-Host "Creating extraparsers.go..."
@@ -319,7 +365,20 @@ runs:
       shell: bash
       run: |
         echo "Tidying up Go modules..."
-        go mod tidy
+        # Wrapped for the same reason as the fetch above, and go-retry.sh's own
+        # preamble insists on it: guarding one command and leaving its siblings
+        # bare guards nothing. This resolves the whole module graph — the
+        # private module over SSH, every transitive dependency through the
+        # proxy — so it is the second most likely network call in this action.
+        #
+        # GO_RETRY_DIRECT_FROM=99 pins every attempt to the default GOPROXY, as
+        # the fetch above does and as the pwsh arm does. Letting attempts 3-4
+        # flip a WHOLE graph to `direct` is the case check-deprecated-deps.sh
+        # pins the same flag for: one renamed or retagged upstream then fails
+        # permanently where the proxy would still have served it.
+        # shellcheck source=/dev/null
+        source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/go-retry.sh"
+        GO_RETRY_DIRECT_FROM=99 go_retry mod tidy
 
     # FIX 2: Explicitly use pwsh on Windows to avoid 'bash' invoking WSL
     - name: Add any missing Go modules (Windows)
@@ -327,4 +386,13 @@ runs:
       shell: pwsh
       run: |
         Write-Host "Tidying up Go modules..."
-        go mod tidy
+        # Each `run:` is its own shell, so the helper is dot-sourced again here.
+        # Same argument as the bash arm: this resolves the whole module graph
+        # over the network. prepare_and_run.yml's build-windows-amd64 is also
+        # the only caller anywhere that passes go-cache: false, so there it
+        # resolves the graph cold; release.yml's windows build caches like
+        # everyone else.
+        . "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.ps1"
+        if (-not (Invoke-GoWithRetry -GoArgs @("mod", "tidy") -What "go mod tidy")) {
+          throw "go mod tidy failed"
+        }

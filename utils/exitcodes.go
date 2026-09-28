@@ -42,11 +42,13 @@ const (
 
 	// ExitEnvironmentUnsupported means Keploy had the privileges it asked for,
 	// but the machine or container it runs in lacks something the
-	// instrumentation cannot start without: tracefs/debugfs not mounted, no
-	// non-loopback IPv4 address. The remedy is to change that environment
-	// (mount tracefs, give the container a network) — not setcap, not sudo,
-	// and nothing to do with the tests. Not 5: the enterprise build uses 5 for
-	// a command that needs a session it cannot use.
+	// instrumentation cannot start without: tracefs/debugfs not mounted, or,
+	// for an agent started with --is-docker, no non-loopback IPv4 address for
+	// the applications it serves to reach it at. The remedy is to change that
+	// environment (mount tracefs, give the agent's container a network) — not
+	// setcap, not sudo, and nothing to do with the tests. Not 5: the
+	// enterprise build uses 5 for a command that needs a session it cannot
+	// use.
 	ExitEnvironmentUnsupported = 6
 )
 

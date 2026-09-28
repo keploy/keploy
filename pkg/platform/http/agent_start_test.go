@@ -3,16 +3,16 @@ package http
 // AN AGENT THAT CANNOT START MUST FAIL THE RUN, AT ONCE, AND SAY WHY.
 //
 // The native agent is a separate process. When it could not start -- no
-// privileges to raise the memlock rlimit, no tracefs, no non-loopback IPv4
-// address -- the readiness wait never looked at the process: it polled a
-// dead port for the whole ready budget (330s), or, when the agent's exit
-// failed the caller's errgroup first, returned a bare "context canceled" that
-// `keploy mock record` then read as the user's Ctrl+C and exited 0 on, with
-// the test command never run.
+// privileges to raise the memlock rlimit, no tracefs -- the readiness wait
+// never looked at the process: it polled a dead port for the whole ready
+// budget (330s), or, when the agent's exit failed the caller's errgroup
+// first, returned a bare "context canceled" that `keploy mock record` then
+// read as the user's Ctrl+C and exited 0 on, with the test command never run.
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,7 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -206,8 +208,10 @@ func TestAnAgentThatAnswersIsReady(t *testing.T) {
 // already has one. A native agent refused it may not be in a container at
 // all: on a bare host, root is refused eBPF by kernel lockdown or by an
 // SELinux or AppArmor policy, which no container flag changes. And tracefs is
-// only ever missing on Linux: a macOS or Windows agent reporting its
-// environment is short of something is short of a network.
+// only ever missing on Linux, while no native agent needs a network: it is
+// reached over loopback, so a machine with its network off has nothing to
+// connect. The agent container does need an address, on the network the
+// application's command names.
 func TestAnAgentThatCouldNotStartIsGivenARemedyThatCanWork(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -218,11 +222,11 @@ func TestAnAgentThatCouldNotStartIsGivenARemedyThatCanWork(t *testing.T) {
 		wrong    []string
 	}{
 		{"native, privileges", utils.ErrPrivilegeRequired, false, "linux", []string{"--privileged", "lockdown", "SELinux or AppArmor"}, nil},
-		{"native, environment", utils.ErrEnvironmentUnsupported, false, "linux", []string{"mount -t tracefs", "non-loopback IPv4 address"}, nil},
-		{"native on macOS, environment", utils.ErrEnvironmentUnsupported, false, "darwin", []string{"non-loopback IPv4 address"}, []string{"tracefs", "mount"}},
-		{"native on Windows, environment", utils.ErrEnvironmentUnsupported, false, "windows", []string{"non-loopback IPv4 address"}, []string{"tracefs", "mount"}},
+		{"native, environment", utils.ErrEnvironmentUnsupported, false, "linux", []string{"mount -t tracefs"}, []string{"IPv4", "network"}},
+		{"native on macOS, environment", utils.ErrEnvironmentUnsupported, false, "darwin", []string{"the agent's log"}, []string{"tracefs", "mount", "IPv4", "network"}},
+		{"native on Windows, environment", utils.ErrEnvironmentUnsupported, false, "windows", []string{"the agent's log"}, []string{"tracefs", "mount", "IPv4", "network"}},
 		{"docker, privileges", utils.ErrPrivilegeRequired, true, "linux", []string{"rootless", "SELinux or AppArmor"}, []string{"Run keploy against a rootful Docker daemon"}},
-		{"docker, environment", utils.ErrEnvironmentUnsupported, true, "linux", []string{"mount -t debugfs"}, nil},
+		{"docker, environment", utils.ErrEnvironmentUnsupported, true, "linux", []string{"mount -t debugfs", "--network none"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			remedy := agentStartRemedy(tc.cause, tc.isDocker, tc.goos)
@@ -450,5 +454,153 @@ func TestDockerComposeThatMayNotLowerPerfEventParanoidSaysWhy(t *testing.T) {
 	}
 	if len(steps) != 1 || steps[0] != perfEventParanoidRemedy {
 		t.Fatalf("logged next_step %q, want only %q", steps, perfEventParanoidRemedy)
+	}
+}
+
+// Under docker compose the agent's exit reaches keploy as its container's
+// State.ExitCode, not as a process keploy waited on. It has to mean exactly
+// what a native agent's exit status means: the specific code armed, its
+// reason carried, and the remedy for an agent in a container logged. Read any
+// other way, the tracefs remedy never reached a compose user, and compose's
+// own exit was mirrored as the test command's.
+func TestAComposeAgentThatCouldNotStartSaysWhyAsAnyOtherDoes(t *testing.T) {
+	for _, tc := range []struct {
+		code     int
+		cause    error // nil: a failure with no specific reason
+		wantCode int   // the exit code armed; 0 when none is
+	}{
+		{utils.ExitEnvironmentUnsupported, utils.ErrEnvironmentUnsupported, utils.ExitEnvironmentUnsupported},
+		{utils.ExitPrivilegeRequired, utils.ErrPrivilegeRequired, utils.ExitPrivilegeRequired},
+		{137, nil, 0},
+		{utils.ExitKeployError, nil, 0},
+	} {
+		core, logs := observer.New(zap.ErrorLevel)
+		a := &AgentClient{logger: zap.New(core), conf: &config.Config{}}
+		utils.ErrCode = 0
+		t.Cleanup(func() { utils.ErrCode = 0 })
+
+		err := a.agentStoppedBeforeReady(&agentContainerExit{container: "keploy-v3-x", code: tc.code}, true)
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("the keploy-agent container keploy-v3-x exited with code %d", tc.code)) {
+			t.Fatalf("exit %d: got %v, want an error naming the agent's container and its exit", tc.code, err)
+		}
+		if tc.cause != nil && !errors.Is(err, tc.cause) {
+			t.Fatalf("exit %d: got %q, want it to carry %q", tc.code, err, tc.cause)
+		}
+		if utils.ErrCode != tc.wantCode {
+			t.Fatalf("exit %d: armed %d, want %d", tc.code, utils.ErrCode, tc.wantCode)
+		}
+		if tc.cause != nil {
+			want := agentStartRemedy(tc.cause, true, runtime.GOOS)
+			if n := logs.FilterField(zap.String("next_step", want)).Len(); n != 1 {
+				t.Fatalf("exit %d: logged %v, want the container remedy %q once", tc.code, logs.All(), want)
+			}
+		}
+	}
+}
+
+func TestAgentContainerExitSaysItRanOutOfMemory(t *testing.T) {
+	err := &agentContainerExit{container: "keploy-v3-x", code: 137, oomKilled: true}
+	if got := err.Error(); !strings.Contains(got, "exited with code 137") || !strings.Contains(got, "out of memory") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// What keploy read from the stopped keploy-agent compose service decides
+// whose failure a compose run is. An agent that never let the app start could
+// not start at all: its exit is armed, and the container remedy logged,
+// exactly as for any agent that could not start. One that died under a
+// running app is keploy's failure, and its code says nothing about the
+// machine. And one compose stopped after the app exited has not failed at
+// all: blaming it fails every compose run.
+func TestComposeAgentFailureDecidesFromTheStoppedAgent(t *testing.T) {
+	const at, later = "2026-09-25T12:00:00Z", "2026-09-25T12:00:10Z"
+	const neverStarted = "0001-01-01T00:00:00Z"
+	ended := func(status string, code int, started string) *container.State {
+		return &container.State{Status: status, ExitCode: code, StartedAt: started, FinishedAt: later}
+	}
+	for _, tc := range []struct {
+		name       string
+		agent, app *container.State
+		want       string // "" when there is no failure
+		cause      error  // the specific reason, armed and remedied; nil when there is none
+	}{
+		{
+			name:  "no tracefs: the agent exited 6 and compose never started the app",
+			agent: ended("exited", utils.ExitEnvironmentUnsupported, at),
+			app:   ended("created", 0, neverStarted),
+			want:  "the keploy agent could not start (the keploy-agent container keploy-v3-x exited with code 6)",
+			cause: utils.ErrEnvironmentUnsupported,
+		},
+		{
+			name:  "eBPF refused: the agent exited 3, and docker could not say how the app ended",
+			agent: ended("exited", utils.ExitPrivilegeRequired, at),
+			want:  "the keploy agent could not start (the keploy-agent container keploy-v3-x exited with code 3)",
+			cause: utils.ErrPrivilegeRequired,
+		},
+		{
+			name:  "the agent was killed mid-run, and the namespace took the app with it",
+			agent: ended("exited", 137, at),
+			app:   ended("exited", 137, at),
+			want:  "the keploy agent stopped while the test command was running: the keploy-agent container keploy-v3-x exited with code 137",
+		},
+		{
+			name:  "the normal end: the app exited, and compose stopped the agent",
+			agent: ended("exited", 0, at),
+			app:   ended("exited", 7, at),
+		},
+		{
+			name:  "the app returned its own code, then compose killed an agent slow to stop",
+			agent: ended("exited", 137, at),
+			app:   ended("exited", 0, at),
+		},
+		{name: "docker could not say how the agent ended", app: ended("exited", 137, at)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.ErrorLevel)
+			a := &AgentClient{logger: zap.New(core), conf: &config.Config{}}
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+
+			err := a.composeAgentFailure(app.StoppedAgent{Container: "keploy-v3-x", Agent: tc.agent, App: tc.app})
+			if tc.want == "" {
+				if err != nil || utils.ErrCode != 0 || logs.Len() != 0 {
+					t.Fatalf("got %v (armed %d, logged %v), want no failure", err, utils.ErrCode, logs.All())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want %q", err, tc.want)
+			}
+			wantCode, remedies := 0, 0
+			if tc.cause != nil {
+				wantCode, remedies = utils.ExitCodeFor(tc.cause), 1
+				if !errors.Is(err, tc.cause) {
+					t.Fatalf("got %q, want it to carry %q", err, tc.cause)
+				}
+			}
+			if utils.ErrCode != wantCode {
+				t.Fatalf("armed exit %d, want %d", utils.ErrCode, wantCode)
+			}
+			if n := logs.FilterFieldKey("next_step").Len(); n != remedies {
+				t.Fatalf("logged %v, want %d remedy", logs.All(), remedies)
+			}
+		})
+	}
+}
+
+// Nothing read from the stopped agent -- the app never ran it under compose,
+// or read nothing before the teardown -- is no account of a replay, and no
+// sign that the agent failed.
+func TestComposeReadsWithNothingReadFromTheStoppedAgent(t *testing.T) {
+	a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{}}
+	if _, err := a.ComposeAgentOutcome(); err == nil {
+		t.Fatal("ComposeAgentOutcome with no app returned an outcome")
+	}
+	a.apps.Store(uint64(0), &app.App{})
+	if got, err := a.ComposeAgentOutcome(); err == nil {
+		t.Fatalf("ComposeAgentOutcome with nothing read returned %+v: an account nobody read", got)
+	}
+	if err := a.ComposeAgentFailure(); err != nil {
+		t.Fatalf("ComposeAgentFailure with nothing read returned %v", err)
 	}
 }

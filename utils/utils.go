@@ -1021,7 +1021,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 	// Non-windows (existing logic)
 	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
-	children, err := findChildPIDs(ppid)
+	children, groupOf, err := findChildPIDs(ppid)
 	if err != nil {
 		return err
 	}
@@ -1030,7 +1030,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 
 	logger.Debug("Found child PIDs", zap.Ints("children", children))
 
-	uniqueProcess, err := uniqueProcessGroups(children)
+	uniqueProcess, err := uniqueProcessGroups(children, groupOf)
 	if err != nil {
 		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
 		uniqueProcess = children
@@ -1140,12 +1140,14 @@ func isProcessRunning(pid int) (bool, error) {
 	return true, nil
 }
 
-func uniqueProcessGroups(pids []int) ([]int, error) {
+// uniqueProcessGroups returns the process group of each of pids, as groupOf
+// reads it, each group once.
+func uniqueProcessGroups(pids []int, groupOf func(pid int) (int, error)) ([]int, error) {
 	uniqueGroups := make(map[int]bool)
 	var uniqueGPIDs []int
 
 	for _, pid := range pids {
-		pgid, err := getProcessGroupID(pid)
+		pgid, err := groupOf(pid)
 		if err != nil {
 			return nil, err
 		}
@@ -1156,89 +1158,6 @@ func uniqueProcessGroups(pids []int) ([]int, error) {
 	}
 
 	return uniqueGPIDs, nil
-}
-
-func getProcessGroupID(pid int) (int, error) {
-	statusPath := filepath.Join("/proc", strconv.Itoa(pid), "status")
-	statusBytes, err := os.ReadFile(statusPath)
-	if err != nil {
-		return 0, err
-	}
-
-	status := string(statusBytes)
-	for _, line := range strings.Split(status, "\n") {
-		if strings.HasPrefix(line, "NSpgid:") {
-			return extractIDFromStatusLine(line), nil
-		}
-	}
-
-	return 0, nil
-}
-
-// extractIDFromStatusLine extracts the ID from a status line in the format "Key:\tValue".
-func extractIDFromStatusLine(line string) int {
-	fields := strings.Fields(line)
-	if len(fields) == 2 {
-		id, err := strconv.Atoi(fields[1])
-		if err == nil {
-			return id
-		}
-	}
-	return -1
-}
-
-// findChildPIDs takes a parent PID and returns a slice of all descendant PIDs.
-func findChildPIDs(parentPID int) ([]int, error) {
-	var childPIDs []int
-
-	// Recursive helper function to find all descendants of a given PID.
-	var findDescendants func(int)
-	findDescendants = func(pid int) {
-		procDirs, err := os.ReadDir("/proc")
-		if err != nil {
-			return
-		}
-
-		for _, procDir := range procDirs {
-			if !procDir.IsDir() {
-				continue
-			}
-
-			childPid, err := strconv.Atoi(procDir.Name())
-			if err != nil {
-				continue
-			}
-
-			statusPath := filepath.Join("/proc", procDir.Name(), "status")
-			statusBytes, err := os.ReadFile(statusPath)
-			if err != nil {
-				continue
-			}
-
-			status := string(statusBytes)
-			for _, line := range strings.Split(status, "\n") {
-				if strings.HasPrefix(line, "PPid:") {
-					fields := strings.Fields(line)
-					if len(fields) == 2 {
-						ppid, err := strconv.Atoi(fields[1])
-						if err != nil {
-							break
-						}
-						if ppid == pid {
-							childPIDs = append(childPIDs, childPid)
-							findDescendants(childPid)
-						}
-					}
-					break
-				}
-			}
-		}
-	}
-
-	// Start the recursion with the initial parent PID.
-	findDescendants(parentPID)
-
-	return childPIDs, nil
 }
 
 // ephemeralPortRange reports the kernel's local port range and whether it could
@@ -1949,9 +1868,12 @@ func GetContainerIPv4() (string, error) {
 	}
 
 	// Tagged, so the agent that cannot start without it says so in its exit
-	// status: a machine or container with no IPv4 address but loopback's
-	// (docker --network none, a sandbox, an IPv6-only host) is the
-	// environment to change, not a privilege to grant.
+	// status: a container with no IPv4 address but loopback's (docker
+	// --network none, an IPv6-only network) is the environment to change, not
+	// a privilege to grant. Only an agent started with --is-docker asks (its
+	// hooks, as they load): they send the connections of the applications it
+	// serves to this address. A native one is reached over loopback and needs
+	// no address of its own.
 	return "", fmt.Errorf("%w: could not find a non-loopback IP for the container", ErrEnvironmentUnsupported)
 }
 

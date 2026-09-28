@@ -158,6 +158,17 @@ type UnmatchedCall struct {
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 }
 
+// MockOutcome is the end of a mock replay as the agent saw it: the mocks it
+// served and the outgoing calls that matched none of them -- what
+// /consumedmocks and /mockerrors answer, in one document. A containerised
+// agent writes it as it stops (pkg/platform/docker AgentOutcomeFile), for the
+// one caller that cannot ask it over HTTP: a docker compose run, where the
+// agent is stopped along with the app.
+type MockOutcome struct {
+	Consumed []MockState     `json:"consumed"`
+	Missed   []UnmatchedCall `json:"missed"`
+}
+
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
 func MockSummaryFromSpec(mock *Mock) string {
 	if mock.Spec.HTTPReq != nil {

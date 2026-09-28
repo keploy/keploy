@@ -1,11 +1,18 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
@@ -134,5 +141,72 @@ func TestAgentThatIsStoppedExitsZero(t *testing.T) {
 				t.Fatalf("a stopped agent exits %d", got)
 			}
 		})
+	}
+}
+
+// `keploy agent` dies of a hang-up, as it did before NewCtx made one stop
+// keploy gracefully, because its owners count on that (utils.DieOnHangup). The
+// agent is a copy of this test binary that builds the agent command on
+// NewCtx's context, runs its PreRunE and waits for that context to end.
+func TestAgentDiesOfAHangUp(t *testing.T) {
+	if dir := os.Getenv("KEPLOY_TEST_AGENT_HANGUP"); dir != "" {
+		ctx := utils.NewCtx()
+		cmd := Agent(ctx, zap.NewNop(), &config.Config{}, agentSvcFactory{}, noFlags{})
+		if err := cmd.PreRunE(cmd, nil); err != nil {
+			os.Exit(3)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "ready"), nil, 0o600); err != nil {
+			os.Exit(3)
+		}
+		<-ctx.Done()
+		os.Exit(0)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no SIGHUP")
+	}
+	// Go starts a child with the default action for a signal it catches, so
+	// the agent starts with SIGHUP's default even when `go test` runs under
+	// nohup.
+	caught := make(chan os.Signal, 1)
+	signal.Notify(caught, syscall.SIGHUP)
+	t.Cleanup(func() { signal.Stop(caught) })
+
+	dir := t.TempDir()
+	agent := exec.Command(os.Args[0], "-test.run=^TestAgentDiesOfAHangUp$")
+	agent.Env = append(os.Environ(), "KEPLOY_TEST_AGENT_HANGUP="+dir)
+	var out bytes.Buffer
+	agent.Stdout, agent.Stderr = &out, &out
+	if err := agent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- agent.Wait() }()
+	deadline := time.After(30 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
+			break
+		}
+		select {
+		case err := <-exited:
+			t.Fatalf("the agent ended before it was ready: %v\n%s", err, out.String())
+		case <-deadline:
+			_ = agent.Process.Kill()
+			<-exited
+			t.Fatalf("the agent was never ready\n%s", out.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err := agent.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(30 * time.Second):
+		_ = agent.Process.Kill()
+		<-exited
+		t.Fatalf("the agent was still running 30s after SIGHUP\n%s", out.String())
+	}
+	if st := agent.ProcessState.Sys().(syscall.WaitStatus); !st.Signaled() || st.Signal() != syscall.SIGHUP {
+		t.Fatalf("the agent ended with %v, want it dead of SIGHUP\n%s", agent.ProcessState, out.String())
 	}
 }

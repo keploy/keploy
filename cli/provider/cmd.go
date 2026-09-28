@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/config/loader"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
@@ -316,6 +317,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pid of the keploy client process; the launcher passes os.Getpid())")
+		// Only the PATH travels here. The token itself stays in a 0600 file,
+		// because argv is world-readable through /proc/<pid>/cmdline and `ps`,
+		// and the local users that would read it there are the ones this token
+		// exists to keep out of the control plane.
+		cmd.Flags().String("token-file", "", "path to the file holding this session's agent control-plane token (set by the keploy client)")
 		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.Agent.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -622,7 +628,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	// expected to persist keploy.yml for reuse across invocations.
 	// The `agent` subcommand is a worker process spawned by the
 	// parent keploy: it still reads an existing keploy.yml via
-	// viper.ReadInConfig() in PreProcessFlags to pick up the same
+	// loader.Read in PreProcessFlags to pick up the same
 	// settings the parent resolved, but it has no use for writing
 	// a fresh one if the file is missing — the parent has already
 	// handed it the effective config via CLI flags + env. Running
@@ -691,14 +697,17 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	// not allowed" on Linux) until a keploy.yml existed. Under the default
 	// --path, <path>/keploy is also where keploy keeps its tests, which
 	// utils.EnsureKeployPathIsFolder explains.
-	configFile := findKeployConfig(configPath)
+	configFile := loader.Find(configPath)
 	viper.SetConfigType("yml")
 	if configFile == "" {
 		IsConfigFileFound = false
 		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
-		viper.SetConfigFile(configFile)
-		if err := viper.ReadInConfig(); err != nil {
+		// keploy.yml is a file of the repository keploy runs in, which a cloned
+		// repo decides: loader.Read is viper's read of it, bounded -- a FIFO,
+		// a link to /dev/zero or a file past keploy's limits is refused, where
+		// viper.ReadInConfig blocked for good or ran out of memory.
+		if err := loader.Read(viper.GetViper(), configFile); err != nil {
 			errMsg := "failed to read config file"
 			utils.LogError(c.logger, err, errMsg, zap.String("file", configFile))
 			return errors.New(errMsg)
@@ -723,8 +732,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		overridePath := filepath.Join(appDir, fmt.Sprintf("%s.keploy.yml", lastDir))
 
 		if _, statErr := os.Stat(overridePath); statErr == nil {
-			viper.SetConfigFile(overridePath)
-			if err := viper.MergeInConfig(); err != nil {
+			if err := loader.Merge(viper.GetViper(), overridePath); err != nil {
 				errMsg := fmt.Sprintf("failed to merge override config file: %s", overridePath)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
@@ -754,23 +762,6 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 func mockViperPrefix(cmd *cobra.Command) string {
 	if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
 		return "mock"
-	}
-	return ""
-}
-
-// keployConfigNames are the files that are keploy's configuration, in the
-// order viper's lookup preferred them. CreateConfigFile writes keploy.yml.
-var keployConfigNames = []string{"keploy.yaml", "keploy.yml"}
-
-// findKeployConfig returns the path of keploy's config file in dir, or "" when
-// there is none. A directory, or a file that cannot be stat'd, is not one --
-// as viper's lookup treated them.
-func findKeployConfig(dir string) string {
-	for _, name := range keployConfigNames {
-		p := filepath.Join(dir, name)
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
-		}
 	}
 	return ""
 }

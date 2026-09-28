@@ -23,7 +23,7 @@ const defaultMockBufferCapacity = 100
 // therefore hold far more than the windows that can resolve while a test's
 // LATE-decoded mock (e.g. a large async Mongo aggregate response) is still in
 // flight — otherwise the owning window is evicted before the mock lands,
-// ownerWindow() misses, and the mock is orphaned from its test's mapping →
+// ownerWindowLocked() misses, and the mock is orphaned from its test's mapping →
 // replay match_phase=no_mocks for that query. The previous 256 was far too
 // small: heavy-load recordings burst well past 1000 resolved windows within a
 // single 7 s span (go-memory-load-mongo: ~1000 windows/7 s peak), so a slow
@@ -65,6 +65,38 @@ type resolvedWindow struct {
 	end      time.Time
 	testName string
 	mapping  bool
+	// keep is the window's own verdict: false for a static-dedup duplicate.
+	// A late mock is kept or pruned by the window that OWNS it, never by the
+	// resolve that happens to find it (see the retroactive bin).
+	keep bool
+}
+
+// ownerWindowLocked returns the recently-resolved window that owns a per-test
+// mock timestamped t: one whose [start,end] contains t (inclusive, matching
+// ResolveRange's current-window test). Sequential request windows never
+// overlap, but concurrent sync-mode requests' windows can; a KEPT window then
+// wins over a static-dedup duplicate, because pruning a kept test's mock fails
+// its replay while keeping a duplicate's costs one extra mock. Among windows
+// with the same verdict the oldest wins. Caller holds m.mu.
+//
+// Only RESOLVED windows are known. A kept window still open when the mock is
+// judged cannot win: a shorter duplicate that resolves inside it first prunes
+// the mock (or, on a flush tick, the mock's duplicate owner does).
+func (m *SyncMockManager) ownerWindowLocked(t time.Time) (resolvedWindow, bool) {
+	var owner resolvedWindow
+	found := false
+	for _, w := range m.recentWindows {
+		if t.Before(w.start) || t.After(w.end) {
+			continue
+		}
+		if w.keep {
+			return w, true
+		}
+		if !found {
+			owner, found = w, true
+		}
+	}
+	return owner, found
 }
 
 // nopLogger is the fallback when no logger has been installed via
@@ -1032,15 +1064,6 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 	}
 	mappingChan := m.mappingChan
 
-	ownerWindow := func(t time.Time) (resolvedWindow, bool) {
-		for _, w := range m.recentWindows {
-			if !t.Before(w.start) && !t.After(w.end) {
-				return w, true
-			}
-		}
-		return resolvedWindow{}, false
-	}
-
 	keepIdx := 0
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
@@ -1054,7 +1077,18 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 			continue
 		}
-		if w, ok := ownerWindow(mock.Spec.ReqTimestampMock); ok {
+		if w, ok := m.ownerWindowLocked(mock.Spec.ReqTimestampMock); ok {
+			if !w.keep {
+				// A static-dedup duplicate's window (sync mode): its late mocks
+				// go the way its in-time ones went in ResolveRange — pruned,
+				// except a startup-window mock, which is rescued with no owner
+				// and no mapping (a duplicate's testName is synthetic).
+				if isStartupMock(mock) {
+					mock.Name = "mock-" + generateRandomString(8)
+					mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+				}
+				continue
+			}
 			mock.Name = "mock-" + generateRandomString(8)
 			if w.mapping {
 				if lateMappings == nil {
@@ -1067,7 +1101,7 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 			mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: w.testName})
 			continue
 		}
-		// STARTUP RESCUE: a startup-window mock the ownerWindow check above
+		// STARTUP RESCUE: a startup-window mock the ownerWindowLocked check above
 		// didn't claim (boot traffic owns no window; an early-test mock whose
 		// window hasn't resolved yet on this ticker tick). Flush it to disk
 		// proactively rather than leaving it parked in the buffer where a dedup
@@ -1554,19 +1588,6 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// eviction happens at the append-and-cap below; keeping the count high enough
 	// (8192, was 256) is what stops a burst from evicting a window while its test's
 	// late aggregate mock is still decoding — the go-memory-load-mongo no_mocks bug.
-	// ownerWindow returns the recently-resolved window whose [start,end]
-	// contains t (inclusive, matching the current-window test below).
-	// Windows are non-overlapping FIFO request windows, so at most one
-	// matches.
-	ownerWindow := func(t time.Time) (resolvedWindow, bool) {
-		for _, w := range m.recentWindows {
-			if !t.Before(w.start) && !t.After(w.end) {
-				return w, true
-			}
-		}
-		return resolvedWindow{}, false
-	}
-
 	keepIdx := 0
 
 	for i := 0; i < len(m.buffer); i++ {
@@ -1625,6 +1646,25 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 				// Owned by THIS window's test → tag it so a capacity
 				// drop suppresses testName rather than orphaning it.
 				mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: testName})
+			} else if ownerW, ok := m.ownerWindowLocked(mockTime); ok && ownerW.keep {
+				// This duplicate's window overlaps an earlier KEPT window that
+				// also contains the mock (concurrent sync-mode requests): the
+				// kept test owns it, exactly as the retroactive bin below
+				// decides for a mock outside the current window.
+				if !outChanBound {
+					m.buffer[keepIdx] = mock
+					keepIdx++
+					continue
+				}
+				mock.Name = "mock-" + generateRandomString(8)
+				if ownerW.mapping {
+					if lateMappings == nil {
+						lateMappings = make(map[string][]string)
+					}
+					lateMappings[ownerW.testName] = append(lateMappings[ownerW.testName], mock.Name)
+				}
+				mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: ownerW.testName})
+				lateBinned++
 			} else if isStartupMock(mock) {
 				// STARTUP RESCUE (static-dedup duplicate window): keep==false
 				// means the enterprise static-dedup deemed THIS test case a
@@ -1666,26 +1706,43 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		// stale-cutoff so an in-window-but-old mock (long test window that
 		// straddles the 7 s horizon) is rescued rather than reaped. Mirrors
 		// the in-window branch's keep / outChanBound handling.
-		if ownerW, ok := ownerWindow(mockTime); ok {
-			if keep {
-				if !outChanBound {
-					m.buffer[keepIdx] = mock
-					keepIdx++
-					continue
-				}
-				mock.Name = "mock-" + generateRandomString(8)
-				if ownerW.mapping {
-					if lateMappings == nil {
-						lateMappings = make(map[string][]string)
+		//
+		// The verdict is the OWNER's (ownerW.keep), not this call's keep. With
+		// static dedup most resolves are duplicates, and deciding by the finder
+		// dropped a kept test's late mock whenever a duplicate's resolve found
+		// it — while persisting a duplicate's late mock whenever a kept resolve
+		// did. The in-time path's startup rescue applies here too, so a
+		// startup-window mock of a duplicate is not lost for decoding late.
+		if ownerW, ok := m.ownerWindowLocked(mockTime); ok {
+			if !ownerW.keep {
+				if isStartupMock(mock) {
+					if !outChanBound {
+						m.buffer[keepIdx] = mock
+						keepIdx++
+						continue
 					}
-					lateMappings[ownerW.testName] = append(lateMappings[ownerW.testName], mock.Name)
+					mock.Name = "mock-" + generateRandomString(8)
+					mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 				}
-				// Owned by the retro-matched window's test → tag it so a
-				// capacity drop suppresses that TC.
-				mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: ownerW.testName})
-				lateBinned++
+				continue
 			}
-			// Handled (flushed or retained); drop from the current buffer.
+			if !outChanBound {
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			mock.Name = "mock-" + generateRandomString(8)
+			if ownerW.mapping {
+				if lateMappings == nil {
+					lateMappings = make(map[string][]string)
+				}
+				lateMappings[ownerW.testName] = append(lateMappings[ownerW.testName], mock.Name)
+			}
+			// Owned by the retro-matched window's test → tag it so a
+			// capacity drop suppresses that TC.
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: ownerW.testName})
+			lateBinned++
+			// Handled (flushed); drop from the current buffer.
 			continue
 		}
 
@@ -1780,6 +1837,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		end:      end,
 		testName: testName,
 		mapping:  mapping,
+		keep:     keep,
 	})
 	if len(m.recentWindows) > maxRecentWindows {
 		// Drop the oldest entries; copy down so the big backing array
@@ -1856,11 +1914,13 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 // ResolveRange, so without the rescue here the kept mocks are gone.
 //
 // Discriminator: a mock belongs to a kept test iff its ReqTimestampMock
-// falls inside a recently-resolved window (recentWindows only ever holds
-// NON-duplicate windows — duplicates resolve through here, not
-// ResolveRange). So a before-the-horizon mock that owns a recent window
-// is a late kept mock → flush it (rescue); one that owns none is the
-// skipped duplicate's own debris → drop it. Session/connection mocks are
+// falls inside a recently-resolved KEPT window. (In async mode, the only
+// caller, duplicates resolve through here rather than ResolveRange, so every
+// window in recentWindows is kept; a sync-mode ResolveRange(keep=false) window
+// is recorded with keep=false and never claims a mock here.) So a
+// before-the-horizon mock that owns a recent kept window is a late kept mock
+// → flush it (rescue); one that owns none is the skipped duplicate's own
+// debris → drop it. Session/connection mocks are
 // reusable across tests and are never reaped by a per-test cleanup.
 func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	if m == nil {
@@ -1873,15 +1933,6 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	m.mu.Lock()
 	outChanBound, _ := m.outChanStatus()
 	mappingChan := m.mappingChan
-
-	ownerWindow := func(t time.Time) (resolvedWindow, bool) {
-		for _, w := range m.recentWindows {
-			if !t.Before(w.start) && !t.After(w.end) {
-				return w, true
-			}
-		}
-		return resolvedWindow{}, false
-	}
 
 	keepIdx := 0
 	for i := 0; i < len(m.buffer); i++ {
@@ -1914,8 +1965,10 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 
 		// RESCUE: a before-the-horizon per-test mock that owns a recent
 		// KEPT window is a legitimately-kept test's late arrival — flush
-		// it to that test instead of deleting it as duplicate debris.
-		if w, ok := ownerWindow(mock.Spec.ReqTimestampMock); ok {
+		// it to that test instead of deleting it as duplicate debris. One
+		// owned by a duplicate window falls through to the startup rescue
+		// and is otherwise dropped, as the duplicate's own debris is.
+		if w, ok := m.ownerWindowLocked(mock.Spec.ReqTimestampMock); ok && w.keep {
 			if !outChanBound {
 				// Can't deliver yet; retain so a later flush sends it.
 				m.buffer[keepIdx] = mock

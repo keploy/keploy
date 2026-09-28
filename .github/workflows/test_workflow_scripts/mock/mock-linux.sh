@@ -52,11 +52,17 @@ PY
 cat > conftest.py <<'PY'
 import os, json, urllib.request, pytest
 AGENT=os.environ.get("KEPLOY_MOCK_AGENT")
+TOKEN=os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
 def _post(p,b):
     if not AGENT: return
+    # The agent guards its control plane with a bearer token and exports it
+    # here for exactly this caller. Absent when recording with an older
+    # released binary, hence the conditional.
+    h={"Content-Type":"application/json"}
+    if TOKEN: h["Authorization"]="Bearer "+TOKEN
     try:
         r=urllib.request.Request(AGENT+p,data=json.dumps(b).encode(),
-            headers={"Content-Type":"application/json"},method="POST")
+            headers=h,method="POST")
         urllib.request.urlopen(r,timeout=3).read()
     except Exception: pass
 @pytest.fixture(autouse=True)
