@@ -332,3 +332,28 @@ func TestSealedWindowsLeaveNoGapBetweenSequentialTests(t *testing.T) {
 	})
 	require.Equal(t, at(100), parallel[1].Start, "overlapping tests keep their own starts")
 }
+
+func TestRunnerScopeStepWindows(t *testing.T) {
+	_, scope := feed(t, `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.01Z","Action":"run","Package":"orders/e2e","Test":"TestA/create"}
+{"Time":"2026-09-24T10:00:00.02Z","Action":"run","Package":"orders/e2e","Test":"TestA/create/nested"}
+{"Time":"2026-09-24T10:00:00.03Z","Action":"pass","Package":"orders/e2e","Test":"TestA/create/nested"}
+{"Time":"2026-09-24T10:00:00.04Z","Action":"pass","Package":"orders/e2e","Test":"TestA/create"}
+{"Time":"2026-09-24T10:00:00.05Z","Action":"run","Package":"orders/e2e","Test":"TestA/delete"}
+{"Time":"2026-09-24T10:00:00.09Z","Action":"pass","Package":"orders/e2e","Test":"TestA/delete"}
+{"Time":"2026-09-24T10:00:00.1Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
+`)
+	sameWindows(t, []models.ScopeWindow{
+		{Name: "create", Start: runnerT0.Add(20 * time.Millisecond), End: runnerT0.Add(30 * time.Millisecond)},
+		{Name: "create", Start: runnerT0.Add(10 * time.Millisecond), End: runnerT0.Add(40 * time.Millisecond)},
+		{Name: "delete", Start: runnerT0.Add(40 * time.Millisecond), End: runnerT0.Add(90 * time.Millisecond)},
+	}, scope.stepWindows())
+
+	_, plain := feed(t, plainSequential)
+	var steps []string
+	for _, w := range plain.stepWindows() {
+		steps = append(steps, w.Name)
+	}
+	require.Equal(t, []string{"one", "two"}, steps)
+	require.Nil(t, (*runnerScope)(nil).stepWindows())
+}

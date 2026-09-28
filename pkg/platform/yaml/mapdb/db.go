@@ -277,8 +277,8 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 }
 
 // UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
-func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string][]string) error {
-	if len(byTest) == 0 {
+func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry) error {
+	if len(byTest) == 0 && len(startup) == 0 {
 		return nil
 	}
 	mappingPath := filepath.Join(db.path, testSetID)
@@ -310,11 +310,19 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	}
 	sort.Strings(testIDs)
 	for _, testID := range testIDs {
-		if i, ok := at[testID]; ok {
-			mapping.TestCases[i].Cases = mergeNames(mapping.TestCases[i].Cases, byTest[testID])
-			continue
+		in := byTest[testID]
+		i, ok := at[testID]
+		if !ok {
+			mapping.TestCases = append(mapping.TestCases, models.MappedTestCase{ID: testID})
+			i = len(mapping.TestCases) - 1
 		}
-		mapping.TestCases = append(mapping.TestCases, models.MappedTestCase{ID: testID, Cases: byTest[testID]})
+		tc := &mapping.TestCases[i]
+		tc.Cases = mergeNames(tc.Cases, in.Cases)
+		tc.CaseMocks = mergeMaps(tc.CaseMocks, in.CaseMocks)
+		tc.CaseSteps = mergeMaps(tc.CaseSteps, in.CaseSteps)
+	}
+	if len(startup) > 0 {
+		mapping.Startup = startup
 	}
 	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
 	if err != nil {
@@ -324,6 +332,19 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
 	}
 	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+func mergeMaps[V any](existing, incoming map[string]V) map[string]V {
+	if len(incoming) == 0 {
+		return existing
+	}
+	if existing == nil {
+		existing = make(map[string]V, len(incoming))
+	}
+	for k, v := range incoming {
+		existing[k] = v
+	}
+	return existing
 }
 
 // mergeNames unions incoming names into existing ones, keeping order and dropping repeats.

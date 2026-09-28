@@ -157,10 +157,11 @@ type runnerScope struct {
 	closed    []models.ScopeWindow
 	results   []TestOutcome
 	readTimed int
+	steps     map[string]string
 }
 
 func newRunnerScope(ctx context.Context, logger *zap.Logger, marker ScopeMarker) *runnerScope {
-	return &runnerScope{ctx: ctx, logger: logger, marker: marker, paused: map[string]bool{}, starts: map[string]time.Time{}}
+	return &runnerScope{ctx: ctx, logger: logger, marker: marker, paused: map[string]bool{}, starts: map[string]time.Time{}, steps: map[string]string{}}
 }
 
 // writer is the stdout observer to hand the app runner; nil when the adapter is off.
@@ -224,6 +225,9 @@ func (r *runnerScope) begin(ev scopeEvent, at time.Time) {
 	}
 	r.open = append(kept, ev)
 	r.starts[ev.name()] = at
+	if _, sub, ok := strings.Cut(ev.test, "/"); ok {
+		r.steps[ev.name()], _, _ = strings.Cut(sub, "/")
+	}
 }
 
 func (r *runnerScope) end(ev scopeEvent, at time.Time) {
@@ -276,6 +280,23 @@ func sealed(windows []models.ScopeWindow) []models.ScopeWindow {
 		}
 	}
 	return windows
+}
+
+func (r *runnerScope) stepWindows() []models.ScopeWindow {
+	if r == nil {
+		return nil
+	}
+	var out []models.ScopeWindow
+	for _, w := range r.windows() {
+		r.mu.Lock()
+		step, ok := r.steps[w.Name]
+		r.mu.Unlock()
+		if ok {
+			w.Name = step
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // tests lists every result the runner printed, in the order it printed them.

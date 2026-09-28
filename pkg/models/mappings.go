@@ -95,13 +95,17 @@ type MappedTestCase struct {
 	ID    string      `json:"id" yaml:"id" bson:"id"`
 	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
 	// Cases names the test cases this test produced when its record captured incoming requests.
-	Cases []string `json:"cases,omitempty" yaml:"cases,omitempty" bson:"cases,omitempty"`
+	Cases     []string            `json:"cases,omitempty" yaml:"cases,omitempty" bson:"cases,omitempty"`
+	CaseMocks map[string][]string `json:"case_mocks,omitempty" yaml:"case_mocks,omitempty" bson:"case_mocks,omitempty"`
+	CaseSteps map[string]string   `json:"case_steps,omitempty" yaml:"case_steps,omitempty" bson:"case_steps,omitempty"`
 }
 
 type persistedTestFormat struct {
-	ID          string      `json:"id" yaml:"id"`
-	MockEntries []MockEntry `json:"mock_entries,omitempty" yaml:"mock_entries,omitempty"`
-	Cases       []string    `json:"cases,omitempty" yaml:"cases,omitempty"`
+	ID          string              `json:"id" yaml:"id"`
+	MockEntries []MockEntry         `json:"mock_entries,omitempty" yaml:"mock_entries,omitempty"`
+	Cases       []string            `json:"cases,omitempty" yaml:"cases,omitempty"`
+	CaseMocks   map[string][]string `json:"case_mocks,omitempty" yaml:"case_mocks,omitempty"`
+	CaseSteps   map[string]string   `json:"case_steps,omitempty" yaml:"case_steps,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -146,6 +150,7 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	var persisted persistedTestFormat
 	if err := node.Decode(&persisted); err == nil && (nodeHasField(node, "mock_entries") || nodeHasField(node, "cases")) {
 		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
+		tc.CaseMocks, tc.CaseSteps = persisted.CaseMocks, persisted.CaseSteps
 		return nil
 	}
 
@@ -181,6 +186,7 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	var persisted persistedTestFormat
 	if err := json.Unmarshal(data, &persisted); err == nil && (jsonContainsField(data, "mock_entries") || jsonContainsField(data, "cases")) {
 		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
+		tc.CaseMocks, tc.CaseSteps = persisted.CaseMocks, persisted.CaseSteps
 		return nil
 	}
 
@@ -223,12 +229,15 @@ func (tc MappedTestCase) persistedFormat() persistedTestFormat {
 		ID:          tc.ID,
 		MockEntries: append([]MockEntry(nil), tc.Mocks...),
 		Cases:       append([]string(nil), tc.Cases...),
+		CaseMocks:   tc.CaseMocks,
+		CaseSteps:   tc.CaseSteps,
 	}
 }
 
 func (tc *MappedTestCase) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string, cases []string) {
 	tc.ID = id
 	tc.Cases = append([]string(nil), cases...)
+	tc.CaseMocks, tc.CaseSteps = nil, nil
 	tc.Mocks = nil
 	if len(mockEntries) > 0 {
 		tc.Mocks = append([]MockEntry(nil), mockEntries...)

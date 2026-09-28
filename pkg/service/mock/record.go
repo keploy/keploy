@@ -183,7 +183,8 @@ func (m *mockService) Record(ctx context.Context) error {
 				m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 			}
 			mockCount++
-			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID})
+			kind := mk.Spec.Metadata["type"]
+			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection"})
 		}
 	}()
 
@@ -311,9 +312,7 @@ func (m *mockService) Record(ctx context.Context) error {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
 				}
 			}
-			if byCase := correlateCases(windows, capture.list()); len(byCase) > 0 {
-				m.upsertCases(persistCtx, name, byCase)
-			}
+			m.upsertCases(persistCtx, name, correlateCases(windows, recorded, capture.list(), scope.stepWindows()), startupMocks(windows, recorded))
 		}
 	}
 
@@ -412,13 +411,16 @@ func (m *mockService) deleteCases(ctx context.Context, name string, ids []string
 }
 
 // upsertCases writes which test cases each flow produced into the mapping.
-func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[string][]string) {
+func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[string]models.MappedTestCase, startup []models.MockEntry) {
+	if len(byCase) == 0 && len(startup) == 0 {
+		return
+	}
 	mapper, ok := m.mappingDB.(CaseMapper)
 	if !ok {
 		m.logger.Warn("the mapping store cannot record test cases per flow", zap.String("mock-set", name))
 		return
 	}
-	if err := mapper.UpsertCases(ctx, name, byCase); err != nil {
+	if err := mapper.UpsertCases(ctx, name, byCase, startup); err != nil {
 		m.logger.Warn("failed to write per-flow test cases", zap.Error(err))
 		return
 	}
@@ -454,6 +456,8 @@ type capturedMock struct {
 	name string
 	ts   time.Time
 	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	end  time.Time
+	boot bool
 }
 
 // correlateScopes buckets each recorded mock into the per-test scope window its
@@ -514,14 +518,76 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 }
 
 // correlateCases lists each flow's test cases by the window their request fell in; a case outside every window stays unmapped.
-func correlateCases(windows []models.ScopeWindow, cases []capturedMock) map[string][]string {
-	byTest := make(map[string][]string)
+func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, steps []models.ScopeWindow) map[string]models.MappedTestCase {
+	byTest := make(map[string]models.MappedTestCase)
+	spans := make(map[string]models.ScopeWindow, len(cases))
+	for _, c := range cases {
+		spans[c.name] = models.ScopeWindow{Name: c.name, Start: c.ts, End: c.end}
+	}
 	for test, entries := range correlateScopes(windows, cases) {
+		tc := models.MappedTestCase{CaseSteps: make(map[string]string, len(entries))}
 		for _, e := range entries {
-			byTest[test] = append(byTest[test], e.Name)
+			tc.Cases = append(tc.Cases, e.Name)
+			tc.CaseSteps[e.Name] = containing(steps, spans[e.Name].Start)
+		}
+		byTest[test] = tc
+	}
+	var own []capturedMock
+	at := make(map[string]time.Time, len(mocks))
+	for _, mk := range mocks {
+		if !mk.boot {
+			own = append(own, mk)
+			at[mk.name] = mk.ts
 		}
 	}
+	for test, entries := range correlateScopes(windows, own) {
+		tc, ok := byTest[test]
+		if !ok {
+			continue
+		}
+		in := make([]models.ScopeWindow, 0, len(tc.Cases))
+		for _, c := range tc.Cases {
+			in = append(in, spans[c])
+		}
+		for _, e := range entries {
+			c := containing(in, at[e.Name])
+			if c == "" {
+				continue
+			}
+			if tc.CaseMocks == nil {
+				tc.CaseMocks = map[string][]string{}
+			}
+			tc.CaseMocks[c] = append(tc.CaseMocks[c], e.Name)
+		}
+		byTest[test] = tc
+	}
 	return byTest
+}
+
+func startupMocks(windows []models.ScopeWindow, mocks []capturedMock) []models.MockEntry {
+	var out []models.MockEntry
+	for _, mk := range mocks {
+		if mk.boot || containing(windows, mk.ts) == "" {
+			out = append(out, models.MockEntry{Name: mk.name})
+		}
+	}
+	return out
+}
+
+func containing(windows []models.ScopeWindow, at time.Time) string {
+	best := -1
+	for i, w := range windows {
+		if at.Before(w.Start) || at.After(w.End) {
+			continue
+		}
+		if best == -1 || w.Start.After(windows[best].Start) {
+			best = i
+		}
+	}
+	if best == -1 {
+		return ""
+	}
+	return windows[best].Name
 }
 
 // drainTrailingMocks blocks until the agent has evidently finished handing over

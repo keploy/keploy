@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -63,8 +64,57 @@ func TestMappedTestCaseWithoutCasesStillDecodes(t *testing.T) {
 		if err := yaml.Unmarshal([]byte(doc), &tc); err != nil {
 			t.Fatal(err)
 		}
-		if tc.ID != "t1" || len(tc.Mocks) == 0 || len(tc.Cases) != 0 {
+		if tc.ID != "t1" || len(tc.Mocks) == 0 || len(tc.Cases) != 0 || tc.CaseMocks != nil || tc.CaseSteps != nil {
 			t.Fatalf("%q came back as %+v", doc, tc)
 		}
+	}
+}
+
+func TestMappedTestCaseCaseMocksAndStepsRoundTrip(t *testing.T) {
+	in := Mapping{Version: "api.keploy.io/v1beta1", Kind: MappingKind, TestSetID: "set",
+		TestCases: []MappedTestCase{{
+			ID:        "orders/e2e.TestA",
+			Mocks:     []MockEntry{{Name: "mock-1"}, {Name: "mock-2"}, {Name: "mock-3"}},
+			Cases:     []string{"test-1", "test-2"},
+			CaseMocks: map[string][]string{"test-1": {"mock-1", "mock-2"}},
+			CaseSteps: map[string]string{"test-1": "create", "test-2": ""},
+		}},
+		Startup: []MockEntry{{Name: "mock-0"}},
+	}
+	y, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"case_mocks:\n", "case_steps:\n", `test-2: ""`, "startup:\n"} {
+		if !strings.Contains(string(y), want) {
+			t.Fatalf("%q missing from:\n%s", want, y)
+		}
+	}
+	var fromYAML Mapping
+	if err := yaml.Unmarshal(y, &fromYAML); err != nil {
+		t.Fatal(err)
+	}
+	j, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromJSON Mapping
+	if err := json.Unmarshal(j, &fromJSON); err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range []Mapping{fromYAML, fromJSON} {
+		if !reflect.DeepEqual(in, got) {
+			t.Fatalf("came back as %+v", got)
+		}
+	}
+
+	var old struct {
+		Tests []struct {
+			ID          string      `yaml:"id"`
+			MockEntries []MockEntry `yaml:"mock_entries"`
+		} `yaml:"tests"`
+	}
+	if err := yaml.Unmarshal(y, &old); err != nil || len(old.Tests) != 1 || len(old.Tests[0].MockEntries) != 3 {
+		t.Fatalf("an older reader read %+v, %v", old, err)
 	}
 }

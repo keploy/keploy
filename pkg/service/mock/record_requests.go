@@ -58,7 +58,7 @@ func (c *caseCapture) add(tc *models.TestCase) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.cases = append(c.cases, capturedMock{name: tc.Name, ts: caseTime(tc)})
+	c.cases = append(c.cases, capturedMock{name: tc.Name, ts: caseTime(tc), end: caseEnd(tc)})
 }
 
 // caseTime is when the app received the request, which decides the flow it belongs to.
@@ -67,6 +67,13 @@ func caseTime(tc *models.TestCase) time.Time {
 		return tc.HTTPReq.Timestamp
 	}
 	return tc.GrpcReq.Timestamp
+}
+
+func caseEnd(tc *models.TestCase) time.Time {
+	if !tc.HTTPResp.Timestamp.IsZero() {
+		return tc.HTTPResp.Timestamp
+	}
+	return tc.GrpcResp.Timestamp
 }
 
 // wait blocks until the incoming stream has been drained, or grace has passed.
