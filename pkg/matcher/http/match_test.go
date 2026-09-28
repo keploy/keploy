@@ -230,6 +230,36 @@ func TestMatch_PassFailBannerMatchesAssertionVerdict_4636(t *testing.T) {
 	})
 }
 
+// TestMatch_AssertionOnBodySkippedTestCase_StillSeesClearedBody guards against a
+// regression introduced while fixing #4636: moving the assertion check ahead of
+// everything else in Match must not move it ahead of the BodySkipped clearing
+// too. On main, that clearing always ran first (it used to be the very first
+// thing in the function), so AssertionMatch always evaluated json_contains /
+// json_equal against an EMPTY actual body for a test case whose response body
+// was >1MB at record time. If the assertion check runs before the clearing,
+// those assertions see the live body instead and can flip verdict.
+func TestMatch_AssertionOnBodySkippedTestCase_StillSeesClearedBody(t *testing.T) {
+	logger := zap.NewNop()
+	noiseConfig := map[string]map[string][]string{}
+
+	tc := &models.TestCase{
+		Name: "body-skipped-with-json-contains",
+		HTTPResp: models.HTTPResp{
+			StatusCode:  200,
+			BodySkipped: true,
+			BodySize:    7,
+		},
+		Assertions: map[models.AssertionType]interface{}{
+			models.JsonContains: map[string]interface{}{"a": float64(1)},
+		},
+	}
+	actualResponse := &models.HTTPResp{StatusCode: 200, Body: `{"a":1}`}
+
+	pass, _ := Match(tc, actualResponse, noiseConfig, false, false, logger, false)
+
+	assert.False(t, pass, "json_contains must be judged against the cleared (empty) body for a BodySkipped test case, not the live body")
+}
+
 // TestMatch_InvalidJSONBody_321 ensures that when the actual response body is not valid JSON,
 // it is treated as plain text and compared directly, leading to a mismatch if different.
 // TestMatch_InvalidJSONBody_321 ensures that when the actual response body is not valid JSON,

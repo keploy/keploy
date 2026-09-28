@@ -50,6 +50,41 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		opt(&mo)
 	}
 
+	// If the response body was skipped during recording (>1MB), compute body size comparison
+	// and clear the actual body so the normal comparison runs (empty vs empty).
+	//
+	// This has to run BEFORE the assertion check below: AssertionMatch reads
+	// actualResponse.Body directly, and on main this clearing always happened
+	// first (it used to be the first thing in the function, with the
+	// assertion check only at the very end). Checking assertions before this
+	// would hand json_contains/json_equal the live, uncleared body for a
+	// BodySkipped test case — a behavior change nobody asked for.
+	var bodySizeResult models.IntResult
+	if tc.HTTPResp.BodySkipped {
+		actualBodySize := int64(len(actualResponse.Body))
+		bodySizeMatch := tc.HTTPResp.BodySize == actualBodySize
+
+		logger.Info("response body was greater than 1MB during recording, comparing body size",
+			zap.String("testcase", tc.Name),
+			zap.Int64("expected_size", tc.HTTPResp.BodySize),
+			zap.Int64("actual_size", actualBodySize),
+			zap.Bool("size_match", bodySizeMatch))
+
+		// Log actual response body as debug before clearing
+		logger.Debug("actual response body (skipped during recording)",
+			zap.String("testcase", tc.Name),
+			zap.String("body", actualResponse.Body))
+
+		bodySizeResult = models.IntResult{
+			Normal:   bodySizeMatch,
+			Expected: int(tc.HTTPResp.BodySize),
+			Actual:   int(actualBodySize),
+		}
+
+		// Clear actual body so body comparison below runs as empty vs empty
+		actualResponse.Body = ""
+	}
+
 	// When assertions are present, they alone decide the verdict (see
 	// AssertionMatch's doc comment) - handle that here, before any of the
 	// response-comparison logic below, so the printed "Testrun passed"/
@@ -76,34 +111,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 		}
 		return pass, res
-	}
-
-	// If the response body was skipped during recording (>1MB), compute body size comparison
-	// and clear the actual body so the normal comparison runs (empty vs empty).
-	var bodySizeResult models.IntResult
-	if tc.HTTPResp.BodySkipped {
-		actualBodySize := int64(len(actualResponse.Body))
-		bodySizeMatch := tc.HTTPResp.BodySize == actualBodySize
-
-		logger.Info("response body was greater than 1MB during recording, comparing body size",
-			zap.String("testcase", tc.Name),
-			zap.Int64("expected_size", tc.HTTPResp.BodySize),
-			zap.Int64("actual_size", actualBodySize),
-			zap.Bool("size_match", bodySizeMatch))
-
-		// Log actual response body as debug before clearing
-		logger.Debug("actual response body (skipped during recording)",
-			zap.String("testcase", tc.Name),
-			zap.String("body", actualResponse.Body))
-
-		bodySizeResult = models.IntResult{
-			Normal:   bodySizeMatch,
-			Expected: int(tc.HTTPResp.BodySize),
-			Actual:   int(actualBodySize),
-		}
-
-		// Clear actual body so body comparison below runs as empty vs empty
-		actualResponse.Body = ""
 	}
 
 	bodyType := models.Plain
