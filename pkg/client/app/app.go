@@ -209,6 +209,7 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	if a.opts.MockMode && a.opts.AgentPort != 0 {
 		// The app shares the agent's network namespace, so a test can mark its own start and end here.
 		tlsFlags += fmt.Sprintf("-e KEPLOY_MOCK_AGENT=http://localhost:%d ", a.opts.AgentPort)
+		tlsFlags += "-e " + token.MockAgentTokenEnv + " "
 	}
 	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
 	if len(parts) < 3 {
