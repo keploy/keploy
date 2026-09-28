@@ -318,7 +318,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 
 	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
-	if err := m.store.Push(persistCtx, name); err != nil {
+	if !runnerPassed(appErr) {
+		m.logger.Warn("tests failed; the recording was kept locally and not published", zap.String("mock-set", name))
+	} else if err := m.store.Push(persistCtx, name); err != nil {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
 
@@ -335,6 +337,14 @@ func (m *mockService) Record(ctx context.Context) error {
 	//     fails when the tests fail.
 	m.propagateExit(appErr, "record")
 	return nil
+}
+
+func runnerPassed(appErr models.AppError) bool {
+	switch appErr.AppErrorType {
+	case models.ErrAppStopped, models.ErrCtxCanceled, "":
+		return true
+	}
+	return false
 }
 
 // runnerScope builds the adapter that turns test output into scope calls, or nil when it is off.
