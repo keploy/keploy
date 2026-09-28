@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -242,4 +243,20 @@ func TestRecordWritesCaseMocksStepsAndStartup(t *testing.T) {
 	require.Equal(t, map[string][]string{"test-3": {"mock-4"}}, b.CaseMocks)
 	require.Equal(t, []string{"mock-3", "mock-4", "mock-5"}, b.MockNames())
 	require.Equal(t, []string{"mock-0", "mock-3"}, mapping.StartupMockNames())
+}
+
+func TestRecordRefusesATestThatRanTwice(t *testing.T) {
+	instr := newRunnerInstr(t, jsonSequential+`{"Time":"2026-09-24T10:00:00.03Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.04Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
+`)
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = t.TempDir()
+	dir := t.TempDir()
+	store := &countingStore{}
+	err := New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), dir, ""), store, nil, cfg).Record(context.Background())
+	require.EqualError(t, err, "TestA ran 2 times in orders/e2e; test names must be unique within a folder (check -count, or package e2e and e2e_test both defining it)")
+	require.Zero(t, store.pushes)
+	_, statErr := os.Stat(filepath.Join(dir, "set", "mappings.yaml"))
+	require.True(t, os.IsNotExist(statErr), "no mapping is written")
 }

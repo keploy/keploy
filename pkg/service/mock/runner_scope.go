@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -157,11 +159,13 @@ type runnerScope struct {
 	closed    []models.ScopeWindow
 	results   []TestOutcome
 	readTimed int
+	runs      map[string]int
+	tops      []scopeEvent
 	steps     map[string]string
 }
 
 func newRunnerScope(ctx context.Context, logger *zap.Logger, marker ScopeMarker) *runnerScope {
-	return &runnerScope{ctx: ctx, logger: logger, marker: marker, paused: map[string]bool{}, starts: map[string]time.Time{}, steps: map[string]string{}}
+	return &runnerScope{ctx: ctx, logger: logger, marker: marker, paused: map[string]bool{}, starts: map[string]time.Time{}, runs: map[string]int{}, steps: map[string]string{}}
 }
 
 // writer is the stdout observer to hand the app runner; nil when the adapter is off.
@@ -227,7 +231,12 @@ func (r *runnerScope) begin(ev scopeEvent, at time.Time) {
 	r.starts[ev.name()] = at
 	if _, sub, ok := strings.Cut(ev.test, "/"); ok {
 		r.steps[ev.name()], _, _ = strings.Cut(sub, "/")
+		return
 	}
+	if r.runs[ev.name()] == 0 {
+		r.tops = append(r.tops, ev)
+	}
+	r.runs[ev.name()]++
 }
 
 func (r *runnerScope) end(ev scopeEvent, at time.Time) {
@@ -297,6 +306,26 @@ func (r *runnerScope) stepWindows() []models.ScopeWindow {
 		}
 	}
 	return out
+}
+
+func (r *runnerScope) repeated() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, ev := range r.tops {
+		n := r.runs[ev.name()]
+		if n < 2 {
+			continue
+		}
+		pkg, p := ev.pkg, path.Base(ev.pkg)
+		if pkg == "" {
+			pkg, p = "one package", "<p>"
+		}
+		return fmt.Errorf("%s ran %d times in %s; test names must be unique within a folder (check -count, or package %s and %s_test both defining it)", ev.test, n, pkg, p, p)
+	}
+	return nil
 }
 
 // tests lists every result the runner printed, in the order it printed them.

@@ -357,3 +357,45 @@ func TestRunnerScopeStepWindows(t *testing.T) {
 	require.Equal(t, []string{"one", "two"}, steps)
 	require.Nil(t, (*runnerScope)(nil).stepWindows())
 }
+
+func TestRunnerScopeRefusesATestThatRanTwice(t *testing.T) {
+	for _, tc := range []struct {
+		name, output, want string
+	}{
+		{
+			name: "json, -count=2 or orders and orders_test both defining it",
+			output: `{"Time":"2026-09-29T03:13:00.796794+05:30","Action":"run","Package":"example.com/dup/orders","Test":"TestX"}
+{"Time":"2026-09-29T03:13:00.796875+05:30","Action":"run","Package":"example.com/dup/orders","Test":"TestX/step"}
+{"Time":"2026-09-29T03:13:00.796884+05:30","Action":"pass","Package":"example.com/dup/orders","Test":"TestX/step","Elapsed":0}
+{"Time":"2026-09-29T03:13:00.796888+05:30","Action":"pass","Package":"example.com/dup/orders","Test":"TestX","Elapsed":0}
+{"Time":"2026-09-29T03:13:00.79689+05:30","Action":"run","Package":"example.com/dup/orders","Test":"TestX"}
+{"Time":"2026-09-29T03:13:00.796904+05:30","Action":"pass","Package":"example.com/dup/orders","Test":"TestX","Elapsed":0}
+`,
+			want: "TestX ran 2 times in example.com/dup/orders; test names must be unique within a folder (check -count, or package orders and orders_test both defining it)",
+		},
+		{
+			name:   "plain",
+			output: "=== RUN   TestX\n--- PASS: TestX (0.00s)\n=== RUN   TestX\n--- PASS: TestX (0.00s)\n=== RUN   TestX\n--- PASS: TestX (0.00s)\n",
+			want:   "TestX ran 3 times in one package; test names must be unique within a folder (check -count, or package <p> and <p>_test both defining it)",
+		},
+		{
+			name:   "the same name in two packages is fine",
+			output: `{"Action":"run","Package":"a","Test":"TestX"}` + "\n" + `{"Action":"pass","Package":"a","Test":"TestX"}` + "\n" + `{"Action":"run","Package":"b","Test":"TestX"}` + "\n" + `{"Action":"pass","Package":"b","Test":"TestX"}` + "\n",
+		},
+		{
+			name:   "subtests of the same name under different tests are fine",
+			output: plainSequential + "=== RUN   TestD\n=== RUN   TestD/one\n--- PASS: TestD (0.00s)\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, scope := feed(t, tc.output)
+			err := scope.repeated()
+			if tc.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.EqualError(t, err, tc.want)
+		})
+	}
+	require.NoError(t, (*runnerScope)(nil).repeated())
+}

@@ -282,6 +282,11 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
+	if err := scope.repeated(); err != nil {
+		m.propagateExit(appErr, "record")
+		utils.LogError(m.logger, err, "a test ran more than once")
+		return err
+	}
 	if overlaps := scope.overlapping(); len(overlaps) > 0 {
 		if !m.config.Mock.AllowParallelTests {
 			m.propagateExit(appErr, "record")
