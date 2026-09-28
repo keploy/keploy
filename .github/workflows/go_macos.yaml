@@ -21,9 +21,30 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build amd64
-        run: GOARCH=amd64 go build -v ./...
-
+      # macOS ships as darwin/arm64 only (Apple silicon), so this is the
+      # one macOS target to keep compiling.
       - name: Build arm64
         run: GOARCH=arm64 go build -v ./...
 
+      # The step above runs on a Mac, where cgo is ON by default — so it cannot
+      # see the constraint that actually binds downstream. Consumers of this
+      # module cross-compile their darwin binaries FROM LINUX with
+      # CGO_ENABLED=0, and under that combination any cgo-only dependency stops
+      # linking rather than silently switching implementation.
+      #
+      # That is not hypothetical: docker/compose's backend reaches
+      # github.com/fsnotify/fsevents through pkg/watch, fsevents is cgo-only on
+      # darwin, and adding the compose library broke a downstream darwin build
+      # with `undefined: EventFlags` while this workflow stayed green. The fix
+      # keeps that import behind a build tag
+      # (pkg/platform/docker/compose_backend_darwin.go); this step is what keeps
+      # it that way.
+      - name: Build darwin/arm64 without cgo (downstream cross-compile shape)
+        run: GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build ./...
+
+      # macOS has no /proc. The process-tree walk every Ctrl+C of a native run
+      # makes (utils.InterruptProcessTree) reads the kernel's process table
+      # there instead, and only a Mac can run that code: a Linux runner builds
+      # the other implementation.
+      - name: Test utils on darwin
+        run: go test -count=1 ./utils/

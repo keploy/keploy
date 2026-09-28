@@ -25,8 +25,8 @@ func newConsoleLogger(w zapcore.WriteSyncer, level zapcore.Level) *zap.Logger {
 	LogCfg.EncoderConfig.EncodeDuration = zapcore.StringDurationEncoder
 	LogCfg.EncoderConfig.EncodeCaller = nil
 	LogCfg.Level = zap.NewAtomicLevelAt(level)
-	encoder := zapcore.NewConsoleEncoder(LogCfg.EncoderConfig)
-	core := zapcore.NewCore(encoder, wrapWriter(w), LogCfg.Level)
+	encoder := newPlainConsoleEncoder(LogCfg.EncoderConfig)
+	core := zapcore.NewCore(encoder, wrapWriter(w, encoder), LogCfg.Level)
 	return zap.New(newRedactingCore(core))
 }
 

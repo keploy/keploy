@@ -249,19 +249,30 @@ installKeploy (){
     }
 
 
-    install_keploy_darwin_all() {
+    install_keploy_darwin_arm64() {
         if [ "$version" != "latest" ]; then
-            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_darwin_all.tar.gz"
+            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_darwin_arm64.tar.gz"
         else
-            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
+            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_arm64.tar.gz"
         fi
         # macOS tar does not support --overwrite option so we need to remove the directory first
         # to avoid the "File exists" error
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
         
-        # Download with progress
-        download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"
+        # Download with progress. Stop on failure: extracting a tarball that
+        # is not there still prints "Extracted binary", and move_keploy_binary
+        # then `exit`s, which closes the shell when this script is sourced.
+        if ! download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"; then
+            if [ "$version" != "latest" ]; then
+                # Releases before the Apple Silicon-only build shipped the macOS
+                # binary as a universal keploy_darwin_all.tar.gz; there is no
+                # keploy_darwin_arm64.tar.gz to pin in them, and this script does
+                # not go looking for the old name.
+                echo "Releases before the Apple Silicon-only macOS build published keploy_darwin_all.tar.gz instead, and cannot be pinned on macOS with this script." >&2
+            fi
+            return 1
+        fi
         
         # Extract with loader
         run_with_loader "Extracting binary..." "Extracted binary" "tar xzf /tmp/keploy.tar.gz -C /tmp/keploy/ && rm -f /tmp/keploy.tar.gz"
@@ -313,7 +324,10 @@ installKeploy (){
         else
             echo "$1" >> $2
         fi
-        source $2
+        # The rc file's own status (an early `return` for non-interactive
+        # shells, zsh syntax bash cannot parse) says nothing about the install,
+        # so do not let it become this function's -- and installKeploy's -- status.
+        source $2 || true
     }
 
 
@@ -426,6 +440,26 @@ installKeploy (){
     }
 
 
+    # The macOS release is Apple Silicon (arm64) only. Gate on the
+    # hardware, not the shell: under Rosetta (Terminal set to "Open using
+    # Rosetta", `arch -x86_64 zsh`, an Intel-Homebrew bash) uname -m says
+    # x86_64 on an Apple Silicon Mac, yet the arm64 binary still runs
+    # natively from that shell, so also accept hw.optional.arm64=1 (set on
+    # Apple Silicon even when translated; absent or 0 on Intel). On a real
+    # Intel Mac there is nothing to download, so say so and fail instead
+    # of silently falling through to another installer.
+    install_keploy_darwin() {
+        if [ "$ARCH" = "arm64" ] || [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
+            cleanup_tmp
+            install_keploy_darwin_arm64
+            return
+        fi
+        echo "Keploy's native macOS build is Apple Silicon (arm64) only; this Mac reports $ARCH." >&2
+        echo "On an Intel Mac, run Keploy inside Lima: https://keploy.io/docs/installation/macos-installation/#option-2-install-keploy-with-lima" >&2
+        return 1
+    }
+
+
     ARCH=$(uname -m)
     
     OS_NAME="$(uname -s)"
@@ -437,8 +471,7 @@ installKeploy (){
     if [ "$IS_CI" = false ]; then
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
-            cleanup_tmp
-            install_keploy_darwin_all
+            install_keploy_darwin
             return
         elif [ "$OS_NAME" = "Linux" ]; then
              if [ "$NO_ROOT" = false ]; then
@@ -457,27 +490,32 @@ installKeploy (){
                 return
             fi
         elif [[ "$OS_NAME" == MINGW32_NT* ]] || [[ "$OS_NAME" == MINGW64_NT* ]] || [[ "$OS_NAME" == MSYS_NT* ]] || [[ "$OS_NAME" == CYGWIN_NT* ]]; then
-            # This is the OSS build, which intercepts with eBPF and therefore has
-            # no native Windows backend -- DefaultNativeCommandSupported in
+            # The --oss build intercepts with eBPF and therefore has no native
+            # Windows backend -- DefaultNativeCommandSupported in
             # cli/provider/hooks.go accepts linux only, so `keploy record -c ...`
-            # is refused here. Native Windows (userspace, no Administrator) ships
-            # in the Community build, so point there rather than only at WSL2.
-            echo "The OSS build has no native Windows support (it intercepts with eBPF, which is Linux only)."
+            # is refused here. Keploy itself runs natively on Windows (userspace,
+            # no Administrator), installed from PowerShell, so point there rather
+            # than only at WSL2. User-facing text names no editions: the product
+            # is just "keploy".
+            echo "This build (--oss) has no native Windows support: it intercepts with eBPF, which is Linux only."
             echo ""
-            echo "For native Windows -- no WSL, no Docker, no Administrator -- install the Community build:"
+            echo "Keploy runs natively on Windows -- no WSL, no Docker, no Administrator. Install it from PowerShell:"
             echo "  https://keploy.io/docs/installation/windows-installation/"
             echo ""
-            echo "To stay on the OSS build, run Keploy under WSL2:"
+            echo "To keep using this build, run it under WSL2:"
             echo "  https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10"
             echo ""
-            echo "The OSS build also supports running your application in Docker on every"
+            echo "This build also supports running your application in Docker on every"
             echo "platform. Download keploy_windows_amd64 from the releases page first:"
             echo "  https://github.com/keploy/keploy/releases"
         else
             echo "Unknown OS, install Linux to run Keploy"
         fi
     else
-        if [ "$ARCH" = "x86_64" ]; then
+        if [ "$OS_NAME" = "Darwin" ]; then
+            install_keploy_darwin
+            return
+        elif [ "$ARCH" = "x86_64" ]; then
             cleanup_tmp
             install_keploy_amd
         elif [ "$ARCH" = "aarch64" ]; then
@@ -502,13 +540,24 @@ done
 set -- "${forwarded_args[@]}"
 
 if [ "$USE_OSS" = false ]; then
-    echo "Installing Keploy Community Edition"
+    echo "Installing Keploy"
     curl --silent -O -L https://keploy.io/ent/install.sh
     source install.sh "$@"
-    return 0 2>/dev/null || exit 0
+    ent_status=$?
+    # Hand back whatever the enterprise installer returned: it refuses an
+    # Intel Mac (and a bad -v) with status 1, and this is the default route
+    # `curl ... install.sh && source install.sh` takes, so exiting 0 here
+    # would turn that refusal into a green CI step with nothing installed.
+    return $ent_status 2>/dev/null || exit $ent_status
 fi
 
-installKeploy "$@"
+if ! installKeploy "$@"; then
+    # Non-zero either way: `return` when sourced (never `exit`, which would
+    # close the user's shell), `exit` when run as a script. Without this a
+    # refused install -- an Intel Mac, a bad -v -- went on to run
+    # `keploy example` against whatever keploy was already on PATH.
+    return 1 2>/dev/null || exit 1
+fi
 
 
 if command -v keploy &> /dev/null; then

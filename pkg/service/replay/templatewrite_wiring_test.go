@@ -117,14 +117,19 @@ to drift, so it is named as a gap rather than half-closed.
 
 `//go:build !cgo` is covered BY ACCIDENT and worth saying so: cross-
 compiling to darwin and windows implicitly disables cgo, so at least one
-of the five loads sees those files. Nobody chose that — if the platform
+of the four loads sees those files. Nobody chose that — if the platform
 list were ever narrowed back to host-native builds it would silently go
 dark, and keploy ships CGO_ENABLED=0 static binaries.
+
+darwin/amd64 is deliberately absent: keploy ships macOS as arm64 only
+(Apple silicon). A file constrained to BOTH darwin and amd64 is therefore
+invisible to the scan — and to every binary a user can run, which is why
+that is acceptable. Plain `_darwin.go` and `_amd64.go` files are still
+covered by the darwin/arm64 and linux/amd64 loads respectively.
 */
 var wiringPlatforms = []struct{ GOOS, GOARCH string }{
 	{"linux", "amd64"},
 	{"linux", "arm64"},
-	{"darwin", "amd64"},
 	{"darwin", "arm64"},
 	{"windows", "amd64"},
 }
@@ -473,7 +478,7 @@ func wiringProbe(ctx context.Context, r *Replayer, id string, ts *models.TestSet
 			// ONE PLATFORM for these five. They prove the TYPE
 			// RESOLUTION works, not the build context — that is what
 			// TestTheScanSeesOtherPlatforms is for — and running each
-			// against all five loads costs 20 of the suite's 55
+			// against all four loads costs 15 of the suite's 45
 			// package loads for no additional assurance.
 			found := directStoreWrites(loadPackagesFor(t, wiringPlatforms[:1]))
 			// THE PROBE, not merely "something". Asserting len > 0 made

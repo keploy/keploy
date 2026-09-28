@@ -220,8 +220,9 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		}
 	}
 
-	// converts the response message buffer to http response
-	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(mock.Resp)), req)
+	// converts the response message buffer to http response (the final one:
+	// net/http does not skip interim 1xx responses)
+	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResponse(mock.Resp))), req)
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(req)))
 		return err

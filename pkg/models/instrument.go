@@ -139,7 +139,22 @@ type OutgoingOptions struct {
 	SchemaNoiseDetection bool
 	SchemaNoiseStrict    bool
 	SkipTLSMITM          bool
-	ConnKey              string // connection-level key for TLSHandshakeStore correlation
+	// ConnKey names THIS connection's socket, as an opaque token on which the
+	// connection's two capture legs agree: the raw leg that carries its
+	// cleartext prelude (a MySQL greeting and SSLRequest) and the decrypted leg
+	// that carries what follows the TLS handshake. The TLSHandshakeStore pairs
+	// the two by it (HandshakeOwner), so a decrypted stream is stitched with its
+	// OWN connection's greeting, salt and timestamp, and never with another's.
+	// The enterprise proxyless capture sets it to the kernel socket cookie on
+	// both legs. Empty means unknown; the legs then pair by ConnProc, and
+	// without that by arrival order on the destination port.
+	ConnKey string
+	// ConnProc names the process that made THIS connection, as an opaque token
+	// both capture legs agree on. It is the fallback pairing identity when
+	// ConnKey is unknown on either leg: a stream is then only ever stitched with
+	// a greeting captured from its own process, never another app's. Runtime,
+	// per-connection: json:"-" like SrcPid.
+	ConnProc string `json:"-"`
 	// PreferH2, on the REPLAY path, tells the TLS MITM to advertise h2 in ALPN
 	// (instead of the default http/1.1 downgrade) so a dual-protocol client
 	// stays on HTTP/2 and its request matches a recorded kind:Http2 mock.
@@ -246,6 +261,28 @@ type OutgoingOptions struct {
 	// options and uses it to pick the worker's scoped mock view (per-PID
 	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
 	SrcPid uint32 `json:"-"`
+	// NetNS names the network namespace THIS connection was made from, as an
+	// opaque token. It exists because some destination addresses name a
+	// different server in every network namespace: 127.0.0.0/8, ::1, link-local
+	// addresses and unresolved hostnames (see AddrIsNetnsLocal). A long-lived
+	// capture layer that records many pods in one agent (the enterprise
+	// DaemonSet) sees "127.0.0.1:3306" from every pod with a MySQL sidecar, and
+	// each is a different server. Anything that keys per-server state on such an
+	// address must qualify it by this token (see HandshakeServerKey).
+	//
+	// Two connections with EQUAL tokens must have been made from the same live
+	// network namespace. A token may be finer than that (one per process, say):
+	// that only costs extra per-server work. It must never be coarser, and in
+	// particular must not be a bare netns inode number, which the kernel reuses
+	// as soon as a namespace is freed.
+	//
+	// Empty means unknown, and per-server state for a namespace-local address is
+	// then not shared with any other connection at all (HandshakeServerKey
+	// returns ""): an app/session scope does not name a namespace, since every
+	// replica of a deployment shares it. A capture layer may leave it empty for
+	// a connection whose destination is routable, since nothing keys a routable
+	// address by namespace. Runtime, per-connection: json:"-" like SrcPid.
+	NetNS string `json:"-"`
 }
 
 type ConditionalDstCfg struct {

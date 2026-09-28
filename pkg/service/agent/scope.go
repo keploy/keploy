@@ -18,6 +18,15 @@ import (
 //	POST {url}/agent/scope/begin  {"name":"<test>"}
 //	POST {url}/agent/scope/end    {"name":"<test>"}
 //
+// The control plane is authenticated, so both calls must carry the token Keploy
+// exports next to the URL:
+//
+//	Authorization: Bearer $KEPLOY_MOCK_AGENT_TOKEN
+//
+// Treat it as absent-able: a runner driven by an older Keploy will not see the
+// variable, and an agent started without a token accepts either way. Send the
+// header when the variable is set and omit it when it is not.
+//
 // Scoping is entirely optional: with no scope calls the set records/replays
 // suite-level, which is still correct.
 

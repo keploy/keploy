@@ -36,7 +36,7 @@ func CheckKeployFolderPermissions(logger *zap.Logger, keployPath string) ([]Perm
 
 	// Folder exists, check if it's a directory
 	if !info.IsDir() {
-		return nil, fmt.Errorf("keploy path %s exists but is not a directory", keployPath)
+		return nil, notAFolderError(keployPath)
 	}
 
 	// Walk the directory tree and check permissions

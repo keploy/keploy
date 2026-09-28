@@ -180,6 +180,12 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		a.logger.Debug("failed to remove stale agent readiness file", zap.Error(err))
 	}
 
+	// A replay's outcome, left as the agent is stopped for a CLI that cannot
+	// ask for it (see stopOutcomePath).
+	if path := stopOutcomePath(a.config.Agent.SetupOptions); path != "" {
+		a.armStopOutcome(path, utils.RegisterPreCancelHook)
+	}
+
 	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
@@ -529,7 +535,11 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 }
 
 func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
-	hookErr := errors.New("failed to hook into the app")
+	// Every failure below is WRAPPED, never replaced: what failed decides the
+	// agent's exit status (utils.ExitCodeFor), and that status is the only way
+	// the CLI that launched this agent learns whether it lacks privileges or
+	// the environment lacks something. A fresh "failed to hook into the app"
+	// error here is what made every such agent exit the same.
 
 	parentErrGrp := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 
@@ -583,7 +593,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load hooks")
-		return hookErr
+		return fmt.Errorf("failed to hook into the app: %w", err)
 	}
 
 	if a.proxyStarted {
@@ -596,10 +606,16 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		return ctx.Err()
 	default:
 	}
-	DNSIPv4, err := utils.GetContainerIPv4()
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to get container IP")
-		return hookErr
+	// DNSIPv4 is the address the proxy's DNS server answers with when it has
+	// no recorded answer to serve, so it has to be one the application reaches
+	// the proxy at — which the hooks that just loaded know, and hooks that do
+	// not say leave the proxy's loopback default. Asking the machine for a
+	// non-loopback address here instead, for every agent, kept a native one
+	// from starting on a machine with none: a laptop with its network off,
+	// exactly where replaying recorded mocks has to work.
+	var DNSIPv4 string
+	if h, ok := a.Hooks.(coreAgent.ProxyAddressReporter); ok {
+		DNSIPv4 = h.ProxyIPv4()
 	}
 	if coreAgent.ProxyHook != nil {
 		a.Proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
@@ -621,7 +637,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		// StartProxy propagates auxiliary-hook failures (keploy#4078)
 		// rather than swallowing them.
 		proxyCtxCancel()
-		return hookErr
+		return fmt.Errorf("failed to hook into the app: %w", err)
 	}
 
 	a.proxyStarted = true

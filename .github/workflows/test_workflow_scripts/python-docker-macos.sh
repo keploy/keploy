@@ -70,10 +70,76 @@ docker network create "$NETWORK_NAME"
 
 # --- Start fresh Mongo (force remove any stale one first) ---
 docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
-docker_pull_retry mongo
-docker run --name "$DB_CONTAINER" --rm \
+# MongoDB 8 refuses to start on a Linux kernel >= 6.19 -- its vendored
+# TCMalloc violates the rseq ABI, so it exits 1 within ~100ms, logging
+# "MongoDB cannot start: Linux kernel versions 6.19 and newer has a known
+# incompatibility with this version of MongoDB" (SERVER-121912). Every
+# self-hosted macOS runner is past that line, and the bare `mongo` tag is
+# 8.3, so this database has been dead on arrival here; what differed between
+# lanes was only whether anything noticed. Pin 7: it predates the broken
+# allocator. Revisit when a MongoDB release ships the fixed one -- 7.0 is the
+# oldest series docker-library still publishes, so this has a shelf life.
+docker_pull_retry mongo:7
+# No --rm, for the same reason the gin-mongo lane dropped it: when this
+# container dies its exit code and its logs are the only account of why, and
+# --rm deletes both at the instant they matter. The cleanup() above removes it
+# by name, and the workflow's `if: always()` step reaps by `docker ps -aq`
+# even if this shell is killed outright.
+docker run --name "$DB_CONTAINER" \
   --net "$NETWORK_NAME" --network-alias mongo \
-  -p "${DB_PORT}:27017" -d mongo
+  -p "${DB_PORT}:27017" -d mongo:7
+
+# ...and then WAIT for it, because this lane could not tell a dead database
+# from a working one. MongoDB has been exiting on arrival here (see above),
+# and the suite still reported 10/10 PASSED: every request 500'd, keploy
+# recorded the 500s faithfully and replayed them faithfully, so the lane was
+# proving only that the app stays broken the same way. A test set recorded
+# against a dead dependency is worse than a red lane -- it is a green one.
+mongo_postmortem() {
+    echo "--- docker ps -a (this job's containers) ---"
+    docker ps -a --filter "name=${DB_CONTAINER}" || true
+    echo "--- container state ---"
+    docker inspect "$DB_CONTAINER" \
+      --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{printf "%q" .State.Error}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' 2>&1 || true
+    echo "--- container logs ---"
+    docker logs --tail 200 "$DB_CONTAINER" 2>&1 | tail -40 || true
+    echo "--- readiness probe ---"
+    # Asked of the IMAGE, not the container: when the database has already
+    # exited, `docker exec` can only answer "not running", which is the one
+    # case where this question matters most. The wait probes with mongosh, so
+    # an image without it fails the wait against a healthy database.
+    docker run --rm --entrypoint sh mongo:7 -c 'command -v mongosh || echo "mongosh IS NOT IN THIS IMAGE (the wait cannot pass, whatever the database is doing)"' 2>&1 || true
+    echo "--- image platform ---"
+    docker image inspect mongo:7 --format '{{.Os}}/{{.Architecture}}' 2>&1 || true
+}
+
+echo "Waiting for MongoDB to accept connections..."
+for i in $(seq 1 30); do
+    if docker exec "$DB_CONTAINER" mongosh --quiet --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1; then
+        echo "MongoDB is up after $i attempt(s)."
+        break
+    fi
+    # Only states that mean DEAD end the wait: Docker Desktop keeps its daemon
+    # in a VM and can fail to answer for a moment, and `docker inspect` prints
+    # a bare newline to stdout when it cannot, so "could not ask" must not read
+    # as "the database is dead".
+    if state=$(docker inspect "$DB_CONTAINER" --format '{{.State.Status}}' 2>/dev/null); then
+        state=$(printf '%s' "$state" | tr -d '[:space:]')
+        case "$state" in
+            exited|dead|removing)
+                echo "::error::MongoDB ${state} before it ever accepted a connection, so the app cannot reach its database and this run would record an outage instead of a test."
+                mongo_postmortem
+                exit 1
+                ;;
+        esac
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "::error::MongoDB never came up, so the app cannot reach its database and this run would record an outage instead of a test."
+        mongo_postmortem
+        exit 1
+    fi
+    sleep 2
+done
 
 # --- Prepare app image & keploy config ---
 rm -rf keploy/  # Clean up old test data

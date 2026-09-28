@@ -31,6 +31,13 @@ type mockService struct {
 	store           Store
 	hooks           record.RecordHooks // reused so enterprise obfuscation/encryption applies on record
 	config          *config.Config
+	// userCommand is the test command exactly as the user gave it. A build
+	// that instruments natively rewrites config.Command after construction --
+	// on macOS it becomes `DYLD_INSERT_LIBRARIES='/tmp/keploy-native-<pid>/…'
+	// KEPLOY_SHIM_CTRL=… <command>` -- and that launch line is not the user's
+	// command: recorded in the replay receipt it leaked a temp path, and
+	// `keploy mock status` handed it back to agents as the command to run.
+	userCommand string
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil
@@ -59,6 +66,7 @@ func New(
 		store:           store,
 		hooks:           hooks,
 		config:          cfg,
+		userCommand:     cfg.Command,
 	}
 }
 
@@ -102,7 +110,9 @@ func (m *mockService) setName() string {
 // Natively the agent is keploy's own sibling and is alive right through
 // teardown, so those reads always answer. Under compose the runner exiting is
 // what stops the whole project — the agent service included — so every one of
-// them is fired at an agent that is dying in that instant. The agent client
+// them is fired at an agent that is dying in that instant. (The replay's
+// outcome is the exception: the agent leaves it as it stops, and it is read
+// back from the stopped container instead -- ComposeOutcomeReader.) The agent client
 // holds a zero-value http.Client with no timeout of its own
 // (pkg/platform/http/agent.go), and a SIGTERM'd server that still accepts but
 // never answers would hang the run: forever on the record side, whose reads sit
@@ -144,7 +154,7 @@ func (m *mockService) isDockerCompose() bool {
 // healthcheck, and that healthcheck only passes once keploy posts /agent/ready.
 // This function therefore waits only for the agent to become REACHABLE; the
 // app stays parked at its healthcheck until the caller has armed the proxy.
-func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group) (chan models.AppError, error) {
+func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group, phase string) (chan models.AppError, error) {
 	if !m.isDockerCompose() {
 		return nil, nil
 	}
@@ -195,17 +205,48 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 		}
 		return nil, fmt.Errorf("keploy-agent did not become ready within %s", pkg.AgentReadyTimeout())
 	case appErr := <-appExit:
-		// The project died on its own — a bad compose file, a failed build, a
-		// port already taken. Report that now rather than sitting out the full
-		// agent budget waiting for an agent that is never going to start.
-		reason := string(appErr.AppErrorType)
-		if reason == "" {
-			reason = "exited"
+		// The agent first. It is a service in the project, and when it is the
+		// one that stopped -- it could not start: no tracefs on the machine
+		// Docker runs on, a kernel that refused it eBPF -- compose aborts the
+		// project over it ("dependency failed to start: container keploy-v3-…
+		// exited (6)"). That exit is compose's, not the test command's, which
+		// never ran: mirroring it as the runner's code told the user their
+		// tests failed and lost the agent's own reason with it.
+		if err := m.composeAgentFailure(); err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("the compose project %s while keploy was waiting for the keploy-agent to come up (exit code %d)", reason, appErr.ExitCode)
+		// Otherwise the project died on its own — a bad compose file, a failed
+		// build, a port already taken. Report that now rather than sitting out
+		// the full agent budget waiting for an agent that is never going to
+		// start.
+		//
+		// Mirror its exit code on the way out. `keploy mock` promises to
+		// propagate the wrapped runner's code, and that promise was kept only
+		// when the runner got as far as step 8: a project that died during
+		// agent bring-up reached the caller as a plain error, so keploy exited
+		// a generic 1 and the runner's own code was lost. Which of the two
+		// paths a dying project takes is a race — the same crash reported two
+		// different exit codes depending on whether the agent's health poll
+		// landed first.
+		m.propagateExit(appErr, phase)
+		if appErr.ExitCode > 0 {
+			return nil, fmt.Errorf("the compose project exited with code %d while keploy was waiting for the keploy-agent to come up", appErr.ExitCode)
+		}
+		return nil, fmt.Errorf("the compose project stopped while keploy was waiting for the keploy-agent to come up: %w", appErr)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// composeAgentFailure is the keploy-agent compose service having stopped while
+// the app still needed it, as keploy's own failure, or nil. See
+// ComposeAgentFailureReader.
+func (m *mockService) composeAgentFailure() error {
+	reader, ok := m.instrumentation.(ComposeAgentFailureReader)
+	if !ok || !m.isDockerCompose() {
+		return nil
+	}
+	return reader.ComposeAgentFailure()
 }
 
 // releaseComposeApp releases the app service, which has been parked at its

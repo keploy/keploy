@@ -198,6 +198,15 @@ DOCS="$(sudo grep -hc '^kind:' keploy/fc/mocks.yaml 2>/dev/null)"
 DOCS="${DOCS:-0}"
 [ "$DOCS" -gt 0 ] || fail "recorded no mocks, so this proves nothing about a real session"
 
+# The agent keploy started for the session must have enforced its control-plane
+# token, which reaches the agent container through the `docker run` client's
+# environment. That handoff fails OPEN — an agent that got no token serves
+# everything, and every assertion above still passes — so the lines the agent
+# and keploy's own check print when it breaks are what fail the lane.
+if sudo grep -aqE "running WITHOUT authentication|NOT enforcing control-plane authentication" record.log; then
+  fail "the agent ran without its control-plane token: the docker run token handoff is broken"
+fi
+
 # What keploy actually did, on success as well as failure. Whether the endpoint
 # was dropped at all is a property of the daemon and differs between platforms,
 # so a lane that only prints on failure cannot say which half it exercised: the

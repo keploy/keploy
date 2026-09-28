@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 
 	"github.com/go-chi/chi/v5"
@@ -34,8 +35,46 @@ func isDaemonSetAgent() bool {
 	return os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true"
 }
 
+// newAgentRouter builds the control-plane router with every route behind the
+// token guard. The guard goes in before any route is registered: the control
+// plane streams live TLS session keys and captured traffic and accepts
+// session-mutating POSTs, and loopback is not a privilege boundary — other
+// local users, neighbouring containers, and the application under test (which
+// shares the agent's network namespace) can all reach it.
+//
+// An error means the agent was handed a token it cannot read, and must not
+// start; see routes.ConsumeSessionToken.
+//
+// A DaemonSet agent never serves this router (see the gate in Agent), so it
+// neither consumes a token nor says anything about one: telling every node's
+// log that a server it never starts is unauthenticated would be a false alarm.
+func newAgentRouter(logger *zap.Logger, a agent.Service, tokenFile string, isDocker, daemonSet bool) (chi.Router, error) {
+	sessionToken := ""
+	if !daemonSet {
+		tok, err := routes.ConsumeSessionToken(logger, tokenFile, isDocker)
+		if err != nil {
+			return nil, err
+		}
+		sessionToken = tok
+	}
+	router := chi.NewRouter()
+	router.Use(routes.Authenticate(logger, sessionToken))
+	routes.ActiveHooks.New(router, a, logger)
+	return router, nil
+}
+
 func init() {
 	Register("agent", Agent)
+}
+
+// agentFailed separates an agent that died from the ways a healthy one ends.
+// Setup returns nil when the process is stopped before the agent announced its
+// port, and context.Canceled when a serving agent is stopped (SIGTERM from the
+// CLI, docker stop, the kubelet); an error that arrives while the root context
+// is already cancelled is teardown, not the agent failing. Reading any of
+// those as a failure would turn every clean stop into a crash.
+func agentFailed(ctx context.Context, err error) bool {
+	return err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil
 }
 
 func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
@@ -44,12 +83,22 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 		Short: "starts keploy agent for hooking and starting proxy",
 		// Hidden: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			// A hang-up kills the agent, as it did before NewCtx made one
+			// stop keploy gracefully: see utils.DieOnHangup.
+			utils.DieOnHangup()
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Every failure below arms a non-zero exit and returns nil: the
+			// failure is already logged, and a returned error would have cobra
+			// print usage on top of it. What must not happen is what used to:
+			// `return nil` alone, so an agent that could not start exited 0 --
+			// and the CLI that launched it, docker, and the kubelet all read
+			// that as a clean finish.
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
+				utils.SetExitCodeOnce(utils.ExitKeployError)
 				return nil
 			}
 
@@ -57,6 +106,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			var ok bool
 			if a, ok = svc.(agent.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
+				utils.SetExitCodeOnce(utils.ExitKeployError)
 				return nil
 			}
 
@@ -87,9 +137,21 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			}
 
 			startAgentCh := make(chan int)
-			router := chi.NewRouter()
-
-			routes.ActiveHooks.New(router, a, logger)
+			daemonSet := isDaemonSetAgent()
+			// Read directly, like client-pid above, so this never depends on
+			// config wiring. An unreadable flag is not a reason to refuse to
+			// start: it means no launcher passed a file, and the environment
+			// is consulted instead.
+			tokenFile, tfErr := cmd.Flags().GetString("token-file")
+			if tfErr != nil {
+				logger.Debug("could not read the token-file flag", zap.Error(tfErr))
+			}
+			router, err := newAgentRouter(logger, a, tokenFile, isDocker, daemonSet)
+			if err != nil {
+				utils.LogError(logger, err, "refusing to start the agent")
+				utils.SetExitCodeOnce(utils.ExitKeployError)
+				return nil
+			}
 			go func() {
 				select {
 				case <-ctx.Done():
@@ -114,7 +176,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					// (/agent/stop, /agent/storemocks, …). Skip it. We still
 					// receive on startAgentCh above so Agent.Setup's unbuffered
 					// port handoff never blocks.
-					if isDaemonSetAgent() {
+					if daemonSet {
 						logger.Info("running as a Kubernetes DaemonSet agent; not starting the control-plane HTTP server (push architecture has no inbound HTTP consumers)")
 						return
 					}
@@ -125,6 +187,14 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			err = a.Setup(ctx, startAgentCh)
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")
+				if agentFailed(ctx, err) {
+					// The specific code when the failure carries one: the CLI
+					// that launched this agent reads it back as its own
+					// (pkg/platform/http AgentClient.Setup), which is how a
+					// user is told "grant privileges" apart from "mount
+					// tracefs".
+					utils.SetExitCodeOnce(utils.ExitCodeFor(err))
+				}
 				return nil
 			}
 

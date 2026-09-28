@@ -101,23 +101,26 @@ func TestChunkedResponseExitsOnEOF(t *testing.T) {
 // record) rather than the terminator in a dedicated read. The old strict
 // equality check `string(resp) == "0\r\n\r\n"` missed this shape, so the
 // loop blocked on a second ReadBytes until the upstream's keep-alive timed
-// out (~60s observed). After the fix uses bytes.HasSuffix, the loop must
-// exit promptly — we assert completion well under the keep-alive idle
-// window by enforcing a tight 100 ms budget (the happy-path return takes
-// microseconds; anything over 100 ms means the suffix check regressed).
+// out (~60s observed). The response's chunked framing now ends the loop
+// (chunkedBody), so it must exit promptly — we assert completion well under
+// the keep-alive idle window by enforcing a tight 100 ms budget (the
+// happy-path return takes microseconds; anything over 100 ms means the
+// terminator was not recognised).
 func TestChunkedResponseExitsOnSuffixedTerminator(t *testing.T) {
 	h := newTestHTTP()
 
 	clientConn := &mockConn{}
-	// Buggy shape: body tail + last-chunk marker in one TLS record.
+	// Buggy shape: body tail + last-chunk marker in one TLS record. The
+	// headers and the start of the chunk were read before chunkedResponse
+	// runs, as handleChunkedResponses leaves them in finalResp.
 	destConn := &mockConn{
-		data: []byte("abcdef0\r\n\r\n"),
+		data: []byte("def\r\n0\r\n\r\n"),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 	defer cancel()
 
-	var finalResp []byte
+	finalResp := []byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nabc")
 
 	start := time.Now()
 	done := make(chan error, 1)
@@ -133,17 +136,17 @@ func TestChunkedResponseExitsOnSuffixedTerminator(t *testing.T) {
 		}
 		if elapsed > 100*time.Millisecond {
 			t.Fatalf("chunkedResponse took %v (> 100ms) — suggests a second "+
-				"ReadBytes call on an idle conn; the suffix check did not match",
+				"ReadBytes call on an idle conn; the terminator was not recognised",
 				elapsed)
 		}
 		if destConn.readCount != 1 {
-			t.Errorf("expected exactly 1 read (exit on suffix match), got %d "+
-				"— a second read means the terminator detection regressed to "+
-				"strict equality", destConn.readCount)
+			t.Errorf("expected exactly 1 read (exit on the last-chunk), got %d "+
+				"— a second read means the terminator was not recognised",
+				destConn.readCount)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatalf("chunkedResponse stuck past 100ms on buffer \"<body>0\\r\\n\\r\\n\" "+
-			"after %d reads — suffix-terminator check regressed", destConn.readCount)
+			"after %d reads — the terminator was not recognised", destConn.readCount)
 	}
 }
 
