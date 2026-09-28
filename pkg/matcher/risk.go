@@ -40,6 +40,10 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
+	added, grown := splitArrayLengthChanges(added, expMaps)
+	removed, shrunk := splitArrayLengthChanges(removed, actMaps)
+	valueChanges = append(append(valueChanges, grown...), shrunk...)
+
 	added, removed = reportPaths(added), reportPaths(removed)
 	typeChanges, valueChanges = reportPaths(typeChanges), reportPaths(valueChanges)
 
@@ -278,6 +282,21 @@ func reportPath(key string) string {
 		}
 	}
 	return b.String()
+}
+
+func splitArrayLengthChanges(keys []string, other pathMaps) (fields, lengthChanges []string) {
+	otherPaths := make(map[string]struct{}, len(other.types))
+	for k := range other.types {
+		otherPaths[reportPath(k)] = struct{}{}
+	}
+	for _, k := range keys {
+		if _, ok := otherPaths[reportPath(k)]; ok && strings.Contains(k, arrayIndexMark) {
+			lengthChanges = append(lengthChanges, k)
+			continue
+		}
+		fields = append(fields, k)
+	}
+	return fields, lengthChanges
 }
 
 func reportPaths(keys []string) []string {
