@@ -127,3 +127,35 @@ func TestReplayOutcomeCarriesTheCasesAndTheMocksPerTest(t *testing.T) {
 }
 
 var _ = config.Config{}
+
+func TestPairCasesAndAttributeMocksPickTheInnermostWindow(t *testing.T) {
+	windows := []models.ScopeWindow{
+		{Name: "pkg.TestA", Start: runnerT0, End: runnerT0.Add(100 * time.Millisecond)},
+		{Name: "pkg.TestA/create", Start: runnerT0.Add(10 * time.Millisecond), End: runnerT0.Add(40 * time.Millisecond)},
+		{Name: "pkg.TestA/create/nested", Start: runnerT0.Add(20 * time.Millisecond), End: runnerT0.Add(30 * time.Millisecond)},
+	}
+	recorded := map[string][]*models.TestCase{
+		"pkg.TestA":               {httpCase("test-3", "GET", "/orders", 200, `[]`, runnerT0)},
+		"pkg.TestA/create":        {httpCase("test-1", "POST", "/orders", 201, `{}`, runnerT0)},
+		"pkg.TestA/create/nested": {httpCase("test-2", "GET", "/orders/1", 200, `{}`, runnerT0)},
+	}
+	actual := []*models.TestCase{
+		httpCase("", "POST", "/orders", 201, `{}`, runnerT0.Add(15*time.Millisecond)),
+		httpCase("", "GET", "/orders/1", 200, `{}`, runnerT0.Add(25*time.Millisecond)),
+		httpCase("", "GET", "/orders", 200, `[]`, runnerT0.Add(60*time.Millisecond)),
+	}
+	compare := func(tc *models.TestCase, resp *models.HTTPResp) (bool, *models.Result) {
+		return tc.HTTPResp.StatusCode == resp.StatusCode, &models.Result{}
+	}
+	for _, o := range pairCases(windows, recorded, actual, compare) {
+		require.NotNil(t, o.Actual, "%s was not paired in its own window", o.Case.Name)
+		require.True(t, o.Passed, o.Case.Name)
+	}
+
+	expected := map[string][]models.MockEntry{"pkg.TestA/create/nested": {{Name: "mock-0"}}}
+	consumed := []models.MockState{{Name: "mock-0", Kind: models.HTTP, Timestamp: runnerT0.Add(25 * time.Millisecond).UnixNano()}}
+	out := attributeMocks(windows, expected, consumed, nil)
+	require.Len(t, out, 1)
+	require.Equal(t, "pkg.TestA/create/nested", out[0].Flow)
+	require.Equal(t, "mock-0", out[0].Consumed[0].Name)
+}

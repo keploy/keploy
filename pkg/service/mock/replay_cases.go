@@ -122,12 +122,8 @@ func requestKey(method, rawURL string) string {
 }
 
 func flowAt(windows []models.ScopeWindow, at time.Time) (string, bool) {
-	for _, w := range windows {
-		if !at.Before(w.Start) && !at.After(w.End) {
-			return w.Name, true
-		}
-	}
-	return "", false
+	name := containing(windows, at)
+	return name, name != ""
 }
 
 // pairCases matches the requests the runner made this run with the cases each flow recorded, in order within the flow.
