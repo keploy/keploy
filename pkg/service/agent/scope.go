@@ -84,7 +84,6 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 	return nil
 }
 
-// BeginScope is BeginScopeAt stamped with the agent's clock.
 // openWindow remembers when a test said it started, in either mode, so a client can read the windows later.
 func (a *Agent) openWindow(name string, pid int, at time.Time) {
 	a.scopeMu.Lock()
@@ -107,6 +106,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) {
 	a.scopeMu.Unlock()
 }
 
+// BeginScope is BeginScopeAt stamped with the agent's clock.
 func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
 	return a.BeginScopeAt(ctx, name, pid, time.Time{})
 }

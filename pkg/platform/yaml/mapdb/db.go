@@ -438,6 +438,21 @@ func (db *MappingDb) decodeMapping(ctx context.Context, testSetID string) (*mode
 	return mapping, filepath.Join(mappingPath, fileName+"."+detected.FileExtension()), true, nil
 }
 
+// GetCases lists the test cases each flow recorded, keyed by flow.
+func (db *MappingDb) GetCases(ctx context.Context, testSetID string) (map[string][]string, error) {
+	mapping, _, present, err := db.decodeMapping(ctx, testSetID)
+	if err != nil || !present {
+		return map[string][]string{}, err
+	}
+	out := make(map[string][]string, len(mapping.TestCases))
+	for _, tc := range mapping.TestCases {
+		if len(tc.Cases) > 0 {
+			out[tc.ID] = append([]string(nil), tc.Cases...)
+		}
+	}
+	return out, nil
+}
+
 // GetStartup reads the test-set-scoped startup section from mappings.yaml.
 //
 // Startup mocks are the traffic the app produced while booting — driver
@@ -460,21 +475,6 @@ func (db *MappingDb) decodeMapping(ctx context.Context, testSetID string) (*mode
 // A missing file, or a file with no startup section, is not an error — it
 // returns nil, which is the correct answer for every mapping written before the
 // section existed.
-// GetCases lists the test cases each flow recorded, keyed by flow.
-func (db *MappingDb) GetCases(ctx context.Context, testSetID string) (map[string][]string, error) {
-	mapping, _, present, err := db.decodeMapping(ctx, testSetID)
-	if err != nil || !present {
-		return map[string][]string{}, err
-	}
-	out := make(map[string][]string, len(mapping.TestCases))
-	for _, tc := range mapping.TestCases {
-		if len(tc.Cases) > 0 {
-			out[tc.ID] = append([]string(nil), tc.Cases...)
-		}
-	}
-	return out, nil
-}
-
 func (db *MappingDb) GetStartup(ctx context.Context, testSetID string) ([]models.MockEntry, error) {
 	mapping, _, present, err := db.decodeMapping(ctx, testSetID)
 	if err != nil {
