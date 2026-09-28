@@ -321,6 +321,10 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 	}
 
+	if err := m.hooks.AfterRecordingComplete(persistCtx, &rec.RecordingCompleteContext{TestSetID: name, Path: m.config.Path}); err != nil {
+		m.logger.Warn("AfterRecordingComplete hook failed", zap.Error(err), zap.String("mock-set", name))
+	}
+
 	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
 	if !runnerPassed(appErr) {
 		m.logger.Warn("tests failed; the recording was kept locally and not published", zap.String("mock-set", name))

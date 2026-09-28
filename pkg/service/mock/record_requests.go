@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -42,9 +43,15 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 		defer close(c.done)
 		for tc := range incoming {
 			seen.Add(1)
+			if err := m.hooks.BeforeTestCaseInsert(persistCtx, &rec.TestCaseContext{TestCase: tc, TestSetID: name}); err != nil {
+				m.logger.Debug("BeforeTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
+			}
 			if err := m.testDB.InsertTestCase(persistCtx, tc, name, true); err != nil {
 				utils.LogError(m.logger, err, "failed to persist test case", zap.String("case", tc.Name))
 				continue
+			}
+			if err := m.hooks.AfterTestCaseInsert(persistCtx, &rec.TestCaseContext{TestCase: tc, TestSetID: name}); err != nil {
+				m.logger.Debug("AfterTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
 			}
 			c.add(tc)
 		}

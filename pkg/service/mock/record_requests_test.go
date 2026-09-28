@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -259,4 +261,66 @@ func TestRecordRefusesATestThatRanTwice(t *testing.T) {
 	require.Zero(t, store.pushes)
 	_, statErr := os.Stat(filepath.Join(dir, "set", "mappings.yaml"))
 	require.True(t, os.IsNotExist(statErr), "no mapping is written")
+}
+
+type hookSpy struct {
+	rec.BaseRecordHooks
+	mu       sync.Mutex
+	calls    []string
+	complete []rec.RecordingCompleteContext
+}
+
+func (h *hookSpy) add(s string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, s)
+}
+
+func (h *hookSpy) BeforeTestCaseInsert(_ context.Context, info *rec.TestCaseContext) error {
+	h.add("before-case " + info.TestSetID + " " + info.TestCase.Name)
+	return nil
+}
+
+func (h *hookSpy) AfterTestCaseInsert(_ context.Context, info *rec.TestCaseContext) error {
+	h.add("after-case " + info.TestSetID + " " + info.TestCase.Name)
+	return nil
+}
+
+func (h *hookSpy) BeforeMockInsert(_ context.Context, info *rec.MockContext) error {
+	h.add("before-mock " + info.TestSetID + " " + info.Mock.Name)
+	return nil
+}
+
+func (h *hookSpy) AfterMockInsert(_ context.Context, info *rec.MockContext) error {
+	h.add("after-mock " + info.TestSetID + " " + info.Mock.Name)
+	return nil
+}
+
+func (h *hookSpy) AfterRecordingComplete(_ context.Context, info *rec.RecordingCompleteContext) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.complete = append(h.complete, *info)
+	return nil
+}
+
+func TestRecordPassesCasesAndMocksThroughTheHooks(t *testing.T) {
+	instr := newRunnerInstr(t, jsonSequential)
+	instr.incoming = []*models.TestCase{caseAt("test-1", runnerT0.Add(5*time.Millisecond))}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(6*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = t.TempDir()
+	withRequests(cfg)
+	dir := t.TempDir()
+	hooks := &hookSpy{}
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), dir, ""), nil, hooks, cfg)
+	svc.(TestDBSetter).SetTestDB(&memTestDB{})
+	require.NoError(t, svc.Record(context.Background()))
+
+	require.ElementsMatch(t, []string{"before-case set test-1", "after-case set test-1", "before-mock set mock-0", "after-mock set mock-0"}, hooks.calls)
+	require.Less(t, slices.Index(hooks.calls, "before-case set test-1"), slices.Index(hooks.calls, "after-case set test-1"))
+	require.Equal(t, []rec.RecordingCompleteContext{{TestSetID: "set", Path: cfg.Path}}, hooks.complete)
+	_, err := os.Stat(filepath.Join(dir, "set", "mappings.yaml"))
+	require.NoError(t, err, "the hook ran after the mappings were written")
 }
