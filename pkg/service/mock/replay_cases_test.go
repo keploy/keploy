@@ -221,3 +221,37 @@ func TestPairCasesDoesNotCompareGRPCAsHTTP(t *testing.T) {
 	require.True(t, out[1].Passed)
 	require.Equal(t, 1, calls)
 }
+
+func TestPairCasesFindsSubtestRequestsUnderTheTopLevelFlow(t *testing.T) {
+	scope := feed(t, jsonEvent("run", "TestTestSuiteValidation", 0)+
+		jsonEvent("run", "TestTestSuiteValidation/missing_name", 1)+jsonEvent("pass", "TestTestSuiteValidation/missing_name", 2)+
+		jsonEvent("run", "TestTestSuiteValidation/missing_steps", 3)+jsonEvent("pass", "TestTestSuiteValidation/missing_steps", 4)+
+		jsonEvent("pass", "TestTestSuiteValidation", 5))
+	windows := mergeWindows(scope.windows(), nil)
+	at := func(sec float64) time.Time { return runnerT0.Add(time.Duration(sec * float64(time.Second))) }
+	flow := "e2e/orders.TestTestSuiteValidation"
+	recorded := map[string][]*models.TestCase{flow: {
+		httpCase("missing_name-1", "POST", "/testsuite", 400, `{"error":"name"}`, at(1.5)),
+		httpCase("missing_steps-1", "POST", "/testsuite", 400, `{"error":"steps"}`, at(3.5)),
+	}}
+	actual := []*models.TestCase{
+		httpCase("", "POST", "/testsuite", 400, `{"error":"name"}`, at(1.5)),
+		httpCase("", "POST", "/testsuite", 400, `{"error":"steps"}`, at(3.5)),
+	}
+	out := pairCases(windows, recorded, actual, func(tc *models.TestCase, resp *models.HTTPResp) (bool, *models.Result) {
+		return tc.HTTPResp.Body == resp.Body, nil
+	})
+	require.Len(t, out, 2)
+	for _, o := range out {
+		require.NotNil(t, o.Actual, "%s was made in its subtest and must be paired", o.Case.Name)
+		require.True(t, o.Passed, o.Case.Name)
+	}
+
+	expected := map[string][]models.MockEntry{flow: {{Name: "mock-0"}}}
+	consumed := []models.MockState{{Name: "mock-0", Kind: models.Mongo, Timestamp: at(3.6).UnixNano()}}
+	mocks := attributeMocks(windows, expected, consumed, []models.UnmatchedCall{{Protocol: "Mongo", At: at(1.6)}})
+	require.Len(t, mocks, 1)
+	require.Equal(t, flow, mocks[0].Flow)
+	require.Len(t, mocks[0].Consumed, 1)
+	require.Len(t, mocks[0].Missed, 1)
+}

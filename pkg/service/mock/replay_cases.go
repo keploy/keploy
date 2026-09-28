@@ -121,9 +121,26 @@ func requestKey(method, rawURL string) string {
 	return strings.ToUpper(method) + " " + normalisePath(rawURL)
 }
 
-func flowAt(windows []models.ScopeWindow, at time.Time) (string, bool) {
-	name := containing(windows, at)
-	return name, name != ""
+func flowAt[V any](windows []models.ScopeWindow, at time.Time, known map[string]V) (string, bool) {
+	best, top := -1, -1
+	for i, w := range windows {
+		if at.Before(w.Start) || at.After(w.End) {
+			continue
+		}
+		if _, ok := known[w.Name]; ok && (best == -1 || w.Start.After(windows[best].Start)) {
+			best = i
+		}
+		if top == -1 || len(w.Name) < len(windows[top].Name) {
+			top = i
+		}
+	}
+	if best == -1 {
+		best = top
+	}
+	if best == -1 {
+		return "", false
+	}
+	return windows[best].Name, true
 }
 
 // pairCases matches the requests the runner made this run with the cases each flow recorded, in order within the flow.
@@ -133,7 +150,7 @@ func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestC
 		if a.Kind == models.GRPC_EXPORT {
 			continue
 		}
-		if flow, ok := flowAt(windows, caseTime(a)); ok {
+		if flow, ok := flowAt(windows, caseTime(a), recorded); ok {
 			byFlow[flow] = append(byFlow[flow], a)
 		}
 	}
@@ -188,7 +205,7 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 		if c.Timestamp == 0 {
 			continue // an older agent does not say when it served a mock
 		}
-		if flow, ok := flowAt(windows, time.Unix(0, c.Timestamp)); ok {
+		if flow, ok := flowAt(windows, time.Unix(0, c.Timestamp), expected); ok {
 			get(flow).Consumed = append(get(flow).Consumed, c)
 		}
 	}
@@ -196,7 +213,7 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 		if miss.At.IsZero() {
 			continue
 		}
-		if flow, ok := flowAt(windows, miss.At); ok {
+		if flow, ok := flowAt(windows, miss.At, expected); ok {
 			get(flow).Missed = append(get(flow).Missed, miss)
 		}
 	}
