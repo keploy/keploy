@@ -549,28 +549,44 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 			at[mk.name] = mk.ts
 		}
 	}
-	for test, entries := range correlateScopes(windows, own) {
-		tc, ok := byTest[test]
-		if !ok {
-			continue
-		}
-		in := make([]models.ScopeWindow, 0, len(tc.Cases))
+	holder := make(map[string]string, len(cases))
+	inFlow := make(map[string][]models.ScopeWindow)
+	for test, tc := range byTest {
 		for _, c := range tc.Cases {
-			in = append(in, spans[c])
+			holder[c] = test
+			inFlow[flowOf(windows, test)] = append(inFlow[flowOf(windows, test)], spans[c])
 		}
+	}
+	for test, entries := range correlateScopes(windows, own) {
 		for _, e := range entries {
-			c := containing(in, at[e.Name])
+			c := containing(inFlow[flowOf(windows, test)], at[e.Name])
 			if c == "" {
 				continue
 			}
+			tc := byTest[holder[c]]
 			if tc.CaseMocks == nil {
 				tc.CaseMocks = map[string][]string{}
 			}
 			tc.CaseMocks[c] = append(tc.CaseMocks[c], e.Name)
+			byTest[holder[c]] = tc
 		}
-		byTest[test] = tc
+	}
+	for _, tc := range byTest {
+		for _, names := range tc.CaseMocks {
+			sort.SliceStable(names, func(i, j int) bool { return at[names[i]].Before(at[names[j]]) })
+		}
 	}
 	return byTest
+}
+
+func flowOf(windows []models.ScopeWindow, test string) string {
+	flow := test
+	for _, w := range windows {
+		if strings.HasPrefix(test, w.Name+"/") && len(w.Name) < len(flow) {
+			flow = w.Name
+		}
+	}
+	return flow
 }
 
 func startupMocks(windows []models.ScopeWindow, mocks []capturedMock) []models.MockEntry {

@@ -324,3 +324,39 @@ func TestRecordPassesCasesAndMocksThroughTheHooks(t *testing.T) {
 	_, err := os.Stat(filepath.Join(dir, "set", "mappings.yaml"))
 	require.NoError(t, err, "the hook ran after the mappings were written")
 }
+
+func TestCorrelateCasesPairsAMockWithACaseOfTheSameFlowAcrossEntries(t *testing.T) {
+	at := func(s string) time.Time {
+		v, err := time.Parse(time.RFC3339Nano, s)
+		require.NoError(t, err)
+		return v
+	}
+	windows := []models.ScopeWindow{
+		{Name: "orders/stats.TestOrderLifecycle", Start: at("2026-09-29T22:35:22.100Z"), End: at("2026-09-29T22:35:22.300Z")},
+		{Name: "orders/stats.TestOrderLifecycle/get", Start: at("2026-09-29T22:35:22.158Z"), End: at("2026-09-29T22:35:22.200Z")},
+		{Name: "orders/stats.TestOther", Start: at("2026-09-29T22:35:22.300Z"), End: at("2026-09-29T22:35:22.400Z")},
+	}
+	cases := []capturedMock{{name: "get-orders-by-id-2", ts: at("2026-09-29T22:35:22.157977Z"), end: at("2026-09-29T22:35:22.15832Z")}}
+	mocks := []capturedMock{
+		{name: "mock-27", ts: at("2026-09-29T22:35:22.158056Z")},
+		{name: "mock-28", ts: at("2026-09-29T22:35:22.35Z")},
+	}
+	got := correlateCases(windows, mocks, cases, nil)
+	require.Equal(t, map[string]models.MappedTestCase{
+		"orders/stats.TestOrderLifecycle": {
+			Cases:     []string{"get-orders-by-id-2"},
+			CaseMocks: map[string][]string{"get-orders-by-id-2": {"mock-27"}},
+			CaseSteps: map[string]string{"get-orders-by-id-2": ""},
+		},
+	}, got)
+	require.Equal(t, map[string][]string{"orders/stats.TestOrderLifecycle/get": {"mock-27"}, "orders/stats.TestOther": {"mock-28"}},
+		func() map[string][]string {
+			out := map[string][]string{}
+			for k, v := range correlateScopes(windows, mocks) {
+				for _, e := range v {
+					out[k] = append(out[k], e.Name)
+				}
+			}
+			return out
+		}(), "mock-27 stays in the subtest's mock_entries")
+}
