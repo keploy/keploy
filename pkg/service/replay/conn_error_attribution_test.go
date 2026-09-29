@@ -29,6 +29,12 @@ func TestIsAppConnectionErrorMsg(t *testing.T) {
 		`unexpected end of JSON input`,
 		`invalid response type for HTTP test case`,
 		`internal error: test case result is nil`,
+		// No-answer failures stay out of APP_CONNECTION_ERROR: the prune gate
+		// reads them through isAppNoAnswerMsg, and the report's category (which
+		// k8s-proxy triages on) must not change. A stop's cancel is not the app
+		// being unreachable.
+		`Get "http://localhost:8080/x": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`,
+		`Get "http://localhost:8080/x": context canceled`,
 	}
 	for _, m := range notConnErrors {
 		if isAppConnectionErrorMsg(m) {
