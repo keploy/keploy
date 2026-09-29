@@ -323,7 +323,7 @@ func (m *mockService) Record(ctx context.Context) error {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
 				}
 			}
-			m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded))
+			m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded), skippedTests(scope.tests()))
 		}
 	}
 
@@ -451,20 +451,36 @@ func (m *mockService) deleteCases(ctx context.Context, name string, ids []string
 }
 
 // upsertCases writes which test cases each flow produced into the mapping.
-func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[string]models.MappedTestCase, startup []models.MockEntry) {
-	if len(byCase) == 0 && len(startup) == 0 {
-		return
-	}
+func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[string]models.MappedTestCase, startup []models.MockEntry, skipped []string) {
 	mapper, ok := m.mappingDB.(CaseMapper)
 	if !ok {
 		m.logger.Warn("the mapping store cannot record test cases per flow", zap.String("mock-set", name))
 		return
 	}
-	if err := mapper.UpsertCases(ctx, name, byCase, startup); err != nil {
+	if err := mapper.UpsertCases(ctx, name, byCase, startup, &skipped); err != nil {
 		m.logger.Warn("failed to write per-flow test cases", zap.Error(err))
 		return
 	}
 	m.logger.Info("wrote per-flow test cases", zap.Int("flows", len(byCase)), zap.String("mock-set", name))
+}
+
+func skippedTests(outcomes []TestOutcome) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, o := range outcomes {
+		if o.Status != "skip" || seen[o.Name] {
+			continue
+		}
+		top := true
+		for _, p := range outcomes {
+			top = top && !strings.HasPrefix(o.Name, p.Name+"/")
+		}
+		if top {
+			seen[o.Name] = true
+			out = append(out, o.Name)
+		}
+	}
+	return out
 }
 
 // deleteMappings drops the set's old per-test mappings so a re-record cannot leave tests pointing at renamed mocks.

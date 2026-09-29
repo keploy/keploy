@@ -510,3 +510,30 @@ func TestAnAcceptedRecordReplacesTheSetAndLeavesNoCopy(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "only the set itself remains")
 }
+
+func TestRecordListsTheTopLevelTestsTheRunnerSkipped(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   []string
+	}{
+		{"one skipped, one passing", jsonEvent("run", "TestA", 0) + jsonEvent("pass", "TestA", 1) +
+			jsonEvent("run", "TestSkipped", 1) + jsonEvent("skip", "TestSkipped", 1.1) +
+			jsonEvent("run", "TestB", 2) + jsonEvent("run", "TestB/later", 2.1) + jsonEvent("skip", "TestB/later", 2.2) + jsonEvent("pass", "TestB", 3),
+			[]string{"e2e/orders.TestSkipped"}},
+		{"nothing skipped", jsonEvent("run", "TestA", 0) + jsonEvent("pass", "TestA", 1), []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			instr := newRunnerInstr(t, tc.output)
+			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(500*time.Millisecond))}
+			dir := t.TempDir()
+			require.NoError(t, recordSetWith(t, zap.NewNop(), instr, mapdb.New(zap.NewNop(), dir, ""), nil, nil))
+			data, err := os.ReadFile(filepath.Join(dir, "set", "mappings.yaml"))
+			require.NoError(t, err)
+			mapping, err := mapdb.DecodeMapping(data, zap.NewNop())
+			require.NoError(t, err)
+			require.NotNil(t, mapping.Skipped, "the key is always written, so a reader can tell none from unknown:\n%s", data)
+			require.Equal(t, tc.want, *mapping.Skipped)
+		})
+	}
+}
