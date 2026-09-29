@@ -418,16 +418,22 @@ func (t *tee) drop(reason string) {
 	if isDesyncingDrop(reason) && !t.desynced.Swap(true) {
 		if t.logger != nil {
 			// Say what the owner actually does: onDesync starts suppression
-			// that follows the connection's ACTIVITY (proxy_v2.go
-			// trackOrphanWhileActive), not the test cases that used it.
+			// that follows the connection's ACTIVITY
+			// (syncMock.UnrecordedConn), not the test cases that used it.
+			// Also for a parser that re-aligns: when it re-aligns is known
+			// only once it gets there, and it can be a full queue behind.
 			msg := "relay: capture dropped a chunk; this direction is no longer fed to the parser, so the connection records no further mocks"
+			next := "the app's traffic is unaffected. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection, so on a busy pooled connection that can be every later test case"
 			if t.parserCanResync {
 				msg = "relay: capture dropped a chunk; the parser re-aligns on the next message it can frame, and the exchanges the hole cut are not recorded"
+			}
+			if reason == DropPerConnCap {
+				next += ". reason=per_conn_cap: record.recordBuffer.maxMemoryPerConnection bounds this connection's capture buffer"
 			}
 			t.logger.Warn(msg,
 				zap.String("dir", t.dir.String()),
 				zap.String("reason", reason),
-				zap.String("next_step", "the app's traffic is unaffected. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection, so on a busy pooled connection that can be every later test case. If reason=per_conn_cap, raise record.recordBuffer.maxMemoryPerConnection; if reason=memory_pressure, give the agent more memory"),
+				zap.String("next_step", next),
 			)
 		}
 		// Report the hole so the owner can suppress the test cases that

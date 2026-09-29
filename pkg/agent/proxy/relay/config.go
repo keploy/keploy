@@ -238,11 +238,13 @@ type Config struct {
 	// perfectly while producing zero further mocks, and the test cases
 	// recorded against it replay as match_phase=no_mocks.
 	//
-	// The expected implementation is to record the start of the hole and,
-	// when the connection ends, mark that whole span so the test cases
-	// overlapping it are suppressed instead of shipped mock-less. That is
-	// the half that closes the failure by construction; retirement (below)
-	// is the best-effort half that gets capture going again.
+	// The expected implementation suppresses the test cases recorded while
+	// the connection carries traffic from here on, instead of shipping them
+	// mock-less (syncMock.UnrecordedConn). A parser that cannot re-align
+	// (ParserCanResyncAfterGap false) is no longer fed, so the connection has
+	// stopped being recorded; one that can re-aligns at some later message,
+	// but when is known only once it gets there, possibly a full queue behind
+	// the traffic, by when the test cases in between have been streamed.
 	OnCaptureDesync func(reason string)
 
 	// OnClientChunkTeed is invoked after each successful tee of a

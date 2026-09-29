@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -23,79 +21,6 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
-
-const (
-	// orphanIdleGrace is how long a retired connection must carry no bytes
-	// before its suppression window is closed. Longer than any plausible
-	// gap WITHIN one app request (the window must never close mid-request
-	// and let a half-covered test case through), short enough that a
-	// connection idling between bursts stops suppressing quickly.
-	orphanIdleGrace = 1 * time.Second
-
-	// orphanIdleCheck is how often idleness is re-evaluated. The window can
-	// therefore over-cover by up to orphanIdleCheck past the true idle
-	// point, which errs toward suppressing — the safe direction.
-	orphanIdleCheck = 250 * time.Millisecond
-)
-
-// orphanWindowOpener is the slice of supervisor.Session that trackOrphanWhileActive
-// needs, so the loop can be tested without a live connection.
-type orphanWindowOpener interface {
-	OpenOrphanWindow(start time.Time) func()
-}
-
-// trackOrphanWhileActive keeps a suppression window open only while a retired
-// connection is actually carrying bytes, and closes it whenever the connection
-// falls idle.
-//
-// A retired connection can no longer be captured, but that only costs a test
-// case if the app USED it while serving that test case. A single window held
-// from the fallthrough to end-of-session says "everything after this point is
-// unreliable", which for a connection that then sat idle for ten minutes
-// throws away ten minutes of perfectly good recording — and on a fallthrough
-// early in a run, the entire run. Following activity instead suppresses the
-// spans that can really have lost a mock and nothing else.
-//
-// It always returns with its window closed. stop must be closed by the caller
-// once the connection has ended.
-// idleGrace and checkEvery are parameters rather than the package constants
-// so the loop is testable in milliseconds; production passes
-// orphanIdleGrace / orphanIdleCheck.
-func trackOrphanWhileActive(stop <-chan struct{}, sess orphanWindowOpener, lastForwardNanos *atomic.Int64, idleGrace, checkEvery time.Duration) {
-	closeWindow := sess.OpenOrphanWindow(time.Now())
-	defer func() {
-		if closeWindow != nil {
-			closeWindow()
-		}
-	}()
-
-	ticker := time.NewTicker(checkEvery)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-stop:
-			return
-		case now := <-ticker.C:
-			idle := now.Sub(time.Unix(0, lastForwardNanos.Load())) > idleGrace
-			switch {
-			case idle && closeWindow != nil:
-				closeWindow()
-				closeWindow = nil
-			case !idle && closeWindow == nil:
-				// Traffic resumed on a connection that still cannot be
-				// captured. Reopen from the RESUME instant, not from now:
-				// the tick only tells us traffic happened at some point in
-				// the last checkEvery, and bytes moved from
-				// lastForwardNanos onwards. Opening at `now` would leave up
-				// to checkEvery of live traffic uncovered, and a request
-				// served entirely inside that hole is exactly the
-				// mock-less test case this exists to catch.
-				closeWindow = sess.OpenOrphanWindow(time.Unix(0, lastForwardNanos.Load()))
-			}
-		}
-	}
-}
 
 // recordViaSupervisor runs a V2-capable parser's RecordOutgoing inside
 // the new supervisor + relay architecture.
@@ -226,37 +151,17 @@ func (p *Proxy) recordViaSupervisor(
 		realCertHook = p.cbshim.RegisterReal
 	}
 
-	// lastForwardNanos is when this connection last moved a byte in either
-	// direction, stamped by the wrapped BumpActivity below. Read by the
-	// activity-scoped suppression loop.
-	var lastForwardNanos atomic.Int64
-	lastForwardNanos.Store(time.Now().UnixNano())
-
-	// ONE suppression tracker per connection, started by whichever cause
-	// fires first and stopped when the connection ends.
-	//
-	// Both causes — a tee desync and a retired parser — leave the connection
-	// in the same state: it can no longer be captured. So they share one
-	// activity-scoped window rather than opening two. They are also not
-	// independent: the incident's chain was memory-pressure drop → parser
-	// starves mid-frame → hang watchdog → passthrough fallthrough, so the
-	// DESYNC fires first. Giving it a plain open-ended window of its own
-	// would subsume the fallthrough's scoped one (WasMockOrphanedInWindow
-	// ORs the ranges) and silently restore the whole-session suppression
-	// this design exists to avoid.
-	var (
-		trackerOnce sync.Once
-		trackerStop = make(chan struct{})
-	)
-	startOrphanTracking := func() {
-		trackerOnce.Do(func() {
-			go trackOrphanWhileActive(trackerStop, svSess, &lastForwardNanos, orphanIdleGrace, orphanIdleCheck)
-		})
-	}
-	// Safe whether or not the tracker ever started — closing a channel with
-	// no reader is a no-op — and it guarantees the goroutine cannot outlive
-	// the connection.
-	defer close(trackerStop)
+	// A connection whose parser can no longer follow it stops being recorded,
+	// and the test cases recorded while it carries traffic from then on are
+	// left out (syncMock.UnrecordedConn: the rule a DaemonSet agent applies
+	// too). Two causes stop it, a desync the parser cannot re-align across and
+	// a retired parser, and they are not independent: the incident's chain was
+	// memory-pressure drop, parser starves mid-frame, hang watchdog,
+	// passthrough fallthrough. So they share one UnrecordedConn and the first
+	// one wins. It is ended when the connection ends, here or by a panic, so no
+	// span outlives it.
+	unrecorded := syncMock.NewUnrecordedConn(svSess.OpenOrphanWindow, syncMock.UnrecordedIdleGrace, syncMock.UnrecordedIdleCheck)
+	defer unrecorded.End()
 
 	relayCfg := relay.Config{
 		Logger: logger,
@@ -278,19 +183,19 @@ func (p *Proxy) recordViaSupervisor(
 		// periods that can really have cost a mock.
 		BumpActivity: func() {
 			sv.BumpActivity()
-			lastForwardNanos.Store(time.Now().UnixNano())
+			unrecorded.Note(time.Time{}) // on the wire now
 		},
 		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
 		OnClientChunkTeed:    sv.MarkPendingWork,
 		RealCertHook:         realCertHook,
-		// A hole in this connection's capture. Remember when it opened so
-		// the teardown below can mark the whole span: from here on the
-		// parser frames from the wrong offset and emits nothing, so every
-		// test case overlapping the span must be suppressed rather than
-		// shipped mock-less (replay would report match_phase=no_mocks).
-		// Suppression is what closes the failure by construction —
-		// retirement below only restores capture for what follows.
-		OnCaptureDesync: func(string) { startOrphanTracking() },
+		// A hole in this connection's capture: every test case recorded while
+		// it carries traffic from here on is left out rather than shipped
+		// mock-less (replay would report match_phase=no_mocks). A parser that
+		// cannot re-align is no longer fed (the tee stops that direction). One
+		// that can re-aligns at some later message, but when is known only
+		// once it gets there, and it can be a full queue behind the traffic:
+		// the test cases in between would already have been streamed.
+		OnCaptureDesync: func(string) { unrecorded.Stop(time.Now()) },
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
@@ -464,16 +369,14 @@ func (p *Proxy) recordViaSupervisor(
 		// trade the memory-pressure and resync-hole suppressors already
 		// make: a smaller recording in which every test replays, instead of
 		// a larger one that lies.
-		// The tracker goroutine owns its window and closes it on the way
-		// out; `defer close(trackerStop)` at the top of this function is
-		// what stops it, so the close survives a panic here rather than
-		// only the happy path. An orphan window that never closes would
-		// suppress every test case for the REST OF THE SESSION.
+		// `defer unrecorded.End()` at the top of this function closes the span
+		// when the connection ends, so the close survives a panic here rather
+		// than only the happy path. A span that never closes would suppress
+		// every test case for the REST OF THE SESSION.
 		if !shuttingDown {
-			// Shared with the desync path — see startOrphanTracking. If a
-			// tee already desynced this connection the tracker is running,
-			// and this is a no-op rather than a second window.
-			startOrphanTracking()
+			// Shared with the desync path: if a tee already stopped this
+			// connection, this is a no-op rather than a second span.
+			unrecorded.Stop(time.Now())
 		}
 		<-relayDone
 		return nil

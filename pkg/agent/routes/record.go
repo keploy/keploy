@@ -364,16 +364,197 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// forever during shutdown when no test cases are arriving.
 	var tcsSentSoFar int       // TCs sent to CLI this session
 	var tcsSuppressedSoFar int // TCs suppressed: pressure OR resync-hole overlapped the TC's HTTP window, or its mock was capacity-dropped
+	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
+	// send checks one test case and streams it unless it is left out. It
+	// reports false once the stream is broken.
+	send := func(t *models.TestCase) bool {
+		// Skip this test case if memory pressure overlapped its HTTP window
+		// [request, response]: under pressure the paired mock may have been
+		// dropped, so sending the TC would orphan it at replay. We check the
+		// TC window against recorded pressure ranges (not individual mock
+		// drops) because that check is race-free regardless of when the
+		// mock's goroutine runs relative to this handler.
+		tcRespTime := t.HTTPResp.Timestamp
+		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+		// A mongo/v2 reassembly resync hole strands a delivered-but-unframable
+		// op: its TC records mock-less though no pressure range covers it. The
+		// enterprise parser reports the hole via Session.RecordOrphanWindow;
+		// suppress any TC whose window overlaps it, same as for pressure.
+		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
+		// A capacity drop (outChan overflow / already-closed channel)
+		// feeds nothing into pressureRanges, so the pressure-overlap check
+		// above cannot catch it. Suppress by EXACT owning test name so a
+		// TC whose mock was capacity-dropped is not streamed mock-less
+		// (replay: match_phase=no_mocks), without over-suppressing any
+		// concurrent TC that kept all its mocks.
+		mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
+
+		if hasPressure || hasOrphan || mockDropped {
+			tcsSuppressedSoFar++
+			a.logger.Debug("agent: TC suppressed — memory pressure / resync-hole overlapped TC window or a mock was capacity-dropped, not sent to CLI",
+				zap.String("tc_name", t.Name),
+				zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
+				zap.Int("pressure_overlaps", pressureOverlaps),
+				zap.Int("resync_orphan_overlaps", orphanOverlaps),
+				zap.Bool("capacity_drop", mockDropped),
+				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
+			)
+			return true
+		}
+
+		tcsSentSoFar++
+		// Stream each test case as JSON
+		// 1. Write metadata (JSON)
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Disposition", `form-data; name="metadata"`)
+		header.Set("Content-Type", "application/json")
+		part, err := mw.CreatePart(header)
+		if err != nil {
+			a.logger.Error("failed to create metadata part", zap.Error(err))
+			return false
+		}
+		if err := json.NewEncoder(part).Encode(t); err != nil {
+			a.logger.Error("failed to encode metadata", zap.Error(err))
+			return false
+		}
+
+		// 2. Write file part if exists
+		if t.HasBinaryFile {
+			a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
+			for _, form := range t.HTTPReq.Form {
+				for i, path := range form.Paths {
+					if path == "" {
+						continue
+					}
+
+					// Get filename from FileNames if available, or base of path
+					fileName := "binary_file"
+					if i < len(form.FileNames) {
+						fileName = form.FileNames[i]
+					} else {
+						fileName = filepath.Base(path)
+					}
+
+					fileHeader := textproto.MIMEHeader{}
+					fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
+					filePart, err := mw.CreatePart(fileHeader)
+					if err != nil {
+						a.logger.Error("failed to create file part", zap.Error(err))
+						return false
+					}
+
+					f, err := os.Open(path)
+					if err != nil {
+						a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
+						return false
+					}
+					if _, err := io.Copy(filePart, f); err != nil {
+						f.Close()
+						a.logger.Error("failed to copy file to stream", zap.Error(err))
+						return false
+					}
+					f.Close()
+					a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
+
+					// Cleanup temp file
+					os.Remove(path)
+				}
+			}
+		}
+
+		// 3. Write delimiter part to force closure of previous part (file)
+		// This is critical: The client reads the file part until it sees the *next* boundary.
+		// Without this delimiter, the client blocks waiting for the *next testcase* to create a boundary,
+		// causing a deadlock if testcases are infrequent.
+		delimiterHeader := textproto.MIMEHeader{}
+		delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
+		if _, err := mw.CreatePart(delimiterHeader); err != nil {
+			a.logger.Error("failed to create delimiter part", zap.Error(err))
+			return false
+		}
+
+		flusher.Flush() // Immediately send data to the client
+		return true
+	}
+
+	// A capture that can tell when a test case's verdict under the rule for
+	// unrecorded traffic is final (the enterprise proxyless agent) holds each
+	// test case until it is: a span that overlaps it can become known after it
+	// completes (syncMock settle.go). Without one, test cases go at once.
+	var hold *syncmgr.TestCaseHold
+	if w := syncmgr.Get().Watermark(); w != nil {
+		hold = syncmgr.NewTestCaseHold(w, syncmgr.TestCaseHoldMax, syncmgr.TestCaseHoldBytes)
+	}
+	var holdTick *time.Ticker
+	defer func() {
+		if holdTick != nil {
+			holdTick.Stop()
+		}
+	}()
+	// release sends what the hold lets go, and keeps a ticker going while it
+	// holds any. It reports false once the stream is broken.
+	release := func() bool {
+		for _, h := range hold.Release() {
+			if h.Unsettled {
+				tcsUnsettled++
+				// What held it, for the first of this recording and then
+				// one in 1,024: the bound can let many go.
+				if h.HeldBy != nil && (tcsUnsettled <= 64 || tcsUnsettled%1024 == 0) {
+					if ce := a.logger.Check(zap.DebugLevel, "agent: test case let go by the hold's bound before its verdict was final"); ce != nil {
+						ce.Write(zap.String("tc_name", h.TC.Name), zap.Int("unsettled", tcsUnsettled),
+							zap.Stringer("held_by", h.HeldBy))
+					}
+				}
+			}
+			if !send(h.TC) {
+				return false
+			}
+		}
+		// Every test case still held starts no earlier than the earliest:
+		// past the cap, the spans before it are the ones joined (Spans).
+		hold.EarliestStarts(func(_, _ string, start time.Time) { syncmgr.Get().CheckedBefore(start) })
+		if hold.Len() > 0 && holdTick == nil {
+			holdTick = time.NewTicker(syncmgr.TestCaseHoldTick)
+		} else if hold.Len() == 0 && holdTick != nil {
+			holdTick.Stop()
+			holdTick = nil
+		}
+		return true
+	}
 	for {
+		var tickC <-chan time.Time
+		if holdTick != nil {
+			tickC = holdTick.C
+		}
 		select {
 		case <-r.Context().Done():
 			a.logger.Debug("Client closed the connection or context was cancelled")
 			return
+		case <-tickC:
+			if !release() {
+				return
+			}
 		case t, ok := <-tc:
 			if !ok {
-				// Channel closed = recording session over.
+				// Channel closed = recording session over. What the hold
+				// still has goes as its verdicts settle, or its bound ends.
+				for hold != nil && hold.Len() > 0 {
+					if holdTick == nil {
+						holdTick = time.NewTicker(syncmgr.TestCaseHoldTick)
+					}
+					select {
+					case <-r.Context().Done():
+						return
+					case <-holdTick.C:
+					}
+					if !release() {
+						return
+					}
+				}
 				_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
-				orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
+				orphanRecorded, orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
+				pressureRecorded, pressureSpans := syncmgr.Get().PressureRangeCount()
 				// Suppression protects replay from test cases whose mocks
 				// were never captured, but it is coarse: the windows are
 				// timestamp-based and session-wide, so a connection that
@@ -388,127 +569,46 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					tcsSuppressedSoFar*100/total >= massSuppressionPercent {
 					logRecordingComplete = a.logger.Warn
 				}
+				if tcsUnsettled > 0 {
+					// The capture's parsers ran more than the hold's bound
+					// behind: these were checked against what was known then.
+					a.logger.Warn("agent: some test cases were saved before the agent had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
+						zap.Int("test_cases", tcsUnsettled),
+						zap.Duration("held_up_to", syncmgr.TestCaseHoldMax))
+				}
 				logRecordingComplete("agent: recording complete",
 					zap.Int("tcs_sent_to_cli", tcsSentSoFar),
 					zap.Int("tcs_suppressed_total", tcsSuppressedSoFar),
-					zap.Int("pressure_ranges_total", syncmgr.Get().PressureRangeCount()),
-					zap.Int("orphan_ranges_total", orphanClosed),
+					// _total is how often each suppressor fired; the spans
+					// are what they were kept as, after overlapping and (past
+					// the cap) joining (syncMock.Spans).
+					zap.Int("pressure_ranges_total", pressureRecorded),
+					zap.Int("pressure_spans", pressureSpans),
+					zap.Int("orphan_ranges_total", orphanRecorded),
+					zap.Int("orphan_spans_closed", orphanClosed),
 					zap.Int("orphan_ranges_still_open", orphanOpen),
 					zap.Int64("mocks_dropped_by_pressure", finalDropped),
 					zap.Int64("mocks_added_successfully", finalAdded),
 					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
 					zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
+					zap.Int("tcs_released_unsettled", tcsUnsettled),
 				)
 				return
 			}
 
-			// Skip this test case if memory pressure overlapped its HTTP window
-			// [request, response]: under pressure the paired mock may have been
-			// dropped, so sending the TC would orphan it at replay. We check the
-			// TC window against recorded pressure ranges (not individual mock
-			// drops) because that check is race-free regardless of when the
-			// mock's goroutine runs relative to this handler.
-			tcRespTime := t.HTTPResp.Timestamp
-			hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
-			// A mongo/v2 reassembly resync hole strands a delivered-but-unframable
-			// op: its TC records mock-less though no pressure range covers it. The
-			// enterprise parser reports the hole via Session.RecordOrphanWindow;
-			// suppress any TC whose window overlaps it, same as for pressure.
-			hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
-			// A capacity drop (outChan overflow / already-closed channel)
-			// feeds nothing into pressureRanges, so the pressure-overlap check
-			// above cannot catch it. Suppress by EXACT owning test name so a
-			// TC whose mock was capacity-dropped is not streamed mock-less
-			// (replay: match_phase=no_mocks), without over-suppressing any
-			// concurrent TC that kept all its mocks.
-			mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
-
-			if hasPressure || hasOrphan || mockDropped {
-				tcsSuppressedSoFar++
-				a.logger.Debug("agent: TC suppressed — memory pressure / resync-hole overlapped TC window or a mock was capacity-dropped, not sent to CLI",
-					zap.String("tc_name", t.Name),
-					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
-					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
-					zap.Int("pressure_overlaps", pressureOverlaps),
-					zap.Int("resync_orphan_overlaps", orphanOverlaps),
-					zap.Bool("capacity_drop", mockDropped),
-					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
-				)
+			if hold == nil {
+				if !send(t) {
+					return
+				}
 				continue
 			}
-
-			tcsSentSoFar++
-			// Stream each test case as JSON
-			// 1. Write metadata (JSON)
-			header := textproto.MIMEHeader{}
-			header.Set("Content-Disposition", `form-data; name="metadata"`)
-			header.Set("Content-Type", "application/json")
-			part, err := mw.CreatePart(header)
-			if err != nil {
-				a.logger.Error("failed to create metadata part", zap.Error(err))
+			// One that is final at once goes at once; behind held ones, it
+			// waits for the tick, which looks at them all.
+			wasEmpty := hold.Len() == 0
+			hold.Add(t, "", "")
+			if wasEmpty && !release() {
 				return
 			}
-			if err := json.NewEncoder(part).Encode(t); err != nil {
-				a.logger.Error("failed to encode metadata", zap.Error(err))
-				return
-			}
-
-			// 2. Write file part if exists
-			if t.HasBinaryFile {
-				a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
-				for _, form := range t.HTTPReq.Form {
-					for i, path := range form.Paths {
-						if path == "" {
-							continue
-						}
-
-						// Get filename from FileNames if available, or base of path
-						fileName := "binary_file"
-						if i < len(form.FileNames) {
-							fileName = form.FileNames[i]
-						} else {
-							fileName = filepath.Base(path)
-						}
-
-						fileHeader := textproto.MIMEHeader{}
-						fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
-						filePart, err := mw.CreatePart(fileHeader)
-						if err != nil {
-							a.logger.Error("failed to create file part", zap.Error(err))
-							return
-						}
-
-						f, err := os.Open(path)
-						if err != nil {
-							a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
-							return
-						}
-						if _, err := io.Copy(filePart, f); err != nil {
-							f.Close()
-							a.logger.Error("failed to copy file to stream", zap.Error(err))
-							return
-						}
-						f.Close()
-						a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
-
-						// Cleanup temp file
-						os.Remove(path)
-					}
-				}
-			}
-
-			// 3. Write delimiter part to force closure of previous part (file)
-			// This is critical: The client reads the file part until it sees the *next* boundary.
-			// Without this delimiter, the client blocks waiting for the *next testcase* to create a boundary,
-			// causing a deadlock if testcases are infrequent.
-			delimiterHeader := textproto.MIMEHeader{}
-			delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
-			if _, err := mw.CreatePart(delimiterHeader); err != nil {
-				a.logger.Error("failed to create delimiter part", zap.Error(err))
-				return
-			}
-
-			flusher.Flush() // Immediately send data to the client
 		}
 	}
 }
