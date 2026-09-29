@@ -105,6 +105,11 @@ type MockManager struct {
 	windowStart time.Time
 	windowEnd   time.Time
 
+	// windowListeners are the OnTestWindow callbacks, keyed by registration.
+	windowListenersMu  sync.Mutex
+	windowListeners    map[uint64]func(start, end time.Time)
+	nextWindowListener uint64
+
 	// firstWindowStart caches the earliest windowStart observed across
 	// all SetMocksWithWindow calls for this manager's lifetime. It's
 	// used by the strict pre-filter to distinguish STARTUP-INIT mocks
@@ -625,6 +630,47 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 	m.windowEnd = end
 	m.windowMu.Unlock()
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
+	if !start.IsZero() {
+		m.notifyTestWindow(start, end)
+	}
+}
+
+// OnTestWindow registers fn to run each time a real test window is published
+// (SetMocksWithWindow past its staging call, or a non-zero
+// SetCurrentTestWindow). fn runs synchronously on the setter's goroutine, after
+// every MockManager lock is released and before the setter returns, so what it
+// writes reaches the app before the replayer sends that test's request. It
+// must not block for long. The returned func unregisters fn.
+func (m *MockManager) OnTestWindow(fn func(start, end time.Time)) (unregister func()) {
+	if fn == nil {
+		return func() {}
+	}
+	m.windowListenersMu.Lock()
+	if m.windowListeners == nil {
+		m.windowListeners = make(map[uint64]func(start, end time.Time))
+	}
+	m.nextWindowListener++
+	id := m.nextWindowListener
+	m.windowListeners[id] = fn
+	m.windowListenersMu.Unlock()
+	return func() {
+		m.windowListenersMu.Lock()
+		delete(m.windowListeners, id)
+		m.windowListenersMu.Unlock()
+	}
+}
+
+// notifyTestWindow runs the OnTestWindow listeners with no lock held.
+func (m *MockManager) notifyTestWindow(start, end time.Time) {
+	m.windowListenersMu.Lock()
+	fns := make([]func(start, end time.Time), 0, len(m.windowListeners))
+	for _, fn := range m.windowListeners {
+		fns = append(fns, fn)
+	}
+	m.windowListenersMu.Unlock()
+	for _, fn := range fns {
+		fn(start, end)
+	}
 }
 
 // IsTestWindowActive reports whether a non-zero test window is currently
@@ -786,8 +832,18 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 // seeded into their per-connID dedicated trees via AddConnectionMock
 // so subsequent GetConnectionMocks lookups take the O(1) path.
 //
-// Also resets the per-test droppedOutOfWindow counter.
+// Also resets the per-test droppedOutOfWindow counter, and — once every lock
+// is released — runs the OnTestWindow listeners when a real test window was
+// published (not the BaseTime staging call).
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	if m.setMocksWithWindow(filtered, unfiltered, start, end) {
+		m.notifyTestWindow(start, end)
+	}
+}
+
+// setMocksWithWindow is SetMocksWithWindow under swapMu. It reports whether it
+// published start/end as the current test window.
+func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) bool {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 
@@ -1186,6 +1242,7 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 			zap.Time("windowStart", start),
 			zap.Time("windowEnd", end))
 	}
+	return !isInitialStaging
 }
 
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {

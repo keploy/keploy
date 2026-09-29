@@ -463,3 +463,13 @@ type WindowAware interface {
 	// prepared-statement reads.
 	CurrentTestWindow() (time.Time, time.Time)
 }
+
+// TestWindowListener is an optional MockMemDb extension. OnTestWindow registers
+// fn to run each time the replay publishes a test window, synchronously and
+// before the call that published it returns — so whatever fn writes reaches
+// the app before that test's request is sent. The returned func unregisters
+// fn. A parser holding a stream open (a Kubernetes watch) uses it to deliver
+// the events recorded before the test that is about to run.
+type TestWindowListener interface {
+	OnTestWindow(fn func(start, end time.Time)) (unregister func())
+}
