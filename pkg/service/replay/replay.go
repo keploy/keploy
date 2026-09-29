@@ -1984,25 +1984,78 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		zap.String("testSetID", testSetID),
 		zap.Int("count", len(consumedMocks)),
 		zap.Any("mocks", consumedMocks))
-	for _, m := range consumedMocks {
+	// Partition the pre-first-test consumption. Everything drained here was
+	// consumed BEFORE any test fired, but it is not all the same tier:
+	//
+	//   - Reusable/session traffic (driver handshakes, auth, connection-pool
+	//     warm-up) genuinely belongs to no test — it is what the STARTUP section
+	//     below exists to record, and it is folded into totalConsumedMocks as
+	//     before.
+	//   - PER-TEST single-use mocks can also land here when the app-readiness
+	//     gate (waitForAppReady, above) polls Test.HealthURL and that endpoint
+	//     calls a mocked dependency. A /health handler that runs e.g. SELECT 1
+	//     against a mocked DB makes the proxy serve — and DeleteFilteredMock
+	//     permanently consume — a per-test mock that belongs to a recorded test
+	//     case (classically the recorded get-health test's own SELECT 1).
+	//     Folding THAT into totalConsumedMocks marks it Deleted, so every later
+	//     per-test filterOutDeleted strips it and the test that owns it fails
+	//     with no_mocks (an intermittent, misattributed "degraded"/500 on the
+	//     probe endpoint).
+	//
+	// So re-arm per-test mocks the gate consumed by WITHHOLDING them from
+	// totalConsumedMocks: the next per-test SendMockFilterParamsToAgent rebuilds
+	// the serving pool from the stored corpus and, because they are not marked
+	// Deleted, re-inserts them so their owning test consumes (and then counts)
+	// them. This is the same withhold-to-re-arm effect the per-retry-cycle rewind
+	// (rewindConsumedForRetryCycle) uses to re-serve per-test mocks each cycle.
+	// The tier is decided by isReusableTierState on the recorder-derived
+	// Lifetime/type carried through GetConsumedMocks; a session->per-test mis-tag
+	// only re-arms a mock (keeps it available), and the reverse mis-tag is no
+	// worse than before this fix (the original fold behaviour).
+	//
+	// NOTE: this withhold is CLI-side. Under the experimental
+	// KEPLOY_AGENT_OWNS_CONSUMED=1 path the agent filters from its own
+	// never-rewound consumedPersistent, which the CLI does not touch, so the
+	// gate-consumption bug is not yet fixed there (that path is OFF by default;
+	// closing it needs an agent-side "un-flag consumed" primitive).
+	startupConsumed, rearmedConsumed := partitionInitialConsumed(consumedMocks)
+	for _, m := range startupConsumed {
 		totalConsumedMocks[m.Name] = m
 		passingTotalConsumedMocks[m.Name] = m
+	}
+	for _, m := range rearmedConsumed {
+		r.logger.Debug("re-arming a per-test mock consumed by the readiness gate before any test fired",
+			zap.String("testSetID", testSetID),
+			zap.String("mock", m.Name),
+			zap.String("kind", string(m.Kind)))
+		// Withheld from totalConsumedMocks (so it stays re-armed for serving),
+		// but seed a NON-Deleted placeholder in passingTotalConsumedMocks so
+		// --remove-unused-mocks / UpdateMocks does not prune this boot/readiness
+		// mock from the corpus when its owning test happens to fail or be
+		// deselected this run. passingTotalConsumedMocks is never sent to the
+		// agent, so this does not undo the re-arm; if the owning test later
+		// passes, it overwrites this with the real MockState. Mirrors the
+		// non-executed-test preserve block below.
+		if _, exists := passingTotalConsumedMocks[m.Name]; !exists {
+			passingTotalConsumedMocks[m.Name] = models.MockState{Name: m.Name, Kind: m.Kind}
+		}
 	}
 
 	// Record the boot-time traffic as the test-set's STARTUP section.
 	//
-	// These are, by definition, the mocks consumed before the first test fired
-	// — driver handshakes, auth, connection-pool warm-up. They belong to no
-	// single test case, so upsertActualTestMockMapping's per-test window filter
-	// can never attribute them (its own comment calls them "session-level
-	// traffic that should not be per-test") and until now they were simply
-	// absent from mappings.yaml.
+	// These are, by definition, the reusable/session mocks consumed before the
+	// first test fired — driver handshakes, auth, connection-pool warm-up. They
+	// belong to no single test case, so upsertActualTestMockMapping's per-test
+	// window filter can never attribute them (its own comment calls them
+	// "session-level traffic that should not be per-test") and until now they
+	// were simply absent from mappings.yaml.
 	//
 	// That absence is invisible on the timestamp path, which reloads them via
 	// disk.LoadBefore(firstWindowStart), but fatal on the mapping path, which
 	// loads strictly by name. Writing them here is what lets the reader hand
-	// them back for every test.
-	setStartupMocks(actualTestMockMappings, consumedMocks)
+	// them back for every test. Only the reusable tier is written — a per-test
+	// mock re-armed above belongs to its own test's section, not to startup.
+	setStartupMocks(actualTestMockMappings, startupConsumed)
 
 	// Snapshot the post-setup consumed-mock baseline. These are the
 	// reusable/session mocks (driver handshake, auth, connection pool
@@ -5499,6 +5552,33 @@ func isReusableTierState(s models.MockState) bool {
 		return true
 	}
 	return false
+}
+
+// partitionInitialConsumed splits the mocks consumed BEFORE the first test of a
+// test set fired into two tiers:
+//
+//   - startup: reusable/session traffic (driver handshakes, auth, connection-
+//     pool warm-up) that belongs to no single test. It is folded into the
+//     consumed accounting and written as the test set's STARTUP section.
+//   - rearm: per-test single-use mocks that were consumed this early only
+//     because the app-readiness gate (waitForAppReady) polled an endpoint that
+//     calls a mocked dependency (e.g. a /health handler running SELECT 1 against
+//     a mocked DB). These belong to a real recorded test case, so they must NOT
+//     be marked consumed here; withholding them from totalConsumedMocks re-arms
+//     them (the next SendMockFilterParamsToAgent re-inserts them into the
+//     serving pool) so their owning test consumes them.
+//
+// The tier is decided by isReusableTierState on the recorder-derived
+// Lifetime/type carried through GetConsumedMocks.
+func partitionInitialConsumed(consumed []models.MockState) (startup, rearm []models.MockState) {
+	for _, m := range consumed {
+		if isReusableTierState(m) {
+			startup = append(startup, m)
+		} else {
+			rearm = append(rearm, m)
+		}
+	}
+	return startup, rearm
 }
 
 func isMockSubset(actual []string, expected []string) bool {
