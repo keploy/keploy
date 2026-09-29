@@ -15,9 +15,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// mockDrainGrace bounds how long Record waits for the agent to hand over the
-// last few mocks after the wrapped runner has exited.
-const mockDrainGrace = 5 * time.Second
+// mockDrainStall bounds how long Record waits, after capture has stopped, for a
+// consumer that has stopped making progress (it used to wait 5 s in all): one
+// still persisting mocks is waited for however long it takes.
+const mockDrainStall = 5 * time.Second
 
 // mockDrainQuiet is how long the outgoing stream must stay silent before the
 // drain concludes the agent has handed over everything.
@@ -26,8 +27,8 @@ const mockDrainGrace = 5 * time.Second
 // dependency response, emits the mock, and it travels agent -> gob stream ->
 // CLI, while the CLI independently observes the wrapped runner exit. Measured
 // on a failing reproduction that gap ran to a median of 6.5ms and a maximum of
-// 22.8ms. 500ms is an order of magnitude of headroom on that, is paid once per
-// recording, and is bounded by mockDrainGrace above.
+// 22.8ms. 500ms is an order of magnitude of headroom on that, and is paid once
+// per recording.
 const mockDrainQuiet = 500 * time.Millisecond
 
 // Record runs the wrapped test command and captures every outgoing dependency
@@ -140,36 +141,60 @@ func (m *mockService) Record(ctx context.Context) error {
 	// scope-window correlation after the run can build mappings.yaml.
 	var recorded []capturedMock
 	mockCount := 0
-	// Bumped for every mock that arrives, whether or not it ends up persisted,
-	// and read by the drain below while the consumer is still running - hence
-	// atomic. mockCount stays a plain int: it is only read after consumerDone.
-	var mocksSeen atomic.Int64
+	// mocksSeen is bumped for every mock that arrives, whether or not it ends
+	// up persisted. heldSeen counts only those requested before the drain
+	// began (drainFrom; 0 until it does): what the agent held when the runner
+	// exited, which the drain waits for, as opposed to calls something left
+	// running keeps making. heldDone counts those the consumer has finished
+	// with, and heldBusy is set while it works on one: a consumer persisting
+	// is draining, however long one write takes (a 12 MB mock, a disk stall),
+	// and the drain's quiet bound does not run meanwhile. All are read while
+	// the consumer is still running - hence atomic. mockCount stays a plain
+	// int: it is only read after consumerDone.
+	var mocksSeen, heldSeen, heldDone, drainFrom atomic.Int64
+	var heldBusy atomic.Bool
 	consumerDone := make(chan struct{})
+	persist := func(mk *models.Mock) {
+		mctx := &rec.MockContext{Mock: mk, TestSetID: name}
+		if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
+			m.logger.Debug("BeforeMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
+		}
+		if mctx.Skip {
+			return
+		}
+		if err := m.mockDB.InsertMock(persistCtx, mk, name); err != nil {
+			if errors.Is(err, models.ErrMockEncode) {
+				m.logger.Warn("dropping one unencodable mock and continuing", zap.String("kind", mk.GetKind()), zap.Error(err))
+				return
+			}
+			utils.LogError(m.logger, err, "failed to persist mock", zap.String("mock", mk.Name))
+			return
+		}
+		if err := m.hooks.AfterMockInsert(ctx, &rec.MockContext{Mock: mk, TestSetID: name}); err != nil {
+			m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
+		}
+		mockCount++
+		recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID})
+	}
 	go func() {
 		defer utils.Recover(m.logger)
 		defer close(consumerDone)
 		for mk := range outgoing {
 			mocksSeen.Add(1)
-			mctx := &rec.MockContext{Mock: mk, TestSetID: name}
-			if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
-				m.logger.Debug("BeforeMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
+			// An undated mock cannot be told apart, and is taken as held:
+			// dropping it would be the loss the drain exists to prevent.
+			// Mocks the agent's parsers emit are dated.
+			held := false
+			if from := drainFrom.Load(); from == 0 || mk.Spec.ReqTimestampMock.IsZero() || mk.Spec.ReqTimestampMock.UnixNano() <= from {
+				held = true
+				heldBusy.Store(true)
+				heldSeen.Add(1)
 			}
-			if mctx.Skip {
-				continue
+			persist(mk)
+			if held {
+				heldDone.Add(1)
+				heldBusy.Store(false)
 			}
-			if err := m.mockDB.InsertMock(persistCtx, mk, name); err != nil {
-				if errors.Is(err, models.ErrMockEncode) {
-					m.logger.Warn("dropping one unencodable mock and continuing", zap.String("kind", mk.GetKind()), zap.Error(err))
-					continue
-				}
-				utils.LogError(m.logger, err, "failed to persist mock", zap.String("mock", mk.Name))
-				continue
-			}
-			if err := m.hooks.AfterMockInsert(ctx, &rec.MockContext{Mock: mk, TestSetID: name}); err != nil {
-				m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
-			}
-			mockCount++
-			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID})
 		}
 	}()
 
@@ -226,12 +251,16 @@ func (m *mockService) Record(ctx context.Context) error {
 	// rather than a fixed sleep: a sleep long enough to be safe would be paid
 	// in full by every recording, and one short enough not to hurt would still
 	// be a race. This returns as soon as the agent stops sending.
-	m.drainTrailingMocks(ctx, consumerDone, &mocksSeen)
+	drainStart := time.Now()
+	drainFrom.Store(drainStart.UnixNano())
+	m.drainTrailingMocks(consumerDone, drainStart, func() (uint64, bool) {
+		return uint64(heldSeen.Load() + heldDone.Load()), heldBusy.Load()
+	})
 	stopCapture()
-	select {
-	case <-consumerDone:
-	case <-time.After(mockDrainGrace):
-		m.logger.Debug("timed out waiting for the mock consumer to finish after teardown")
+	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
+		m.logger.Warn("the mock consumer made no progress after capture stopped; not waiting for it any longer",
+			zap.Int64("mocks_seen", mocksSeen.Load()),
+			zap.Duration("stalledFor", mockDrainStall))
 	}
 
 	if parent.Err() != nil { // user Ctrl+C
@@ -358,35 +387,64 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 }
 
 // drainTrailingMocks blocks until the agent has evidently finished handing over
-// mocks: no new arrival for mockDrainQuiet, or the stream ended by itself, or
-// mockDrainGrace elapsed, or the user interrupted. It must be called BEFORE the
-// capture context is cancelled - see the call site.
-func (m *mockService) drainTrailingMocks(ctx context.Context, consumerDone <-chan struct{}, mocksSeen *atomic.Int64) {
-	deadline := time.After(mockDrainGrace)
+// mocks: no new arrival of one requested before the drain began
+// (mocksSeen counts those) for mockDrainQuiet, or the stream ended by itself.
+// It is bounded by progress, not by a deadline: an agent still handing over a
+// backlog is waited for however long that takes, and so is one the user
+// interrupted (Ctrl+C stops the recording, not the handing over of what was
+// already captured). Calls something left running keeps making do not hold
+// it. It must be called BEFORE the capture context is cancelled - see the
+// call site.
+func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, held func() (progress uint64, busy bool)) {
 	quiet := time.NewTimer(mockDrainQuiet)
 	defer quiet.Stop()
 
-	last := mocksSeen.Load()
+	last, _ := held()
 	for {
 		select {
 		case <-consumerDone:
 			// The agent closed the stream on its own; nothing left to wait for.
 			return
-		case <-ctx.Done():
-			// Ctrl+C. Stop waiting and let the caller report what it has.
-			return
-		case <-deadline:
-			m.logger.Debug("timed out draining trailing mocks after runner exit",
-				zap.Int64("mocks_seen", mocksSeen.Load()))
+		case <-utils.InterruptedAgain():
+			m.logger.Warn("stopped saving the mocks the agent captured before the run ended, at a second interrupt",
+				zap.String("next_step", "mocks the agent still held were not saved"))
 			return
 		case <-quiet.C:
-			if now := mocksSeen.Load(); now != last {
-				// Still arriving - reset and keep waiting.
+			// Quiet means the stream brought nothing held while the consumer
+			// was free to take it: a consumer still persisting one is not
+			// quiet, however long the write takes.
+			if now, busy := held(); now != last || busy {
 				last = now
+				quiet.Reset(mockDrainQuiet)
+				continue
+			}
+			// Quiet is not proof: an agent whose capture can tell says whether
+			// it may still hand over a mock from before the runner exited.
+			if m.agentPendingBefore(from) {
 				quiet.Reset(mockDrainQuiet)
 				continue
 			}
 			return
 		}
 	}
+}
+
+// pendingReader is an agent client that can ask the agent whether it may still
+// hand over something captured before a time (AgentClient.PendingBefore).
+type pendingReader interface {
+	PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error)
+}
+
+// agentPendingBefore reports whether the agent says it may still hand over a
+// mock captured before `before`. False when it cannot tell.
+func (m *mockService) agentPendingBefore(before time.Time) bool {
+	pr, ok := m.instrumentation.(pendingReader)
+	if !ok {
+		return false
+	}
+	pending, known, err := pr.PendingBefore(context.Background(), before)
+	if err != nil {
+		m.logger.Debug("could not ask the agent what it has yet to hand over; going by the stream's quiet", zap.Error(err))
+	}
+	return known && pending
 }

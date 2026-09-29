@@ -12,6 +12,7 @@ import (
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -80,6 +81,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/storemocks", a.StoreMocks)
 		r.Post("/updatemockparams", a.UpdateMockParams)
 		r.Post("/stop", a.Stop)
+		r.Get("/record/pending", a.HandlePending)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
@@ -491,6 +493,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		if holdTick != nil {
 			holdTick.Stop()
 		}
+		syncmgr.Get().NoteHeld(time.Time{})
 	}()
 	// release sends what the hold lets go, and keeps a ticker going while it
 	// holds any. It reports false once the stream is broken.
@@ -520,6 +523,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			holdTick.Stop()
 			holdTick = nil
 		}
+		// What the stream still holds keeps a stop's drain going (PendingBefore).
+		syncmgr.Get().NoteHeld(hold.Oldest())
 		return true
 	}
 	for {
@@ -611,6 +616,35 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// PendingResponse answers GET /agent/record/pending.
+type PendingResponse struct {
+	// Pending: the agent may still hand over a test case or a mock captured
+	// before the time asked about.
+	Pending bool `json:"pending"`
+}
+
+// HandlePending tells a recording's stop whether the agent may still hand over
+// a test case or a mock captured before ?before= (Unix nanoseconds): its
+// capture has not got past that time, or a test case it holds for its verdict
+// ended before it. The stop drains the agent's streams until it may not, and
+// not only until they fall quiet: a parser can be behind the traffic, and
+// quiet, for longer than any fixed grace. 501 when the agent cannot tell (its
+// capture has no watermark); the stop then goes by quiet alone.
+func (a *Agent) HandlePending(w http.ResponseWriter, r *http.Request) {
+	ns, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+	if err != nil {
+		http.Error(w, "before must be a Unix time in nanoseconds", http.StatusBadRequest)
+		return
+	}
+	pending, known := syncmgr.Get().PendingBefore(time.Unix(0, ns))
+	if !known {
+		http.Error(w, "this agent's capture cannot tell what it has yet to hand over", http.StatusNotImplemented)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(PendingResponse{Pending: pending})
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
@@ -720,6 +754,14 @@ func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Establish the stream now, as the test-case and mock streams do, not
+	// with the first mapping: the client's request returns only once the
+	// headers arrive. A recording that emits no mappings (a DaemonSet or
+	// proxyless one) otherwise left the client's GetMappings blocked for the
+	// whole session, and its stop waited out the mapping drain's cap.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
 	enc := json.NewEncoder(w)
 

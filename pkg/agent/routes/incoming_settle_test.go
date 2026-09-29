@@ -149,3 +149,48 @@ func TestHandleIncoming_HoldsATestCaseUntilItsVerdictIsFinal(t *testing.T) {
 		t.Fatalf("streamed %v, want only [clean]: a test case over a stop found after it completed was saved without its mocks", got)
 	}
 }
+
+// backlogWatermark says a backlog is pending until flipped.
+type backlogWatermark struct {
+	switchWatermark
+	pending atomic.Bool
+}
+
+func (w *backlogWatermark) PendingBefore(time.Time) bool { return w.pending.Load() }
+
+// A recording's stop asks the agent whether it may still hand over something
+// captured before it; an agent whose capture cannot tell says so (501), and
+// the stop goes by quiet alone.
+func TestHandlePending(t *testing.T) {
+	a := &Agent{logger: zap.NewNop()}
+	ask := func() (int, string) {
+		rr := httptest.NewRecorder()
+		a.HandlePending(rr, httptest.NewRequest(http.MethodGet, "/agent/record/pending?before=1000", nil))
+		return rr.Code, strings.TrimSpace(rr.Body.String())
+	}
+	syncmgr.Get().SetWatermark(nil)
+	if code, _ := ask(); code != http.StatusNotImplemented {
+		t.Fatalf("without a watermark: %d, want 501", code)
+	}
+	w := &backlogWatermark{}
+	syncmgr.Get().SetWatermark(w)
+	t.Cleanup(func() { syncmgr.Get().SetWatermark(nil); syncmgr.Get().NoteHeld(time.Time{}) })
+	w.pending.Store(true)
+	if code, body := ask(); code != http.StatusOK || body != `{"pending":true}` {
+		t.Fatalf("capture behind: %d %s", code, body)
+	}
+	w.pending.Store(false)
+	if code, body := ask(); code != http.StatusOK || body != `{"pending":false}` {
+		t.Fatalf("capture through: %d %s", code, body)
+	}
+	// A test case held for its verdict that ended before the time asked
+	// about is pending too.
+	syncmgr.Get().NoteHeld(time.Unix(0, 999))
+	if _, body := ask(); body != `{"pending":true}` {
+		t.Fatalf("a held test case from before: %s", body)
+	}
+	syncmgr.Get().NoteHeld(time.Unix(0, 1001))
+	if _, body := ask(); body != `{"pending":false}` {
+		t.Fatalf("a held test case from after: %s", body)
+	}
+}

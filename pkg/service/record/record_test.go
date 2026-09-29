@@ -1627,6 +1627,9 @@ func runUnreachableAgentTailCase(t *testing.T, i int) {
 		testSetConf:     recTestSetConf{},
 		hooks:           BaseRecordHooks{},
 		config:          &config.Config{},
+		// Not about the stop's drain, which would otherwise wait out its
+		// quiet bound on this never-closing stream every iteration.
+		frameQuiet: 50 * time.Millisecond,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

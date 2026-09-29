@@ -316,6 +316,9 @@ type SyncMockManager struct {
 	// watermark says when a test case's verdict is final (settle.go); nil
 	// when nothing can tell.
 	watermark atomic.Pointer[watermarkBox]
+	// heldOldest is the earliest end (UnixNano) of a test case the recorder's
+	// stream holds for its verdict (NoteHeld); 0 when none.
+	heldOldest atomic.Int64
 	// onDrop is told of each mock the outChan capacity path drops (OnDrop).
 	onDrop atomic.Pointer[func(*models.Mock)]
 	// sending holds the request time of each mock taken out of the buffer

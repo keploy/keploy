@@ -57,6 +57,14 @@ type Explainer interface {
 	HeldBy(namespace, pod string, start, end time.Time, fence uint64) fmt.Stringer
 }
 
+// Backlog is a Watermark that can also tell whether the capture may still
+// emit a test case or a mock captured before a time: a reader or a parser has
+// not got past it. A recording's stop drains the agent's streams until it
+// cannot (the agent's /record/pending, the CLI's drain).
+type Backlog interface {
+	PendingBefore(before time.Time) bool
+}
+
 const (
 	// TestCaseHoldMax bounds how long a test case is held for its verdict.
 	TestCaseHoldMax = 30 * time.Second
@@ -136,6 +144,17 @@ func (h *TestCaseHold) EarliestStarts(fn func(namespace, pod string, start time.
 
 // Bytes is about how many bytes the held test cases take.
 func (h *TestCaseHold) Bytes() int64 { return h.bytes }
+
+// Oldest is the earliest end of a test case held, zero when none is.
+func (h *TestCaseHold) Oldest() time.Time {
+	var oldest time.Time
+	for _, e := range h.q {
+		if end := e.TC.HTTPResp.Timestamp; oldest.IsZero() || end.Before(oldest) {
+			oldest = end
+		}
+	}
+	return oldest
+}
 
 // Release returns the test cases whose verdict is final, and those the bounds
 // release, in the order they came per pod: one waits behind an earlier one of
@@ -243,6 +262,37 @@ func (m *SyncMockManager) SetWatermark(w Watermark) {
 		return
 	}
 	m.watermark.Store(&watermarkBox{w})
+}
+
+// NoteHeld says the earliest end of a test case the recorder's stream still
+// holds (TestCaseHold.Oldest), zero when it holds none.
+func (m *SyncMockManager) NoteHeld(oldest time.Time) {
+	if m == nil {
+		return
+	}
+	var ns int64
+	if !oldest.IsZero() {
+		ns = oldest.UnixNano()
+	}
+	m.heldOldest.Store(ns)
+}
+
+// PendingBefore reports whether this recording may still hand over a test case
+// or a mock captured before `before`, and whether that can be told at all (a
+// capture with a Backlog watermark): a test case held for its verdict, or a
+// capture reader or parser that has not got past it.
+func (m *SyncMockManager) PendingBefore(before time.Time) (pending, known bool) {
+	if m == nil {
+		return false, false
+	}
+	b, ok := m.Watermark().(Backlog)
+	if !ok {
+		return false, false
+	}
+	if h := m.heldOldest.Load(); h != 0 && h <= before.UnixNano() {
+		return true, true
+	}
+	return b.PendingBefore(before), true
 }
 
 // Watermark is what SetWatermark set, nil when none.
