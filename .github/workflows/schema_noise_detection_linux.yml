@@ -7,6 +7,12 @@ name: Schema Noise Detection On Linux
 #   --schema-noise-detection -> detect the drifting field (body.created_at) and
 #                               persist it under noise.req on the ES mock.
 #   test.schemaNoiseStrict    -> a drift on a NON-noise field is rejected.
+#
+# Phases D and E of the same script also guard --remove-unused-mocks: a replay
+# where a request got no answer (client timeout), or one stopped mid-set (the
+# keploy agent stopped), must not prune any recorded mock or create
+# mappings.yaml, a clean replay must still prune an unused mock, and a full
+# replay after the stop must pass every test and map every one of them.
 
 on:
   push:
