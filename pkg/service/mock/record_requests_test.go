@@ -511,7 +511,7 @@ func TestAnAcceptedRecordReplacesTheSetAndLeavesNoCopy(t *testing.T) {
 	require.Len(t, entries, 1, "only the set itself remains")
 }
 
-func TestRecordListsTheTopLevelTestsTheRunnerSkipped(t *testing.T) {
+func TestRecordListsTheTestsTheRunnerSkipped(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		output string
@@ -520,7 +520,7 @@ func TestRecordListsTheTopLevelTestsTheRunnerSkipped(t *testing.T) {
 		{"one skipped, one passing", jsonEvent("run", "TestA", 0) + jsonEvent("pass", "TestA", 1) +
 			jsonEvent("run", "TestSkipped", 1) + jsonEvent("skip", "TestSkipped", 1.1) +
 			jsonEvent("run", "TestB", 2) + jsonEvent("run", "TestB/later", 2.1) + jsonEvent("skip", "TestB/later", 2.2) + jsonEvent("pass", "TestB", 3),
-			[]string{"e2e/orders.TestSkipped"}},
+			[]string{"e2e/orders.TestSkipped", "e2e/orders.TestB/later"}},
 		{"nothing skipped", jsonEvent("run", "TestA", 0) + jsonEvent("pass", "TestA", 1), []string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

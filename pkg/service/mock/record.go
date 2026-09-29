@@ -471,14 +471,8 @@ func skippedTests(outcomes []TestOutcome) []string {
 		if o.Status != "skip" || seen[o.Name] {
 			continue
 		}
-		top := true
-		for _, p := range outcomes {
-			top = top && !strings.HasPrefix(o.Name, p.Name+"/")
-		}
-		if top {
-			seen[o.Name] = true
-			out = append(out, o.Name)
-		}
+		seen[o.Name] = true
+		out = append(out, o.Name)
 	}
 	return out
 }
