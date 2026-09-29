@@ -161,3 +161,19 @@ func TestReplayScopeLeavesTheGlobalPoolAloneWhileWorkersOverlap(t *testing.T) {
 	require.Len(t, px.calls, calls, "a second worker running at the same time only narrows its own view")
 	require.Equal(t, []string{"b-1"}, px.scoped[2])
 }
+
+func TestReplayScopeOfASubtestKeepsTheFlowsPool(t *testing.T) {
+	px := &flowProxy{}
+	a := &Agent{logger: zap.NewNop(), Proxy: px, config: &config.Config{Agent: config.Agent{Mode: models.MODE_TEST}}}
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, []*models.Mock{{Name: "a-1"}}, nil))
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"TestA": {"a-1"}, "TestA/create": {"a-1"}}))
+	require.NoError(t, a.BeginScope(ctx, "TestA", 7))
+	calls := len(px.calls)
+	require.NoError(t, a.BeginScope(ctx, "TestA/create", 7))
+	require.NoError(t, a.EndScope(ctx, "TestA/create", 7))
+	require.Len(t, px.calls, calls, "the subtest neither re-arms the flow's consumed mocks nor restores the whole pool")
+	require.NoError(t, a.EndScope(ctx, "TestA", 7))
+	require.Len(t, px.calls, calls+1)
+	require.Equal(t, 1, px.cleared)
+}

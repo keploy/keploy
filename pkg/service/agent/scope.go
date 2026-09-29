@@ -58,7 +58,7 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		names, ok := a.scopeTable[name]
 		w, windowed := a.flowWindows[name]
 		first := a.firstFlow
-		others := false
+		others := a.narrowed != nil
 		for k := range a.workerOpen {
 			others = others || k.pid != uint32(pid)
 		}
