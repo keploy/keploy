@@ -604,37 +604,63 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 // capture hot path. A panic in Read now ends the read with an error; the
 // helper goroutine used to swallow it and leave this function waiting.
 func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, numBytes int) ([]byte, error) {
+	b, err := AppendRequiredBytes(ctx, logger, reader, nil, numBytes)
+	if len(b) == 0 {
+		return nil, err // nothing read: nil, as callers have always seen it
+	}
+	return b, err
+}
+
+// readGrowStep is the most AppendRequiredBytes allocates ahead of the bytes it
+// has received while the buffer is small; past it the buffer at most doubles.
+//
+// A declared length is only a claim. A misframed MySQL header declares up to
+// 16 MiB, and allocating that up front held 16 MiB (32 MiB once the packet
+// was copied behind its header) outside every capture bound, until that much
+// data arrived: minutes on a pooled connection.
+const readGrowStep = 64 << 10
+
+// AppendRequiredBytes is ReadRequiredBytes appending the numBytes to dst. The
+// buffer grows only as bytes arrive, so what it allocates is bounded by what
+// was read (at most twice that, or readGrowStep), never by numBytes. On an
+// error it returns dst with whatever was read appended.
+func AppendRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, dst []byte, numBytes int) ([]byte, error) {
 	const maxEmptyReads = 5
 	if numBytes <= 0 {
-		return nil, nil
+		return dst, nil
 	}
-	buf := make([]byte, numBytes)
-	got, emptyReads := 0, 0
-	for got < numBytes {
+	want := len(dst) + numBytes
+	emptyReads := 0
+	for len(dst) < want {
 		if err := ctx.Err(); err != nil {
-			return readSoFar(buf, got), err
+			return dst, err
 		}
-		n, err := readContained(logger, reader, buf[got:])
+		if len(dst) == cap(dst) {
+			grown := make([]byte, len(dst), min(want, max(len(dst)+readGrowStep, 2*len(dst))))
+			copy(grown, dst)
+			dst = grown
+		}
+		n, err := readContained(logger, reader, dst[len(dst):min(cap(dst), want)])
 		if n > 0 {
-			got += n
+			dst = dst[:len(dst)+n]
 			emptyReads = 0
 		}
-		if err == nil || (err == io.EOF && got == numBytes) {
+		if err == nil || (err == io.EOF && len(dst) == want) {
 			continue
 		}
 		if err != io.EOF {
-			return readSoFar(buf, got), err
+			return dst, err
 		}
 		if emptyReads++; emptyReads >= maxEmptyReads {
-			return readSoFar(buf, got), err // several EOFs in a row: a true EOF
+			return dst, err // several EOFs in a row: a true EOF
 		}
 		select {
 		case <-ctx.Done():
-			return readSoFar(buf, got), ctx.Err()
+			return dst, ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return buf, nil
+	return dst, nil
 }
 
 // readContained is reader.Read with a panic turned into an error, reported
@@ -650,15 +676,6 @@ func readContained(logger *zap.Logger, reader io.Reader, p []byte) (n int, err e
 	n, err = reader.Read(p)
 	panicked = false
 	return n, err
-}
-
-// readSoFar is what ReadRequiredBytes collected before it stopped: nil when
-// nothing, as callers have always seen it.
-func readSoFar(buf []byte, got int) []byte {
-	if got == 0 {
-		return nil
-	}
-	return buf[:got]
 }
 
 // ReadFromPeer function is used to read the buffer from the peer connection. The peer can be either the client or the destination.

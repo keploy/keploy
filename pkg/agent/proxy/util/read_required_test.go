@@ -1,9 +1,12 @@
 package util
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -174,5 +177,96 @@ func TestReadRequiredBytesContainsAPanickingReader(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("ReadRequiredBytes hung on a panicking reader")
+	}
+}
+
+// A declared length is only a claim. A misframed MySQL header declares up to
+// 16 MiB; the read used to allocate all of it up front and hold it, outside
+// every capture bound, until that much data arrived. What it allocates is now
+// bounded by what arrives.
+func TestReadRequiredBytesAllocatesWhatArrivesNotWhatIsDeclared(t *testing.T) {
+	const declared = 16<<20 - 1 // the largest length a MySQL packet header can declare
+	stop := errors.New("no more data")
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	b, err := ReadRequiredBytes(context.Background(), zap.NewNop(), &stepReader{data: make([]byte, 21), step: 21, err: stop}, declared)
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, stop) || len(b) != 21 {
+		t.Fatalf("got (%d bytes, %v), want the 21 bytes that arrived and the reader's error", len(b), err)
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > 1<<20 {
+		t.Fatalf("reading 21 of a declared %d bytes allocated %d bytes", declared, got)
+	}
+}
+
+// Every byte of a long read arrives, in order, however the reader splits it.
+func TestAppendRequiredBytesGrowsAcrossManyReads(t *testing.T) {
+	want := make([]byte, 3*readGrowStep+17)
+	for i := range want {
+		want[i] = byte(i * 7)
+	}
+	dst := []byte("hdr:")
+	got, err := AppendRequiredBytes(context.Background(), zap.NewNop(), &stepReader{data: append([]byte(nil), want...), step: 4093}, dst, len(want))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[:4]) != "hdr:" || !bytes.Equal(got[4:], want) {
+		t.Fatalf("appended %d bytes that differ from the %d read", len(got)-4, len(want))
+	}
+	if cap(got) != len(got) {
+		t.Fatalf("a completed read keeps %d bytes of slack", cap(got)-len(got))
+	}
+}
+
+// RCA #2's stall: one Sentry event that cannot be delivered (egress blocked,
+// the event from a recovered parser panic) made every packet read wait for a
+// Flush(2s) on v3.6.78, about 6s for three reads, with no CPU burnt. The
+// server here accepts and never answers, as a blackholed Sentry does.
+func TestReadRequiredBytesIsNotSlowedByAnUndeliverableSentryEvent(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+	)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	prev := sentry.CurrentHub().Client()
+	if err := sentry.Init(sentry.ClientOptions{Dsn: "http://public@" + ln.Addr().String() + "/1"}); err != nil {
+		t.Fatalf("sentry.Init: %v", err)
+	}
+	t.Cleanup(func() {
+		sentry.CurrentHub().BindClient(prev)
+		_ = ln.Close()
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+	})
+
+	sentry.CaptureMessage("a parser panicked")
+	time.Sleep(100 * time.Millisecond) // the transport is now blocked sending it
+	r := &stepReader{data: bytes.Repeat([]byte{1, 0, 0, 1}, 3), step: 4}
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		if _, err := ReadRequiredBytes(context.Background(), zap.NewNop(), r, 4); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("3 packet-header reads took %v with an undeliverable Sentry event queued: reads are waiting on Sentry", d)
 	}
 }

@@ -68,36 +68,28 @@ func ReadPacketStream(ctx context.Context, logger *zap.Logger, conn net.Conn, bu
 	}
 }
 
-// ReadPacketBuffer reads a MySQL packet from the connection
+// ReadPacketBuffer reads a MySQL packet (header and payload) from the
+// connection into one buffer, grown only as the payload arrives: the header's
+// 3-byte length (at most the protocol's 16 MiB - 1) is not allocated up front,
+// so a misframed header costs what was read, not what it declares.
 func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
-	var packetBuffer []byte
-	// first read the header length
 	header, err := util.ReadRequiredBytes(ctx, logger, conn, 4)
+	if err != nil {
+		return nil, err
+	}
+
+	payloadLength := GetPayloadLength(header[:3])
+	if payloadLength == 0 {
+		return header, nil
+	}
+	packet, err := util.AppendRequiredBytes(ctx, logger, conn, header, int(payloadLength))
 	if err != nil {
 		if err == io.EOF {
 			return nil, err
 		}
-		// return packetBuffer, fmt.Errorf("failed to read mysql packet header: %w", err)
-		return packetBuffer, err
+		return packet[:4], err // the header, as before: a partial payload is not a packet
 	}
-
-	packetBuffer = append(packetBuffer, header...)
-
-	// read the payload length
-	payloadLength := GetPayloadLength(header[:3])
-	if payloadLength > 0 {
-		payload, err := util.ReadRequiredBytes(ctx, logger, conn, int(payloadLength))
-		if err != nil {
-			if err == io.EOF {
-				return nil, err
-			}
-			// return packetBuffer, fmt.Errorf("failed to read mysql packet payload: %w", err)
-			return packetBuffer, err
-		}
-		packetBuffer = append(packetBuffer, payload...)
-	}
-
-	return packetBuffer, nil
+	return packet, nil
 }
 
 // BytesToMySQLPacket converts a byte slice to a MySQL packet
