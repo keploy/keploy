@@ -394,7 +394,7 @@ type Config struct {
 	// When a tee desyncs — a chunk lost to [DropPerConnCap] or
 	// [DropMemoryPressure] — the connection's captured byte stream has a
 	// hole in it. The tee already says so in its own words: it logs "capture
-	// desynced; this connection can no longer be recorded" and fires
+	// dropped a chunk" at Warn (once per direction) and fires
 	// [Config.OnCaptureDesync] so the owner can suppress the test cases
 	// recorded over the hole. Until now it then kept pushing anyway, and a
 	// length-prefix framer reading from the wrong offset does not merely
