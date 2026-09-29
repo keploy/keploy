@@ -269,27 +269,36 @@ func ReadUint24(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16
 }
 
+// ReadLengthEncodedString reads a length-encoded string. Input that ends
+// before the string does is io.ErrUnexpectedEOF, never io.EOF: the record
+// loops read a bare io.EOF as the connection closing cleanly, so a malformed
+// packet would end the recording as if nothing were wrong.
 func ReadLengthEncodedString(b []byte) ([]byte, bool, int, error) {
-	// Get length
 	num, isNull, n := ReadLengthEncodedInteger(b)
+	if n == 0 {
+		// No length to read: an empty buffer, or a 0xfc/0xfd/0xfe prefix cut
+		// short. Not a NULL (0xfb) or an empty string (0x00): both take a byte.
+		return nil, false, 0, io.ErrUnexpectedEOF
+	}
 	if num < 1 {
 		return b[n:n], isNull, n, nil
 	}
-
-	n += int(num)
-
-	// Check data length
-	if len(b) >= n {
-		return b[n-int(num) : n : n], false, n, nil
+	if num > uint64(len(b)-n) {
+		// Checked before the int conversion: a misframed 8-byte length
+		// overflows int and would slice with a negative bound.
+		return nil, false, n, io.ErrUnexpectedEOF
 	}
-	return nil, false, n, io.EOF
+	end := n + int(num)
+	return b[n:end:end], false, end, nil
 }
 
-// ReadNullTerminatedString reads a null-terminated string from a byte slice
+// ReadNullTerminatedString reads a null-terminated string from a byte slice.
+// A string with no terminator is io.ErrUnexpectedEOF, for the reason given at
+// ReadLengthEncodedString.
 func ReadNullTerminatedString(b []byte) ([]byte, int, error) {
 	i := bytes.IndexByte(b, 0x00)
 	if i == -1 {
-		return nil, 0, io.EOF
+		return nil, 0, io.ErrUnexpectedEOF
 	}
 	return b[:i], i + 1, nil
 }

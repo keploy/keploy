@@ -1,7 +1,9 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"testing"
 )
 
@@ -430,5 +432,56 @@ func BenchmarkReadLengthEncodedInteger(b *testing.B) {
 				ReadLengthEncodedInteger(tc.data)
 			}
 		})
+	}
+}
+
+// Input that ends before its string does is io.ErrUnexpectedEOF, never
+// io.EOF: the record loops read a bare io.EOF as the connection closing, and
+// a malformed packet ended the recording as if nothing were wrong.
+func TestReadLengthEncodedString_TruncatedIsUnexpectedEOF(t *testing.T) {
+	for _, b := range [][]byte{
+		{},                // no length at all
+		{0xfc}, {0xfc, 1}, // 2-byte length cut short (read as NULL before)
+		{0xfd, 1, 2},            // 3-byte length cut short
+		{0xfe, 1, 2, 3},         // 8-byte length cut short
+		{3, 'a', 'b'},           // body cut short
+		{0xfc, 0x00, 0x01, 'x'}, // 256-byte body, 1 present
+		{0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 'x'}, // overflows int: sliced with a negative bound before
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("% x: panicked: %v", b, r)
+				}
+			}()
+			if s, _, _, err := ReadLengthEncodedString(b); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("% x: (%q, %v), want io.ErrUnexpectedEOF", b, s, err)
+			}
+		}()
+	}
+	for _, c := range []struct {
+		in     []byte
+		want   string
+		isNull bool
+		n      int
+	}{
+		{[]byte{0xfb, 'x'}, "", true, 1},
+		{[]byte{0x00, 'x'}, "", false, 1},
+		{[]byte{2, 'a', 'b', 'x'}, "ab", false, 3},
+		{append([]byte{0xfc, 0x01, 0x01}, make([]byte, 257)...), string(make([]byte, 257)), false, 260},
+	} {
+		s, isNull, n, err := ReadLengthEncodedString(c.in)
+		if err != nil || string(s) != c.want || isNull != c.isNull || n != c.n {
+			t.Fatalf("% x = (%q, %v, %d, %v), want (%q, %v, %d, nil)", c.in[:min(len(c.in), 4)], s, isNull, n, err, c.want, c.isNull, c.n)
+		}
+	}
+}
+
+func TestReadNullTerminatedString_UnterminatedIsUnexpectedEOF(t *testing.T) {
+	if _, _, err := ReadNullTerminatedString([]byte("abc")); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if s, n, err := ReadNullTerminatedString([]byte("ab\x00c")); err != nil || string(s) != "ab" || n != 3 {
+		t.Fatalf("= (%q, %d, %v)", s, n, err)
 	}
 }
