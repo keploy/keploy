@@ -505,89 +505,64 @@ const (
 //     is bounded at 150ms — substantially tighter than the 500ms sleep
 //     Track D removed — so the record hot path perf win is preserved.
 //   - Non-EOF errors are always authoritative and surface immediately.
+//
+// It reads on the calling goroutine, as ReadRequiredBytes does. It used to start
+// a goroutine per Read and wait for it over a channel, which could not return
+// any earlier on a cancelled context (its deferred errgroup Wait still waited
+// for the Read), and a Read that panicked was recovered on that goroutine and
+// never answered, so the caller waited forever. ctx is checked before every
+// Read; a panic in Read ends the read with an error.
 func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
+	// One scratch buffer per call, and the message appended from it, so what is
+	// returned is sized to the message as it always was.
+	scratch := make([]byte, 1024)
 	var buffer []byte
 	emptyEOFRetries := 0
-
-	// Channel to communicate read results. Buffered with capacity 1 so the
-	// read goroutine's send never blocks even if the outer select has already
-	// returned on ctx.Done — otherwise the deferred g.Wait() could deadlock
-	// waiting for a goroutine that is itself blocked sending on an
-	// unbuffered channel.
-	readResult := make(chan struct {
-		n   int
-		err error
-		buf []byte
-	}, 1)
-
-	g, ctx := errgroup.WithContext(ctx)
-
-	defer func() {
-		err := g.Wait()
-		if err != nil {
-			utils.LogError(logger, err, "failed to read the request message in proxy")
-		}
-		close(readResult)
-	}()
-
 	for {
-		// Start a goroutine to perform the read operation
-		g.Go(func() error {
-			defer Recover(logger, nil, nil)
-			buf := make([]byte, 1024)
-			n, err := reader.Read(buf)
-			if ctx.Err() != nil {
-				return nil
-			}
-			readResult <- struct {
-				n   int
-				err error
-				buf []byte
-			}{n, err, buf}
-			return nil
-		})
-
-		// Use a select statement to wait for either the read result or context cancellation
-		select {
-		case <-ctx.Done():
+		if err := ctx.Err(); err != nil {
+			return buffer, err
+		}
+		n, err := readContained(logger, reader, scratch)
+		if ctx.Err() != nil {
+			// As before: a read that returns after the context ended is not
+			// taken.
 			return buffer, ctx.Err()
-		case result := <-readResult:
-			if result.n > 0 {
-				buffer = append(buffer, result.buf[:result.n]...)
-			}
+		}
+		if n > 0 {
+			buffer = append(buffer, scratch[:n]...)
+		}
 
-			if result.err != nil {
-				// Non-EOF errors always surface immediately.
-				if result.err != io.EOF {
-					return buffer, result.err
-				}
-				// EOF with data already collected in this call is
-				// authoritative (short-data-then-EOF / mid-stream peer
-				// close on a clean message boundary). Fast-return as
-				// Track D intended.
-				if len(buffer) > 0 {
-					return buffer, result.err
-				}
-				// Zero-byte EOF on an empty buffer: apply the
-				// bounded handshake retry budget. This protects the
-				// Postgres v3 handshake race where the replayer's
-				// startup response is still being written when the
-				// app issues its first Read. Budget is capped so
-				// mid-stream closes surface within 150ms.
-				if emptyEOFRetries >= HandshakeEOFRetryMax {
-					return buffer, result.err
-				}
-				emptyEOFRetries++
-				select {
-				case <-ctx.Done():
-					return buffer, ctx.Err()
-				case <-time.After(HandshakeEOFRetrySleep):
-				}
-				continue
+		if err != nil {
+			// Non-EOF errors always surface immediately.
+			if err != io.EOF {
+				return buffer, err
 			}
-			if result.n < len(result.buf) {
-				return buffer, nil
+			// EOF with data already collected in this call is
+			// authoritative (short-data-then-EOF / mid-stream peer
+			// close on a clean message boundary). Fast-return as
+			// Track D intended.
+			if len(buffer) > 0 {
+				return buffer, err
 			}
+			// Zero-byte EOF on an empty buffer: apply the
+			// bounded handshake retry budget. This protects the
+			// Postgres v3 handshake race where the replayer's
+			// startup response is still being written when the
+			// app issues its first Read. Budget is capped so
+			// mid-stream closes surface within 150ms.
+			if emptyEOFRetries >= HandshakeEOFRetryMax {
+				return buffer, err
+			}
+			emptyEOFRetries++
+			select {
+			case <-ctx.Done():
+				return buffer, ctx.Err()
+			case <-time.After(HandshakeEOFRetrySleep):
+			}
+			continue
+		}
+		if n < len(scratch) {
+			return buffer, nil
 		}
 	}
 }
