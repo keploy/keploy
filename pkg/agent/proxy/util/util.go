@@ -592,80 +592,73 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 	}
 }
 
-// ReadRequiredBytes ReadBytes function is utilized to read the required number of bytes from the reader.
-// It returns the content as a byte array.
+// ReadRequiredBytes reads exactly numBytes from reader, returning fewer only
+// with the error that stopped it. Empty io.EOF reads are retried (maxEmptyReads,
+// 100ms apart) before EOF is believed, and ctx is checked before every read.
+//
+// It reads on the calling goroutine. It used to start a goroutine per Read
+// (with a deferred Recover that flushed Sentry) and wait for it over a
+// channel, which could not return any earlier: its deferred errgroup Wait
+// still waited for the Read. A MySQL recorder frames every packet with two of
+// these reads, so the goroutine, channel and flush were paid per packet on the
+// capture hot path. A panic in Read now ends the read with an error; the
+// helper goroutine used to swallow it and leave this function waiting.
 func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, numBytes int) ([]byte, error) {
-	var buffer []byte
 	const maxEmptyReads = 5
-	emptyReads := 0
-
-	// Channel to communicate read results
-	readResult := make(chan struct {
-		n   int
-		err error
-		buf []byte
-	})
-
-	g, ctx := errgroup.WithContext(ctx)
-
-	defer func() {
-		err := g.Wait()
-		if err != nil {
-			utils.LogError(logger, err, "failed to read the request message in proxy")
+	if numBytes <= 0 {
+		return nil, nil
+	}
+	buf := make([]byte, numBytes)
+	got, emptyReads := 0, 0
+	for got < numBytes {
+		if err := ctx.Err(); err != nil {
+			return readSoFar(buf, got), err
 		}
-		close(readResult)
-	}()
-
-	for numBytes > 0 {
-		// Start a goroutine to perform the read operation
-		g.Go(func() error {
-			defer Recover(logger, nil, nil)
-			buf := make([]byte, numBytes)
-			n, err := reader.Read(buf)
-			if ctx.Err() != nil {
-				return nil
-			}
-			readResult <- struct {
-				n   int
-				err error
-				buf []byte
-			}{n, err, buf}
-			return nil
-		})
-
-		// Use a select statement to wait for either the read result or context cancellation with timeout
+		n, err := readContained(logger, reader, buf[got:])
+		if n > 0 {
+			got += n
+			emptyReads = 0
+		}
+		if err == nil || (err == io.EOF && got == numBytes) {
+			continue
+		}
+		if err != io.EOF {
+			return readSoFar(buf, got), err
+		}
+		if emptyReads++; emptyReads >= maxEmptyReads {
+			return readSoFar(buf, got), err // several EOFs in a row: a true EOF
+		}
 		select {
 		case <-ctx.Done():
-			return buffer, ctx.Err()
-		// case <-time.After(5 * time.Second):
-		// 	logger.Error("timeout occurred while reading the packet")
-		// 	return buffer, context.DeadlineExceeded
-		case result := <-readResult:
-			if result.n > 0 {
-				buffer = append(buffer, result.buf[:result.n]...)
-				numBytes -= result.n
-				emptyReads = 0 // Reset the counter because we got some data
-			}
-
-			if result.err != nil {
-				if result.err == io.EOF {
-					emptyReads++
-					if emptyReads >= maxEmptyReads {
-						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
-					}
-					time.Sleep(time.Millisecond * 100) // Sleep before trying again
-					continue
-				}
-				return buffer, result.err
-			}
-
-			if numBytes == 0 {
-				return buffer, nil
-			}
+			return readSoFar(buf, got), ctx.Err()
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
+	return buf, nil
+}
 
-	return buffer, nil
+// readContained is reader.Read with a panic turned into an error, reported
+// like any recovered parser panic (RecoverWithoutClose).
+func readContained(logger *zap.Logger, reader io.Reader, p []byte) (n int, err error) {
+	panicked := true
+	defer func() {
+		if panicked {
+			n, err = 0, errors.New("read panicked")
+		}
+	}()
+	defer RecoverWithoutClose(logger)
+	n, err = reader.Read(p)
+	panicked = false
+	return n, err
+}
+
+// readSoFar is what ReadRequiredBytes collected before it stopped: nil when
+// nothing, as callers have always seen it.
+func readSoFar(buf []byte, got int) []byte {
+	if got == 0 {
+		return nil
+	}
+	return buf[:got]
 }
 
 // ReadFromPeer function is used to read the buffer from the peer connection. The peer can be either the client or the destination.
@@ -1004,7 +997,9 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		return
 	}
 
-	sentry.Flush(2 * time.Second)
+	// Flush only after a recovered panic (below), as RecoverWithoutClose does: this
+	// is deferred once per parser read, and a flush on the clean path made every
+	// read wait on the process's one Sentry transport worker.
 	if r := recover(); r != nil {
 		logger.Error("Recovered from panic in parser, closing active connections")
 		if client != nil {
