@@ -3751,6 +3751,12 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 	return nil
 }
 
+func (p *Proxy) ClearTestWindow() {
+	if m := p.getMockManager(); m != nil {
+		m.SetCurrentTestWindow(time.Time{}, time.Time{})
+	}
+}
+
 // FirstTestWindowStart returns the earliest test window start observed
 // by the underlying MockManager, or zero before any non-BaseTime
 // SetMocksWithWindow has landed. Satisfies the agent's optional
