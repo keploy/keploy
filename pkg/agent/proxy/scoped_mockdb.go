@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -126,6 +127,13 @@ func (s *scopedMockDb) Revision() uint64 {
 		return r.Revision()
 	}
 	return 0
+}
+
+func (s *scopedMockDb) OnTestWindow(fn func(start, end time.Time)) func() {
+	if l, ok := s.MockMemDb.(integrations.TestWindowListener); ok {
+		return l.OnTestWindow(fn)
+	}
+	return func() {}
 }
 
 func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
