@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v3/pkg"
@@ -78,7 +80,19 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 	// only the HTTP-specific bits (body extraction, JSON/form diff).
 	noiseEngine := schemanoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
 
+	// KPTIMING: per-stage latency instrumentation. Replay served requests in
+	// 9.8-14.6s where a disk read should be sub-millisecond, and neither pool
+	// size (346-605 candidates) nor mock availability (0 no_mocks) explains it.
+	// These timings attribute the wall clock to a stage so the cause stops
+	// being guessed at. Logged at INFO so a normal run carries them -- the
+	// DEBUG level is unusable here (2,970 lines/sec, 11GB for a full run).
+	kpT0 := time.Now()
+	kpIter := 0
+	kpReqLabel := input.method + " " + input.url.Path
+
 	for {
+		kpIter++
+		kpIterStart := time.Now()
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
 		}
@@ -120,6 +134,41 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		combined = append(combined, perTestMocks...)
 		combined = append(combined, sessionMocks...)
 		unfilteredMocks := FilterHTTPMocks(combined)
+		kpPoolMs := time.Since(kpIterStart).Milliseconds()
+		// KPTIMING: WHO is in the pool. Mock names are "<owner>-<n>", so the
+		// prefix identifies the recording file that contributed it. The pool is
+		// 610-898 where one test owns ~37 -- this names the contributors instead
+		// of leaving the gap to inference.
+		if kpIter == 1 {
+			byOwner := map[string]int{}
+			for _, m := range unfilteredMocks {
+				owner := m.Name
+				if i := strings.LastIndex(owner, "-"); i > 0 {
+					owner = owner[:i]
+				}
+				byOwner[owner]++
+			}
+			type oc struct {
+				o string
+				n int
+			}
+			ocs := make([]oc, 0, len(byOwner))
+			for o, n := range byOwner {
+				ocs = append(ocs, oc{o, n})
+			}
+			sort.Slice(ocs, func(i, j int) bool { return ocs[i].n > ocs[j].n })
+			top := make([]string, 0, 8)
+			for i := 0; i < len(ocs) && i < 8; i++ {
+				top = append(top, fmt.Sprintf("%s=%d", ocs[i].o, ocs[i].n))
+			}
+			h.Logger.Info("KPTIMING pool-owners",
+				zap.String("req", kpReqLabel),
+				zap.Int("pool_size", len(unfilteredMocks)),
+				zap.Int("per_test", len(perTestMocks)),
+				zap.Int("session", len(sessionMocks)),
+				zap.Int("distinct_owners", len(byOwner)),
+				zap.Strings("top", top))
+		}
 
 		// Log all mock names in a single line for better readability
 		mockNames := make([]string, len(unfilteredMocks))
@@ -155,6 +204,17 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 					zap.Int("candidates", len(schemaMatched)))
 			}
 		}
+		// KPTIMING stage 4b/4c: schema filter (method, URL, content-type,
+		// header keys, query params) over the whole pool.
+		kpSchemaMs := time.Since(kpIterStart).Milliseconds() - kpPoolMs
+		h.Logger.Info("KPTIMING stage",
+			zap.String("req", kpReqLabel),
+			zap.Int("iter", kpIter),
+			zap.Int("pool_size", len(unfilteredMocks)),
+			zap.Int64("pool_fetch_ms", kpPoolMs),
+			zap.Int64("schema_match_ms", kpSchemaMs),
+			zap.Int("schema_survivors", len(schemaMatched)),
+			zap.Int64("elapsed_ms", time.Since(kpT0).Milliseconds()))
 
 		if len(schemaMatched) == 0 {
 			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(unfilteredMocks), pool: unfilteredMocks}, nil
@@ -165,20 +225,40 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			zap.Int("total_http_mocks", len(unfilteredMocks)))
 
 		// Exact body match
+		kpExact := time.Now()
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
+		kpExactMs := time.Since(kpExact).Milliseconds()
 		if ok {
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
+			kpU := time.Now()
 			if !h.updateMock(ctx, bestMatch, mockDb, nil) {
+				h.Logger.Info("KPTIMING retry",
+					zap.String("req", kpReqLabel), zap.Int("iter", kpIter),
+					zap.String("reason", "updateMock-failed-exactbody"),
+					zap.Int64("update_ms", time.Since(kpU).Milliseconds()),
+					zap.Int64("elapsed_ms", time.Since(kpT0).Milliseconds()))
 				continue
 			}
+			h.Logger.Info("KPTIMING served",
+				zap.String("req", kpReqLabel), zap.Int("iters", kpIter),
+				zap.String("via", "exact-byte"), zap.Int64("exact_ms", kpExactMs),
+				zap.Int64("update_ms", time.Since(kpU).Milliseconds()),
+				zap.Int64("total_ms", time.Since(kpT0).Milliseconds()))
 			return true, bestMatch, nil, nil
 		}
 
 		shortListed := schemaMatched
 		// Schema match for JSON bodies
 		if pkg.IsJSON(input.body) {
+			kpBody := time.Now()
 			bodyMatched, err := h.PerformBodyMatch(ctx, schemaMatched, input.body)
+			h.Logger.Info("KPTIMING bodymatch",
+				zap.String("req", kpReqLabel), zap.Int("iter", kpIter),
+				zap.Int("in", len(schemaMatched)), zap.Int("out", len(bodyMatched)),
+				zap.Int64("exact_ms", kpExactMs),
+				zap.Int64("bodymatch_ms", time.Since(kpBody).Milliseconds()),
+				zap.Int64("elapsed_ms", time.Since(kpT0).Milliseconds()))
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -207,9 +287,25 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			if len(bodyMatched) == 1 {
 				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
 				detected, _ := noiseEngine.Detect(bodyMatched[0], input.body, userBodyNoise)
+				kpUpd := time.Now()
 				if !h.updateMock(ctx, bodyMatched[0], mockDb, detected) {
+					// KPTIMING: updateMock failed -> the WHOLE match restarts,
+					// re-fetching both pools. This is the suspected source of
+					// multi-second latency; the iter counter makes it visible.
+					h.Logger.Info("KPTIMING retry",
+						zap.String("req", kpReqLabel),
+						zap.Int("iter", kpIter),
+						zap.String("reason", "updateMock-failed-exact"),
+						zap.Int64("elapsed_ms", time.Since(kpT0).Milliseconds()))
 					continue
 				}
+				h.Logger.Info("KPTIMING served",
+					zap.String("req", kpReqLabel),
+					zap.Int("iters", kpIter),
+					zap.String("via", "exact-body"),
+					zap.String("mock", bodyMatched[0].Name),
+					zap.Int64("update_ms", time.Since(kpUpd).Milliseconds()),
+					zap.Int64("total_ms", time.Since(kpT0).Milliseconds()))
 				return true, bodyMatched[0], nil, nil
 			}
 
@@ -219,15 +315,36 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 
 		h.Logger.Debug("Performing fuzzy match for req buffer")
 		// Perform fuzzy match on the request
+		kpFuzzy := time.Now()
 		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
+		kpFuzzyMs := time.Since(kpFuzzy).Milliseconds()
 		if isMatched {
 			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
 			detected, _ := noiseEngine.Detect(bestMatch, input.body, userBodyNoise)
 			if !h.updateMock(ctx, bestMatch, mockDb, detected) {
+				h.Logger.Info("KPTIMING retry",
+					zap.String("req", kpReqLabel),
+					zap.Int("iter", kpIter),
+					zap.String("reason", "updateMock-failed-fuzzy"),
+					zap.Int64("elapsed_ms", time.Since(kpT0).Milliseconds()))
 				continue
 			}
+			h.Logger.Info("KPTIMING served",
+				zap.String("req", kpReqLabel),
+				zap.Int("iters", kpIter),
+				zap.String("via", "fuzzy"),
+				zap.String("mock", bestMatch.Name),
+				zap.Int("fuzzy_pool", len(shortListed)),
+				zap.Int64("fuzzy_ms", kpFuzzyMs),
+				zap.Int64("total_ms", time.Since(kpT0).Milliseconds()))
 			return true, bestMatch, nil, nil
 		}
+		h.Logger.Info("KPTIMING miss",
+			zap.String("req", kpReqLabel),
+			zap.Int("iters", kpIter),
+			zap.Int("pool_size", len(unfilteredMocks)),
+			zap.Int64("fuzzy_ms", kpFuzzyMs),
+			zap.Int64("total_ms", time.Since(kpT0).Milliseconds()))
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed, pool: unfilteredMocks}, nil
 	}
 }
@@ -956,10 +1073,81 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	return idx
 }
 
+// jsonBodyOf returns the JSON body of an HTTP message, or the input unchanged
+// when it is already a bare body. Mock bodies are stored bare; the live request
+// arrives as a full raw message, so both shapes reach the identity gate.
+func jsonBodyOf(b []byte) []byte {
+	if i := bytes.Index(b, []byte("\r\n\r\n")); i >= 0 {
+		return b[i+4:]
+	}
+	if i := bytes.Index(b, []byte("\n\n")); i >= 0 {
+		return b[i+2:]
+	}
+	return b
+}
+
+// filterByReqIdentity drops candidates whose request identity — the
+// `operationName` of a GraphQL call, or the JSON-RPC equivalent — differs from
+// the live request's.
+//
+// WHY. Fuzzy matching has no similarity floor: findStringMatch returns the
+// nearest mock by Levenshtein distance however far away it is, so a request
+// that matches NOTHING is still answered. Measured on an enterprise-ui replay:
+// a `CreateATGApp` mutation whose app name had drifted since recording was
+// served a `GetTestReports` response out of a 1889-mock pool — HTTP 200, a
+// completely different operation, and NO miss logged because something matched.
+// The caller then waits 30s for state that can never arrive. A loud miss is
+// strictly better than a silent wrong answer: the miss names the drifted
+// request, the wrong answer hides it behind a timeout somewhere else.
+//
+// Only applied when BOTH sides carry an identity, so this is inert for every
+// non-multiplexed endpoint: a plain REST body has no identity key and the pool
+// is returned untouched. Mocks with no identity are kept as candidates, since
+// an absent key is not evidence of a different call.
+//
+// An EMPTY result is returned as empty, and that is the point: it means the
+// pool holds no mock for this operation, so the only honest outcome is a miss.
+// Falling back to the unfiltered pool here would restore the exact bug — the
+// nearest unrelated mock served as a 200.
+func filterByReqIdentity(tcsMocks []*models.Mock, reqBuff []byte) []*models.Mock {
+	// reqBuff is the RAW http message at the live call site (match.go passes
+	// input.raw), so the JSON body has to be split off first -- parsing the raw
+	// bytes yields no identity and the gate would silently no-op. Verified: the
+	// same helper returns "" on the raw message and "operationName=CreateATGApp"
+	// on its body.
+	reqID := mismatch.ExtractReqIdentity(jsonBodyOf(reqBuff))
+	if reqID == "" {
+		return tcsMocks
+	}
+	kept := make([]*models.Mock, 0, len(tcsMocks))
+	for _, m := range tcsMocks {
+		if m == nil || m.Spec.HTTPReq == nil {
+			continue
+		}
+		mockID := mismatch.ExtractReqIdentity(jsonBodyOf([]byte(m.Spec.HTTPReq.Body)))
+		if mockID == "" || mockID == reqID {
+			kept = append(kept, m)
+		}
+	}
+	return kept
+}
+
 // PerformFuzzyMatch performs fuzzy matching on the request body.
 // Noisy (obfuscated) values are stripped from mock bodies before computing
 // similarity so that redacted padding doesn't skew the score.
 func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
+	// Identity gate, before any distance is computed: see filterByReqIdentity.
+	if filtered := filterByReqIdentity(tcsMocks, reqBuff); len(filtered) != len(tcsMocks) {
+		h.Logger.Debug("fuzzy: dropped candidates with a different request identity",
+			zap.Int("before", len(tcsMocks)), zap.Int("after", len(filtered)))
+		tcsMocks = filtered
+		if len(tcsMocks) == 0 {
+			// No mock records this operation at all: report a miss rather than
+			// serving the nearest unrelated one.
+			return false, nil
+		}
+	}
+
 	// Log all mock names in a single line for better readability
 	mockNames := make([]string, len(tcsMocks))
 	for i, mock := range tcsMocks {
@@ -967,6 +1155,15 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	}
 	h.Logger.Debug("mocks under consideration for performfuzzyMatch function", zap.Strings("mock names", mockNames))
 
+	kpFz := time.Now()
+	defer func() {
+		if ms := time.Since(kpFz).Milliseconds(); ms > 200 {
+			h.Logger.Info("KPTIMING fuzzy-detail",
+				zap.Int("candidates", len(tcsMocks)),
+				zap.Int("req_bytes", len(reqBuff)),
+				zap.Int64("fuzzy_total_ms", ms))
+		}
+	}()
 	encodedReq := encode(reqBuff)
 	for _, mock := range tcsMocks {
 		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
@@ -1270,10 +1467,24 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 	if len(detectedNoise) > 0 {
 		deleteMock.Spec.ReqBodyNoise = mergeReqBodyNoise(deleteMock.Spec.ReqBodyNoise, detectedNoise)
 	}
+	// KPTIMING: both of these take treesMu / swapMu internally. If a request is
+	// spending seconds here it is lock contention, not matching cost.
+	kpDel := time.Now()
 	if mockDb.DeleteFilteredMock(deleteMock) {
+		if ms := time.Since(kpDel).Milliseconds(); ms > 50 {
+			h.Logger.Info("KPTIMING slow-delete", zap.String("mock", matchedMock.Name), zap.Int64("delete_ms", ms))
+		}
 		return true
 	}
-	return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
+	kpUpd := time.Now()
+	res := mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
+	if ms := time.Since(kpDel).Milliseconds(); ms > 50 {
+		h.Logger.Info("KPTIMING slow-update",
+			zap.String("mock", matchedMock.Name), zap.Bool("ok", res),
+			zap.Int64("delete_ms", kpUpd.Sub(kpDel).Milliseconds()),
+			zap.Int64("update_ms", time.Since(kpUpd).Milliseconds()))
+	}
+	return res
 }
 
 // filterStrictNoiseMatches enforces strict request-body matching on the

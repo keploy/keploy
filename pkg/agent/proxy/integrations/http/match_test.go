@@ -1106,3 +1106,97 @@ func TestQueryParamsMatch_ValueSensitive(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Request-identity gate on fuzzy matching (filterByReqIdentity).
+//
+// Regression cover for a silent wrong answer observed on an enterprise-ui
+// replay: fuzzy matching has no similarity floor, so a CreateATGApp mutation
+// whose app name had drifted since recording was answered with an unrelated
+// GetTestReports response out of a 1889-mock pool — HTTP 200, no miss logged,
+// and the caller then timed out 30s later waiting for state that could not
+// arrive.
+// ---------------------------------------------------------------------------
+
+func identityMock(name, body string) *models.Mock {
+	return &models.Mock{
+		Name: name,
+		Kind: models.Kind(models.HTTP),
+		Spec: models.MockSpec{
+			HTTPReq:  &models.HTTPReq{Method: models.Method("POST"), URL: "/query", Body: body},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Body: `{"data":{}}`},
+		},
+	}
+}
+
+const (
+	createAppReq = `{"operationName":"CreateATGApp","variables":{"name":"app-1767232949464"},"query":"mutation CreateATGApp($name: String!) { createATGApp(name: $name) }"}`
+	reportsBody  = `{"operationName":"GetTestReports","variables":{"appId":"259f9ac2","page":1},"query":"query GetTestReports($appId: String!) { getTestReports(appId: $appId) { reports } }"}`
+)
+
+// A pool holding only a DIFFERENT operation must miss, not serve its nearest
+// member. This is the bug itself.
+func TestFuzzy_DifferentOperation_Misses(t *testing.T) {
+	h := newHTTP()
+	pool := []*models.Mock{identityMock("reports", reportsBody)}
+
+	if ok, m := h.PerformFuzzyMatch(pool, []byte(createAppReq)); ok {
+		t.Fatalf("served %q for a CreateATGApp request: a different operation must miss", m.Name)
+	}
+}
+
+// The same operation with drifted ARGUMENTS must still fuzzy-match: that is
+// what fuzzy matching is for, and the gate keys on identity, not arguments.
+func TestFuzzy_SameOperationDifferentArgs_StillMatches(t *testing.T) {
+	h := newHTTP()
+	recorded := `{"operationName":"CreateATGApp","variables":{"name":"app-1767227201284"},"query":"mutation CreateATGApp($name: String!) { createATGApp(name: $name) }"}`
+	pool := []*models.Mock{
+		identityMock("reports", reportsBody),
+		identityMock("createApp", recorded),
+	}
+
+	ok, m := h.PerformFuzzyMatch(pool, []byte(createAppReq))
+	if !ok {
+		t.Fatal("same operation with a drifted argument must still match")
+	}
+	if m.Name != "createApp" {
+		t.Fatalf("matched %q, want createApp", m.Name)
+	}
+}
+
+// Bodies with no identity key (plain REST) are untouched by the gate, so
+// existing fuzzy behaviour is preserved.
+func TestFuzzy_NoIdentityKey_PoolUntouched(t *testing.T) {
+	h := newHTTP()
+	pool := []*models.Mock{identityMock("plain", `{"user":"alice","role":"admin"}`)}
+
+	if ok, _ := h.PerformFuzzyMatch(pool, []byte(`{"user":"bob","role":"admin"}`)); !ok {
+		t.Fatal("a body with no identity key must keep its previous fuzzy behaviour")
+	}
+}
+
+// A mock with no identity stays a candidate: an absent key is not evidence of
+// a different call.
+func TestFuzzy_MockWithoutIdentity_KeptAsCandidate(t *testing.T) {
+	h := newHTTP()
+	pool := []*models.Mock{identityMock("legacy", `{"name":"app-1767227201284"}`)}
+
+	if ok, _ := h.PerformFuzzyMatch(pool, []byte(createAppReq)); !ok {
+		t.Fatal("an identity-less mock must remain a fuzzy candidate")
+	}
+}
+
+// The live call site passes input.raw (a full HTTP message), not a bare body.
+// An earlier version of the gate parsed identity out of the raw bytes, got "",
+// and silently no-opped -- the bug survived a full replay with the fix built in.
+func TestFuzzy_RawHTTPMessage_GateStillApplies(t *testing.T) {
+	h := newHTTP()
+	pool := []*models.Mock{identityMock("reports", reportsBody)}
+
+	raw := []byte("POST /query HTTP/1.1\r\nHost: localhost:8083\r\n" +
+		"Content-Type: application/json\r\n\r\n" + createAppReq)
+
+	if ok, m := h.PerformFuzzyMatch(pool, raw); ok {
+		t.Fatalf("served %q for a raw CreateATGApp message: the gate must read identity from the BODY", m.Name)
+	}
+}
