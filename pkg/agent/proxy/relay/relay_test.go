@@ -291,6 +291,11 @@ func TestTeeSpillsOnChannelFull(t *testing.T) {
 		TeeChanBuf:           1,
 		PerConnCap:           1 << 30, // large → spill absorbs the burst, no drop
 		OnMarkMockIncomplete: drops.record,
+		// Nothing reads the FakeConn, so teardown waits out the stall
+		// window, which is time the process could run: on a starved host
+		// many times its length in wall time. The harness bounds teardown in
+		// wall time, so the window runs on an injected clock.
+		stallClock: newFakeStallClock(onTime),
 	})
 
 	// Send many small chunks while NOT draining the FakeConn — this used to

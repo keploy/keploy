@@ -45,10 +45,11 @@ const (
 	//
 	// It bounds STALLED time, not elapsed time: the wait ends the moment the
 	// parser takes anything at all, so an arbitrarily slow parser still
-	// receives every chunk. It only elapses when the parser frees nothing at
-	// all for this long, which is taken as "gone" — the whole remaining
-	// queue is then abandoned at once and reported, rather than the wait
-	// being re-entered per chunk.
+	// receives every chunk. And it is time the process could RUN, not wall
+	// time (see stallMeter): a starved process's parser cannot read either.
+	// It only elapses when the parser frees nothing at all for this long,
+	// which is taken as "gone" — the whole remaining queue is then abandoned
+	// at once and reported, rather than the wait being re-entered per chunk.
 	//
 	// Exposed as [Config.ConsumerStallGrace] rather than fixed in the tee so
 	// the owner picks the policy, the way net/http's Server.Shutdown takes
@@ -146,6 +147,9 @@ type Config struct {
 	// pkg/agent/proxy/proxy.go; zero and negative are passed through
 	// untouched so the default above applies.
 	ConsumerStallGrace time.Duration
+	// stallClock measures ConsumerStallGrace (see stallMeter); nil is the
+	// process's own clocks. Tests set it to drive the window.
+	stallClock stallClock
 
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.

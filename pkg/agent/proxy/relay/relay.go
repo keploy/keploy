@@ -222,6 +222,9 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	// positional signature, which is already at seven arguments.
 	r.teeC2D.onDesync = cfg.OnCaptureDesync
 	r.teeD2C.onDesync = cfg.OnCaptureDesync
+	if cfg.stallClock != nil {
+		r.teeC2D.clock, r.teeD2C.clock = cfg.stallClock, cfg.stallClock
+	}
 
 	// Whether a desynced tee keeps feeding its parser. Assigned here, before
 	// Run spawns any forwarder, so push can read it without synchronisation.
