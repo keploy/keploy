@@ -31,6 +31,8 @@ type mockMemDb struct {
 	updateUnFilteredReturn  bool
 	deletedFiltered         *models.Mock
 	deleteFilteredReturn    bool
+	// winStart / winEnd are what CurrentTestWindow reports; zero = no window.
+	winStart, winEnd time.Time
 }
 
 func (m *mockMemDb) GetUnFilteredMocks() ([]*models.Mock, error) { return m.mocks, m.err }
@@ -61,7 +63,7 @@ func (m *mockMemDb) GetSessionScopedMocks() ([]*models.Mock, error)      { retur
 func (m *mockMemDb) HasFirstTestFired() bool                             { return false }
 func (m *mockMemDb) FirstTestWindowStart() time.Time                     { return time.Time{} }
 func (m *mockMemDb) WindowSnapshot() models.WindowSnapshot               { return models.WindowSnapshot{} }
-func (m *mockMemDb) CurrentTestWindow() (time.Time, time.Time)           { return time.Time{}, time.Time{} }
+func (m *mockMemDb) CurrentTestWindow() (time.Time, time.Time)           { return m.winStart, m.winEnd }
 func (m *mockMemDb) GetConnectionMocks(_ string) ([]*models.Mock, error) { return nil, nil }
 func (m *mockMemDb) SessionMockHitCounts() map[string]uint64             { return nil }
 
@@ -1104,5 +1106,133 @@ func TestQueryParamsMatch_ValueSensitive(t *testing.T) {
 					tc.mockParams, tc.reqQuery, tc.urlNoise, got, tc.want)
 			}
 		})
+	}
+}
+
+// authorizeMock is one recorded POST /v1/authorize: the body is the same for
+// every caller, only the (noised) Authorization value differs.
+func authorizeMock(name, token string, reqAt time.Time) *models.Mock {
+	return &models.Mock{
+		Name: name,
+		Kind: models.Kind(models.HTTP),
+		Spec: models.MockSpec{
+			HTTPReq: &models.HTTPReq{
+				Method: "POST",
+				URL:    "http://192.0.2.10:8084/v1/authorize",
+				Header: map[string]string{
+					"Authorization": "Bearer " + token,
+					"Content-Type":  "application/json",
+				},
+				Body: `{"resource":{"type":"cluster","id":"c-1"}}`,
+			},
+			ReqTimestampMock: reqAt,
+			ResTimestampMock: reqAt.Add(time.Millisecond),
+		},
+		Noise:        []string{"^Bearer " + token + "$"},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession, LifetimeDerived: true},
+	}
+}
+
+func authorizeReq(token string) *req {
+	body := []byte(`{"resource":{"type":"cluster","id":"c-1"}}`)
+	return &req{
+		method: "POST",
+		url:    &url.URL{Scheme: "http", Host: "192.0.2.10:8084", Path: "/v1/authorize"},
+		header: http.Header{
+			"Authorization": []string{"Bearer " + token},
+			"Content-Type":  []string{"application/json"},
+		},
+		body: body,
+		raw:  append([]byte("POST /v1/authorize HTTP/1.1\r\nHost: 192.0.2.10:8084\r\n\r\n"), body...),
+	}
+}
+
+// TestMatch_IdenticalSessionMocksPreferCurrentTestWindow pins the repeated
+// PAT check: two tests make the same POST /v1/authorize (one with a valid
+// token, one with a bad one), both recorded mocks are reusable session mocks
+// with identical bodies, and each test must get the reply recorded inside its
+// own window — not the first test's 200 for both.
+func TestMatch_IdenticalSessionMocksPreferCurrentTestWindow(t *testing.T) {
+	h := newHTTP()
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 29, 5, 50, 29, 0, time.UTC)
+	valid := authorizeMock("mock-valid", "kep_valid", t0.Add(598*time.Millisecond))
+	bad := authorizeMock("mock-bad", "kep_bad", t0.Add(622*time.Millisecond))
+
+	cases := []struct {
+		name             string
+		winStart, winEnd time.Time
+		live             *req
+		want             string
+	}{
+		{"window of the bad-token test", t0.Add(621 * time.Millisecond), t0.Add(628 * time.Millisecond), authorizeReq("kep_bad"), "mock-bad"},
+		{"window of the valid-token test", t0.Add(597 * time.Millisecond), t0.Add(610 * time.Millisecond), authorizeReq("kep_valid"), "mock-valid"},
+		// Negative controls: behaviour without a usable window is unchanged —
+		// the first recorded mock wins, exactly as before.
+		{"no active window: first recorded mock", time.Time{}, time.Time{}, authorizeReq("kep_bad"), "mock-valid"},
+		{"window matching neither: first recorded mock", t0.Add(900 * time.Millisecond), t0.Add(950 * time.Millisecond), authorizeReq("kep_bad"), "mock-valid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &mockMemDb{
+				mocks:                  []*models.Mock{valid, bad},
+				updateUnFilteredReturn: true,
+				winStart:               tc.winStart,
+				winEnd:                 tc.winEnd,
+			}
+			matched, got, _, err := h.match(ctx, tc.live, db, nil, nil, nil, true, false, false)
+			if err != nil || !matched || got == nil {
+				t.Fatalf("match() = (%v, %v, %v), want a match", matched, got, err)
+			}
+			if got.Name != tc.want {
+				t.Fatalf("matched %q, want %q", got.Name, tc.want)
+			}
+		})
+	}
+}
+
+// TestPreferCurrentTestWindow pins the reordering itself: mocks recorded inside
+// the window first, relative order kept in both groups, an untimed mock never
+// promoted, and no change without a window or when none is inside it.
+func TestPreferCurrentTestWindow(t *testing.T) {
+	t0 := time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)
+	at := func(name string, ms int) *models.Mock {
+		m := httpMock(name, "GET", "/x")
+		if ms >= 0 {
+			m.Spec.ReqTimestampMock = t0.Add(time.Duration(ms) * time.Millisecond)
+		}
+		return m
+	}
+	names := func(ms []*models.Mock) string {
+		var out []string
+		for _, m := range ms {
+			out = append(out, m.Name)
+		}
+		return strings.Join(out, ",")
+	}
+	pool := []*models.Mock{at("a", 10), at("b", 50), at("c", 20), at("d", 55), at("e", -1)}
+	win := func(from, to int) *mockMemDb {
+		return &mockMemDb{winStart: t0.Add(time.Duration(from) * time.Millisecond), winEnd: t0.Add(time.Duration(to) * time.Millisecond)}
+	}
+	cases := []struct {
+		name string
+		db   *mockMemDb
+		want string
+	}{
+		{"in-window first, order kept; no timestamp stays among the rest", win(50, 60), "b,d,a,c,e"},
+		{"bounds are inclusive", win(20, 50), "b,c,a,d,e"},
+		{"no active window", &mockMemDb{}, "a,b,c,d,e"},
+		{"every timed mock outside: unchanged", win(100, 200), "a,b,c,d,e"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := append([]*models.Mock(nil), pool...)
+			if got := names(preferCurrentTestWindow(in, tc.db)); got != tc.want {
+				t.Fatalf("order = %s, want %s", got, tc.want)
+			}
+		})
+	}
+	if got := preferCurrentTestWindow(pool[:1], win(50, 60)); len(got) != 1 {
+		t.Fatalf("single mock: got %d", len(got))
 	}
 }

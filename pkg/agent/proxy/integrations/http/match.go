@@ -164,6 +164,15 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			zap.Int("schema_matched", len(schemaMatched)),
 			zap.Int("total_http_mocks", len(unfilteredMocks)))
 
+		// The same call made by different tests — a repeated request whose only
+		// difference is a header the recorder marked as noise, such as the
+		// Authorization of a PAT check — reaches here as several SESSION mocks
+		// (DeriveLifetime lax-promotes tagged HTTP mocks), none consumed or
+		// window-filtered, so the first body match below would hand every later
+		// test the earliest test's reply. Try the ones recorded inside the
+		// current test first, as the MySQL replayer does.
+		schemaMatched = preferCurrentTestWindow(schemaMatched, mockDb)
+
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
 		if ok {
@@ -230,6 +239,37 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed, pool: unfilteredMocks}, nil
 	}
+}
+
+// preferCurrentTestWindow returns mocks with the ones whose recorded request lies
+// inside the outer test window being replayed (bounds inclusive, as in
+// mysql/replayer's mockInCurrentWindow) moved to the front, keeping the order
+// within both groups. Only a recorded timestamp inside the window moves a mock:
+// one without a timestamp keeps its place among the rest. With no active window
+// (staging, between tests), or when no mock or every mock is inside, the slice
+// is returned as is.
+func preferCurrentTestWindow(mocks []*models.Mock, mockDb integrations.MockMemDb) []*models.Mock {
+	if len(mocks) < 2 || mockDb == nil {
+		return mocks
+	}
+	winStart, winEnd := mockDb.CurrentTestWindow()
+	if winStart.IsZero() || winEnd.IsZero() {
+		return mocks
+	}
+	inside := make([]*models.Mock, 0, len(mocks))
+	var rest []*models.Mock
+	for _, m := range mocks {
+		reqAt := m.Spec.ReqTimestampMock
+		if !reqAt.IsZero() && !reqAt.Before(winStart) && !reqAt.After(winEnd) {
+			inside = append(inside, m)
+		} else {
+			rest = append(rest, m)
+		}
+	}
+	if len(inside) == 0 || len(rest) == 0 {
+		return mocks
+	}
+	return append(inside, rest...)
 }
 
 // FilterHTTPMocks Filter mocks to only HTTP mocks
