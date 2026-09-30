@@ -5,12 +5,13 @@ name: Repeated Headers Replay (Linux)
 # whose dependency answered with two Set-Cookie lines served them as one
 # cookie.
 #
-# The matrix runs the same record -> replay against two keploy binaries:
-#   - build  -> the PR's binary. MUST pass.
-#   - latest -> the published `latest`. Fails until a release carries the
-#               fix: it has no line lengths to replay from. continue-on-error
-#               so it documents the bug without blocking; drop the leg once
-#               `latest` has the fix.
+# Runs only the `build` (PR) binary, for record and replay, like the other
+# guards of a feature the published `latest` does not have
+# (startup-mock-capture-linux.yml, mock_linux.yml). The feature spans both
+# halves: the recorder stores each header's line lengths and the replayer
+# sends them. So a `latest` recorder leaves nothing to replay from, a
+# `latest` replayer folds the lines as before, and a leg with `latest` on
+# either side tests nothing of this change and fails by construction.
 on:
   workflow_call:
     inputs:
@@ -29,19 +30,8 @@ jobs:
   repeated_headers_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - job: record_build_replay_build
-            src: build
-            continue_on_error: false
-          - job: record_latest_replay_latest
-            src: latest
-            continue_on_error: true
-    name: repeated-headers (${{ matrix.config.job }})
+    name: repeated-headers (record_build_replay_build)
     timeout-minutes: 15
-    continue-on-error: ${{ matrix.config.continue_on_error }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -56,7 +46,7 @@ jobs:
       - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.config.src }}
+          src: build
 
       - name: Run repeated-headers guard
         env:
@@ -71,7 +61,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: repeated-headers-${{ matrix.config.job }}-logs
+          name: repeated-headers-logs
           path: |
             .github/workflows/test_workflow_scripts/python/repeated-headers/*.txt
             .github/workflows/test_workflow_scripts/python/repeated-headers/keploy/

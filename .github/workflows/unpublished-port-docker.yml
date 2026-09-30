@@ -8,11 +8,13 @@ name: Unpublished App Port (Docker)
 # transient reset and, when it comes first in the set, costing the readiness
 # gate its whole ceiling.
 #
-# The matrix runs the same record -> replay against two keploy binaries:
-#   - build  -> the PR's binary and image. MUST pass.
-#   - latest -> the published `latest`, which says none of this.
-#               continue-on-error so it documents the bug without blocking;
-#               drop the leg once `latest` has the fix.
+# Runs only the `build` (PR) binary and image, for record and replay, like
+# the other guards of a feature the published `latest` does not have
+# (startup-mock-capture-linux.yml, mock_linux.yml). The script asserts both
+# halves in one run: the recorder's warning and the replayer's failure. A
+# `latest` recorder warns of nothing and a `latest` replayer says nothing of
+# the port, so a leg with `latest` on either side tests nothing of this
+# change and fails by construction.
 on:
   workflow_call:
 
@@ -21,19 +23,8 @@ jobs:
     # The PR's agent image is only built for non-fork runs.
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - job: record_build_replay_build
-            src: build
-            continue_on_error: false
-          - job: record_latest_replay_latest
-            src: latest
-            continue_on_error: true
-    name: unpublished-port (${{ matrix.config.job }})
+    name: unpublished-port (record_build_replay_build)
     timeout-minutes: 20
-    continue-on-error: ${{ matrix.config.continue_on_error }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -46,7 +37,7 @@ jobs:
       - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.config.src }}
+          src: build
 
       - name: Run unpublished-port guard
         env:
@@ -61,7 +52,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: unpublished-port-${{ matrix.config.job }}-logs
+          name: unpublished-port-logs
           path: |
             .github/workflows/test_workflow_scripts/python/unpublished-port/*.txt
             .github/workflows/test_workflow_scripts/python/unpublished-port/keploy/
