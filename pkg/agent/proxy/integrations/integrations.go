@@ -387,9 +387,29 @@ type MockConsumer interface {
 //	due := sched.Released(msg.Spec.ReqTimestampMock, start)
 //
 // The schedule is immutable; it is replaced (never mutated) at each set's
-// staging call.
+// staging call, which also changes WindowPacer.StagingEpoch.
 type RecordedWindowsReader interface {
 	RecordedWindows() *models.WindowSchedule
+}
+
+// WindowPacer is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
+// MockManager implements it) for a parser that holds traffic until the replay
+// reaches a recorded window — FLOW permits that find nothing due yet — and must
+// serve it when the window moves, with no request of its own to wake it.
+//
+//   - WindowChanged returns a channel closed at the next test-window change,
+//     after the new window and trees are visible. Take it BEFORE reading the
+//     state it guards; each change hands out a fresh channel. It is also closed
+//     once when the manager is closed.
+//   - StagingEpoch changes at every staging call (a new set, or the set staged
+//     again for a replacement agent). State built from one staging snapshot,
+//     such as per-set delivery queues, is rebuilt when it changes.
+//
+// A MockMemDb without it gives no signal: serve held work at the connection's
+// next request instead.
+type WindowPacer interface {
+	WindowChanged() <-chan struct{}
+	StagingEpoch() uint64
 }
 
 // WindowAware is the test-window facet of MockMemDb. Parsers that

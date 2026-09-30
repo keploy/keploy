@@ -27,6 +27,8 @@ import (
 //	                          addToHitIndexIfAbsent take hitMu as a LEAF —
 //	                          never acquire treesMu from under either, and
 //	                          never take hitMu while holding treesMu)
+//	sigMu                    (window-change signal; a LEAF — nothing is
+//	                          taken under it, and it may be taken under any)
 //
 // Any new code path that acquires more than one of these MUST take them
 // in the declared order. Readers of {mock pool, test window} as an
@@ -165,6 +167,19 @@ type MockManager struct {
 	// Stored under swapMu, read lock-free (RecordedWindows).
 	recordedWindows atomic.Pointer[models.WindowSchedule]
 	windowsSeeded   *models.WindowSchedule
+
+	// windowSig is closed, and replaced by a fresh channel, every time the
+	// published test window changes (SetMocksWithWindow, SetCurrentTestWindow),
+	// after the new state is visible. WindowChanged hands out the current one.
+	// sigMu guards the swap and is a LEAF lock: nothing is acquired under it.
+	sigMu     sync.Mutex
+	windowSig chan struct{}
+
+	// stagingEpoch changes at every staging call (a SetMocksWithWindow with the
+	// models.BaseTime sentinel): a new set, or the same set staged again after
+	// an agent replacement. State a consumer builds from one staging snapshot
+	// is valid for one epoch. Written under swapMu, read lock-free.
+	stagingEpoch atomic.Uint64
 
 	// swapMu guards the {filtered, unfiltered, window} swap performed by
 	// SetMocksWithWindow. Writers Lock(); readers via GetFilteredMocksInWindow
@@ -307,6 +322,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		connectionLastTs:    make(map[string]time.Time),
 		sweeperStop:         make(chan struct{}),
 		hitIdx:              make(map[string]*models.Mock),
+		windowSig:           make(chan struct{}),
 		logger:              logger,
 	}
 	// Start the per-connection idle sweeper. Reclaims
@@ -339,6 +355,10 @@ func (m *MockManager) Close() {
 	m.closeOnce.Do(func() {
 		m.closed.Store(true)
 		close(m.sweeperStop)
+		// Wake anything waiting on a window change so it can see IsClosed and
+		// stop. The replacement channel stays open, so a waiter that does not
+		// check IsClosed blocks again instead of spinning.
+		m.signalWindowChange()
 	})
 }
 
@@ -635,6 +655,7 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 	m.windowEnd = end
 	m.windowMu.Unlock()
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
+	m.signalWindowChange()
 }
 
 // IsTestWindowActive reports whether a non-zero test window is currently
@@ -796,8 +817,17 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 // seeded into their per-connID dedicated trees via AddConnectionMock
 // so subsequent GetConnectionMocks lookups take the O(1) path.
 //
-// Also resets the per-test droppedOutOfWindow counter.
+// Also resets the per-test droppedOutOfWindow counter, and closes the channel
+// WindowChanged handed out once the new trees and window are visible.
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	m.setMocksWithWindow(filtered, unfiltered, start, end)
+	m.signalWindowChange()
+}
+
+// setMocksWithWindow is SetMocksWithWindow without the window-change signal, so
+// SetMocksWithWindowThreeTier can finish its startup-tier additions before it
+// wakes anyone.
+func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 
@@ -843,6 +873,9 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// test bleed and get dropped.
 	isInitialStaging := start.Equal(models.BaseTime)
 	if isInitialStaging {
+		// Every staging call starts a new epoch, boundary or not: whatever a
+		// consumer built from the previous staging snapshot is stale now.
+		m.stagingEpoch.Add(1)
 		// Staging is the set boundary as far as routing is concerned: this is
 		// where the previous set's window bits and startup-init cutoff go, so
 		// they are replaced in the same call that replaces the trees rather
@@ -1239,9 +1272,11 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 // gRPC, Kafka, etc.) can pass nil for `startup` and get behaviour
 // identical to SetMocksWithWindow.
 func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup []*models.Mock, start, end time.Time) {
+	// Signal once everything below has landed, startup additions included.
+	defer m.signalWindowChange()
 	if len(startup) == 0 {
 		// Delegate to legacy path — no pre-partitioned startup to seed.
-		m.SetMocksWithWindow(filtered, unfiltered, start, end)
+		m.setMocksWithWindow(filtered, unfiltered, start, end)
 		return
 	}
 	// Run the legacy path FIRST so its internal startup tree is rebuilt
@@ -1252,7 +1287,7 @@ func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup 
 	// go through a lock-respecting path) while letting the caller
 	// contribute connection-scoped mocks that the heuristic can't
 	// derive on its own.
-	m.SetMocksWithWindow(filtered, unfiltered, start, end)
+	m.setMocksWithWindow(filtered, unfiltered, start, end)
 	// Scoped so swapMu and treesMu are RELEASED before hitIdx is seeded below.
 	// bumpHitCount's slow path takes hitMu and then treesMu; seeding from in
 	// here would take them in the opposite order and the two paths would
@@ -2413,6 +2448,48 @@ func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 // returned schedule is immutable.
 func (m *MockManager) RecordedWindows() *models.WindowSchedule {
 	return m.recordedWindows.Load()
+}
+
+// WindowChanged returns a channel that is closed at the next change of the
+// published test window — every SetMocksWithWindow (per-test and staging) and
+// SetCurrentTestWindow — once the new trees and window are visible, and at
+// Close. Each change hands out a fresh channel.
+//
+// Take the channel BEFORE reading the state it guards, or a change that lands
+// between the read and the wait is missed:
+//
+//	for {
+//		ch := db.WindowChanged()
+//		start, _ := db.CurrentTestWindow()
+//		serveWhatIsDue(start, db.StagingEpoch())
+//		select {
+//		case <-ch:
+//		case <-connDone:
+//			return
+//		}
+//	}
+func (m *MockManager) WindowChanged() <-chan struct{} {
+	m.sigMu.Lock()
+	defer m.sigMu.Unlock()
+	return m.windowSig
+}
+
+// StagingEpoch identifies the current staging snapshot. It changes at every
+// staging call (SetMocksWithWindow with models.BaseTime): a new test set, or the
+// same set staged again for a replacement agent. Anything a consumer derived
+// from a staging snapshot — a per-set delivery queue — must be rebuilt when it
+// changes. Zero until the first staging call.
+func (m *MockManager) StagingEpoch() uint64 {
+	return m.stagingEpoch.Load()
+}
+
+// signalWindowChange wakes every WindowChanged waiter and arms a fresh channel.
+func (m *MockManager) signalWindowChange() {
+	m.sigMu.Lock()
+	old := m.windowSig
+	m.windowSig = make(chan struct{})
+	m.sigMu.Unlock()
+	close(old)
 }
 
 // MarkMockAsUsed marks the given mock as used (consumed) without modifying

@@ -113,3 +113,170 @@ func TestRecordedWindowsSurvivesTheWorkerScopeWrap(t *testing.T) {
 		t.Fatal("MockManager does not implement RecordedWindowsReader")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// O2: WindowChanged and StagingEpoch
+// ---------------------------------------------------------------------------
+
+func fired(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// Every window switch closes the channel handed out before it, after the new
+// window is visible, and hands out a fresh open one.
+func TestWindowChangedFiresOnEveryWindowSwitch(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+
+	steps := []struct {
+		name string
+		do   func()
+		want time.Time // CurrentTestWindow start once woken; zero = no window
+	}{
+		{"staging", func() { mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now()) }, time.Time{}},
+		{"test-1", func() { mm.SetMocksWithWindow(nil, nil, pms(1000), pms(1100)) }, pms(1000)},
+		{"test-2", func() { mm.SetMocksWithWindow(nil, nil, pms(2000), pms(2100)) }, pms(2000)},
+		{"the same window again", func() { mm.SetMocksWithWindow(nil, nil, pms(2000), pms(2100)) }, pms(2000)},
+		{"SetCurrentTestWindow", func() { mm.SetCurrentTestWindow(pms(3000), pms(3100)) }, pms(3000)},
+		{"three-tier", func() {
+			mm.SetMocksWithWindowThreeTier(nil, nil, []*models.Mock{newMockForTest("boot", pms(10), models.LifetimePerTest)}, pms(4000), pms(4100))
+		}, pms(4000)},
+	}
+	for _, s := range steps {
+		ch := mm.WindowChanged()
+		if fired(ch) {
+			t.Fatalf("%s: channel closed before the switch", s.name)
+		}
+		s.do()
+		if !fired(ch) {
+			t.Fatalf("%s: WindowChanged did not fire", s.name)
+		}
+		if start, _ := mm.CurrentTestWindow(); !start.Equal(s.want) {
+			t.Fatalf("%s: woken with window start %v, want %v (signal fired before the window was published)", s.name, start, s.want)
+		}
+		if fired(mm.WindowChanged()) {
+			t.Fatalf("%s: the next channel is already closed", s.name)
+		}
+	}
+	// The three-tier call signals after its startup additions land.
+	ch := mm.WindowChanged()
+	go mm.SetMocksWithWindowThreeTier(nil, nil, []*models.Mock{newMockForTest("boot-2", pms(20), models.LifetimePerTest)}, pms(5000), pms(5100))
+	<-ch
+	startup, _ := mm.GetStartupMocks()
+	if !containsMockNamed(startup, "boot-2") {
+		t.Fatal("three-tier signalled before its explicit startup mocks were inserted")
+	}
+}
+
+// The epoch moves at every staging call — a boundary, and a mid-set restage — and
+// never at a per-test call.
+func TestStagingEpochChangesAtEachStagingCall(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	e0 := mm.StagingEpoch()
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	e1 := mm.StagingEpoch()
+	if e1 == e0 {
+		t.Fatal("the set's staging call did not change the epoch")
+	}
+	mm.SetMocksWithWindow(nil, nil, pms(1000), pms(1100))
+	mm.SetCurrentTestWindow(pms(2000), pms(2100))
+	if mm.StagingEpoch() != e1 {
+		t.Fatal("a per-test window change moved the staging epoch")
+	}
+	// A reset alone is not a staging call.
+	mm.ResetForReplaySession()
+	if mm.StagingEpoch() != e1 {
+		t.Fatal("ResetForReplaySession moved the epoch; the staging call is the boundary")
+	}
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	e2 := mm.StagingEpoch()
+	if e2 == e1 {
+		t.Fatal("the next set's staging call did not change the epoch")
+	}
+	// A mid-set restage (no reset before it) is a new staging snapshot too.
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if mm.StagingEpoch() == e2 {
+		t.Fatal("a mid-set staging call did not change the epoch")
+	}
+}
+
+// Close wakes waiters once, and a waiter that does not check IsClosed blocks
+// again rather than spinning.
+func TestWindowChangedWakesOnClose(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	ch := mm.WindowChanged()
+	mm.Close()
+	if !fired(ch) {
+		t.Fatal("Close did not wake the waiter")
+	}
+	if fired(mm.WindowChanged()) {
+		t.Fatal("after Close WindowChanged returns a closed channel, so a waiter loop would spin")
+	}
+	mm.Close() // idempotent: no double close
+}
+
+func TestWindowPacerSurvivesTheWorkerScopeWrap(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	var mgr interface{} = mm
+	if _, ok := mgr.(integrations.WindowPacer); !ok {
+		t.Fatal("MockManager does not implement WindowPacer")
+	}
+	var db interface{} = &scopedMockDb{MockMemDb: mm}
+	p, ok := db.(integrations.WindowPacer)
+	if !ok {
+		t.Fatal("the worker-scope wrap erases WindowPacer")
+	}
+	ch := p.WindowChanged()
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if !fired(ch) || p.StagingEpoch() != mm.StagingEpoch() || p.StagingEpoch() == 0 {
+		t.Fatal("the wrapped WindowPacer does not follow the manager")
+	}
+}
+
+// -race: waiters looping on the documented take-channel-then-read pattern while
+// windows switch concurrently. Every waiter must observe the final window.
+func TestWindowChangedConcurrentWaiters(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	const switches, waiters = 200, 8
+	final := pms(switches * 10)
+	done := make(chan struct{})
+	for w := 0; w < waiters; w++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for {
+				ch := mm.WindowChanged()
+				if start, _ := mm.CurrentTestWindow(); start.Equal(final) {
+					_ = mm.StagingEpoch()
+					return
+				}
+				select {
+				case <-ch:
+				case <-time.After(10 * time.Second):
+					t.Error("waiter missed the final window switch")
+					return
+				}
+			}
+		}()
+	}
+	for i := 1; i <= switches; i++ {
+		if i%50 == 0 {
+			mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		}
+		mm.SetMocksWithWindow(nil, nil, pms(i*10), pms(i*10+5))
+	}
+	for w := 0; w < waiters; w++ {
+		<-done
+	}
+}

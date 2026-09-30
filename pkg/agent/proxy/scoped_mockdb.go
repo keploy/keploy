@@ -137,12 +137,29 @@ func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
 	return 0
 }
 
-// RecordedWindows carries no mock data, so it passes straight through.
+// RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
+// pass straight through.
 func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
 	if r, ok := s.MockMemDb.(integrations.RecordedWindowsReader); ok {
 		return r.RecordedWindows()
 	}
 	return nil
+}
+
+// WindowChanged of a manager without the signal returns nil, a channel that
+// never fires — the same "no signal" a consumer sees when the assertion fails.
+func (s *scopedMockDb) WindowChanged() <-chan struct{} {
+	if p, ok := s.MockMemDb.(integrations.WindowPacer); ok {
+		return p.WindowChanged()
+	}
+	return nil
+}
+
+func (s *scopedMockDb) StagingEpoch() uint64 {
+	if p, ok := s.MockMemDb.(integrations.WindowPacer); ok {
+		return p.StagingEpoch()
+	}
+	return 0
 }
 
 func (s *scopedMockDb) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
