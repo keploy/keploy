@@ -427,9 +427,12 @@ func ParseBinaryDate(b []byte) (interface{}, int, error) {
 	// Three accepted lengths widen the window for a garbage length byte to be
 	// trusted, so the fields are checked too (ParseBinaryDateTime guards the
 	// same way via validYMDHMS): 07ffff636363... would otherwise decode to
-	// "65535-99-99" and land in the mock. An all-zero Y/M/D is the zero date
-	// some drivers send with a non-zero length, so it stays valid.
-	if !(year == 0 && month == 0 && day == 0) && (month < 1 || month > 12 || day < 1 || day > 31) {
+	// "65535-99-99" and land in the mock. Only the upper bounds are checked:
+	// a zero year, month or day is a value MySQL stores and sends when
+	// NO_ZERO_IN_DATE is off ('2024-01-00', a birthdate with an unknown day;
+	// the MySQL 5.6 default, MariaDB's default, any sql_mode=''), and the zero
+	// date itself comes with a non-zero length from some drivers.
+	if year > 9999 || month > 12 || day > 31 {
 		return nil, 0, fmt.Errorf("invalid DATE %04d-%02d-%02d (misaligned?)", year, month, day)
 	}
 	return fmt.Sprintf("%04d-%02d-%02d", year, month, day), int(length) + 1, nil
@@ -459,7 +462,11 @@ func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
 
 	switch l {
 	case 4:
-		// YYYY-MM-DD
+		// YYYY-MM-DD. The same guard as the longer forms (validYMDHMS):
+		// 04ffffff63 would otherwise decode to "65535-99-99".
+		if !validYMDHMS(int(year), int(month), int(day), 0, 0, 0) {
+			return nil, 0, fmt.Errorf("invalid DATETIME %04d-%02d-%02d (misaligned?)", year, month, day)
+		}
 		return fmt.Sprintf("%04d-%02d-%02d", year, month, day), 1 + l, nil
 	case 7:
 		hour := int(p[4])
@@ -487,10 +494,14 @@ func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
 	panic(fmt.Sprintf("unreachable code reached in ParseBinaryDateTime: unexpected length l=%d", l))
 }
 
+// validYMDHMS guards a decoded DATETIME/TIMESTAMP against a misaligned or
+// garbage length byte. A zero year, month or day is valid: MySQL stores and
+// sends them when NO_ZERO_IN_DATE / NO_ZERO_DATE are off ('0000-00-00
+// 00:00:00', '2024-01-00 10:00:00'), so only the upper bounds are checked.
 func validYMDHMS(y, m, d, hh, mm, ss int) bool {
-	return y >= 1 && y <= 9999 &&
-		m >= 1 && m <= 12 &&
-		d >= 1 && d <= 31 && // fine for a quick guard; deeper month/day checks optional
+	return y >= 0 && y <= 9999 &&
+		m >= 0 && m <= 12 &&
+		d >= 0 && d <= 31 &&
 		hh >= 0 && hh <= 23 &&
 		mm >= 0 && mm <= 59 &&
 		ss >= 0 && ss <= 59

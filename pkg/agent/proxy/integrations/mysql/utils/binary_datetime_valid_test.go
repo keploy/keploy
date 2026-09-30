@@ -70,7 +70,11 @@ func TestParseBinaryDate_ValidEncodings(t *testing.T) {
 		// otherwise this decodes to "65535-99-99" and lands in the mock.
 		{name: "valid length but nonsense month and day", hexData: "07ffff6363631700", wantErr: true},
 		{name: "month 13", hexData: "04e8070d0f", wantErr: true},
-		{name: "day 0", hexData: "04e8070100", wantErr: true},
+		// NO_ZERO_IN_DATE off: MySQL stores and sends a zero day or month.
+		{name: "day 0 (NO_ZERO_IN_DATE off)", hexData: "04e8070100", want: "2024-01-00", wantN: 5},
+		{name: "month 0 (NO_ZERO_IN_DATE off)", hexData: "04e807000f", want: "2024-00-15", wantN: 5},
+		{name: "day 32", hexData: "04e8070120", wantErr: true},
+		{name: "year 10000", hexData: "0410270101", wantErr: true},
 		// All-zero Y/M/D with a non-zero length is the zero date; still valid.
 		{name: "zero date sent with length 4", hexData: "0400000000", want: "0000-00-00", wantN: 5},
 		{name: "length 200 is garbage", hexData: "c8010203040506", wantErr: true},
@@ -147,6 +151,48 @@ func TestParseBinaryTime_ValidEncodings(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tt.want, got)
 			require.Equal(t, tt.wantN, n, "bytes consumed")
+		})
+	}
+}
+
+// A DATETIME/TIMESTAMP with a zero year, month or day is a value MySQL stores
+// and sends when NO_ZERO_IN_DATE / NO_ZERO_DATE are off, so it must decode;
+// only out-of-range fields (a misaligned or garbage length byte) are refused.
+func TestParseBinaryDateTimeAcceptsZeroInDate(t *testing.T) {
+	tests := []struct {
+		name    string
+		hexData string
+		want    string
+		wantN   int
+		wantErr bool
+	}{
+		{name: "zero day", hexData: "07e80701000a0000", want: "2024-01-00 10:00:00", wantN: 8},
+		{name: "zero month and day", hexData: "07e80700000a0000", want: "2024-00-00 10:00:00", wantN: 8},
+		{name: "zero date with a time", hexData: "070000000001020300", want: "0000-00-00 01:02:03", wantN: 8},
+		{name: "month 13", hexData: "07e8070d010a0000", wantErr: true},
+		{name: "hour 24", hexData: "07e8070101180000", wantErr: true},
+		{name: "length 4 garbage", hexData: "04ffffff63", wantErr: true},
+		{name: "length 4 zero day", hexData: "04e8070100", want: "2024-01-00", wantN: 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := hex.DecodeString(tt.hexData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, n, err := ParseBinaryDateTime(b)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ParseBinaryDateTime(%s) = %v, want an error", tt.hexData, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseBinaryDateTime(%s): %v", tt.hexData, err)
+			}
+			if got != tt.want || n != tt.wantN {
+				t.Fatalf("ParseBinaryDateTime(%s) = %v, %d; want %q, %d", tt.hexData, got, n, tt.want, tt.wantN)
+			}
 		})
 	}
 }
