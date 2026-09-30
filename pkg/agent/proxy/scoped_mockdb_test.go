@@ -68,34 +68,28 @@ func TestScopedForResolvesWorkerAndFallsBack(t *testing.T) {
 	db := &fakeMockDb{}
 	self := uint32(os.Getpid())
 
-	// Empty registry: fast path, no /proc walk, returns the bare manager.
 	p := &Proxy{}
-	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(self, db), "no scopes ⇒ whole pool")
-
-	// A registered worker PID: the call is scoped to its allowlist.
 	p.SetWorkerScope(self, []string{"only-this"})
-	require.IsType(t, &scopedMockDb{}, p.scopedFor(self, db), "own PID resolves to a scoped view")
+	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(self, db), "no scope table ⇒ whole pool")
 
-	// PID 0 (unknown origin) and an unregistered/dead PID ⇒ whole pool.
+	p.SetMappedUniverse([]string{"only-this", "other"})
+	require.IsType(t, &workerView{}, p.scopedFor(self, db), "own PID resolves to a scoped view")
 	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(0, db))
-	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(4000000000, db))
-
-	// Cleared ⇒ back to the whole pool.
-	p.ClearWorkerScope(self)
-	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(self, db))
 }
 
 func TestScopedForWalksUpProcessTree(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("process-tree walk is linux only")
 	}
-	db := &fakeMockDb{}
+	db := &fakeMockDb{mocks: []*models.Mock{{Name: "m"}, {Name: "other"}}}
 	// Register the PARENT of this process; this process's call must resolve up to
 	// it (models a worker whose child/grandchild opened the socket).
 	p := &Proxy{}
+	p.SetMappedUniverse([]string{"m", "other"})
 	p.SetWorkerScope(uint32(os.Getppid()), []string{"m"})
-	require.IsType(t, &scopedMockDb{}, p.scopedFor(uint32(os.Getpid()), db),
-		"a call from a descendant resolves up to the registered worker")
+	got, err := p.scopedFor(uint32(os.Getpid()), db).GetFilteredMocks()
+	require.NoError(t, err)
+	require.Equal(t, []string{"m"}, scopedNames(got), "a call from a descendant resolves up to the registered worker")
 
 	p.ClearAllWorkerScopes()
 	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(uint32(os.Getpid()), db))
@@ -183,4 +177,55 @@ func TestScopedMockDb_StartupTierIsScopedToTheWorker(t *testing.T) {
 	if !containsMockNamed(startup, "mock-A") {
 		t.Fatal("worker A cannot see its own mock")
 	}
+}
+
+func TestWorkerViewResolvesTheScopeOnEveryRead(t *testing.T) {
+	db := &fakeMockDb{mocks: []*models.Mock{{Name: "boot"}, {Name: "a-1"}, {Name: "b-1"}}}
+	self := uint32(os.Getpid())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a-1", "b-1"})
+	pooled := p.scopedFor(self, db)
+	read := func() []string {
+		got, err := pooled.GetFilteredMocks()
+		require.NoError(t, err)
+		return scopedNames(got)
+	}
+	require.ElementsMatch(t, []string{"boot", "a-1", "b-1"}, read(), "before any test: the whole pool")
+	p.SetWorkerScope(self, []string{"a-1"})
+	require.ElementsMatch(t, []string{"boot", "a-1"}, read(), "a connection opened before the test began sees the test's mocks")
+	p.SetWorkerScope(self, []string{"b-1"})
+	require.ElementsMatch(t, []string{"boot", "b-1"}, read(), "and the next test's on its next request")
+	p.ClearWorkerScope(self)
+	require.ElementsMatch(t, []string{"boot", "a-1", "b-1"}, read(), "between tests: the whole pool again")
+}
+
+func TestAFlowWindowHidesOtherFlowsMocksFromEveryTier(t *testing.T) {
+	mgr := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mgr.Close()
+	t0 := time.Now().Add(-time.Hour)
+	boot := newMockForTest("boot", t0, models.LifetimePerTest)
+	a1 := newMockForTest("a-1", t0.Add(10*time.Second), models.LifetimePerTest)
+	b1 := newMockForTest("b-1", t0.Add(20*time.Second), models.LifetimePerTest)
+	mgr.SetMocksWithWindow([]*models.Mock{boot, a1, b1}, nil, models.BaseTime, time.Now())
+	pooled := integrations.MockMemDb(mgr)
+	mgr.SeedStartupCutoff(a1.Spec.ReqTimestampMock)
+	mgr.SetMocksWithWindow([]*models.Mock{a1, boot}, nil, a1.Spec.ReqTimestampMock, a1.Spec.ReqTimestampMock)
+
+	snap := pooled.WindowSnapshot()
+	require.True(t, snap.Active, "the flow's window is open, so a miss inside it is counted")
+	require.True(t, snap.FirstTestFired, "the matcher has left boot phase")
+	for name, read := range map[string]func() ([]*models.Mock, error){
+		"filtered": pooled.GetFilteredMocks, "unfiltered": pooled.GetUnFilteredMocks,
+		"session": pooled.GetSessionMocks, "startup": pooled.GetStartupMocks,
+	} {
+		got, err := read()
+		require.NoError(t, err)
+		require.False(t, containsMockNamed(got, "b-1"), "another flow's mock is readable through the %s tier", name)
+	}
+	perTest, err := pooled.GetFilteredMocks()
+	require.NoError(t, err)
+	require.Equal(t, []string{"a-1"}, scopedNames(perTest))
+	startup, err := pooled.GetStartupMocks()
+	require.NoError(t, err)
+	require.Equal(t, []string{"boot"}, scopedNames(startup))
 }

@@ -7,6 +7,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -221,7 +222,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 5. Hand the agent the per-test table so the runner's /agent/scope/begin
 	//    calls can narrow the served pool per test (best-effort / optional).
-	m.pushScopeTable(ctx, name)
+	m.pushScopeTable(ctx, name, append(append([]*models.Mock(nil), filtered...), unfiltered...))
 
 	// 6. Stage the whole pool as the initial serving window (BaseTime..now, no
 	//    mapping) — same call RunTestSet makes before the first test.
@@ -557,7 +558,7 @@ func (m *mockService) highestMockIndex(ctx context.Context, name string) int64 {
 
 // pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)
 // and hands the agent the name→mock-names table so per-test scoping works.
-func (m *mockService) pushScopeTable(ctx context.Context, name string) {
+func (m *mockService) pushScopeTable(ctx context.Context, name string, mocks []*models.Mock) {
 	if m.mappingDB == nil {
 		return
 	}
@@ -569,19 +570,78 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) {
 	if err != nil || !meaningful || len(mappings) == 0 {
 		return
 	}
-	table := make(map[string][]string, len(mappings))
-	for testName, entries := range mappings {
-		names := make([]string, 0, len(entries))
-		for _, e := range entries {
-			names = append(names, e.Name)
-		}
-		table[testName] = names
+	var startup []models.MockEntry
+	if r, ok := m.mappingDB.(interface {
+		GetStartup(ctx context.Context, testSetID string) ([]models.MockEntry, error)
+	}); ok {
+		startup, _ = r.GetStartup(ctx, name)
 	}
+	table := scopeTable(mappings, startup, mocks)
 	if err := pusher.PushScopeTable(ctx, table); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
 		return
 	}
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table.Mappings)), zap.String("mock-set", name))
+}
+
+func scopeTable(mappings map[string][]models.MockEntry, startup []models.MockEntry, mocks []*models.Mock) models.ScopeTableReq {
+	at := make(map[string]time.Time, len(mocks))
+	for _, mk := range mocks {
+		if mk != nil {
+			at[mk.Name] = mk.Spec.ReqTimestampMock
+		}
+	}
+	shared := make([]string, 0, len(startup))
+	for _, e := range startup {
+		shared = append(shared, e.Name)
+	}
+	flowOf := make(map[string]string, len(mappings))
+	tests := make([]string, 0, len(mappings))
+	for test := range mappings {
+		flow := test
+		for other := range mappings {
+			if len(other) < len(flow) && strings.HasPrefix(test, other+"/") {
+				flow = other
+			}
+		}
+		flowOf[test] = flow
+		tests = append(tests, test)
+	}
+	sort.Strings(tests)
+	flows := make(map[string][]models.MockEntry, len(mappings))
+	for _, test := range tests {
+		flows[flowOf[test]] = append(flows[flowOf[test]], mappings[test]...)
+	}
+	out := models.ScopeTableReq{Mappings: make(map[string][]string, len(mappings)), Windows: map[string]models.ScopeWindow{}}
+	for flow, entries := range flows {
+		var w models.ScopeWindow
+		for _, e := range entries {
+			t := at[e.Name]
+			if t.IsZero() {
+				continue
+			}
+			if w.Start.IsZero() || t.Before(w.Start) {
+				w.Start = t
+			}
+			if t.After(w.End) {
+				w.End = t
+			}
+		}
+		if w.Start.IsZero() {
+			continue
+		}
+		out.Windows[flow] = w
+		if out.FirstStart.IsZero() || w.Start.Before(out.FirstStart) {
+			out.FirstStart = w.Start
+		}
+	}
+	for test, flow := range flowOf {
+		out.Mappings[test] = models.MergeStartupMockNames(flows[flow], shared)
+		if w, ok := out.Windows[flow]; ok {
+			out.Windows[test] = w
+		}
+	}
+	return out
 }
 
 // ReplayOutcome is what a replay produced, for a wrapping build that meters or

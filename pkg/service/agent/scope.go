@@ -56,6 +56,12 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		a.openWindow(name, pid, at)
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
+		w, windowed := a.flowWindows[name]
+		first := a.firstFlow
+		others := a.narrowed != nil
+		for k := range a.workerOpen {
+			others = others || k.pid != uint32(pid)
+		}
 		a.scopeMu.Unlock()
 		if !ok || len(names) == 0 {
 			// No per-test mapping for this test — leave the whole pool armed.
@@ -66,17 +72,27 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 			// PID, so concurrent workers never overwrite one shared filter.
 			a.logger.Debug("scope begin: worker-scoped pool", zap.String("test", name), zap.Int("worker", pid), zap.Int("mocks", len(names)))
 			a.SetWorkerScope(uint32(pid), names)
+		}
+		if others {
 			return nil
 		}
-		// No worker PID reported — restrict the single global pool (correct for
-		// a sequential single-worker suite, the pre-Design-A behavior).
-		a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)))
-		return a.UpdateMockParams(ctx, models.MockFilterParams{
+		params := models.MockFilterParams{
 			MockMapping:     names,
 			UseMappingBased: true,
 			AfterTime:       models.BaseTime,
 			BeforeTime:      time.Now(),
-		})
+		}
+		if windowed {
+			params.AfterTime, params.BeforeTime, params.FirstRecordedTestStart = w.Start, w.End, first
+		}
+		a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)), zap.Bool("window", windowed))
+		if err := a.UpdateMockParams(ctx, params); err != nil {
+			return err
+		}
+		a.scopeMu.Lock()
+		a.narrowed = &scopeKey{pid: uint32(pid), name: name}
+		a.scopeMu.Unlock()
+		return nil
 	}
 
 	a.openWindow(name, pid, at)
@@ -123,6 +139,10 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		a.closeWindow(name, pid, at)
 		a.scopeMu.Lock()
 		_, scoped := a.scopeTable[name]
+		narrowed := a.narrowed != nil && *a.narrowed == scopeKey{pid: uint32(pid), name: name}
+		if narrowed {
+			a.narrowed = nil
+		}
 		a.scopeMu.Unlock()
 		if !scoped {
 			return nil
@@ -130,13 +150,19 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		if pid > 0 {
 			a.logger.Debug("scope end: clearing worker scope", zap.String("test", name), zap.Int("worker", pid))
 			a.ClearWorkerScope(uint32(pid))
+		}
+		if !narrowed {
 			return nil
 		}
 		a.logger.Debug("scope end: restoring whole pool", zap.String("test", name))
-		return a.UpdateMockParams(ctx, models.MockFilterParams{
+		err := a.UpdateMockParams(ctx, models.MockFilterParams{
 			AfterTime:  models.BaseTime,
 			BeforeTime: time.Now(),
 		})
+		if c, ok := a.Proxy.(interface{ ClearTestWindow() }); ok {
+			c.ClearTestWindow()
+		}
+		return err
 	}
 
 	a.closeWindow(name, pid, at)
@@ -189,6 +215,13 @@ func (a *Agent) SetScopeTable(_ context.Context, table map[string][]string) erro
 	}
 	a.SetMappedUniverse(universe)
 	return nil
+}
+
+func (a *Agent) SetScopeWindows(_ context.Context, windows map[string]models.ScopeWindow, first time.Time) {
+	a.scopeMu.Lock()
+	a.flowWindows = windows
+	a.firstFlow = first
+	a.scopeMu.Unlock()
 }
 
 // DrainCapturedMocks returns and clears the mocks captured on miss during a
