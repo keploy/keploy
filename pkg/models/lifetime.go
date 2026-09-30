@@ -3,6 +3,7 @@ package models
 import (
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -95,6 +96,9 @@ func (l Lifetime) String() string {
 //     the recorder is still promoted to session when semantically
 //     reusable — this is how HikariCP startup COM_PING mocks survive
 //     strict-window pre-filtering.
+//     1a. The same, for any Kind + metadata combination an out-of-tree
+//     parser declared through RegisterSessionReusable, unless the mock
+//     is tagged "connection".
 //  2. Spec.Metadata["type"] == "config"       → LifetimeSession
 //  3. Spec.Metadata["type"] == "connection"   → LifetimeConnection
 //     (requires non-empty connID; falls back to Session if missing).
@@ -152,6 +156,14 @@ func (m *Mock) DeriveLifetime() {
 	tag := ""
 	if m.Spec.Metadata != nil {
 		tag = m.Spec.Metadata["type"]
+	}
+	// The same promotion for out-of-tree kinds, declared through
+	// RegisterSessionReusable. A "connection" tag is left to the switch below:
+	// connection scope is already reusable, and session scope would serve the
+	// mock to other connections.
+	if tag != "connection" && sessionReusableHooks.match(m) {
+		m.TestModeInfo.Lifetime = LifetimeSession
+		return
 	}
 	switch tag {
 	case "config":
@@ -392,4 +404,94 @@ func IsMySQLSessionReusableCommandType(cmdType string) bool {
 		return true
 	}
 	return false
+}
+
+// RegisterSessionReusable declares that the mocks of kind for which isReusable
+// returns true are session-reusable, even though their recorder tagged them
+// "mocks" (or left them untagged). DeriveLifetime then classifies them as
+// LifetimeSession, exactly as it already does for MySQL's connection-alive
+// commands. The on-disk tag is not changed, so older replayers keep reading the
+// recording as they always did.
+//
+// This is the hook for out-of-tree parsers, which cannot add their commands to
+// mysqlIsSessionReusableCommand. Its typical use is a protocol whose setup
+// exchange is answered the same way for any caller and is replayed by a cursor
+// over the recorded answers, not consumed once per test — for example a
+// message-broker PRODUCER or SUBSCRIBE handshake, which a client re-sends on
+// every reconnect.
+//
+// isReusable is called on every mock of kind at ingest, so it must be cheap,
+// must look at the mock alone (its Kind and Spec.Metadata), and must not keep
+// the pointer. Call RegisterSessionReusable from an init function: a mock
+// derived before the registration keeps the lifetime it was derived with.
+// Several registrations for one kind are OR-ed. A nil isReusable is ignored.
+//
+// A mock the recorder tagged "connection" keeps LifetimeConnection: a
+// connection-scoped mock is already reusable, and promoting it would let it be
+// served to other connections.
+func RegisterSessionReusable(kind Kind, isReusable func(*Mock) bool) {
+	sessionReusableHooks.add(kind, isReusable)
+}
+
+// sessionReusableHooks holds the RegisterSessionReusable predicates.
+var sessionReusableHooks mockPredicates
+
+// mockPredicates is a per-kind registry of predicates on a single mock. Reads
+// are lock-free (DeriveLifetime runs once per mock on every ingest path);
+// registration copies the map, which is fine because it happens at init.
+type mockPredicates struct {
+	mu    sync.Mutex // serialises writers only
+	byKnd atomic.Pointer[map[Kind][]func(*Mock) bool]
+}
+
+func (r *mockPredicates) add(kind Kind, fn func(*Mock) bool) {
+	if fn == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	next := make(map[Kind][]func(*Mock) bool)
+	if cur := r.byKnd.Load(); cur != nil {
+		for k, fns := range *cur {
+			next[k] = append([]func(*Mock) bool(nil), fns...)
+		}
+	}
+	next[kind] = append(next[kind], fn)
+	r.byKnd.Store(&next)
+}
+
+// match reports whether any predicate registered for m.Kind accepts m.
+func (r *mockPredicates) match(m *Mock) bool {
+	if m == nil {
+		return false
+	}
+	cur := r.byKnd.Load()
+	if cur == nil {
+		return false
+	}
+	for _, fn := range (*cur)[m.Kind] {
+		if fn(m) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasKind reports whether any predicate is registered for kind.
+func (r *mockPredicates) hasKind(kind Kind) bool {
+	cur := r.byKnd.Load()
+	return cur != nil && len((*cur)[kind]) > 0
+}
+
+// any reports whether any predicate is registered at all.
+func (r *mockPredicates) any() bool {
+	cur := r.byKnd.Load()
+	return cur != nil && len(*cur) > 0
+}
+
+// reset drops every registration. Tests only.
+func (r *mockPredicates) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.byKnd.Store(nil)
 }
