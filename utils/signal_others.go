@@ -35,11 +35,6 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 }
 
 func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, extraEnv []string) CmdError {
-	return ExecuteCommandTee(ctx, logger, userCmd, kind, cancel, waitDelay, stdin, extraEnv, nil)
-}
-
-// ExecuteCommandTee is ExecuteCommand that also copies the command's stdout to tee, when set.
-func ExecuteCommandTee(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, extraEnv []string, tee io.Writer) CmdError {
 	// Run the app as the user who invoked sudo
 
 	// Run through `sh -c` when a shell is available; fall back to a direct exec
@@ -74,7 +69,6 @@ func ExecuteCommandTee(ctx context.Context, logger *zap.Logger, userCmd string, 
 		cmdType = FindDockerCmd(userCmd)
 	}
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
-	stdout := teeStdout(tee)
 
 	// When in-memory compose content is provided, pipe it via stdin and skip PTY.
 	// PTY takes over the terminal's stdin/stdout so it cannot coexist with an
@@ -96,7 +90,7 @@ func ExecuteCommandTee(ctx context.Context, logger *zap.Logger, userCmd string, 
 			Setsid: true,
 		}
 		logger.Debug("Output is a TTY (Docker Compose -> PTY)")
-		return executeWithPTY(ctx, logger, cmd, stdout)
+		return executeWithPTY(ctx, logger, cmd)
 	}
 
 	// For non-PTY execution, use Setpgid for process group management
@@ -108,7 +102,7 @@ func ExecuteCommandTee(ctx context.Context, logger *zap.Logger, userCmd string, 
 		logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
 	}
 	// Set the output of the command to stdout/stderr
-	cmd.Stdout = stdout
+	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
@@ -129,7 +123,7 @@ func ExecuteCommandTee(ctx context.Context, logger *zap.Logger, userCmd string, 
 // This is necessary for Docker Compose when Setpgid is true, as Docker Compose
 // tries to read terminal size for rendering progress bars. Without a PTY,
 // the OS would pause the background process with SIGTTOU/SIGTTIN.
-func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd, stdout io.Writer) CmdError {
+func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdError {
 	// Start the command with a PTY
 	// pty.Start creates a PTY pair, assigns the slave PTY to cmd's stdin/stdout/stderr,
 	// and starts the command
@@ -166,7 +160,7 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd, stdout
 	outputDone := make(chan struct{})
 	var copyErr error
 	go func() {
-		_, copyErr = io.Copy(stdout, ptmx)
+		_, copyErr = io.Copy(os.Stdout, ptmx)
 		close(outputDone)
 	}()
 

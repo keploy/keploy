@@ -106,11 +106,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	//    Without this the run dialled an agent that was never started, failed
 	//    to arm the capture, and ended having recorded nothing — while the app
 	//    itself never came up at all.
-	var scope *runnerScope
-	if m.mappingDB != nil {
-		scope = m.runnerScope()
-	}
-	composeAppExit, err := m.startComposeApp(ctx, errGrp, "record", scope.writer())
+	composeAppExit, err := m.startComposeApp(ctx, errGrp, "record")
 	if err != nil {
 		if parent.Err() != nil {
 			return nil
@@ -233,7 +229,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	if composeAppExit != nil {
 		appErr = <-composeAppExit
 	} else {
-		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command, StdoutObserver: scope.writer()})
+		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
 	}
 
 	// 8. Drain the trailing mocks, THEN stop capturing.
@@ -282,37 +278,22 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
-	if err := scope.repeated(); err != nil {
+	var windows []models.ScopeWindow
+	if m.mappingDB != nil {
+		windows = m.agentWindows(persistCtx)
+	}
+	if err := repeatedScope(windows); err != nil {
 		m.propagateExit(appErr, "record")
 		utils.LogError(m.logger, err, "a test ran more than once")
 		return err
 	}
-	if overlaps := scope.overlapping(); len(overlaps) > 0 {
-		if !m.config.Mock.AllowParallelTests {
-			m.propagateExit(appErr, "record")
-			stopReason = "tests ran at the same time, so their mocks cannot be mapped per test"
-			err := fmt.Errorf("%s (%s); run them one at a time (go test -p 1, no t.Parallel()) or pass --allow-parallel-tests", stopReason, firstFew(overlaps, 10))
-			utils.LogError(m.logger, err, stopReason)
-			return err
-		}
-		m.logger.Warn("tests ran at the same time; per-test mappings are best-effort", zap.Strings("overlaps", overlaps))
-	}
 	keep = true
 	if m.mappingDB != nil {
-		windows := m.testWindows(persistCtx, scope)
 		if len(windows) > 0 {
-			if scope.usedReadTime() {
-				m.logger.Warn(fmt.Sprintf("test boundaries taken from output timing; %d mocks fell within 20 ms of a boundary — use `go test -json` (or `go tool test2json -t`) for exact attribution",
-					nearBoundary(windows, recorded, boundarySlack)))
-			}
 			byTest := correlateScopes(windows, recorded)
-			byCase := correlateCases(windows, recorded, capture.list(), scope.stepWindows())
-			skipped := map[string]bool{}
-			for _, o := range scope.tests() {
-				skipped[o.Name] = o.Status == "skip"
-			}
+			byCase := correlateCases(windows, recorded, capture.list(), stepWindows(windows))
 			for _, w := range windows {
-				if _, ok := byTest[w.Name]; !ok && !(skipped[w.Name] && len(byCase[w.Name].Cases) == 0) {
+				if _, ok := byTest[w.Name]; !ok {
 					byTest[w.Name] = nil
 				}
 			}
@@ -359,20 +340,6 @@ func runnerPassed(appErr models.AppError) bool {
 		return true
 	}
 	return false
-}
-
-// runnerScope builds the adapter that reads each test's boundaries and result from the runner's output, or nil when it is off.
-// Nothing it reads is posted to the agent: a boundary read from output lags the test, so the agent keeps only the marks
-// a test makes itself, and record and replay build their windows the same way (testWindows).
-func (m *mockService) runnerScope() *runnerScope {
-	if m.config.Mock.NoRunnerScope || !teeable(m.config.Command) {
-		return nil
-	}
-	return newRunnerScope()
-}
-
-func (m *mockService) testWindows(ctx context.Context, scope *runnerScope) []models.ScopeWindow {
-	return mergeWindows(scope.windows(), m.agentWindows(ctx))
 }
 
 // agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.
@@ -480,14 +447,6 @@ func (m *mockService) deleteMappings(ctx context.Context, name string) {
 	if err := deleter.Delete(ctx, name); err != nil {
 		m.logger.Debug("no existing mappings to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
 	}
-}
-
-// firstFew joins up to n items, saying how many more there are.
-func firstFew(items []string, n int) string {
-	if len(items) <= n {
-		return strings.Join(items, ", ")
-	}
-	return fmt.Sprintf("%s and %d more", strings.Join(items[:n], ", "), len(items)-n)
 }
 
 // capturedMock is one recorded mock's name + request timestamp + source worker

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"time"
 
@@ -161,7 +160,7 @@ func (m *mockService) isDockerCompose() bool {
 // healthcheck, and that healthcheck only passes once keploy posts /agent/ready.
 // This function therefore waits only for the agent to become REACHABLE; the
 // app stays parked at its healthcheck until the caller has armed the proxy.
-func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group, phase string, stdout io.Writer) (chan models.AppError, error) {
+func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group, phase string) (chan models.AppError, error) {
 	if !m.isDockerCompose() {
 		return nil, nil
 	}
@@ -184,7 +183,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 		exit := models.AppError{AppErrorType: models.ErrInternal, Err: errors.New("the app runner panicked")}
 		defer utils.Recover(m.logger)
 		defer func() { appExit <- exit }()
-		exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command, StdoutObserver: stdout})
+		exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
 		return nil
 	})
 

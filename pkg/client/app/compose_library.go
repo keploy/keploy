@@ -133,11 +133,7 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		}
 	}()
 
-	var stdout io.Writer = os.Stdout
-	if a.stdoutObserver != nil {
-		stdout = io.MultiWriter(os.Stdout, a.stdoutObserver)
-	}
-	err = runner.Up(upCtx, opts, stdout, os.Stderr)
+	err = runner.Up(upCtx, opts, os.Stdout, os.Stderr)
 	close(upDone)
 
 	// Wait for the teardown to finish before returning.

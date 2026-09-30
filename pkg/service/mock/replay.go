@@ -151,8 +151,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//
 	//    Without this the run dialled an agent that was never started and
 	//    failed before serving a single mock.
-	scope := m.runnerScope()
-	composeAppExit, err := m.startComposeApp(ctx, errGrp, "replay", scope.writer())
+	composeAppExit, err := m.startComposeApp(ctx, errGrp, "replay")
 	if err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -268,7 +267,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if composeAppExit != nil {
 		appErr = <-composeAppExit
 	} else {
-		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command, StdoutObserver: scope.writer()})
+		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
 	}
 
 	if parent.Err() != nil { // user Ctrl+C
@@ -304,12 +303,12 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 10. Summarise what was served and missed.
 	detail := replayDetail{
-		windows:  m.testWindows(ctx, scope),
+		windows:  m.agentWindows(ctx),
 		expected: m.expectedMocks(ctx, name),
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),
 	}
-	counts := m.reportOutcome(ctx, loaded, scope.tests(), detail)
+	counts := m.reportOutcome(ctx, loaded, detail)
 	missed, missesKnown := counts.missed, counts.missed >= 0
 
 	// 11. Exit code: mirror the runner; with --strict also fail on any miss.
@@ -596,15 +595,6 @@ type ReplayOutcome struct {
 	Cases []CaseOutcome
 	// Mocks is what each test used and missed, next to what it recorded.
 	Mocks []FlowMocks
-	// Tests is each test the runner reported, read from its output; empty when the runner-scope adapter is off.
-	Tests []TestOutcome
-}
-
-// TestOutcome is one test's result as the runner printed it: pass, fail or skip, and how long it took.
-type TestOutcome struct {
-	Name     string
-	Status   string
-	Duration time.Duration
 }
 
 // replayOutcomeReporter is installed by a wrapping build (enterprise) from
@@ -633,7 +623,7 @@ type replayCounts struct {
 // The two reads are tracked apart on purpose. Collapsing them into one "did the
 // agent answer" flag makes a half-answer indistinguishable from no answer, and
 // then reports a run whose misses were never read as a clean one.
-func (m *mockService) reportOutcome(ctx context.Context, loaded int, tests []TestOutcome, detail replayDetail) replayCounts {
+func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail replayDetail) replayCounts {
 	var consumed []models.MockState
 	var misses []models.UnmatchedCall
 	var consumedErr, missesErr error
@@ -729,7 +719,6 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, tests []Tes
 				Loaded:   loaded,
 				Consumed: len(consumed),
 				Missed:   len(misses),
-				Tests:    tests,
 				Cases:    pairCases(detail.windows, detail.recorded, detail.actual, m.compareCase),
 				Mocks:    attributeMocks(detail.windows, detail.expected, consumed, misses),
 			})

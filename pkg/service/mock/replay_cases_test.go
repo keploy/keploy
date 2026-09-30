@@ -86,7 +86,7 @@ func TestAttributeMocksUsesTheTestRunningAtTheTime(t *testing.T) {
 
 // A replay with requests on compares what the app answered with the recorded cases and says which mocks each test used.
 func TestReplayOutcomeCarriesTheCasesAndTheMocksPerTest(t *testing.T) {
-	instr := newRunnerInstr(t, jsonSequential)
+	instr := newRunnerInstr(t, sequentialMarks()...)
 	instr.incoming = []*models.TestCase{httpCase("", "POST", "http://localhost:8080/orders", 201, `{"id":"new"}`, runnerT0.Add(5*time.Millisecond))}
 	instr.consumedMocks = []models.MockState{{Name: "mock-0", Kind: models.HTTP, Timestamp: runnerT0.Add(6 * time.Millisecond).UnixNano()}}
 	instr.mockErrors = []models.UnmatchedCall{{Protocol: "Mongo", ActualSummary: "insert shop.orders", At: runnerT0.Add(7 * time.Millisecond)}}
@@ -182,7 +182,7 @@ func (l lateIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions)
 }
 
 func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
-	instr := newRunnerInstr(t, jsonSequential)
+	instr := newRunnerInstr(t, sequentialMarks()...)
 	late := lateIncoming{runnerInstr: instr, after: 200 * time.Millisecond, tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
 	dir := t.TempDir()
 	mapDB := mapdb.New(zap.NewNop(), dir, "")
@@ -223,11 +223,11 @@ func TestPairCasesDoesNotCompareGRPCAsHTTP(t *testing.T) {
 }
 
 func TestPairCasesFindsSubtestRequestsUnderTheTopLevelFlow(t *testing.T) {
-	scope := feed(t, jsonEvent("run", "TestTestSuiteValidation", 0)+
-		jsonEvent("run", "TestTestSuiteValidation/missing_name", 1)+jsonEvent("pass", "TestTestSuiteValidation/missing_name", 2)+
-		jsonEvent("run", "TestTestSuiteValidation/missing_steps", 3)+jsonEvent("pass", "TestTestSuiteValidation/missing_steps", 4)+
-		jsonEvent("pass", "TestTestSuiteValidation", 5))
-	windows := mergeWindows(scope.windows(), nil)
+	windows := []models.ScopeWindow{
+		mark("e2e/orders.TestTestSuiteValidation/missing_name", time.Second, 2*time.Second),
+		mark("e2e/orders.TestTestSuiteValidation/missing_steps", 3*time.Second, 4*time.Second),
+		mark("e2e/orders.TestTestSuiteValidation", 0, 5*time.Second),
+	}
 	at := func(sec float64) time.Time { return runnerT0.Add(time.Duration(sec * float64(time.Second))) }
 	flow := "e2e/orders.TestTestSuiteValidation"
 	recorded := map[string][]*models.TestCase{flow: {
