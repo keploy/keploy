@@ -59,9 +59,6 @@ type scopeWindowReader interface {
 type scopeTableSetter interface {
 	SetScopeTable(ctx context.Context, table map[string][]string) error
 }
-type scopeWindowSetter interface {
-	SetScopeWindows(ctx context.Context, windows map[string]models.ScopeWindow, first time.Time)
-}
 type mockStatsReader interface {
 	MockStats(ctx context.Context) (models.MockStats, error)
 }
@@ -134,9 +131,6 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-	}
-	if s, ok := a.svc.(scopeWindowSetter); ok {
-		s.SetScopeWindows(r.Context(), req.Windows, req.FirstStart)
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})

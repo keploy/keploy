@@ -139,10 +139,6 @@ type Agent struct {
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
 	scopeTable   map[string][]string    // replay: test name -> mock names (from mappings.yaml)
 	loadedMocks  int                    // replay: count of mocks stored, for /agent/mock/stats
-
-	flowWindows map[string]models.ScopeWindow
-	firstFlow   time.Time
-	narrowed    *scopeKey
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {

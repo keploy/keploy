@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -230,76 +229,41 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 	p.workerScopeMu.Unlock()
 }
 
-// scopedFor returns a mock view for an outgoing call from kpid. While a scope table is installed the
-// view looks up kpid's worker on every read, not once per connection: a pooled connection opened
-// before a test began must still see that test's mocks. Otherwise (and for kpid == 0, a non-eBPF
-// platform or lookup miss) it is the bare manager, the whole pool.
+// scopedFor returns a mock view for an outgoing call from kpid. If some ancestor
+// of kpid is a registered worker with an active scope, the returned view is
+// narrowed to that worker's allowlist; otherwise the bare manager is returned
+// (whole pool). kpid == 0 (non-eBPF platform / lookup miss) ⇒ whole pool.
 func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.MockMemDb {
 	if kpid == 0 || mgr == nil {
 		return mgr
 	}
 	p.workerScopeMu.RLock()
-	installed := p.mappedUniverse != nil
+	if len(p.workerScope) == 0 {
+		p.workerScopeMu.RUnlock()
+		return mgr // fast path: nobody scoped — no /proc walk, exact old behavior
+	}
+	// Walk up the process tree to the nearest registered worker. Bounded so a
+	// reparent race or an unexpected /proc shape can never spin.
+	var allow map[string]struct{}
+	pid := kpid
+	for i := 0; i < 32 && pid > 1; i++ {
+		if set, ok := p.workerScope[pid]; ok {
+			allow = set
+			break
+		}
+		ppid, ok := ppidFromStat(pid)
+		if !ok {
+			break
+		}
+		pid = ppid
+	}
+	universe := p.mappedUniverse
 	p.workerScopeMu.RUnlock()
-	if !installed {
+
+	if allow == nil {
 		return mgr
 	}
-	return &workerView{scopedMockDb: scopedMockDb{MockMemDb: mgr}, p: p, kpid: kpid}
-}
-
-type workerView struct {
-	scopedMockDb
-	p     *Proxy
-	kpid  uint32
-	once  sync.Once
-	chain []uint32
-}
-
-func (v *workerView) view() *scopedMockDb {
-	v.once.Do(func() {
-		pid := v.kpid
-		for i := 0; i < 32 && pid > 1; i++ {
-			v.chain = append(v.chain, pid)
-			ppid, ok := ppidFromStat(pid)
-			if !ok {
-				break
-			}
-			pid = ppid
-		}
-	})
-	v.p.workerScopeMu.RLock()
-	defer v.p.workerScopeMu.RUnlock()
-	for _, pid := range v.chain {
-		if set, ok := v.p.workerScope[pid]; ok {
-			return &scopedMockDb{MockMemDb: v.MockMemDb, allow: set, universe: v.p.mappedUniverse}
-		}
-	}
-	return &v.scopedMockDb
-}
-
-func (v *workerView) GetFilteredMocks() ([]*models.Mock, error) { return v.view().GetFilteredMocks() }
-func (v *workerView) GetFilteredMocksInWindow() ([]*models.Mock, error) {
-	return v.view().GetFilteredMocksInWindow()
-}
-func (v *workerView) GetPerTestMocksInWindow() ([]*models.Mock, error) {
-	return v.view().GetPerTestMocksInWindow()
-}
-func (v *workerView) GetSessionMocks() ([]*models.Mock, error) { return v.view().GetSessionMocks() }
-func (v *workerView) GetUnFilteredMocks() ([]*models.Mock, error) {
-	return v.view().GetUnFilteredMocks()
-}
-func (v *workerView) GetSessionScopedMocks() ([]*models.Mock, error) {
-	return v.view().GetSessionScopedMocks()
-}
-func (v *workerView) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return v.view().GetFilteredMocksByKind(kind)
-}
-func (v *workerView) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return v.view().GetUnFilteredMocksByKind(kind)
-}
-func (v *workerView) GetStartupMocks() ([]*models.Mock, error) { return v.view().GetStartupMocks() }
-func (v *workerView) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return v.view().GetStartupMocksByKind(kind)
+	return &scopedMockDb{MockMemDb: mgr, allow: allow, universe: universe}
 }
 
 // ppidFromStat reads the parent PID of pid from /proc/<pid>/stat. The comm field

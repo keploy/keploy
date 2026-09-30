@@ -141,9 +141,7 @@ type ScopeWindow struct {
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopeTableReq struct {
-	Mappings   map[string][]string    `json:"mappings"`
-	Windows    map[string]ScopeWindow `json:"windows,omitempty"`
-	FirstStart time.Time              `json:"firstStart,omitempty"`
+	Mappings map[string][]string `json:"mappings"`
 }
 
 // ErrMockStatsUnsupported reports that an agent cannot answer /agent/mock/stats

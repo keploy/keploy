@@ -255,23 +255,3 @@ func TestPairCasesFindsSubtestRequestsUnderTheTopLevelFlow(t *testing.T) {
 	require.Len(t, mocks[0].Consumed, 1)
 	require.Len(t, mocks[0].Missed, 1)
 }
-
-func TestScopeTableGroupsEachFlowWithTheSharedMocksAndItsWindow(t *testing.T) {
-	at := func(sec int) time.Time { return runnerT0.Add(time.Duration(sec) * time.Second) }
-	mocks := []*models.Mock{mockAt("mock-0", at(0)), mockAt("mock-1", at(10)), mockAt("mock-2", at(12)), mockAt("mock-3", at(20)), mockAt("mock-4", at(30))}
-	table := scopeTable(map[string][]models.MockEntry{
-		"orders/e2e.TestA":        {{Name: "mock-1"}},
-		"orders/e2e.TestA/create": {{Name: "mock-2"}},
-		"orders/e2e.TestB":        {{Name: "mock-3"}},
-		"orders/e2e.TestEmpty":    nil,
-	}, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-4"}}, mocks)
-
-	require.Equal(t, []string{"mock-1", "mock-2", "mock-0", "mock-4"}, table.Mappings["orders/e2e.TestA"])
-	require.Equal(t, table.Mappings["orders/e2e.TestA"], table.Mappings["orders/e2e.TestA/create"], "a subtest's scope serves its whole flow")
-	require.Equal(t, []string{"mock-3", "mock-0", "mock-4"}, table.Mappings["orders/e2e.TestB"])
-	require.Empty(t, table.Mappings["orders/e2e.TestEmpty"], "a flow with no mocks is not narrowed")
-	require.Equal(t, models.ScopeWindow{Start: at(10), End: at(12)}, table.Windows["orders/e2e.TestA"])
-	require.Equal(t, models.ScopeWindow{Start: at(20), End: at(20)}, table.Windows["orders/e2e.TestB"])
-	require.NotContains(t, table.Windows, "orders/e2e.TestEmpty")
-	require.True(t, table.FirstStart.Equal(at(10)))
-}
