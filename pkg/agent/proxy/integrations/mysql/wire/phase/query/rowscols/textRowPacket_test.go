@@ -8,6 +8,63 @@ import (
 	"go.uber.org/zap"
 )
 
+// TestDecodeTextRow_TruncatedPacket guards the bounds-check fix in
+// DecodeTextRow. Before the fix, a packet shorter than the 4-byte header,
+// or one that ran out of bytes mid-row, indexed past the end of data and
+// panicked the connection handler instead of returning a decode error -
+// exactly the "malformed or unexpected network data" panic described for
+// the MySQL parser boundary.
+func TestDecodeTextRow_TruncatedPacket(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+	columns := []*mysql.ColumnDefinition41{{Type: byte(mysql.FieldTypeVarString), Name: "id"}}
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty packet", data: []byte{}},
+		{name: "shorter than header", data: []byte{0x01, 0x02}},
+		{name: "header only, no row data", data: []byte{0x01, 0x00, 0x00, 0x01}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("DecodeTextRow panicked on %q: %v", tt.name, r)
+				}
+			}()
+			_, _, err := DecodeTextRow(ctx, logger, tt.data, columns)
+			if err == nil {
+				t.Fatalf("expected a decode error for %q, got nil", tt.name)
+			}
+		})
+	}
+}
+
+// TestDecodeTextRow_IncompleteLengthPrefix guards against a truncated
+// extended length-encoded-integer prefix (a lone 0xfc/0xfd/0xfe marker with
+// its follow-up bytes cut off). ReadLengthEncodedInteger reports that as
+// isNull=true, n=0 to signal "could not even read the length" - not a real
+// NULL, which is always the single byte 0xfb. Before the shared helper
+// treated n==0 as an error, ReadLengthEncodedString swallowed this case and
+// returned an empty value with no error, so the truncated row was accepted
+// instead of rejected.
+func TestDecodeTextRow_IncompleteLengthPrefix(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+	columns := []*mysql.ColumnDefinition41{{Type: byte(mysql.FieldTypeVarString), Name: "id"}}
+
+	// header(4) + a lone 0xfc extended-length marker with no follow-up bytes.
+	data := []byte{0x01, 0x00, 0x00, 0x01, 0xfc}
+
+	_, _, err := DecodeTextRow(ctx, logger, data, columns)
+	if err == nil {
+		t.Fatal("expected a decode error for a truncated extended length prefix, got nil")
+	}
+}
+
 // TestEncodeTextRow_FewerValuesThanColumns guards the bounds-check fix at
 // textRowPacket.go:60. Before the fix, a TextRow whose Values slice was
 // shorter than the column list panicked the agent goroutine with

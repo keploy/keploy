@@ -21,7 +21,11 @@ import (
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row
 
 func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mysql.ColumnDefinition41) (*mysql.BinaryRow, int, error) {
-
+	// A row cut short (misframed, or a capture hole) is an error, not a
+	// panic: a panic kills the recorder for the rest of its connection.
+	if len(data) < 5 {
+		return nil, 0, fmt.Errorf("binary row packet too short for its header and OK byte: %d bytes", len(data))
+	}
 	offset := 0
 	row := &mysql.BinaryRow{
 		Header: mysql.Header{
@@ -38,6 +42,9 @@ func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*m
 	offset++
 
 	nullBitmapLen := (len(columns) + 7 + 2) / 8
+	if len(data) < offset+nullBitmapLen {
+		return nil, offset, fmt.Errorf("binary row packet too short for its %d-byte null bitmap: %d bytes after the OK byte", nullBitmapLen, len(data)-offset)
+	}
 	nullBitmap := data[offset : offset+nullBitmapLen]
 	row.RowNullBuffer = nullBitmap
 
@@ -51,6 +58,14 @@ func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*m
 				Value: nil,
 			})
 			continue
+		}
+
+		// The bitmap says this column has a value, so a byte must remain.
+		// ParseBinaryDate/DateTime/Time read an empty slice as "nothing to
+		// parse" and return (nil, 0, nil): without this check a row cut off
+		// after its bitmap would be recorded with a NULL the server never sent.
+		if offset >= len(data) {
+			return nil, offset, fmt.Errorf("binary row has %d of its %d values", i, len(columns))
 		}
 
 		res, n, err := readBinaryValue(data[offset:], col)
@@ -112,6 +127,9 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 		return res, n, err
 
 	case mysql.FieldTypeTiny:
+		if len(data) < 1 {
+			return nil, 0, errors.New("malformed FieldTypeTiny value")
+		}
 		if isUnsigned {
 			res.value = uint8(data[0])
 			return res, 1, nil

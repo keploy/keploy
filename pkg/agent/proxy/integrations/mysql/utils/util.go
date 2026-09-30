@@ -386,9 +386,52 @@ func ParseBinaryDate(b []byte) (interface{}, int, error) {
 		// Non-NULL zero DATE (length byte present, payload length=0)
 		return ZeroDateString, 1, nil
 	}
+	// MYSQL_TYPE_DATE shares the DATETIME binary encoding, so its valid
+	// payload lengths are 0, 4, 7 and 11 - not just 4.
+	//
+	// A server-sent binary resultset row only ever carries 0 or 4
+	// (Protocol_binary::store_date), which is what makes "4" look sufficient.
+	// But this function also decodes bytes written by the CLIENT: it is called
+	// from preparedstmt/stmtExecutePacket.go for COM_STMT_EXECUTE parameters
+	// and from queryPacket.go for query attributes, and several mainstream
+	// drivers bind a DATE parameter using the 7-byte form:
+	//
+	//	MariaDB Connector/J 2.x  DateParameter.writeBinary          -> 7
+	//	MariaDB Connector/J 3.x  LocalDateCodec.encodeBinary        -> 7
+	//	                         (DateCodec, for java.sql.Date, writes 4)
+	//	MySQL Connector/J 5.1.x  storeDateTime413AndNewer (setDate) -> 7
+	//	MySQL Connector/J 8.0.x  storeDate, up to and incl. 8.0.22  -> 7
+	//	MySQL Connector/J 8.0.29+ StringValueEncoder.encodeAsBinary
+	//	                         (setObject(String, MysqlType.DATE)
+	//	                          -> writeDateTime)                 -> 7, or 11
+	//	                                              with microseconds
+	//
+	// The server accepts all of them: sql/sql_prepare.cc's MYSQL_TYPE_DATE
+	// case takes any len >= 4 and ignores the trailing bytes. Only the date
+	// part is read regardless of length, exactly as the server does, and
+	// returning int(length)+1 keeps the caller's offset aligned across the
+	// bytes that were skipped.
+	//
+	// Any other length is not trusted: the caller advances its offset by it,
+	// so a garbage length byte would misalign (or run past) every later
+	// column instead of failing here.
+	if length != 4 && length != 7 && length != 11 {
+		return nil, 0, fmt.Errorf("invalid DATE length %d (expected 0|4|7|11) - likely misaligned buffer", length)
+	}
+	if len(b) < 1+int(length) {
+		return nil, 0, fmt.Errorf("unexpected end of buffer while reading DATE value, len(b)=%d, expected at least %d", len(b), 1+int(length))
+	}
 	year := binary.LittleEndian.Uint16(b[1:3])
 	month := b[3]
 	day := b[4]
+	// Three accepted lengths widen the window for a garbage length byte to be
+	// trusted, so the fields are checked too (ParseBinaryDateTime guards the
+	// same way via validYMDHMS): 07ffff636363... would otherwise decode to
+	// "65535-99-99" and land in the mock. An all-zero Y/M/D is the zero date
+	// some drivers send with a non-zero length, so it stays valid.
+	if !(year == 0 && month == 0 && day == 0) && (month < 1 || month > 12 || day < 1 || day > 31) {
+		return nil, 0, fmt.Errorf("invalid DATE %04d-%02d-%02d (misaligned?)", year, month, day)
+	}
 	return fmt.Sprintf("%04d-%02d-%02d", year, month, day), int(length) + 1, nil
 }
 
@@ -461,6 +504,16 @@ func ParseBinaryTime(b []byte) (interface{}, int, error) {
 	if length == 0 {
 		// Non-NULL zero TIME
 		return ZeroTimeString, 1, nil
+	}
+	// TIME's valid payload lengths are 8 (no microseconds) and 12 (with
+	// them). Anything else is not trusted as the bytes-consumed count the
+	// caller advances its offset by, and a payload shorter than its length
+	// is an error, not an index past the end of b.
+	if length != 8 && length != 12 {
+		return nil, 0, fmt.Errorf("invalid TIME length %d (expected 0|8|12) - likely misaligned buffer", length)
+	}
+	if len(b) < 1+int(length) {
+		return nil, 0, fmt.Errorf("unexpected end of buffer while reading TIME value, len(b)=%d, expected at least %d", len(b), 1+int(length))
 	}
 	isNegative := b[1] == 1
 	days := binary.LittleEndian.Uint32(b[2:6])

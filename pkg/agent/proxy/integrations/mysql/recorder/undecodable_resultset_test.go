@@ -72,6 +72,23 @@ func binaryRowPayload(id int64, email *string) []byte {
 
 func str(s string) *string { return &s }
 
+// undecodableDateColumn replaces the email column in the DATE cases.
+var undecodableDateColumn = &mysql.ColumnDefinition41{Catalog: "def", Schema: "app", Table: "users", OrgTable: "users",
+	Name: "born", OrgName: "born", FixedLength: 0x0c, CharacterSet: 0x3f, ColumnLength: 10, Type: byte(mysql.FieldTypeDate)}
+
+// binaryDateRowPayload is a row of (id BIGINT, born DATE); a nil born leaves
+// its bytes out, though the null bitmap says it is there.
+func binaryDateRowPayload(id int64, born []byte) []byte {
+	p := []byte{0x00, 0x00} // OK header, null bitmap
+	p = binary.LittleEndian.AppendUint64(p, uint64(id))
+	return append(p, born...)
+}
+
+// dateValue is a DATE in the binary protocol: length 4, year, month, day.
+func dateValue(y uint16, m, d byte) []byte {
+	return append(binary.LittleEndian.AppendUint16([]byte{4}, y), m, d)
+}
+
 var (
 	eofPayload = []byte{0xfe, 0x00, 0x00, 0x02, 0x00}
 	// okEOFPayload is the OK packet that ends a result set under
@@ -178,6 +195,16 @@ func undecodableCases() []undecodableCase {
 	}
 	cutString := binaryRowPayload(2, str("b@example.com"))
 	cutString = cutString[:len(cutString)-4]
+	binDate := func(name string, valid bool, row []byte) undecodableCase {
+		return undecodableCase{name: "binary/" + name, op: "COM_STMT_EXECUTE", command: execute, parts: binaryRows, valid: valid,
+			reply: func(t *testing.T, deprecateEOF bool) [][]byte {
+				if row == nil {
+					row = binaryDateRowPayload(2, dateValue(1991, 2, 3))
+				}
+				return resultSet(deprecateEOF, [][]byte{col0(t), columnPayload(t, undecodableDateColumn)},
+					[][]byte{binaryDateRowPayload(1, dateValue(1990, 1, 2)), row, binaryDateRowPayload(3, dateValue(1992, 3, 4))})
+			}}
+	}
 
 	prepare := wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "SELECT id, email FROM users WHERE id > ?"...), 0)
 	prepareParts := func(m *models.Mock) int {
@@ -205,6 +232,18 @@ func undecodableCases() []undecodableCase {
 		// length-encoded string must start, read as an empty value before.
 		bin("row cut before its last value", false, col1, binaryRowPayload(2, nil)),
 		bin("row with a string value cut short", false, col1, cutString),
+		// A row that is only its OK byte sliced past the packet for its null
+		// bitmap, and the panic took the recorder down with it.
+		bin("row that is only its OK byte", false, col1, []byte{0x00}),
+		// A DATE value cut off after the null bitmap: the date parsers read an
+		// empty slice as "nothing to parse" and returned (nil, 0, nil), so the
+		// row was recorded with a NULL the server never sent.
+		binDate("DATE whole", true, nil),
+		binDate("row cut before its DATE value", false, binaryDateRowPayload(2, nil)),
+		// A DATE whose length byte is not a protocol value was trusted as the
+		// bytes it took, misaligning (or running past) the rest of the row.
+		binDate("DATE with a length that is not a protocol value", false,
+			binaryDateRowPayload(2, append([]byte{5}, dateValue(1991, 2, 3)[1:]...))),
 		prep("whole", true, col0, col1),
 		prep("parameter length prefix cut short", false, bad(truncatedPrefixColumn), col1),
 		prep("last column length prefix cut short", false, col0, bad(truncatedPrefixColumn)),
