@@ -2315,7 +2315,7 @@ func (c *CmdConfigurator) readMockSetName(cmd *cobra.Command) error {
 		utils.LogError(c.logger, err, "failed to get the name flag")
 		return errors.New("failed to get the name flag")
 	}
-	if name != "" {
+	if cmd.Flags().Changed("name") {
 		c.cfg.Mock.Name = name
 	}
 	if c.cfg.Mock.Name == "" {
