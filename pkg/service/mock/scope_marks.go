@@ -1,8 +1,8 @@
 package mock
 
 import (
+	"errors"
 	"fmt"
-	"path"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -31,7 +31,14 @@ func stepWindows(windows []models.ScopeWindow) []models.ScopeWindow {
 	return out
 }
 
-func repeatedScope(windows []models.ScopeWindow) error {
+var ErrRecordRefused = errors.New("recording refused")
+
+type refusal struct{ msg string }
+
+func (r refusal) Error() string        { return r.msg }
+func (r refusal) Is(target error) bool { return target == ErrRecordRefused }
+
+func repeatedScope(windows []models.ScopeWindow, existed bool) error {
 	runs := map[string]int{}
 	var order []string
 	for _, w := range windows {
@@ -48,15 +55,15 @@ func repeatedScope(windows []models.ScopeWindow) error {
 		if n < 2 {
 			continue
 		}
-		pkg, test := "", name
+		folder, test := "this run", name
 		if i := strings.LastIndexByte(name, '.'); i >= 0 {
-			pkg, test = name[:i], name[i+1:]
+			folder, test = name[:i], name[i+1:]
 		}
-		p := path.Base(pkg)
-		if pkg == "" {
-			pkg, p = "one package", "<p>"
+		last := "Nothing was changed: your previous recording is kept."
+		if !existed {
+			last = "Nothing was saved."
 		}
-		return fmt.Errorf("%s ran %d times in %s; test names must be unique within a folder (check -count, or package %s and %s_test both defining it)", test, n, pkg, p, p)
+		return refusal{fmt.Sprintf("Recording stopped: %s ran %d times in %s.\nEach test in a folder needs its own name. Rename one of them (or drop -count=%d), then run keploy mock record again.\n%s", test, n, folder, n, last)}
 	}
 	return nil
 }

@@ -275,8 +275,14 @@ func TestRecordRefusesATestThatRanTwice(t *testing.T) {
 	cfg.Path = t.TempDir()
 	dir := t.TempDir()
 	store := &countingStore{}
-	err := New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), dir, ""), store, nil, cfg).Record(context.Background())
-	require.EqualError(t, err, "TestA ran 2 times in orders/e2e; test names must be unique within a folder (check -count, or package e2e and e2e_test both defining it)")
+	core, logs := observer.New(zap.DebugLevel)
+	err := New(zap.New(core), instr, stubMockDB{}, mapdb.New(zap.NewNop(), dir, ""), store, nil, cfg).Record(context.Background())
+	want := "Recording stopped: TestA ran 2 times in orders/e2e.\nEach test in a folder needs its own name. Rename one of them (or drop -count=2), then run keploy mock record again.\nNothing was saved."
+	require.EqualError(t, err, want)
+	require.ErrorIs(t, err, ErrRecordRefused)
+	all := logs.All()
+	require.Equal(t, want, all[len(all)-1].Message, "the refusal is the last thing printed")
+	require.Equal(t, zap.ErrorLevel, all[len(all)-1].Level)
 	require.Zero(t, store.pushes)
 	_, statErr := os.Stat(filepath.Join(dir, "set", "mappings.yaml"))
 	require.True(t, os.IsNotExist(statErr), "no mapping is written")

@@ -174,21 +174,25 @@ func TestRepeatedScope(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		windows []models.ScopeWindow
+		existed bool
 		want    string
 	}{
-		{"one run each", flowMarks(), ""},
-		{"a test began twice", append(sequentialMarks(), mark("orders/e2e.TestA", 30*time.Millisecond, 40*time.Millisecond)),
-			"TestA ran 2 times in orders/e2e; test names must be unique within a folder (check -count, or package e2e and e2e_test both defining it)"},
-		{"the same subtest name under two tests is fine", []models.ScopeWindow{mark("p.TestA", 0, 1), mark("p.TestA/one", 0, 1), mark("p.TestB", 2, 3), mark("p.TestB/one", 2, 3)}, ""},
-		{"the same name in two packages is fine", []models.ScopeWindow{mark("a.TestX", 0, 1), mark("b.TestX", 2, 3)}, ""},
+		{"one run each", flowMarks(), true, ""},
+		{"a test began twice over a recording that existed", append(sequentialMarks(), mark("orders/e2e.TestA", 30*time.Millisecond, 40*time.Millisecond)), true,
+			"Recording stopped: TestA ran 2 times in orders/e2e.\nEach test in a folder needs its own name. Rename one of them (or drop -count=2), then run keploy mock record again.\nNothing was changed: your previous recording is kept."},
+		{"a test began three times in a new set", append(sequentialMarks(), mark("orders/e2e.TestA", 30*time.Millisecond, 40*time.Millisecond), mark("orders/e2e.TestA", 50*time.Millisecond, 60*time.Millisecond)), false,
+			"Recording stopped: TestA ran 3 times in orders/e2e.\nEach test in a folder needs its own name. Rename one of them (or drop -count=3), then run keploy mock record again.\nNothing was saved."},
+		{"the same subtest name under two tests is fine", []models.ScopeWindow{mark("p.TestA", 0, 1), mark("p.TestA/one", 0, 1), mark("p.TestB", 2, 3), mark("p.TestB/one", 2, 3)}, true, ""},
+		{"the same name in two packages is fine", []models.ScopeWindow{mark("a.TestX", 0, 1), mark("b.TestX", 2, 3)}, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := repeatedScope(tc.windows)
+			err := repeatedScope(tc.windows, tc.existed)
 			if tc.want == "" {
 				require.NoError(t, err)
 				return
 			}
 			require.EqualError(t, err, tc.want)
+			require.ErrorIs(t, err, ErrRecordRefused)
 		})
 	}
 }

@@ -118,7 +118,7 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 3. Overwrite the named set in place: drop the previous mocks so the
 	//    re-record is a clean rewrite, not an append.
-	restore := m.saveSet(name)
+	restore, existed := m.saveSet(name)
 	keep := false
 	defer func() { restore(keep) }()
 	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
@@ -282,9 +282,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	if m.mappingDB != nil {
 		windows = m.agentWindows(persistCtx)
 	}
-	if err := repeatedScope(windows); err != nil {
+	if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
-		utils.LogError(m.logger, err, "a test ran more than once")
+		m.logger.Error(err.Error())
 		return err
 	}
 	keep = true
@@ -358,9 +358,9 @@ func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
 	return windows
 }
 
-func (m *mockService) saveSet(name string) func(keep bool) {
+func (m *mockService) saveSet(name string) (func(keep bool), bool) {
 	if m.config.Path == "" {
-		return func(bool) {}
+		return func(bool) {}, true
 	}
 	set := filepath.Join(m.config.Path, name)
 	saved := filepath.Join(m.config.Path, "."+name+".previous")
@@ -388,7 +388,7 @@ func (m *mockService) saveSet(name string) func(keep bool) {
 				m.logger.Warn("could not put the previous recording back; it is kept at "+saved, zap.String("mock-set", name), zap.Error(mvErr))
 			}
 		}
-	}
+	}, !absent
 }
 
 // caseNames lists the test cases the set holds before a re-record.
