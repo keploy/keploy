@@ -133,7 +133,7 @@ type MappingDB interface {
 
 // CaseMapper is an optional MappingDB extension: Record writes which test cases each flow produced through it.
 type CaseMapper interface {
-	UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry) error
+	UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, skipped *[]string) error
 }
 
 // IncomingReader is an optional Instrumentation extension: the agent's stream of the app's captured incoming requests.

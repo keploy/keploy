@@ -153,3 +153,45 @@ func TestMappedTestCaseKeepsMocksBesideCases(t *testing.T) {
 		})
 	}
 }
+
+func TestMappingSkippedRoundTrip(t *testing.T) {
+	none := []string{}
+	some := []string{"orders/e2e.TestSkipped"}
+	for _, tc := range []struct {
+		name    string
+		skipped *[]string
+		want    string
+	}{
+		{"unknown", nil, ""},
+		{"none", &none, "skipped: []"},
+		{"some", &some, "skipped:\n    - orders/e2e.TestSkipped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := Mapping{Version: "api.keploy.io/v1beta1", Kind: MappingKind, TestSetID: "set", Skipped: tc.skipped}
+			y, err := yaml.Marshal(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" && strings.Contains(string(y), "skipped") || tc.want != "" && !strings.Contains(string(y), tc.want) {
+				t.Fatalf("wrote:\n%s", y)
+			}
+			var fromYAML Mapping
+			if err := yaml.Unmarshal(y, &fromYAML); err != nil {
+				t.Fatal(err)
+			}
+			j, err := json.Marshal(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fromJSON Mapping
+			if err := json.Unmarshal(j, &fromJSON); err != nil {
+				t.Fatal(err)
+			}
+			for _, got := range []Mapping{fromYAML, fromJSON} {
+				if !reflect.DeepEqual(tc.skipped, got.Skipped) {
+					t.Fatalf("skipped came back as %v, want %v", got.Skipped, tc.skipped)
+				}
+			}
+		})
+	}
+}

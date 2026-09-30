@@ -70,6 +70,7 @@ type Mapping struct {
 	// omitempty so an existing mappings.yaml round-trips byte-identically until a
 	// startup mock is actually recorded; every older reader ignores the key.
 	Startup []MockEntry `json:"startup,omitempty" yaml:"startup,omitempty" bson:"startup,omitempty"`
+	Skipped *[]string   `json:"skipped,omitempty" yaml:"skipped,omitempty" bson:"skipped,omitempty"`
 }
 
 // StartupMockNames returns the names of the test-set-scoped startup mocks. Callers

@@ -3,6 +3,7 @@ package models
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"io"
 	"time"
 )
 
@@ -430,6 +431,8 @@ type SetupOptions struct {
 type RunOptions struct {
 	//IgnoreErrors bool
 	AppCommand string // command to run the application
+	// StdoutObserver also receives the command's stdout while it runs, when set.
+	StdoutObserver io.Writer
 }
 
 //For test bench
