@@ -144,6 +144,17 @@ type RecordedWindowsSeeder interface {
 	SeedRecordedWindows(ws []models.TestWindow)
 }
 
+// CarryOverPlanner is the optional extension implemented by proxies with a
+// carry-over tier (models.RegisterCarryOver). For the window that starts at
+// start it names the recorded-time range of registered per-test mocks the agent
+// loads from its on-disk store beside the window's own mocks and passes in the
+// filtered slice of the same SetMocksWithWindow call. ok is false when there is
+// nothing to load. A proxy without it gets no lookahead load, the pre-existing
+// behaviour.
+type CarryOverPlanner interface {
+	CarryOverLoadRange(start time.Time) (from, to time.Time, ok bool)
+}
+
 type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.

@@ -440,23 +440,57 @@ var sessionReusableHooks mockPredicates
 // are lock-free (DeriveLifetime runs once per mock on every ingest path);
 // registration copies the map, which is fine because it happens at init.
 type mockPredicates struct {
-	mu    sync.Mutex // serialises writers only
-	byKnd atomic.Pointer[map[Kind][]func(*Mock) bool]
+	mu     sync.Mutex // serialises writers only
+	nextID uint64
+	byKnd  atomic.Pointer[map[Kind][]mockPredicate]
 }
 
-func (r *mockPredicates) add(kind Kind, fn func(*Mock) bool) {
+type mockPredicate struct {
+	id uint64
+	fn func(*Mock) bool
+}
+
+// add registers fn for kind and returns a function that removes exactly this
+// registration.
+func (r *mockPredicates) add(kind Kind, fn func(*Mock) bool) (remove func()) {
 	if fn == nil {
-		return
+		return func() {}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	next := make(map[Kind][]func(*Mock) bool)
+	r.nextID++
+	id := r.nextID
+	r.storeLocked(func(next map[Kind][]mockPredicate) {
+		next[kind] = append(next[kind], mockPredicate{id: id, fn: fn})
+	})
+	return func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.storeLocked(func(next map[Kind][]mockPredicate) {
+			kept := next[kind][:0]
+			for _, p := range next[kind] {
+				if p.id != id {
+					kept = append(kept, p)
+				}
+			}
+			if len(kept) == 0 {
+				delete(next, kind)
+				return
+			}
+			next[kind] = kept
+		})
+	}
+}
+
+// storeLocked publishes a modified copy of the map. Caller holds mu.
+func (r *mockPredicates) storeLocked(edit func(map[Kind][]mockPredicate)) {
+	next := make(map[Kind][]mockPredicate)
 	if cur := r.byKnd.Load(); cur != nil {
-		for k, fns := range *cur {
-			next[k] = append([]func(*Mock) bool(nil), fns...)
+		for k, ps := range *cur {
+			next[k] = append([]mockPredicate(nil), ps...)
 		}
 	}
-	next[kind] = append(next[kind], fn)
+	edit(next)
 	r.byKnd.Store(&next)
 }
 
@@ -469,8 +503,8 @@ func (r *mockPredicates) match(m *Mock) bool {
 	if cur == nil {
 		return false
 	}
-	for _, fn := range (*cur)[m.Kind] {
-		if fn(m) {
+	for _, p := range (*cur)[m.Kind] {
+		if p.fn(m) {
 			return true
 		}
 	}

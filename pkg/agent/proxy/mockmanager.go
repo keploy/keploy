@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,10 @@ import (
 //	                          never take hitMu while holding treesMu)
 //	sigMu                    (window-change signal; a LEAF — nothing is
 //	                          taken under it, and it may be taken under any)
+//	swapMu  →  treesMu, carry.mu
+//	                         (fileCarryOver, under SetMocksWithWindow;
+//	                          carry.mu is a LEAF, also taken bare by
+//	                          DeleteFilteredMock and the carry-over readers)
 //
 // Any new code path that acquires more than one of these MUST take them
 // in the declared order. Readers of {mock pool, test window} as an
@@ -162,7 +167,8 @@ type MockManager struct {
 
 	// recordedWindows is the current set's recorded test windows — every test
 	// of the set, selected or not — as seeded by SeedRecordedWindows. nil when
-	// the replayer sent none. It changes at the same moments as the startup
+	// the replayer sent none or no kind registered a carry-over predicate
+	// (see SeedRecordedWindows). It changes at the same moments as the startup
 	// cutoff: parked in windowsSeeded until the set's staging call installs it.
 	// Stored under swapMu, read lock-free (RecordedWindows).
 	recordedWindows atomic.Pointer[models.WindowSchedule]
@@ -180,6 +186,18 @@ type MockManager struct {
 	// an agent replacement. State a consumer builds from one staging snapshot
 	// is valid for one epoch. Written under swapMu, read lock-free.
 	stagingEpoch atomic.Uint64
+
+	// carry is the carry-over tier: per-test mocks of RegisterCarryOver kinds
+	// that stay reachable outside their own window (carryover.go). Empty, and
+	// never touched, while no kind is registered. Reset at every staging call
+	// and when a pass goes back to an earlier window.
+	carry *carryOverPool
+	// carryLastStart is the window start of the last SetMocksWithWindow that
+	// filed the carry-over tier, and carryLoadedTo the recorded time up to
+	// which the agent has loaded registered mocks ahead of their window in this
+	// pass (CarryOverLoadRange). Under swapMu.
+	carryLastStart time.Time
+	carryLoadedTo  time.Time
 
 	// swapMu guards the {filtered, unfiltered, window} swap performed by
 	// SetMocksWithWindow. Writers Lock(); readers via GetFilteredMocksInWindow
@@ -323,6 +341,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		sweeperStop:         make(chan struct{}),
 		hitIdx:              make(map[string]*models.Mock),
 		windowSig:           make(chan struct{}),
+		carry:               newCarryOverPool(),
 		logger:              logger,
 	}
 	// Start the per-connection idle sweeper. Reclaims
@@ -876,6 +895,10 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		// Every staging call starts a new epoch, boundary or not: whatever a
 		// consumer built from the previous staging snapshot is stale now.
 		m.stagingEpoch.Add(1)
+		// The carry-over tier and its lookahead bookkeeping belong to that
+		// snapshot too.
+		m.carry.reset()
+		m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
 		// Staging is the set boundary as far as routing is concerned: this is
 		// where the previous set's window bits and startup-init cutoff go, so
 		// they are replaced in the same call that replaces the trees rather
@@ -940,6 +963,16 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// only in-window mocks.
 	filteredForTree := filtered
 	var droppedInvalid, droppedOutOfWindow uint64
+	// carryIn collects the per-test mocks of RegisterCarryOver kinds that this
+	// window does not hold (loaded ahead of their window, or mapped to this
+	// test from a gap); they are offered to the carry-over tier below instead
+	// of being dropped. Nil while no kind is registered.
+	// Carry-over also needs the recorded windows the replayer seeds at staging
+	// (SeedRecordedWindows): without them there is no release rule to hold a
+	// mock by, and a closed window's mocks are dropped as they always were.
+	carryOn := models.CarryOverRegistered() && !isInitialStaging && !start.IsZero() && !end.IsZero() &&
+		m.recordedWindows.Load().Len() > 0
+	var carryIn []*models.Mock
 	// Initial-staging skips the per-test partition entirely — everything
 	// was already routed into startupInit above.
 	if isInitialStaging {
@@ -1009,6 +1042,10 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, st
 			// whole machinery exists to protect against.
 			if !firstStart.IsZero() && req.Before(firstStart) {
 				startupInit = append(startupInit, mock)
+				continue
+			}
+			if carryOn && models.IsCarryOver(mock) {
+				carryIn = append(carryIn, mock)
 				continue
 			}
 			droppedOutOfWindow++
@@ -1091,6 +1128,7 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		outgoingKinds[k] = struct{}{}
 	}
 	oldStartup := m.startup
+	oldPerTest := m.filtered
 	m.treesMu.RUnlock()
 	if oldStartup != nil {
 		oldStartup.rangeValues(func(v interface{}) bool {
@@ -1142,6 +1180,11 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	m.setUnFilteredMocks(unfilteredForTree, false)
 
 	touchedAll := map[models.Kind]struct{}{}
+	if carryOn {
+		for k := range m.fileCarryOver(oldPerTest, carryIn, filteredForTree, start) {
+			touchedAll[k] = struct{}{}
+		}
+	}
 	for _, mk := range filteredForTree {
 		if mk != nil {
 			touchedAll[mk.Kind] = struct{}{}
@@ -1887,7 +1930,17 @@ func (m *MockManager) HasMocksByKind(kind models.Kind, match func(*models.Mock) 
 	}
 
 	// Per-kind trees already hold only this kind; the startup tree is mixed.
-	return anyMatch(unf, false) || anyMatch(flt, false) || anyMatch(startup, true)
+	if anyMatch(unf, false) || anyMatch(flt, false) || anyMatch(startup, true) {
+		return true
+	}
+	if models.CarryOverKind(kind) {
+		for _, mk := range m.carry.snapshot(kind) {
+			if match(mk) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
@@ -2237,6 +2290,33 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	if m.DeleteStartupMock(mock) {
 		return true
 	}
+	// Last, the carry-over tier (RegisterCarryOver kinds only): a mock
+	// reachable outside its own window, consumed by whichever test the
+	// application happened to publish it in. Deleted, like any consumed
+	// per-test mock, so the agent's next load filters it out; CarryOver, so
+	// the replay attributes it to its own window.
+	if models.CarryOverKind(mock.Kind) {
+		if mk, ok := m.carry.take(mock); ok {
+			if err := m.flagMockAsUsed(models.MockState{
+				Name:             mk.Name,
+				Kind:             mk.Kind,
+				Usage:            models.Deleted,
+				IsFiltered:       mk.TestModeInfo.IsFiltered,
+				SortOrder:        mk.TestModeInfo.SortOrder,
+				Type:             mk.Spec.Metadata["type"],
+				Lifetime:         mk.TestModeInfo.Lifetime,
+				ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
+				ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
+				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+				CarryOver:        true,
+			}); err != nil {
+				m.logger.Error("failed to flag carry-over mock as used", zap.Error(err))
+			}
+			m.bumpRevisionKind(mk.Kind)
+			m.bumpRevisionAll()
+			return true
+		}
+	}
 	return false
 }
 
@@ -2359,6 +2439,13 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
+			// A registered kind's startup-band mock first consumed after a
+			// test fired (a startup push to a consumer created lazily, or
+			// held back by its permits) is consumed outside its own window,
+			// as a late push through MarkMockAsUsed is: the replay keeps it
+			// whatever the running test's verdict and maps it to the
+			// startup section.
+			CarryOver: m.consumedOutOfWindow(*mk),
 		}); err != nil {
 			m.logger.Error("failed to flag startup mock as used", zap.Error(err))
 		}
@@ -2428,8 +2515,28 @@ func (m *MockManager) SeedStartupCutoff(start time.Time) {
 //
 // Consumers read it through RecordedWindows, to release traffic that the test
 // windows do not pace by themselves at the recorded window it belongs to.
+//
+// It is kept only while a kind has registered a carry-over predicate
+// (models.CarryOverRegistered): every reader is the carry-over tier or the
+// parser of a kind that paces by the windows, and such a kind registers one.
+// With none registered the schedule (about 92 bytes a test, for the whole set)
+// would be read by nobody, so it is not built, the staging call's windows are
+// garbage once the call returns, and no schedule is left installed or parked.
 func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 	if len(ws) == 0 {
+		return
+	}
+	if !models.CarryOverRegistered() {
+		m.swapMu.Lock()
+		m.windowsSeeded = nil
+		if !m.boundaryPending {
+			m.recordedWindows.Store(nil)
+		}
+		m.swapMu.Unlock()
+		if m.logger != nil {
+			m.logger.Debug("recorded test windows not kept: no kind registered a carry-over predicate",
+				zap.Int("windows", len(ws)))
+		}
 		return
 	}
 	s := models.NewWindowSchedule(ws)
@@ -2444,8 +2551,8 @@ func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 
 // RecordedWindows returns the current set's recorded test windows, or nil when
 // the replayer sent none (mock replay, an older CLI, SetFilteredMocks-only
-// callers): consumers then treat everything as released, as before. The
-// returned schedule is immutable.
+// callers) or no kind registered a carry-over predicate: consumers then treat
+// everything as released, as before. The returned schedule is immutable.
 func (m *MockManager) RecordedWindows() *models.WindowSchedule {
 	return m.recordedWindows.Load()
 }
@@ -2521,6 +2628,9 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		// (e.g. Pulsar) that consume via MarkMockAsUsed rather than the
 		// Delete*/Update* paths, so UpdateMocks can persist it back to disk.
 		ReqBodyNoise: reqBodyNoiseOf(mock.Spec),
+		// A registered kind's per-test mock consumed outside the current
+		// window (a server push delivered late) belongs to its own window.
+		CarryOver: m.consumedOutOfWindow(mock),
 	}); err != nil {
 		if m.logger != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
@@ -2777,4 +2887,193 @@ func (m *MockManager) GetMySQLCounts() (total, config, data int) {
 		return true
 	})
 	return
+}
+
+// fileCarryOver updates the carry-over tier for the window that starts at
+// start, right after the per-test and session trees were swapped. Caller holds
+// swapMu. Returns the kinds whose carry-over contents changed.
+//
+//   - A pass that goes back to an earlier window (a retry cycle, the deferred
+//     streaming tests) starts the tier over: CarryOverLoadRange has told the
+//     agent to reload from the set's start, and the reload is filtered by what
+//     was consumed.
+//   - The registered mocks the closing window's per-test tree still holds
+//     (unconsumed) and those the agent passed outside this window (carryIn)
+//     are offered, if reachable from this window: the release window of their
+//     recorded time minus models.CarryOverLookahead has started.
+//   - A mock the new per-test tree holds is served from there, so it leaves
+//     (or never enters) the tier.
+//   - A mock the session tree also holds (lax mode promotes out-of-window
+//     per-test mocks there) is reachable already and is not duplicated.
+func (m *MockManager) fileCarryOver(oldPerTest *TreeDb, carryIn, newPerTest []*models.Mock, start time.Time) map[models.Kind]struct{} {
+	changed := map[models.Kind]struct{}{}
+	if !m.carryLastStart.IsZero() && start.Before(m.carryLastStart) {
+		for _, mk := range m.carry.snapshot("") {
+			changed[mk.Kind] = struct{}{}
+		}
+		m.carry.reset()
+		m.carryLoadedTo = time.Time{}
+	}
+	sched := m.recordedWindows.Load()
+	defer func() {
+		m.carryLastStart = start
+		if sched.Len() > 0 {
+			m.carryLoadedTo = carryLoadHorizon(sched, start)
+		}
+	}()
+
+	var candidates []*models.Mock
+	offer := func(mk *models.Mock) {
+		if mk == nil || !models.IsCarryOver(mk) {
+			return
+		}
+		if carryReachable(sched, mk.Spec.ReqTimestampMock, start) {
+			candidates = append(candidates, mk)
+		}
+	}
+	if oldPerTest != nil {
+		oldPerTest.rangeValues(func(v interface{}) bool {
+			if mk, ok := v.(*models.Mock); ok {
+				offer(mk)
+			}
+			return true
+		})
+	}
+	for _, mk := range carryIn {
+		offer(mk)
+	}
+
+	inTree := map[carryKey]struct{}{}
+	for _, mk := range newPerTest {
+		if mk != nil && models.IsCarryOver(mk) {
+			inTree[carryKeyOf(mk)] = struct{}{}
+		}
+	}
+	if len(candidates) > 0 {
+		// Lax mode: skip what the session tree already serves.
+		kinds := map[models.Kind]struct{}{}
+		for _, mk := range candidates {
+			kinds[mk.Kind] = struct{}{}
+		}
+		m.treesMu.RLock()
+		for k := range kinds {
+			if tree := m.unfilteredByKind[k]; tree != nil {
+				tree.rangeValues(func(v interface{}) bool {
+					if mk, ok := v.(*models.Mock); ok && mk != nil && mk.TestModeInfo.Lifetime == models.LifetimePerTest {
+						inTree[carryKeyOf(mk)] = struct{}{}
+					}
+					return true
+				})
+			}
+		}
+		m.treesMu.RUnlock()
+	}
+	if len(candidates) == 0 && len(inTree) == 0 {
+		return changed
+	}
+
+	res := m.carry.file(candidates, inTree)
+	for k := range res.kinds {
+		changed[k] = struct{}{}
+	}
+	if res.leftOut > 0 && m.logger != nil {
+		fields := []zap.Field{
+			zap.Int("leftOut", res.leftOut),
+			zap.Int("leftOutThisSet", res.leftOutTotal),
+			zap.Int("held", res.heldCount),
+			zap.Int("heldBytes", res.heldBytes),
+			zap.Int("capBytes", carryOverCapBytes),
+			zap.Time("windowStart", start),
+		}
+		if res.firstCapHit {
+			m.logger.Warn("carry-over tier is full: mocks the application may publish outside their own test window "+
+				"are no longer kept past that window, in recorded order from here on; a test that consumes one of "+
+				"them late will miss it. The held mocks are ones earlier tests left unconsumed", fields...)
+		} else {
+			m.logger.Debug("carry-over tier still full; more mocks left out", fields...)
+		}
+	}
+	return changed
+}
+
+// carryLoadHorizon is the latest recorded time a registered mock can have and
+// still be reachable while the window that starts at start is current.
+func carryLoadHorizon(sched *models.WindowSchedule, start time.Time) time.Time {
+	h, bounded := sched.ReleaseHorizon(start)
+	if !bounded {
+		return maxRecordedTime
+	}
+	return h.Add(models.CarryOverLookahead)
+}
+
+// maxRecordedTime stands for "no upper bound" in a load range; its UnixNano is
+// representable.
+var maxRecordedTime = time.Unix(0, math.MaxInt64)
+
+// CarryOverLoadRange tells the agent which recorded-time range of registered
+// (RegisterCarryOver) per-test mocks to load, beside the window's own mocks,
+// for the window that starts at start: from where the previous window's load
+// ended (or from the set's start, on the first window of a pass or when a
+// pass goes back to an earlier window) up to the latest recorded time this
+// window makes reachable. The loaded mocks are passed to SetMocksWithWindow
+// in the filtered slice like any other; this manager files the out-of-window
+// ones into the carry-over tier and advances the range.
+//
+// ok is false when there is nothing to load: no registered kind, no recorded
+// windows (the replayer did not send them), a staging call, or an empty range.
+func (m *MockManager) CarryOverLoadRange(start time.Time) (from, to time.Time, ok bool) {
+	if !models.CarryOverRegistered() || start.IsZero() || start.Equal(models.BaseTime) {
+		return time.Time{}, time.Time{}, false
+	}
+	sched := m.recordedWindows.Load()
+	if sched.Len() == 0 {
+		return time.Time{}, time.Time{}, false
+	}
+	m.swapMu.RLock()
+	cutoff, last, loaded := m.firstWindowStart, m.carryLastStart, m.carryLoadedTo
+	m.swapMu.RUnlock()
+	switch {
+	case !loaded.IsZero() && !start.Before(last):
+		from = loaded
+	case !cutoff.IsZero():
+		from = cutoff
+	default:
+		from = sched.Window(0).Start
+	}
+	to = carryLoadHorizon(sched, start)
+	if to.Before(from) {
+		return time.Time{}, time.Time{}, false
+	}
+	return from, to, true
+}
+
+// GetCarryOverMocks returns the carry-over tier (see RegisterCarryOver) in
+// recorded order: registered per-test mocks reachable outside their own
+// window. A parser serves them after the running test's own mocks and consumes
+// them through DeleteFilteredMock. Empty while no kind is registered.
+func (m *MockManager) GetCarryOverMocks() ([]*models.Mock, error) {
+	return m.carry.snapshot(""), nil
+}
+
+// GetCarryOverMocksByKind is GetCarryOverMocks for one kind.
+func (m *MockManager) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return m.carry.snapshot(kind), nil
+}
+
+// consumedOutOfWindow reports whether a per-test mock of a RegisterCarryOver
+// kind is being consumed while a window that does not contain it is current —
+// a server push delivered after its window, consumed through MarkMockAsUsed.
+func (m *MockManager) consumedOutOfWindow(mock models.Mock) bool {
+	if mock.TestModeInfo.Lifetime != models.LifetimePerTest || !models.CarryOverKind(mock.Kind) {
+		return false
+	}
+	req := mock.Spec.ReqTimestampMock
+	if req.IsZero() {
+		return false
+	}
+	start, end := m.CurrentTestWindow()
+	if start.IsZero() || end.IsZero() {
+		return false
+	}
+	return req.Before(start) || req.After(end)
 }

@@ -3838,6 +3838,16 @@ func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
 	}
 }
 
+// CarryOverLoadRange reports which recorded-time range of carry-over mocks the
+// agent should load beside the window that starts at start. Satisfies the
+// agent's optional CarryOverPlanner extension interface.
+func (p *Proxy) CarryOverLoadRange(start time.Time) (time.Time, time.Time, bool) {
+	if m := p.getMockManager(); m != nil {
+		return m.CarryOverLoadRange(start)
+	}
+	return time.Time{}, time.Time{}, false
+}
+
 // GetConsumedMocks returns the consumed filtered mocks.
 func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
 	m := p.getMockManager()

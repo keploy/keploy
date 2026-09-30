@@ -155,6 +155,21 @@ func (s *scopedMockDb) WindowChanged() <-chan struct{} {
 	return nil
 }
 
+// The carry-over tier is a read tier like the others, so it goes through keep().
+func (s *scopedMockDb) GetCarryOverMocks() ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {
+		return s.keep(r.GetCarryOverMocks())
+	}
+	return nil, nil
+}
+
+func (s *scopedMockDb) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {
+		return s.keep(r.GetCarryOverMocksByKind(kind))
+	}
+	return nil, nil
+}
+
 func (s *scopedMockDb) StagingEpoch() uint64 {
 	if p, ok := s.MockMemDb.(integrations.WindowPacer); ok {
 		return p.StagingEpoch()

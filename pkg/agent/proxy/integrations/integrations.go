@@ -388,6 +388,11 @@ type MockConsumer interface {
 //
 // The schedule is immutable; it is replaced (never mutated) at each set's
 // staging call, which also changes WindowPacer.StagingEpoch.
+//
+// The agent keeps the windows only while some kind has registered a carry-over
+// predicate (models.RegisterCarryOver); otherwise RecordedWindows is nil. A
+// parser that paces by them registers its kind, as the traffic it paces is
+// what carry-over exists for.
 type RecordedWindowsReader interface {
 	RecordedWindows() *models.WindowSchedule
 }
@@ -410,6 +415,20 @@ type RecordedWindowsReader interface {
 type WindowPacer interface {
 	WindowChanged() <-chan struct{}
 	StagingEpoch() uint64
+}
+
+// CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it) for a parser whose kind registered a
+// carry-over predicate (models.RegisterCarryOver). It returns, in recorded
+// order, the registered per-test mocks that are reachable outside their own
+// test window: loaded up to models.CarryOverLookahead ahead of their release
+// window, and kept after their window closes until consumed. Serve them after
+// the running test's own mocks (GetPerTestMocksInWindow), and consume them
+// through DeleteFilteredMock, which falls back per-test, then startup, then
+// carry-over, and reports a carry-over consume with MockState.CarryOver.
+type CarryOverReader interface {
+	GetCarryOverMocks() ([]*models.Mock, error)
+	GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error)
 }
 
 // WindowAware is the test-window facet of MockMemDb. Parsers that
