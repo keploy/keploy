@@ -979,21 +979,11 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 
 	var loaded []*models.Mock
 	var err error
-	var mode string
-	switch {
-	case params.UseMappingBased && len(params.MockMapping) > 0:
-		mode = "mapping"
+	mode := perTestLoadMode(params)
+	switch mode {
+	case loadModeMapping:
 		loaded, err = disk.LoadByNames(params.MockMapping)
-	// Gate on the CALLER's flag, not the agent's own config. The two are
-	// independent: params.StrictMockWindow is what the replayer resolved for
-	// this run and is what :1047 below already uses, while a.config is the
-	// agent process's default. When they disagree, this switch would pick the
-	// windowed disk load while the filter that consumes its output ran lax (or
-	// the reverse) — the residency decision and the filtering decision have to
-	// come from one source. IsStrictMockWindow folds in the env override, so
-	// KEPLOY_STRICT_MOCK_WINDOW still opts out either way.
-	case pkg.IsStrictMockWindow(params.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
-		mode = "strict-window"
+	case loadModeStrictWindow:
 		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
 		if err == nil && !firstWindowStart.IsZero() {
 			var startup []*models.Mock
@@ -1003,7 +993,6 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 			}
 		}
 	default:
-		mode = "lax-all"
 		loaded, err = disk.LoadAll()
 	}
 	if err != nil {
@@ -1014,6 +1003,91 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 		zap.Int("loadedFromDisk", len(loaded)),
 		zap.Int("residentIneligible", len(resident)))
 	return dedupByName(resident, loaded), nil
+}
+
+const (
+	loadModeMapping      = "mapping"
+	loadModeStrictWindow = "strict-window"
+	loadModeLaxAll       = "lax-all"
+)
+
+// perTestLoadMode is which per-test mocks loadPerTestMocks reads from disk for
+// this call: mapping -> named mocks; strict -> window + startup band; lax -> all.
+//
+// Gate on the CALLER's flag, not the agent's own config. The two are
+// independent: params.StrictMockWindow is what the replayer resolved for this
+// run and is what the filter in UpdateMockParams uses, while a.config is the
+// agent process's default. When they disagree, the windowed disk load would be
+// picked while the filter that consumes its output ran lax (or the reverse) —
+// the residency decision and the filtering decision have to come from one
+// source. IsStrictMockWindow folds in the env override, so
+// KEPLOY_STRICT_MOCK_WINDOW still opts out either way.
+func perTestLoadMode(params models.MockFilterParams) string {
+	switch {
+	case params.UseMappingBased && len(params.MockMapping) > 0:
+		return loadModeMapping
+	case pkg.IsStrictMockWindow(params.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
+		return loadModeStrictWindow
+	}
+	return loadModeLaxAll
+}
+
+// loadCarryOverLookahead loads the per-test mocks of RegisterCarryOver kinds
+// that the proxy's carry-over tier needs for this window beyond the window's
+// own mocks: the range CarryOverLoadRange names, which starts where the previous
+// window's load ended and reaches models.CarryOverLookahead past what this
+// window releases. They go to the proxy in the filtered slice, and the manager
+// files the out-of-window ones into the carry-over tier.
+//
+// Only for the windowed disk loads (strict-window, mapping). The lax load
+// already holds every mock, and its filter makes the out-of-window ones session
+// mocks; nothing loads when no kind registered a carry-over predicate, the
+// proxy has no planner, or there is no disk store.
+func (a *Agent) loadCarryOverLookahead(disk *proxyPkg.DiskMocks, params models.MockFilterParams) ([]*models.Mock, error) {
+	if disk == nil || !models.CarryOverRegistered() || perTestLoadMode(params) == loadModeLaxAll {
+		return nil, nil
+	}
+	planner, ok := a.Proxy.(coreAgent.CarryOverPlanner)
+	if !ok {
+		return nil, nil
+	}
+	from, to, ok := planner.CarryOverLoadRange(params.AfterTime)
+	if !ok {
+		return nil, nil
+	}
+	carry, err := disk.LoadCarryOver(from, to)
+	if err != nil {
+		return nil, err
+	}
+	a.logger.Debug("agent mock residency: loaded carry-over mocks ahead of their window",
+		zap.Time("from", from), zap.Time("to", to), zap.Int("count", len(carry)))
+	return carry, nil
+}
+
+// appendCarryOver adds the lookahead mocks the filtered slice does not hold
+// already (by name), marked per-test like the rest of it.
+func appendCarryOver(filtered, carry []*models.Mock) []*models.Mock {
+	if len(carry) == 0 {
+		return filtered
+	}
+	have := make(map[string]struct{}, len(filtered))
+	for _, m := range filtered {
+		if m != nil {
+			have[m.Name] = struct{}{}
+		}
+	}
+	for _, m := range carry {
+		if m == nil {
+			continue
+		}
+		if _, dup := have[m.Name]; dup {
+			continue
+		}
+		have[m.Name] = struct{}{}
+		m.TestModeInfo.IsFiltered = true
+		filtered = append(filtered, m)
+	}
+	return filtered
 }
 
 // dedupByName concatenates two slices, keeping the first occurrence per name
@@ -1051,6 +1125,14 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	if !params.FirstRecordedTestStart.IsZero() {
 		if seeder, ok := a.Proxy.(coreAgent.StartupCutoffSeeder); ok {
 			seeder.SeedStartupCutoff(params.FirstRecordedTestStart)
+		}
+	}
+	// Same moment, same optional-capability style: the recorded window of every
+	// test of the set, which lets the proxy release traffic the test windows do
+	// not pace by themselves (server push) at the window it belongs to.
+	if len(params.RecordedWindows) > 0 {
+		if seeder, ok := a.Proxy.(coreAgent.RecordedWindowsSeeder); ok {
+			seeder.SeedRecordedWindows(params.RecordedWindows)
 		}
 	}
 
@@ -1147,6 +1229,11 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
 		return err
 	}
+	carryOver, err := a.loadCarryOverLookahead(disk, params)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to load the carry-over mocks for this test from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
+		return err
+	}
 
 	a.logger.Debug("Original mocks before filtering",
 		zap.Int("originalFiltered", len(originalFiltered)),
@@ -1218,6 +1305,14 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		zap.Int("unfilteredMocks", len(unfilteredMocks)),
 		zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
 		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
+
+	// The carry-over lookahead bypasses the filter on purpose: on a windowed
+	// proxy the filter runs lax and would make these session mocks, reachable in
+	// every window and never consumed out of the manager's carry-over tier.
+	// They are per-test mocks outside this window, which is exactly what
+	// SetMocksWithWindow files into that tier. filterOutDeleted below still
+	// drops the ones already consumed.
+	filteredMocks = appendCarryOver(filteredMocks, carryOver)
 
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.AgentOwnsConsumed {

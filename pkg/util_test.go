@@ -993,6 +993,83 @@ func TestToHTTPHeader_AcceptListValue_FoldedSingleHeader(t *testing.T) {
 	assert.Equal(t, "trace-id=abc,user-key=def,env=test", httpHeader["Baggage"][0])
 }
 
+// The wire lines of a recorded header, round-tripped: what ToYamlHTTPHeader and
+// ToYamlHTTPHeaderLineLengths store, ToWireHTTPHeader sends back out, and only
+// what they stored. A tenant header sent twice goes out twice, not folded; one
+// Accept line with commas in it stays one line (the dict(**headers) fix above).
+func TestToWireHTTPHeaderSendsTheRecordedLines(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wire http.Header
+	}{
+		{"a header repeated on two lines", http.Header{"X_tenant": {"acme", "acme"}}},
+		{"one line carrying commas", http.Header{"Accept": {"a, b"}}},
+		{"repeated lines carrying commas", http.Header{"Cookie": {"a=1,2", "b=3,,", ",c"}}},
+		{"an empty line among them", http.Header{"X-Empty": {"", "x", ""}}},
+		{"both together", http.Header{"X_tenant": {"acme", "acme"}, "Accept": {"a, b"}, "Host": {"h"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			header := ToYamlHTTPHeader(tc.wire)
+			lengths := ToYamlHTTPHeaderLineLengths(tc.wire)
+			for name, lines := range tc.wire {
+				if _, stored := lengths[name]; stored != (len(lines) > 1) {
+					t.Errorf("%s on %d line(s): lengths stored = %v", name, len(lines), stored)
+				}
+			}
+			assert.Equal(t, tc.wire, ToWireHTTPHeader(header, lengths))
+		})
+	}
+	assert.Nil(t, ToYamlHTTPHeaderLineLengths(http.Header{"Accept": {"a, b"}, "Host": {"h"}}),
+		"a header with no repeated line records no lengths, so nothing new reaches disk")
+}
+
+// A recording made before the lengths existed replays as it always did, and a
+// value that no longer is the lines it was recorded from (a template rendered,
+// a secret decrypted to something else, a hand edit) is sent as one line, not
+// cut at a guessed boundary.
+func TestToWireHTTPHeaderFoldsWhatItCannotSplit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   string
+		lengths []int
+	}{
+		{"no lengths: a recording from before them", "ab,ab", nil},
+		{"one length is not a repeated header", "ab,ab", []int{5}},
+		{"the value grew", "ab,abb", []int{2, 2}},
+		{"the value shrank", "ab,a", []int{2, 2}},
+		{"no comma where a line ended", "abXab", []int{2, 2}},
+		{"a line too long for the value", "ab", []int{2, 5}},
+		{"a negative length", "ab,ab", []int{-1, 5}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var lengths models.HeaderLineLengths
+			if tc.lengths != nil {
+				lengths = models.HeaderLineLengths{"X_tenant": tc.lengths}
+			}
+			got := ToWireHTTPHeader(map[string]string{"X_tenant": tc.value}, lengths)
+			assert.Equal(t, http.Header{"X_tenant": {tc.value}}, got)
+		})
+	}
+	// Lengths for a name the header no longer has add nothing.
+	got := ToWireHTTPHeader(map[string]string{"Accept": "a"}, models.HeaderLineLengths{"X_tenant": {2, 2}})
+	assert.Equal(t, http.Header{"Accept": {"a"}}, got)
+}
+
+// The recorded curl command reproduces the request that was recorded, a
+// repeated header on its own lines included.
+func TestMakeCurlCommandRepeatsARepeatedHeader(t *testing.T) {
+	curl := MakeCurlCommand(models.HTTPReq{
+		Method:            "GET",
+		URL:               "http://localhost:8080/v1/session",
+		Header:            map[string]string{"X_tenant": "acme,acme", "Accept": "a, b", "Content-Length": "0"},
+		HeaderLineLengths: models.HeaderLineLengths{"X_tenant": {4, 4}},
+	})
+	assert.Equal(t, 2, strings.Count(curl, "--header 'X_tenant: acme' \\\n"), curl)
+	assert.NotContains(t, curl, "acme,acme")
+	assert.Contains(t, curl, "--header 'Accept: a, b' \\\n")
+	assert.NotContains(t, curl, "Content-Length")
+}
+
 // TestParseHTTPRequest_And_Response_111 contains sub-tests for ParseHTTPRequest and
 // ParseHTTPResponse, validating both success and failure cases for parsing raw
 // HTTP data into their respective struct representations.

@@ -446,7 +446,7 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
 		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
 	body := stub.Spec.HTTPResp.Body
-	header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+	header := pkg.ToWireHTTPHeader(stub.Spec.HTTPResp.Header, stub.Spec.HTTPResp.HeaderLineLengths)
 	var respBody string
 	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
 		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))

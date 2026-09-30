@@ -45,10 +45,11 @@ const (
 	//
 	// It bounds STALLED time, not elapsed time: the wait ends the moment the
 	// parser takes anything at all, so an arbitrarily slow parser still
-	// receives every chunk. It only elapses when the parser frees nothing at
-	// all for this long, which is taken as "gone" — the whole remaining
-	// queue is then abandoned at once and reported, rather than the wait
-	// being re-entered per chunk.
+	// receives every chunk. And it is time the process could RUN, not wall
+	// time (see stallMeter): a starved process's parser cannot read either.
+	// It only elapses when the parser frees nothing at all for this long,
+	// which is taken as "gone" — the whole remaining queue is then abandoned
+	// at once and reported, rather than the wait being re-entered per chunk.
 	//
 	// Exposed as [Config.ConsumerStallGrace] rather than fixed in the tee so
 	// the owner picks the policy, the way net/http's Server.Shutdown takes
@@ -146,6 +147,9 @@ type Config struct {
 	// pkg/agent/proxy/proxy.go; zero and negative are passed through
 	// untouched so the default above applies.
 	ConsumerStallGrace time.Duration
+	// stallClock measures ConsumerStallGrace (see stallMeter); nil is the
+	// process's own clocks. Tests set it to drive the window.
+	stallClock stallClock
 
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.
@@ -238,11 +242,13 @@ type Config struct {
 	// perfectly while producing zero further mocks, and the test cases
 	// recorded against it replay as match_phase=no_mocks.
 	//
-	// The expected implementation is to record the start of the hole and,
-	// when the connection ends, mark that whole span so the test cases
-	// overlapping it are suppressed instead of shipped mock-less. That is
-	// the half that closes the failure by construction; retirement (below)
-	// is the best-effort half that gets capture going again.
+	// The expected implementation suppresses the test cases recorded while
+	// the connection carries traffic from here on, instead of shipping them
+	// mock-less (syncMock.UnrecordedConn). A parser that cannot re-align
+	// (ParserCanResyncAfterGap false) is no longer fed, so the connection has
+	// stopped being recorded; one that can re-aligns at some later message,
+	// but when is known only once it gets there, possibly a full queue behind
+	// the traffic, by when the test cases in between have been streamed.
 	OnCaptureDesync func(reason string)
 
 	// OnClientChunkTeed is invoked after each successful tee of a
@@ -394,7 +400,7 @@ type Config struct {
 	// When a tee desyncs — a chunk lost to [DropPerConnCap] or
 	// [DropMemoryPressure] — the connection's captured byte stream has a
 	// hole in it. The tee already says so in its own words: it logs "capture
-	// desynced; this connection can no longer be recorded" and fires
+	// dropped a chunk" at Warn (once per direction) and fires
 	// [Config.OnCaptureDesync] so the owner can suppress the test cases
 	// recorded over the hole. Until now it then kept pushing anyway, and a
 	// length-prefix framer reading from the wrong offset does not merely

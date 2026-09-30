@@ -913,6 +913,14 @@ type MockState struct {
 	// store it on the kind-agnostic MockSpec.ReqBodyNoise field. fieldpath
 	// ("body.user.id") -> regex list; empty list means "ignore the whole field".
 	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
+	// CarryOver marks a mock consumed outside the running test's window through
+	// a path that exists for exactly that (see RegisterCarryOver): taken from
+	// the carry-over tier, or a registered kind's per-test mock consumed out of
+	// window through MarkMockAsUsed (a server push delivered late). The replay
+	// attributes such a mock to its own recorded window — mapped to that
+	// window's test, and kept from the prune whatever the running test's
+	// verdict — instead of to the test that happened to be running.
+	CarryOver bool `json:"carryOver,omitempty"`
 }
 
 func (m *Mock) DeepCopy() *Mock {

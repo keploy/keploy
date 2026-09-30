@@ -373,6 +373,64 @@ type MockConsumer interface {
 	MarkMockAsUsed(mock models.Mock) bool
 }
 
+// RecordedWindowsReader is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it). It exposes the recorded window of every
+// test of the set being replayed, selected or not, as the replayer seeded it at
+// staging (models.MockFilterParams.RecordedWindows).
+//
+// A parser whose protocol has traffic the test windows do not pace by
+// themselves — a broker's server push — uses it to hold that traffic until the
+// replay reaches the recorded window it belongs to:
+//
+//	sched := db.RecordedWindows()                 // nil: release everything
+//	start, _ := db.CurrentTestWindow()
+//	due := sched.Released(msg.Spec.ReqTimestampMock, start)
+//
+// The schedule is immutable; it is replaced (never mutated) at each set's
+// staging call, which also changes WindowPacer.StagingEpoch.
+//
+// The agent keeps the windows only while some kind has registered a carry-over
+// predicate (models.RegisterCarryOver); otherwise RecordedWindows is nil. A
+// parser that paces by them registers its kind, as the traffic it paces is
+// what carry-over exists for.
+type RecordedWindowsReader interface {
+	RecordedWindows() *models.WindowSchedule
+}
+
+// WindowPacer is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
+// MockManager implements it) for a parser that holds traffic until the replay
+// reaches a recorded window — FLOW permits that find nothing due yet — and must
+// serve it when the window moves, with no request of its own to wake it.
+//
+//   - WindowChanged returns a channel closed at the next test-window change,
+//     after the new window and trees are visible. Take it BEFORE reading the
+//     state it guards; each change hands out a fresh channel. It is also closed
+//     once when the manager is closed.
+//   - StagingEpoch changes at every staging call (a new set, or the set staged
+//     again for a replacement agent). State built from one staging snapshot,
+//     such as per-set delivery queues, is rebuilt when it changes.
+//
+// A MockMemDb without it gives no signal: serve held work at the connection's
+// next request instead.
+type WindowPacer interface {
+	WindowChanged() <-chan struct{}
+	StagingEpoch() uint64
+}
+
+// CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it) for a parser whose kind registered a
+// carry-over predicate (models.RegisterCarryOver). It returns, in recorded
+// order, the registered per-test mocks that are reachable outside their own
+// test window: loaded up to models.CarryOverLookahead ahead of their release
+// window, and kept after their window closes until consumed. Serve them after
+// the running test's own mocks (GetPerTestMocksInWindow), and consume them
+// through DeleteFilteredMock, which falls back per-test, then startup, then
+// carry-over, and reports a carry-over consume with MockState.CarryOver.
+type CarryOverReader interface {
+	GetCarryOverMocks() ([]*models.Mock, error)
+	GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error)
+}
+
 // WindowAware is the test-window facet of MockMemDb. Parsers that
 // partition their index into per-test / session / startup tiers
 // consult these accessors at dispatch time to pick the right tier

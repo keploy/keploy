@@ -192,9 +192,19 @@ type MockFilterParams struct {
 	// Zero means "not supplied"; the cutoff then falls back to the fired
 	// windows, which is the pre-existing behaviour.
 	FirstRecordedTestStart time.Time `json:"firstRecordedTestStart,omitempty"`
-	BeforeTime             time.Time `json:"beforeTime,omitempty"`
-	MockMapping            []string  `json:"mockMapping,omitempty"`
-	UseMappingBased        bool      `json:"useMappingBased"`
+	// RecordedWindows is the [request, response] window of EVERY recorded test
+	// of the set being staged, the unselected and ignored ones included. Sent
+	// on the staging call only, beside FirstRecordedTestStart; the agent
+	// applies it through the proxy's optional SeedRecordedWindows capability,
+	// so traffic the test windows do not pace by themselves (a broker's server
+	// push, and what the application publishes while handling it) can be
+	// released by the recorded window it belongs to (models.WindowSchedule).
+	// Empty means "not supplied": everything is then released at once, which
+	// is the pre-existing behaviour.
+	RecordedWindows []TestWindow `json:"recordedWindows,omitempty"`
+	BeforeTime      time.Time    `json:"beforeTime,omitempty"`
+	MockMapping     []string     `json:"mockMapping,omitempty"`
+	UseMappingBased bool         `json:"useMappingBased"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase

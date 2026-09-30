@@ -65,6 +65,11 @@ type IngressProxyManager struct {
 
 	ingressHook IngressHook
 
+	// relocated maps an app port whose bind the record hooks moved (keploy's
+	// ingress forwarder then holds the port) to the port the app was moved
+	// to, for each forwarder that started with a known one. Guarded by mu.
+	relocated map[uint16]uint16
+
 	// startOnce gates the ListenForIngressEvents goroutine so that
 	// repeated Start() calls (a reconnecting recorder opening a new
 	// /agent/incoming stream while the agent process keeps running)
@@ -196,8 +201,33 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 	}
 	started = true
 	close(startDone)
+	if newAppPort != 0 {
+		pm.mu.Lock()
+		if _, ok := pm.active[origAppPort]; ok { // not stopped in the meantime
+			if pm.relocated == nil {
+				pm.relocated = make(map[uint16]uint16)
+			}
+			pm.relocated[origAppPort] = newAppPort
+		}
+		pm.mu.Unlock()
+	}
 	pm.logger.Info("Started ingress forwarding",
 		zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
+}
+
+// AppListenPort is the port the app's own socket listens on for its port orig.
+// That is orig, unless the record hooks moved the app's bind elsewhere and
+// keploy's ingress forwarder holds orig: then it is the port the app was moved
+// to, and ok is false while that port is not known (the forwarder is still
+// starting, or the bind event did not carry it).
+func (pm *IngressProxyManager) AppListenPort(orig uint16) (port uint16, ok bool) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if _, forwarded := pm.active[orig]; !forwarded {
+		return orig, true
+	}
+	moved, ok := pm.relocated[orig]
+	return moved, ok
 }
 
 // StopAll gracefully shuts down all active ingress proxies.
@@ -208,6 +238,7 @@ func (pm *IngressProxyManager) StopAll() {
 		stops[p] = s
 	}
 	pm.active = make(map[uint16]proxyStop)
+	pm.relocated = nil
 	pm.mu.Unlock()
 
 	for p, s := range stops {

@@ -135,6 +135,26 @@ type StartupCutoffSeeder interface {
 	SeedStartupCutoff(start time.Time)
 }
 
+// RecordedWindowsSeeder is the optional extension implemented by proxies whose
+// mock manager can be told the recorded window of every test of the set being
+// staged (models.MockFilterParams.RecordedWindows). Optional in the same style
+// as StartupCutoffSeeder: an agent whose proxy lacks it does not seed, and
+// consumers then release everything at once, the pre-existing behaviour.
+type RecordedWindowsSeeder interface {
+	SeedRecordedWindows(ws []models.TestWindow)
+}
+
+// CarryOverPlanner is the optional extension implemented by proxies with a
+// carry-over tier (models.RegisterCarryOver). For the window that starts at
+// start it names the recorded-time range of registered per-test mocks the agent
+// loads from its on-disk store beside the window's own mocks and passes in the
+// filtered slice of the same SetMocksWithWindow call. ok is false when there is
+// nothing to load. A proxy without it gets no lookahead load, the pre-existing
+// behaviour.
+type CarryOverPlanner interface {
+	CarryOverLoadRange(start time.Time) (from, to time.Time, ok bool)
+}
+
 type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.
@@ -175,6 +195,14 @@ type ConsumedStateReader interface {
 
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
+}
+
+// AppListenPorter is the optional extension of an IncomingProxy that knows
+// which port the app's own socket listens on for one of the app's ports. While
+// recording, keploy's ingress forwarder holds the app's port and the app
+// listens on the port its bind was moved to.
+type AppListenPorter interface {
+	AppListenPort(orig uint16) (port uint16, ok bool)
 }
 
 type ProxyOptions struct {

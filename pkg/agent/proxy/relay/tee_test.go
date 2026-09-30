@@ -489,26 +489,29 @@ func TestTee_GoneConsumerIsAbandonedAtOnce(t *testing.T) {
 // actually stopped costs grace × queue-depth — hundreds of queued chunks turn
 // teardown into minutes, which is exactly why bounding the whole flush was
 // tempting. Deciding once and abandoning the remainder gets both: this must
-// finish in about ONE grace regardless of how much is queued.
+// finish in ONE window regardless of how much is queued.
+//
+// The window is time the process could run (stallMeter), so it is measured
+// on an injected clock, not in wall time: on a starved host one window of run
+// time is many of wall time, and a wall-clock bound here would fail there
+// for the behaviour the window exists to have.
 func TestTee_StalledConsumerCostsOneGraceNotOnePerChunk(t *testing.T) {
 	t.Parallel()
 	const queued = 200
-	tt, rec, _ := newTestTeeWithConsumer(t, 1<<30, 1) // consumer never reads
+	clk := newFakeStallClock(onTime)
+	tt, rec := newTestTeeClock(t, 1<<30, 1, clk) // consumer never reads
 
 	for i := 0; i < queued; i++ {
 		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
 	}
 
-	start := time.Now()
 	tt.close()
 	tt.waitDone()
-	elapsed := time.Since(start)
 
-	// Per-chunk re-decision would be ~queued × grace; allow generous slack
-	// for scheduling while still failing that shape by orders of magnitude.
-	if limit := 4 * testStallGrace; elapsed > limit {
-		t.Errorf("teardown took %v with %d chunks queued (limit %v): the stall verdict is being "+
-			"re-taken per chunk instead of once for the connection", elapsed, queued, limit)
+	// Per-chunk re-decision would take queued windows of samples.
+	if got, want := clk.waits(), int(testStallGrace/stallTick); got != want {
+		t.Errorf("teardown sampled %d ticks with %d chunks queued, want one window of %d: the stall verdict is being "+
+			"re-taken per chunk instead of once for the connection", got, queued, want)
 	}
 	if n := rec.count(DropConsumerGone); n != 1 {
 		t.Errorf("consumer_gone reported %d times, want exactly 1", n)
