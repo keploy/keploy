@@ -1,0 +1,39 @@
+name: Windows CI scripts
+
+# The PowerShell that keeps the shared self-hosted Windows Docker VM usable
+# (.github/scripts/windows) runs on runners that share ONE Docker daemon, so a
+# wrong decision there does not fail its own job - it kills a sibling job's
+# containers. reap-keploy-containers.ps1 did exactly that, removing live
+# keploy agents mid-replay, cleanup-windows.ps1 removed Created-state
+# application containers and pruned under live locks, and ensure-docker.ps1
+# restarted Docker Desktop under running jobs after one failed `docker info`.
+# Their cases run here under pwsh on every change to them or to a workflow (the
+# cases pin the self-hosted Windows jobs' timeouts, the go-dedup script's
+# compose-project hand-off, and the text of every "Recover stale runner state"
+# step), and under Windows PowerShell 5.1 in prepare_and_run's precheck-windows.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/scripts/windows/**'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - '.github/scripts/windows/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  reaper:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the Windows Docker cleanup scripts (pwsh)
+        shell: pwsh
+        run: ./.github/scripts/windows/reap-keploy-containers.tests.ps1

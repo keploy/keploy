@@ -29,6 +29,11 @@ type Instrumentation interface {
 	// New methods for improved mock management
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
+	// GetMockStats returns the agent's non-draining mock-session snapshot (the
+	// loaded count plus consumed/missed totals). The compose setup uses it to
+	// verify the agent still holds the stored corpus after the bring-up, before
+	// any test fires: a replacement agent reports loaded 0.
+	GetMockStats(ctx context.Context) (models.MockStats, error)
 	GetRecentAppLogs(ctx context.Context) string
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
 	// NotifyGracefulShutdown notifies the agent that the application is shutting down gracefully.
@@ -94,6 +99,11 @@ type ReportDB interface {
 
 type TestSetConfig interface {
 	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
+	// ReadForUpdate reports a config.yaml that did not parse instead of
+	// handing back a zero value. Read deliberately swallows that so
+	// secret hydration continues; a caller that is about to REPLACE the
+	// whole document must not.
+	ReadForUpdate(ctx context.Context, testSetID string) (*models.TestSet, error)
 	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 	ReadSecret(ctx context.Context, testSetID string) (map[string]interface{}, error)
 }

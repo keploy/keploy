@@ -34,10 +34,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		defer pUtil.Recover(h.Logger, clientConn, nil)
 		defer close(errCh)
 		for {
-			//Check if the expected header is present
-			if bytes.Contains(reqBuf, []byte("Expect: 100-continue")) {
-				h.Logger.Debug("The expect header is present in the request buffer and writing the 100 continue response to the client")
-				//Send the 100 continue response
+			// The whole header section first: only then is it known whether
+			// the client is waiting for a 100 (Continue) before its body.
+			if _, _, err := h.readRequestHead(ctx, &reqBuf, clientConn, nil); err != nil {
+				errCh <- err
+				return
+			}
+			if awaitsContinue(reqBuf) {
+				h.Logger.Debug("the client awaits a 100 Continue before its body; writing it")
 				_, err := clientConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 				if err != nil {
 					if ctx.Err() != nil {
@@ -47,16 +51,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- err
 					return
 				}
-				h.Logger.Debug("The 100 continue response has been sent to the user application")
-				//Read the request buffer again
-				newRequest, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to read the request buffer from the user application")
-					errCh <- err
-					return
-				}
-				//Append the new request buffer to the old request buffer
-				reqBuf = append(reqBuf, newRequest...)
+				// HandleChunkedRequests reads the body the client now sends,
+				// by its framing.
 			}
 
 			h.Logger.Debug("handling the chunked requests to read the complete request")
@@ -316,7 +312,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
+			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict()) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err

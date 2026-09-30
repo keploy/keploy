@@ -526,14 +526,69 @@ func TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved(t *testing.T) {
 	}
 }
 
+// servingCountingListener counts accepted connections and actually SERVES
+// HTTP, so a readiness probe against it SUCCEEDS on the first attempt.
+//
+// countingListener accepts and immediately closes, which is never a
+// completed HTTP response — so waitForHTTPServing polls it for the whole
+// of resetResendReadyTimeout and makes ~25 connections rather than one.
+// A test asserting only "the probe dialled" does not need the poll loop,
+// and paying five seconds of wall clock for it buys no assertion.
+//
+// The count is also causally tight here in a way the accept-loop counter
+// is not: ConnState fires StateNew before the request is read, so by the
+// time the probe has its response the connection is already counted.
+func servingCountingListener(t *testing.T) (host, port string, conns *atomic.Int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var n atomic.Int64
+	srv := &http.Server{
+		// ANY completed response proves the app serves — waitForHTTPServing
+		// deliberately does not require 2xx, so 404 is the honest fixture.
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}),
+		ConnState: func(_ net.Conn, state http.ConnState) {
+			if state == http.StateNew {
+				n.Add(1)
+			}
+		},
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	h, p, _ := net.SplitHostPort(ln.Addr().String())
+	return h, p, &n
+}
+
 // The opt-out covers the reset-resend readiness re-gate too — that path
 // needs it MORE, since its trigger is a transport reset, which behind a
 // port-forward is what a dying forward produces. Asserted by counting
-// connections, because the probe returns in microseconds against a
-// listener that accepts.
+// connections.
+//
+// ONE LISTENER PER SUBTEST, and that is the whole fixture.
+//
+// This used to share a single listener and take `before := conns.Load()`
+// at the top of each subtest. The counter is incremented by the server's
+// own goroutine, so it is not causally complete when the code under test
+// returns: connections the ENABLED subtest opened were still being
+// counted when the DISABLED subtest snapshotted its baseline, and they
+// were then attributed to a subtest that dialled nothing. Reproduced
+// directly — the counter rose from 25 to 26 after the probe had
+// returned, and the suite failed with exactly the "1 connection(s) made
+// with probing disabled" this test prints.
+//
+// The old comment blamed a probe that "returns in microseconds against a
+// listener that accepts". It does not: countingListener accepts and
+// closes, waitForHTTPServing therefore never succeeds, and the poll loop
+// ran the full five-second ceiling opening ~25 connections — which is
+// what made the window wide enough to lose. A per-subtest listener
+// removes the shared baseline entirely (nothing else can dial that
+// port, so zero means zero), and serving HTTP makes the first sentence
+// true.
 func TestWaitForResetResendReady_HonoursTheDisableFlag(t *testing.T) {
-	host, port, conns := countingListener(t)
-
 	for _, tc := range []struct {
 		name     string
 		disabled bool
@@ -543,7 +598,7 @@ func TestWaitForResetResendReady_HonoursTheDisableFlag(t *testing.T) {
 		{"probing disabled", true, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			before := conns.Load()
+			host, port, conns := servingCountingListener(t)
 			cfg := gateCfg(500 * time.Millisecond)
 			cfg.Test.Host = host
 			cfg.Test.Port = uint32(mustAtoi(t, port))
@@ -562,7 +617,7 @@ func TestWaitForResetResendReady_HonoursTheDisableFlag(t *testing.T) {
 				},
 				"test-set-0")
 
-			made := conns.Load() - before
+			made := conns.Load()
 			if tc.disabled && made != 0 {
 				t.Fatalf("%d connection(s) made with probing disabled; the reset-resend re-gate "+
 					"re-opens the destructive probe in response to the very reset a dying "+

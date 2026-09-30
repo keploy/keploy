@@ -9,12 +9,18 @@ docker_build_retry docker compose build
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
 
-# Generate the keploy-config file.
-$RECORD_BIN config --generate
-
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"ts":[]}}
+KEPLOY_CFG
 
 container_kill() {
     REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
@@ -56,7 +62,6 @@ send_request(){
     wait
 }
 
-
 do_record_iteration() {
     local i="$1"
     local extra_flags="${2:-}"
@@ -74,6 +79,22 @@ do_record_iteration() {
     fi
     if grep "ERROR" "$log"; then
         echo "Error found in pipeline..."
+        cat "$log"
+        cat "docker-compose-tmp.yaml"
+        exit 1
+    fi
+    # The agent says this when it was handed no control-plane token: it then
+    # serves /agent/pcap/keylog, /agent/stop and /agent/storemocks to anything
+    # that can reach the port, and the run still passes.
+    #
+    # keploy probes for this itself at the readiness gate and logs an ERROR,
+    # which the check above already catches. This is the second line of
+    # defence, on the handoff most likely to break: keploy rewrites this
+    # compose file heavily, and losing the agent service's KEPLOY_AGENT_TOKEN
+    # environment entry in one of those rewrites — or compose not being given
+    # the value to fill it from — is exactly the silent regression this guards.
+    if grep -q "running WITHOUT authentication" "$log"; then
+        echo "The agent came up with no control-plane token; the compose token handoff is broken."
         cat "$log"
         cat "docker-compose-tmp.yaml"
         exit 1

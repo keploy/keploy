@@ -220,8 +220,16 @@ rm -rf keploy/ keploy.yml || true
 
 sudo rm -f /tmp/keploy-logs.txt
 
-sudo "$RECORD_BIN" config --generate
-sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' ./keploy.yml
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > ./keploy.yml <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"updated_at":[]}}
+KEPLOY_CFG
 go_retry build -o urlShort
 endsec
 

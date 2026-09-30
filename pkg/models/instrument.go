@@ -111,10 +111,50 @@ type OutgoingOptions struct {
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
-	SchemaNoiseDetection   bool                           // when true, detect request-body field drift vs the recorded mock and record it as field-path noise (req_body_noise) on the matched mock
-	SchemaNoiseStrict      bool                           // when true (replay/enforcement path), a mock (any parser) that carries learned req_body_noise must match strictly: every request-body field must match except the learned-noise paths, so a non-noise drift rejects the mock
-	SkipTLSMITM            bool
-	ConnKey                string // connection-level key for TLSHandshakeStore correlation
+	// MockNoiseDetection / MockNoiseStrict are the canonical spelling.
+	//
+	// MockNoiseDetection: detect request-body field drift vs the recorded mock
+	// and record it as field-path noise (req_body_noise) on the matched mock.
+	//
+	// MockNoiseStrict (replay/enforcement path): a mock (any parser) that
+	// carries learned req_body_noise must match strictly — every request-body
+	// field must match except the learned-noise paths, so a non-noise drift
+	// rejects the mock.
+	MockNoiseDetection bool
+	MockNoiseStrict    bool
+
+	// SchemaNoiseDetection / SchemaNoiseStrict are the previous spelling, kept
+	// as a mirror rather than removed.
+	//
+	// Go has no field aliases, so unlike the package rename (see
+	// integrations/schemanoise) this cannot be solved with `=`. Both fields are
+	// therefore carried and NormalizeMockNoise reconciles them. An unmigrated
+	// producer — a k8s-proxy or enterprise build from before the rename, or a
+	// stored config written by one — sets only these, and its intent must
+	// survive: JSON/YAML decoding silently drops unknown keys, so a mismatch
+	// here is not an error anywhere, it is a toggle that quietly does nothing.
+	//
+	// Deprecated: set MockNoiseDetection / MockNoiseStrict. Read through
+	// NoiseDetection() / NoiseStrict(), never directly.
+	SchemaNoiseDetection bool
+	SchemaNoiseStrict    bool
+	SkipTLSMITM          bool
+	// ConnKey names THIS connection's socket, as an opaque token on which the
+	// connection's two capture legs agree: the raw leg that carries its
+	// cleartext prelude (a MySQL greeting and SSLRequest) and the decrypted leg
+	// that carries what follows the TLS handshake. The TLSHandshakeStore pairs
+	// the two by it (HandshakeOwner), so a decrypted stream is stitched with its
+	// OWN connection's greeting, salt and timestamp, and never with another's.
+	// The enterprise proxyless capture sets it to the kernel socket cookie on
+	// both legs. Empty means unknown; the legs then pair by ConnProc, and
+	// without that by arrival order on the destination port.
+	ConnKey string
+	// ConnProc names the process that made THIS connection, as an opaque token
+	// both capture legs agree on. It is the fallback pairing identity when
+	// ConnKey is unknown on either leg: a stream is then only ever stitched with
+	// a greeting captured from its own process, never another app's. Runtime,
+	// per-connection: json:"-" like SrcPid.
+	ConnProc string `json:"-"`
 	// PreferH2, on the REPLAY path, tells the TLS MITM to advertise h2 in ALPN
 	// (instead of the default http/1.1 downgrade) so a dual-protocol client
 	// stays on HTTP/2 and its request matches a recorded kind:Http2 mock.
@@ -221,6 +261,28 @@ type OutgoingOptions struct {
 	// options and uses it to pick the worker's scoped mock view (per-PID
 	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
 	SrcPid uint32 `json:"-"`
+	// NetNS names the network namespace THIS connection was made from, as an
+	// opaque token. It exists because some destination addresses name a
+	// different server in every network namespace: 127.0.0.0/8, ::1, link-local
+	// addresses and unresolved hostnames (see AddrIsNetnsLocal). A long-lived
+	// capture layer that records many pods in one agent (the enterprise
+	// DaemonSet) sees "127.0.0.1:3306" from every pod with a MySQL sidecar, and
+	// each is a different server. Anything that keys per-server state on such an
+	// address must qualify it by this token (see HandshakeServerKey).
+	//
+	// Two connections with EQUAL tokens must have been made from the same live
+	// network namespace. A token may be finer than that (one per process, say):
+	// that only costs extra per-server work. It must never be coarser, and in
+	// particular must not be a bare netns inode number, which the kernel reuses
+	// as soon as a namespace is freed.
+	//
+	// Empty means unknown, and per-server state for a namespace-local address is
+	// then not shared with any other connection at all (HandshakeServerKey
+	// returns ""): an app/session scope does not name a namespace, since every
+	// replica of a deployment shares it. A capture layer may leave it empty for
+	// a connection whose destination is routable, since nothing keys a routable
+	// address by namespace. Runtime, per-connection: json:"-" like SrcPid.
+	NetNS string `json:"-"`
 }
 
 type ConditionalDstCfg struct {
@@ -247,11 +309,20 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
-	ClientNSPID     uint32
-	Container       string
-	KeployContainer string
-	DockerDelay     uint64
-	Synchronous     bool
+	ClientNSPID uint32
+	Container   string
+	// FromContainer is the already-running container to re-create under
+	// keploy's namespaces. Set only for utils.FromContainer runs.
+	FromContainer string
+	// FromContainerWasRunning records whether that container was up when
+	// keploy stopped it, so teardown knows whether to start it again. The stop
+	// happens before the agent starts - the agent publishes the app's ports and
+	// cannot bind them while the original still holds them - so it is decided
+	// there rather than in App.
+	FromContainerWasRunning bool
+	KeployContainer         string
+	DockerDelay             uint64
+	Synchronous             bool
 	// Cmd               string
 	AgentURI          string
 	IsDocker          bool

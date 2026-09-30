@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -433,4 +434,53 @@ func TestNewSnapshotsStallGrace(t *testing.T) {
 			t.Fatalf("recordBufferStallGrace = %v, want %v", got, want)
 		}
 	})
+}
+
+// TestMockClearsThePreviousTestSetsConsumption pins the cross-process invariant
+// the CLI's per-set latch now depends on.
+//
+// Under KEPLOY_AGENT_OWNS_CONSUMED the agent filters from its own
+// consumedPersistent. The replayer treats a successful MockOutgoing — which
+// lands here — as proof that the previous test set's consumption is gone, and
+// on that basis stops sending its own map. If Mock ever stops performing the
+// reset, the CLI hands set N+1's pool to an agent still holding set N's names:
+// mock names are unique only WITHIN a set, so set N's mock-1 (Usage: Deleted)
+// drops set N+1's unrelated mock-1, and filterOutDeleted stamps set N's
+// IsFiltered/SortOrder onto its mock-2. A wrong test result, silently, with
+// every suite green.
+//
+// TestPersistentConsumed_ClearedAtTestSetBoundary pins ResetForReplaySession in
+// isolation; nothing pinned that Mock actually calls it, and it is one
+// deletable line.
+func TestMockClearsThePreviousTestSetsConsumption(t *testing.T) {
+	p := New(zap.NewNop(), nil, &config.Config{})
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+	p.setMockManager(mm)
+
+	// The previous test set consumed two mocks. mock-2 is deliberately not
+	// Deleted: a clear that only swept Deleted entries would still stamp the
+	// old ordering onto the next set's same-named mock.
+	for _, st := range []models.MockState{
+		{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted},
+		{Name: "mock-2", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 7},
+	} {
+		if err := mm.flagMockAsUsed(st); err != nil {
+			t.Fatalf("flagMockAsUsed: %v", err)
+		}
+	}
+	if len(p.GetPersistentConsumed()) != 2 {
+		t.Fatalf("precondition: the previous set's consumption was not recorded")
+	}
+
+	// The test-set boundary. The error is ignored on purpose: Mock can fail
+	// later, at the nsswitch setup, and that failure is AFTER the reset — the
+	// property under test is the reset, not the call's overall success.
+	_ = p.Mock(context.Background(), models.OutgoingOptions{})
+
+	if got := p.GetPersistentConsumed(); len(got) != 0 {
+		t.Fatalf("Mock did not clear the previous test set's consumption: %#v — the replayer treats a "+
+			"successful MockOutgoing as proof that it did, and stops sending its own map, so this "+
+			"silently mis-filters the next test set", got)
+	}
 }

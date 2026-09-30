@@ -188,8 +188,16 @@ docker run --name mysql-container \
 wait_for_mysql
 
 # Generate Keploy configuration and add noise parameter
-sudo "$RECORD_KEPLOY_BIN" config --generate
-sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' ./keploy.yml
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > ./keploy.yml <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"duration_ms":[]}}
+KEPLOY_CFG
 echo "Keploy config generated and updated."
 endsec
 

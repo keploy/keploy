@@ -1,4 +1,4 @@
-package schemanoise
+package mocknoise
 
 import (
 	"reflect"

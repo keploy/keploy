@@ -18,6 +18,7 @@ import (
 
 	"github.com/invopop/yaml"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -114,25 +115,22 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 
 	utils.RemoveDoubleQuotes(utils.TemplatizedValues)
 
-	var existingMetadata map[string]interface{}
-	existingTestSet, err := t.testSetConf.Read(ctx, testSetID)
-	if err == nil && existingTestSet != nil && existingTestSet.Metadata != nil {
-		existingMetadata = existingTestSet.Metadata
-	}
-
-	err = t.testSetConf.Write(ctx, testSetID, &models.TestSet{
-		PreScript:  "",
-		PostScript: "",
-		Template:   utils.TemplatizedValues,
-		Metadata:   existingMetadata,
-	})
-	if err != nil {
+	// READ-MODIFY-WRITE, not a fresh struct. Write replaces the whole
+	// config.yaml, and this literal used to carry Metadata forward while
+	// still dropping AppCommand and resetting PreScript and PostScript to
+	// "" — so templatizing a test-set silently deleted the user's
+	// per-test-set app command and both hooks. Carrying fields one at a
+	// time fixes them one at a time; mutating what was read cannot drop
+	// one at all.
+	if err := testset.WriteTemplatedConfig(
+		ctx, t.testSetConf, testSetID, utils.TemplatizedValues,
+	); err != nil {
 		utils.LogError(t.logger, err, "failed to write test set")
 		return err
 	}
 
 	if len(utils.SecretValues) > 0 {
-		err = utils.AddToGitIgnore(t.logger, t.config.Path, "/*/secret.yaml")
+		err := utils.AddToGitIgnore(t.logger, t.config.Path, "/*/secret.yaml")
 		if err != nil {
 			t.logger.Debug("Failed to add secret files to .gitignore", zap.Error(err))
 		}

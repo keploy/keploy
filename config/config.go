@@ -10,33 +10,37 @@ import (
 )
 
 type Config struct {
-	Path              string              `json:"path" yaml:"path" mapstructure:"path"`
-	StorageFormat     string              `json:"storageFormat" yaml:"storageFormat" mapstructure:"storageFormat"` // serialization format for testcases/mocks/reports: "yaml" (default) or "json"
-	AppName           string              `json:"appName" yaml:"appName" mapstructure:"appName"`
-	AppID             uint64              `json:"appId" yaml:"appId" mapstructure:"appId"` // deprecated field
-	Command           string              `json:"command" yaml:"command" mapstructure:"command"`
-	Templatize        Templatize          `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
-	Port              uint32              `json:"port" yaml:"port" mapstructure:"port"`
-	E2E               bool                `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
-	DNSPort           uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
-	ProxyPort         uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
-	IncomingProxyPort uint16              `json:"incomingProxyPort" yaml:"incomingProxyPort" mapstructure:"incomingProxyPort"`
-	Debug             bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
-	DisableTele       bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
-	DisableANSI       bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
-	JSONOutput        bool                `json:"jsonOutput" yaml:"jsonOutput" mapstructure:"jsonOutput"`
-	InDocker          bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
-	ContainerName     string              `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
-	NetworkName       string              `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
-	BuildDelay        uint64              `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
-	Test              Test                `json:"test" yaml:"test" mapstructure:"test"`
-	Record            Record              `json:"record" yaml:"record" mapstructure:"record"`
-	Report            Report              `json:"report" yaml:"report" mapstructure:"report"`
-	Normalize         Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
-	DisableMapping    bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
-	RetryPassing      bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
-	ConfigPath        string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
-	BypassRules       []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	Path              string     `json:"path" yaml:"path" mapstructure:"path"`
+	StorageFormat     string     `json:"storageFormat" yaml:"storageFormat" mapstructure:"storageFormat"` // serialization format for testcases/mocks/reports: "yaml" (default) or "json"
+	AppName           string     `json:"appName" yaml:"appName" mapstructure:"appName"`
+	AppID             uint64     `json:"appId" yaml:"appId" mapstructure:"appId"` // deprecated field
+	Command           string     `json:"command" yaml:"command" mapstructure:"command"`
+	Templatize        Templatize `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
+	Port              uint32     `json:"port" yaml:"port" mapstructure:"port"`
+	E2E               bool       `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
+	DNSPort           uint32     `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
+	ProxyPort         uint32     `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	IncomingProxyPort uint16     `json:"incomingProxyPort" yaml:"incomingProxyPort" mapstructure:"incomingProxyPort"`
+	Debug             bool       `json:"debug" yaml:"debug" mapstructure:"debug"`
+	DisableTele       bool       `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
+	DisableANSI       bool       `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
+	JSONOutput        bool       `json:"jsonOutput" yaml:"jsonOutput" mapstructure:"jsonOutput"`
+	InDocker          bool       `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
+	ContainerName     string     `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
+	// FromContainer names an already-running container to record against.
+	// Mutually exclusive with Command: keploy re-creates that container under
+	// its own namespaces through the Engine API instead of running a command.
+	FromContainer  string              `json:"fromContainer" yaml:"fromContainer" mapstructure:"fromContainer"`
+	NetworkName    string              `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
+	BuildDelay     uint64              `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
+	Test           Test                `json:"test" yaml:"test" mapstructure:"test"`
+	Record         Record              `json:"record" yaml:"record" mapstructure:"record"`
+	Report         Report              `json:"report" yaml:"report" mapstructure:"report"`
+	Normalize      Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
+	DisableMapping bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
+	RetryPassing   bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
+	ConfigPath     string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
+	BypassRules    []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	// MysqlPorts pins extra destination ports to the MySQL parser,
 	// skipping auto-detection for them. Rarely needed now that ports are
 	// detected automatically (see DisableMysqlAutoDetect); keep it for
@@ -335,6 +339,26 @@ type MockCmd struct {
 	// RecordTimer optionally bounds a record session (e.g. "30s"); the wrapped
 	// runner exiting on its own ends recording first in almost all cases.
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	// EmitMockEvents logs one line per mock as it is first served, so a client
+	// driving keploy (an IDE, a desktop API client) can show which dependency
+	// calls came from disk while the run is still going. Off by default: the
+	// lines are for a machine reading stdout, and a human watching a terminal
+	// does not want one per database round-trip.
+	//
+	// It exists because there was previously NO per-mock signal at replay time
+	// at any log level — only aggregate counts — so every client had to infer
+	// "served" from something else and present a guess as a measurement.
+	EmitMockEvents bool `json:"emitMockEvents" yaml:"emitMockEvents" mapstructure:"emitMockEvents"`
+	// MinCoverage fails a replay whose test run covered less than this
+	// percentage of the code (0 disables it). The number is the runner's own
+	// coverage report for that run -- go test -coverprofile, lcov, Cobertura
+	// or JaCoCo -- so the floor is only as real as the report: a run that
+	// writes none fails the gate rather than passing it unmeasured.
+	MinCoverage float64 `json:"minCoverage" yaml:"minCoverage" mapstructure:"minCoverage"`
+	// CoverageReport names the coverage report the test command writes, when
+	// it is not one of the runners' default locations. Relative to the
+	// directory keploy runs in.
+	CoverageReport string `json:"coverageReport" yaml:"coverageReport" mapstructure:"coverageReport"`
 }
 
 type Contract struct {
@@ -407,45 +431,66 @@ type Test struct {
 	// such a caller still sets Test.Host (it rewrites recorded request
 	// URLs), and the resolved-test-target fallback will reach for that
 	// address and probe it. Intent has to be stated, not inferred.
-	DisableAppReadyProbe        bool                `json:"disableAppReadyProbe" yaml:"disableAppReadyProbe" mapstructure:"disableAppReadyProbe"`
-	Host                        string              `json:"host" yaml:"host" mapstructure:"host"`
-	Port                        uint32              `json:"port" yaml:"port" mapstructure:"port"`
-	GRPCPort                    uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
-	SSEPort                     uint32              `json:"ssePort" yaml:"ssePort" mapstructure:"ssePort"`
-	Protocol                    ProtocolConfig      `json:"protocol" yaml:"protocol" mapstructure:"protocol"`
-	APITimeout                  uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
-	SkipCoverage                bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                   // boolean to capture the coverage in test
-	CoverageReportPath          string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
-	IgnoreOrdering              bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
-	MongoPassword               string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
-	Language                    models.Language     `json:"language" yaml:"language" mapstructure:"language"`
-	RemoveUnusedMocks           bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
-	PreserveFailedMocks         bool                `json:"preserveFailedMocks" yaml:"preserveFailedMocks" mapstructure:"preserveFailedMocks"` // skip mock pruning when tests fail (set by k8s-proxy autoreplay)
-	FallBackOnMiss              bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`                // Deprecated: this flag is ignored. Replay is now always deterministic.
-	JacocoAgentPath             string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
-	BasePath                    string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	Mocking                     bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
-	IgnoredTests                map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
-	DisableLineCoverage         bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
-	UpdateTemplate              bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
-	MustPass                    bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
-	MaxFailAttempts             uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
-	MaxFlakyChecks              uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
-	ProtoFile                   string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
-	ProtoDir                    string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
-	ProtoInclude                []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
-	CompareAll                  bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
-	SchemaMatch                 bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
-	UpdateTestMapping           bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
-	DisableAutoHeaderNoise      bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"`                                    // skip auto-noise for flaky headers (e.g. AWS SigV4)
-	SchemaNoiseDetection        bool                `json:"schemaNoiseDetection" yaml:"schemaNoiseDetection" mapstructure:"schemaNoiseDetection"`                                          // detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching; available to any parser implementing the shared schema-noise adapter
-	SchemaNoiseStrict           bool                `json:"schemaNoiseStrict" yaml:"schemaNoiseStrict" mapstructure:"schemaNoiseStrict"`                                                   // replay-path enforcement: for a mock that already carries learned req_body_noise, match strictly — every request-body field must match except the learned-noise paths, so a non-noise drift fails the match. Left false on the auto-replay path so it can still learn noise leniently. Available to any parser implementing the shared schema-noise adapter.
-	StrictFailure               bool                `json:"strictFailure" yaml:"strictFailure" mapstructure:"strictFailure"`                                                               // when true, a response-failing test (testPass=false) is marked FAILED even if the consumed mock set diverged from the recorded mapping. Default false preserves the historical demotion: response failures with mock-set mismatch are marked OBSOLETE so the user can re-record without seeing the response diff as a hard failure. Set true to surface every response divergence as a real test failure for CI gating; the per-test OBSOLETE label is replaced by FAILED but the mappingDiff (expected vs actual mocks, missing calls) is still written to the report for diagnostics.
-	AssertDependencies          bool                `json:"assertDependencies" yaml:"assertDependencies" mapstructure:"assertDependencies"`                                                // when true, a per-test dependency the recording says this test exercised (a mapped, non-reusable-tier mock) that goes UNCONSUMED during replay fails the test: FAILED status, failed test set, non-zero exit. DEFAULT FALSE ON PURPOSE — today such a test is silently demoted to OBSOLETE without failing the test set, so defaulting this true would flip every existing suite red on upgrade. See keploy-consumer-design-v2.md §5 false-pass row 0 ("worker stops producing -> expected mock unconsumed -> OBSOLETE, exit 0, verified_green") and §7 slice 4. Independent of strictFailure: that flag only promotes a test whose RESPONSE also failed, so it cannot catch the response-matched-but-dependency-vanished case this flag exists for. Regardless of this flag the DepResult rows are always written and always rendered, so the missing dependency is visible in the report / JUnit / --format json either way, and they are the same size either way — this flag changes the verdict only, never what is persisted. CAVEAT on what "unconsumed" can prove: the per-test consumed-mock set is drained the moment the response comes back, so an outgoing call the app makes AFTER writing its response (audit write, analytics POST, cache set, async token refresh) is attributed to the NEXT test and reads as missing here. The signal is "not observed during this test's window", not "never made". PRECONDITIONS — the signal it keys off (an armed per-test mock mapping) is not computed unless ALL hold: instrument mode (`keploy test -c "<cmd>"`, not --base-path / remote-agent), mapping enabled (NOT test.disableMapping), and the test set has a usable mappings.yaml (re-record, or run once with --update-test-mapping, for test sets recorded before mappings existed). ELIGIBILITY — even with all of those, only PER-TEST tier mocks are asserted. Session/connection-tier mocks are excluded (recorded once at app boot, shared across every test, so a per-test presence assertion on them fails healthy tests at random) and so is DNS (non-deterministic resolution order). models.Mock.DeriveLifetime classifies an UNTAGGED HTTP / HTTP2 / Postgres / MySQL / Generic mock as session-tier, so a recording whose mocks carry no per-test tier tag has NOTHING eligible: every test is reported dependencies_checked=false (NOT CHECKED — not "checked and clean") and this flag cannot fail anything, with one WARN per test set naming that reason. SCOPE — streaming (SSE/chunked) test cases are exempt whatever the preconditions say: RunTestSet defers them to a second pass that populates no DepResult and never resolves a dependency verdict, so this flag cannot fail a streaming test. When a precondition fails, or a test set defers streaming test cases, the replayer logs one WARN per test set naming the reason, rather than reporting a green run for an assertion that never executed. COVERAGE TODAY, recorded here so it is a decision rather than a support-thread discovery: DeriveLifetime's kind fallback (rule 4) catches the untagged case and its lax-mode promotion (rule 5) catches EVERY non-canonical tag for the same kind list, so under default settings there is no tag value that makes an HTTP / HTTP2 / MySQL / Postgres / PostgresV2 / Generic mock per-test tier — measured across all 42 kind x tag combinations. Since only per-test tier is eligible, this flag cannot fail a test in an HTTP, MySQL, Postgres or Generic suite; it reaches the checked branch only for Mongo / Redis / gRPC-style recordings, or when KEPLOY_STRICT_MOCK_WINDOW is set to an enabling value (a disk-load-time env gate that StrictMockWindow below deliberately does NOT control — see the Scope note on laxKindFallbackDisabled in pkg/models/lifetime.go). For every other suite the flag is inert by construction and its only signal is the one WARN per test set. Widening that is a FOLLOW-UP and needs one of: the tier taggers emitting a canonical per-test tag for HTTP/Postgres/MySQL, or the lax kind fallback being disabled for newly-recorded test sets. Until one of those lands, release notes for this flag must say which recordings it actually covers.
-	StrictMockWindow            bool                `json:"strictMockWindow" yaml:"strictMockWindow" mapstructure:"strictMockWindow"`                                                      // Strict containment: per-test (LifetimePerTest) mocks whose request timestamp falls outside the outer test window are DROPPED rather than promoted to the cross-test unfiltered pool, which eliminates cross-test mock bleed. Default TRUE now that every stateful-protocol recorder classifies mocks finely enough (session vs per-test for connection-alive commands, per-connection data mocks) that legitimate cross-test sharing is encoded as session/connection lifetime rather than implicit out-of-window reuse. Opt out by setting this to false in keploy.yaml, or export KEPLOY_STRICT_MOCK_WINDOW=0 at process start — the env var wins over config.
-	KeepAppAlive                bool                `json:"keepAppAlive" yaml:"keepAppAlive" mapstructure:"keepAppAlive"`                                                                  // Start the user app ONCE on the outer errgroup at Start() time instead of restarting it per test-set. Skips the per-test-set RunApplication spawn + NotifyGracefulShutdown (reuses the existing serveTest gating) and skips the --delay wait on every test-set after the first (the app is already warm after the boundary). Matches the production globality autoreplay shape where a single user-app process serves every test-set back-to-back; required for cross-test-set bugs that need a long-lived TCP connection (asyncpg pool, JDBC HikariCP pool, etc.) to surface — see keploy/integrations#203 for the session-tier staleness case. Works for every cmdType that manages a user application (docker-compose, docker-run, docker-start, native); cmdType == Empty (no -c) short-circuits the one-shot spawn since there's nothing to manage. Default FALSE preserves the historical per-test-set restart behaviour.
-	ConnectionPoolIdleRetention time.Duration       `json:"connectionPoolIdleRetention,omitempty" yaml:"connectionPoolIdleRetention,omitempty" mapstructure:"connectionPoolIdleRetention"` // How long a per-connID connection-scoped mock pool survives without activity before the idle sweeper reclaims it. Default 5m — enough for HikariCP-style pooled connections bridging test boundaries without activity. Extend for long-running integration tests that may idle a connection between requests for more than 5 minutes; shorter values make the sweeper more aggressive at cost of potentially reclaiming active connections. Zero / negative reverts to the default.
-	CmdUsed                     string              `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
+	DisableAppReadyProbe   bool                `json:"disableAppReadyProbe" yaml:"disableAppReadyProbe" mapstructure:"disableAppReadyProbe"`
+	Host                   string              `json:"host" yaml:"host" mapstructure:"host"`
+	Port                   uint32              `json:"port" yaml:"port" mapstructure:"port"`
+	GRPCPort               uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	SSEPort                uint32              `json:"ssePort" yaml:"ssePort" mapstructure:"ssePort"`
+	Protocol               ProtocolConfig      `json:"protocol" yaml:"protocol" mapstructure:"protocol"`
+	APITimeout             uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
+	SkipCoverage           bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                   // boolean to capture the coverage in test
+	CoverageReportPath     string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
+	IgnoreOrdering         bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
+	MongoPassword          string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
+	Language               models.Language     `json:"language" yaml:"language" mapstructure:"language"`
+	RemoveUnusedMocks      bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
+	PreserveFailedMocks    bool                `json:"preserveFailedMocks" yaml:"preserveFailedMocks" mapstructure:"preserveFailedMocks"` // skip mock pruning when tests fail (set by k8s-proxy autoreplay)
+	FallBackOnMiss         bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`                // Deprecated: this flag is ignored. Replay is now always deterministic.
+	JacocoAgentPath        string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
+	BasePath               string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	Mocking                bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
+	IgnoredTests           map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
+	DisableLineCoverage    bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
+	UpdateTemplate         bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
+	MustPass               bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
+	MaxFailAttempts        uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
+	MaxFlakyChecks         uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
+	ProtoFile              string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
+	ProtoDir               string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
+	ProtoInclude           []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
+	CompareAll             bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
+	SchemaMatch            bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
+	UpdateTestMapping      bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
+	DisableAutoHeaderNoise bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"` // skip auto-noise for flaky headers (e.g. AWS SigV4)
+	// AutoReplay marks the run as auto-replay: the pass that replays a test set
+	// immediately after recording it, against the SAME application build.
+	//
+	// Deliberately a mode flag, not a single behaviour switch: auto-replay's
+	// premise (app and recording are the same binary) invalidates a whole class
+	// of leniency, and the k8s-proxy side already grades its failures by a
+	// separate auto-replay rule. Today it disables the additive
+	// response-schema auto-pass — that pass exists for the CI shape, where the
+	// app is a NEWER build and a backward-compatible field addition is real API
+	// evolution. Auto-replay cannot have grown a field, so an addition there is
+	// nondeterminism. Left false so the CLI and cloud replay keep today's
+	// behaviour; only the auto-replay caller opts in.
+	AutoReplay bool `json:"autoReplay" yaml:"autoReplay" mapstructure:"autoReplay"`
+	// MockNoiseDetection / MockNoiseStrict are the canonical spelling; the
+	// SchemaNoise* pair below is the previous one, kept so an existing
+	// keploy.yml keeps working. NormalizeMockNoise reconciles them — read via
+	// NoiseDetection() / NoiseStrict(), never off a field.
+	MockNoiseDetection bool `json:"mockNoiseDetection" yaml:"mockNoiseDetection" mapstructure:"mockNoiseDetection"` // detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching; available to any parser implementing the shared mock-noise adapter
+	MockNoiseStrict    bool `json:"mockNoiseStrict" yaml:"mockNoiseStrict" mapstructure:"mockNoiseStrict"`          // replay-path enforcement: for a mock that already carries learned req_body_noise, match strictly — every request-body field must match except the learned-noise paths, so a non-noise drift fails the match
+	// Deprecated: use MockNoiseDetection.
+	SchemaNoiseDetection bool `json:"schemaNoiseDetection" yaml:"schemaNoiseDetection" mapstructure:"schemaNoiseDetection"` // detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching; available to any parser implementing the shared schema-noise adapter
+	// Deprecated: use MockNoiseStrict.
+	SchemaNoiseStrict           bool          `json:"schemaNoiseStrict" yaml:"schemaNoiseStrict" mapstructure:"schemaNoiseStrict"`                                                   // replay-path enforcement: for a mock that already carries learned req_body_noise, match strictly — every request-body field must match except the learned-noise paths, so a non-noise drift fails the match. Left false on the auto-replay path so it can still learn noise leniently. Available to any parser implementing the shared schema-noise adapter.
+	StrictFailure               bool          `json:"strictFailure" yaml:"strictFailure" mapstructure:"strictFailure"`                                                               // when true, a response-failing test (testPass=false) is marked FAILED even if the consumed mock set diverged from the recorded mapping. Default false preserves the historical demotion: response failures with mock-set mismatch are marked OBSOLETE so the user can re-record without seeing the response diff as a hard failure. Set true to surface every response divergence as a real test failure for CI gating; the per-test OBSOLETE label is replaced by FAILED but the mappingDiff (expected vs actual mocks, missing calls) is still written to the report for diagnostics.
+	AssertDependencies          bool          `json:"assertDependencies" yaml:"assertDependencies" mapstructure:"assertDependencies"`                                                // when true, a per-test dependency the recording says this test exercised (a mapped, non-reusable-tier mock) that goes UNCONSUMED during replay fails the test: FAILED status, failed test set, non-zero exit. DEFAULT FALSE ON PURPOSE — today such a test is silently demoted to OBSOLETE without failing the test set, so defaulting this true would flip every existing suite red on upgrade. See keploy-consumer-design-v2.md §5 false-pass row 0 ("worker stops producing -> expected mock unconsumed -> OBSOLETE, exit 0, verified_green") and §7 slice 4. Independent of strictFailure: that flag only promotes a test whose RESPONSE also failed, so it cannot catch the response-matched-but-dependency-vanished case this flag exists for. Regardless of this flag the DepResult rows are always written and always rendered, so the missing dependency is visible in the report / JUnit / --format json either way, and they are the same size either way — this flag changes the verdict only, never what is persisted. CAVEAT on what "unconsumed" can prove: the per-test consumed-mock set is drained the moment the response comes back, so an outgoing call the app makes AFTER writing its response (audit write, analytics POST, cache set, async token refresh) is attributed to the NEXT test and reads as missing here. The signal is "not observed during this test's window", not "never made". PRECONDITIONS — the signal it keys off (an armed per-test mock mapping) is not computed unless ALL hold: instrument mode (`keploy test -c "<cmd>"`, not --base-path / remote-agent), mapping enabled (NOT test.disableMapping), and the test set has a usable mappings.yaml (re-record, or run once with --update-test-mapping, for test sets recorded before mappings existed). ELIGIBILITY — even with all of those, only PER-TEST tier mocks are asserted. Session/connection-tier mocks are excluded (recorded once at app boot, shared across every test, so a per-test presence assertion on them fails healthy tests at random) and so is DNS (non-deterministic resolution order). models.Mock.DeriveLifetime classifies an UNTAGGED HTTP / HTTP2 / Postgres / MySQL / Generic mock as session-tier, so a recording whose mocks carry no per-test tier tag has NOTHING eligible: every test is reported dependencies_checked=false (NOT CHECKED — not "checked and clean") and this flag cannot fail anything, with one WARN per test set naming that reason. SCOPE — streaming (SSE/chunked) test cases are exempt whatever the preconditions say: RunTestSet defers them to a second pass that populates no DepResult and never resolves a dependency verdict, so this flag cannot fail a streaming test. When a precondition fails, or a test set defers streaming test cases, the replayer logs one WARN per test set naming the reason, rather than reporting a green run for an assertion that never executed. COVERAGE TODAY, recorded here so it is a decision rather than a support-thread discovery: DeriveLifetime's kind fallback (rule 4) catches the untagged case and its lax-mode promotion (rule 5) catches EVERY non-canonical tag for the same kind list, so under default settings there is no tag value that makes an HTTP / HTTP2 / MySQL / Postgres / PostgresV2 / Generic mock per-test tier — measured across all 42 kind x tag combinations. Since only per-test tier is eligible, this flag cannot fail a test in an HTTP, MySQL, Postgres or Generic suite; it reaches the checked branch only for Mongo / Redis / gRPC-style recordings, or when KEPLOY_STRICT_MOCK_WINDOW is set to an enabling value (a disk-load-time env gate that StrictMockWindow below deliberately does NOT control — see the Scope note on laxKindFallbackDisabled in pkg/models/lifetime.go). For every other suite the flag is inert by construction and its only signal is the one WARN per test set. Widening that is a FOLLOW-UP and needs one of: the tier taggers emitting a canonical per-test tag for HTTP/Postgres/MySQL, or the lax kind fallback being disabled for newly-recorded test sets. Until one of those lands, release notes for this flag must say which recordings it actually covers.
+	StrictMockWindow            bool          `json:"strictMockWindow" yaml:"strictMockWindow" mapstructure:"strictMockWindow"`                                                      // Strict containment: per-test (LifetimePerTest) mocks whose request timestamp falls outside the outer test window are DROPPED rather than promoted to the cross-test unfiltered pool, which eliminates cross-test mock bleed. Default TRUE now that every stateful-protocol recorder classifies mocks finely enough (session vs per-test for connection-alive commands, per-connection data mocks) that legitimate cross-test sharing is encoded as session/connection lifetime rather than implicit out-of-window reuse. Opt out by setting this to false in keploy.yaml, or export KEPLOY_STRICT_MOCK_WINDOW=0 at process start — the env var wins over config.
+	KeepAppAlive                bool          `json:"keepAppAlive" yaml:"keepAppAlive" mapstructure:"keepAppAlive"`                                                                  // Start the user app ONCE on the outer errgroup at Start() time instead of restarting it per test-set. Skips the per-test-set RunApplication spawn + NotifyGracefulShutdown (reuses the existing serveTest gating) and skips the --delay wait on every test-set after the first (the app is already warm after the boundary). Matches the production globality autoreplay shape where a single user-app process serves every test-set back-to-back; required for cross-test-set bugs that need a long-lived TCP connection (asyncpg pool, JDBC HikariCP pool, etc.) to surface — see keploy/integrations#203 for the session-tier staleness case. Works for every cmdType that manages a user application (docker-compose, docker-run, docker-start, native); cmdType == Empty (no -c) short-circuits the one-shot spawn since there's nothing to manage. Default FALSE preserves the historical per-test-set restart behaviour.
+	ConnectionPoolIdleRetention time.Duration `json:"connectionPoolIdleRetention,omitempty" yaml:"connectionPoolIdleRetention,omitempty" mapstructure:"connectionPoolIdleRetention"` // How long a per-connID connection-scoped mock pool survives without activity before the idle sweeper reclaims it. Default 5m — enough for HikariCP-style pooled connections bridging test boundaries without activity. Extend for long-running integration tests that may idle a connection between requests for more than 5 minutes; shorter values make the sweeper more aggressive at cost of potentially reclaiming active connections. Zero / negative reverts to the default.
+	CmdUsed                     string        `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
 }
 
 // Report output formats for `keploy report --format`.

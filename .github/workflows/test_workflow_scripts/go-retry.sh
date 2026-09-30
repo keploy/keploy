@@ -68,7 +68,26 @@
 #
 #   Bare `no such host` is excluded: it lives in DOCKER_PULL_RETRY_RE, not the
 #   build one, because a dead host is usually permanent.
-GO_RETRY_RE=${GO_RETRY_RE:-'stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out|429 Too Many Requests|too many requests|read "https?://[^"]*": unexpected EOF'}
+#
+#   GitHub's SSH rejections are included, and they are the one entry here that
+#   looks permanent and is not. Fetching github.com/keploy/integrations goes
+#   over SSH (GOPRIVATE + an insteadOf rewrite), and github.com sheds SSH
+#   sessions under load by refusing the key or dropping the connection during
+#   key exchange, which surfaces as:
+#
+#     git@github.com: Permission denied (publickey).
+#     kex_exchange_identification: Connection closed by remote host
+#
+#   Indistinguishable, by text, from a key that is genuinely wrong. What
+#   separates them is that this one clears on its own: observed on run
+#   36014034365, where the SAME key and commit failed in `build-linux-arm64`
+#   while succeeding in four sibling jobs of that very run, and `golangci-lint`
+#   failed twice and then passed with nothing changed. A real key problem fails
+#   every job, every time, so the cost of retrying it is ~35s and four copies
+#   of one error at the point somebody is already setting the key up. The cost
+#   of NOT retrying the transient case is a red lane on an unrelated PR, which
+#   is what this file exists to prevent.
+GO_RETRY_RE=${GO_RETRY_RE:-'stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out|429 Too Many Requests|too many requests|read "https?://[^"]*": unexpected EOF|permission denied \(publickey\)|kex_exchange_identification|connection closed by remote host'}
 
 go_retry() {
   local attempt=1
@@ -76,8 +95,10 @@ go_retry() {
   local direct_from="${GO_RETRY_DIRECT_FROM:-3}"
   local sleep_sec="${GO_RETRY_BACKOFF:-5}"
   local proxy rc out_f err_f fifo_f tee_pid
-  # Explicit template so the names are greppable in a log and portable to
-  # BSD mktemp; no lane that sources this runs on macOS today.
+  # Explicit template so the names are greppable in a log and portable to BSD
+  # mktemp — which is now load-bearing rather than precautionary:
+  # setup-private-parsers sources this file, and prepare_and_run.yml and
+  # release.yml both run it on macos-latest.
   out_f="$(mktemp "${TMPDIR:-/tmp}/go-retry-out.XXXXXX")"
   err_f="$(mktemp "${TMPDIR:-/tmp}/go-retry-err.XXXXXX")"
   fifo_f="${err_f}.fifo"
@@ -124,6 +145,13 @@ go_retry() {
     # holding the inherited stderr fd would stall here, but go reaps its own
     # children, so the only candidates are git/ssh helpers on the direct-mode
     # attempts, which the runners do not spawn.
+    #
+    # setup-private-parsers does make go shell out to git (and git to ssh) on
+    # every attempt, GOPROXY notwithstanding, because its module is GOPRIVATE —
+    # but that does not widen the exposure above: go captures git's stderr into
+    # a buffer and re-prints it ("exit status 128: <git message>") rather than
+    # handing its own fd down, so the fifo write end never reaches git or ssh.
+    # A wedged ssh therefore hangs at `go "$@"` above, not here.
     wait "$tee_pid" 2>/dev/null || true
     rm -f "$fifo_f"
     # stdout reaches the caller ONLY on success. A failed attempt's partial

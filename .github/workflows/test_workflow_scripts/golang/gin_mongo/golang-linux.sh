@@ -49,14 +49,17 @@ if [ -f "./keploy.yml" ]; then
     rm ./keploy.yml
 fi
 
-# Generate the keploy-config file.
-sudo "$RECORD_BIN" config --generate
-
-# Update the global noise to ts.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
-
-sed -i 's/ports: 0/ports: 27017/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"ts":[]}}
+KEPLOY_CFG
 
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
@@ -167,7 +170,6 @@ has_unexpected_errors() {
     local log_file="$1"
     grep "ERROR" "$log_file" | grep -Ev "failed to read from connection.*use of closed network connection"
 }
-
 
 for record_iteration in {1..2}; do
     app_name="ginMongo_${record_iteration}"
@@ -290,7 +292,6 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
 fi
 
 all_passed=true
-
 
 # Default-format (yaml) report scan. Glob picks up reports for every
 # test-set in test-run-0 — including the json-recorded ones, since the

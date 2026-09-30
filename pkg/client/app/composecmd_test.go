@@ -2,8 +2,12 @@ package app
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/agent/token"
+	"go.keploy.io/server/v3/utils"
 )
 
 // SetupCompose can only splice `-f <generated>.yaml` into a command that is a
@@ -87,4 +91,46 @@ func TestComposeLaunchPlan(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestKeepAgentTokenThroughSudo: `sudo docker compose up` is a spelling keploy
+// recognises as compose, and sudo's env_reset drops the control-plane token
+// the generated agent service asks compose for. Without --preserve-env that
+// agent comes up with no token at all.
+func TestKeepAgentTokenThroughSudo(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"sudo docker compose up", "sudo --preserve-env=KEPLOY_AGENT_TOKEN docker compose up"},
+		{"sudo -E docker compose up", "sudo --preserve-env=KEPLOY_AGENT_TOKEN -E docker compose up"},
+		{"  sudo docker-compose up", "  sudo --preserve-env=KEPLOY_AGENT_TOKEN docker-compose up"},
+		{"docker compose up", "docker compose up"},
+		{"sudoku up", "sudoku up"},
+	} {
+		if got := keepAgentTokenThroughSudo(tc.in); got != tc.want {
+			t.Errorf("keepAgentTokenThroughSudo(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestWithAgentToken_OnlyTheComposeCommandIsGivenTheAgentToken: under compose
+// the app command is what starts the agent, so it must carry the token its
+// compose file names — through a leading sudo too. Under every other kind the
+// app command is the application under test, which is handed nothing.
+func TestWithAgentToken_OnlyTheComposeCommandIsGivenTheAgentToken(t *testing.T) {
+	const cmd = "sudo docker compose -f docker-compose-tmp.yaml up"
+	gotCmd, gotEnv := (&App{kind: utils.DockerCompose}).withAgentToken(cmd)
+	if want := []string{token.Env + "=" + token.Session()}; !slices.Equal(gotEnv, want) {
+		t.Errorf("compose command env = %v, want %v", gotEnv, want)
+	}
+	if want := "sudo --preserve-env=" + token.Env + " docker compose -f docker-compose-tmp.yaml up"; gotCmd != want {
+		t.Errorf("compose command = %q, want %q: sudo would drop the token before compose could fill it in", gotCmd, want)
+	}
+	for _, kind := range []utils.CmdType{utils.Native, utils.DockerRun, utils.DockerStart, utils.FromContainer} {
+		gotCmd, gotEnv := (&App{kind: kind}).withAgentToken(cmd)
+		if gotEnv != nil {
+			t.Errorf("%s: the application under test was handed %v", kind, gotEnv)
+		}
+		if gotCmd != cmd {
+			t.Errorf("%s: the application's command was rewritten to %q", kind, gotCmd)
+		}
+	}
 }

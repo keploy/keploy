@@ -1,0 +1,58 @@
+name: Mock Mode Regression (Docker Compose, Linux)
+# End-to-end guard for `keploy mock record|replay` against a docker compose
+# project — the one command type where the keploy agent is a service INSIDE the
+# thing being wrapped, so the app cannot be started last the way it is natively
+# and is instead held at the agent's healthcheck until the proxy is armed. This
+# lane guards that the compose path works at all; the ORDER of the agent calls
+# is pinned by TestComposeOrdering in pkg/service/mock.
+#
+# Separate from mock_linux.yml because this lane needs the agent image loaded
+# into the local daemon, and the job that builds it skips on fork PRs. Folding
+# this into mock_linux.yml would take the native mock lane down with it there.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
+
+jobs:
+  mock_compose_linux:
+    # Fork PRs are already excluded by the caller, whose needs include the
+    # fork-guarded job that builds the agent image this lane loads.
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: mock-mode (docker_compose)
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      # A source build reports version 3-dev, and ghcr.io/keploy/keploy:v3-dev
+      # is not published — without loading the PR's own image the compose path
+      # has no agent to start at all.
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run mock-mode docker-compose e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-compose-linux.sh"

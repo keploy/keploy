@@ -85,9 +85,16 @@ func ShouldReexecWithSudo() bool {
 	// `--cmd-type docker-compose -c "make up"` would take the native path
 	// here, start unprivileged, and then fail deep inside the docker branch
 	// trying to write /proc/sys/kernel/perf_event_paranoid (#4399).
+	// --from-container runs the app as a container, so it needs root for the
+	// same reason every other docker kind does. It is checked before --cmd-type
+	// because it does not require one: the flag alone settles the kind.
+	if ExtractFromContainerFromArgs(os.Args) != "" {
+		return true
+	}
+
 	if explicit := ExtractCmdTypeFromArgs(os.Args); explicit != "" {
 		switch kind := CmdType(explicit); kind {
-		case Native, DockerRun, DockerStart, DockerCompose:
+		case Native, DockerRun, DockerStart, DockerCompose, FromContainer:
 			return IsDockerCmd(kind)
 		}
 		// Anything else is rejected later by ValidateFlags with a proper

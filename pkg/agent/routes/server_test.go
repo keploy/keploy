@@ -184,3 +184,26 @@ func TestStartAgentServer_ServesAfterTransientPortConflict(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// TestNewAgentHTTPServer_BoundsIdleClientsWithoutCuttingStreams pins the two
+// halves of the server's timeout policy. /agent/pcap/keylog and
+// /agent/pcap/traffic hold one response open for a whole recording, so a
+// ReadTimeout or WriteTimeout would cut them mid-stream; and without
+// ReadHeaderTimeout a client that opens a connection and never finishes its
+// request holds a goroutine forever on a port any local process can reach.
+// Neither shows up in a test of a working flow: the streams are only cut after
+// the timeout, and the slow client only costs a goroutine.
+func TestNewAgentHTTPServer_BoundsIdleClientsWithoutCuttingStreams(t *testing.T) {
+	srv := newAgentHTTPServer(http.NotFoundHandler())
+
+	if srv.ReadTimeout != 0 || srv.WriteTimeout != 0 {
+		t.Errorf("ReadTimeout=%v WriteTimeout=%v: either cuts the long-lived pcap and keylog streams mid-session",
+			srv.ReadTimeout, srv.WriteTimeout)
+	}
+	if srv.ReadHeaderTimeout <= 0 {
+		t.Error("no ReadHeaderTimeout: a client that never finishes its request line holds a goroutine indefinitely")
+	}
+	if srv.IdleTimeout <= 0 {
+		t.Error("no IdleTimeout: a keep-alive connection that goes quiet is held indefinitely")
+	}
+}

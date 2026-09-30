@@ -24,12 +24,18 @@ rm -rf keploy/
 go_retry build -o http-pokeapi
 echo "go binary built"
 
-# Generate the keploy-config file.
-sudo "$RECORD_BIN" config --generate
-
 # Update the global noise to updated_at.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"updated_at":[]}}
+KEPLOY_CFG
 
 send_request() {
     local index=$1  
@@ -104,7 +110,6 @@ fi
 
 # Start the go-http app in test mode.
 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs.txt
-
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
