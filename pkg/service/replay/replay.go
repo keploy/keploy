@@ -2159,6 +2159,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	testsToRun := activeTestCases
+	// Mocks the agent reports consumed outside their own window (a late server
+	// push, a carry-over publish) are kept and mapped by their own window, not
+	// by the running test; see carryOverAttribution.
+	carryAttr := newCarryOverAttribution(testCases)
 	// stoppedEarly records that a cycle exited before every test it intended to
 	// run had produced a verdict. The counters cannot express this on their own:
 	// `success` is ASSIGNED per cycle while `failure`/`obsolete` accumulate, and
@@ -2600,7 +2604,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			tcReqTime, tcRespTime := recordReqResTimestamps(testCase)
-			upsertActualTestMockMapping(actualTestMockMappings, testCase.Name, consumedMocks, tcReqTime, tcRespTime)
+			carryAttr.mapConsumed(actualTestMockMappings, testCase.Name, tcReqTime, tcRespTime, consumedMocks)
 
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Debug("consumed mocks for test case",
@@ -2703,6 +2707,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			default:
 				currentFailures++
 			}
+			carryAttr.keepWhateverTheVerdict(passingTotalConsumedMocks, testCase.Name, consumedMocks)
 			if outcome.FailsTestSet {
 				testSetStatus = models.TestSetStatusFailed
 			}
@@ -3346,7 +3351,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			tcReqTimeStream, tcRespTimeStream := recordReqResTimestamps(tc)
-			upsertActualTestMockMapping(actualTestMockMappings, tc.Name, consumedMocks, tcReqTimeStream, tcRespTimeStream)
+			carryAttr.mapConsumed(actualTestMockMappings, tc.Name, tcReqTimeStream, tcRespTimeStream, consumedMocks)
 
 			// Log consumed mocks for streaming test
 			r.logger.Debug("consumed mocks for streaming test case",
@@ -3395,6 +3400,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 			}
+			carryAttr.keepWhateverTheVerdict(passingTotalConsumedMocks, tc.Name, consumedMocks)
 
 			if testResult != nil {
 				testCaseResult := &models.TestResult{
