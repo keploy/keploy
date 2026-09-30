@@ -1684,7 +1684,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, recordedSetShapeOf(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -1855,7 +1855,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, recordedSetShapeOf(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -2291,15 +2291,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			var testPass bool
 			var loopErr error
 
-			var reqTime, respTime time.Time
-			switch testCase.Kind {
-			case models.HTTP:
-				reqTime = testCase.HTTPReq.Timestamp
-				respTime = testCase.HTTPResp.Timestamp
-			case models.GRPC_EXPORT:
-				reqTime = testCase.GrpcReq.Timestamp
-				respTime = testCase.GrpcResp.Timestamp
-			}
+			reqTime, respTime := testWindowOf(testCase)
 
 			// Per-test names PLUS the test-set's startup names. On this path the
 			// agent calls disk.LoadByNames(MockMapping) and loads nothing else,
@@ -2308,7 +2300,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// startup section exists to close. The timestamp path needs no
 			// equivalent: it reloads them via disk.LoadBefore(firstWindowStart).
 			expectedNames := models.MergeStartupMockNames(expectedTestMockMappings[testCase.Name], startupMockNames)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased, time.Time{})
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased, recordedSetShape{})
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 					testSetStatus = resolvedStatus
@@ -3110,7 +3102,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// to expected would have that unexpected consumption tolerated — a
 			// test that should go OBSOLETE would pass instead.
 			streamExpected := models.MergeStartupMockNames(expectedTestMockMappings[tc.Name], startupMockNames)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased, time.Time{})
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased, recordedSetShape{})
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
@@ -4023,11 +4015,6 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-// SendMockFilterParamsToAgent sends filtering parameters to agent instead of sending filtered mocks
-// firstRecordedTestStart is the request time of the EARLIEST RECORDED test in
-// the set, and is only meaningful on the initial staging call. It lets the agent
-// seed the startup-init cutoff from the set's recorded shape instead of from
-// whichever test fires first; pass the zero time on per-test calls.
 // firstRecordedTestStart returns the request time of the earliest RECORDED test
 // in the set. testDB returns cases sorted by request timestamp, so it is the
 // first one's; a case with no request time contributes nothing rather than
@@ -4044,7 +4031,62 @@ func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
 	return time.Time{}
 }
 
-func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, firstRecordedTestStart time.Time) error {
+// recordedSetShape is what the staging call tells the agent about the set's
+// recording as a whole. Per-test calls send the zero value.
+//
+//   - firstTestStart is the request time of the EARLIEST RECORDED test; the
+//     agent seeds the startup-init cutoff from it instead of from whichever
+//     test fires first.
+//   - windows is the window of EVERY recorded test, selected or not; the agent
+//     releases traffic the test windows do not pace by themselves (server push)
+//     at the recorded window it belongs to.
+type recordedSetShape struct {
+	firstTestStart time.Time
+	windows        []models.TestWindow
+}
+
+func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
+	return recordedSetShape{
+		firstTestStart: firstRecordedTestStart(testCases),
+		windows:        recordedTestWindows(testCases),
+	}
+}
+
+// recordedTestWindows returns the window each recorded test opens on the agent
+// when it runs — the same [req, res] pair the per-test SendMockFilterParamsToAgent
+// call sends (HTTP and gRPC; other kinds open none) — for every test case of the
+// set, including those this run does not select. A case with no request time
+// opens no window and is left out.
+func recordedTestWindows(testCases []*models.TestCase) []models.TestWindow {
+	out := make([]models.TestWindow, 0, len(testCases))
+	for _, tc := range testCases {
+		start, end := testWindowOf(tc)
+		if start.IsZero() {
+			continue
+		}
+		out = append(out, models.TestWindow{TestCase: tc.Name, Start: start, End: end})
+	}
+	return out
+}
+
+// testWindowOf is the [req, res] window the per-test agent call opens for tc.
+func testWindowOf(tc *models.TestCase) (time.Time, time.Time) {
+	if tc == nil {
+		return time.Time{}, time.Time{}
+	}
+	switch tc.Kind {
+	case models.HTTP:
+		return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+	case models.GRPC_EXPORT:
+		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+	}
+	return time.Time{}, time.Time{}
+}
+
+// SendMockFilterParamsToAgent sends filtering parameters to agent instead of
+// sending filtered mocks. shape is only meaningful on the set's staging call
+// (see recordedSetShape); pass the zero value on per-test calls.
+func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, shape recordedSetShape) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -4092,7 +4134,8 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	params := models.MockFilterParams{
 		AfterTime:              afterTime,
 		BeforeTime:             beforeTime,
-		FirstRecordedTestStart: firstRecordedTestStart,
+		FirstRecordedTestStart: shape.firstTestStart,
+		RecordedWindows:        shape.windows,
 		MockMapping:            expectedMockMapping,
 		UseMappingBased:        useMappingBased,
 		AgentOwnsConsumed:      agentOwnsConsumed,
@@ -4250,7 +4293,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	if err := r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
-	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases)); err != nil {
+	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, recordedSetShapeOf(testCases)); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at the filter params: %w", testSetID, err)
 	}
 	// Same soft-fail as the setup call site: a readiness-file write that fails

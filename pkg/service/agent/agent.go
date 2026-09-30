@@ -1053,6 +1053,14 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 			seeder.SeedStartupCutoff(params.FirstRecordedTestStart)
 		}
 	}
+	// Same moment, same optional-capability style: the recorded window of every
+	// test of the set, which lets the proxy release traffic the test windows do
+	// not pace by themselves (server push) at the window it belongs to.
+	if len(params.RecordedWindows) > 0 {
+		if seeder, ok := a.Proxy.(coreAgent.RecordedWindowsSeeder); ok {
+			seeder.SeedRecordedWindows(params.RecordedWindows)
+		}
+	}
 
 	a.logger.Debug("UpdateMockParams called",
 		zap.Time("afterTime", params.AfterTime),

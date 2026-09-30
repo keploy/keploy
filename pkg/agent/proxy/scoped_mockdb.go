@@ -137,6 +137,14 @@ func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
 	return 0
 }
 
+// RecordedWindows carries no mock data, so it passes straight through.
+func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
+	if r, ok := s.MockMemDb.(integrations.RecordedWindowsReader); ok {
+		return r.RecordedWindows()
+	}
+	return nil
+}
+
 func (s *scopedMockDb) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
 	if bk, ok := s.MockMemDb.(interface {
 		GetFilteredMocksByKind(models.Kind) ([]*models.Mock, error)

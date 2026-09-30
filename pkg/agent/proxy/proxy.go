@@ -3829,6 +3829,15 @@ func (p *Proxy) SeedStartupCutoff(start time.Time) {
 	}
 }
 
+// SeedRecordedWindows hands the underlying MockManager the recorded window of
+// every test of the set being staged. Satisfies the agent's optional
+// RecordedWindowsSeeder extension interface.
+func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
+	if m := p.getMockManager(); m != nil {
+		m.SeedRecordedWindows(ws)
+	}
+}
+
 // GetConsumedMocks returns the consumed filtered mocks.
 func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
 	m := p.getMockManager()

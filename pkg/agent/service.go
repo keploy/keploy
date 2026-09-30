@@ -135,6 +135,15 @@ type StartupCutoffSeeder interface {
 	SeedStartupCutoff(start time.Time)
 }
 
+// RecordedWindowsSeeder is the optional extension implemented by proxies whose
+// mock manager can be told the recorded window of every test of the set being
+// staged (models.MockFilterParams.RecordedWindows). Optional in the same style
+// as StartupCutoffSeeder: an agent whose proxy lacks it does not seed, and
+// consumers then release everything at once, the pre-existing behaviour.
+type RecordedWindowsSeeder interface {
+	SeedRecordedWindows(ws []models.TestWindow)
+}
+
 type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.

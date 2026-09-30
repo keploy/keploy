@@ -200,6 +200,8 @@ type prInstr struct {
 	// lastParams is the filter-params payload of the most recent send, so a
 	// test can assert what the agent was actually told.
 	lastParams models.MockFilterParams
+	// allParams is every send, in order.
+	allParams []models.MockFilterParams
 }
 
 func (f *prInstr) Setup(context.Context, string, models.SetupOptions) error     { return nil }
@@ -240,6 +242,7 @@ func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilter
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastParams = params
+	f.allParams = append(f.allParams, params)
 	f.updateCalls++
 	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates {
 		close(f.appStopped) // the application exits mid-set
@@ -1227,7 +1230,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	// Baseline: with a trustworthy agent history the flag is honoured and the
 	// CLI's map is NOT sent. Without this the assertion below proves nothing.
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, time.Time{}); err != nil {
+		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if !h.instr.lastParams.AgentOwnsConsumed {
@@ -1239,7 +1242,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	r.rewindConsumedForRetryCycle(map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
 
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, time.Time{}); err != nil {
+		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if h.instr.lastParams.AgentOwnsConsumed {

@@ -158,6 +158,14 @@ type MockManager struct {
 	// the live value would refuse it. Written under swapMu.
 	cutoffSeeded time.Time
 
+	// recordedWindows is the current set's recorded test windows — every test
+	// of the set, selected or not — as seeded by SeedRecordedWindows. nil when
+	// the replayer sent none. It changes at the same moments as the startup
+	// cutoff: parked in windowsSeeded until the set's staging call installs it.
+	// Stored under swapMu, read lock-free (RecordedWindows).
+	recordedWindows atomic.Pointer[models.WindowSchedule]
+	windowsSeeded   *models.WindowSchedule
+
 	// swapMu guards the {filtered, unfiltered, window} swap performed by
 	// SetMocksWithWindow. Writers Lock(); readers via GetFilteredMocksInWindow
 	// RLock() the snapshot read so they cannot observe a torn (newMocks,
@@ -462,6 +470,8 @@ func (m *MockManager) ResetForReplaySession() {
 	// is always the EARLIER one, so it would win any running-minimum guard and
 	// the next set would run on the aborted set's cutoff.
 	m.cutoffSeeded = time.Time{}
+	// Same for a parked window seed: it belongs to the set that sent it.
+	m.windowsSeeded = nil
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -848,6 +858,10 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 			// which is exactly the historical clear.
 			m.firstWindowStart = m.cutoffSeeded
 			m.cutoffSeeded = time.Time{}
+			// Install this set's recorded windows, or none: a set the replayer
+			// did not seed must not inherit the previous set's.
+			m.recordedWindows.Store(m.windowsSeeded)
+			m.windowsSeeded = nil
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -2365,6 +2379,40 @@ func (m *MockManager) SeedStartupCutoff(start time.Time) {
 	if m.firstWindowStart.IsZero() || start.Before(m.firstWindowStart) {
 		m.firstWindowStart = start
 	}
+}
+
+// SeedRecordedWindows installs the recorded [request, response] window of every
+// test of the set being staged (MockFilterParams.RecordedWindows), the
+// unselected and ignored ones included.
+//
+// It follows SeedStartupCutoff's rules, for the same reason: the replayer sends
+// it in the staging call, before SetMocksWithWindow, so at a set boundary the
+// value is parked and the staging call installs it together with the new trees.
+// Seeded mid-set (no boundary pending) it applies at once. An empty ws is
+// ignored.
+//
+// Consumers read it through RecordedWindows, to release traffic that the test
+// windows do not pace by themselves at the recorded window it belongs to.
+func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
+	if len(ws) == 0 {
+		return
+	}
+	s := models.NewWindowSchedule(ws)
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	if m.boundaryPending {
+		m.windowsSeeded = s
+		return
+	}
+	m.recordedWindows.Store(s)
+}
+
+// RecordedWindows returns the current set's recorded test windows, or nil when
+// the replayer sent none (mock replay, an older CLI, SetFilteredMocks-only
+// callers): consumers then treat everything as released, as before. The
+// returned schedule is immutable.
+func (m *MockManager) RecordedWindows() *models.WindowSchedule {
+	return m.recordedWindows.Load()
 }
 
 // MarkMockAsUsed marks the given mock as used (consumed) without modifying

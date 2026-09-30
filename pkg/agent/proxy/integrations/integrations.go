@@ -373,6 +373,25 @@ type MockConsumer interface {
 	MarkMockAsUsed(mock models.Mock) bool
 }
 
+// RecordedWindowsReader is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it). It exposes the recorded window of every
+// test of the set being replayed, selected or not, as the replayer seeded it at
+// staging (models.MockFilterParams.RecordedWindows).
+//
+// A parser whose protocol has traffic the test windows do not pace by
+// themselves — a broker's server push — uses it to hold that traffic until the
+// replay reaches the recorded window it belongs to:
+//
+//	sched := db.RecordedWindows()                 // nil: release everything
+//	start, _ := db.CurrentTestWindow()
+//	due := sched.Released(msg.Spec.ReqTimestampMock, start)
+//
+// The schedule is immutable; it is replaced (never mutated) at each set's
+// staging call.
+type RecordedWindowsReader interface {
+	RecordedWindows() *models.WindowSchedule
+}
+
 // WindowAware is the test-window facet of MockMemDb. Parsers that
 // partition their index into per-test / session / startup tiers
 // consult these accessors at dispatch time to pick the right tier
