@@ -1788,6 +1788,8 @@ func (r *Recorder) Start(ctx context.Context) error {
 	})
 
 	errGrp.Go(func() error {
+		// The document the MockDB writes for each mock, for AfterMockInsert.
+		insertedDoc := NewInsertedMockDoc(persistCtx, r.hooks)
 		for mock := range frames.Outgoing {
 			r.frameProgress.Add(1)
 			// Deferred-orphan revoke: a reserved-Kind control frame, NOT a mock.
@@ -1844,7 +1846,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 			if mock.IsAsync() {
 				asyncMockIDs.Store(tempID, struct{}{})
 			}
-			err := r.mockDB.InsertMock(persistCtx, mock, newTestSetID)
+			encoded, encodedFormat, err := insertedDoc.Insert(r.mockDB, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() != nil {
 					// See the sibling note on the test-case insert: insertMockErrChan
@@ -1935,6 +1937,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 			} else {
 				if hookErr := r.hooks.AfterMockInsert(ctx, &MockContext{
 					Mock: mock, TestSetID: newTestSetID,
+					Encoded: encoded, EncodedFormat: encodedFormat,
 				}); hookErr != nil {
 					r.logger.Error("AfterMockInsert hook failed; mock was inserted successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
 						zap.Error(hookErr),

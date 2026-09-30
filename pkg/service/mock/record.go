@@ -154,6 +154,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	var mocksSeen, heldSeen, heldDone, drainFrom atomic.Int64
 	var heldBusy atomic.Bool
 	consumerDone := make(chan struct{})
+	// The document the MockDB writes for each mock, for AfterMockInsert. Used
+	// only by persist, which runs on the one consumer goroutine.
+	insertedDoc := rec.NewInsertedMockDoc(persistCtx, m.hooks)
 	persist := func(mk *models.Mock) {
 		mctx := &rec.MockContext{Mock: mk, TestSetID: name}
 		if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
@@ -162,7 +165,8 @@ func (m *mockService) Record(ctx context.Context) error {
 		if mctx.Skip {
 			return
 		}
-		if err := m.mockDB.InsertMock(persistCtx, mk, name); err != nil {
+		encoded, encodedFormat, err := insertedDoc.Insert(m.mockDB, mk, name)
+		if err != nil {
 			if errors.Is(err, models.ErrMockEncode) {
 				m.logger.Warn("dropping one unencodable mock and continuing", zap.String("kind", mk.GetKind()), zap.Error(err))
 				return
@@ -170,7 +174,9 @@ func (m *mockService) Record(ctx context.Context) error {
 			utils.LogError(m.logger, err, "failed to persist mock", zap.String("mock", mk.Name))
 			return
 		}
-		if err := m.hooks.AfterMockInsert(ctx, &rec.MockContext{Mock: mk, TestSetID: name}); err != nil {
+		if err := m.hooks.AfterMockInsert(ctx, &rec.MockContext{
+			Mock: mk, TestSetID: name, Encoded: encoded, EncodedFormat: encodedFormat,
+		}); err != nil {
 			m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 		}
 		mockCount++

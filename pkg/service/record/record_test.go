@@ -1,9 +1,12 @@
 package record
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -13,10 +16,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 // fakeInstr is a minimal Instrumentation whose mapping stream is driven by the
@@ -2032,5 +2038,160 @@ func TestGetTestAndMockChans_ShutdownHandoffDoesNotWedgeWithoutAConsumer(t *test
 				}
 			})
 		}
+	}
+}
+
+// countingMockDB wraps a MockYaml the way k8s-proxy's does: it embeds it and
+// overrides InsertMock only, to count every mock the recording persists.
+type countingMockDB struct {
+	*mockdb.MockYaml
+	mu       sync.Mutex
+	inserted int
+}
+
+func (c *countingMockDB) InsertMock(ctx context.Context, m *models.Mock, testSetID string) error {
+	c.mu.Lock()
+	c.inserted++
+	c.mu.Unlock()
+	return c.MockYaml.InsertMock(ctx, m, testSetID)
+}
+
+func (c *countingMockDB) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inserted
+}
+
+// encodedHooks keeps a copy of every document the recorder hands
+// AfterMockInsert: what a hook that keeps a copy of the mocks file writes.
+type encodedHooks struct {
+	BaseRecordHooks
+	mu      sync.Mutex
+	docs    [][]byte
+	formats []string
+}
+
+func (h *encodedHooks) AfterMockInsert(_ context.Context, info *MockContext) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.docs = append(h.docs, append([]byte(nil), info.Encoded...))
+	h.formats = append(h.formats, info.EncodedFormat)
+	return nil
+}
+
+// laneMocks is the production-shape lane's mocks (DNS, the MySQL handshake, a
+// 20-row text result, an OK, a COM_QUIT with no response), and an HTTP mock.
+func laneMocks(t *testing.T) []*models.Mock {
+	t.Helper()
+	f, err := os.Open(filepath.Join("..", "..", "platform", "yaml", "mockdb", "testdata", "mysql_capture_starved_mocks.yaml"))
+	require.NoError(t, err)
+	defer f.Close()
+	dec := yamlLib.NewDecoder(f)
+	var docs []*yaml.NetworkTrafficDoc
+	for {
+		var d yaml.NetworkTrafficDoc
+		if err := dec.Decode(&d); err != nil {
+			require.ErrorIs(t, err, io.EOF)
+			break
+		}
+		docs = append(docs, &d)
+	}
+	mocks, err := mockdb.DecodeMocks(docs, zap.NewNop())
+	require.NoError(t, err)
+	require.Len(t, mocks, 6)
+	ts := time.Unix(1700000000, 0).UTC()
+	return append(mocks, &models.Mock{
+		Version: models.GetVersion(), Kind: models.HTTP,
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", ProtoMajor: 1, ProtoMinor: 1, URL: "http://orders.shop/x", Header: map[string]string{"Accept": "*/*"}, Timestamp: ts},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"X-Num": "123"}, Body: "line one\n\tline two\n", Timestamp: ts},
+			ReqTimestampMock: ts, ResTimestampMock: ts,
+		},
+	})
+}
+
+// The AfterMockInsert hooks get the document the MockDB wrote for each mock
+// (MockContext.Encoded), byte for byte what is in the mocks file, so a hook
+// that keeps a copy of the file (k8s-proxy's full-mock archive) does not
+// encode every mock a second time; that second encode was ~31% of a 1-CPU
+// k8s-proxy's CPU. It reaches them through a MockDB wrapped the way k8s-proxy
+// wraps one, and the wrapper's InsertMock still runs for every mock.
+func TestStart_AfterMockInsertGetsTheDocumentInTheMocksFile(t *testing.T) {
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(string(format), func(t *testing.T) {
+			f := &fakeInstr{
+				mappings: make(chan models.TestMockMapping),
+				incoming: make(chan *models.TestCase),
+				outgoing: make(chan *models.Mock),
+			}
+			dir := t.TempDir()
+			db := &countingMockDB{MockYaml: mockdb.NewWithFormat(zap.NewNop(), dir, "mocks", format)}
+			hooks := &encodedHooks{}
+			r := &Recorder{
+				logger:          zap.NewNop(),
+				testDB:          &recTestDB{},
+				mockDB:          db,
+				mappingDb:       &recMappingDB{},
+				telemetry:       &recTelemetry{},
+				instrumentation: &blockingInstr{f},
+				testSetConf:     recTestSetConf{},
+				hooks:           hooks,
+				config:          &config.Config{},
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- r.Start(ctx) }()
+
+			mocks := laneMocks(t)
+			for i, m := range mocks {
+				m.Name = fmt.Sprintf("temp-%d", i)
+				select {
+				case f.outgoing <- m:
+				case <-time.After(10 * time.Second):
+					t.Fatalf("the recorder stopped consuming mocks at %d", i)
+				}
+			}
+			require.Eventually(t, func() bool { return db.count() == len(mocks) }, 10*time.Second, 5*time.Millisecond,
+				"the wrapper's InsertMock did not run for every mock: the recorder went around it")
+			require.Eventually(t, func() bool {
+				hooks.mu.Lock()
+				defer hooks.mu.Unlock()
+				return len(hooks.docs) == len(mocks)
+			}, 10*time.Second, 5*time.Millisecond, "AfterMockInsert did not run for every mock")
+
+			cancel()
+			close(f.outgoing)
+			close(f.incoming)
+			close(f.mappings)
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(90 * time.Second):
+				t.Fatal("Start did not return")
+			}
+
+			files, err := filepath.Glob(filepath.Join(dir, "*", "mocks."+format.FileExtension()))
+			require.NoError(t, err)
+			require.Len(t, files, 1)
+			file, err := os.ReadFile(files[0])
+			require.NoError(t, err)
+
+			hooks.mu.Lock()
+			defer hooks.mu.Unlock()
+			for i, doc := range hooks.docs {
+				require.NotEmpty(t, doc, "AfterMockInsert got no document for mock %d", i)
+				require.Equal(t, string(format), hooks.formats[i], "document %d handed in the wrong format", i)
+			}
+			var want []byte
+			if format == yaml.FormatYAML {
+				want = append([]byte(utils.GetVersionAsComment()), bytes.Join(hooks.docs, []byte("---\n"))...)
+			} else {
+				want = bytes.Join(hooks.docs, nil)
+			}
+			require.Equal(t, string(file), string(want),
+				"the documents AfterMockInsert got are not what is in %s", filepath.Base(files[0]))
+		})
 	}
 }

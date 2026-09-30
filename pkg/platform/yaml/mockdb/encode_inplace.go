@@ -197,22 +197,22 @@ func encodeYAMLDoc(buf *bytes.Buffer, v any) (err error) {
 	return enc.Close()
 }
 
-// yamlBuffers are the buffers InsertMock makes a document in: one per mock
+// docBuffers are the buffers InsertMock makes a document in: one per mock
 // written at a time, not one allocated per mock.
-var yamlBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+var docBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
-// yamlBufferKeep is the largest buffer kept for the next mock: a rare
+// docBufferKeep is the largest buffer kept for the next mock: a rare
 // multi-MB result is not held for the rest of the recording.
-const yamlBufferKeep = 1 << 20
+const docBufferKeep = 1 << 20
 
-func getYAMLBuffer() *bytes.Buffer {
-	b := yamlBuffers.Get().(*bytes.Buffer)
+func getDocBuffer() *bytes.Buffer {
+	b := docBuffers.Get().(*bytes.Buffer)
 	b.Reset()
 	return b
 }
 
-func putYAMLBuffer(b *bytes.Buffer) {
-	if b.Cap() <= yamlBufferKeep {
-		yamlBuffers.Put(b)
+func putDocBuffer(b *bytes.Buffer) {
+	if b.Cap() <= docBufferKeep {
+		docBuffers.Put(b)
 	}
 }
