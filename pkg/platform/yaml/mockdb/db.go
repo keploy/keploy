@@ -977,28 +977,53 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		// skippable failure returns below and the deferred flush commits
 		// whatever is already buffered, so writing "---" first injected a stray
 		// empty YAML document into mocks.yaml for every dropped mock.
-		mockYaml, err := EncodeMock(mock, ys.Logger)
-		if err != nil {
-			// Only keploy's own encoders are pure enough to be skippable. A
-			// registered mapper can fail for environmental reasons, so those stay
-			// fatal — see errMapperEncode.
-			if errors.Is(err, errMapperEncode) {
-				return fmt.Errorf("failed to encode mock (yaml): %w", err)
+		//
+		// A kind whose spec can be marshaled in place is written in one pass
+		// (encode_inplace.go); the others through EncodeMock's yaml.Node.
+		// Either way the document is made in memory first: marshaling in
+		// place can fail partway (a value YAML cannot marshal), and what the
+		// emitter had streamed by then would be half a document in the file.
+		buf := getYAMLBuffer()
+		defer putYAMLBuffer(buf)
+		if v, inPlace := encodeMockInPlace(mock); inPlace {
+			// A mock that holds a string a block scalar cannot carry is
+			// written with it double-quoted (yaml.EncodeQuoted): as the
+			// literal block yaml.v3 picks, it would not read back, and
+			// the file would stop loading from it on.
+			if yaml.NeedsQuoting(v) {
+				q, err := yaml.EncodeQuoted(v)
+				if err != nil {
+					return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+				}
+				v = q
 			}
-			return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+			if err := encodeYAMLDoc(buf, v); err != nil {
+				// A payload fault, as EncodeMock's Node encode of the same
+				// value is: skippable.
+				return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+			}
+		} else {
+			doc, err := EncodeMock(mock, ys.Logger)
+			if err != nil {
+				// Only keploy's own encoders are pure enough to be skippable. A
+				// registered mapper can fail for environmental reasons, so those
+				// stay fatal — see errMapperEncode.
+				if errors.Is(err, errMapperEncode) {
+					return fmt.Errorf("failed to encode mock (yaml): %w", err)
+				}
+				return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+			}
+			if err := encodeYAMLDoc(buf, &doc); err != nil {
+				return fmt.Errorf("failed to encode mock yaml: %w", err)
+			}
 		}
 		if !isFileEmpty {
 			if _, err := writer.WriteString("---\n"); err != nil {
 				return fmt.Errorf("failed to write document separator: %w", err)
 			}
 		}
-		encoder := yamlLib.NewEncoder(writer)
-		if err := encoder.Encode(&mockYaml); err != nil {
-			_ = encoder.Close()
-			return fmt.Errorf("failed to encode mock yaml: %w", err)
-		}
-		if err := encoder.Close(); err != nil {
-			return fmt.Errorf("failed to close yaml encoder: %w", err)
+		if _, err := writer.Write(buf.Bytes()); err != nil {
+			return fmt.Errorf("failed to write mock yaml: %w", err)
 		}
 	}
 

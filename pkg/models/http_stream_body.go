@@ -100,7 +100,11 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		if body == "" && len(h.StreamBody) > 0 {
 			body = streamChunksToLegacyBody(h.StreamBody, detectStreamBodyKind(h.Header))
 		}
-		if err := bodyNode.Encode(body); err != nil {
+		if YAMLBlockScalarUnsafe(body) {
+			// Node.Encode writes it as a block scalar and parses that
+			// back, which fails (YAMLBlockScalarUnsafe): the mock was lost.
+			bodyNode = &yamlLib.Node{Kind: yamlLib.ScalarNode, Tag: "!!str", Value: body, Style: yamlLib.DoubleQuotedStyle}
+		} else if err := bodyNode.Encode(body); err != nil {
 			return nil, err
 		}
 	}
@@ -737,11 +741,15 @@ func stringNode(value string) *yamlLib.Node {
 			Value: base64.StdEncoding.EncodeToString([]byte(value)),
 		}
 	}
-	return &yamlLib.Node{
+	n := &yamlLib.Node{
 		Kind:  yamlLib.ScalarNode,
 		Tag:   "!!str",
 		Value: value,
 	}
+	if YAMLBlockScalarUnsafe(value) {
+		n.Style = yamlLib.DoubleQuotedStyle // not a block scalar that reads back as another string
+	}
+	return n
 }
 
 // cloneStreamChunks returns a deep copy of a slice of HTTPStreamChunk.

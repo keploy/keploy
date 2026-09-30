@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -75,5 +76,35 @@ func TestDecodeIgnoresUnknownMetadataKeys(t *testing.T) {
 	}
 	if got.Description != "" {
 		t.Fatalf("unknown keys must not bleed into fields: %+v", got)
+	}
+}
+
+// A test case whose body a block scalar cannot carry (tab-indented JSON, a
+// body that opens with a line break) is encoded, and reads back exactly.
+// Node.Encode wrote it as a block and failed to parse that back: the test
+// case was not saved.
+func TestEncodeTestcaseCarriesABodyABlockScalarCannot(t *testing.T) {
+	for _, body := range []string{"\t{\n\t\"a\": 1\n}", "\n\thello", " a\nb"} {
+		tc := httpTestCase()
+		tc.HTTPReq.Body, tc.HTTPResp.Body = body, body
+		doc, err := EncodeTestcase(tc, zap.NewNop())
+		if err != nil {
+			t.Fatalf("body %q: EncodeTestcase: %v", body, err)
+		}
+		out, err := yamlLib.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var read yaml.NetworkTrafficDoc
+		if err := yamlLib.Unmarshal(out, &read); err != nil {
+			t.Fatalf("body %q: the test case does not load: %v\n%s", body, err, out)
+		}
+		back, err := Decode(&read, zap.NewNop())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if back.HTTPReq.Body != body || back.HTTPResp.Body != body {
+			t.Fatalf("read back request %q, response %q, want %q", back.HTTPReq.Body, back.HTTPResp.Body, body)
+		}
 	}
 }
