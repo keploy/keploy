@@ -78,7 +78,7 @@ func mappedCases(t *testing.T, dir string) map[string][]string {
 
 func TestRecordRequestsFlagReachesTheAgentSetup(t *testing.T) {
 	for _, on := range []bool{true, false} {
-		instr := newRunnerInstr(t)
+		instr := newRunnerInstr(t, "")
 		db := &memTestDB{}
 		require.NoError(t, recordSetWith(t, zap.NewNop(), instr, nil, db, func(cfg *config.Config) {
 			if on {
@@ -93,7 +93,7 @@ func TestRecordRequestsFlagReachesTheAgentSetup(t *testing.T) {
 
 // Each stored case is listed under the flow whose window held its request; one outside every window stays on disk but unlisted.
 func TestRecordRequestsStoresCasesAndListsThemPerFlow(t *testing.T) {
-	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr := newRunnerInstr(t, jsonSequential)
 	instr.incoming = []*models.TestCase{
 		caseAt("test-1", runnerT0.Add(5*time.Millisecond)),
 		caseAt("test-2", runnerT0.Add(15*time.Millisecond)),
@@ -124,7 +124,7 @@ func TestRecordRequestsTurnOffWhenTheyCannotBeRecorded(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			core, logs := observer.New(zap.WarnLevel)
-			instr := newRunnerInstr(t, sequentialMarks()...)
+			instr := newRunnerInstr(t, jsonSequential)
 			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
 			require.NoError(t, recordSetWith(t, zap.New(core), instr, mapdb.New(zap.NewNop(), t.TempDir(), ""), tc.db, tc.tweak))
 			opts, read := instr.setup()
@@ -217,17 +217,17 @@ func TestStartupMocks(t *testing.T) {
 	require.Len(t, startupMocks(nil, mocks), 5)
 }
 
-func stepsMarks() []models.ScopeWindow {
-	return []models.ScopeWindow{
-		mark("orders/e2e.TestA/create", 10*time.Millisecond, 40*time.Millisecond),
-		mark("orders/e2e.TestA", 0, 100*time.Millisecond),
-		mark("orders/e2e.TestB", 100*time.Millisecond, 200*time.Millisecond),
-	}
-}
+const jsonSteps = `{"Time":"2026-09-24T10:00:00Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.01Z","Action":"run","Package":"orders/e2e","Test":"TestA/create"}
+{"Time":"2026-09-24T10:00:00.04Z","Action":"pass","Package":"orders/e2e","Test":"TestA/create"}
+{"Time":"2026-09-24T10:00:00.1Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.1Z","Action":"run","Package":"orders/e2e","Test":"TestB"}
+{"Time":"2026-09-24T10:00:00.2Z","Action":"pass","Package":"orders/e2e","Test":"TestB"}
+`
 
 func TestRecordWritesCaseMocksStepsAndStartup(t *testing.T) {
 	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
-	instr := newRunnerInstr(t, stepsMarks()...)
+	instr := newRunnerInstr(t, jsonSteps)
 	instr.incoming = []*models.TestCase{
 		httpCase("test-1", "POST", "/orders", 201, "{}", at(15)),
 		httpCase("test-2", "GET", "/orders", 200, "[]", at(60)),
@@ -269,7 +269,9 @@ func TestRecordWritesCaseMocksStepsAndStartup(t *testing.T) {
 }
 
 func TestRecordRefusesATestThatRanTwice(t *testing.T) {
-	instr := newRunnerInstr(t, append(sequentialMarks(), mark("orders/e2e.TestA", 30*time.Millisecond, 40*time.Millisecond))...)
+	instr := newRunnerInstr(t, jsonSequential+`{"Time":"2026-09-24T10:00:00.03Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.04Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
+`)
 	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
 	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
 	cfg.Path = t.TempDir()
@@ -329,7 +331,7 @@ func (h *hookSpy) AfterRecordingComplete(_ context.Context, info *rec.RecordingC
 }
 
 func TestRecordPassesCasesAndMocksThroughTheHooks(t *testing.T) {
-	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr := newRunnerInstr(t, jsonSequential)
 	instr.incoming = []*models.TestCase{caseAt("test-1", runnerT0.Add(5*time.Millisecond))}
 	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(6*time.Millisecond))}
 	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
@@ -388,7 +390,7 @@ func TestCorrelateCasesPairsAMockWithACaseOfTheSameFlowAcrossEntries(t *testing.
 
 func TestRecordAndReplayPutASetupCallInTheParentTest(t *testing.T) {
 	setup := runnerT0.Add(flowSetupAt)
-	instr := newRunnerInstr(t, flowMarks()...)
+	instr := newRunnerInstr(t, flowRun())
 	instr.incoming = []*models.TestCase{httpCase("test-1", "POST", "/apps", 201, "{}", setup)}
 	instr.mocks = []*models.Mock{
 		mockAt("mock-0", runnerT0.Add(1500*time.Millisecond)),
@@ -396,6 +398,8 @@ func TestRecordAndReplayPutASetupCallInTheParentTest(t *testing.T) {
 	}
 	dir := t.TempDir()
 	require.NoError(t, recordSetWith(t, zap.NewNop(), instr, mapdb.New(zap.NewNop(), dir, ""), &memTestDB{}, withRequests))
+	marks, _ := instr.seen()
+	require.Empty(t, marks)
 
 	data, err := os.ReadFile(filepath.Join(dir, "set", "mappings.yaml"))
 	require.NoError(t, err)
@@ -411,12 +415,13 @@ func TestRecordAndReplayPutASetupCallInTheParentTest(t *testing.T) {
 	require.Equal(t, []string{"test-1"}, flow.Cases)
 	require.Equal(t, map[string]string{"test-1": ""}, flow.CaseSteps, "the call before the first subtest is the parent's")
 	require.Equal(t, map[string][]string{"test-1": {"mock-1"}}, flow.CaseMocks)
-	require.Equal(t, []string{"mock-1"}, flow.MockNames())
-	require.Equal(t, []string{"mock-0"}, mapping.StartupMockNames(), "a call between two tests' marks belongs to no test")
+	require.Equal(t, []string{"mock-0", "mock-1"}, flow.MockNames(), "the call in the gap before TestFlow belongs to TestFlow")
+	require.Empty(t, mapping.Startup)
 
+	replay := feed(t, flowRun())
 	recorded := map[string][]*models.TestCase{"e2e/orders.TestFlow": {httpCase("test-1", "POST", "/apps", 201, "{}", setup)}}
 	actual := []*models.TestCase{httpCase("", "POST", "/apps", 201, "{}", setup.Add(time.Millisecond))}
-	out := pairCases(flowMarks(), recorded, actual, func(*models.TestCase, *models.HTTPResp) (bool, *models.Result) { return true, nil })
+	out := pairCases(mergeWindows(replay.windows(), nil), recorded, actual, func(*models.TestCase, *models.HTTPResp) (bool, *models.Result) { return true, nil })
 	require.Len(t, out, 1)
 	require.NotNil(t, out[0].Actual, "replay sees the request where record put it")
 	require.True(t, out[0].Passed)
@@ -439,11 +444,14 @@ func snapshotTree(t *testing.T, root string) map[string]string {
 
 func TestARefusedRecordLeavesTheSetExactlyAsItWas(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		marks []models.ScopeWindow
-		err   string
+		name   string
+		output string
+		err    string
 	}{
-		{"a test ran twice", append(sequentialMarks(), mark("orders/e2e.TestA", 30*time.Millisecond, 40*time.Millisecond)), "TestA ran 2 times"},
+		{"a test ran twice", jsonSequential + `{"Time":"2026-09-24T10:00:00.03Z","Action":"run","Package":"orders/e2e","Test":"TestA"}
+{"Time":"2026-09-24T10:00:00.04Z","Action":"pass","Package":"orders/e2e","Test":"TestA"}
+`, "TestA ran 2 times"},
+		{"tests overlapped", plainParallel, "TestA and TestB"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -454,7 +462,7 @@ func TestARefusedRecordLeavesTheSetExactlyAsItWas(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(set, "tests", "test-1.yaml"), []byte("# old case\nname: test-1\n"), 0o644))
 			before := snapshotTree(t, dir)
 
-			instr := newRunnerInstr(t, tc.marks...)
+			instr := newRunnerInstr(t, tc.output)
 			instr.incoming = []*models.TestCase{caseAt("", runnerT0.Add(5*time.Millisecond))}
 			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
 			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
@@ -475,7 +483,7 @@ func TestAnAcceptedRecordReplacesTheSetAndLeavesNoCopy(t *testing.T) {
 	set := filepath.Join(dir, "set")
 	require.NoError(t, os.MkdirAll(set, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(set, "mocks.yaml"), []byte("# old mocks\n"), 0o644))
-	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr := newRunnerInstr(t, jsonSequential)
 	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
 	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
 	cfg.Path = dir
@@ -488,4 +496,31 @@ func TestAnAcceptedRecordReplacesTheSetAndLeavesNoCopy(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "only the set itself remains")
+}
+
+func TestRecordListsTheTestsTheRunnerSkipped(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   []string
+	}{
+		{"one skipped, one passing", jsonEvent("run", "TestA", 0) + jsonEvent("pass", "TestA", 1) +
+			jsonEvent("run", "TestSkipped", 1) + jsonEvent("skip", "TestSkipped", 1.1) +
+			jsonEvent("run", "TestB", 2) + jsonEvent("run", "TestB/later", 2.1) + jsonEvent("skip", "TestB/later", 2.2) + jsonEvent("pass", "TestB", 3),
+			[]string{"e2e/orders.TestSkipped", "e2e/orders.TestB/later"}},
+		{"nothing skipped", jsonEvent("run", "TestA", 0) + jsonEvent("pass", "TestA", 1), []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			instr := newRunnerInstr(t, tc.output)
+			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(500*time.Millisecond))}
+			dir := t.TempDir()
+			require.NoError(t, recordSetWith(t, zap.NewNop(), instr, mapdb.New(zap.NewNop(), dir, ""), nil, nil))
+			data, err := os.ReadFile(filepath.Join(dir, "set", "mappings.yaml"))
+			require.NoError(t, err)
+			mapping, err := mapdb.DecodeMapping(data, zap.NewNop())
+			require.NoError(t, err)
+			require.NotNil(t, mapping.Skipped, "the key is always written, so a reader can tell none from unknown:\n%s", data)
+			require.Equal(t, tc.want, *mapping.Skipped)
+		})
+	}
 }

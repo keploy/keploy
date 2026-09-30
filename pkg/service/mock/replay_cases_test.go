@@ -86,14 +86,14 @@ func TestAttributeMocksUsesTheTestRunningAtTheTime(t *testing.T) {
 
 // A replay with requests on compares what the app answered with the recorded cases and says which mocks each test used.
 func TestReplayOutcomeCarriesTheCasesAndTheMocksPerTest(t *testing.T) {
-	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr := newRunnerInstr(t, jsonSequential)
 	instr.incoming = []*models.TestCase{httpCase("", "POST", "http://localhost:8080/orders", 201, `{"id":"new"}`, runnerT0.Add(5*time.Millisecond))}
 	instr.consumedMocks = []models.MockState{{Name: "mock-0", Kind: models.HTTP, Timestamp: runnerT0.Add(6 * time.Millisecond).UnixNano()}}
 	instr.mockErrors = []models.UnmatchedCall{{Protocol: "Mongo", ActualSummary: "insert shop.orders", At: runnerT0.Add(7 * time.Millisecond)}}
 	dir := t.TempDir()
 	mapDB := mapdb.New(zap.NewNop(), dir, "")
 	require.NoError(t, mapDB.UpsertBatch(context.Background(), "set", map[string][]models.MockEntry{"orders/e2e.TestA": {{Name: "mock-0"}}}))
-	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil))
+	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
 	recorded := httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{"id":"old"}`, runnerT0)
 	db := &memTestDB{existing: []*models.TestCase{recorded}}
 
@@ -182,11 +182,11 @@ func (l lateIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions)
 }
 
 func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
-	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr := newRunnerInstr(t, jsonSequential)
 	late := lateIncoming{runnerInstr: instr, after: 200 * time.Millisecond, tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
 	dir := t.TempDir()
 	mapDB := mapdb.New(zap.NewNop(), dir, "")
-	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil))
+	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
 	db := &memTestDB{existing: []*models.TestCase{httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0)}}
 	var got ReplayOutcome
 	RegisterReplayOutcomeReporter(func(_ context.Context, o ReplayOutcome) { got = o })
@@ -223,11 +223,11 @@ func TestPairCasesDoesNotCompareGRPCAsHTTP(t *testing.T) {
 }
 
 func TestPairCasesFindsSubtestRequestsUnderTheTopLevelFlow(t *testing.T) {
-	windows := []models.ScopeWindow{
-		mark("e2e/orders.TestTestSuiteValidation/missing_name", time.Second, 2*time.Second),
-		mark("e2e/orders.TestTestSuiteValidation/missing_steps", 3*time.Second, 4*time.Second),
-		mark("e2e/orders.TestTestSuiteValidation", 0, 5*time.Second),
-	}
+	scope := feed(t, jsonEvent("run", "TestTestSuiteValidation", 0)+
+		jsonEvent("run", "TestTestSuiteValidation/missing_name", 1)+jsonEvent("pass", "TestTestSuiteValidation/missing_name", 2)+
+		jsonEvent("run", "TestTestSuiteValidation/missing_steps", 3)+jsonEvent("pass", "TestTestSuiteValidation/missing_steps", 4)+
+		jsonEvent("pass", "TestTestSuiteValidation", 5))
+	windows := mergeWindows(scope.windows(), nil)
 	at := func(sec float64) time.Time { return runnerT0.Add(time.Duration(sec * float64(time.Second))) }
 	flow := "e2e/orders.TestTestSuiteValidation"
 	recorded := map[string][]*models.TestCase{flow: {
@@ -254,4 +254,24 @@ func TestPairCasesFindsSubtestRequestsUnderTheTopLevelFlow(t *testing.T) {
 	require.Equal(t, flow, mocks[0].Flow)
 	require.Len(t, mocks[0].Consumed, 1)
 	require.Len(t, mocks[0].Missed, 1)
+}
+
+func TestScopeTableGroupsEachFlowWithTheSharedMocksAndItsWindow(t *testing.T) {
+	at := func(sec int) time.Time { return runnerT0.Add(time.Duration(sec) * time.Second) }
+	mocks := []*models.Mock{mockAt("mock-0", at(0)), mockAt("mock-1", at(10)), mockAt("mock-2", at(12)), mockAt("mock-3", at(20)), mockAt("mock-4", at(30))}
+	table := scopeTable(map[string][]models.MockEntry{
+		"orders/e2e.TestA":        {{Name: "mock-1"}},
+		"orders/e2e.TestA/create": {{Name: "mock-2"}},
+		"orders/e2e.TestB":        {{Name: "mock-3"}},
+		"orders/e2e.TestEmpty":    nil,
+	}, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-4"}}, mocks)
+
+	require.Equal(t, []string{"mock-1", "mock-2", "mock-0", "mock-4"}, table.Mappings["orders/e2e.TestA"])
+	require.Equal(t, table.Mappings["orders/e2e.TestA"], table.Mappings["orders/e2e.TestA/create"], "a subtest's scope serves its whole flow")
+	require.Equal(t, []string{"mock-3", "mock-0", "mock-4"}, table.Mappings["orders/e2e.TestB"])
+	require.Empty(t, table.Mappings["orders/e2e.TestEmpty"], "a flow with no mocks is not narrowed")
+	require.Equal(t, models.ScopeWindow{Start: at(10), End: at(12)}, table.Windows["orders/e2e.TestA"])
+	require.Equal(t, models.ScopeWindow{Start: at(20), End: at(20)}, table.Windows["orders/e2e.TestB"])
+	require.NotContains(t, table.Windows, "orders/e2e.TestEmpty")
+	require.True(t, table.FirstStart.Equal(at(10)))
 }

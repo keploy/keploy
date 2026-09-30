@@ -4,99 +4,21 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-type runnerInstr struct {
-	*composeInstr
-	mocks    []*models.Mock
-	windows  []models.ScopeWindow
-	incoming []*models.TestCase
-
-	mu           sync.Mutex
-	setupOpts    models.SetupOptions
-	incomingRead bool
-}
-
-func (r *runnerInstr) Setup(_ context.Context, _ string, opts models.SetupOptions) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.setupOpts = opts
-	return nil
-}
-
-func (r *runnerInstr) GetIncoming(_ context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
-	r.mu.Lock()
-	r.incomingRead = true
-	r.mu.Unlock()
-	out := make(chan *models.TestCase, len(r.incoming))
-	for _, tc := range r.incoming {
-		out <- tc
-	}
-	close(out)
-	return out, nil
-}
-
-func (r *runnerInstr) setup() (models.SetupOptions, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.setupOpts, r.incomingRead
-}
-
-func newRunnerInstr(t *testing.T, marks ...models.ScopeWindow) *runnerInstr {
+func marksInstr(t *testing.T, marks ...models.ScopeWindow) *runnerInstr {
 	t.Helper()
-	return &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}), windows: marks}
+	r := newRunnerInstr(t, "")
+	r.windows = marks
+	return r
 }
-
-func (r *runnerInstr) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
-	if _, err := r.composeInstr.GetOutgoing(ctx, opts); err != nil {
-		return nil, err
-	}
-	out := make(chan *models.Mock, len(r.mocks))
-	for _, mk := range r.mocks {
-		out <- mk
-	}
-	close(out)
-	return out, nil
-}
-
-func (r *runnerInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]models.ScopeWindow(nil), r.windows...), nil
-}
-
-func recordSet(t *testing.T, instr *runnerInstr, mapDB MappingDB, tweak func(*config.Config)) error {
-	t.Helper()
-	return recordSetWith(t, zap.NewNop(), instr, mapDB, nil, tweak)
-}
-
-func recordSetWith(t *testing.T, logger *zap.Logger, instr *runnerInstr, mapDB MappingDB, testDB TestDB, tweak func(*config.Config)) error {
-	t.Helper()
-	cfg := instrConfig(instr.composeInstr, utils.Native, "./shop.test -test.v")
-	cfg.Path = t.TempDir()
-	if tweak != nil {
-		tweak(cfg)
-	}
-	utils.ErrCode = 0
-	t.Cleanup(func() { utils.ErrCode = 0 })
-	svc := New(logger, instr, stubMockDB{}, mapDB, nil, nil, cfg)
-	if testDB != nil {
-		svc.(TestDBSetter).SetTestDB(testDB)
-	}
-	return svc.Record(context.Background())
-}
-
-var runnerT0 = time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
 
 func mark(name string, start, end time.Duration) models.ScopeWindow {
 	return models.ScopeWindow{Name: name, Start: runnerT0.Add(start), End: runnerT0.Add(end)}
@@ -109,8 +31,6 @@ func sequentialMarks() []models.ScopeWindow {
 	}
 }
 
-const flowSetupAt = 2500 * time.Millisecond
-
 func flowMarks() []models.ScopeWindow {
 	return []models.ScopeWindow{
 		mark("e2e/orders.TestZ", 0, time.Second),
@@ -120,21 +40,8 @@ func flowMarks() []models.ScopeWindow {
 	}
 }
 
-func mappedNames(t *testing.T, mapDB *mapdb.MappingDb) map[string][]string {
-	t.Helper()
-	got, _, err := mapDB.Get(context.Background(), "set")
-	require.NoError(t, err)
-	out := make(map[string][]string, len(got))
-	for test, entries := range got {
-		for _, e := range entries {
-			out[test] = append(out[test], e.Name)
-		}
-	}
-	return out
-}
-
 func TestRecordMapsEachTestByItsOwnMarks(t *testing.T) {
-	instr := newRunnerInstr(t, append(sequentialMarks(), mark("fixture.Setup", 30*time.Millisecond, 40*time.Millisecond))...)
+	instr := marksInstr(t, append(sequentialMarks(), mark("fixture.Setup", 30*time.Millisecond, 40*time.Millisecond))...)
 	instr.mocks = []*models.Mock{
 		mockAt("mock-0", runnerT0.Add(5*time.Millisecond)),
 		mockAt("mock-1", runnerT0.Add(35*time.Millisecond)),
@@ -151,7 +58,7 @@ func TestRecordMapsEachTestByItsOwnMarks(t *testing.T) {
 }
 
 func TestRecordWithoutMarksIsOnePool(t *testing.T) {
-	instr := newRunnerInstr(t)
+	instr := newRunnerInstr(t, "")
 	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
 	dir := t.TempDir()
 	require.NoError(t, recordSet(t, instr, mapdb.New(zap.NewNop(), dir, ""), nil))

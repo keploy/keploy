@@ -107,7 +107,7 @@ type ComposeAgentFailureReader interface {
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopePusher interface {
-	PushScopeTable(ctx context.Context, table map[string][]string) error
+	PushScopeTable(ctx context.Context, table models.ScopeTableReq) error
 }
 
 // MockDB reads and writes a named mock set on disk. It is exactly the surface
@@ -133,7 +133,7 @@ type MappingDB interface {
 
 // CaseMapper is an optional MappingDB extension: Record writes which test cases each flow produced through it.
 type CaseMapper interface {
-	UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry) error
+	UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, skipped *[]string) error
 }
 
 // IncomingReader is an optional Instrumentation extension: the agent's stream of the app's captured incoming requests.

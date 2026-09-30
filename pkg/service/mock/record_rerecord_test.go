@@ -20,12 +20,12 @@ func mockAt(name string, at time.Time) *models.Mock {
 func TestReRecordDropsTheOldMappings(t *testing.T) {
 	mapDB := mapdb.New(zap.NewNop(), t.TempDir(), "")
 
-	first := newRunnerInstr(t)
+	first := newRunnerInstr(t, "")
 	first.windows = []models.ScopeWindow{{Name: "TestOld", Start: ts(10), End: ts(20)}}
 	first.mocks = []*models.Mock{mockAt("mock-0", ts(15))}
 	require.NoError(t, recordSet(t, first, mapDB, nil))
 
-	second := newRunnerInstr(t)
+	second := newRunnerInstr(t, "")
 	second.windows = []models.ScopeWindow{{Name: "TestNew", Start: ts(10), End: ts(20)}}
 	second.mocks = []*models.Mock{mockAt("mock-0", ts(15))}
 	require.NoError(t, recordSet(t, second, mapDB, nil))

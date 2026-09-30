@@ -107,6 +107,13 @@ type App struct {
 	// stopped is what readStoppedAgent read from the keploy-agent compose
 	// service's container after compose stopped it.
 	stopped stoppedAgent
+	// stdoutObserver also receives the app's stdout while it runs, when set.
+	stdoutObserver io.Writer
+}
+
+// SetStdoutObserver sends a copy of the app's stdout to w while it runs.
+func (a *App) SetStdoutObserver(w io.Writer) {
+	a.stdoutObserver = w
 }
 
 func (a *App) Setup(ctx context.Context) error {
@@ -1830,7 +1837,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		if a.useComposeLibrary() {
 			return a.runComposeInProcess(ctx, composeDown)
 		}
-		return utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
+		return utils.ExecuteCommandTee(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv, a.stdoutObserver)
 	}
 
 	var err error

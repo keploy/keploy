@@ -277,8 +277,8 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 }
 
 // UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
-func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry) error {
-	if len(byTest) == 0 && len(startup) == 0 {
+func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, skipped *[]string) error {
+	if len(byTest) == 0 && len(startup) == 0 && skipped == nil {
 		return nil
 	}
 	mappingPath := filepath.Join(db.path, testSetID)
@@ -323,6 +323,9 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	}
 	if len(startup) > 0 {
 		mapping.Startup = startup
+	}
+	if skipped != nil {
+		mapping.Skipped = skipped
 	}
 	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
 	if err != nil {
