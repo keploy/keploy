@@ -213,6 +213,10 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			Body:       string(reqBody),
 			URLParams:  pkg.URLParams(req),
 			Timestamp:  reqTimeTest,
+
+			// Replay sends this request again: keep what it takes to
+			// send a repeated header on its own lines.
+			HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(req.Header),
 		},
 		HTTPResp: models.HTTPResp{
 			StatusCode:    resp.StatusCode,

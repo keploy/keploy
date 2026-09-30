@@ -782,6 +782,11 @@ jobs:
     # coverage is in the Go unit tests under pkg/agent/proxy/syncMock.
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/startup-mock-capture-linux.yml
+  run_repeated_headers_linux:
+    # Guard: replay sends a recorded header on the lines it arrived on
+    # (a tenant header sent twice; a mock's two Set-Cookie lines).
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/repeated-headers-linux.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml

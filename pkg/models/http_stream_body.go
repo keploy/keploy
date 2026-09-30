@@ -120,6 +120,8 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		ProtoMinor    int               `yaml:"proto_minor"`
 		Binary        string            `yaml:"binary,omitempty"`
 		Timestamp     time.Time         `yaml:"timestamp"`
+
+		HeaderLineLengths HeaderLineLengths `yaml:"header_line_lengths,omitempty"`
 	}
 
 	return httpRespYAML{
@@ -133,6 +135,8 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		ProtoMinor:    h.ProtoMinor,
 		Binary:        h.Binary,
 		Timestamp:     h.Timestamp,
+
+		HeaderLineLengths: h.HeaderLineLengths,
 	}, nil
 }
 
@@ -151,6 +155,8 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 		ProtoMinor    int               `yaml:"proto_minor"`
 		Binary        string            `yaml:"binary,omitempty"`
 		Timestamp     time.Time         `yaml:"timestamp"`
+
+		HeaderLineLengths HeaderLineLengths `yaml:"header_line_lengths,omitempty"`
 	}
 
 	var raw httpRespYAML
@@ -167,6 +173,7 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 	h.ProtoMinor = raw.ProtoMinor
 	h.Binary = raw.Binary
 	h.Timestamp = raw.Timestamp
+	h.HeaderLineLengths = raw.HeaderLineLengths
 
 	// Decode body — may produce a plain string body, streaming chunks, or both.
 	// StreamBody is populated only when the YAML body field was a sequence node.

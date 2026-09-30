@@ -139,6 +139,10 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 					StatusCode: respParsed.StatusCode,
 					Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 					Body:       string(respBody),
+
+					// Replay serves this response: keep what it takes to serve a
+					// repeated header (Set-Cookie) on its own lines.
+					HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 				},
 				Created:          time.Now().Unix(),
 				ReqTimestampMock: reqTs,

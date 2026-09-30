@@ -162,6 +162,78 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 	return header
 }
 
+// ToYamlHTTPHeaderLineLengths is the other half of ToYamlHTTPHeader for a
+// header keploy will send back out: for each name that arrived on more than one
+// line, the length of each line's value, in arrival order. ToYamlHTTPHeader's
+// join cannot be undone without them (see models.HeaderLineLengths). nil when
+// every name arrived on one line, so the recording is stored as it always was.
+func ToYamlHTTPHeaderLineLengths(httpHeader http.Header) models.HeaderLineLengths {
+	var lineLengths models.HeaderLineLengths
+	for name, values := range httpHeader {
+		if len(values) < 2 {
+			continue
+		}
+		lengths := make([]int, len(values))
+		for i, value := range values {
+			lengths[i] = len(value)
+		}
+		if lineLengths == nil {
+			lineLengths = models.HeaderLineLengths{}
+		}
+		lineLengths[name] = lengths
+	}
+	return lineLengths
+}
+
+// ToWireHTTPHeader is ToHTTPHeader for a recorded header keploy sends back out:
+// a test case's request, a mock's response. A value recorded from several lines
+// goes out on those lines again, in their order, as long as it is still exactly
+// those lines joined by ","; anything else goes out as ToHTTPHeader sends it,
+// one line per name.
+func ToWireHTTPHeader(header map[string]string, lineLengths models.HeaderLineLengths) http.Header {
+	wire := ToHTTPHeader(header)
+	for name, lengths := range lineLengths {
+		value, ok := header[name]
+		if !ok {
+			continue
+		}
+		if lines, ok := splitHeaderLines(value, lengths); ok {
+			wire[name] = lines
+		}
+	}
+	return wire
+}
+
+// splitHeaderLines cuts value back into the lines ToYamlHTTPHeader joined, or
+// reports false when value is not len(lengths) lines of those lengths joined by
+// ",": a value rewritten since it was recorded (a template rendered, a secret
+// decrypted to something else, an edit) is not split by a guess.
+func splitHeaderLines(value string, lengths []int) ([]string, bool) {
+	if len(lengths) < 2 {
+		return nil, false
+	}
+	lines := make([]string, 0, len(lengths))
+	pos := 0
+	for i, n := range lengths {
+		if n < 0 || n > len(value)-pos {
+			return nil, false
+		}
+		lines = append(lines, value[pos:pos+n])
+		pos += n
+		if i == len(lengths)-1 {
+			break
+		}
+		if pos >= len(value) || value[pos] != ',' {
+			return nil, false
+		}
+		pos++
+	}
+	if pos != len(value) {
+		return nil, false
+	}
+	return lines, true
+}
+
 // CompareMultiValueHeaders compares a mock header value (as a comma-separated string)
 // with an input header value (as a slice of strings). It normalizes whitespace,
 // splits the mock header value by commas, trims spaces, sorts both sets of values,
@@ -224,13 +296,12 @@ func ToHTTPHeader(mockHeader map[string]string) http.Header {
 		// Starlette failure mode reproducible during replay even when
 		// the original client sent exactly one Accept header.
 		//
-		// Trade-off: a recording whose on-wire request actually used
-		// repeated same-name headers (rare on the request side; common
-		// only for Set-Cookie which is a response header and never
-		// built by this helper) replays as a single comma-folded
-		// header. Per RFC 7230 §3.2.2 the receiver-side parse is
-		// semantically equivalent for list-valued headers, so this
-		// folding is wire-safe for the headers that actually matter.
+		// A value that really did arrive on several lines is folded
+		// here too. That is right for comparing and matching, and wrong
+		// for sending: an app reading the first of `X-A: a` twice gets
+		// "a", and of `X-A: a,a` gets "a,a". Code that sends a
+		// recorded header uses ToWireHTTPHeader, which puts the lines
+		// back.
 		header[i] = []string{j}
 	}
 	return header
@@ -538,7 +609,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
 	}
-	req.Header = ToHTTPHeader(tc.HTTPReq.Header)
+	req.Header = ToWireHTTPHeader(tc.HTTPReq.Header, tc.HTTPReq.HeaderLineLengths)
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
@@ -2489,10 +2560,11 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 func MakeCurlCommand(tc models.HTTPReq) string {
 	curl := fmt.Sprintf("curl --request %s \\\n", string(tc.Method))
 	curl = curl + fmt.Sprintf("  --url %s \\\n", tc.URL)
-	header := ToHTTPHeader(tc.Header)
-
-	for k, v := range ToYamlHTTPHeader(header) {
-		if k != "Content-Length" {
+	for k, lines := range ToWireHTTPHeader(tc.Header, tc.HeaderLineLengths) {
+		if k == "Content-Length" {
+			continue
+		}
+		for _, v := range lines {
 			curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
 		}
 	}
