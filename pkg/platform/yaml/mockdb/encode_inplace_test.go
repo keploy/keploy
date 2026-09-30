@@ -532,3 +532,79 @@ func TestEncodeQuotedWritesTheLanesMocksAsTheOnePassWriteDoes(t *testing.T) {
 		}
 	}
 }
+
+// A header that arrived on more than one wire line keeps its line lengths
+// (models.HeaderLineLengths) through the one-pass write, written plain and
+// written through EncodeQuoted: replay sends a mock's recorded lines again
+// from them, and a mock that reads back without them is sent with each such
+// header folded into one line.
+func TestInsertMockInPlaceKeepsRecordedHeaderLines(t *testing.T) {
+	at := time.Date(2026, 9, 30, 8, 42, 54, 313873046, time.UTC)
+	reqLines := models.HeaderLineLengths{"X-Forwarded-For": {8, 8}}
+	respLines := models.HeaderLineLengths{"Set-Cookie": {5, 5}}
+	for _, reqBody := range []string{`{"id":7}`, "\tleading tab\nx"} {
+		quoted := models.YAMLBlockScalarUnsafe(reqBody)
+		t.Run(fmt.Sprintf("quoted=%v", quoted), func(t *testing.T) {
+			m := &models.Mock{Version: models.GetVersion(), Kind: models.HTTP,
+				Spec: models.MockSpec{
+					Metadata: map[string]string{"type": "config"},
+					HTTPReq: &models.HTTPReq{Method: "POST", ProtoMajor: 1, ProtoMinor: 1, URL: "http://orders.shop/x",
+						Header: map[string]string{"X-Forwarded-For": "10.0.0.1,10.0.0.2"}, HeaderLineLengths: reqLines,
+						Body: reqBody, Timestamp: at},
+					HTTPResp: &models.HTTPResp{StatusCode: 200,
+						Header: map[string]string{"Set-Cookie": "a=1;x,b=2;y"}, HeaderLineLengths: respLines,
+						Body: `{"ok":true}`, Timestamp: at},
+					ReqTimestampMock: at, ResTimestampMock: at,
+				}}
+			v, inPlace := encodeMockInPlace(m)
+			if !inPlace {
+				t.Fatal("an HTTP mock is not written in place")
+			}
+			if got := yaml.NeedsQuoting(v); got != quoted {
+				t.Fatalf("NeedsQuoting = %v, want %v: the case does not take the write path it names", got, quoted)
+			}
+			dir := t.TempDir()
+			file := writeYAML(t, dir, []*models.Mock{m})
+			got, err := New(zap.NewNop(), dir, "mocks").GetUnFilteredMocks(context.Background(), "test-set-0", time.Time{}, time.Time{}, nil, nil)
+			if err != nil {
+				t.Fatalf("the file does not read back: %v\n%s", err, file)
+			}
+			if len(got) != 1 {
+				t.Fatalf("read back %d mocks, want 1:\n%s", len(got), file)
+			}
+			if !reflect.DeepEqual(got[0].Spec.HTTPReq.HeaderLineLengths, reqLines) {
+				t.Errorf("request header lines read back as %v, want %v:\n%s", got[0].Spec.HTTPReq.HeaderLineLengths, reqLines, file)
+			}
+			if !reflect.DeepEqual(got[0].Spec.HTTPResp.HeaderLineLengths, respLines) {
+				t.Errorf("response header lines read back as %v, want %v:\n%s", got[0].Spec.HTTPResp.HeaderLineLengths, respLines, file)
+			}
+			if got[0].Spec.HTTPReq.Body != reqBody {
+				t.Errorf("request body read back as %q, want %q", got[0].Spec.HTTPReq.Body, reqBody)
+			}
+
+			// EncodeMock, which rewrites the file (the prune) with the same
+			// spec through a yaml.Node, keeps them too.
+			doc, err := EncodeMock(m, zap.NewNop())
+			if err != nil {
+				t.Fatalf("EncodeMock: %v", err)
+			}
+			out, err := yamlLib.Marshal(doc)
+			if err != nil {
+				t.Fatalf("marshal EncodeMock's document: %v", err)
+			}
+			var back yaml.NetworkTrafficDoc
+			if err := yamlLib.Unmarshal(out, &back); err != nil {
+				t.Fatalf("EncodeMock's document does not load: %v\n%s", err, out)
+			}
+			rewritten, err := DecodeMocks([]*yaml.NetworkTrafficDoc{&back}, zap.NewNop())
+			if err != nil || len(rewritten) != 1 {
+				t.Fatalf("EncodeMock's document does not decode (%d mocks): %v\n%s", len(rewritten), err, out)
+			}
+			if !reflect.DeepEqual(rewritten[0].Spec.HTTPReq.HeaderLineLengths, reqLines) ||
+				!reflect.DeepEqual(rewritten[0].Spec.HTTPResp.HeaderLineLengths, respLines) {
+				t.Errorf("EncodeMock's document reads back with request lines %v and response lines %v, want %v and %v:\n%s",
+					rewritten[0].Spec.HTTPReq.HeaderLineLengths, rewritten[0].Spec.HTTPResp.HeaderLineLengths, reqLines, respLines, out)
+			}
+		})
+	}
+}
