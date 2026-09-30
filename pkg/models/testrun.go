@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"time"
 )
 
 type TestReport struct {
@@ -153,6 +154,8 @@ type UnmatchedCall struct {
 	// side-by-side whole-mock diff (left = mock, right = live request).
 	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`
 	ReceivedReq    string `json:"received_req,omitempty" yaml:"received_req,omitempty"`
+	// At is when the call missed, so a client can tell which test made it.
+	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 }
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it

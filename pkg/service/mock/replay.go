@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go.keploy.io/server/v3/config"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 // to verify it -- which a failing test command never is.
 func (m *mockService) Replay(ctx context.Context) (err error) {
 	name := m.setName()
+	requests := m.requests()
 	started := time.Now()
 	parent := ctx
 	// A replay that could not start leaves a receipt saying so. Without it
@@ -114,14 +116,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 1. Instrument in mock (test) mode — no ingress port relocation.
 	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
-		Container:     m.config.ContainerName,
-		FromContainer: m.config.FromContainer,
-		CommandType:   m.config.CommandType,
-		DockerDelay:   m.config.BuildDelay,
-		BuildDelay:    m.config.BuildDelay,
-		Mode:          models.MODE_TEST,
-		MockMode:      true,
-		ConfigPath:    m.config.ConfigPath,
+		Container:        m.config.ContainerName,
+		FromContainer:    m.config.FromContainer,
+		CommandType:      m.config.CommandType,
+		DockerDelay:      m.config.BuildDelay,
+		BuildDelay:       m.config.BuildDelay,
+		Mode:             models.MODE_TEST,
+		MockMode:         true,
+		RecordRequests:   requests,
+		ConfigPath:       m.config.ConfigPath,
+		PassThroughPorts: config.GetByPassPorts(m.config),
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -187,6 +191,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	// 4. Load the whole set and push it into the proxy.
+	watchCtx, stopWatch := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopWatch()
+	actual := m.watchIncoming(watchCtx, requests)
 	empty := map[string]bool{}
 	filtered, err := m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), empty, empty)
 	if err != nil {
@@ -282,6 +289,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// suite that never finished.
 		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: context.Cause(ctx)}
 	}
+	if actual != nil {
+		m.drainTrailingMocks(ctx, actual.done, &actual.seen)
+	}
+	stopWatch()
+	actual.wait(mockDrainGrace)
 
 	// 9. Under --on-miss record, append any calls served live-from-upstream to
 	//    the set so the next replay serves them from the mock (VCR new_episodes).
@@ -290,7 +302,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	// 10. Summarise what was served and missed.
-	counts := m.reportOutcome(ctx, loaded)
+	detail := replayDetail{
+		windows:  m.agentWindows(ctx),
+		expected: m.expectedMocks(ctx, name),
+		recorded: m.recordedCases(ctx, name),
+		actual:   actual.list(),
+	}
+	counts := m.reportOutcome(ctx, loaded, detail)
 	missed, missesKnown := counts.missed, counts.missed >= 0
 
 	// 11. Exit code: mirror the runner; with --strict also fail on any miss.
@@ -573,6 +591,10 @@ type ReplayOutcome struct {
 	Loaded   int
 	Consumed int
 	Missed   int
+	// Cases is each recorded request replayed, with the app's answer compared to the recording.
+	Cases []CaseOutcome
+	// Mocks is what each test used and missed, next to what it recorded.
+	Mocks []FlowMocks
 }
 
 // replayOutcomeReporter is installed by a wrapping build (enterprise) from
@@ -601,7 +623,7 @@ type replayCounts struct {
 // The two reads are tracked apart on purpose. Collapsing them into one "did the
 // agent answer" flag makes a half-answer indistinguishable from no answer, and
 // then reports a run whose misses were never read as a clean one.
-func (m *mockService) reportOutcome(ctx context.Context, loaded int) replayCounts {
+func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail replayDetail) replayCounts {
 	var consumed []models.MockState
 	var misses []models.UnmatchedCall
 	var consumedErr, missesErr error
@@ -697,6 +719,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int) replayCount
 				Loaded:   loaded,
 				Consumed: len(consumed),
 				Missed:   len(misses),
+				Cases:    pairCases(detail.windows, detail.recorded, detail.actual, m.compareCase),
+				Mocks:    attributeMocks(detail.windows, detail.expected, consumed, misses),
 			})
 		}
 	}

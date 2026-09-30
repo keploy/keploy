@@ -359,6 +359,8 @@ type MockCmd struct {
 	// it is not one of the runners' default locations. Relative to the
 	// directory keploy runs in.
 	CoverageReport string `json:"coverageReport" yaml:"coverageReport" mapstructure:"coverageReport"`
+	// RecordRequests captures the app's incoming requests as test cases, on by default; needs --pass-through-ports <app port>.
+	RecordRequests bool `json:"recordRequests" yaml:"recordRequests" mapstructure:"recordRequests"`
 }
 
 type Contract struct {

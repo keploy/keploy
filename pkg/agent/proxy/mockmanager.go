@@ -2556,9 +2556,13 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
 	}
+	if mock.Timestamp == 0 {
+		mock.Timestamp = time.Now().UnixNano() // when it was first served, so a client can tell which test used it
+	}
 	m.consumedMu.Lock()
 	if idx, exists := m.consumedIndex[mock.Name]; exists {
-		m.consumedList[idx] = mock // update state, preserve position
+		mock.Timestamp = m.consumedList[idx].Timestamp
+		m.consumedList[idx] = mock // update state, preserve position and first use
 	} else {
 		m.consumedIndex[mock.Name] = len(m.consumedList)
 		m.consumedList = append(m.consumedList, mock)

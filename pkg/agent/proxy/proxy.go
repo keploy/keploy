@@ -4085,6 +4085,7 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
 			if parserErr.MismatchReport != nil {
 				errs = append(errs, models.UnmatchedCall{
+					At:            parserErr.MismatchReport.At,
 					Protocol:      parserErr.MismatchReport.Protocol,
 					ActualSummary: parserErr.MismatchReport.ActualSummary,
 					Destination:   parserErr.MismatchReport.Destination,

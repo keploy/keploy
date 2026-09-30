@@ -1312,6 +1312,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if opts.MockMode {
 		args = append(args, "--mock-mode")
 	}
+	if opts.RecordRequests {
+		args = append(args, "--record-requests")
+	}
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
 	// pattern (and for the same reason) as --disable-mapping above: the
 	// orchestrator has already applied flag > yaml > default, and the native

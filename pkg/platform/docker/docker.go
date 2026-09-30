@@ -120,6 +120,7 @@ func agentHealthcheckStartPeriod() time.Duration {
 var ComposeServiceHook func(serviceIdentifier string, serviceNode *yaml.Node)
 
 type Impl struct {
+	mockAgentURL string // where a test can mark its own start and end, set in mock mode
 	nativeDockerClient.APIClient
 	timeoutForDockerQuery time.Duration
 	logger                *zap.Logger
@@ -869,10 +870,16 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Debug {
 		command = append(command, "--debug")
 	}
+	if opts.MockMode && opts.AgentPort != 0 {
+		idc.mockAgentURL = fmt.Sprintf("http://localhost:%d", opts.AgentPort)
+	}
 	if opts.MockMode {
 		// `keploy mock record|replay` — the containerised agent must skip
 		// ingress/bind relocation (the wrapped process is a test runner).
 		command = append(command, "--mock-mode")
+	}
+	if opts.RecordRequests {
+		command = append(command, "--record-requests")
 	}
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
@@ -1457,6 +1464,12 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 			certPath := fmt.Sprintf("%s/ca.crt", KeployTLSMountPath)
 			trustStorePath := fmt.Sprintf("%s/truststore.jks", KeployTLSMountPath)
 			idc.addServiceEnvVar(serviceContentNode, "NODE_EXTRA_CA_CERTS", certPath)
+			if idc.mockAgentURL != "" {
+				idc.addServiceEnvVar(serviceContentNode, "KEPLOY_MOCK_AGENT", idc.mockAgentURL)
+				if token.Session() != "" {
+					idc.addServiceEnvVar(serviceContentNode, token.MockAgentTokenEnv, "${"+token.MockAgentTokenEnv+"}")
+				}
+			}
 			idc.addServiceEnvVar(serviceContentNode, "REQUESTS_CA_BUNDLE", certPath)
 			idc.addServiceEnvVar(serviceContentNode, "SSL_CERT_FILE", certPath)
 			idc.addServiceEnvVar(serviceContentNode, "CARGO_HTTP_CAINFO", certPath)

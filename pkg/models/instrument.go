@@ -337,7 +337,9 @@ type SetupOptions struct {
 	// because the wrapped process is a test runner, not a server whose
 	// incoming traffic becomes test cases. Only outgoing calls are captured
 	// (record) or served (replay). Forwarded to the agent via --mock-mode.
-	MockMode                  bool
+	MockMode bool
+	// RecordRequests keeps the ingress hooks on in mock mode so the app's incoming requests become test cases; forwarded as --record-requests.
+	RecordRequests            bool
 	GlobalPassthrough         bool
 	CapturePackets            bool
 	OpportunisticTLSIntercept bool

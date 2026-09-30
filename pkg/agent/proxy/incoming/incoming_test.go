@@ -66,6 +66,73 @@ func TestWaitForIngressTargetWhenKnownSkipsUnknownPort(t *testing.T) {
 	}
 }
 
+func TestDialIngressTargetWaitsForAppToListen(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	listening := make(chan net.Listener, 1)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		l, err := net.Listen("tcp4", addr)
+		if err != nil {
+			listening <- nil
+			return
+		}
+		listening <- l
+	}()
+
+	conn, err := dialIngressTarget(context.Background(), addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dialIngressTarget returned error: %v", err)
+	}
+	_ = conn.Close()
+	if l := <-listening; l == nil {
+		t.Fatal("app listener could not rebind the port")
+	} else {
+		_ = l.Close()
+	}
+}
+
+func TestDialIngressTargetGivesUpAfterTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	start := time.Now()
+	if _, err := dialIngressTarget(context.Background(), addr, 100*time.Millisecond); err == nil {
+		t.Fatal("expected an error dialing a port nothing listens on")
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("expected to retry for the timeout then give up, took %s", elapsed)
+	}
+}
+
+func TestDialIngressTargetStopsOnCanceledContext(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if _, err := dialIngressTarget(ctx, addr, 5*time.Second); err == nil {
+		t.Fatal("expected an error dialing a port nothing listens on")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("canceled context should stop retries immediately, took %s", elapsed)
+	}
+}
+
 func newTestIngressHook() *goTCPIngressHook {
 	return newGoTCPIngressHook(&IngressProxyManager{logger: zap.NewNop()})
 }

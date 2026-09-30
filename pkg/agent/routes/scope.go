@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/models"
@@ -23,6 +24,35 @@ type scopeBeginner interface {
 type scopeEnder interface {
 	EndScope(ctx context.Context, name string, pid int) error
 }
+type scopeBeginnerAt interface {
+	BeginScopeAt(ctx context.Context, name string, pid int, at time.Time) error
+}
+type scopeEnderAt interface {
+	EndScopeAt(ctx context.Context, name string, pid int, at time.Time) error
+}
+
+// beginScope hands the runner's time to a service that takes it and falls back to the old call.
+func beginScope(ctx context.Context, svc any, req models.ScopeReq) error {
+	if s, ok := svc.(scopeBeginnerAt); ok {
+		return s.BeginScopeAt(ctx, req.Name, req.Pid, req.At)
+	}
+	if s, ok := svc.(scopeBeginner); ok {
+		return s.BeginScope(ctx, req.Name, req.Pid)
+	}
+	return nil
+}
+
+// endScope is beginScope for the end of a scope.
+func endScope(ctx context.Context, svc any, req models.ScopeReq) error {
+	if s, ok := svc.(scopeEnderAt); ok {
+		return s.EndScopeAt(ctx, req.Name, req.Pid, req.At)
+	}
+	if s, ok := svc.(scopeEnder); ok {
+		return s.EndScope(ctx, req.Name, req.Pid)
+	}
+	return nil
+}
+
 type scopeWindowReader interface {
 	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
 }
@@ -46,12 +76,10 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-begin request: %v", err), http.StatusBadRequest)
 		return
 	}
-	if s, ok := a.svc.(scopeBeginner); ok {
-		if err := s.BeginScope(r.Context(), req.Name, req.Pid); err != nil {
-			a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if err := beginScope(r.Context(), a.svc, req); err != nil {
+		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
@@ -64,12 +92,10 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-end request: %v", err), http.StatusBadRequest)
 		return
 	}
-	if s, ok := a.svc.(scopeEnder); ok {
-		if err := s.EndScope(r.Context(), req.Name, req.Pid); err != nil {
-			a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if err := endScope(r.Context(), a.svc, req); err != nil {
+		a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})

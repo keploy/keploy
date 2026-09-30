@@ -25,6 +25,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
@@ -66,6 +67,7 @@ type Builder struct {
 // (prepared stmt 12)", "find users").
 func NewReport(protocol, actualSummary string) *Builder {
 	return &Builder{report: models.MockMismatchReport{
+		At:            time.Now(),
 		Protocol:      protocol,
 		ActualSummary: actualSummary,
 	}}

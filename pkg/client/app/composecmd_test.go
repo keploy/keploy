@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/token"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -105,7 +106,7 @@ func TestKeepAgentTokenThroughSudo(t *testing.T) {
 		{"docker compose up", "docker compose up"},
 		{"sudoku up", "sudoku up"},
 	} {
-		if got := keepAgentTokenThroughSudo(tc.in); got != tc.want {
+		if got := keepAgentTokenThroughSudo(tc.in, token.Env); got != tc.want {
 			t.Errorf("keepAgentTokenThroughSudo(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
@@ -132,5 +133,23 @@ func TestWithAgentToken_OnlyTheComposeCommandIsGivenTheAgentToken(t *testing.T) 
 		if gotCmd != cmd {
 			t.Errorf("%s: the application's command was rewritten to %q", kind, gotCmd)
 		}
+	}
+}
+
+func TestWithAgentTokenKeepsTheMockTokenThroughSudo(t *testing.T) {
+	mock := models.SetupOptions{MockMode: true}
+	gotCmd, _ := (&App{kind: utils.DockerCompose, opts: mock}).withAgentToken("sudo docker compose up")
+	if want := "sudo --preserve-env=" + token.Env + "," + token.MockAgentTokenEnv + " docker compose up"; gotCmd != want {
+		t.Errorf("compose command = %q, want %q", gotCmd, want)
+	}
+	gotCmd, gotEnv := (&App{kind: utils.DockerRun, opts: mock}).withAgentToken("sudo docker run --rm e2e")
+	if want := "sudo --preserve-env=" + token.MockAgentTokenEnv + " docker run --rm e2e"; gotCmd != want || gotEnv != nil {
+		t.Errorf("docker run command = %q, env %v, want %q", gotCmd, gotEnv, want)
+	}
+	if gotCmd, _ := (&App{kind: utils.DockerRun}).withAgentToken("sudo docker run --rm e2e"); gotCmd != "sudo docker run --rm e2e" {
+		t.Errorf("outside mock mode docker run was rewritten to %q", gotCmd)
+	}
+	if got := keepAgentTokenThroughSudo("sudo docker run x"); got != "sudo docker run x" {
+		t.Errorf("nothing to keep, yet rewritten to %q", got)
 	}
 }

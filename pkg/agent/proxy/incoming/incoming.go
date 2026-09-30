@@ -3,12 +3,14 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -401,6 +403,21 @@ func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duratio
 	}
 }
 
+func dialIngressTarget(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		conn, err := net.DialTimeout("tcp4", addr, timeout)
+		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || !time.Now().Before(deadline) {
+			return conn, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(ingressTargetPollInterval):
+		}
+	}
+}
+
 func (h *goTCPIngressHook) StopIngress(origPort uint16) error {
 	h.mu.Lock()
 	st, ok := h.forwarders[origPort]
@@ -438,7 +455,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// (the original) instead.
 		actualPort := appPort
 
-		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
+		upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
 		if err != nil {
 			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
 				zap.String("final_app_addr", finalAppAddr),

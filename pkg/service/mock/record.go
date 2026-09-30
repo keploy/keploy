@@ -4,7 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go.keploy.io/server/v3/config"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -37,6 +42,7 @@ const mockDrainQuiet = 500 * time.Millisecond
 // pushes the set to the store, and propagates the runner's exit code.
 func (m *mockService) Record(ctx context.Context) error {
 	name := m.setName()
+	requests := m.requests()
 	m.logger.Info("Recording mocks for your test command",
 		zap.String("mock-set", name),
 		zap.String("command", m.userCommand))
@@ -69,14 +75,16 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 1. Instrument: start the agent, hooks and proxy in mock mode (no ingress
 	//    port relocation — the runner is not a server).
 	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
-		Container:     m.config.ContainerName,
-		FromContainer: m.config.FromContainer,
-		CommandType:   m.config.CommandType,
-		DockerDelay:   m.config.BuildDelay,
-		BuildDelay:    m.config.BuildDelay,
-		Mode:          models.MODE_RECORD,
-		MockMode:      true,
-		ConfigPath:    m.config.ConfigPath,
+		Container:        m.config.ContainerName,
+		FromContainer:    m.config.FromContainer,
+		CommandType:      m.config.CommandType,
+		DockerDelay:      m.config.BuildDelay,
+		BuildDelay:       m.config.BuildDelay,
+		Mode:             models.MODE_RECORD,
+		MockMode:         true,
+		ConfigPath:       m.config.ConfigPath,
+		PassThroughPorts: config.GetByPassPorts(m.config),
+		RecordRequests:   requests,
 	}); err != nil {
 		if parent.Err() != nil {
 			return nil
@@ -110,10 +118,19 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 3. Overwrite the named set in place: drop the previous mocks so the
 	//    re-record is a clean rewrite, not an append.
+	restore, existed := m.saveSet(name)
+	keep := false
+	defer func() { restore(keep) }()
 	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
 		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
 	}
 	m.mockDB.ResetCounterID()
+	m.deleteMappings(persistCtx, name)
+	if requests {
+		// The old cases stay until the run has ended so the new ones are numbered after them: a flow
+		// re-recorded on its own must not reuse the names of the flows the set carries.
+		defer m.deleteCases(persistCtx, name, m.caseNames(persistCtx, name))
+	}
 
 	// 4. Arm the record proxy and stream captured mocks.
 	captureCtx, stopCapture := context.WithCancel(context.WithoutCancel(ctx))
@@ -169,9 +186,13 @@ func (m *mockService) Record(ctx context.Context) error {
 				m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 			}
 			mockCount++
-			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID})
+			kind := mk.Spec.Metadata["type"]
+			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection"})
 		}
 	}()
+
+	// 4b. With --record-requests, also store the app's incoming requests as test cases.
+	capture := m.captureCases(captureCtx, persistCtx, name, &mocksSeen, requests)
 
 	// 5. Release the compose app now that the capture is armed and draining.
 	//    This is the post-arm half of step 2 — see releaseComposeApp.
@@ -233,8 +254,10 @@ func (m *mockService) Record(ctx context.Context) error {
 	case <-time.After(mockDrainGrace):
 		m.logger.Debug("timed out waiting for the mock consumer to finish after teardown")
 	}
+	capture.wait(mockDrainGrace)
 
 	if parent.Err() != nil { // user Ctrl+C
+		keep = true
 		m.logger.Info("recording stopped", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return nil
 	}
@@ -255,32 +278,51 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
+	var windows []models.ScopeWindow
 	if m.mappingDB != nil {
-		if reader, ok := m.instrumentation.(ScopeReader); ok {
-			scopeCtx, cancelScope := context.WithTimeout(persistCtx, agentEpilogueTimeout)
-			windows, werr := reader.GetScopeWindows(scopeCtx)
-			cancelScope()
-			if werr != nil {
-				m.logger.Debug("failed to read per-test scope windows; recording suite-level", zap.Error(werr))
-			} else if len(windows) > 0 {
-				byTest := correlateScopes(windows, recorded)
-				if len(byTest) > 0 {
-					if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
-						m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
-					} else {
-						m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
-					}
+		windows = m.agentWindows(persistCtx)
+	}
+	if err := repeatedScope(windows, existed); err != nil {
+		m.propagateExit(appErr, "record")
+		m.logger.Error(err.Error())
+		return err
+	}
+	keep = true
+	if m.mappingDB != nil {
+		if len(windows) > 0 {
+			byTest := correlateScopes(windows, recorded)
+			byCase := correlateCases(windows, recorded, capture.list(), stepWindows(windows))
+			for _, w := range windows {
+				if _, ok := byTest[w.Name]; !ok {
+					byTest[w.Name] = nil
 				}
 			}
+			if len(byTest) > 0 {
+				if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
+					m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
+				} else {
+					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
+				}
+			}
+			m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded))
 		}
 	}
 
+	if err := m.hooks.AfterRecordingComplete(persistCtx, &rec.RecordingCompleteContext{TestSetID: name, Path: m.config.Path}); err != nil {
+		m.logger.Warn("AfterRecordingComplete hook failed", zap.Error(err), zap.String("mock-set", name))
+	}
+
 	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
-	if err := m.store.Push(persistCtx, name); err != nil {
+	if !runnerPassed(appErr) {
+		m.logger.Warn("tests failed; the recording was kept locally and not published", zap.String("mock-set", name))
+	} else if err := m.store.Push(persistCtx, name); err != nil {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
 
 	m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+	if capture != nil {
+		m.logger.Info("recorded test cases", zap.Int("cases", len(capture.list())), zap.String("mock-set", name))
+	}
 	if mockCount == 0 {
 		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
 			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
@@ -292,12 +334,129 @@ func (m *mockService) Record(ctx context.Context) error {
 	return nil
 }
 
+func runnerPassed(appErr models.AppError) bool {
+	switch appErr.AppErrorType {
+	case models.ErrAppStopped, models.ErrCtxCanceled, "":
+		return true
+	}
+	return false
+}
+
+// agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.
+func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
+	reader, ok := m.instrumentation.(ScopeReader)
+	if !ok {
+		return nil
+	}
+	scopeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
+	defer cancel()
+	windows, err := reader.GetScopeWindows(scopeCtx)
+	if err != nil {
+		m.logger.Debug("failed to read per-test scope windows from the agent", zap.Error(err))
+		return nil
+	}
+	return windows
+}
+
+func (m *mockService) saveSet(name string) (func(keep bool), bool) {
+	if m.config.Path == "" {
+		return func(bool) {}, true
+	}
+	set := filepath.Join(m.config.Path, name)
+	saved := filepath.Join(m.config.Path, "."+name+".previous")
+	_ = os.RemoveAll(saved)
+	err := os.CopyFS(saved, os.DirFS(set))
+	absent := errors.Is(err, fs.ErrNotExist)
+	if err != nil {
+		_ = os.RemoveAll(saved)
+		if !absent {
+			m.logger.Warn("could not keep a copy of the set before re-recording it; a refused recording cannot be undone", zap.String("mock-set", name), zap.Error(err))
+		}
+	}
+	return func(keep bool) {
+		switch {
+		case keep:
+			_ = os.RemoveAll(saved)
+		case absent:
+			_ = os.RemoveAll(set)
+		case err == nil:
+			if rmErr := os.RemoveAll(set); rmErr != nil {
+				m.logger.Warn("could not put the previous recording back", zap.String("mock-set", name), zap.Error(rmErr))
+				return
+			}
+			if mvErr := os.Rename(saved, set); mvErr != nil {
+				m.logger.Warn("could not put the previous recording back; it is kept at "+saved, zap.String("mock-set", name), zap.Error(mvErr))
+			}
+		}
+	}, !absent
+}
+
+// caseNames lists the test cases the set holds before a re-record.
+func (m *mockService) caseNames(ctx context.Context, name string) []string {
+	if m.testDB == nil {
+		return nil
+	}
+	tcs, err := m.testDB.GetTestCases(ctx, name)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(tcs))
+	for _, tc := range tcs {
+		ids = append(ids, tc.Name)
+	}
+	return ids
+}
+
+// deleteCases drops the set's old test cases so a re-record ends clean, as it does for mocks.
+func (m *mockService) deleteCases(ctx context.Context, name string, ids []string) {
+	if m.testDB == nil || len(ids) == 0 {
+		return
+	}
+	if err := m.testDB.DeleteTests(ctx, name, ids); err != nil {
+		m.logger.Debug("failed to delete the old test cases", zap.String("mock-set", name), zap.Error(err))
+	}
+}
+
+// upsertCases writes which test cases each flow produced into the mapping.
+func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[string]models.MappedTestCase, startup []models.MockEntry) {
+	if len(byCase) == 0 && len(startup) == 0 {
+		return
+	}
+	mapper, ok := m.mappingDB.(CaseMapper)
+	if !ok {
+		m.logger.Warn("the mapping store cannot record test cases per flow", zap.String("mock-set", name))
+		return
+	}
+	if err := mapper.UpsertCases(ctx, name, byCase, startup); err != nil {
+		m.logger.Warn("failed to write per-flow test cases", zap.Error(err))
+		return
+	}
+	m.logger.Info("wrote per-flow test cases", zap.Int("flows", len(byCase)), zap.String("mock-set", name))
+}
+
+// deleteMappings drops the set's old per-test mappings so a re-record cannot leave tests pointing at renamed mocks.
+func (m *mockService) deleteMappings(ctx context.Context, name string) {
+	if m.mappingDB == nil {
+		return
+	}
+	deleter, ok := m.mappingDB.(MappingDeleter)
+	if !ok {
+		m.logger.Warn("the mapping store cannot delete, so old per-test mappings may linger", zap.String("mock-set", name))
+		return
+	}
+	if err := deleter.Delete(ctx, name); err != nil {
+		m.logger.Debug("no existing mappings to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
+	}
+}
+
 // capturedMock is one recorded mock's name + request timestamp + source worker
 // PID, used to correlate mocks into per-test scope windows.
 type capturedMock struct {
 	name string
 	ts   time.Time
 	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	end  time.Time
+	boot bool
 }
 
 // correlateScopes buckets each recorded mock into the per-test scope window its
@@ -355,6 +514,95 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 		byTest[windows[best].Name] = append(byTest[windows[best].Name], models.MockEntry{Name: mk.name})
 	}
 	return byTest
+}
+
+// correlateCases lists each flow's test cases by the window their request fell in; a case outside every window stays unmapped.
+func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, steps []models.ScopeWindow) map[string]models.MappedTestCase {
+	byTest := make(map[string]models.MappedTestCase)
+	spans := make(map[string]models.ScopeWindow, len(cases))
+	for _, c := range cases {
+		spans[c.name] = models.ScopeWindow{Name: c.name, Start: c.ts, End: c.end}
+	}
+	for test, entries := range correlateScopes(windows, cases) {
+		tc := models.MappedTestCase{CaseSteps: make(map[string]string, len(entries))}
+		for _, e := range entries {
+			tc.Cases = append(tc.Cases, e.Name)
+			tc.CaseSteps[e.Name] = containing(steps, spans[e.Name].Start)
+		}
+		byTest[test] = tc
+	}
+	var own []capturedMock
+	at := make(map[string]time.Time, len(mocks))
+	for _, mk := range mocks {
+		if !mk.boot {
+			own = append(own, mk)
+			at[mk.name] = mk.ts
+		}
+	}
+	holder := make(map[string]string, len(cases))
+	inFlow := make(map[string][]models.ScopeWindow)
+	for test, tc := range byTest {
+		for _, c := range tc.Cases {
+			holder[c] = test
+			inFlow[flowOf(windows, test)] = append(inFlow[flowOf(windows, test)], spans[c])
+		}
+	}
+	for test, entries := range correlateScopes(windows, own) {
+		for _, e := range entries {
+			c := containing(inFlow[flowOf(windows, test)], at[e.Name])
+			if c == "" {
+				continue
+			}
+			tc := byTest[holder[c]]
+			if tc.CaseMocks == nil {
+				tc.CaseMocks = map[string][]string{}
+			}
+			tc.CaseMocks[c] = append(tc.CaseMocks[c], e.Name)
+			byTest[holder[c]] = tc
+		}
+	}
+	for _, tc := range byTest {
+		for _, names := range tc.CaseMocks {
+			sort.SliceStable(names, func(i, j int) bool { return at[names[i]].Before(at[names[j]]) })
+		}
+	}
+	return byTest
+}
+
+func flowOf(windows []models.ScopeWindow, test string) string {
+	flow := test
+	for _, w := range windows {
+		if strings.HasPrefix(test, w.Name+"/") && len(w.Name) < len(flow) {
+			flow = w.Name
+		}
+	}
+	return flow
+}
+
+func startupMocks(windows []models.ScopeWindow, mocks []capturedMock) []models.MockEntry {
+	var out []models.MockEntry
+	for _, mk := range mocks {
+		if mk.boot || containing(windows, mk.ts) == "" {
+			out = append(out, models.MockEntry{Name: mk.name})
+		}
+	}
+	return out
+}
+
+func containing(windows []models.ScopeWindow, at time.Time) string {
+	best := -1
+	for i, w := range windows {
+		if at.Before(w.Start) || at.After(w.End) {
+			continue
+		}
+		if best == -1 || w.Start.After(windows[best].Start) {
+			best = i
+		}
+	}
+	if best == -1 {
+		return ""
+	}
+	return windows[best].Name
 }
 
 // drainTrailingMocks blocks until the agent has evidently finished handing over

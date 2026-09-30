@@ -28,6 +28,7 @@ type mockService struct {
 	instrumentation Instrumentation
 	mockDB          MockDB
 	mappingDB       MappingDB // may be nil (suite-level only)
+	testDB          TestDB    // set only for --record-requests
 	store           Store
 	hooks           record.RecordHooks // reused so enterprise obfuscation/encryption applies on record
 	config          *config.Config
@@ -85,6 +86,11 @@ func (m *mockService) SetStore(store Store) {
 	if store != nil {
 		m.store = store
 	}
+}
+
+// SetTestDB gives Record a store for the app's incoming requests (--record-requests).
+func (m *mockService) SetTestDB(db TestDB) {
+	m.testDB = db
 }
 
 // SetRecordHooks replaces the record hooks (e.g. enterprise secret obfuscation).

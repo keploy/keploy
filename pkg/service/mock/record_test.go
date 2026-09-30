@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // failsRecord is failsGroup for the stages only a recording has: a dying
@@ -100,6 +101,52 @@ func TestAnInterruptedRecordingIsNotAFailure(t *testing.T) {
 			defer cancel()
 			if err := recordWith(t, ctx, instr, base, utils.Native); err != nil {
 				t.Fatalf("an interrupted recording failed: %v", err)
+			}
+		})
+	}
+}
+
+type countingStore struct{ pushes int }
+
+func (s *countingStore) Pull(context.Context, string) error { return nil }
+
+func (s *countingStore) Push(context.Context, string) error {
+	s.pushes++
+	return nil
+}
+
+func TestRecordPublishesOnlyWhenTheTestsPassed(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		runResult models.AppError
+		pushes    int
+		exitCode  int
+		warned    bool
+	}{
+		{"passed", models.AppError{AppErrorType: models.ErrAppStopped}, 1, 0, false},
+		{"failed", models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 2}, 0, 2, true},
+		{"failed without a code", models.AppError{AppErrorType: models.ErrCommandError}, 0, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := newInstr(t, agentUpFromSetup, false, tc.runResult)
+			cfg := instrConfig(base, utils.Native, "go test ./...")
+			cfg.Path = t.TempDir()
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			core, logs := observer.New(zap.WarnLevel)
+			store := &countingStore{}
+			if err := New(zap.New(core), base, stubMockDB{}, nil, store, nil, cfg).Record(context.Background()); err != nil {
+				t.Fatalf("Record returned %v", err)
+			}
+			if store.pushes != tc.pushes {
+				t.Fatalf("pushes = %d, want %d", store.pushes, tc.pushes)
+			}
+			if utils.ErrCode != tc.exitCode {
+				t.Fatalf("exit code = %d, want %d", utils.ErrCode, tc.exitCode)
+			}
+			warned := logs.FilterMessage("tests failed; the recording was kept locally and not published").Len() == 1
+			if warned != tc.warned {
+				t.Fatalf("warned = %v, want %v", warned, tc.warned)
 			}
 		})
 	}
