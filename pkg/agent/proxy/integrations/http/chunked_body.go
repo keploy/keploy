@@ -214,17 +214,44 @@ func messageHead(msg []byte, response bool) (head []byte, bodyStart int, status 
 	}
 }
 
-// finalResponse is resp from its final response on: the interim 1xx
-// responses in front of it (a 100 Continue to an "Expect: 100-continue"
-// request, a 103 Early Hints) are dropped. The mock records the answer to the
-// request, not a 100 with an empty body. resp is returned as is when its final
-// header section has not arrived.
+// finalResponse is resp from its final response on, framed by blank lines: the
+// interim 1xx responses in front of it (a 100 Continue to an "Expect:
+// 100-continue" request, a 103 Early Hints) are dropped. resp is returned as is
+// when its final header section has not arrived. parseFinalResponse falls back
+// to it for an interim net/http will not read.
 func finalResponse(resp []byte) []byte {
 	head, bodyStart, _, ok := messageHead(resp, true)
 	if !ok {
 		return resp
 	}
 	return resp[bodyStart-len(head):]
+}
+
+// responseAsRead is resp, a response its client read only in part
+// (FinalHTTP.RespReadInPart), as a message net/http parses into what the
+// client had: from its final response on, past any interim 1xx, with a header
+// section cut short closed after its last whole line. The header line the
+// client was cut in, and those after it, it never had. The status line must be
+// whole: without it there is no response to record, and resp comes back
+// unclosed, for the parse to fail on. A body cut short is left as it is; the
+// caller reads it as far as it goes.
+func responseAsRead(resp []byte) []byte {
+	for {
+		i := bytes.Index(resp, []byte("\r\n\r\n"))
+		if i < 0 {
+			break
+		}
+		if status := responseStatus(resp[:i+4]); status >= 100 && status < 200 && status != 101 {
+			resp = resp[i+4:] // an interim response: the final one follows
+			continue
+		}
+		return resp // its whole header section
+	}
+	end := bytes.LastIndex(resp, []byte("\r\n"))
+	if end < 0 {
+		return resp
+	}
+	return append(resp[:end+2:end+2], '\r', '\n')
 }
 
 // responseStatus is the status code of an HTTP/1.x response head, or 0 when
