@@ -87,7 +87,7 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 	}
 
 	switch mysql.FieldType(col.Type) {
-	case mysql.FieldTypeLong:
+	case mysql.FieldTypeLong, mysql.FieldTypeInt24: // MEDIUMINT is sent as 4 bytes, like INT
 		if len(data) < 4 {
 			return nil, 0, errors.New("malformed FieldTypeLong value")
 		}
@@ -104,7 +104,9 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 		mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB,
 		mysql.FieldTypeJSON,
 		mysql.FieldTypeNewDecimal, // NEWDECIMAL (0xF6 / 246) is sent as a length-encoded string in binary rows
-		mysql.FieldTypeDecimal:    // legacy DECIMAL (0) — treat same as NEWDECIMAL
+		mysql.FieldTypeDecimal,    // legacy DECIMAL (0) — treat same as NEWDECIMAL
+		mysql.FieldTypeEnum, mysql.FieldTypeSet,
+		mysql.FieldTypeBit, mysql.FieldTypeGeometry, mysql.FieldTypeVector: // bytes, kept as a string like a BLOB's
 		value, _, n, err := utils.ReadLengthEncodedString(data)
 		res.value = string(value)
 		return res, n, err
@@ -244,7 +246,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 		}
 
 		switch ce.Type {
-		case mysql.FieldTypeLong:
+		case mysql.FieldTypeLong, mysql.FieldTypeInt24:
 			n, err := coerceToInt64(ce.Value)
 			if err != nil {
 				return nil, fmt.Errorf("column %q: %w", col.Name, err)
@@ -261,7 +263,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 
 		case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar,
 			mysql.FieldTypeNewDecimal, mysql.FieldTypeDecimal,
-			mysql.FieldTypeJSON:
+			mysql.FieldTypeJSON, mysql.FieldTypeEnum, mysql.FieldTypeSet:
 			s, ok := ce.Value.(string)
 			if !ok {
 				return nil, fmt.Errorf("string-like field %q not a string", col.Name)
@@ -270,7 +272,8 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 				return nil, err
 			}
 
-		case mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB:
+		case mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB,
+			mysql.FieldTypeBit, mysql.FieldTypeGeometry, mysql.FieldTypeVector:
 			switch v := ce.Value.(type) {
 			case []byte:
 				if err := writeLenEncBytes(body, v); err != nil {

@@ -482,3 +482,55 @@ func TestCoerceToString(t *testing.T) {
 		})
 	}
 }
+
+// Every column type a server sends in a binary row decodes, and encodes back
+// to the same bytes. MEDIUMINT (INT24) is a 4-byte integer, and BIT, ENUM,
+// SET, GEOMETRY and VECTOR are length-encoded strings. They had no case, so a
+// row carrying one did not decode ("unsupported column type"), and the
+// recorder skipped the row: the COM_STMT_EXECUTE result set was recorded
+// without it. BIT, GEOMETRY and VECTOR bytes are kept as a string, as a
+// BLOB's are.
+func TestBinaryRow_EveryServerColumnTypeRoundTrips(t *testing.T) {
+	ctx, logger := context.Background(), zap.NewNop()
+	le32 := func(v int32) []byte {
+		u := uint32(v)
+		return []byte{byte(u), byte(u >> 8), byte(u >> 16), byte(u >> 24)}
+	}
+	lenenc := func(s string) []byte { return append([]byte{byte(len(s))}, s...) }
+	for _, c := range []struct {
+		name  string
+		col   *mysql.ColumnDefinition41
+		wire  []byte
+		value interface{}
+	}{
+		{"MEDIUMINT", &mysql.ColumnDefinition41{Name: "m", Type: byte(mysql.FieldTypeInt24)}, le32(-8388608), int32(-8388608)},
+		{"MEDIUMINT UNSIGNED", &mysql.ColumnDefinition41{Name: "m", Type: byte(mysql.FieldTypeInt24), Flags: mysql.UNSIGNED_FLAG}, le32(16777215), uint32(16777215)},
+		{"BIT(1)", &mysql.ColumnDefinition41{Name: "b", Type: byte(mysql.FieldTypeBit)}, lenenc("\x01"), "\x01"},
+		{"BIT(16)", &mysql.ColumnDefinition41{Name: "b", Type: byte(mysql.FieldTypeBit)}, lenenc("\x80\x00"), "\x80\x00"},
+		{"ENUM", &mysql.ColumnDefinition41{Name: "e", Type: byte(mysql.FieldTypeEnum)}, lenenc("active"), "active"},
+		{"SET", &mysql.ColumnDefinition41{Name: "s", Type: byte(mysql.FieldTypeSet)}, lenenc("a,c"), "a,c"},
+		{"VECTOR", &mysql.ColumnDefinition41{Name: "v", Type: byte(mysql.FieldTypeVector)}, lenenc("\x00\x00\x80\x3f"), "\x00\x00\x80\x3f"},
+		{"GEOMETRY", &mysql.ColumnDefinition41{Name: "g", Type: byte(mysql.FieldTypeGeometry)}, lenenc("\x00\x00\x00\x00\x01\x01\x00\x00\x00"), "\x00\x00\x00\x00\x01\x01\x00\x00\x00"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// OK byte, a 1-byte null bitmap (one column + 2 reserved bits), the value.
+			payload := append([]byte{0x00, 0x00}, c.wire...)
+			pkt := append([]byte{byte(len(payload)), 0, 0, 7}, payload...)
+			cols := []*mysql.ColumnDefinition41{c.col}
+			row, n, err := DecodeBinaryRow(ctx, logger, pkt, cols)
+			if err != nil {
+				t.Fatalf("DecodeBinaryRow: %v", err)
+			}
+			if n != len(pkt) || len(row.Values) != 1 || row.Values[0].Value != c.value {
+				t.Fatalf("decoded (%d of %d bytes) %#v, want %#v", n, len(pkt), row.Values, c.value)
+			}
+			out, err := EncodeBinaryRow(ctx, logger, row, cols)
+			if err != nil {
+				t.Fatalf("EncodeBinaryRow: %v", err)
+			}
+			if string(out) != string(pkt) {
+				t.Fatalf("encoded % x, want % x", out, pkt)
+			}
+		})
+	}
+}
