@@ -93,7 +93,7 @@ func TestReplayOutcomeCarriesTheCasesAndTheMocksPerTest(t *testing.T) {
 	dir := t.TempDir()
 	mapDB := mapdb.New(zap.NewNop(), dir, "")
 	require.NoError(t, mapDB.UpsertBatch(context.Background(), "set", map[string][]models.MockEntry{"orders/e2e.TestA": {{Name: "mock-0"}}}))
-	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
+	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil))
 	recorded := httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{"id":"old"}`, runnerT0)
 	db := &memTestDB{existing: []*models.TestCase{recorded}}
 
@@ -186,7 +186,7 @@ func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
 	late := lateIncoming{runnerInstr: instr, after: 200 * time.Millisecond, tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
 	dir := t.TempDir()
 	mapDB := mapdb.New(zap.NewNop(), dir, "")
-	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
+	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil))
 	db := &memTestDB{existing: []*models.TestCase{httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0)}}
 	var got ReplayOutcome
 	RegisterReplayOutcomeReporter(func(_ context.Context, o ReplayOutcome) { got = o })

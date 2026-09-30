@@ -19,10 +19,10 @@ func TestUpsertCasesRoundTripsThroughDisk(t *testing.T) {
 			if err := db.UpsertBatch(ctx, "set", map[string][]models.MockEntry{"t1": {{Name: "mock-0"}}}); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"t1": {Cases: []string{"test-1"}}, "t2": {Cases: []string{"test-2"}}}, nil, nil); err != nil {
+			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"t1": {Cases: []string{"test-1"}}, "t2": {Cases: []string{"test-2"}}}, nil); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"t1": {Cases: []string{"test-1", "test-3"}}}, nil, nil); err != nil {
+			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"t1": {Cases: []string{"test-1", "test-3"}}}, nil); err != nil {
 				t.Fatal(err)
 			}
 			cases, err := db.GetCases(ctx, "set")
@@ -74,12 +74,12 @@ func TestUpsertCasesWritesCaseMocksStepsAndStartup(t *testing.T) {
 			}
 			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{
 				"t1": {Cases: []string{"test-1"}, CaseMocks: map[string][]string{"test-1": {"mock-1"}}, CaseSteps: map[string]string{"test-1": "create"}},
-			}, []models.MockEntry{{Name: "mock-0"}}, nil); err != nil {
+			}, []models.MockEntry{{Name: "mock-0"}}); err != nil {
 				t.Fatal(err)
 			}
 			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{
 				"t1": {Cases: []string{"test-2"}, CaseSteps: map[string]string{"test-2": ""}},
-			}, nil, nil); err != nil {
+			}, nil); err != nil {
 				t.Fatal(err)
 			}
 			data, err := yaml.ReadFileF(ctx, zap.NewNop(), dir+"/set", "mappings", format)
