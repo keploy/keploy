@@ -68,6 +68,8 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			URLReplacements: urlReplacements,
 			PortMappings:    portMappings,
 			TLSConfig:       h.tlsConfig,
+
+			AppPortReachability: h.appPortReachability(),
 		}
 
 		// Check if this is a streaming test case
@@ -115,6 +117,8 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,
 			PortMappings:    portMappings,
+
+			AppPortReachability: h.appPortReachability(),
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
@@ -127,6 +131,13 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
 
+}
+
+// appPortReachability is the instrumentation's answer to "can this address ever
+// reach the app?" when it has one (Docker mode), else nil: a refused test is
+// then re-sent as an app still starting, as before.
+func (h *Hooks) appPortReachability() pkg.AppPortReachability {
+	return appPortReachabilityOf(h.instrumentation)
 }
 
 func effectiveHTTPConfigPort(tc *models.TestCase, cfg config.Test) uint32 {

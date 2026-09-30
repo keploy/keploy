@@ -959,6 +959,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	 * immediately because no join was requested.
 	 */
 	uiJoinObserved := newUIJoinPorts()
+	unreachablePorts := newUnreachablePortWarner(r.logger, r.instrumentation, r.config)
 
 	runAppErrGrp, _ := errgroup.WithContext(ctx)
 	runAppCtx := context.WithoutCancel(ctx)
@@ -1738,6 +1739,8 @@ func (r *Recorder) Start(ctx context.Context) error {
 			 */
 			uiJoinObserved.observe(testCase.AppPort)
 			err := r.testDB.InsertTestCase(persistCtx, testCase, newTestSetID, true)
+			// After the insert, which is what names an auto-named test case.
+			unreachablePorts.check(ctx, testCase)
 			if err != nil {
 				if ctx.Err() != nil {
 					// Once shutdown has begun nothing reads insertTestErrChan:

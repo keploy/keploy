@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -2194,4 +2195,110 @@ func TestStart_AfterMockInsertGetsTheDocumentInTheMocksFile(t *testing.T) {
 				"the documents AfterMockInsert got are not what is in %s", filepath.Base(files[0]))
 		})
 	}
+}
+
+// namingTestDB names each test case as the real test store does on insert
+// (test-1, test-2, ...), so what reads tc.Name after the insert sees the name.
+type namingTestDB struct{ *recTestDB }
+
+func (d namingTestDB) InsertTestCase(ctx context.Context, tc *models.TestCase, set string, log bool) error {
+	d.mu.Lock()
+	n := len(d.inserted) + 1
+	d.mu.Unlock()
+	if tc.Name == "" {
+		tc.Name = fmt.Sprintf("test-%d", n)
+	}
+	return d.recTestDB.InsertTestCase(ctx, tc, set, log)
+}
+
+// unpublishedInstr is blockingInstr in Docker mode with some of the app's ports
+// unpublished: UnreachableAppPort answers for those, as the docker-backed
+// instrumentation does, and records every question it is asked.
+type unpublishedInstr struct {
+	*blockingInstr
+	unpublished map[uint16]string
+	mu          sync.Mutex
+	asked       []string
+}
+
+func (u *unpublishedInstr) UnreachableAppPort(_ context.Context, host string, port uint16) string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.asked = append(u.asked, fmt.Sprintf("%s:%d", host, port))
+	return u.unpublished[port]
+}
+
+// A test case recorded on an app port the host cannot reach is refused on
+// every replay (the app calling its own in-container server, recorded as
+// ingress on a port the docker command never published). That is known the
+// moment the first such test case is recorded, so the recording says so then,
+// once per port, naming the port and the fix; a replay a day later that logs
+// "app not yet accepting connections" for each of them is the wrong place to
+// find out. Test cases on a reachable port warn nothing.
+func TestStart_WarnsOnceForATestCaseRecordedOnAnUnreachablePort(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	const reason = "it is not published on the host; add -p 8096:8096"
+	instr := &unpublishedInstr{blockingInstr: &blockingInstr{f}, unpublished: map[uint16]string{8096: reason}}
+	core, logs := observer.New(zap.WarnLevel)
+	testDB := &recTestDB{}
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          namingTestDB{testDB},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	// Unnamed, as captured: the insert names them.
+	for _, tc := range []*models.TestCase{
+		{Kind: models.HTTP, AppPort: 8095, HTTPReq: models.HTTPReq{URL: "http://localhost:8095/health"}},
+		{Kind: models.HTTP, AppPort: 8096, HTTPReq: models.HTTPReq{URL: "http://localhost:8096/echo"}},
+		{Kind: models.HTTP, AppPort: 8095, HTTPReq: models.HTTPReq{URL: "http://localhost:8095/relay"}},
+		{Kind: models.HTTP, AppPort: 8096, HTTPReq: models.HTTPReq{URL: "http://localhost:8096/echo"}},
+	} {
+		select {
+		case f.incoming <- tc:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the recorder stopped consuming test cases at %s", tc.HTTPReq.URL)
+		}
+	}
+	require.Eventually(t, func() bool {
+		testDB.mu.Lock()
+		defer testDB.mu.Unlock()
+		return len(testDB.inserted) == 4
+	}, 5*time.Second, 20*time.Millisecond, "the recorder did not persist every test case")
+
+	cancel()
+	close(f.outgoing)
+	close(f.incoming)
+	close(f.mappings)
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+
+	warned := logs.FilterMessageSnippet("8096").All()
+	require.Len(t, warned, 1, "want one warning for port 8096, got: %v", logs.All())
+	assert.Equal(t, "test cases recorded on the app's port 8096 cannot be replayed: "+reason, warned[0].Message)
+	assert.Equal(t, "test-2", warned[0].ContextMap()["first testcase on the port"],
+		"the warning names the first test case recorded on the port, by the name the insert gave it")
+	assert.Empty(t, logs.FilterMessageSnippet("8095").All(), "a reachable port warned")
+
+	instr.mu.Lock()
+	defer instr.mu.Unlock()
+	assert.Equal(t, []string{"localhost:8095", "localhost:8096"}, instr.asked,
+		"each port is checked once, at the address replay will send its tests to")
 }

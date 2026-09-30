@@ -1715,7 +1715,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// runs every test-set, matching the historical lifecycle.
 		if serveTest && !r.isFirstTestSet {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(r.config.Test, testCases, testSetID, r.logger)) {
+		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(runTestSetCtx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation))) {
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
@@ -1914,7 +1914,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// one-shot spawn actually fired.
 			if serveTest && !r.isFirstTestSet {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(r.config.Test, testCases, testSetID, r.logger)) {
+			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(runTestSetCtx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation))) {
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
 
@@ -5434,6 +5434,12 @@ const resetResendReadyTimeout = 5 * time.Second
 // successful re-send's consumption is still accounted by the subsequent per-test
 // GetConsumedMocks in RunTestSet (loopErr becomes nil, so that block runs).
 func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase, testSetID string, origErr error) (interface{}, bool, []models.MockState) {
+	// A reset at an address the app can never be reached at (a published port
+	// it listens behind only on 127.0.0.1 in its container) comes back on every
+	// re-send, and waiting for it to serve first would wait out each gate.
+	if pkg.IsUnreachableAppPort(origErr) {
+		return nil, false, nil
+	}
 	for attempt := 1; attempt <= maxResetResends; attempt++ {
 		if ctx.Err() != nil {
 			return nil, false, nil

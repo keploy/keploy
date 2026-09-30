@@ -197,6 +197,14 @@ type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }
 
+// AppListenPorter is the optional extension of an IncomingProxy that knows
+// which port the app's own socket listens on for one of the app's ports. While
+// recording, keploy's ingress forwarder holds the app's port and the app
+// listens on the port its bind was moved to.
+type AppListenPorter interface {
+	AppListenPort(orig uint16) (port uint16, ok bool)
+}
+
 type ProxyOptions struct {
 	// DNSIPv4Addr is the proxy IP returned by the DNS server. default is loopback address
 	DNSIPv4Addr string

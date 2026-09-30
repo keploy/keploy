@@ -1,0 +1,69 @@
+name: Unpublished App Port (Docker)
+# Guard: in Docker mode, a test recorded on an app port the host cannot reach
+# (the app calling its own in-container server, on a port the docker command
+# does not publish, or on a published one it listens behind only on
+# 127.0.0.1) is named at record time, with what would make it reachable, and
+# at replay fails at once saying why the port cannot be reached from the host,
+# instead of being re-sent as an app "not yet accepting connections" or a
+# transient reset and, when it comes first in the set, costing the readiness
+# gate its whole ceiling.
+#
+# The matrix runs the same record -> replay against two keploy binaries:
+#   - build  -> the PR's binary and image. MUST pass.
+#   - latest -> the published `latest`, which says none of this.
+#               continue-on-error so it documents the bug without blocking;
+#               drop the leg once `latest` has the fix.
+on:
+  workflow_call:
+
+jobs:
+  unpublished_port_docker:
+    # The PR's agent image is only built for non-fork runs.
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_build_replay_build
+            src: build
+            continue_on_error: false
+          - job: record_latest_replay_latest
+            src: latest
+            continue_on_error: true
+    name: unpublished-port (${{ matrix.config.job }})
+    timeout-minutes: 20
+    continue-on-error: ${{ matrix.config.continue_on_error }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.src }}
+
+      - name: Run unpublished-port guard
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        # `bash <script>` (not `source`) so the script's intentional `set +e`
+        # is not overridden by the step's default `-eo pipefail`.
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/unpublished-port/python-docker.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unpublished-port-${{ matrix.config.job }}-logs
+          path: |
+            .github/workflows/test_workflow_scripts/python/unpublished-port/*.txt
+            .github/workflows/test_workflow_scripts/python/unpublished-port/keploy/
+          if-no-files-found: warn
+          retention-days: 7

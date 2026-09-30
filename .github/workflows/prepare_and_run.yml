@@ -787,6 +787,11 @@ jobs:
     # (a tenant header sent twice; a mock's two Set-Cookie lines).
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/repeated-headers-linux.yml
+  run_unpublished_port_docker:
+    # Guard: a test recorded on an app port the docker command does not
+    # publish is named at record time and fails at replay saying so.
+    needs: [build-and-upload, upload-latest, build-docker-image-amd64]
+    uses: ./.github/workflows/unpublished-port-docker.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml

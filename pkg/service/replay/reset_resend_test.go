@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -246,4 +247,25 @@ func (h *perAttemptConsumerHook) SimulateRequest(_ context.Context, _ *models.Te
 
 func (h *perAttemptConsumerHook) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
 	return h.mm.GetConsumedMocks(), nil
+}
+
+// A reset at an address the app can never be reached at (docker dropping the
+// connection to a published port the app listens behind only on 127.0.0.1) is
+// the same reset on every re-send, and each re-send first waits for the app to
+// serve there: up to 6 × 5 s per test for nothing. It is not re-sent.
+func TestRetryResetOnce_NotForAnUnreachableAppPort(t *testing.T) {
+	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	hook := &realMockManagerHook{mm: mm}
+	r := newTestReplayer(hook)
+	tc := &models.TestCase{Name: "post-echo-1", Kind: models.HTTP}
+
+	unreachable := &pkg.UnreachableAppPortError{Port: 8097, Reason: "the app listens on port 8097 only on 127.0.0.1", Err: connResetURLErr()}
+	resp, retried, drained := r.retryResetOnce(context.Background(), tc, "test-set-0", unreachable)
+	if retried || resp != nil || drained != nil {
+		t.Fatalf("got retried=%v resp=%v drained=%v; want no re-send", retried, resp, drained)
+	}
+	if got := atomic.LoadInt32(&hook.calls); got != 0 {
+		t.Fatalf("re-sent %d times; want none", got)
+	}
 }

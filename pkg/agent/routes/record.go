@@ -94,6 +94,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/scope/windows", a.HandleScopeWindows)
 		r.Post("/scope/table", a.HandleScopeTable)
 		r.Get("/mock/stats", a.HandleMockStats)
+		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
 		// Pollable, non-draining view of which mocks have been served. Distinct
 		// from /consumedmocks, which drains and is read once at end of run.
