@@ -24,6 +24,7 @@ type outcomeProxy struct {
 	consumedErr error
 	missed      []models.UnmatchedCall
 	block       chan struct{}
+	missedAsked chan struct{} // closed when GetMockErrors is called, if set
 }
 
 func (p *outcomeProxy) GetConsumedMocks(context.Context) ([]models.MockState, error) {
@@ -34,6 +35,9 @@ func (p *outcomeProxy) GetConsumedMocks(context.Context) ([]models.MockState, er
 }
 
 func (p *outcomeProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
+	if p.missedAsked != nil {
+		close(p.missedAsked)
+	}
 	return p.missed, nil
 }
 
@@ -108,11 +112,22 @@ func TestWriteStopOutcomeLeavesNothingItCouldNotRead(t *testing.T) {
 // A proxy that never answers must cost the shutdown stopOutcomeTimeout, not
 // the rest of compose's stop grace -- after which the container is killed and
 // neither the outcome nor the agent's own teardown happens.
+//
+// And giving up has to mean that no outcome is left: a proxy that answers
+// after all, as the shutdown goes on, must not have its answer written in
+// behind the give-up, for the CLI to read as this replay's account.
 func TestLeaveStopOutcomeGivesUpOnAWedgedProxy(t *testing.T) {
 	block := make(chan struct{})
-	defer close(block)
-	a := &Agent{Proxy: &outcomeProxy{block: block}, logger: zap.NewNop()}
-	path := filepath.Join(t.TempDir(), "outcome.json")
+	released := false
+	defer func() {
+		if !released {
+			close(block)
+		}
+	}()
+	proxy := &outcomeProxy{block: block, missedAsked: make(chan struct{})}
+	a := &Agent{Proxy: proxy, logger: zap.NewNop()}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "outcome.json")
 
 	done := make(chan struct{})
 	go func() {
@@ -126,6 +141,20 @@ func TestLeaveStopOutcomeGivesUpOnAWedgedProxy(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("left an outcome for a proxy that never answered: %v", err)
+	}
+
+	// The proxy answers after all.
+	close(block)
+	released = true
+	select {
+	case <-proxy.missedAsked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the abandoned read never finished")
+	}
+	// Longer than the abandoned read takes to write, were it going to.
+	time.Sleep(500 * time.Millisecond)
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("wrote %v after giving up (%v)", entries, err)
 	}
 }
 
