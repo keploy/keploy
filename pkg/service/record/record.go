@@ -84,10 +84,22 @@ type drainOpts[T any] struct {
 	afterStop func(T)
 	// keepUndated keeps undated frames even when afterStop is set.
 	keepUndated bool
-	// forwarded, when set, is told of each frame handed to the consumer.
-	forwarded func(T)
+	// handing, when set, is called with each frame about to be handed to the
+	// consumer, and returns what to run once it has been. It reads what it
+	// needs from the frame there: a handed frame is the consumer's, which may
+	// change it (InsertTestCase names an unnamed test case in place).
+	handing func(T) (handed func())
 	// kind names the frames in logs ("test cases", "mocks").
 	kind string
+}
+
+// beforeHand runs o.handing for a frame about to be handed over, and returns
+// what to run once it has been.
+func (o drainOpts[T]) beforeHand(item T) (handed func()) {
+	if o.handing == nil {
+		return func() {}
+	}
+	return o.handing(item)
 }
 
 // forwardUntilDrained forwards a frame stream from the agent to its consumer,
@@ -169,6 +181,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 		if draining {
 			again = utils.InterruptedAgain()
 		}
+		onHanded := o.beforeHand(item)
 		handed := false
 		select {
 		case out <- item:
@@ -176,9 +189,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			if draining {
 				sinceStop++
 			}
-			if o.forwarded != nil {
-				o.forwarded(item)
-			}
+			onHanded()
 			handed = true
 		case <-abandoned:
 			o.dropped(item)
@@ -245,12 +256,11 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 				}
 				stopTimer(idle)
 				if forward, _ := keep(item); forward {
+					onHanded := o.beforeHand(item)
 					select {
 					case out <- item:
 						r.frameProgress.Add(1)
-						if o.forwarded != nil {
-							o.forwarded(item)
-						}
+						onHanded()
 					case <-abandoned:
 						o.dropped(item)
 						return
@@ -2174,7 +2184,13 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				postStopTests.Store(tc.Name, struct{}{})
 				r.logger.Debug("not recording a test case served after the stop", zap.String("testCaseName", tc.Name))
 			}
-			opts.forwarded = func(tc *models.TestCase) { recordedTests.Store(tc.Name, struct{}{}) }
+			// Keyed by the name the test case is handed over with: the
+			// agent's, which its mappings carry. Read before the hand-off,
+			// since the consumer's insert names an unnamed test case in place.
+			opts.handing = func(tc *models.TestCase) func() {
+				name := tc.Name
+				return func() { recordedTests.Store(name, struct{}{}) }
+			}
 		}
 		forwardUntilDrained(ctx, r, incomingStream, incomingChan, abandoned, opts)
 		return nil

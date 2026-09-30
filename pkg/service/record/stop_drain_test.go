@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -494,5 +495,101 @@ func TestGetTestAndMockChans_TrafficAfterTheStopIsFilteredToTheEnd(t *testing.T)
 	<-done
 	if len(got) != 0 {
 		t.Fatalf("recorded %v after the drain ended the stream", got)
+	}
+}
+
+// Under docker compose the test-case forwarder notes each test case it hands
+// on (recordedTests), by the name the agent's mappings carry. It read that
+// name after the hand-off, when the test case was already the consumer's, and
+// InsertTestCase names an unnamed test case in place (TestYaml.upsert, after
+// the placeholder it claimed): a data race, which failed the echo-sql lane's
+// record step under -race, and a key that was the agent's name or the store's,
+// whichever won. Each of the forwarder's two hand-offs is driven on its own:
+// while it forwards, and after the drain has ended the stream.
+func TestGetTestAndMockChans_ComposeForwarderLeavesAHandedTestCaseToItsConsumer(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name              string
+		forwarding, ended int
+	}{
+		{"while forwarding", 8, 0},
+		{"after the drain ended the stream", 0, 8},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeInstr{
+				mappings: make(chan models.TestMockMapping),
+				incoming: make(chan *models.TestCase),
+				outgoing: make(chan *models.Mock),
+			}
+			instr := &ctxInstr{fakeInstr: f, incomingCtx: make(chan context.Context, 1)}
+			cfg := &config.Config{}
+			cfg.CommandType = string(utils.DockerCompose)
+			r := &Recorder{logger: zap.NewNop(), instrumentation: instr, config: cfg, frameQuiet: 50 * time.Millisecond}
+			g, gctx := errgroup.WithContext(context.Background())
+			ctx, cancel := context.WithCancel(gctx)
+			defer cancel()
+			ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+			frames, err := r.GetTestAndMockChans(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer frames.Abandon()
+			streamCtx := <-instr.incomingCtx
+
+			store := testdb.New(zap.NewNop(), t.TempDir())
+			var names []string
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for tc := range frames.Incoming {
+					if err := store.InsertTestCase(context.Background(), tc, "test-set-0", false); err != nil {
+						t.Errorf("InsertTestCase: %v", err)
+						continue
+					}
+					names = append(names, tc.Name)
+				}
+			}()
+
+			captured := time.Now()
+			sent := 0
+			send := func() {
+				t.Helper()
+				// Unnamed, as the agent sends a test case outside synchronous
+				// mode: the store names it.
+				tc := &models.TestCase{
+					Kind:     models.HTTP,
+					HTTPReq:  models.HTTPReq{Method: http.MethodGet, URL: fmt.Sprintf("http://app/items/%d", sent), Timestamp: captured},
+					HTTPResp: models.HTTPResp{StatusCode: http.StatusOK, Timestamp: captured},
+				}
+				select {
+				case f.incoming <- tc:
+					sent++
+				case <-time.After(5 * time.Second):
+					t.Fatalf("test case %d was not taken", sent)
+				}
+			}
+			for i := 0; i < c.forwarding; i++ {
+				send()
+			}
+			cancel()
+			<-streamCtx.Done() // the drain has ended the stream
+			for i := 0; i < c.ended; i++ {
+				send()
+			}
+			close(f.incoming)
+			<-done
+
+			if len(names) != sent {
+				t.Fatalf("persisted %d of %d test cases", len(names), sent)
+			}
+			seen := map[string]bool{}
+			for _, n := range names {
+				if n == "" || seen[n] {
+					t.Fatalf("the store named the test cases %q: want every one named, once", names)
+				}
+				seen[n] = true
+			}
+		})
 	}
 }
