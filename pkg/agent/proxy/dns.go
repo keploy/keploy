@@ -19,15 +19,18 @@ import (
 	"go.uber.org/zap"
 )
 
-func (p *Proxy) startTCPDNSServer(_ context.Context) error {
+// startTCPDNSServer binds and serves the TCP DNS listener. See
+// startUDPDNSServer for the onListening (NotifyStartedFunc) contract.
+func (p *Proxy) startTCPDNSServer(_ context.Context, onListening func()) error {
 	addr := fmt.Sprintf(":%v", p.DNSPort)
 
 	handler := p
 	server := &dns.Server{
-		Addr:      addr,
-		Net:       "tcp",
-		Handler:   handler,
-		ReusePort: true,
+		Addr:              addr,
+		Net:               "tcp",
+		Handler:           handler,
+		ReusePort:         true,
+		NotifyStartedFunc: onListening,
 	}
 
 	p.TCPDNSServer = server
@@ -35,20 +38,30 @@ func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 	p.logger.Info(fmt.Sprintf("starting TCP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
+		// Return (not swallow) the bind error so the errgroup surfaces it; a
+		// silently-dead TCP DNS listener otherwise looks healthy.
 		utils.LogError(p.logger, err, "failed to start tcp dns server", zap.String("addr", server.Addr))
+		return err
 	}
 	return nil
 }
 
-func (p *Proxy) startUDPDNSServer(_ context.Context) error {
+// startUDPDNSServer binds and serves the UDP DNS listener. onListening, if
+// non-nil, is invoked exactly once by miekg/dns AFTER the socket is bound and
+// just before it starts serving (NotifyStartedFunc) -- StartProxy waits on it
+// so the agent's readiness (which releases the depends_on'd app container in
+// docker-compose replay) cannot fire before DNS is actually answering. A failed
+// bind never invokes it (StartProxy's timeout surfaces that).
+func (p *Proxy) startUDPDNSServer(_ context.Context, onListening func()) error {
 	addr := fmt.Sprintf(":%v", p.DNSPort)
 
 	handler := p
 	server := &dns.Server{
-		Addr:      addr,
-		Net:       "udp",
-		Handler:   handler,
-		ReusePort: true,
+		Addr:              addr,
+		Net:               "udp",
+		Handler:           handler,
+		ReusePort:         true,
+		NotifyStartedFunc: onListening,
 	}
 
 	p.UDPDNSServer = server

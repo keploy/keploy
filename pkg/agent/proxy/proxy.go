@@ -435,6 +435,14 @@ const (
 	// short enough that hitting it reads as a pause and not a hang.
 	minRecordBufferStallGrace = 100 * time.Millisecond
 	maxRecordBufferStallGrace = 10 * time.Second
+
+	// dnsBindTimeout is the BACKSTOP for StartProxy's DNS-listener readiness
+	// wait. A real bind error fails fast via dnsErrCh, so this only bounds the
+	// pathological case of a socket that neither reports listening nor errors.
+	// Generous enough never to false-fail a healthy start (a bind is a syscall,
+	// near-instant) yet short enough that a truly stuck start surfaces as an
+	// error instead of hanging the whole run.
+	dnsBindTimeout = 30 * time.Second
 )
 
 // clampRecordBuffer validates user-supplied record-buffer values
@@ -1743,6 +1751,21 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// legacy default response.
 	p.captureDNSUpstream()
 
+	// Closed (via NotifyStartedFunc) once each DNS socket is bound. StartProxy
+	// blocks on both below before returning, so the agent's readiness -- and the
+	// docker-compose `depends_on: service_healthy` app-release gated on it --
+	// cannot fire before DNS is listening. Without this the reconstructed
+	// replay app's eager boot-time resolve of a recorded name races an unbound
+	// DNS socket and dies with UnknownHostException, tearing down the whole
+	// stack (intermittent cloud-replay flake, saas/selfhosted pipeline 9847).
+	tcpDNSReady := make(chan struct{})
+	udpDNSReady := make(chan struct{})
+	// A DNS bind failure closes neither ready channel; the goroutines below also
+	// report it here so the wait fails FAST with the real error (e.g. "bind:
+	// address already in use") instead of stalling to the timeout. Buffered for
+	// both servers so the send never blocks a goroutine that is exiting.
+	dnsErrCh := make(chan error, 2)
+
 	// start the TCP DNS server
 	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
 	g.Go(func() error {
@@ -1750,9 +1773,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		errCh := make(chan error, 1)
 		go func(errCh chan error) {
 			defer utils.Recover(p.logger)
-			err := p.startTCPDNSServer(ctx)
+			err := p.startTCPDNSServer(ctx, func() { close(tcpDNSReady) })
 			if err != nil {
 				errCh <- err
+				dnsErrCh <- err
 			}
 		}(errCh)
 
@@ -1778,9 +1802,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		errCh := make(chan error, 1)
 		go func(errCh chan error) {
 			defer utils.Recover(p.logger)
-			err := p.startUDPDNSServer(ctx)
+			err := p.startUDPDNSServer(ctx, func() { close(udpDNSReady) })
 			if err != nil {
 				errCh <- err
+				dnsErrCh <- err
 			}
 		}(errCh)
 
@@ -1802,6 +1827,29 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// Wait for the proxy server to be ready or fail
 	if err := <-readyChan; err != nil {
 		return err
+	}
+
+	// ...then wait for the DNS listeners to actually be bound before returning,
+	// so nothing gated on StartProxy (notably the agent readiness that releases
+	// the app container) can observe an unbound DNS socket. ListenAndServe binds
+	// then serves; the NotifyStartedFunc set in start{TCP,UDP}DNSServer closes
+	// these once bound. A bind FAILURE reports on dnsErrCh, so we fail fast with
+	// the real error; dnsBindTimeout is only a backstop for a socket that neither
+	// binds nor errors. One shared deadline caps the total wait for both servers.
+	dnsBindDeadline := time.After(dnsBindTimeout)
+	for _, d := range []struct {
+		name string
+		ch   <-chan struct{}
+	}{{"UDP", udpDNSReady}, {"TCP", tcpDNSReady}} {
+		select {
+		case <-d.ch:
+		case err := <-dnsErrCh:
+			return fmt.Errorf("DNS server failed to start: %w", err)
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-dnsBindDeadline:
+			return fmt.Errorf("%s DNS server did not report listening within %s", d.name, dnsBindTimeout)
+		}
 	}
 
 	if p.auxiliaryHook != nil {

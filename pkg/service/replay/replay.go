@@ -1984,25 +1984,78 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		zap.String("testSetID", testSetID),
 		zap.Int("count", len(consumedMocks)),
 		zap.Any("mocks", consumedMocks))
-	for _, m := range consumedMocks {
+	// Partition the pre-first-test consumption. Everything drained here was
+	// consumed BEFORE any test fired, but it is not all the same tier:
+	//
+	//   - Reusable/session traffic (driver handshakes, auth, connection-pool
+	//     warm-up) genuinely belongs to no test — it is what the STARTUP section
+	//     below exists to record, and it is folded into totalConsumedMocks as
+	//     before.
+	//   - PER-TEST single-use mocks can also land here when the app-readiness
+	//     gate (waitForAppReady, above) polls Test.HealthURL and that endpoint
+	//     calls a mocked dependency. A /health handler that runs e.g. SELECT 1
+	//     against a mocked DB makes the proxy serve — and DeleteFilteredMock
+	//     permanently consume — a per-test mock that belongs to a recorded test
+	//     case (classically the recorded get-health test's own SELECT 1).
+	//     Folding THAT into totalConsumedMocks marks it Deleted, so every later
+	//     per-test filterOutDeleted strips it and the test that owns it fails
+	//     with no_mocks (an intermittent, misattributed "degraded"/500 on the
+	//     probe endpoint).
+	//
+	// So re-arm per-test mocks the gate consumed by WITHHOLDING them from
+	// totalConsumedMocks: the next per-test SendMockFilterParamsToAgent rebuilds
+	// the serving pool from the stored corpus and, because they are not marked
+	// Deleted, re-inserts them so their owning test consumes (and then counts)
+	// them. This is the same withhold-to-re-arm effect the per-retry-cycle rewind
+	// (rewindConsumedForRetryCycle) uses to re-serve per-test mocks each cycle.
+	// The tier is decided by isReusableTierState on the recorder-derived
+	// Lifetime/type carried through GetConsumedMocks; a session->per-test mis-tag
+	// only re-arms a mock (keeps it available), and the reverse mis-tag is no
+	// worse than before this fix (the original fold behaviour).
+	//
+	// NOTE: this withhold is CLI-side. Under the experimental
+	// KEPLOY_AGENT_OWNS_CONSUMED=1 path the agent filters from its own
+	// never-rewound consumedPersistent, which the CLI does not touch, so the
+	// gate-consumption bug is not yet fixed there (that path is OFF by default;
+	// closing it needs an agent-side "un-flag consumed" primitive).
+	startupConsumed, rearmedConsumed := partitionInitialConsumed(consumedMocks)
+	for _, m := range startupConsumed {
 		totalConsumedMocks[m.Name] = m
 		passingTotalConsumedMocks[m.Name] = m
+	}
+	for _, m := range rearmedConsumed {
+		r.logger.Debug("re-arming a per-test mock consumed by the readiness gate before any test fired",
+			zap.String("testSetID", testSetID),
+			zap.String("mock", m.Name),
+			zap.String("kind", string(m.Kind)))
+		// Withheld from totalConsumedMocks (so it stays re-armed for serving),
+		// but seed a NON-Deleted placeholder in passingTotalConsumedMocks so
+		// --remove-unused-mocks / UpdateMocks does not prune this boot/readiness
+		// mock from the corpus when its owning test happens to fail or be
+		// deselected this run. passingTotalConsumedMocks is never sent to the
+		// agent, so this does not undo the re-arm; if the owning test later
+		// passes, it overwrites this with the real MockState. Mirrors the
+		// non-executed-test preserve block below.
+		if _, exists := passingTotalConsumedMocks[m.Name]; !exists {
+			passingTotalConsumedMocks[m.Name] = models.MockState{Name: m.Name, Kind: m.Kind}
+		}
 	}
 
 	// Record the boot-time traffic as the test-set's STARTUP section.
 	//
-	// These are, by definition, the mocks consumed before the first test fired
-	// — driver handshakes, auth, connection-pool warm-up. They belong to no
-	// single test case, so upsertActualTestMockMapping's per-test window filter
-	// can never attribute them (its own comment calls them "session-level
-	// traffic that should not be per-test") and until now they were simply
-	// absent from mappings.yaml.
+	// These are, by definition, the reusable/session mocks consumed before the
+	// first test fired — driver handshakes, auth, connection-pool warm-up. They
+	// belong to no single test case, so upsertActualTestMockMapping's per-test
+	// window filter can never attribute them (its own comment calls them
+	// "session-level traffic that should not be per-test") and until now they
+	// were simply absent from mappings.yaml.
 	//
 	// That absence is invisible on the timestamp path, which reloads them via
 	// disk.LoadBefore(firstWindowStart), but fatal on the mapping path, which
 	// loads strictly by name. Writing them here is what lets the reader hand
-	// them back for every test.
-	setStartupMocks(actualTestMockMappings, consumedMocks)
+	// them back for every test. Only the reusable tier is written — a per-test
+	// mock re-armed above belongs to its own test's section, not to startup.
+	setStartupMocks(actualTestMockMappings, startupConsumed)
 
 	// Snapshot the post-setup consumed-mock baseline. These are the
 	// reusable/session mocks (driver handshake, auth, connection pool
@@ -2114,6 +2167,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// the cycle's own testsToRun is the only statement that stays true in all of
 	// those cases.
 	stoppedEarly := false
+	// Tests whose request got no answer, classified off the error in hand.
+	var noAnswerTests []string
+	noteNoAnswer := func(name string, err error) {
+		if isAppNoAnswerMsg(err.Error()) {
+			noAnswerTests = append(noAnswerTests, name)
+		}
+	}
 	finalTestCaseResults := make(map[string]*models.TestResult)
 	itr := 1
 	if r.config.RetryPassing {
@@ -2305,6 +2365,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			if loopErr != nil {
 				utils.LogError(r.logger, loopErr, "failed to simulate request")
+				noteNoAnswer(testCase.Name, loopErr)
 				currentFailures++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, loopErr.Error())
@@ -3090,6 +3151,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			if simErr != nil {
 				utils.LogError(r.logger, simErr, "failed to simulate streaming request")
+				noteNoAnswer(tc.Name, simErr)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, simErr.Error())
@@ -3160,6 +3222,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 					if streamErr != nil {
 						r.logger.Error("failed to read streaming response", zap.Error(streamErr))
+						noteNoAnswer(tc.Name, streamErr)
 						failure++
 						testSetStatus = models.TestSetStatusFailed
 						testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, streamErr.Error())
@@ -3393,6 +3456,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	// Prune and mappings only; the report and stoppedEarly are unchanged. Every
+	// loaded, non-ignored test must have a verdict from Phase 1 or Phase 2 (each
+	// path counts one before it continues or breaks). stoppedEarly cannot say
+	// this: it counts against testsToRun, which the selection already narrowed
+	// (a selected-test list, a selection loop cut short) and which leaves out
+	// the streaming tests.
+	toScore := 0
+	for _, tc := range testCases {
+		if _, ok := ignoredTests[tc.Name]; !ok {
+			toScore++
+		}
+	}
+	allTestsGotAVerdict := success+failure+obsolete == toScore
+
 	// Fold every mock consumed since the last rewind into the cross-cycle
 	// union — the final main-loop cycle's mocks and the streaming Phase 2
 	// mocks (Phase 2 appends to totalConsumedMocks and never rewinds).
@@ -3414,17 +3491,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	timeTaken := time.Since(startTime)
 
-	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
-	if err != nil {
+	testCaseResults, resultsErr := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
+	if resultsErr != nil {
 		if runTestSetCtx.Err() != context.Canceled {
-			if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
+			if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), resultsErr); ok {
 				testSetStatus = resolvedStatus
 			} else {
-				utils.LogError(r.logger, err, "failed to get test case results")
+				utils.LogError(r.logger, resultsErr, "failed to get test case results")
 				testSetStatus = models.TestSetStatusInternalErr
 			}
 		}
 	}
+	// The prune's connection-error rule reads these back: unreadable or short of
+	// the verdicts, they cannot vouch for anything (fail closed).
+	scoredResults := 0
+	for _, tr := range testCaseResults {
+		if tr.Status != models.TestStatusIgnored {
+			scoredResults++
+		}
+	}
+	resultsComplete := resultsErr == nil && scoredResults >= success+failure+obsolete
 
 	err = r.hookImpl.BeforeTestResult(ctx, testRunID, testSetID, testCaseResults)
 	if err != nil {
@@ -3611,17 +3697,40 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// sound when a mock going unconsumed actually means the app didn't need it. A
 	// run whose app could not reach its dependencies fails every test and consumes
 	// nothing — pruning that would delete the recording's mocks because of an
-	// infrastructure fault. shouldPrune holds them; see shouldSkipPruning for the
-	// full set of reasons.
+	// infrastructure fault. shouldPrune holds them and lists the reasons.
 	pruneEnabled := r.config.Test.RemoveUnusedMocks && r.instrument
-	prune := shouldPrune(r.config.Test.RemoveUnusedMocks, r.instrument, success, failure, obsolete,
-		r.config.Test.PreserveFailedMocks, testCaseResults)
+	// INTERNAL_ERR: keploy lost part of the run, e.g. a result insert.
+	internalErr := testSetStatus == models.TestSetStatusInternalErr
+	// Read once: the prune and the mappings hold below decide on the same value.
+	appUnreachable := anyAppConnectionError(testCaseResults)
+	prune, pruneRefusal := shouldPrune(r.config.Test.RemoveUnusedMocks, r.instrument, pruneRun{
+		allTestsGotAVerdict: allTestsGotAVerdict,
+		internalErr:         internalErr,
+		resultsComplete:     resultsComplete,
+		noAnswer:            len(noAnswerTests) > 0,
+		appUnreachable:      appUnreachable,
+		success:             success,
+		failure:             failure,
+		obsolete:            obsolete,
+		preserveFailedMocks: r.config.Test.PreserveFailedMocks,
+	})
 	if pruneEnabled && !prune {
-		r.logger.Warn("skipping mock pruning: this run's consumed-mock set is not trustworthy enough to delete against, so recorded mocks are preserved",
+		fields := []zap.Field{
 			zap.String("testSetID", testSetID),
+			zap.String("reason", pruneRefusal),
 			zap.Int("passed", success),
 			zap.Int("failed", failure),
-			zap.Bool("appUnreachable", anyAppConnectionError(testCaseResults)))
+			zap.Int("obsolete", obsolete),
+			zap.Int("testsToScore", toScore),
+			zap.String("status", string(testSetStatus)),
+			zap.Error(resultsErr),
+		}
+		if n := len(noAnswerTests); n > 0 {
+			// One chronically unanswered test stops pruning for the whole set;
+			// this names it. Capped so an outage does not log every test.
+			fields = append(fields, zap.Int("noAnswerCount", n), zap.Strings("noAnswerTests", noAnswerTests[:min(n, 20)]))
+		}
+		r.logger.Warn("skipping mock pruning: this run's consumed-mock set is not trustworthy enough to delete against, so recorded mocks are preserved", fields...)
 	}
 	if prune {
 		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
@@ -3708,9 +3817,30 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// the mappings the feature relies on. UpdateTestMapping=true
 	// still writes an empty file when explicitly requested — that
 	// matches the operator intent of "force a refresh".
-	shouldWriteMappings := r.config.Test.UpdateTestMapping
-	if !shouldWriteMappings && r.mappingDB != nil && len(actualTestMockMappings.TestCases) > 0 {
-		exists, existsErr := r.mappingDB.Exists(ctx, testSetID)
+	//
+	// No write may leave a loaded test out of the file for good, as no default
+	// run adds to a file that exists. A run that did not score every loaded
+	// test writes nothing: no create, no StoreMappings merge, no backfill. A run
+	// where a test got no answer, was refused or lost its result has no entry
+	// for that test, so by default it must not create the file, but may backfill
+	// one that exists. --update-test-mapping writes it either way: mapdb.Insert
+	// replaces only this run's entries, so the next such run adds the missing
+	// test (MergeStartupMockNames keeps an unmapped test on the time window).
+	mappingExists := sync.OnceValues(func() (bool, error) { return r.mappingDB.Exists(ctx, testSetID) })
+	holdMappings := ""
+	wouldWrite := r.mappingDB != nil && (r.config.Test.UpdateTestMapping ||
+		len(actualTestMockMappings.TestCases) > 0 || len(actualTestMockMappings.Startup) > 0)
+	if wouldWrite && !allTestsGotAVerdict {
+		holdMappings = "not every loaded test got a verdict"
+	} else if wouldWrite && !r.config.Test.UpdateTestMapping &&
+		(len(noAnswerTests) > 0 || internalErr || !resultsComplete || appUnreachable) {
+		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
+			holdMappings = "a test got no answer, was refused or lost its result, and a new file would lack it for good"
+		}
+	}
+	shouldWriteMappings := r.config.Test.UpdateTestMapping && holdMappings == ""
+	if !r.config.Test.UpdateTestMapping && holdMappings == "" && r.mappingDB != nil && len(actualTestMockMappings.TestCases) > 0 {
+		exists, existsErr := mappingExists()
 		if existsErr != nil {
 			r.logger.Debug("Skipping create-if-not-present mappings.yaml write — file-existence check failed; treating as 'exists' to avoid clobbering",
 				zap.String("testSetID", testSetID),
@@ -3722,7 +3852,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// See backfillStartupSection: writes a STARTUP-ONLY document so the
 	// operator's per-test mappings are never rewritten by a subset run.
-	if !shouldWriteMappings {
+	if holdMappings != "" {
+		// Into a file that exists, the default flag would only have backfilled
+		// the startup section, so a subset run on a mapped set stays quiet.
+		logHold := r.logger.Warn
+		if !r.config.Test.UpdateTestMapping {
+			if exists, existsErr := mappingExists(); existsErr == nil && exists {
+				logHold = r.logger.Debug
+			}
+		}
+		logHold("not writing mappings.yaml", zap.String("testSetID", testSetID), zap.String("reason", holdMappings))
+	} else if !shouldWriteMappings {
 		r.backfillStartupSection(ctx, testSetID, actualTestMockMappings)
 	}
 
@@ -4762,6 +4902,18 @@ func isAppConnectionErrorMsg(msg string) bool {
 		strings.Contains(m, ": eof")
 }
 
+// isAppNoAnswerMsg: no complete answer came back (timeout, cancellation, app
+// closed mid-response). Prune gate only, never APP_CONNECTION_ERROR: a stop's
+// cancellation is not the app being down.
+func isAppNoAnswerMsg(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "client.timeout exceeded") ||
+		strings.Contains(m, "context deadline exceeded") ||
+		strings.Contains(m, "context canceled") ||
+		strings.Contains(m, "i/o timeout") ||
+		strings.Contains(m, "unexpected eof")
+}
+
 // appendCategoryUnique appends c only if it is not already present.
 func appendCategoryUnique(cats []models.FailureCategory, c models.FailureCategory) []models.FailureCategory {
 	for _, x := range cats {
@@ -4803,16 +4955,17 @@ func anyAppConnectionError(results []models.TestResult) bool {
 //   - success == 0: no test passed, so nothing vouches for any mock. The keep-set
 //     collapses to what the startup/never-executed paths contributed, and every
 //     mock a real request would have used is deleted.
-//   - any AppConnectionError: those requests never reached the app, so they
-//     consumed no mocks for want of a connection, not for want of need.
+//   - appUnreachable (any AppConnectionError, see anyAppConnectionError): those
+//     requests never reached the app, so they consumed no mocks for want of a
+//     connection, not for want of need.
 //
 // Both mean "no information", and pruning reads that as "delete" — which is the
 // bug. Note this is NOT the same as "the run produced no signal at all": a run
 // can have passing tests AND one connection error, and it lands here because that
 // one test's mocks would be wrongly deleted. Callers must not describe it as a
 // zero-passing run.
-func pruneInputUntrustworthy(success int, results []models.TestResult) bool {
-	return success == 0 || anyAppConnectionError(results)
+func pruneInputUntrustworthy(success int, appUnreachable bool) bool {
+	return success == 0 || appUnreachable
 }
 
 // shouldSkipPruning decides whether a completed run is allowed to delete recorded
@@ -4831,21 +4984,58 @@ func pruneInputUntrustworthy(success int, results []models.TestResult) bool {
 //
 // shouldPrune is the COMPLETE gate on the destructive prune: it must be enabled
 // (RemoveUnusedMocks), keploy must be instrumenting the run, and the run's
-// consumed-mock set must be trustworthy enough to delete against.
+// consumed-mock set must be trustworthy enough to delete against. When it
+// refuses, the second value names the rule, for the "skipping mock pruning" log:
+//
+//   - not_every_test_got_a_verdict: a subset or stopped run. The tests it did
+//     not score consumed nothing, and only mappings.yaml protects their mocks.
+//   - internal_error: keploy lost part of the run, such as a result insert.
+//   - results_unreadable: the results the rules below read are missing or short.
+//   - no_answer: a request consumed nothing for want of an answer.
+//   - app_unreachable, no_test_passed, preserve_failed_mocks: shouldSkipPruning.
 //
 // It exists as one function because the data-loss bug lives in this conjunction,
 // not in shouldSkipPruning alone — a correct predicate that isn't wired into the
 // decision deletes mocks just the same. Keeping the whole condition here means a
-// unit test can pin the wiring instead of only the predicate.
-func shouldPrune(removeUnusedMocks, instrument bool, success, failure, obsolete int, preserveFailedMocks bool, results []models.TestResult) bool {
-	if !removeUnusedMocks || !instrument {
-		return false
+// unit test can pin the wiring instead of only the predicate. A zero pruneRun
+// never prunes.
+func shouldPrune(removeUnusedMocks, instrument bool, run pruneRun) (bool, string) {
+	switch {
+	case !removeUnusedMocks || !instrument:
+		return false, "disabled"
+	case !run.allTestsGotAVerdict:
+		return false, "not_every_test_got_a_verdict"
+	case run.internalErr:
+		return false, "internal_error"
+	case !run.resultsComplete:
+		return false, "results_unreadable"
+	case run.noAnswer:
+		return false, "no_answer"
+	case !shouldSkipPruning(run.success, run.failure, run.obsolete, run.preserveFailedMocks, run.appUnreachable):
+		return true, ""
+	case run.appUnreachable:
+		return false, "app_unreachable"
+	case run.success == 0:
+		return false, "no_test_passed"
 	}
-	return !shouldSkipPruning(success, failure, obsolete, preserveFailedMocks, results)
+	return false, "preserve_failed_mocks"
 }
 
-func shouldSkipPruning(success, failure, obsolete int, preserveFailedMocks bool, results []models.TestResult) bool {
-	if pruneInputUntrustworthy(success, results) {
+// pruneRun is what a finished run tells shouldPrune.
+type pruneRun struct {
+	allTestsGotAVerdict        bool // every loaded, non-ignored test was scored
+	internalErr                bool // the set ended INTERNAL_ERR
+	resultsComplete            bool // results read back, none short of the verdicts
+	noAnswer                   bool // a request got no answer (isAppNoAnswerMsg)
+	appUnreachable             bool // anyAppConnectionError over the results read back
+	success, failure, obsolete int
+	preserveFailedMocks        bool
+}
+
+// shouldSkipPruning takes appUnreachable as computed once per set by
+// anyAppConnectionError, so the prune and the mappings hold read one value.
+func shouldSkipPruning(success, failure, obsolete int, preserveFailedMocks, appUnreachable bool) bool {
+	if pruneInputUntrustworthy(success, appUnreachable) {
 		return true
 	}
 	return preserveFailedMocks && (failure > 0 || obsolete > 0)
@@ -5499,6 +5689,33 @@ func isReusableTierState(s models.MockState) bool {
 		return true
 	}
 	return false
+}
+
+// partitionInitialConsumed splits the mocks consumed BEFORE the first test of a
+// test set fired into two tiers:
+//
+//   - startup: reusable/session traffic (driver handshakes, auth, connection-
+//     pool warm-up) that belongs to no single test. It is folded into the
+//     consumed accounting and written as the test set's STARTUP section.
+//   - rearm: per-test single-use mocks that were consumed this early only
+//     because the app-readiness gate (waitForAppReady) polled an endpoint that
+//     calls a mocked dependency (e.g. a /health handler running SELECT 1 against
+//     a mocked DB). These belong to a real recorded test case, so they must NOT
+//     be marked consumed here; withholding them from totalConsumedMocks re-arms
+//     them (the next SendMockFilterParamsToAgent re-inserts them into the
+//     serving pool) so their owning test consumes them.
+//
+// The tier is decided by isReusableTierState on the recorder-derived
+// Lifetime/type carried through GetConsumedMocks.
+func partitionInitialConsumed(consumed []models.MockState) (startup, rearm []models.MockState) {
+	for _, m := range consumed {
+		if isReusableTierState(m) {
+			startup = append(startup, m)
+		} else {
+			rearm = append(rearm, m)
+		}
+	}
+	return startup, rearm
 }
 
 func isMockSubset(actual []string, expected []string) bool {
