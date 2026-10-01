@@ -1,0 +1,104 @@
+name: Linux CI scripts
+
+# Every Linux lane installs its apt packages through
+# test_workflow_scripts/apt-install.sh, so a mistake there fails lanes that
+# have nothing to do with the change. Its mirror failover only matters when a
+# mirror is failing, and its Ubuntu-only update only when a third-party index
+# is broken, which an ordinary run never shows. The tests make both happen on
+# purpose, against a stub mirror. They run on every change to the helper or
+# its tests.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/test_workflow_scripts/apt-install.sh'
+      - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
+      - '.github/workflows/linux-ci-scripts.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/test_workflow_scripts/apt-install.sh'
+      - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
+      - '.github/workflows/linux-ci-scripts.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  apt-install:
+    # A healthy run takes about a minute: four ubuntu containers that fetch
+    # the package lists once each (the third-party case runs the helper four
+    # times, after the first from cached lists), one that builds the test
+    # repository, and two with no network. Each networked case is capped at
+    # 300 s, so a hung case fails with its log well inside this limit.
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test apt-install.sh (mirror failover, third-party sources, source rewrite)
+        run: bash .github/workflows/test_workflow_scripts/apt-install.tests.sh
+
+  # The shape the Ubuntu-only update is for, on the real thing: GitHub's own
+  # image, as the runner user through sudo, beside the image's
+  # packages.microsoft.com source. The update must not read that source, and
+  # must not delete the lists of the sources it does not read. The image
+  # already has a mirror list of its own, so no file under /etc/apt may
+  # change.
+  apt-install-on-runner:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install a package through apt-install.sh on this runner
+        run: |
+          set -o pipefail
+          # apt's own view of the enabled sources, read offline. Captured
+          # first: under pipefail, `grep -q` quitting early could fail apt
+          # with SIGPIPE.
+          uris="$(sudo apt-get update --print-uris)"
+          if ! grep -q 'packages\.microsoft\.com' <<<"$uris"; then
+            echo "::error::this image has no enabled packages.microsoft.com source any more, so this job proves nothing; point it at a third-party source the image does have"
+            exit 1
+          fi
+          # A list that belongs to no source the Ubuntu-only update reads.
+          sentinel=/var/lib/apt/lists/packages.microsoft.com_sentinel_Packages
+          sudo touch "$sentinel"
+          snap() { sudo find /etc/apt -type f -exec sha256sum {} + | sort; }
+          snap >"$RUNNER_TEMP/etc-apt.before"
+          bash .github/workflows/test_workflow_scripts/apt-install.sh hello 2>&1 | tee "$RUNNER_TEMP/apt.log"
+          hello
+          snap >"$RUNNER_TEMP/etc-apt.after"
+          if ! diff "$RUNNER_TEMP/etc-apt.before" "$RUNNER_TEMP/etc-apt.after"; then
+            echo "::error::apt-install.sh changed /etc/apt (above) on an image that already has a mirror list"
+            exit 1
+          fi
+          # Without the update's per-item lines the check below would pass on
+          # nothing.
+          if ! grep -qE '^(Get|Hit):[0-9]+ .* InRelease' "$RUNNER_TEMP/apt.log"; then
+            echo "::error::no Get:/Hit: line for an InRelease in the apt output; has its format changed?"
+            exit 1
+          fi
+          if grep -E '^(Get|Hit|Ign|Err):[0-9]+ .*packages\.microsoft\.com' "$RUNNER_TEMP/apt.log"; then
+            echo "::error::the Ubuntu-only update read packages.microsoft.com"
+            exit 1
+          fi
+          # apt skips its list cleanup after a failed fetch, and says this.
+          if grep -q 'Some index files failed to download' "$RUNNER_TEMP/apt.log"; then
+            grep -E '^(W|E): ' "$RUNNER_TEMP/apt.log" || true
+            echo "::error::an index fetch failed on every mirror (above), so apt skipped its list cleanup and the sentinel check cannot conclude"
+            exit 1
+          fi
+          if [ ! -f "$sentinel" ]; then
+            echo "::error::the Ubuntu-only update deleted the lists of the sources it did not read"
+            exit 1
+          fi
+          # The control: on this image an update with cleanup on does delete
+          # the sentinel. It reads no source, and empties the lists.
+          sudo apt-get -o Dir::Etc::SourceList=/dev/null -o Dir::Etc::SourceParts=/dev/null update
+          if [ -f "$sentinel" ]; then
+            echo "::error::apt's list cleanup kept the sentinel, so the check above proves nothing"
+            exit 1
+          fi
