@@ -1421,7 +1421,7 @@ func getCertCache() *expirable.LRU[string, *tls.Certificate] {
 	return certCache
 }
 
-func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
+func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, destHost string) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
 	/*
@@ -1454,6 +1454,19 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 				dstURL = s
 			}
 		}
+	}
+
+	// Transparent (eBPF) egress leaves both of the above empty: the app dialled
+	// an IP literal, so Go sent no SNI, and no CONNECT tunnel pre-filed a host
+	// for this source port. destHost is the connection's real destination,
+	// handed down from the handshake call site via tls.WithDestHost.
+	//
+	// It matters that this is a bare host and not "ip:port": the SAN kind is
+	// decided by net.ParseIP inside cfssl, which returns nil for "10.0.0.1:443"
+	// (and for a bracketed "[::1]"), silently demoting the leaf to a DNS SAN and
+	// reproducing the no-IP-SAN failure this exists to fix.
+	if dstURL == "" {
+		dstURL = destHost
 	}
 
 	SrcPortToDstURL.Store(sourcePort, dstURL)

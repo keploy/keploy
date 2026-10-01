@@ -2768,6 +2768,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					zap.String("sniHost", sniHost), zap.Uint32("dstPort", destInfo.Port))
 			}
 		}
+		// Name the MITM leaf after the real destination when the app sent no
+		// SNI, which is every TLS dial to an IP literal (RFC 6066). hostFromAddr
+		// strips the port and the IPv6 brackets that dstAddr carries; cfssl then
+		// classifies the bare IP into an IP SAN. A no-op when SNI is present,
+		// since CertForClient prefers clientHello.ServerName.
+		hsCtx = pTls.WithDestHost(hsCtx, hostFromAddr(dstAddr))
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),

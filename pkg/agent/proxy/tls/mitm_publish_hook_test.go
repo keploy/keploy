@@ -54,7 +54,7 @@ func TestMITMPublishHook_FiresOnceWithCorrectArgs(t *testing.T) {
 	}
 	wantConnID := strconv.Itoa(tcpAddr.Port)
 
-	cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{})
+	cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{}, "")
 	if err != nil {
 		t.Fatalf("CertForClient: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestMITMPublishHook_NoCallWhenHookNil(t *testing.T) {
 	}
 	defer cleanup()
 
-	cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{})
+	cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{}, "")
 	if err != nil {
 		t.Fatalf("CertForClient: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestMITMPublishHook_RaceWithToggling(t *testing.T) {
 					fatal.Store(true)
 					return
 				}
-				cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{})
+				cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{}, "")
 				cleanup()
 				if err != nil {
 					t.Errorf("CertForClient: %v", err)
