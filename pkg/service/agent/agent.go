@@ -1371,6 +1371,22 @@ func (a *Agent) ServedMocks(_ context.Context) (map[string]models.MockState, err
 	return reader.GetPersistentConsumed(), nil
 }
 
+// ReadsConsumedForPerTestOnly reports whether svc, the service the route
+// serves, reads the consumed history the way this one does: only in
+// filterOutDeleted, over the per-test mocks it stages, which all come from the
+// filtered half of StoreMocks. The route then advertises it to the client in
+// models.ConsumedScopeHeader, so the client can stop sending the entries of
+// every other mock it served.
+//
+// It is true only when svc is this agent itself. A service that embeds *Agent
+// inherits this method but may override UpdateMockParams to read the history
+// differently, so it does not inherit the answer, and its clients keep
+// sending the whole history.
+func (a *Agent) ReadsConsumedForPerTestOnly(svc Service) bool {
+	s, ok := svc.(*Agent)
+	return ok && s == a
+}
+
 // filterOutDeleted filters out deleted mocks based on totalConsumedMocks
 func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[string]models.MockState) []*models.Mock {
 	filtered := make([]*models.Mock, 0, len(mocks))

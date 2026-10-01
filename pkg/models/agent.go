@@ -224,6 +224,19 @@ type MockFilterParams struct {
 	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
 }
 
+// ConsumedScopeHeader is the /updatemockparams response header in which an agent
+// says how it reads MockFilterParams.TotalConsumedMocks. ConsumedScopePerTest
+// means only for the per-test mocks it stages, all of which the client handed
+// it as the filtered half of StoreMocks; a client may then send just their
+// entries. An agent that does not send the header, which includes every agent
+// released before it, may read entries of other mocks too and must be sent the
+// whole history: agents from v3.0.0-beta1 through v3.3.22 also applied it to the
+// session pool.
+const (
+	ConsumedScopeHeader  = "X-Keploy-Consumed-Scope"
+	ConsumedScopePerTest = "per-test"
+)
+
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`
 }
