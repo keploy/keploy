@@ -17,7 +17,7 @@ import (
 // walk grew with each test the set held: a replay's total cost grew with the
 // square of its length.
 //
-// The index is built once per tree, by setUnFilteredMocks as it inserts: each
+// The index is built once per tree, by buildTier as it inserts: each
 // entry's tree ID in request-time order, and the entries with no request time,
 // which are in every window. A lookup resolves the IDs through the
 // tree, so it returns the mocks the tree holds NOW: a point update keeps the
@@ -33,7 +33,7 @@ type sessionWindowIndex struct {
 	stale   atomic.Bool
 }
 
-// windowEntry is one mock as setUnFilteredMocks inserts it: its tree ID and its
+// windowEntry is one mock as buildTier inserts it: its tree ID and its
 // recorded request time. It is captured at insertion rather than read back from
 // the mock, because the same *Mock listed twice is inserted under two IDs.
 type windowEntry struct {

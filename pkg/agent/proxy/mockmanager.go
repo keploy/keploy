@@ -19,9 +19,10 @@ import (
 // Lock-ordering invariant (MUST be preserved to avoid deadlock):
 //
 //	swapMu  →  treesMu  →  windowMu
-//	swapMu  →  revMu         (SetMocksWithWindow calls Set*Mocks which
-//	                          bump revisions; revMu is a leaf lock —
-//	                          never re-acquire swapMu/treesMu from under it)
+//	swapMu  →  revMu         (staging publishes the tiers, publishFiltered /
+//	                          publishUnfiltered, which bump revisions; revMu
+//	                          is a leaf lock — never re-acquire
+//	                          swapMu/treesMu from under it)
 //	swapMu  →  consumedMu    (independent; never hold consumedMu then swapMu)
 //	hitMu   →  treesMu  →  connMu  →  TreeDb.mu
 //	                         (bumpHitCount's slow path; rebuildHitIndex takes
@@ -43,10 +44,11 @@ import (
 // swapMu). Writers that swap the pool AND publish a new window MUST go
 // through SetMocksWithWindow (which Locks swapMu end-to-end).
 //
-// Fine-grained single-field updates (SetFilteredMocks, SetUnFilteredMocks,
-// SetCurrentTestWindow) do NOT take swapMu — they only serialize on their
-// respective fine-grained mutex. Callers who need whole-snapshot
-// consistency must use the atomic variants above.
+// SetFilteredMocks and SetUnFilteredMocks take swapMu too: they stage, and
+// staging settles which mocks it may stamp under it (see mockOwner).
+// SetCurrentTestWindow does NOT take swapMu — it only serializes on its
+// fine-grained mutex. Callers who need whole-snapshot consistency must use
+// the atomic variants above.
 
 type MockManager struct {
 	// legacy "all" trees (kept for compatibility with existing callers)
@@ -854,21 +856,86 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 // Also resets the per-test droppedOutOfWindow counter, and closes the channel
 // WindowChanged handed out once the new trees and window are visible.
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
-	m.setMocksWithWindow(filtered, unfiltered, nil, start, end)
-	m.signalWindowChange()
-}
-
-// setMocksWithWindow is SetMocksWithWindow without the window-change signal, so
-// SetMocksWithWindowThreeTier can finish its startup-tier additions before it
-// wakes anyone.
-//
-// alsoCounted names mocks the caller adds to a tier after this call (the
-// explicit startup slice of SetMocksWithWindowThreeTier), so the staging
-// indexes them for counting with the rest.
-func (m *MockManager) setMocksWithWindow(filtered, unfiltered, alsoCounted []*models.Mock, start, end time.Time) {
+	// Signal once the new trees and window are visible: the deferred calls
+	// run last in, first out, so swapMu is released first.
+	defer m.signalWindowChange()
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
+	ownForStaging(&filtered, &unfiltered)
+	m.setMocksWithWindowLocked(filtered, unfiltered, nil, start, end)
+}
 
+// mockOwner settles which objects a staging call may stamp.
+//
+// Staging stamps each mock's tree ID and, when it has none, its sort order,
+// into the object it puts in a pool. A mock that is already pooled may be in a
+// matcher's hands (updateMock copies every pooled mock it serves), so it is
+// never written again: one a caller hands back (a mock it got from the pools)
+// is replaced by a copy (Mock.ShallowCopy), one copy per object for the whole
+// call, so a mock listed in two tiers of one staging call stays one object in
+// the pools, which GetSessionMocks dedups by pointer. (Proxy.SetMocks stages
+// its two tiers in two calls, so a mock it lists in both is copied by the
+// second.) A mock no pool has held yet (the agent stages fresh copies every
+// time) is taken over as it is.
+//
+// Mock.Pooled tells the two apart. ownForStaging marks every mock a staging
+// takes, once ownership of all its slices is settled, and staging stamps every
+// mock of a tier before that tier is published. Ownership is settled under
+// swapMu, which every staging holds while it stamps, so two stagings handed
+// the same fresh mock cannot both take it over.
+type mockOwner map[*models.Mock]*models.Mock
+
+// ownForStaging settles ownership of a staging's input slices, in place, then
+// marks each mock the staging takes pooled. Marking comes after every slice is
+// owned, so a fresh mock listed in two slices is taken over once rather than
+// copied by the second. It is a pass of its own, rather than marking in
+// buildTier, in both startup-tier loops and in the carry-over filing, so that
+// one place covers every mock the staging takes.
+func ownForStaging(slices ...*[]*models.Mock) {
+	o := mockOwner{}
+	for _, s := range slices {
+		*s = o.own(*s)
+	}
+	for _, s := range slices {
+		for _, mk := range *s {
+			if mk != nil {
+				mk.MarkPooled()
+			}
+		}
+	}
+}
+
+// own returns in with every pooled mock replaced by its copy. It returns in
+// itself when no mock is pooled, as when the agent stages fresh copies.
+func (o mockOwner) own(in []*models.Mock) []*models.Mock {
+	var out []*models.Mock
+	for i, mk := range in {
+		if mk == nil || !mk.Pooled() {
+			continue
+		}
+		if out == nil {
+			out = append([]*models.Mock(nil), in...)
+		}
+		c, ok := o[mk]
+		if !ok {
+			c = mk.ShallowCopy()
+			o[mk] = c
+		}
+		out[i] = c
+	}
+	if out == nil {
+		return in
+	}
+	return out
+}
+
+// setMocksWithWindowLocked is SetMocksWithWindow without the window-change
+// signal. The caller holds swapMu and owns the mocks (mockOwner).
+//
+// explicitStartup is SetMocksWithWindowThreeTier's startup slice: it joins
+// the startup tier this call builds, and is stamped with the rest of the
+// staging, before any tier is published.
+func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time) {
 	// Track the earliest window-start we've ever seen on this manager.
 	// Used below to distinguish startup-init mocks (recorded before
 	// any test fired) from stale previous-test mocks. Once set, only
@@ -959,8 +1026,8 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered, alsoCounted []*mo
 		// first test fires. Copy it into the startup pool so the
 		// startup engine's index covers every bootstrap-phase query.
 		//
-		// The session tree is still populated below via SetUnFilteredMocks,
-		// so once the first real test fires and SetMocksWithWindow
+		// The session tree is still populated below (buildTier), so once
+		// the first real test fires and SetMocksWithWindow
 		// re-partitions, session mocks revert to being session-tier-only
 		// in the startup tree (which rebuilds from the real-window
 		// firstStart cutoff, not from the unfiltered input).
@@ -1097,9 +1164,9 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered, alsoCounted []*mo
 	// key rather than mutating mk.TestModeInfo.ID in place. The same
 	// *models.Mock pointer can appear in BOTH startupInit and
 	// unfilteredForTree during initial staging (see the BaseTime branch
-	// above that copies unfiltered→startupInit); a subsequent
-	// SetUnFilteredMocks call at L~812 re-stamps mk.TestModeInfo.ID to
-	// its index in the unfiltered slice, invalidating any startup-tier
+	// above that copies unfiltered→startupInit); the session tier's build
+	// below stamps mk.TestModeInfo.ID with its index in the unfiltered
+	// slice, which would invalidate any startup-tier
 	// reference that relied on the original stamp. A mock pointer's
 	// .ID then no longer matches the startup tree's idIndex, so a later
 	// (currently hypothetical but structurally reachable — e.g. future
@@ -1109,7 +1176,7 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered, alsoCounted []*mo
 	// miss. By keying the startup tree off a local copy of
 	// TestModeInfo, we keep the startup tree internally consistent
 	// (idIndex matches the inserted key) while leaving the shared
-	// mock's .ID free to be re-stamped by SetUnFilteredMocks without
+	// mock's .ID free to be stamped by the session tier's build without
 	// corrupting the startup index.
 	for idx, mk := range startupInit {
 		if mk == nil {
@@ -1123,9 +1190,9 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered, alsoCounted []*mo
 			mk.TestModeInfo.SortOrder = int64(idx) + 1
 		}
 		// Tier-local key: copy TestModeInfo and stamp the startup-tree
-		// ID on the copy. mk.TestModeInfo.ID is left untouched so a
-		// later SetUnFilteredMocks re-stamp does not corrupt the
-		// startup tree's idIndex.
+		// ID on the copy. mk.TestModeInfo.ID is left untouched so the
+		// session tier's build, which stamps the same mock during
+		// BaseTime staging, does not corrupt the startup tree's idIndex.
 		newStartup.insert(tierKey(mk, idx), mk)
 	}
 	// Harvest the kinds present BEFORE any tier is swapped.
@@ -1159,6 +1226,27 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered, alsoCounted []*mo
 			}
 			return true
 		})
+	}
+
+	// Build both remaining tiers before publishing anything: building stamps
+	// tree IDs and sort orders, and one staged mock can sit in more than one
+	// tier (startup and session during BaseTime staging), so stamping after
+	// a tier went live would write into a mock its readers may be copying.
+	filteredBuild := m.buildTier(filteredForTree, true)
+	unfilteredBuild := m.buildTier(unfilteredForTree, false)
+	// The explicit startup slice of a three-tier staging joins the startup
+	// tier, stamped after every other tier, as the three-tier call has always
+	// stamped it.
+	for idx, mk := range explicitStartup {
+		if mk == nil {
+			continue
+		}
+		if mk.TestModeInfo.SortOrder == 0 {
+			mk.TestModeInfo.SortOrder = int64(idx) + 1
+		}
+		// Tier-local key with an ID offset by a large constant so it cannot
+		// collide with the startup IDs above (0..N).
+		newStartup.insert(tierKey(mk, 1_000_000+idx), mk)
 	}
 
 	m.treesMu.Lock()
@@ -1198,8 +1286,8 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered, alsoCounted []*mo
 	// window: any revision a consumer can observe now corresponds to a state
 	// where all three tiers agree. Suppression is per-call, not a flag on the
 	// manager, so it cannot swallow a concurrent consumer's own bump.
-	m.setFilteredMocks(filteredForTree, false)
-	m.setUnFilteredMocks(unfilteredForTree, false)
+	m.publishFiltered(filteredBuild, false)
+	m.publishUnfiltered(unfilteredBuild, false)
 
 	touchedAll := map[models.Kind]struct{}{}
 	if carryOn {
@@ -1220,9 +1308,11 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered, alsoCounted []*mo
 	// The startup tree is swapped in this function without any bump of its own,
 	// so its kinds have to be published here or a startup-only kind never
 	// invalidates a cached index.
-	for _, mk := range startupInit {
-		if mk != nil {
-			touchedAll[mk.Kind] = struct{}{}
+	for _, list := range [][]*models.Mock{startupInit, explicitStartup} {
+		for _, mk := range list {
+			if mk != nil {
+				touchedAll[mk.Kind] = struct{}{}
+			}
 		}
 	}
 	// Kinds that were present before this call but are absent from every input
@@ -1243,7 +1333,7 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered, alsoCounted []*mo
 	// mock whose count never moves. Session and connection mocks copied into
 	// startup during BaseTime staging are already covered via unfilteredForTree;
 	// the ones that miss are those the startup tier alone holds.
-	m.rebuildHitIndex(setBoundary, startupInit, filteredForTree, unfilteredForTree, alsoCounted)
+	m.rebuildHitIndex(setBoundary, startupInit, filteredForTree, unfilteredForTree, explicitStartup)
 
 	// Seed per-connID trees for connection-scoped mocks so
 	// GetConnectionMocks takes the O(1) path from the first lookup.
@@ -1320,8 +1410,9 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 //   - `filtered` lands in the per-test tree after window containment
 //     (same pre-filter the legacy entry does).
 //   - `unfiltered` lands in the session (unfiltered) tree.
-//   - `startup` is injected into the dedicated startup tree directly,
-//     BEFORE the internal BaseTime/firstWindowStart heuristic runs.
+//   - `startup` joins the dedicated startup tree, AFTER the internal
+//     BaseTime/firstWindowStart heuristic has routed `filtered` and
+//     `unfiltered` into it, under keys offset so the two cannot collide.
 //     The heuristic still fires so legacy callers that pass a nil
 //     startup slice still get the automatic startup-preservation
 //     behaviour for mocks inside `filtered` whose req < firstStart.
@@ -1332,46 +1423,16 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup []*models.Mock, start, end time.Time) {
 	// Signal once everything below has landed, startup additions included.
 	defer m.signalWindowChange()
-	if len(startup) == 0 {
-		// Delegate to legacy path — no pre-partitioned startup to seed.
-		m.setMocksWithWindow(filtered, unfiltered, nil, start, end)
-		return
-	}
-	// Run the legacy path FIRST so its internal startup tree is rebuilt
-	// with the BaseTime/firstWindowStart heuristic applied to the
-	// filtered/unfiltered inputs. Then augment the startup tree with
-	// the explicit `startup` slice by calling AddStartupMock on each —
-	// this keeps the single-writer discipline (all startup-tree inserts
-	// go through a lock-respecting path) while letting the caller
-	// contribute connection-scoped mocks that the heuristic can't
-	// derive on its own.
-	//
-	// The startup slice is indexed for counting by that same call, so a name
-	// it alone holds keeps its count from one staging to the next.
-	m.setMocksWithWindow(filtered, unfiltered, startup, start, end)
-	// Never take hitMu in here: bumpHitCount's slow path takes hitMu and
-	// then treesMu, and the opposite order would let the two paths deadlock
-	// on each other.
-	func() {
-		m.swapMu.Lock()
-		defer m.swapMu.Unlock()
-		m.treesMu.Lock()
-		defer m.treesMu.Unlock()
-		if m.startup == nil {
-			m.startup = NewTreeDb(customComparator)
-		}
-		for idx, mk := range startup {
-			if mk == nil {
-				continue
-			}
-			if mk.TestModeInfo.SortOrder == 0 {
-				mk.TestModeInfo.SortOrder = int64(idx) + 1
-			}
-			// Tier-local key with an ID offset by a large constant so it cannot
-			// collide with the legacy SetMocksWithWindow's startup IDs (0..N).
-			m.startup.insert(tierKey(mk, 1_000_000+idx), mk)
-		}
-	}()
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	ownForStaging(&filtered, &unfiltered, &startup)
+	// The legacy staging rebuilds the startup tree with the
+	// BaseTime/firstWindowStart heuristic applied to the filtered/unfiltered
+	// inputs, and adds the explicit `startup` slice to it: connection-scoped
+	// mocks the caller partitioned that the heuristic can't derive on its
+	// own. The slice is stamped, filed and indexed for counting with the
+	// rest of the staging, before any tier is published.
+	m.setMocksWithWindowLocked(filtered, unfiltered, startup, start, end)
 }
 
 // GetSessionMocks returns the UNION of startup-tier and session-tier
@@ -1788,6 +1849,7 @@ func (m *MockManager) AddConnectionMock(mock *models.Mock) {
 		tree = NewTreeDb(customComparator)
 		m.connectionTrees[connID] = tree
 	}
+	mock.MarkPooled() // matchers can reach it from here on; see models.Mock.pooled
 	tree.insert(mock.TestModeInfo, mock)
 	m.connectionLastTs[connID] = time.Now()
 	m.connMu.Unlock()
@@ -1981,58 +2043,88 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 // ---------- setters (populate both legacy + per-kind) ----------
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
-	m.setFilteredMocks(mocks, true)
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	ownForStaging(&mocks)
+	m.publishFiltered(m.buildTier(mocks, true), true)
 }
 
-// setFilteredMocks is the body; bump=false lets SetMocksWithWindow swap all
-// three tiers before publishing a single revision (see the note there).
-func (m *MockManager) setFilteredMocks(mocks []*models.Mock, bump bool) {
-	newFiltered := NewTreeDb(customComparator)
-	newFilteredByKind := make(map[models.Kind]*TreeDb)
-	newStateless := make(map[models.Kind]map[string][]*models.Mock)
-	touched := map[models.Kind]struct{}{}
-	var maxSortOrder int64
+// tierBuild is a filtered or unfiltered tier built from a staged slice and
+// not yet published. Building stamps the staged mocks' tree IDs and sort
+// orders; publishing only swaps pointers. setMocksWithWindowLocked builds
+// every tier before it publishes any, so no reader of a published tier can
+// see a mock being stamped. Publishing with bump=false lets it publish one
+// revision for all three tiers (see the note there).
+type tierBuild struct {
+	tree         *TreeDb
+	byKind       map[models.Kind]*TreeDb
+	stateless    map[models.Kind]map[string][]*models.Mock
+	touched      map[models.Kind]struct{}
+	maxSortOrder int64
+	windows      []windowEntry
+	inputs       int
+	v3Names      []string // filtered tier, for the DEBUG_TRACE line
+	v3Trace      bool
+}
+
+func (m *MockManager) buildTier(mocks []*models.Mock, filtered bool) tierBuild {
+	b := tierBuild{
+		tree:      NewTreeDb(customComparator),
+		byKind:    make(map[models.Kind]*TreeDb),
+		stateless: make(map[models.Kind]map[string][]*models.Mock),
+		touched:   map[models.Kind]struct{}{},
+		inputs:    len(mocks),
+	}
+	if !filtered {
+		b.windows = make([]windowEntry, 0, len(mocks))
+	}
 	// DEBUG_TRACE: collect PostgresV3 mock names in the main loop only
 	// when Debug logging is enabled, so non-Debug runs don't allocate
 	// the slice or do the per-mock kind check beyond what the swap
 	// already does. The Check() call short-circuits below if the level
 	// is filtered out.
-	debugV3Trace := m.logger != nil && m.logger.Core().Enabled(zap.DebugLevel)
-	var v3Names []string
-	if debugV3Trace {
-		v3Names = make([]string, 0, 8)
+	b.v3Trace = filtered && m.logger != nil && m.logger.Core().Enabled(zap.DebugLevel)
+	if b.v3Trace {
+		b.v3Names = make([]string, 0, 8)
 	}
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
 		}
-		if mock.TestModeInfo.SortOrder > maxSortOrder {
-			maxSortOrder = mock.TestModeInfo.SortOrder
+		if mock.TestModeInfo.SortOrder > b.maxSortOrder {
+			b.maxSortOrder = mock.TestModeInfo.SortOrder
 		}
 		mock.TestModeInfo.ID = index
-		newFiltered.insert(mock.TestModeInfo, mock)
+		b.tree.insert(mock.TestModeInfo, mock)
+		if !filtered {
+			b.windows = append(b.windows, windowEntry{at: mock.Spec.ReqTimestampMock, id: index})
+		}
 		k := mock.Kind
-		td := newFilteredByKind[k]
+		td := b.byKind[k]
 		if td == nil {
 			td = NewTreeDb(customComparator)
-			newFilteredByKind[k] = td
+			b.byKind[k] = td
 		}
 		td.insert(mock.TestModeInfo, mock)
-		touched[k] = struct{}{}
-		if newStateless[k] == nil {
-			newStateless[k] = make(map[string][]*models.Mock)
+		b.touched[k] = struct{}{}
+		if b.stateless[k] == nil {
+			b.stateless[k] = make(map[string][]*models.Mock)
 		}
 		key := mock.Name
 		if mock.Kind == models.DNS && mock.Spec.DNSReq != nil {
 			key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
 		}
-		newStateless[k][key] = append(newStateless[k][key], mock)
-		if debugV3Trace && mock.Kind == models.PostgresV3 {
-			v3Names = append(v3Names, mock.Name)
+		b.stateless[k][key] = append(b.stateless[k][key], mock)
+		if b.v3Trace && mock.Kind == models.PostgresV3 {
+			b.v3Names = append(b.v3Names, mock.Name)
 		}
 	}
-	if maxSortOrder > 0 {
-		pkg.UpdateSortCounterIfHigher(maxSortOrder)
+	return b
+}
+
+func (m *MockManager) publishFiltered(b tierBuild, bump bool) {
+	if b.maxSortOrder > 0 {
+		pkg.UpdateSortCounterIfHigher(b.maxSortOrder)
 	}
 	m.treesMu.Lock()
 	// A kind that LEAVES the pool must be bumped too: `touched` is built from
@@ -2040,12 +2132,12 @@ func (m *MockManager) setFilteredMocks(mocks []*models.Mock, bump bool) {
 	// its old revision — and a consumer caching by that revision never learns
 	// its mocks are gone and keeps serving them.
 	for k := range m.filteredByKind {
-		touched[k] = struct{}{}
+		b.touched[k] = struct{}{}
 	}
-	m.filtered, m.filteredByKind, m.statelessFiltered = newFiltered, newFilteredByKind, newStateless
+	m.filtered, m.filteredByKind, m.statelessFiltered = b.tree, b.byKind, b.stateless
 	m.treesMu.Unlock()
 	if bump {
-		for k := range touched {
+		for k := range b.touched {
 			m.bumpRevisionKind(k)
 		}
 		m.bumpRevisionAll()
@@ -2055,13 +2147,13 @@ func (m *MockManager) setFilteredMocks(mocks []*models.Mock, bump bool) {
 	// against the failing hashes the parser later misses. Gated behind
 	// logger.Check so non-Debug runs pay nothing for the fmt.Sprintf
 	// + Revision() read.
-	if debugV3Trace {
+	if b.v3Trace {
 		if ce := m.logger.Check(zap.DebugLevel, "DEBUG_TRACE SetFilteredMocks: tree swapped + revision bumped"); ce != nil {
 			ce.Write(
 				zap.String("mockManagerPtr", fmt.Sprintf("%p", m)),
-				zap.Int("inputMocks", len(mocks)),
-				zap.Int("postgresV3Mocks", len(v3Names)),
-				zap.Strings("postgresV3MockNames", v3Names),
+				zap.Int("inputMocks", b.inputs),
+				zap.Int("postgresV3Mocks", len(b.v3Names)),
+				zap.Strings("postgresV3MockNames", b.v3Names),
 				zap.Uint64("newRevision", m.Revision()),
 			)
 		}
@@ -2069,58 +2161,27 @@ func (m *MockManager) setFilteredMocks(mocks []*models.Mock, bump bool) {
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
-	m.setUnFilteredMocks(mocks, true)
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	ownForStaging(&mocks)
+	m.publishUnfiltered(m.buildTier(mocks, false), true)
 }
 
-// setUnFilteredMocks is the body; see setFilteredMocks for why bump exists.
-func (m *MockManager) setUnFilteredMocks(mocks []*models.Mock, bump bool) {
-	newUnFiltered := NewTreeDb(customComparator)
-	newUnFilteredByKind := make(map[models.Kind]*TreeDb)
-	newStateless := make(map[models.Kind]map[string][]*models.Mock)
-	touched := map[models.Kind]struct{}{}
-	windows := make([]windowEntry, 0, len(mocks))
-	var maxSortOrder int64
-	for index, mock := range mocks {
-		if mock.TestModeInfo.SortOrder == 0 {
-			mock.TestModeInfo.SortOrder = int64(index) + 1
-		}
-		if mock.TestModeInfo.SortOrder > maxSortOrder {
-			maxSortOrder = mock.TestModeInfo.SortOrder
-		}
-		mock.TestModeInfo.ID = index
-		newUnFiltered.insert(mock.TestModeInfo, mock)
-		windows = append(windows, windowEntry{at: mock.Spec.ReqTimestampMock, id: index})
-		k := mock.Kind
-		td := newUnFilteredByKind[k]
-		if td == nil {
-			td = NewTreeDb(customComparator)
-			newUnFilteredByKind[k] = td
-		}
-		td.insert(mock.TestModeInfo, mock)
-		touched[k] = struct{}{}
-		if newStateless[k] == nil {
-			newStateless[k] = make(map[string][]*models.Mock)
-		}
-		key := mock.Name
-		if mock.Kind == models.DNS && mock.Spec.DNSReq != nil {
-			key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
-		}
-		newStateless[k][key] = append(newStateless[k][key], mock)
-	}
-	if maxSortOrder > 0 {
-		pkg.UpdateSortCounterIfHigher(maxSortOrder)
+func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
+	if b.maxSortOrder > 0 {
+		pkg.UpdateSortCounterIfHigher(b.maxSortOrder)
 	}
 	m.treesMu.Lock()
 	// Same as the filtered path: bump kinds leaving the pool, not just those
 	// arriving, or a consumer caches a stale index for a kind that emptied.
 	for k := range m.unfilteredByKind {
-		touched[k] = struct{}{}
+		b.touched[k] = struct{}{}
 	}
-	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = newUnFiltered, newUnFilteredByKind, newStateless
-	m.unfilteredWindows = newSessionWindowIndex(windows)
+	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = b.tree, b.byKind, b.stateless
+	m.unfilteredWindows = newSessionWindowIndex(b.windows)
 	m.treesMu.Unlock()
 	if bump {
-		for k := range touched {
+		for k := range b.touched {
 			m.bumpRevisionKind(k)
 		}
 		m.bumpRevisionAll()
@@ -2144,6 +2205,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 		!new.Spec.ReqTimestampMock.Equal(old.Spec.ReqTimestampMock)) {
 		windows.stale.Store(true)
 	}
+	new.MarkPooled() // matchers can reach it from here on; see models.Mock.pooled
 	// Update legacy/global tree first
 	updatedGlobal := globalTree.update(old.TestModeInfo, new.TestModeInfo, new, *old)
 
@@ -2411,7 +2473,7 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 
 	// The startup tree is keyed off a tier-local TestModeInfo copy whose
 	// ID was stamped at insert time and may not match the live mock's
-	// .ID (which can be re-stamped by SetUnFilteredMocks). We can't
+	// .ID (which the session tier's build stamps too). We can't
 	// look up by mock.TestModeInfo directly. Iterate the tree with key
 	// access to find the entry whose value matches by name, then delete
 	// via the actual stored key.
@@ -2754,9 +2816,9 @@ func tierKey(mk *models.Mock, id int) models.TestModeInfo {
 // mock-1 is not the next's.
 //
 // Its sole caller is the staging call, after all three tier swaps, so the
-// fast-path bump sees the new pool. A tier populated after that swap (the
-// explicit startup slice in SetMocksWithWindowThreeTier) is passed in too, or
-// its mocks never reach the index at all.
+// fast-path bump sees the new pool. The explicit startup slice of
+// SetMocksWithWindowThreeTier is passed in too: its mocks need not be in the
+// other slices, and those that are not would never reach the index otherwise.
 //
 // The new index is built under the read lock and swapped in under the write
 // lock, so matches counted meanwhile are not held up: they land on the

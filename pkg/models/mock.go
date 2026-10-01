@@ -117,6 +117,20 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
+
+	// pooled is set when the replay mock manager takes the mock into a staging,
+	// or stores it in a pool that matchers read, and is never cleared. The
+	// staging that takes it stamps it before any matcher can reach it; from then
+	// on matchers may hold the mock and copy it, so nothing may write it again:
+	// the manager copies a pooled mock that it is handed to stage again instead
+	// of stamping it, and the matchers in this repository store an updated copy
+	// rather than edit the mock. (keploy/integrations' HTTP/2 parser still
+	// re-stamps the pooled mock it updates in place.) Runtime only: unexported,
+	// so no encoder carries it, and DeepCopy and ShallowCopy start their copies
+	// unpooled. It sits after SourcePID, in that field's padding, so a Mock is
+	// no bigger for it.
+	pooled bool
+
 	// Noise holds exact-match regex patterns for obfuscated values.
 	// During mock matching, any stored value matching a pattern in this
 	// list is skipped (treated as noise). Written by the enterprise
@@ -127,6 +141,19 @@ type Mock struct {
 	// at serve time; set only for spilled per-test mocks by the agent disk store.
 	// Unexported so gob ignores it — never crosses the wire or a recording.
 	responseHydrator func() (*HTTPResp, []MongoResponse, error)
+}
+
+// Pooled reports whether the replay mock manager has stored m in a pool that
+// matchers read (see MarkPooled).
+func (m *Mock) Pooled() bool { return m.pooled }
+
+// MarkPooled records that m is being stored in a pool that matchers read. Only
+// the mock manager calls it, as it takes or stores the mock and before any
+// matcher can reach it; a mock that is already pooled is left unwritten.
+func (m *Mock) MarkPooled() {
+	if !m.pooled {
+		m.pooled = true
+	}
 }
 
 // SetResponseHydrator installs the lazy response loader (agent disk-residency).
@@ -911,6 +938,19 @@ type MockState struct {
 	// window's test, and kept from the prune whatever the running test's
 	// verdict — instead of to the test that happened to be running.
 	CarryOver bool `json:"carryOver,omitempty"`
+}
+
+// ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
+// (requests, responses and maps are shared, not copied) and its own
+// TestModeInfo, so the copy's tree ID and sort order can be set without
+// touching m.
+func (m *Mock) ShallowCopy() *Mock {
+	if m == nil {
+		return nil
+	}
+	c := *m
+	c.pooled = false
+	return &c
 }
 
 func (m *Mock) DeepCopy() *Mock {

@@ -541,7 +541,8 @@ func TestGetSessionMocks_DedupsStartupSessionOverlap_DuringInitialStaging(t *tes
 	// moves back into startup; our session mock stays in the session
 	// tree AND is NOT re-copied into startup (that copy is unique to
 	// the BaseTime staging branch). The union should now be cleanly
-	// disjoint.
+	// disjoint. Both mocks are pooled already, so the pools serve copies of
+	// them from here on (see mockOwner) and the union is checked by name.
 	firstStart := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
 	firstEnd := firstStart.Add(10 * time.Second)
 	mm.SetMocksWithWindow(
@@ -558,11 +559,16 @@ func TestGetSessionMocks_DedupsStartupSessionOverlap_DuringInitialStaging(t *tes
 		t.Fatalf("GetSessionMocks (post-first-test): want 2, got %d: %v",
 			len(unionAfter), mockNames(unionAfter))
 	}
-	if occurrencesOf(unionAfter, mSession) != 1 {
-		t.Fatalf("session pointer double-counted post-first-test")
+	if unionAfter[0] == unionAfter[1] {
+		t.Fatalf("one pointer double-counted post-first-test")
 	}
-	if occurrencesOf(unionAfter, mPerTest) != 1 {
-		t.Fatalf("perTest pointer double-counted post-first-test")
+	named := map[string]int{}
+	for _, mk := range unionAfter {
+		named[mk.Name]++
+	}
+	if named[mSession.Name] != 1 || named[mPerTest.Name] != 1 {
+		t.Fatalf("GetSessionMocks (post-first-test): want %q and %q once each, got %v",
+			mSession.Name, mPerTest.Name, mockNames(unionAfter))
 	}
 }
 
@@ -875,7 +881,7 @@ func TestGetStartupMocksByKind(t *testing.T) {
 // a session mock appears in BOTH the startup tree AND the unfiltered
 // tree. Pre-fix, the startup-tree loop stamped
 // `mk.TestModeInfo.ID = idx` on the shared *models.Mock pointer, then
-// SetUnFilteredMocks re-stamped the same pointer with its own idx. The
+// the session tier's build re-stamped the same pointer with its own idx. The
 // shared mock's in-memory .ID thereafter reflected only the unfiltered
 // stamping, desynchronising the startup tree's idIndex from the mock's
 // live state. Post-fix, the startup tree uses a TIER-LOCAL copy of
@@ -886,7 +892,7 @@ func TestGetStartupMocksByKind(t *testing.T) {
 // Assertion shape:
 //  1. A session mock seeded during initial staging appears in BOTH
 //     startup and session pools.
-//  2. Its mock.TestModeInfo.ID reflects SetUnFilteredMocks' stamping
+//  2. Its mock.TestModeInfo.ID reflects the session tier's stamping
 //     (index 0 in a one-element unfiltered slice), NOT the startup
 //     tree's stamping.
 //  3. The mock is still reachable via GetStartupMocks — i.e. the
@@ -904,10 +910,10 @@ func TestSetMocksWithWindow_StartupRebuild_DoesNotClobberUnfilteredID(t *testing
 	sess.TestModeInfo.SortOrder = 42
 
 	// Initial staging seeds BOTH the startup tree (via startupInit ∪
-	// unfiltered copy) AND the unfiltered tree (via SetUnFilteredMocks).
+	// unfiltered copy) AND the unfiltered tree (via its tier build).
 	mm.SetMocksWithWindow(nil, []*models.Mock{sess}, models.BaseTime, time.Now())
 
-	// The shared mock pointer's .ID now reflects SetUnFilteredMocks'
+	// The shared mock pointer's .ID now reflects the session tier's
 	// stamping (index 0 in the 1-element unfiltered slice). The startup
 	// tree's internal idIndex is keyed off a separate copy — a stamp
 	// collision here would be invisible at this layer but would
@@ -1181,8 +1187,9 @@ func TestDeleteFilteredMock_ConsumesAStartupTierMockSoRetryLoopsTerminate(t *tes
 // tierFixture stages a set the way the agent does — fresh copies with
 // SortOrder unset on every call, so each tier restamps its keys from 1 and the
 // first entry of every tree lands on (SortOrder:1, ID:0). Reusing pointers
-// across calls carries the first stamping forward and hides the collision
-// entirely, so a test that does that proves nothing.
+// across calls (staging copies them, stamps included) carries the first
+// stamping forward and hides the collision entirely, so a test that does that
+// proves nothing.
 func tierFixture(t *testing.T) (*MockManager, models.Mock) {
 	t.Helper()
 	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())

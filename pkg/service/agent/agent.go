@@ -1385,7 +1385,13 @@ func (a *Agent) ReadsConsumedForPerTestOnly(svc Service) bool {
 	return ok && s == a
 }
 
-// filterOutDeleted filters out deleted mocks based on totalConsumedMocks
+// filterOutDeleted filters out deleted mocks based on totalConsumedMocks.
+//
+// A surviving mock whose recorded consumption state differs is returned as a
+// copy carrying that state; the input is never written. The filters hand it
+// fresh copies, but with no test window they pass the stored mocks through, and
+// a stored mock staged by an earlier call is in the proxy's pools, where
+// matchers read it concurrently.
 func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[string]models.MockState) []*models.Mock {
 	filtered := make([]*models.Mock, 0, len(mocks))
 	for _, m := range mocks {
@@ -1397,7 +1403,8 @@ func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[st
 		// we are picking mocks that are not consumed till now (not present in map),
 		// and, mocks that are updated.
 		if k, ok := totalConsumedMocks[m.Name]; !ok || k.Usage != models.Deleted {
-			if ok {
+			if ok && (m.TestModeInfo.IsFiltered != k.IsFiltered || m.TestModeInfo.SortOrder != k.SortOrder) {
+				m = m.ShallowCopy()
 				m.TestModeInfo.IsFiltered = k.IsFiltered
 				m.TestModeInfo.SortOrder = k.SortOrder
 			}

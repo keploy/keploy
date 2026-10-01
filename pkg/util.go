@@ -3214,7 +3214,7 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 // rev3,rev4,rev1,rev2.
 //
 // That matters because downstream reads this pool as a SEQUENCE, not a set. The
-// slice order becomes TestModeInfo.SortOrder in MockManager.setUnFilteredMocks,
+// slice order becomes TestModeInfo.SortOrder in MockManager.buildTier,
 // which keys the RB-tree that GetUnFilteredMocksByKind walks in order — so a
 // replayer that walks a recorded revision sequence (a cluster-config poll, a
 // bootstrap handshake) is handed it backwards.

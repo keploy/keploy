@@ -432,11 +432,11 @@ func withResponse(m *models.Mock) (*models.Mock, error) {
 	if m == nil || !m.HasSpilledResponse() {
 		return m, nil
 	}
-	loaded := *m
+	loaded := m.ShallowCopy()
 	if err := loaded.HydrateResponse(); err != nil {
 		return nil, fmt.Errorf("http: load the recorded response of mock %q: %w", m.Name, err)
 	}
-	return &loaded, nil
+	return loaded, nil
 }
 
 // buildMockResponseBytes serializes a recorded HTTP mock's response to raw
