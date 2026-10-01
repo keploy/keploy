@@ -2071,10 +2071,6 @@ func (m *MockManager) buildTier(mocks []*models.Mock, filtered bool) tierBuild {
 		touched:   map[models.Kind]struct{}{},
 		inputs:    len(mocks),
 	}
-	var windows []windowEntry
-	if !filtered {
-		windows = make([]windowEntry, 0, len(mocks))
-	}
 	// DEBUG_TRACE: collect PostgresV3 mock names in the main loop only
 	// when Debug logging is enabled, so non-Debug runs don't allocate
 	// the slice or do the per-mock kind check beyond what the swap
@@ -2093,9 +2089,6 @@ func (m *MockManager) buildTier(mocks []*models.Mock, filtered bool) tierBuild {
 		}
 		mock.TestModeInfo.ID = index
 		b.tree.insert(mock.TestModeInfo, mock)
-		if !filtered {
-			windows = append(windows, windowEntry{at: mock.Spec.ReqTimestampMock, id: index})
-		}
 		k := mock.Kind
 		td := b.byKind[k]
 		if td == nil {
@@ -2115,10 +2108,6 @@ func (m *MockManager) buildTier(mocks []*models.Mock, filtered bool) tierBuild {
 		if b.v3Trace && mock.Kind == models.PostgresV3 {
 			b.v3Names = append(b.v3Names, mock.Name)
 		}
-	}
-	if !filtered {
-		// Attached after the inserts, which would drop it.
-		b.tree.setWindowIndex(newSessionWindowIndex(windows))
 	}
 	return b
 }
