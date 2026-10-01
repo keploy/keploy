@@ -169,10 +169,14 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if ok {
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
-			if !h.updateMock(ctx, bestMatch, mockDb, nil) {
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if !claimed {
 				continue
 			}
-			return true, bestMatch, nil, nil
+			return true, served, nil, nil
 		}
 
 		shortListed := schemaMatched
@@ -207,10 +211,14 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			if len(bodyMatched) == 1 {
 				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
 				detected, _ := noiseEngine.Detect(bodyMatched[0], input.body, userBodyNoise)
-				if !h.updateMock(ctx, bodyMatched[0], mockDb, detected) {
+				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, detected)
+				if err != nil {
+					return false, nil, nil, err
+				}
+				if !claimed {
 					continue
 				}
-				return true, bodyMatched[0], nil, nil
+				return true, served, nil, nil
 			}
 
 			// More than one match, perform fuzzy match
@@ -223,10 +231,14 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if isMatched {
 			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
 			detected, _ := noiseEngine.Detect(bestMatch, input.body, userBodyNoise)
-			if !h.updateMock(ctx, bestMatch, mockDb, detected) {
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, detected)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if !claimed {
 				continue
 			}
-			return true, bestMatch, nil, nil
+			return true, served, nil, nil
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed, pool: unfilteredMocks}, nil
 	}
@@ -1172,6 +1184,23 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 		}
 	}
 	return true
+}
+
+// claim takes the matched mock m for this request: it loads m's response
+// (withResponse), then records the match (updateMock), which consumes a
+// per-test mock. Loading comes first so that a response that cannot be loaded
+// leaves the mock unconsumed rather than reported as served. It returns the
+// mock to serve, m or a copy of it with the response loaded, and claimed=false
+// when another connection took m first.
+func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) (served *models.Mock, claimed bool, err error) {
+	served, err = withResponse(m)
+	if err != nil {
+		return nil, false, err
+	}
+	if !h.updateMock(ctx, m, mockDb, detectedNoise) {
+		return nil, false, nil
+	}
+	return served, true, nil
 }
 
 // updateMock processes the matched mock based on its Lifetime.

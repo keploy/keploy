@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -51,6 +52,11 @@ type HTTP struct {
 	// ptRecorder de-duplicates recordOne telemetry-passthrough captures to one
 	// representative exchange per endpoint (see passthrough_egress.go).
 	ptRecorder *ptRecorder
+	// ptLoadWarned holds the names of the recorded pass-through mocks whose
+	// response could not be loaded, each warned about once for the agent's
+	// life. Mock names repeat across test sets (mock-0, mock-1, ...), so a
+	// later set's mock of a name already warned about is not warned again.
+	ptLoadWarned sync.Map
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
