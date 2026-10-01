@@ -349,6 +349,8 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			DockerDelay: r.config.BuildDelay,
 			BuildDelay:  r.config.BuildDelay,
 			Mode:        models.MODE_TEST,
+
+			DisableHandshakeHold: r.config.Record.DisableHandshakeHold,
 		}); err != nil {
 			return nil, fmt.Errorf("setup failed: %w", err)
 		}

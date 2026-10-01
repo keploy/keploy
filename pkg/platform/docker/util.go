@@ -327,6 +327,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
+		if opts.DisableHandshakeHold {
+			alias += " --disable-handshake-hold"
+		}
 		if opts.CapturePackets {
 			alias += " --capture-packets"
 		}
@@ -405,6 +408,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
+			if opts.DisableHandshakeHold {
+				alias += " --disable-handshake-hold"
+			}
 			if opts.CapturePackets {
 				alias += " --capture-packets"
 			}
@@ -467,6 +473,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
+		}
+		if opts.DisableHandshakeHold {
+			alias += " --disable-handshake-hold"
 		}
 		if opts.CapturePackets {
 			alias += " --capture-packets"
@@ -546,6 +555,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
+			if opts.DisableHandshakeHold {
+				alias += " --disable-handshake-hold"
+			}
 			if opts.CapturePackets {
 				alias += " --capture-packets"
 			}
@@ -607,6 +619,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
+		}
+		if opts.DisableHandshakeHold {
+			alias += " --disable-handshake-hold"
 		}
 		if opts.CapturePackets {
 			alias += " --capture-packets"

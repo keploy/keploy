@@ -20,11 +20,13 @@ require (
 	github.com/docker/go-connections v0.7.0
 	github.com/emirpasic/gods v1.18.1
 	github.com/fatih/color v1.18.0
+	github.com/florianl/go-nfqueue/v2 v2.1.0
 	github.com/getkin/kin-openapi v0.126.0
 	github.com/getsentry/sentry-go v0.28.1
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/go-chi/render v1.0.3
 	github.com/go-sql-driver/mysql v1.8.1
+	github.com/google/nftables v0.3.0
 	github.com/google/uuid v1.6.0
 	github.com/gopacket/gopacket v1.4.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
@@ -180,6 +182,8 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.19 // indirect
 	github.com/mattn/go-shellwords v1.0.12 // indirect
+	github.com/mdlayher/netlink v1.9.0 // indirect
+	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/mholt/archives v0.1.2 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/miekg/pkcs11 v1.1.1 // indirect

@@ -165,7 +165,8 @@ func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCf
 	raw, err := pUtil.DialDestinationWith(ctx, h.Logger,
 		pUtil.DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated},
 		func(ctx context.Context, a string) (net.Conn, error) {
-			return d.DialContext(ctx, "tcp", a)
+			// Only replay misses dial here; no handshake was held for them.
+			return pUtil.DialRaw(ctx, d, "tcp", a, nil)
 		})
 	if err != nil {
 		return nil, err

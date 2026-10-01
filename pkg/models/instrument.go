@@ -344,8 +344,13 @@ type SetupOptions struct {
 	// because the wrapped process is a test runner, not a server whose
 	// incoming traffic becomes test cases. Only outgoing calls are captured
 	// (record) or served (replay). Forwarded to the agent via --mock-mode.
-	MockMode                  bool
-	GlobalPassthrough         bool
+	MockMode          bool
+	GlobalPassthrough bool
+	// DisableHandshakeHold turns off holding each redirected connection's
+	// handshake until its destination answers (pkg/agent/proxy/synhold), so
+	// the proxy accepts every connection at once as it used to. Forwarded to
+	// the agent via --disable-handshake-hold.
+	DisableHandshakeHold      bool
 	CapturePackets            bool
 	OpportunisticTLSIntercept bool
 	// ChannelBindingShim mirrors config.Record.ChannelBindingShim. Forwarded
