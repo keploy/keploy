@@ -186,8 +186,9 @@ type MappingDB interface {
 	// timestamp path reloads the same mocks via LoadBefore. A missing file or
 	// absent section returns nil, nil.
 	GetStartup(ctx context.Context, testSetID string) ([]models.MockEntry, error)
-	// Exists reports whether the mappings.yaml file is present on disk
-	// for the given test-set. Distinct from Get's second return (which
+	// Exists reports whether the given test-set has a mappings file on
+	// disk, in either storage format (mappings.yaml or mappings.json, as
+	// Get and Insert find it). Distinct from Get's second return (which
 	// reports "file present AND contains at least one test case with
 	// mocks") because the create-if-not-present write path needs to
 	// distinguish "no file at all" from "file exists but has empty

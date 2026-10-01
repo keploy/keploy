@@ -456,6 +456,9 @@ func generateSchemaName(src string) string {
 	return filepath.Join(dir, newName)
 }
 
+// FileExists reports whether <fileName>.yaml exists under path. It looks for
+// the YAML file only: a store whose files may be in either format (see
+// Format) must ask FileExistsAny, or it misses a set recorded as JSON.
 func FileExists(_ context.Context, logger *zap.Logger, path string, fileName string) (bool, error) {
 	return FileExistsF(nil, logger, path, fileName, FormatYAML)
 }
