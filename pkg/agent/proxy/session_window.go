@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -202,4 +203,40 @@ func (m *MockManager) GetSessionMocksInWindow(start, end time.Time) ([]*models.M
 		}
 	}
 	return out, nil
+}
+
+// RangeSessionMocksWithKey implements integrations.SessionKeyReader: the
+// GetSessionMocks snapshot narrowed to the mocks ix files under key, in the
+// same order, found through the startup and session trees' key indexes.
+func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	m.treesMu.RLock()
+	startup, session := m.startup, m.unfiltered
+	m.treesMu.RUnlock()
+	// GetSessionMocks dedups by pointer only when the startup tier holds
+	// anything, and then across both tiers.
+	if startup == nil || startup.size() == 0 {
+		session.rangeKeyed(ix, key, fn)
+		return nil
+	}
+	var seen map[*models.Mock]struct{}
+	stopped := false
+	visit := func(mk *models.Mock) bool {
+		if _, dup := seen[mk]; dup {
+			return true
+		}
+		if seen == nil {
+			seen = make(map[*models.Mock]struct{}, 8)
+		}
+		seen[mk] = struct{}{}
+		if !fn(mk) {
+			stopped = true
+			return false
+		}
+		return true
+	}
+	startup.rangeKeyed(ix, key, visit)
+	if !stopped {
+		session.rangeKeyed(ix, key, visit)
+	}
+	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/emirpasic/gods/trees/redblacktree"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -37,6 +38,9 @@ type TreeDb struct {
 	// windowed lookup has asked for it. Built, read and dropped under mu; see
 	// windowIndex.
 	win *windowIndex
+	// keyed holds a keyIndex per integrations.MockIndex a lookup has used.
+	// Built, read and dropped under mu.
+	keyed map[*integrations.MockIndex]*keyIndex
 }
 
 func NewTreeDb(comparator func(a, b interface{}) int) *TreeDb {
@@ -48,7 +52,8 @@ func NewTreeDb(comparator func(a, b interface{}) int) *TreeDb {
 
 func (db *TreeDb) insert(key interface{}, obj interface{}) {
 	db.mu.Lock()
-	db.win = nil // an entry the window index does not know
+	db.win = nil   // an entry the window index does not know
+	db.keyed = nil // nor do the key indexes
 	db.rbt.Put(key, obj)
 	// Update ID index
 	if info, ok := key.(models.TestModeInfo); ok {
@@ -144,6 +149,7 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 	}
 	if found {
 		db.dropWindowUnlessFiled(oldInfo.ID, newInfo.ID, newObj)
+		db.followKeyedLocked(oldKey, newKey, cur, newObj)
 		db.rbt.Remove(oldKey)
 		db.rbt.Put(newKey, newObj)
 		// Update ID index
@@ -184,6 +190,7 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 
 	// Found by ID, update it
 	db.dropWindowUnlessFiled(currentKey.ID, newInfo.ID, newObj)
+	db.followKeyedLocked(currentKey, newKey, cur, newObj)
 	db.rbt.Remove(currentKey)
 	db.rbt.Put(newKey, newObj)
 	delete(db.idIndex, oldInfo.ID)
@@ -198,7 +205,15 @@ func (db *TreeDb) deleteAll() {
 	db.rbt.Clear()
 	db.idIndex = make(map[int]models.TestModeInfo) // Reset ID index
 	db.win = nil
+	db.keyed = nil
 	db.mu.Unlock()
+}
+
+// size returns the number of entries the tree holds.
+func (db *TreeDb) size() int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.rbt.Size()
 }
 
 // rangeValues iterates without allocating a []interface{} snapshot.

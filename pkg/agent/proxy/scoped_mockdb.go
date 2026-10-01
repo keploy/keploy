@@ -3,6 +3,7 @@ package proxy
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -71,18 +72,27 @@ func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, er
 	}
 	out := mocks[:0:0]
 	for _, m := range mocks {
-		if m == nil {
-			continue
-		}
-		if _, mine := s.allow[m.Name]; mine {
+		if s.visible(m) {
 			out = append(out, m)
-			continue
-		}
-		if _, mapped := s.universe[m.Name]; !mapped {
-			out = append(out, m) // shared / unmapped mock — visible to everyone
 		}
 	}
 	return out, nil
+}
+
+// visible is keep's verdict on one mock. Without a filter every non-nil mock
+// is visible.
+func (s *scopedMockDb) visible(m *models.Mock) bool {
+	if m == nil {
+		return false
+	}
+	if s.allow == nil || s.universe == nil {
+		return true
+	}
+	if _, mine := s.allow[m.Name]; mine {
+		return true
+	}
+	_, mapped := s.universe[m.Name]
+	return !mapped // shared / unmapped mock — visible to everyone
 }
 
 func (s *scopedMockDb) GetFilteredMocks() ([]*models.Mock, error) {
@@ -119,6 +129,28 @@ func (s *scopedMockDb) GetSessionMocksInWindow(start, end time.Time) ([]*models.
 		}
 	}
 	return out, nil
+}
+
+// RangeSessionMocksWithKey forwards the key index of the wrapped store through
+// the same name filter as GetSessionMocks. A store without the index is
+// walked, which costs each lookup a whole GetSessionMocks snapshot; the agent
+// always wraps the mock manager, which has it.
+func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	if r, ok := s.MockMemDb.(integrations.SessionKeyReader); ok {
+		return r.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
+			return !s.visible(mk) || fn(mk)
+		})
+	}
+	all, err := s.GetSessionMocks()
+	if err != nil {
+		return err
+	}
+	for _, mk := range all {
+		if mk != nil && slices.Contains(ix.Keys(mk), key) && !fn(mk) {
+			break
+		}
+	}
+	return nil
 }
 
 func (s *scopedMockDb) GetUnFilteredMocks() ([]*models.Mock, error) {

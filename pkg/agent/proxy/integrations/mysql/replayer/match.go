@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"iter"
 	"reflect"
+	"slices"
 	"strings"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -449,11 +451,25 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if err != nil {
 			return err
 		}
+		tiersRead = true // recordedQuery reads these tiers, not a second snapshot
 		pool = merge(perTestTier, sessionMocks, connectionTier)
 		if len(pool) == 0 {
 			utils.LogError(logger, nil, "no mysql mocks found")
 			return fmt.Errorf("no mysql mocks found")
 		}
+		return nil
+	}
+	// readTiers reads the per-test and connection tiers, once per command.
+	readTiers := func() error {
+		if tiersRead {
+			return nil
+		}
+		var err error
+		perTestTier, _, connectionTier, err = fetchTiers(func() ([]*models.Mock, error) { return nil, nil })
+		if err != nil {
+			return err
+		}
+		tiersRead = true
 		return nil
 	}
 	inWindowOnly := func(mocks []*models.Mock) []*models.Mock {
@@ -466,32 +482,97 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		return out
 	}
 
-	// In-window pass. While a test window is active, the scan of a COM_QUERY
-	// or COM_STMT_EXECUTE stops at the first candidate, in pool order, that is
-	// an exact match recorded INSIDE the window (queryMatched / stmtMatched),
-	// and nothing it gathered before that candidate is used afterwards. Which
-	// candidate that is does not depend on the candidates before it, so a scan
-	// of only the in-window candidates, in pool order, stops at the same one.
+	// liveStatement is the incoming statement stripped of its inert leading
+	// comment — the same identity matchQueryLive compares on. It is the
+	// yardstick for nearestMock below, and a live PREPARE's key in
+	// preparedIndex.
+	liveStatement := ""
+	switch m := req.Message.(type) {
+	case *mysql.QueryPacket:
+		liveStatement = sqlStatementIdentity(m.Query)
+	case *mysql.StmtPreparePacket:
+		liveStatement = sqlStatementIdentity(m.Query)
+	}
+
+	// First pass. A scan can stop at a candidate it may serve without looking
+	// further, and nothing it gathered before that candidate is used
+	// afterwards. When a command can only stop on a candidate of a known part
+	// of the pool, a scan of that part alone, in pool order, stops on the same
+	// candidate, and the rest of the pool need not be read:
 	//
-	// The whole pool is the wrong place to look for it. Lax mode keeps every
-	// test's MySQL data mocks in the session pool, so walking the pool to the
-	// current window walked the traffic of every earlier test, and each test
-	// of a replay cost more than the one before: the total grew with the
-	// square of the test count. The window's candidates come from the
-	// manager's window index instead (integrations.SessionWindowReader), so a
-	// command costs the same at the end of a set as at its start.
+	//   - COM_QUERY and COM_STMT_EXECUTE, while a test window is active, stop
+	//     at the first exact match recorded INSIDE the window (queryMatched /
+	//     stmtMatched). Their candidates come from the store's window index
+	//     (integrations.SessionWindowReader). A COM_STMT_EXECUTE whose window
+	//     holds no definitive match is settled by the window too when it holds
+	//     a query-exact one: that one is the FIFO fallback ranked above every
+	//     other, and the first in pool order is the window's first.
+	//   - COM_STMT_PREPARE stops at the first exact match the strict gate
+	//     allows, and a recorded PREPARE is exact only when its statement
+	//     identity equals the live one; preparedIndex files the session tier's
+	//     PREPAREs under their identity.
+	//   - COM_STMT_CLOSE serves the best score, the first on a tie, and only
+	//     a recorded CLOSE scores at all; preparedIndex files them. A score as
+	//     high as a CLOSE can reach ends the scan.
 	//
-	// When no in-window candidate stops the scan, the verdict is one of the
-	// fallbacks, which rank the WHOLE pool in pool order; the scan then runs
-	// over the whole pool from clean state, as it always did, reusing what
-	// the in-window pass already computed for its candidates.
+	// Both indexes come from the store (integrations.SessionKeyReader for the
+	// second), so a command costs the same at the end of a set as at its
+	// start. Lax mode keeps every test's MySQL data mocks in the session pool,
+	// and a walk of it for each command made each test cost more than the one
+	// before: the total grew with the square of the test count.
 	//
-	// COM_STMT_EXECUTE needs the whole pool anyway: its prepared-statement
-	// index is built from every recorded PREPARE.
-	inWindowPass := !opts.fullScan && windowActive &&
+	// When the first pass does not settle the command, the verdict is one of
+	// the fallbacks, which rank the WHOLE pool in pool order; the scan then
+	// runs over the whole pool from clean state, as it always did, reusing
+	// what the first pass already computed for its candidates.
+	keyReader, _ := mockDb.(integrations.SessionKeyReader)
+	if opts.fullScan {
+		keyReader = nil
+	}
+	windowPass := !opts.fullScan && windowActive &&
 		(req.Header.Type == sCOM_QUERY || req.Header.Type == sCOM_STMT_EXEC)
-	var candidates []*models.Mock
-	if windowReader, ok := mockDb.(integrations.SessionWindowReader); ok && inWindowPass && req.Header.Type == sCOM_QUERY {
+	keyedPass := keyReader != nil &&
+		(req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_CLOSE)
+	firstPass := windowPass || keyedPass
+	// walkErr is what the keyed walk of the session tier failed with, if it
+	// failed.
+	var walkErr error
+	var candidates iter.Seq[*models.Mock]
+	windowReader, hasWindowReader := mockDb.(integrations.SessionWindowReader)
+	switch {
+	case keyedPass:
+		if err := readTiers(); err != nil {
+			return nil, false, nil, err
+		}
+		key := keyClose
+		if req.Header.Type == sCOM_STMT_PREP {
+			key = keyPrepare + liveStatement
+		}
+		// The per-test and connection tiers are small, and walked whole.
+		candidates = func(yield func(*models.Mock) bool) {
+			for _, mk := range perTestTier {
+				if !yield(mk) {
+					return
+				}
+			}
+			stopped := false
+			if err := keyReader.RangeSessionMocksWithKey(preparedIndex, key, func(mk *models.Mock) bool {
+				stopped = !yield(mk)
+				return !stopped
+			}); err != nil {
+				walkErr = err
+				return
+			}
+			if stopped {
+				return
+			}
+			for _, mk := range connectionTier {
+				if !yield(mk) {
+					return
+				}
+			}
+		}
+	case windowPass && hasWindowReader:
 		perTestMocks, sessionMocks, connectionMocks, err := fetchTiers(func() ([]*models.Mock, error) {
 			return windowReader.GetSessionMocksInWindow(winStart, winEnd)
 		})
@@ -499,14 +580,15 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			return nil, false, nil, err
 		}
 		perTestTier, connectionTier, tiersRead = perTestMocks, connectionMocks, true
-		candidates = merge(inWindowOnly(perTestMocks), sessionMocks, inWindowOnly(connectionMocks))
-	} else {
+		candidates = slices.Values(merge(inWindowOnly(perTestMocks), sessionMocks, inWindowOnly(connectionMocks)))
+	default:
 		if err := loadPool(); err != nil {
 			return nil, false, nil, err
 		}
-		candidates = pool
-		if inWindowPass {
-			candidates = inWindowOnly(pool)
+		if windowPass {
+			candidates = slices.Values(inWindowOnly(pool))
+		} else {
+			candidates = slices.Values(pool)
 		}
 	}
 
@@ -515,6 +597,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// The names of every COM_STMT_EXECUTE mock, for the debug log only. It is a
 	// pass over the whole pool, so it runs only when the line will be written,
 	// and the line is written once per command, not once per candidate.
+	if req.Header.Type == sCOM_STMT_EXEC && debugOn && pool == nil {
+		if err := loadPool(); err != nil {
+			return nil, false, nil, err
+		}
+	}
 	if req.Header.Type == sCOM_STMT_EXEC && debugOn {
 		stmtMocks := []string{}
 		for _, mock := range pool {
@@ -541,24 +628,87 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		logger.Debug("List of com-stmt-execute mocks to match", zap.Strings("mocks", stmtMocks))
 	}
 
-	// Build recordedPrepByConn once (map[connID][]prepEntry) from recorded mocks.
-	// It resolves a recorded EXECUTE or CLOSE to its statement; a PREPARE only
-	// logs it. Every other command would build it and throw it away, at the
-	// cost of a pass over the whole pool.
-	var recordedPrepByConn map[string][]prepEntry
-	if req.Header.Type == sCOM_STMT_EXEC || req.Header.Type == sCOM_STMT_CLOSE ||
-		(req.Header.Type == sCOM_STMT_PREP && debugOn) {
-		recordedPrepByConn = buildRecordedPrepIndex(pool)
+	// recordedQuery resolves a recorded statement (the connID its mock
+	// recorded, a statement ID) to the query its PREPARE recorded: the first
+	// such entry in pool order, what lookupRecordedQuery finds in
+	// buildRecordedPrepIndex(pool). The full scan, and a store without the
+	// key index, build that index from the pool. Otherwise the entry is found
+	// through the tiers, the session tier's through preparedIndex, so no
+	// command indexes the whole pool: the per-test and connection tiers are
+	// read once, and each statement is looked up once.
+	var (
+		prepByConn         map[string][]prepEntry
+		tierPrep, connPrep map[prepKey]string
+		prepMemo           map[prepKey]string
+	)
+	recordedQuery := func(connID string, stmtID uint32) (string, error) {
+		if keyReader == nil {
+			if prepByConn == nil {
+				if pool == nil {
+					if err := loadPool(); err != nil {
+						return "", err
+					}
+				}
+				prepByConn = buildRecordedPrepIndex(pool)
+			}
+			return lookupRecordedQuery(prepByConn, connID, stmtID), nil
+		}
+		k := prepKey{connID, stmtID}
+		if q, ok := prepMemo[k]; ok {
+			return q, nil
+		}
+		if prepMemo == nil {
+			if err := readTiers(); err != nil {
+				return "", err
+			}
+			tierPrep, connPrep = firstPrepEntries(perTestTier), firstPrepEntries(connectionTier)
+			prepMemo = map[prepKey]string{}
+		}
+		q, found := tierPrep[k]
+		if !found {
+			if err := keyReader.RangeSessionMocksWithKey(preparedIndex, prepEntryKey(connID, stmtID), func(mk *models.Mock) bool {
+				if c, e, ok := recordedPrepEntry(mk); ok && c == connID && e.statementID == stmtID {
+					q, found = e.query, true
+					return false
+				}
+				return true
+			}); err != nil {
+				return "", err
+			}
+			if !found {
+				q = connPrep[k]
+			}
+		}
+		prepMemo[k] = q
+		return q, nil
 	}
 
+	// The whole prepared-statement index, for the debug log only.
 	if (req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC) && debugOn {
+		if pool == nil {
+			if err := loadPool(); err != nil {
+				return nil, false, nil, err
+			}
+		}
 		var allEntries []string
-		for connID, prepEntries := range recordedPrepByConn {
+		for connID, prepEntries := range buildRecordedPrepIndex(pool) {
 			for _, entry := range prepEntries {
 				allEntries = append(allEntries, fmt.Sprintf("connID=%s stmtID=%d query=%q mock=%s", connID, entry.statementID, entry.query, entry.mockName))
 			}
 		}
 		logger.Debug("recorded prepEntries", zap.String("entries", strings.Join(allEntries, " | ")))
+	}
+
+	// closeBest is the highest score a COM_STMT_CLOSE candidate can reach (see
+	// matchCloseWithQuery): the header, and the statement when the live one is
+	// known.
+	closeBest := 0
+	if req.Header.Type == sCOM_STMT_CLOSE {
+		closeBest = 2
+		if actClose, _ := req.PacketBundle.Message.(*mysql.StmtClosePacket); actClose != nil && decodeCtx != nil && decodeCtx.StmtIDToQuery != nil &&
+			sqlStatementIdentity(strings.TrimSpace(decodeCtx.StmtIDToQuery[actClose.StatementID])) != "" {
+			closeBest = 12
+		}
 	}
 
 	// Canonical JSON body of the live request for the schema-noise engine.
@@ -648,17 +798,6 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		queryExactMock *models.Mock
 	)
 
-	// liveStatement is the incoming statement stripped of its inert leading
-	// comment — the same identity matchQueryLive compares on. It is the yardstick
-	// for nearestMock below.
-	liveStatement := ""
-	switch m := req.Message.(type) {
-	case *mysql.QueryPacket:
-		liveStatement = sqlStatementIdentity(m.Query)
-	case *mysql.StmtPreparePacket:
-		liveStatement = sqlStatementIdentity(m.Query)
-	}
-
 	// trackNearest remembers the recorded statement closest to the live one.
 	// Reporting only: it never makes a mock servable, it only gives the mismatch
 	// report something truthful to name.
@@ -711,7 +850,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		queryExact bool // COM_STMT_EXECUTE's query-exact signal
 	}
 	var evaluated map[evalKey]evalResult
-	if inWindowPass {
+	if firstPass {
 		evaluated = make(map[evalKey]evalResult)
 	}
 	compareQuery := func(mock *models.Mock, reqIdx int, recorded mysql.PacketBundle, getQuery func(mysql.PacketBundle) string) (bool, int, string) {
@@ -728,10 +867,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 
 	// Iterates the candidates in pool order (unfiltered + connection-scoped)
 	// so prepared-statement executes find their setups even when the setup was
-	// recorded in a different test's window. See inWindowPass above for the
-	// two passes.
+	// recorded in a different test's window. See firstPass above for the two
+	// passes.
+	closeSettled := false
 	for {
-		for _, mock := range candidates {
+		for mock := range candidates {
 			if opts.examined != nil {
 				*opts.examined++
 			}
@@ -760,7 +900,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					// query-aware CLOSE matching via recordedPrepByConn + runtime map
 					var expectedQuery, actualQuery string
 					if expClose, _ := mockReq.PacketBundle.Message.(*mysql.StmtClosePacket); expClose != nil {
-						expectedQuery = lookupRecordedQuery(recordedPrepByConn, mock.Spec.Metadata["connID"], expClose.StatementID)
+						q, err := recordedQuery(mock.Spec.Metadata["connID"], expClose.StatementID)
+						if err != nil {
+							return nil, false, nil, err
+						}
+						expectedQuery = q
 					}
 					if actClose, _ := req.PacketBundle.Message.(*mysql.StmtClosePacket); actClose != nil && decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
 						actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[actClose.StatementID])
@@ -769,6 +913,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					if c > maxMatchedCount {
 						maxMatchedCount, matchedResp, matchedMock = c, &mysql.Response{}, mock
 					}
+					// Nothing later can beat the best score a CLOSE reaches.
+					// Only the first pass stops on it: the full scan also
+					// counts the candidates for a miss report.
+					closeSettled = firstPass && maxMatchedCount >= closeBest
 
 				case sCOM_QUERY:
 					if ok, c, recordedIdentity := compareQuery(mock, reqIdx, mockReq.PacketBundle, queryPacketText); ok {
@@ -885,7 +1033,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 
 						var expectedQuery, actualQuery string
 						if expMsg != nil {
-							expectedQuery = lookupRecordedQuery(recordedPrepByConn, mock.Spec.Metadata["connID"], expMsg.StatementID)
+							q, err := recordedQuery(mock.Spec.Metadata["connID"], expMsg.StatementID)
+							if err != nil {
+								return nil, false, nil, err
+							}
+							expectedQuery = q
 						}
 						if actMsg != nil && decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
 							actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[actMsg.StatementID])
@@ -1005,22 +1157,32 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					}
 				}
 			}
-			if queryMatched || stmtMatched {
+			if queryMatched || stmtMatched || closeSettled {
 				break
 			}
 		}
-		if !inWindowPass || queryMatched || stmtMatched {
+		if walkErr != nil {
+			return nil, false, nil, walkErr
+		}
+		settled := queryMatched || stmtMatched ||
+			// See firstPass: the window's FIFO candidate outranks every other
+			// fallback.
+			(windowPass && req.Header.Type == sCOM_STMT_EXEC && fifoExecMockWindow != nil) ||
+			// The CLOSE pass scored every recorded CLOSE.
+			(req.Header.Type == sCOM_STMT_CLOSE && matchedMock != nil)
+		if !firstPass || settled {
 			break
 		}
-		// No in-window candidate stopped the scan: run it over the whole pool
-		// from clean state. The comparisons already made are in evaluated.
-		inWindowPass = false
+		// The first pass did not settle the command: run the scan over the
+		// whole pool from clean state. The comparisons already made are in
+		// evaluated.
+		firstPass, windowPass = false, false
 		if pool == nil {
 			if err := loadPool(); err != nil {
 				return nil, false, nil, err
 			}
 		}
-		candidates = pool
+		candidates = slices.Values(pool)
 		maxMatchedCount, matchedResp, matchedMock = 0, nil, nil
 		queryMatched, stmtMatched = false, false
 		bestPartialMock, bestPartialQuery = nil, ""
@@ -2314,56 +2476,9 @@ func pluginEqualCompat(exp, act string) bool {
 func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
 	out := make(map[string][]prepEntry)
 	for _, m := range unfiltered {
-		if m == nil || m.Kind != models.MySQL {
-			continue
+		if connID, e, ok := recordedPrepEntry(m); ok {
+			out[connID] = append(out[connID], e)
 		}
-		// MySQL matcher now reads the typed Lifetime with a defensive
-		// fallback to the raw metadata tag. This handles both the
-		// fully-migrated path (DeriveLifetime has run, Lifetime is
-		// set) and the edge case where a mock reached the pool
-		// without DeriveLifetime having set Lifetime — the raw tag
-		// still says config so we skip it correctly.
-		if m.TestModeInfo.Lifetime == models.LifetimeSession ||
-			(m.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(m)) {
-			continue
-		}
-		connID := ""
-		if m.Spec.Metadata != nil {
-			connID = m.Spec.Metadata["connID"]
-		}
-
-		// Check if we have at least one response
-		if len(m.Spec.MySQLResponses) == 0 {
-			continue
-		}
-
-		// Get the statement ID from the first response (if it's a StmtPrepareOkPacket)
-		spok, ok := m.Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket)
-		if !ok || spok == nil {
-			continue
-		}
-		stmtID := spok.StatementID
-
-		// Check if we have at least one request
-		if len(m.Spec.MySQLRequests) == 0 {
-			continue
-		}
-
-		// Get the query from the first request (if it's a StmtPreparePacket)
-		sp, ok := m.Spec.MySQLRequests[0].Message.(*mysql.StmtPreparePacket)
-		if !ok || sp == nil {
-			continue
-		}
-		prepQuery := strings.TrimSpace(sp.Query)
-		if prepQuery == "" {
-			continue
-		}
-
-		out[connID] = append(out[connID], prepEntry{
-			statementID: stmtID,
-			query:       prepQuery,
-			mockName:    m.Name,
-		})
 	}
 	return out
 }
