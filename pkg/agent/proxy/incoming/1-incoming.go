@@ -1,0 +1,558 @@
+package proxy
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/utils"
+
+	"go.keploy.io/server/v3/pkg/agent"
+	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+)
+
+type proxyStop func() error
+
+// IngressHook defines the interface for ingress forwarding implementations.
+// Both the default Go TCP forwarder and external components (e.g. an
+// enterprise ingress handler) implement this interface.
+type IngressHook interface {
+	// StartIngress begins ingress forwarding for the given port pair.
+	// The provided context should be used for lifetime management of the
+	// forwarding goroutines.
+	StartIngress(ctx context.Context, origPort, newPort uint16) error
+	// StopIngress tears down the ingress forwarder for the given original port.
+	StopIngress(origPort uint16) error
+}
+
+type IngressProxyManager struct {
+	mu     sync.Mutex
+	active map[uint16]proxyStop
+	logger *zap.Logger
+	hooks  agent.Hooks
+	tcChan chan *models.TestCase
+	// incomingOpts is read by ingress capture goroutines on every
+	// captured request (CaptureHook call sites in http.go) and written
+	// by IngressProxyManager.Start on every recorder (re)connect. Pre-
+	// atomic this was a plain struct field guarded by nothing on the
+	// read path, which is a real data race the moment a recorder
+	// reconnects with different filter/sampling settings while ingress
+	// traffic is in flight. atomic.Pointer gives a lock-free,
+	// pointer-sized swap that the readers can Load without contending.
+	// Always stored as a heap copy of the caller's value so writes
+	// don't tear the struct in-place.
+	incomingOpts atomic.Pointer[models.IncomingOptions]
+	synchronous  bool
+	// mapping mirrors !cfg.DisableMapping at construction time. Forwarded
+	// to CaptureHook so the synchronous-record path can decide whether
+	// SyncMockManager.ResolveRange should emit a TestMockMapping entry
+	// onto the agent's mappingChan. Without this plumbing the mapping
+	// arg was hardcoded false at the OSS Capture call site, which
+	// silently disabled mappings.yaml production during record (#3905).
+	mapping     bool
+	sampling    bool
+	samplingSem chan struct{}
+
+	ingressHook IngressHook
+
+	// relocated maps an app port whose bind the record hooks moved (keploy's
+	// ingress forwarder then holds the port) to the port the app was moved
+	// to, for each forwarder that started with a known one. Guarded by mu.
+	relocated map[uint16]uint16
+
+	// startOnce gates the ListenForIngressEvents goroutine so that
+	// repeated Start() calls (a reconnecting recorder opening a new
+	// /agent/incoming stream while the agent process keeps running)
+	// don't leak additional watcher goroutines that all consume from
+	// the same eventChan. The IncomingOptions on subsequent calls
+	// still take effect — Start always atomic-swaps incomingOpts via
+	// atomic.Pointer.Store regardless of whether the watcher actually
+	// (re)spawns — so callers that intentionally reconnect with
+	// different filtering get the new behavior immediately on the
+	// next captured request.
+	startOnce sync.Once
+}
+
+func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
+	pm := &IngressProxyManager{
+		logger:      logger,
+		hooks:       h,
+		tcChan:      make(chan *models.TestCase, 100),
+		active:      make(map[uint16]proxyStop),
+		synchronous: cfg.Agent.Synchronous,
+		mapping:     !cfg.DisableMapping,
+		sampling:    false,
+		samplingSem: make(chan struct{}, func() int {
+			if cfg.Agent.EnableSampling > 0 {
+				return cfg.Agent.EnableSampling
+			}
+			return 5
+		}()),
+	}
+	if cfg.Agent.EnableSampling > 0 {
+		pm.sampling = true
+	}
+	// Default to the Go TCP forwarder; can be replaced via SetIngressHook.
+	pm.ingressHook = newGoTCPIngressHook(pm)
+	return pm
+}
+
+// loadIncomingOpts returns the current IncomingOptions snapshot, or a
+// zero-value struct if Start has never been called. CaptureHook readers
+// in http.go call this on every captured request — the atomic.Pointer
+// Load is wait-free, so this stays cheap on the hot path.
+func (pm *IngressProxyManager) loadIncomingOpts() models.IncomingOptions {
+	if p := pm.incomingOpts.Load(); p != nil {
+		return *p
+	}
+	return models.IncomingOptions{}
+}
+
+// SetIngressHook replaces the default Go TCP forwarder with an external
+// ingress handler supplied by an enterprise build.
+func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.ingressHook = h
+}
+
+func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase {
+	// Always update incomingOpts — a reconnecting recorder may pass
+	// different filtering / sampling settings that should take effect
+	// immediately. Atomic swap of a pointer-sized field means the
+	// CaptureHook readers in http.go can Load it on every captured
+	// request without contending on a mutex.
+	optsCopy := opts
+	pm.incomingOpts.Store(&optsCopy)
+
+	// Gate the ListenForIngressEvents goroutine so subsequent Start
+	// invocations don't spawn duplicate watchers. The ctx passed in
+	// here is now process-lifetime (see pkg/service/agent/agent.go),
+	// so the goroutine survives /agent/incoming stream teardowns;
+	// without the gate, each reconnect would leak another watcher.
+	pm.startOnce.Do(func() {
+		go pm.ListenForIngressEvents(ctx)
+	})
+	return pm.tcChan
+}
+
+// TCChan returns the test case channel for direct use by external consumers
+// (e.g., the enterprise proxyless agent) without going through Start().
+func (pm *IngressProxyManager) TCChan() chan *models.TestCase {
+	return pm.tcChan
+}
+
+// StartIngressProxy starts a new ingress proxy on the given original app port if it's not already running.
+// It delegates to the registered IngressHook (default: Go TCP forwarder).
+func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPort, newAppPort uint16) {
+	// If the agent is already shutting down, do not arm a new forwarder.
+	// WatchBindEvents delivers bind events over a buffered channel, so
+	// ListenForIngressEvents can still drain late/stale events after the context
+	// is canceled. Binding then would leave a listener holding the app's port
+	// (commonly 8000) for the next record run ("address already in use") and would
+	// also surface as a spurious ERROR log. Silently skip during teardown.
+	if ctx.Err() != nil {
+		return
+	}
+	pm.mu.Lock()
+	if _, ok := pm.active[origAppPort]; ok {
+		pm.mu.Unlock()
+		return
+	}
+	hook := pm.ingressHook
+	startDone := make(chan struct{})
+	started := false
+	// Reserve the slot so concurrent callers see this port as active.
+	pm.active[origAppPort] = func() error {
+		<-startDone
+		if !started {
+			return nil
+		}
+		return hook.StopIngress(origAppPort)
+	}
+	pm.mu.Unlock()
+
+	if err := hook.StartIngress(ctx, origAppPort, newAppPort); err != nil {
+		close(startDone)
+		if ctx.Err() != nil {
+			// The agent is shutting down (context canceled or deadline exceeded); a
+			// start failure here is expected teardown, not a real error. Keep it out
+			// of ERROR so it doesn't trip error-grep gates in CI record output.
+			pm.logger.Debug("Ingress forwarder start aborted; agent shutting down",
+				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
+		} else {
+			pm.logger.Error("Ingress hook failed to start; verify hook configuration/permissions and required kernel features, or disable the custom ingress hook",
+				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
+		}
+		pm.mu.Lock()
+		delete(pm.active, origAppPort)
+		pm.mu.Unlock()
+		return
+	}
+	started = true
+	close(startDone)
+	if newAppPort != 0 {
+		pm.mu.Lock()
+		if _, ok := pm.active[origAppPort]; ok { // not stopped in the meantime
+			if pm.relocated == nil {
+				pm.relocated = make(map[uint16]uint16)
+			}
+			pm.relocated[origAppPort] = newAppPort
+		}
+		pm.mu.Unlock()
+	}
+	pm.logger.Info("Started ingress forwarding",
+		zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
+}
+
+// AppListenPort is the port the app's own socket listens on for its port orig.
+// That is orig, unless the record hooks moved the app's bind elsewhere and
+// keploy's ingress forwarder holds orig: then it is the port the app was moved
+// to, and ok is false while that port is not known (the forwarder is still
+// starting, or the bind event did not carry it).
+func (pm *IngressProxyManager) AppListenPort(orig uint16) (port uint16, ok bool) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if _, forwarded := pm.active[orig]; !forwarded {
+		return orig, true
+	}
+	moved, ok := pm.relocated[orig]
+	return moved, ok
+}
+
+// StopAll gracefully shuts down all active ingress proxies.
+func (pm *IngressProxyManager) StopAll() {
+	pm.mu.Lock()
+	stops := make(map[uint16]proxyStop, len(pm.active))
+	for p, s := range pm.active {
+		stops[p] = s
+	}
+	pm.active = make(map[uint16]proxyStop)
+	pm.relocated = nil
+	pm.mu.Unlock()
+
+	for p, s := range stops {
+		if err := s(); err != nil {
+			pm.logger.Error("Failed to stop ingress proxy; verify ingress hook stop implementation and permissions, then restart the agent if needed",
+				zap.Uint16("port", p), zap.Error(err))
+		}
+	}
+}
+
+func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
+	eventChan, err := pm.hooks.WatchBindEvents(ctx)
+	if err != nil {
+		pm.logger.Error("Failed to start watching for ingress events", zap.Error(err))
+		return
+	}
+
+	pm.logger.Debug("Listening for application bind events to start ingress proxies...")
+
+	for e := range eventChan {
+
+		pm.logger.Debug("Intercepted application bind event",
+			zap.Uint32("pid", e.PID),
+			zap.Uint16("Orig_App_Port", e.OrigAppPort),
+			zap.Uint16("New_App_Port", e.NewAppPort))
+
+		pm.StartIngressProxy(ctx, e.OrigAppPort, e.NewAppPort)
+	}
+	pm.logger.Debug("Stopping ingress event listener as the event channel was closed.")
+	pm.StopAll()
+}
+
+// goTCPIngressHook is the default IngressHook implementation that uses a
+// Go-based TCP forwarder for ingress traffic capture.
+type goTCPIngressHook struct {
+	pm         *IngressProxyManager
+	mu         sync.Mutex
+	forwarders map[uint16]*tcpForwarderState
+}
+
+type tcpForwarderState struct {
+	listener net.Listener
+	cancel   context.CancelFunc
+	done     chan struct{} // closed when the accept loop exits
+}
+
+const (
+	ingressTargetListenTimeout = 3 * time.Second
+	ingressTargetPollInterval  = 25 * time.Millisecond
+)
+
+func newGoTCPIngressHook(pm *IngressProxyManager) *goTCPIngressHook {
+	return &goTCPIngressHook{
+		pm:         pm,
+		forwarders: make(map[uint16]*tcpForwarderState),
+	}
+}
+
+func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort uint16) error {
+	// TODO : We will change this interface implementation to the IP
+	origAppAddr := "0.0.0.0:" + strconv.Itoa(int(origPort))
+	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newPort))
+	logger := h.pm.logger
+
+	if waited, err := waitForIngressTargetWhenKnown(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
+		if err != nil {
+			logger.Warn("Redirected ingress target was not listening before proxy bind; starting ingress forwarder anyway",
+				zap.String("target", newAppAddr),
+				zap.Duration("timeout", ingressTargetListenTimeout),
+				zap.Error(err))
+		} else {
+			logger.Debug("Redirected ingress target is listening; starting ingress forwarder",
+				zap.String("target", newAppAddr))
+		}
+	} else {
+		logger.Debug("Redirected ingress target port is unknown; using runtime destination lookup",
+			zap.Uint16("orig_port", origPort))
+	}
+
+	// If the agent is already shutting down, do NOT bind the ingress listener.
+	// A forwarder bound during teardown (e.g. from a late/stale bind event whose
+	// target wait above returned context.Canceled) can outlive StopAll's snapshot
+	// and linger holding the app's port (commonly 8000), so the next record run's
+	// application fails to bind it with "address already in use" — the flaky
+	// port-8000 reuse failure. Aborting here is safe: a canceled context means no
+	// ingress traffic will be served anyway.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		logger.Debug("Skipping ingress forwarder bind; agent context canceled (shutting down)",
+			zap.String("target", newAppAddr), zap.Error(ctxErr))
+		return ctxErr
+	}
+
+	listener, err := net.Listen("tcp4", origAppAddr)
+	if err != nil {
+		return fmt.Errorf("ingress proxy failed to listen on %s: %w", origAppAddr, err)
+	}
+	// Close the residual race: if the context was canceled while net.Listen was
+	// binding, release the port immediately and do NOT register the forwarder —
+	// otherwise it would linger holding the port and leave a stale forwarder entry
+	// that blocks re-arming it later.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = listener.Close()
+		return ctxErr
+	}
+	tcpListener, ok := listener.(*net.TCPListener)
+	if !ok {
+		listener.Close()
+		return fmt.Errorf("listener on %s was not a TCP listener", origAppAddr)
+	}
+
+	logger.Debug("Started Ingress forwarder", zap.String("listening_on", origAppAddr), zap.String("forwarding_to", newAppAddr))
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		// Release the listener (and its bound port) whenever the accept loop exits,
+		// even if StopIngress is never called for this forwarder (e.g. it raced with
+		// shutdown and missed StopAll's snapshot). Close is idempotent — StopIngress
+		// may also close it — and this runs before close(done) so a StopIngress
+		// waiter observes the port freed. Prevents the port from lingering post-exit.
+		defer func() { _ = listener.Close() }()
+		sem := make(chan struct{}, 1)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			err = tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+			if err != nil {
+				logger.Error("Failed to set deadline on ingress listener", zap.Error(err))
+				return
+			}
+			clientConn, err := listener.Accept()
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					continue
+				}
+				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
+				return
+			}
+
+			go func(cc net.Conn) {
+				h.pm.handleConnection(ctx, cc, newAppAddr, logger, h.pm.tcChan, sem, origPort)
+			}(clientConn)
+		}
+	}()
+
+	h.mu.Lock()
+	h.forwarders[origPort] = &tcpForwarderState{
+		listener: listener,
+		cancel:   cancel,
+		done:     done,
+	}
+	h.mu.Unlock()
+
+	return nil
+}
+
+func waitForIngressTargetWhenKnown(ctx context.Context, newPort uint16, addr string, timeout time.Duration) (bool, error) {
+	if newPort == 0 {
+		return false, nil
+	}
+	return true, waitForIngressTarget(ctx, addr, timeout)
+}
+
+func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(ingressTargetPollInterval)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		conn, err := net.DialTimeout("tcp4", addr, ingressTargetPollInterval)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for %s to listen: %w", addr, lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (h *goTCPIngressHook) StopIngress(origPort uint16) error {
+	h.mu.Lock()
+	st, ok := h.forwarders[origPort]
+	if !ok {
+		h.mu.Unlock()
+		return fmt.Errorf("no TCP forwarder for port %d", origPort)
+	}
+	delete(h.forwarders, origPort)
+	h.mu.Unlock()
+
+	st.cancel()
+	_ = st.listener.Close()
+	<-st.done
+	return nil
+}
+
+const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
+	defer clientConn.Close()
+
+	preface, err := util.ReadRequiredBytes(ctx, logger, clientConn, len(clientPreface))
+	if err == io.EOF && len(preface) == 0 {
+		return
+	}
+	if err != nil && err != io.EOF {
+		utils.LogError(logger, err, "error reading initial bytes from client connection")
+		return
+	}
+	if looksLikeTLSClientHello(preface) {
+		// Ingress capture only understands HTTP/1 and gRPC. A TLS handshake on
+		// a relocated port is not ours to parse: the usual source is another
+		// container in the same pod dialing a TLS sidecar whose port keploy took,
+		// via the app's own egress. Relay the bytes untouched so the handshake
+		// reaches the real listener instead of being answered as HTTP.
+		pm.relayRaw(ctx, newReplayConn(preface, clientConn), pm.getActualDestination(ctx, clientConn, newAppAddr, logger), logger)
+		return
+	}
+	if bytes.HasPrefix(preface, []byte(clientPreface)) {
+		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
+
+		// newAppAddr holds the port Keploy moved the application to, not the port
+		// it advertises, so the test case records the caller-supplied appPort
+		// (the original) instead.
+		actualPort := appPort
+
+		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
+		if err != nil {
+			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
+				zap.String("final_app_addr", finalAppAddr),
+				zap.Error(err))
+			clientConn.Close() // Close the client connection as we can't proceed
+			return
+		}
+
+		// Pass replayConn so RecordIncoming sees the full byte stream including
+		// the preface. RecordIncoming's forwardAndTee will forward everything
+		// (including the preface) to the upstream app, which is what cmux needs
+		// to see the original handshake.
+		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr, pm.synchronous, pm.mapping)
+	} else {
+		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
+	}
+}
+
+// looksLikeTLSClientHello reports whether b starts like a TLS handshake record
+// (content type 0x16, record version 3.0 to 3.3).
+func looksLikeTLSClientHello(b []byte) bool {
+	return len(b) >= 3 && b[0] == 0x16 && b[1] == 0x03 && b[2] <= 0x03
+}
+
+// relayRaw copies bytes both ways between client and addr without capturing.
+func (pm *IngressProxyManager) relayRaw(ctx context.Context, client net.Conn, addr string, logger *zap.Logger) {
+	upConn, err := net.DialTimeout("tcp4", addr, 3*time.Second)
+	if err != nil {
+		logger.Error("Failed to connect to the relocated listener for a TLS connection; it will not be captured. Verify the application is listening on the resolved address and port.",
+			zap.String("addr", addr), zap.Error(err))
+		return
+	}
+	defer upConn.Close()
+	stop := context.AfterFunc(ctx, func() {
+		_ = client.Close()
+		_ = upConn.Close()
+	})
+	defer stop()
+
+	done := make(chan struct{}, 2)
+	cp := func(dst, src net.Conn) {
+		_, _ = io.Copy(dst, src)
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+		done <- struct{}{}
+	}
+	go cp(upConn, client)
+	go cp(client, upConn)
+	<-done
+	<-done
+}
+
+type replayConn struct {
+	net.Conn
+	reader io.Reader
+}
+
+func newReplayConn(initial []byte, c net.Conn) net.Conn {
+	return &replayConn{
+		Conn:   c,
+		reader: util.NewPrefixReader(initial, c),
+	}
+}
+
+// CloseWrite half-closes the underlying connection when it supports it, so
+// wrapping a TCP conn does not hide the half-close from callers.
+func (r *replayConn) CloseWrite() error {
+	if cw, ok := r.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+func (r *replayConn) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
