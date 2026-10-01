@@ -461,6 +461,40 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		utils.LogError(logger, err, "error reading initial bytes from client connection")
 		return
 	}
+	// TLS is relayed byte-for-byte, never parsed. The forwarder has no way to
+	// terminate it honestly: it holds neither the application's private key nor
+	// any trust the client already has, so a MITM leaf would simply be rejected.
+	//
+	// Without this branch a ClientHello falls through to the HTTP/1.1 parser
+	// below, which cannot parse it and answers in plaintext — the kubelet sees
+	// "server gave HTTP response to HTTPS client" and an HTTPS probe can never
+	// pass, so the pod never goes Ready and is dropped from its Service.
+	//
+	// The cost, stated plainly: inbound TLS is not captured. It is not captured
+	// today either (the connection is rejected outright), so nothing regresses;
+	// it does mean TLS-wrapped gRPC produces no test cases.
+	if util.IsTLSClientHello(preface) {
+		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
+
+		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
+		if err != nil {
+			logger.Error("Failed to connect to upstream application for a TLS connection. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
+				zap.String("final_app_addr", finalAppAddr),
+				zap.Error(err))
+			return
+		}
+		defer upConn.Close()
+
+		logger.Debug("passing an inbound TLS connection through uncaptured",
+			zap.String("final_app_addr", finalAppAddr), zap.Uint16("app_port", appPort))
+
+		// newReplayConn re-emits the peeked bytes, so the application's own TLS
+		// server receives an intact ClientHello and terminates with its own
+		// certificate — which is what the client was expecting all along.
+		forwardRawTCP(ctx, newReplayConn(preface, clientConn), upConn)
+		return
+	}
+
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
