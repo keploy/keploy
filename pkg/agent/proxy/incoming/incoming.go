@@ -503,3 +503,19 @@ func newReplayConn(initial []byte, c net.Conn) net.Conn {
 func (r *replayConn) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
+
+// CloseWrite forwards the half-close to the wrapped connection.
+//
+// replayConn embeds net.Conn as an INTERFACE, so Go promotes only net.Conn's
+// method set and CloseWrite is not in it. Without this method the type
+// assertion inside proxyutil.CloseWriteIfPossible fails and the half-close is
+// silently dropped: the peer's io.Copy never sees a FIN and sits blocked until
+// something else closes the socket. util.Conn carries the same method for the
+// same reason — see the note on it in proxy/util.
+func (r *replayConn) CloseWrite() error {
+	type closeWriter interface{ CloseWrite() error }
+	if cw, ok := r.Conn.(closeWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
