@@ -461,6 +461,15 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		utils.LogError(logger, err, "error reading initial bytes from client connection")
 		return
 	}
+	if looksLikeTLSClientHello(preface) {
+		// Ingress capture only understands HTTP/1 and gRPC. A TLS handshake on
+		// a relocated port is not ours to parse: the usual source is another
+		// container in the same pod dialing a TLS sidecar whose port keploy took,
+		// via the app's own egress. Relay the bytes untouched so the handshake
+		// reaches the real listener instead of being answered as HTTP.
+		pm.relayRaw(ctx, newReplayConn(preface, clientConn), pm.getActualDestination(ctx, clientConn, newAppAddr, logger), logger)
+		return
+	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
@@ -488,6 +497,41 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 	}
 }
 
+// looksLikeTLSClientHello reports whether b starts like a TLS handshake record
+// (content type 0x16, record version 3.0 to 3.3).
+func looksLikeTLSClientHello(b []byte) bool {
+	return len(b) >= 3 && b[0] == 0x16 && b[1] == 0x03 && b[2] <= 0x03
+}
+
+// relayRaw copies bytes both ways between client and addr without capturing.
+func (pm *IngressProxyManager) relayRaw(ctx context.Context, client net.Conn, addr string, logger *zap.Logger) {
+	upConn, err := net.DialTimeout("tcp4", addr, 3*time.Second)
+	if err != nil {
+		logger.Error("Failed to connect to the relocated listener for a TLS connection; it will not be captured. Verify the application is listening on the resolved address and port.",
+			zap.String("addr", addr), zap.Error(err))
+		return
+	}
+	defer upConn.Close()
+	stop := context.AfterFunc(ctx, func() {
+		_ = client.Close()
+		_ = upConn.Close()
+	})
+	defer stop()
+
+	done := make(chan struct{}, 2)
+	cp := func(dst, src net.Conn) {
+		_, _ = io.Copy(dst, src)
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+		done <- struct{}{}
+	}
+	go cp(upConn, client)
+	go cp(client, upConn)
+	<-done
+	<-done
+}
+
 type replayConn struct {
 	net.Conn
 	reader io.Reader
@@ -498,6 +542,15 @@ func newReplayConn(initial []byte, c net.Conn) net.Conn {
 		Conn:   c,
 		reader: util.NewPrefixReader(initial, c),
 	}
+}
+
+// CloseWrite half-closes the underlying connection when it supports it, so
+// wrapping a TCP conn does not hide the half-close from callers.
+func (r *replayConn) CloseWrite() error {
+	if cw, ok := r.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }
 
 func (r *replayConn) Read(p []byte) (int, error) {
