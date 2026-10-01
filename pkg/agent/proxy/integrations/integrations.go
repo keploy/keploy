@@ -228,6 +228,23 @@ type MockMemDb interface {
 	WindowAware
 }
 
+// SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
+// snapshot narrowed to the mocks recorded inside one test window, without
+// walking the rest of it.
+//
+// A replay re-stages every test's window but leaves the reusable pool whole,
+// and lax mode keeps a recording's per-test MySQL data mocks in that pool, so
+// it holds the traffic of every test in the set. A matcher that only wants the
+// current test's mocks would otherwise walk all of them on every command, and a
+// replay's total cost would grow with the square of its length.
+type SessionWindowReader interface {
+	// GetSessionMocksInWindow returns, in GetSessionMocks order, the mocks of
+	// that snapshot whose ReqTimestampMock lies in [start, end] (bounds
+	// included) or is unset: exactly GetSessionMocks filtered by that
+	// predicate.
+	GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error)
+}
+
 // MockReader is the read-only facet of MockMemDb. Parsers that need
 // to enumerate mocks from the in-memory pool but never mutate or
 // consume on match should take this interface directly. Includes both

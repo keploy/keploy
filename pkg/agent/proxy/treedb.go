@@ -4,6 +4,7 @@ package proxy
 // Here it is used to handle the mocks.
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/emirpasic/gods/trees/redblacktree"
@@ -201,4 +202,37 @@ func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
 		}
 	}
 	db.mu.RUnlock()
+}
+
+// valuesInTreeOrder resolves tree IDs to the mocks the tree holds under them now
+// and returns those keep accepts, in tree order. An ID that is no longer in the
+// tree is skipped.
+func (db *TreeDb) valuesInTreeOrder(ids []int, keep func(*models.Mock) bool) []*models.Mock {
+	type hit struct {
+		key interface{}
+		mk  *models.Mock
+	}
+	db.mu.RLock()
+	hits := make([]hit, 0, len(ids))
+	for _, id := range ids {
+		key, ok := db.idIndex[id]
+		if !ok {
+			continue
+		}
+		v, found := db.rbt.Get(key)
+		if !found {
+			continue
+		}
+		if mk, isMock := v.(*models.Mock); isMock && mk != nil && keep(mk) {
+			hits = append(hits, hit{key, mk})
+		}
+	}
+	cmp := db.rbt.Comparator
+	db.mu.RUnlock()
+	sort.Slice(hits, func(i, j int) bool { return cmp(hits[i].key, hits[j].key) < 0 })
+	out := make([]*models.Mock, len(hits))
+	for i, h := range hits {
+		out[i] = h.mk
+	}
+	return out
 }

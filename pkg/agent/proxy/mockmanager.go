@@ -50,6 +50,9 @@ type MockManager struct {
 	// legacy "all" trees (kept for compatibility with existing callers)
 	filtered   *TreeDb
 	unfiltered *TreeDb
+	// unfilteredWindows indexes unfiltered by recorded request time; it is
+	// built with the tree and swapped with it (see sessionWindowIndex).
+	unfilteredWindows *sessionWindowIndex
 
 	// startup tier (Wave 2) holds app-bootstrap traffic recorded BEFORE
 	// the first test window fires — Flyway migrations, Hibernate
@@ -2080,6 +2083,7 @@ func (m *MockManager) setUnFilteredMocks(mocks []*models.Mock, bump bool) {
 	newUnFilteredByKind := make(map[models.Kind]*TreeDb)
 	newStateless := make(map[models.Kind]map[string][]*models.Mock)
 	touched := map[models.Kind]struct{}{}
+	windows := make([]windowEntry, 0, len(mocks))
 	var maxSortOrder int64
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
@@ -2090,6 +2094,7 @@ func (m *MockManager) setUnFilteredMocks(mocks []*models.Mock, bump bool) {
 		}
 		mock.TestModeInfo.ID = index
 		newUnFiltered.insert(mock.TestModeInfo, mock)
+		windows = append(windows, windowEntry{at: mock.Spec.ReqTimestampMock, id: index})
 		k := mock.Kind
 		td := newUnFilteredByKind[k]
 		if td == nil {
@@ -2117,6 +2122,7 @@ func (m *MockManager) setUnFilteredMocks(mocks []*models.Mock, bump bool) {
 		touched[k] = struct{}{}
 	}
 	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = newUnFiltered, newUnFilteredByKind, newStateless
+	m.unfilteredWindows = newSessionWindowIndex(windows)
 	m.treesMu.Unlock()
 	if bump {
 		for k := range touched {
@@ -2131,8 +2137,18 @@ func (m *MockManager) setUnFilteredMocks(mocks []*models.Mock, bump bool) {
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
 	// Snapshot the legacy tree pointer safely
 	m.treesMu.RLock()
-	globalTree := m.unfiltered
+	globalTree, windows := m.unfiltered, m.unfilteredWindows
 	m.treesMu.RUnlock()
+	// The window index files a mock under its ID and request time. An update
+	// that changes either one moves the mock somewhere the index cannot follow,
+	// so the index stands down before the tree changes: a lookup racing the
+	// update walks the tree rather than read an index that is about to be
+	// wrong. A caller that edited the mock in place and passes it as both old
+	// and new hides any such change, so that counts as one.
+	if windows != nil && (old == new || new.TestModeInfo.ID != old.TestModeInfo.ID ||
+		!new.Spec.ReqTimestampMock.Equal(old.Spec.ReqTimestampMock)) {
+		windows.stale.Store(true)
+	}
 	// Update legacy/global tree first
 	updatedGlobal := globalTree.update(old.TestModeInfo, new.TestModeInfo, new, *old)
 
