@@ -142,3 +142,69 @@ func TestCertForClient_SNIWinsOverDestHost(t *testing.T) {
 		t.Errorf("SNI host missing from leaf: DNSNames=%v", leaf.DNSNames)
 	}
 }
+
+// nonTCPAddr is what the v2 relay's fakeconn reports: a valid net.Addr that is
+// not a *net.TCPAddr. CertForClient used to assert the concrete type without
+// checking, so this shape panicked and took the agent down.
+type nonTCPAddr struct{}
+
+func (nonTCPAddr) Network() string { return "pipe" }
+func (nonTCPAddr) String() string  { return "pipe" }
+
+type fakeAddrConn struct{ net.Conn }
+
+func (fakeAddrConn) RemoteAddr() net.Addr { return nonTCPAddr{} }
+
+func TestCertForClient_NonTCPRemoteAddrDoesNotPanic(t *testing.T) {
+	key, ca := testCA(t)
+	logger := zap.NewNop()
+	getCertCache().Remove("relay.example.com")
+
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
+
+	hello := &tls.ClientHelloInfo{
+		ServerName: "relay.example.com",
+		Conn:       fakeAddrConn{Conn: c1},
+	}
+
+	cert, err := CertForClient(logger, hello, key, ca, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("CertForClient on a non-TCP RemoteAddr: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+	var ok bool
+	for _, d := range leaf.DNSNames {
+		if d == "relay.example.com" {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Errorf("leaf not named from SNI: DNSNames=%v", leaf.DNSNames)
+	}
+}
+
+// With no usable source port the port-keyed map must be left alone entirely,
+// or every such connection would file under key 0 and read back a destination
+// belonging to a different connection.
+func TestCertForClient_NonTCPRemoteAddrDoesNotTouchPortMap(t *testing.T) {
+	key, ca := testCA(t)
+	logger := zap.NewNop()
+	SrcPortToDstURL.Delete(0)
+	getCertCache().Remove("a.example.com")
+
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
+
+	if _, err := CertForClient(logger,
+		&tls.ClientHelloInfo{ServerName: "a.example.com", Conn: fakeAddrConn{Conn: c1}},
+		key, ca, time.Time{}, ""); err != nil {
+		t.Fatalf("CertForClient: %v", err)
+	}
+	if v, ok := SrcPortToDstURL.Load(0); ok {
+		t.Errorf("port 0 was written to the destination map: %v", v)
+	}
+}
