@@ -1,0 +1,97 @@
+package proxy
+
+import (
+	"testing"
+
+	"go.uber.org/zap"
+)
+
+func TestNoInterceptSet_SeedsFromKubernetesServiceHost(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+	t.Setenv("KEPLOY_NO_INTERCEPT_HOSTS", "")
+	t.Setenv("KEPLOY_DISABLE_APISERVER_BYPASS", "")
+
+	s := newNoInterceptSet(zap.NewNop())
+	if !s.matches("10.96.0.1") {
+		t.Error("the API server ClusterIP must be relayed without interception")
+	}
+	if s.matches("10.96.0.2") {
+		t.Error("an unrelated address must still be intercepted")
+	}
+}
+
+// The kill switch has to work, because an operator who wants API-server mocks
+// should be able to ask for them.
+func TestNoInterceptSet_KillSwitch(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+	t.Setenv("KEPLOY_NO_INTERCEPT_HOSTS", "")
+	t.Setenv("KEPLOY_DISABLE_APISERVER_BYPASS", "true")
+
+	if newNoInterceptSet(zap.NewNop()).matches("10.96.0.1") {
+		t.Error("KEPLOY_DISABLE_APISERVER_BYPASS=true must re-enable interception")
+	}
+}
+
+func TestNoInterceptSet_ExtraHostsAndCIDRs(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KEPLOY_DISABLE_APISERVER_BYPASS", "")
+	t.Setenv("KEPLOY_NO_INTERCEPT_HOSTS", "192.168.5.5, 172.20.0.0/16 , fd00::1")
+
+	s := newNoInterceptSet(zap.NewNop())
+	for _, in := range []string{"192.168.5.5", "172.20.3.9", "fd00::1"} {
+		if !s.matches(in) {
+			t.Errorf("%s should be relayed without interception", in)
+		}
+	}
+	for _, out := range []string{"192.168.5.6", "172.21.0.1", "fd00::2"} {
+		if s.matches(out) {
+			t.Errorf("%s should still be intercepted", out)
+		}
+	}
+}
+
+// Nothing configured must leave every destination intercepted — the fix must
+// not quietly widen into a general capture hole.
+func TestNoInterceptSet_EmptyMatchesNothing(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KEPLOY_NO_INTERCEPT_HOSTS", "")
+	t.Setenv("KEPLOY_DISABLE_APISERVER_BYPASS", "")
+
+	s := newNoInterceptSet(zap.NewNop())
+	for _, h := range []string{"10.96.0.1", "1.2.3.4", "example.com", ""} {
+		if s.matches(h) {
+			t.Errorf("empty set must not match %q", h)
+		}
+	}
+	var nilSet *noInterceptSet
+	if nilSet.matches("10.96.0.1") {
+		t.Error("a nil set must not match")
+	}
+}
+
+// A hostname is never matched: the set is IP-only by design, and the value it
+// guards is reached by IP. Pinning this stops a later "helpful" DNS lookup
+// per connection.
+func TestNoInterceptSet_IgnoresHostnames(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KEPLOY_DISABLE_APISERVER_BYPASS", "")
+	t.Setenv("KEPLOY_NO_INTERCEPT_HOSTS", "kubernetes.default.svc")
+
+	s := newNoInterceptSet(zap.NewNop())
+	if s.matches("kubernetes.default.svc") {
+		t.Error("hostnames must not be matched")
+	}
+}
+
+// hostFromAddr feeds matches(); it must hand over a bare host for both families
+// or the lookup silently never fires.
+func TestHostFromAddr_StripsPortAndBrackets(t *testing.T) {
+	for addr, want := range map[string]string{
+		"10.96.0.1:443": "10.96.0.1",
+		"[fd00::1]:443": "fd00::1",
+	} {
+		if got := hostFromAddr(addr); got != want {
+			t.Errorf("hostFromAddr(%q) = %q, want %q", addr, got, want)
+		}
+	}
+}

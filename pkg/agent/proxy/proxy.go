@@ -231,6 +231,9 @@ type Proxy struct {
 	OpportunisticTLSIntercept bool
 	IsDocker                  bool
 
+	// Destinations relayed without interception — see noInterceptSet.
+	noIntercept *noInterceptSet
+
 	// EnableIPv6Redirect mirrors config.Agent.EnableIPv6Redirect. When
 	// true (the default), the synthetic DNS fallback answers AAAA
 	// queries with ::1 so clients can reach the proxy via the IPv6
@@ -923,6 +926,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		clientClose:               make(chan bool, 1),
 		Integrations:              make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough:         opts.Agent.GlobalPassthrough,
+		noIntercept:               newNoInterceptSet(logger),
 		OpportunisticTLSIntercept: opts.Agent.OpportunisticTLSIntercept,
 		errChannel:                make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:                  opts.Agent.IsDocker,
@@ -2323,6 +2327,30 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				zap.String("server address", dstAddr))
 			return err
 		}
+		return nil
+	}
+
+	// Relay, never intercept, the destinations whose clients pin a trust store
+	// keploy cannot add its CA to — the Kubernetes API server above all. See
+	// noInterceptSet for why this is not a kernel-side bypass and why mocking
+	// this traffic was not worth keeping.
+	//
+	// Placed ahead of every dispatch below, including the TLS upgrade, because
+	// the damage is done by the handshake itself: the app rejects keploy's leaf
+	// and never completes a call.
+	if host := hostFromAddr(dstAddr); p.noIntercept.matches(host) {
+		dstConn, err = util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to dial a no-intercept destination", zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+			return err
+		}
+		// Debug, not Warn: unlike a parser decline this is a configured
+		// decision, it holds for every connection to this destination, and the
+		// set is already logged once at startup. A Warn per API-server call
+		// would bury the log.
+		p.logger.Debug("relaying a no-intercept destination without interception",
+			zap.String("server address", dstAddr))
+		util.RelayRawPassthrough(srcConn, dstConn)
 		return nil
 	}
 
