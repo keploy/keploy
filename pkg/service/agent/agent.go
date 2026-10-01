@@ -880,6 +880,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		disk.Finalize()
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
 			zap.Int("onDisk", disk.Len()),
+			zap.Int("spilledResponses", disk.SpilledResponses()),
 			zap.Int64("diskBytes", disk.DiskBytes()),
 			zap.Int("residentPerTest", len(storage.filtered)),
 			zap.Int("residentConfig", len(storage.unfiltered)))

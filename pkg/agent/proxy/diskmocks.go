@@ -373,6 +373,20 @@ func (d *DiskMocks) Len() int {
 	return len(d.entries)
 }
 
+// SpilledResponses returns how many on-disk mocks keep their response apart
+// (EligibleForResponseSpill), to be loaded only when served (diagnostics/tests).
+func (d *DiskMocks) SpilledResponses() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, e := range d.entries {
+		if e.respOff >= 0 {
+			n++
+		}
+	}
+	return n
+}
+
 // DiskBytes returns total bytes written to the file (diagnostics/tests).
 func (d *DiskMocks) DiskBytes() int64 {
 	d.mu.Lock()
