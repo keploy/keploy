@@ -69,6 +69,10 @@ type testSetSetup struct {
 
 	consumedMu    sync.Mutex
 	totalConsumed map[string]models.MockState
+	// perTestRegion names the per-test mocks the set handed the agent, the
+	// only ones whose consumed entries an agent that says so reads
+	// (keployPkg.ConsumedForAgent).
+	perTestRegion map[string]struct{}
 }
 
 func (s *testSetSetup) mergeConsumed(mocks []models.MockState) {
@@ -82,9 +86,15 @@ func (s *testSetSetup) mergeConsumed(mocks []models.MockState) {
 	}
 }
 
-func (s *testSetSetup) snapshotConsumed() map[string]models.MockState {
+// snapshotConsumed returns the consumed history to send to the agent: only the
+// entries of the set's per-test mocks when perTestOnly (the agent has said it
+// reads no others), all of them otherwise.
+func (s *testSetSetup) snapshotConsumed(perTestOnly bool) map[string]models.MockState {
 	s.consumedMu.Lock()
 	defer s.consumedMu.Unlock()
+	if perTestOnly && s.perTestRegion != nil {
+		return keployPkg.ConsumedForAgent(s.totalConsumed, s.perTestRegion)
+	}
 	out := make(map[string]models.MockState, len(s.totalConsumed))
 	for k, v := range s.totalConsumed {
 		out[k] = v
@@ -504,6 +514,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		mockKindByName:   mockKindByName,
 		useMappingBased:  useMappingBased,
 		totalConsumed:    map[string]models.MockState{},
+		perTestRegion:    keployPkg.PerTestRegion(filtered),
 		cleanup:          cleanup,
 	}, nil
 }
@@ -637,10 +648,19 @@ func (r *Runner) sendPerTestParams(ctx context.Context, setup *testSetSetup, exp
 		BeforeTime:         tcRespTime,
 		UseMappingBased:    setup.useMappingBased,
 		MockMapping:        expected,
-		TotalConsumedMocks: setup.snapshotConsumed(),
+		TotalConsumedMocks: setup.snapshotConsumed(r.agentReadsConsumedPerTestOnly()),
 		StrictMockWindow:   r.strictMockWindow(),
 	}
 	return r.instrumentation.UpdateMockParams(ctx, params)
+}
+
+// agentReadsConsumedPerTestOnly reports whether the agent has said it reads the
+// consumed history only for the per-test mocks it stages (see
+// models.ConsumedScopeHeader); until then the whole history is sent, because
+// agents from v3.0.0-beta1 through v3.3.22 also applied it to the session pool.
+func (r *Runner) agentReadsConsumedPerTestOnly() bool {
+	s, ok := r.instrumentation.(keployPkg.ConsumedScopeReader)
+	return ok && s.AgentReadsConsumedPerTestOnly()
 }
 
 // checkMockMismatches filters DNS entries from both the expected and

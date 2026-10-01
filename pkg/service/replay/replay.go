@@ -1426,6 +1426,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var ignored int
 	var totalConsumedMocks = map[string]models.MockState{}
 	var passingTotalConsumedMocks = map[string]models.MockState{}
+	// perTestRegion names the per-test mocks this set hands the agent, the
+	// only ones an agent that says so reads consumed entries for (see
+	// consumedForAgent). nil until StoreMocks: then everything is sent.
+	var perTestRegion map[string]struct{}
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -1678,13 +1682,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
+		perTestRegion = pkg.PerTestRegion(filteredMocks)
 
 		if !isMappingEnabled {
 			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, recordedSetShapeOf(testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShapeOf(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -1806,6 +1811,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
+		perTestRegion = pkg.PerTestRegion(filteredMocks)
 		if r.firstRun {
 			err = r.hookImpl.BeforeTestRun(ctx, testRunID)
 			if err != nil {
@@ -1855,7 +1861,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, recordedSetShapeOf(testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShapeOf(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -2304,7 +2310,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// startup section exists to close. The timestamp path needs no
 			// equivalent: it reloads them via disk.LoadBefore(firstWindowStart).
 			expectedNames := models.MergeStartupMockNames(expectedTestMockMappings[testCase.Name], startupMockNames)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased, recordedSetShape{})
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{})
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 					testSetStatus = resolvedStatus
@@ -3109,7 +3115,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// to expected would have that unexpected consumption tolerated — a
 			// test that should go OBSOLETE would pass instead.
 			streamExpected := models.MergeStartupMockNames(expectedTestMockMappings[tc.Name], startupMockNames)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased, recordedSetShape{})
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{})
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
@@ -4025,6 +4031,18 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
+// consumedForAgent is the consumed history to send with filter params: only the
+// per-test region's entries once the agent has said it reads no others
+// (pkg.ConsumedScopeReader), the whole of it until then. Agents from v3.0.0-beta1
+// through v3.3.22 also applied the history to the session pool, so only that
+// answer, never this client's own view of the agent, may narrow it.
+func (r *Replayer) consumedForAgent(total map[string]models.MockState, region map[string]struct{}) map[string]models.MockState {
+	if s, ok := r.instrumentation.(pkg.ConsumedScopeReader); ok && s.AgentReadsConsumedPerTestOnly() {
+		return pkg.ConsumedForAgent(total, region)
+	}
+	return total
+}
+
 // firstRecordedTestStart returns the request time of the earliest RECORDED test
 // in the set. testDB returns cases sorted by request timestamp, so it is the
 // first one's; a case with no request time contributes nothing rather than
@@ -4303,7 +4321,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	if err := r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
-	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, recordedSetShapeOf(testCases)); err != nil {
+	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, recordedSetShapeOf(testCases)); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at the filter params: %w", testSetID, err)
 	}
 	// Same soft-fail as the setup call site: a readiness-file write that fails

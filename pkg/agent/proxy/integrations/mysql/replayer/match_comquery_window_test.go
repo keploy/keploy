@@ -33,6 +33,19 @@ func (f *fakeMockDb) GetConnectionMocks(string) ([]*models.Mock, error) {
 }
 func (f *fakeMockDb) CurrentTestWindow() (time.Time, time.Time) { return f.winStart, f.winEnd }
 
+// GetSessionMocksInWindow implements integrations.SessionWindowReader the way
+// the manager defines it: GetSessionMocks narrowed to [start, end] and undated.
+func (f *fakeMockDb) GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error) {
+	var out []*models.Mock
+	for _, m := range f.session {
+		at := m.Spec.ReqTimestampMock
+		if at.IsZero() || (!at.Before(start) && !at.After(end)) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
 // --- remaining MockMemDb surface: inert stubs ---
 func (f *fakeMockDb) GetFilteredMocks() ([]*models.Mock, error)         { return nil, nil }
 func (f *fakeMockDb) GetUnFilteredMocks() ([]*models.Mock, error)       { return nil, nil }

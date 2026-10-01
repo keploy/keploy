@@ -61,7 +61,6 @@ func queryBundle(sql string) mysql.PacketBundle {
 // closest mock, and the connection was torn down as a missing recording.
 func TestMatchQueryPacket_TraceCommentDoesNotDefeatMatching(t *testing.T) {
 	logger := zap.NewNop()
-	ctx := context.Background()
 
 	const body = "SELECT `invoices`.* FROM `invoices` WHERE `invoices`.`deleted_at` IS NULL " +
 		"AND `invoices`.`external_id` = 'aaaaaaaaaaaaaaaaaaaaaaaa' LIMIT 1"
@@ -76,7 +75,7 @@ func TestMatchQueryPacket_TraceCommentDoesNotDefeatMatching(t *testing.T) {
 		if recorded.Header.Header.PayloadLength != live.Header.Header.PayloadLength {
 			t.Fatalf("test setup broken: this subtest must hold PayloadLength equal")
 		}
-		if ok, score := matchQueryPacket(ctx, logger, recorded, live); !ok {
+		if ok, score, _ := matchQueryLive(logger, recorded, live, &liveQuery{}, queryPacketText); !ok {
 			t.Fatalf("same statement with a different traceparent must match; got ok=false score=%d", score)
 		}
 	})
@@ -88,7 +87,7 @@ func TestMatchQueryPacket_TraceCommentDoesNotDefeatMatching(t *testing.T) {
 		if len(dbmWriter) == len(dbmReader) {
 			t.Fatalf("test setup broken: the two comments must differ in length")
 		}
-		if ok, score := matchQueryPacket(ctx, logger, recorded, live); !ok {
+		if ok, score, _ := matchQueryLive(logger, recorded, live, &liveQuery{}, queryPacketText); !ok {
 			t.Fatalf("same statement behind a different-length trace comment must match; got ok=false score=%d "+
 				"(score 0 means matchCommand sees no candidate at all)", score)
 		}
@@ -98,7 +97,7 @@ func TestMatchQueryPacket_TraceCommentDoesNotDefeatMatching(t *testing.T) {
 		recorded := queryBundle("SELECT /* traceparent=aaaa */ `total` FROM `invoices` WHERE `id` = 1")
 		live := queryBundle("SELECT /* traceparent=bbbb */ `total` FROM `invoices` WHERE `id` = 1")
 
-		if ok, score := matchQueryPacket(ctx, logger, recorded, live); !ok {
+		if ok, score, _ := matchQueryLive(logger, recorded, live, &liveQuery{}, queryPacketText); !ok {
 			t.Fatalf("a tracer may inject its comment anywhere, not just in front; got ok=false score=%d", score)
 		}
 	})
@@ -116,7 +115,6 @@ func TestMatchQueryPacket_TraceCommentDoesNotDefeatMatching(t *testing.T) {
 // mismatch.
 func TestMatchQueryPacket_EqualLengthDifferentStatementsNeverMatch(t *testing.T) {
 	logger := zap.NewNop()
-	ctx := context.Background()
 
 	cases := []struct{ recorded, live string }{
 		{"SHOW FULL FIELDS FROM `invoices`", "SHOW FULL FIELDS FROM `couriers`"},
@@ -138,7 +136,7 @@ func TestMatchQueryPacket_EqualLengthDifferentStatementsNeverMatch(t *testing.T)
 				t.Fatalf("test setup broken: the two statements must have equal PayloadLength")
 			}
 
-			ok, score := matchQueryPacket(ctx, logger, recorded, live)
+			ok, score, _ := matchQueryLive(logger, recorded, live, &liveQuery{}, queryPacketText)
 			if ok {
 				t.Fatalf("different statements must never match")
 			}
@@ -162,7 +160,6 @@ func TestMatchQueryPacket_EqualLengthDifferentStatementsNeverMatch(t *testing.T)
 // Ignoring either would equate statements the server treats differently.
 func TestMatchQueryPacket_ExecutableCommentsAreNeverStripped(t *testing.T) {
 	logger := zap.NewNop()
-	ctx := context.Background()
 
 	cases := []struct{ name, recorded, live string }{
 		{"different version gate", "/*!40101 SET NAMES utf8 */", "/*!80000 SET NAMES utf8 */"},
@@ -176,7 +173,7 @@ func TestMatchQueryPacket_ExecutableCommentsAreNeverStripped(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, score := matchQueryPacket(ctx, logger, queryBundle(tc.recorded), queryBundle(tc.live))
+			ok, score, _ := matchQueryLive(logger, queryBundle(tc.recorded), queryBundle(tc.live), &liveQuery{}, queryPacketText)
 			if ok || score != 0 {
 				t.Errorf("executable comments differ, so these are different statements; got ok=%v score=%d", ok, score)
 			}
@@ -240,7 +237,6 @@ func TestStripInertSQLComments(t *testing.T) {
 // rows for the other.
 func TestMatchQueryPacket_LiteralTypeIsPartOfTheStatement(t *testing.T) {
 	logger := zap.NewNop()
-	ctx := context.Background()
 
 	cases := []struct {
 		recorded, live string
@@ -268,7 +264,7 @@ func TestMatchQueryPacket_LiteralTypeIsPartOfTheStatement(t *testing.T) {
 			if recorded.Header.Header.PayloadLength != live.Header.Header.PayloadLength {
 				t.Fatalf("test setup broken: the pair must be equal length, else the old scoring rejected it anyway")
 			}
-			ok, score := matchQueryPacket(ctx, logger, recorded, live)
+			ok, score, _ := matchQueryLive(logger, recorded, live, &liveQuery{}, queryPacketText)
 			if ok {
 				t.Errorf("a numeric literal and a quoted one are different statements; "+
 					"matching them definitively serves %q's rows for %q", tc.recorded, tc.live)
@@ -296,13 +292,12 @@ func TestMatchQueryPacket_LiteralTypeIsPartOfTheStatement(t *testing.T) {
 // because the recorded response is a different row.
 func TestMatchQueryPacket_InlineLiteralDriftIsServable(t *testing.T) {
 	logger := zap.NewNop()
-	ctx := context.Background()
 
 	const shape = "SELECT `id`, `email`, `full_name` FROM `customers` WHERE `id` = '%s'"
 	recorded := queryBundle(dbmWriter + fmt.Sprintf(shape, "1dc32a3c-a50c-5e92-9797-a6b6c4c7156e"))
 	live := queryBundle(dbmReader + fmt.Sprintf(shape, "2a22d715-4799-5150-80d6-a0dd935fbda2"))
 
-	ok, score := matchQueryPacket(ctx, logger, recorded, live)
+	ok, score, _ := matchQueryLive(logger, recorded, live, &liveQuery{}, queryPacketText)
 	if ok {
 		t.Error("a different id is a different row: this must not be a definitive match")
 	}

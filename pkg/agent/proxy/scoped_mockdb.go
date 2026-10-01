@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -98,6 +99,26 @@ func (s *scopedMockDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 
 func (s *scopedMockDb) GetSessionMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetSessionMocks())
+}
+
+// GetSessionMocksInWindow forwards the window index of the wrapped store through
+// the same name filter as GetSessionMocks; both filters are per mock, so their
+// order does not matter. A store without the index is walked.
+func (s *scopedMockDb) GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.SessionWindowReader); ok {
+		return s.keep(r.GetSessionMocksInWindow(start, end))
+	}
+	all, err := s.GetSessionMocks()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*models.Mock, 0, len(all))
+	for _, mk := range all {
+		if mk != nil && recordedIn(mk, start, end) {
+			out = append(out, mk)
+		}
+	}
+	return out, nil
 }
 
 func (s *scopedMockDb) GetUnFilteredMocks() ([]*models.Mock, error) {
