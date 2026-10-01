@@ -548,7 +548,7 @@ func TestSendMockFilterParamsKeepsAgentOwnsConsumedOnTheNormalPath(t *testing.T)
 	consumed := map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}}
 
 	if err := r.SendMockFilterParamsToAgent(context.Background(), []string{}, models.BaseTime, time.Now(),
-		consumed, false, time.Time{}); err != nil {
+		consumed, false, recordedSetShape{}); err != nil {
 		t.Fatalf("send failed: %v", err)
 	}
 
@@ -583,7 +583,7 @@ func TestConsumedHistoryRebuildSticksAfterARepair(t *testing.T) {
 
 	// A subsequent ORDINARY per-test send, which passes rebuildConsumed=false.
 	if err := r.SendMockFilterParamsToAgent(context.Background(), []string{}, models.BaseTime, time.Now(),
-		consumed, false, time.Time{}); err != nil {
+		consumed, false, recordedSetShape{}); err != nil {
 		t.Fatalf("per-test send failed: %v", err)
 	}
 

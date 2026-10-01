@@ -68,7 +68,14 @@ type FakeConn struct {
 	pos int64
 	// discardTo is the discard watermark set by [FakeConn.DiscardBefore]:
 	// every byte below it is swallowed rather than delivered. Monotonic.
-	discardTo       int64
+	discardTo int64
+	// consumed mirrors pos, for Consumed.
+	consumed atomic.Int64
+	// waits counts the times the reader found nothing to take and blocked
+	// for the next chunk; waiting is set while it is blocked so. See
+	// Waiting.
+	waits           atomic.Uint64
+	waiting         atomic.Bool
 	lastReadNano    atomic.Int64
 	lastWrittenNano atomic.Int64
 	closed          atomic.Bool
@@ -166,6 +173,7 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 			n := copy(p, c.Bytes)
 			f.mu.Lock()
 			f.pos += int64(n)
+			f.consumed.Store(f.pos)
 			if n < len(c.Bytes) {
 				f.buf.Write(c.Bytes[n:])
 				f.bufReadAt = c.ReadAt
@@ -182,6 +190,7 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 	if f.buf.Len() > 0 {
 		n, err := f.buf.Read(p)
 		f.pos += int64(n)
+		f.consumed.Store(f.pos)
 		f.mu.Unlock()
 		// bytes.Buffer.Read returns io.EOF whenever it drains the
 		// buffer to empty, even when we got bytes back on this call
@@ -209,6 +218,7 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 	n := copy(p, chunk.Bytes)
 	f.mu.Lock()
 	f.pos += int64(n)
+	f.consumed.Store(f.pos)
 	if n < len(chunk.Bytes) {
 		f.buf.Write(chunk.Bytes[n:])
 		f.bufReadAt = chunk.ReadAt
@@ -248,6 +258,7 @@ func (f *FakeConn) ReadChunk() (Chunk, error) {
 		if c, ok := f.drainBufferedLocked(); ok {
 			f.mu.Lock()
 			f.pos += int64(len(c.Bytes))
+			f.consumed.Store(f.pos)
 			f.mu.Unlock()
 			return c, nil
 		}
@@ -259,6 +270,7 @@ func (f *FakeConn) ReadChunk() (Chunk, error) {
 	}
 	f.mu.Lock()
 	f.pos += int64(len(c.Bytes))
+	f.consumed.Store(f.pos)
 	f.mu.Unlock()
 	return c, nil
 }
@@ -355,26 +367,56 @@ func (f *FakeConn) recvChunk() (Chunk, error) {
 	// SetReadDeadline calls take effect on this in-flight read. The
 	// changed-notification channel (closed by SetReadDeadline) wakes
 	// the select; we then loop and reload both channels.
+	took := func(c Chunk, ok bool) (Chunk, error) {
+		if !ok {
+			return Chunk{}, io.EOF
+		}
+		f.lastReadNano.Store(c.ReadAt.UnixNano())
+		if !c.WrittenAt.IsZero() {
+			f.lastWrittenNano.Store(c.WrittenAt.UnixNano())
+		}
+		return c, nil
+	}
 	for {
 		dlCh, changedCh := f.currentDeadlineChans()
 		select {
 		case c, ok := <-f.ch:
-			if !ok {
-				return Chunk{}, io.EOF
-			}
-			f.lastReadNano.Store(c.ReadAt.UnixNano())
-			if !c.WrittenAt.IsZero() {
-				f.lastWrittenNano.Store(c.WrittenAt.UnixNano())
-			}
-			return c, nil
+			return took(c, ok)
+		default:
+		}
+		// Nothing to take: the reader is done with all it was handed, and
+		// blocks for more (Waiting).
+		f.waits.Add(1)
+		f.waiting.Store(true)
+		select {
+		case c, ok := <-f.ch:
+			f.waiting.Store(false)
+			return took(c, ok)
 		case <-f.closeCh:
+			f.waiting.Store(false)
 			return Chunk{}, ErrClosed
 		case <-dlCh:
+			f.waiting.Store(false)
 			return Chunk{}, ErrDeadlineExceeded
 		case <-changedCh:
 			// deadline changed; loop and re-fetch.
+			f.waiting.Store(false)
 		}
 	}
+}
+
+// Consumed is how many bytes of this stream have left the FakeConn: handed to
+// the reader, or swallowed for it (DiscardBefore). With what the producer has
+// put on the channel, it tells how much the reader has yet to take.
+func (f *FakeConn) Consumed() int64 { return f.consumed.Load() }
+
+// Waiting reports whether the reader is blocked for the next chunk with
+// nothing buffered for it, and how many times it has blocked so. A reader that
+// reads one message at a time and is blocked so is done with everything it
+// was handed. A caller that sees the same count before and after checking
+// other state knows the reader stayed blocked in between.
+func (f *FakeConn) Waiting() (waiting bool, waits uint64) {
+	return f.waiting.Load(), f.waits.Load()
 }
 
 // DiscardBefore declares that the parser must never be handed a stream
@@ -464,6 +506,7 @@ func (f *FakeConn) applyDiscard() error {
 			}
 			f.buf.Next(int(n))
 			f.pos += n
+			f.consumed.Store(f.pos)
 			if f.buf.Len() == 0 {
 				f.bufReadAt = time.Time{}
 				f.bufWrittenAt = time.Time{}

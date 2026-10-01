@@ -55,13 +55,29 @@ func (a *Agent) armStopOutcome(path string, onStop func(func())) {
 // leaveStopOutcome writes the replay's outcome to path, giving up after
 // stopOutcomeTimeout. A failure is only logged: the CLI that finds no file
 // reports the outcome as unknown, which is the truth.
+//
+// Only the reads run on their own goroutine, and it is abandoned on giving up;
+// the file is written here or not at all. A proxy that answers after the
+// give-up, while the shutdown goes on, must not leave an account behind it for
+// the CLI to read as this replay's.
 func (a *Agent) leaveStopOutcome(path string) {
 	ctx, cancel := context.WithTimeout(context.Background(), stopOutcomeTimeout)
 	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- a.writeStopOutcome(ctx, path) }()
+	type read struct {
+		body []byte
+		err  error
+	}
+	done := make(chan read, 1)
+	go func() {
+		body, err := a.readStopOutcome(ctx)
+		done <- read{body, err}
+	}()
 	select {
-	case err := <-done:
+	case r := <-done:
+		err := r.err
+		if err == nil {
+			err = writeFileWhole(path, r.body)
+		}
 		if err != nil {
 			a.logger.Warn("could not leave what this replay served and missed for keploy to read",
 				zap.String("path", path), zap.Error(err))
@@ -75,25 +91,39 @@ func (a *Agent) leaveStopOutcome(path string) {
 }
 
 // writeStopOutcome reads what the replay served and missed and writes it to
-// path as a models.MockOutcome. Both reads drain, exactly as the CLI's own
-// end-of-run reads do: this is the last time they are made.
-//
-// Written to a temporary file and renamed into place, so an agent killed
-// halfway leaves no file rather than half of one. A missing file reads as
-// "unknown"; a truncated one could only read as a parse error, or worse.
+// path as a models.MockOutcome.
 func (a *Agent) writeStopOutcome(ctx context.Context, path string) error {
+	body, err := a.readStopOutcome(ctx)
+	if err != nil {
+		return err
+	}
+	return writeFileWhole(path, body)
+}
+
+// readStopOutcome reads what the replay served and missed, encoded as a
+// models.MockOutcome. Both reads drain, exactly as the CLI's own end-of-run
+// reads do: this is the last time they are made.
+func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
 	consumed, err := a.GetConsumedMocks(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to read the mocks this replay served: %w", err)
+		return nil, fmt.Errorf("failed to read the mocks this replay served: %w", err)
 	}
 	missed, err := a.GetMockErrors(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to read the calls this replay could not match: %w", err)
+		return nil, fmt.Errorf("failed to read the calls this replay could not match: %w", err)
 	}
 	body, err := json.Marshal(models.MockOutcome{Consumed: consumed, Missed: missed})
 	if err != nil {
-		return fmt.Errorf("failed to encode the replay outcome: %w", err)
+		return nil, fmt.Errorf("failed to encode the replay outcome: %w", err)
 	}
+	return body, nil
+}
+
+// writeFileWhole writes body to path through a temporary file renamed into
+// place, so an agent killed halfway leaves no file rather than half of one. A
+// missing file reads as "unknown"; a truncated one could only read as a parse
+// error, or worse.
+func writeFileWhole(path string, body []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
 	if err != nil {
 		return err

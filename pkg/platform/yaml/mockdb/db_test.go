@@ -29,8 +29,11 @@
 package mockdb
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +41,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 	yaml "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -611,5 +615,245 @@ func TestEncodeMockJSON_HTTP2BinaryBodyIsRefused(t *testing.T) {
 		Spec: models.MockSpec{HTTP2Req: &models.HTTP2Req{Body: "{}"}, HTTP2Resp: &models.HTTP2Resp{Body: "{}"}},
 	}, zap.NewNop()); err != nil {
 		t.Fatalf("a normal UTF-8 http2 body was refused: %v", err)
+	}
+}
+
+// handedMocks is a mock of each way InsertMock writes a YAML document: the
+// production-shape lane's mocks and the other kinds it writes in one pass, a
+// MySQL mock holding a string it double-quotes (yaml.EncodeQuoted), and a
+// Mongo mock, which goes through EncodeMock's yaml.Node.
+func handedMocks(t *testing.T) []*models.Mock {
+	t.Helper()
+	mocks := inPlaceCorpus(t)
+	mocks = append(mocks, trapMocks(t, "\tleading tab\nx", "hand")["mysql-query"])
+	mocks = append(mocks, &models.Mock{
+		Version: models.GetVersion(),
+		Kind:    models.Mongo,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{"operation": "OP_MSG"},
+			MongoRequests: []models.MongoRequest{{
+				Header:  &models.MongoHeader{Length: 50, RequestID: 1, Opcode: 2013},
+				Message: &models.MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"find":"c"} }`}},
+			}},
+			MongoResponses: []models.MongoResponse{{
+				Header:  &models.MongoHeader{Length: 60, RequestID: 2, ResponseTo: 1, Opcode: 2013},
+				Message: &models.MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"ok":1} }`}},
+			}},
+			ReqTimestampMock: time.Date(2026, 9, 30, 8, 42, 54, 0, time.UTC),
+			ResTimestampMock: time.Date(2026, 9, 30, 8, 42, 55, 0, time.UTC),
+		},
+	})
+	return mocks
+}
+
+// docCollector collects the documents InsertMock hands back on its context.
+type docCollector struct {
+	mocks   []*models.Mock
+	docs    [][]byte
+	formats []string
+}
+
+func (c *docCollector) ctx() context.Context {
+	return models.WithMockDocReceiver(context.Background(), func(m *models.Mock, doc []byte, format string) {
+		c.mocks = append(c.mocks, m)
+		c.docs = append(c.docs, bytes.Clone(doc))
+		c.formats = append(c.formats, format)
+	})
+}
+
+// insertHanded inserts m and checks what InsertMock handed back for it: one
+// document, in the file's format, that is exactly what the insert appended to
+// the file after framing (the version comment heading a new YAML file, the
+// "---" line before a later YAML document; nothing for JSON). It returns the
+// document.
+func insertHanded(t *testing.T, ys *MockYaml, c *docCollector, m *models.Mock, format yaml.Format, framing string) []byte {
+	t.Helper()
+	path := filepath.Join(ys.MockPath, "test-set-0", "mocks."+format.FileExtension())
+	before, _ := os.ReadFile(path)
+	handed := len(c.docs)
+	cp := *m
+	if err := ys.InsertMock(c.ctx(), &cp, "test-set-0"); err != nil {
+		t.Fatalf("InsertMock(%s %s): %v", m.Kind, m.Name, err)
+	}
+	if got := len(c.docs) - handed; got != 1 {
+		t.Fatalf("InsertMock(%s %s) handed back %d documents, want the 1 it wrote", m.Kind, m.Name, got)
+	}
+	doc := c.docs[len(c.docs)-1]
+	if c.mocks[len(c.mocks)-1] != &cp {
+		t.Fatalf("InsertMock(%s) handed its document back for another mock", m.Kind)
+	}
+	if c.formats[len(c.formats)-1] != string(format) {
+		t.Fatalf("InsertMock(%s) handed its document back as %q, wrote %q", m.Kind, c.formats[len(c.formats)-1], format)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(after, before) {
+		t.Fatalf("InsertMock(%s) rewrote the file instead of appending", m.Kind)
+	}
+	if want := append([]byte(framing), doc...); !bytes.Equal(after[len(before):], want) {
+		t.Fatalf("InsertMock(%s %s) appended:\n%s\nit handed back, after %q:\n%s", m.Kind, m.Name, after[len(before):], framing, doc)
+	}
+	return doc
+}
+
+// InsertMock hands the receiver on its context (models.WithMockDocReceiver)
+// the document it wrote for each mock, byte for byte, however it wrote it: in
+// one pass, double-quoted, or through EncodeMock. Laid end to end, with the
+// file's version comment and the "---" between YAML documents, the documents
+// handed back ARE the file. This is what the recorder gives the AfterMockInsert
+// hooks, so a hook that keeps a copy of the file need not encode the mock again.
+func TestInsertMock_HandsTheDocumentItWrote(t *testing.T) {
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(string(format), func(t *testing.T) {
+			dir := t.TempDir()
+			ys := NewWithFormat(zap.NewNop(), dir, "mocks", format)
+			c := &docCollector{}
+			mocks := handedMocks(t)
+			for i, m := range mocks {
+				framing := ""
+				if format == yaml.FormatYAML {
+					framing = "---\n"
+					if i == 0 {
+						framing = utils.GetVersionAsComment()
+					}
+				}
+				doc := insertHanded(t, ys, c, m, format, framing)
+				if format == yaml.FormatYAML {
+					dec := yamlLib.NewDecoder(bytes.NewReader(doc))
+					var n yamlLib.Node
+					if bytes.HasPrefix(doc, []byte("---")) || dec.Decode(&n) != nil || !errors.Is(dec.Decode(&n), io.EOF) {
+						t.Fatalf("document %d handed back is not one YAML document:\n%s", i, doc)
+					}
+				} else if !json.Valid(doc) || bytes.Count(doc, []byte("\n")) != 1 || doc[len(doc)-1] != '\n' {
+					t.Fatalf("document %d handed back is not one JSON line:\n%s", i, doc)
+				}
+			}
+			file, err := os.ReadFile(filepath.Join(dir, "test-set-0", "mocks."+format.FileExtension()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := bytes.Join(c.docs, nil)
+			if format == yaml.FormatYAML {
+				want = append([]byte(utils.GetVersionAsComment()), bytes.Join(c.docs, []byte("---\n"))...)
+			}
+			if !bytes.Equal(want, file) {
+				t.Fatalf("the documents handed back are not what is in the file (%d mocks)\nhanded:\n%s\nfile:\n%s", len(mocks), want, file)
+			}
+		})
+	}
+}
+
+// The document handed back is the mock's alone, whatever framing the file
+// gives it: after a first mock that was dropped once the file's version
+// comment was written, and in a file an earlier recording left. And it is
+// handed back as the format written: YAML, for a MockYaml whose Format was
+// left empty.
+func TestInsertMock_HandsTheDocumentWhateverFramesIt(t *testing.T) {
+	clearRegistry(t)
+	mocks := handedMocks(t)
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	c := &docCollector{}
+	if err := ys.InsertMock(c.ctx(), &models.Mock{
+		Version: models.GetVersion(), Name: "bad-1", Kind: models.Kind("ThisKindDoesNotExist"),
+	}, "test-set-0"); !errors.Is(err, models.ErrMockEncode) {
+		t.Fatalf("want a skippable encode error for the first mock, got %v", err)
+	}
+	if len(c.docs) != 0 {
+		t.Fatalf("a dropped mock handed back %d documents", len(c.docs))
+	}
+	// The file holds the version comment only, so the first document written
+	// follows a "---".
+	insertHanded(t, ys, c, mocks[0], yaml.FormatYAML, "---\n")
+	insertHanded(t, ys, c, mocks[1], yaml.FormatYAML, "---\n")
+
+	again := New(zap.NewNop(), dir, "mocks")
+	insertHanded(t, again, c, mocks[2], yaml.FormatYAML, "---\n")
+
+	unset := NewWithFormat(zap.NewNop(), t.TempDir(), "mocks", "")
+	insertHanded(t, unset, c, mocks[3], yaml.FormatYAML, utils.GetVersionAsComment())
+}
+
+// A mock InsertMock does not write hands nothing back: not one it cannot
+// encode, not one a cancelled context stops, and not a gob mock, which is
+// written in the background after InsertMock returns.
+func TestInsertMock_HandsNothingForAMockItDidNotWrite(t *testing.T) {
+	var good *models.Mock
+	for _, m := range inPlaceCorpus(t) {
+		if m.Kind == models.MySQL {
+			good = m
+			break
+		}
+	}
+	handed := 0
+	ctx := models.WithMockDocReceiver(context.Background(), func(*models.Mock, []byte, string) { handed++ })
+
+	ys := New(zap.NewNop(), t.TempDir(), "mocks")
+	bad := *good
+	bad.Spec.MySQLResponses = []mysql.Response{{PacketBundle: mysql.PacketBundle{Message: failingYAML{}}}}
+	if err := ys.InsertMock(ctx, &bad, "test-set-0"); !errors.Is(err, models.ErrMockEncode) {
+		t.Fatalf("InsertMock of an unencodable mock = %v, want ErrMockEncode", err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	c := *good
+	if err := ys.InsertMock(cancelled, &c, "test-set-0"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("InsertMock on a cancelled context = %v, want context.Canceled", err)
+	}
+	if handed != 0 {
+		t.Fatalf("InsertMock handed back %d documents for mocks it did not write", handed)
+	}
+	// The same mock, written, is handed back.
+	w := *good
+	if err := ys.InsertMock(ctx, &w, "test-set-0"); err != nil || handed != 1 {
+		t.Fatalf("InsertMock of a mock it wrote = %v, handed back %d documents, want 1", err, handed)
+	}
+
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	gob := New(zap.NewNop(), t.TempDir(), "mocks")
+	g := *good
+	if err := gob.InsertMock(ctx, &g, "test-set-0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := gob.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if handed != 1 {
+		t.Fatalf("InsertMock handed back %d documents for a gob mock", handed-1)
+	}
+}
+
+// InsertMock hands the document back with the mocks file unlocked: the file's
+// lock is a stripe other files share, so a receiver run under it would hold up
+// their writers, and one that reads the file back would deadlock.
+func TestInsertMock_HandsTheDocumentWithTheFileUnlocked(t *testing.T) {
+	mocks := handedMocks(t)
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	var readBack int
+	ctx := models.WithMockDocReceiver(context.Background(), func(*models.Mock, []byte, string) {
+		got, err := ys.GetUnFilteredMocks(context.Background(), "test-set-0", time.Time{}, time.Time{}, nil, nil)
+		if err != nil {
+			t.Errorf("reading the file back from the receiver: %v", err)
+		}
+		readBack = len(got)
+	})
+	done := make(chan error, 1)
+	go func() {
+		c := *mocks[0]
+		done <- ys.InsertMock(ctx, &c, "test-set-0")
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("InsertMock ran its receiver with the mocks file locked: reading the file back deadlocked")
+	}
+	if readBack != 1 {
+		t.Fatalf("the receiver read back %d mocks, want the 1 just written", readBack)
 	}
 }

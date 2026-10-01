@@ -199,3 +199,35 @@ func TestStartIngressReleasesPortWhenAcceptLoopExits(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// nopIngressHook starts and stops forwarders without binding anything.
+type nopIngressHook struct{}
+
+func (nopIngressHook) StartIngress(context.Context, uint16, uint16) error { return nil }
+func (nopIngressHook) StopIngress(uint16) error                           { return nil }
+
+// While recording, keploy's forwarder holds the app's port and the app listens
+// on the port its bind was moved to. Asked where the app listens, the agent has
+// to look there: the socket on the app's own port is keploy's.
+func TestAppListenPortFollowsTheMovedBind(t *testing.T) {
+	pm := &IngressProxyManager{logger: zap.NewNop(), active: make(map[uint16]proxyStop)}
+	pm.ingressHook = nopIngressHook{}
+
+	if port, ok := pm.AppListenPort(8097); !ok || port != 8097 {
+		t.Fatalf("no forwarder: got %d, %v; want the app's own port", port, ok)
+	}
+	pm.StartIngressProxy(context.Background(), 8097, 41541)
+	if port, ok := pm.AppListenPort(8097); !ok || port != 41541 {
+		t.Fatalf("forwarded: got %d, %v; want the moved bind 41541", port, ok)
+	}
+	// A bind event without the new port: the forwarder holds 8097 and where
+	// the app went is not known.
+	pm.StartIngressProxy(context.Background(), 8098, 0)
+	if port, ok := pm.AppListenPort(8098); ok {
+		t.Fatalf("forwarded to an unknown port: got %d, ok; want not ok", port)
+	}
+	pm.StopAll()
+	if port, ok := pm.AppListenPort(8097); !ok || port != 8097 {
+		t.Fatalf("after StopAll: got %d, %v; want the app's own port", port, ok)
+	}
+}

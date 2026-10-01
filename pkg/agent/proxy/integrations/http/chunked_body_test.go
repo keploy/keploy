@@ -117,7 +117,7 @@ func runChunkedRequest(t *testing.T, first string, conn *scriptedConn) (string, 
 	}
 }
 
-// The replay hang behind the Flipkart-shaped recording's upload test: Java's
+// The replay hang behind the production-shaped recording's upload test: Java's
 // HttpURLConnection writes a chunked-streaming upload's last-chunk "0\r\n" and
 // the final "\r\n" separately, so they reach the proxy in different reads.
 // Neither read ends in "0\r\n\r\n", so the proxy never saw the request end, the

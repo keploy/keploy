@@ -27,8 +27,6 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 	pos := 0
 	packet := &mysql.StmtExecutePacket{}
 
-	logger.Debug("Decoding COM_STMT_EXECUTE packet", zap.Int("packet_length", len(data)), zap.Uint32("client_capabilities", clientCapabilities))
-
 	// Read Status
 	if pos+1 > len(data) {
 		logger.Error("unexpected end of data while reading status", zap.Int("position", pos), zap.Int("data_length", len(data)))
@@ -50,8 +48,6 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 	if !ok && stmtPrepOk == nil {
 		return nil, fmt.Errorf("prepared statement with ID %d not found", packet.StatementID)
 	}
-
-	logger.Debug("The stmtPrepOk packet", zap.Any("statement_id", packet.StatementID), zap.Any("stmtPrepOk", stmtPrepOk))
 
 	// Read Flags
 	if pos+1 > len(data) {

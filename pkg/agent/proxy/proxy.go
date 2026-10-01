@@ -3835,6 +3835,25 @@ func (p *Proxy) SeedStartupCutoff(start time.Time) {
 	}
 }
 
+// SeedRecordedWindows hands the underlying MockManager the recorded window of
+// every test of the set being staged. Satisfies the agent's optional
+// RecordedWindowsSeeder extension interface.
+func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
+	if m := p.getMockManager(); m != nil {
+		m.SeedRecordedWindows(ws)
+	}
+}
+
+// CarryOverLoadRange reports which recorded-time range of carry-over mocks the
+// agent should load beside the window that starts at start. Satisfies the
+// agent's optional CarryOverPlanner extension interface.
+func (p *Proxy) CarryOverLoadRange(start time.Time) (time.Time, time.Time, bool) {
+	if m := p.getMockManager(); m != nil {
+		return m.CarryOverLoadRange(start)
+	}
+	return time.Time{}, time.Time{}, false
+}
+
 // GetConsumedMocks returns the consumed filtered mocks.
 func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
 	m := p.getMockManager()

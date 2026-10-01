@@ -593,6 +593,10 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 				StatusCode: respParsed.StatusCode,
 				Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 				Body:       string(respBody),
+
+				// Replay serves this response: keep what it takes to serve a
+				// repeated header (Set-Cookie) on its own lines.
+				HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 			},
 			Created:          time.Now().Unix(),
 			ReqTimestampMock: m.ReqTimestampMock,

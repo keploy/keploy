@@ -3,6 +3,7 @@ package mockdb
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/gob"
 	"encoding/json"
@@ -875,24 +876,41 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		effFormat = detected
 	}
 
+	buf := getDocBuffer()
+	defer putDocBuffer(buf)
+	if err := ys.appendMock(ctx, mock, mockPath, mockFileName, effFormat, buf); err != nil {
+		return err
+	}
+	// The mock's document is written: hand it to the recorder's receiver,
+	// which gives it to the AfterMockInsert hooks (record.MockContext.Encoded)
+	// so a hook that keeps a copy of this file does not encode the mock again.
+	// It is the document only: not the version comment or the "---" before it.
+	// The file is unlocked by now, so the receiver holds up no writer of a file
+	// whose lock stripe this one shares, and may call back into the MockDB.
+	// The format is spelled as the file's extension: what was written, even
+	// for a MockYaml whose Format was left empty (written as YAML).
+	models.HandMockDoc(ctx, mock, buf.Bytes(), effFormat.FileExtension())
+	return nil
+}
+
+// appendMock appends mock's document to the mocks file in effFormat, under the
+// file's lock. The document is made in buf, and buf is what is written.
+func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath, mockFileName string, effFormat yaml.Format, buf *bytes.Buffer) error {
 	lock := getMockFileLock(mockFileLockKey(mockPath, mockFileName, effFormat))
 	lock.Lock()
 	defer lock.Unlock()
 
 	// Bail before opening the file if the recorder ctx is already cancelled.
 	// Nothing on disk is touched yet — this is the only safe early-exit
-	// point. Past this point we MUST flush the bufio writer before returning
-	// or we leave a truncated mock on disk (yamlLib.Encoder streams into the
-	// bufio.Writer; that writer's internal buffer auto-flushes when full so
-	// partial mock bytes have already hit the file by the time encoder.Encode
-	// returns — skipping writer.Flush() drops the tail of the mock).
+	// point. Past this point we MUST flush the bufio writer before returning:
+	// a document larger than its buffer reaches the file in pieces as it is
+	// written, so skipping writer.Flush() drops the tail of the mock.
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 
-	// Stream the mock directly to the file instead of marshaling to []byte
-	// first. CreateFileF picks the right extension for `effFormat` so the
-	// json pass writes .json and the yaml pass writes .yaml.
+	// CreateFileF picks the right extension for `effFormat` so the json pass
+	// writes .json and the yaml pass writes .yaml.
 	isFileEmpty, err := yaml.CreateFileF(ctx, ys.Logger, mockPath, mockFileName, effFormat)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to create file", zap.String("path directory", mockPath), zap.String("file", mockFileName))
@@ -909,15 +927,13 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	writer := bufio.NewWriter(file)
 	// Belt-and-braces: always flush the bufio writer before file.Close,
 	// even on an error return below. file.Close() does NOT drain a
-	// wrapping bufio.Writer — without this defer, any partially-encoded
-	// bytes still in the bufio buffer at return time would be silently
-	// discarded, leaving the mocks.yaml truncated mid-mock. The deferred
-	// Flush is best-effort: errors are logged at debug because the
-	// happy-path Flush below surfaces real flush errors as the function
-	// return value; this defer only catches the early-return paths that
-	// would otherwise drop the buffer on the floor (in particular the
-	// shutdown-race path where InsertMock is invoked with a cancelled
-	// ctx after encoder.Encode has streamed into the buffer).
+	// wrapping bufio.Writer. The mock's document is made in memory and
+	// written whole, so what an error return can leave in the buffer is the
+	// file's version comment, which must reach the file (see below), or part
+	// of a document whose write failed, of which more may already be in the
+	// file. The deferred Flush is best-effort: errors are logged at debug
+	// because the happy-path Flush below surfaces real flush errors as the
+	// function return value.
 	defer func() {
 		if flushErr := writer.Flush(); flushErr != nil && ys.Logger != nil {
 			ys.Logger.Debug("deferred bufio flush returned error",
@@ -926,10 +942,11 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		}
 	}()
 
-	// Encode + stream. Each branch takes a different in-memory representation:
-	// JSON builds NetworkTrafficDocJSON directly (no yaml.Node anywhere),
-	// YAML keeps using EncodeMock -> yamlLib.Encoder for wire compatibility
-	// with pre-existing mocks.yaml files.
+	// Encode, then write. Each branch takes a different in-memory
+	// representation: JSON builds NetworkTrafficDocJSON directly (no yaml.Node
+	// anywhere), YAML writes the document EncodeMock's yaml.Node would (below).
+	// Either way the mock's document is made in buf first, and buf is what is
+	// written, so it is also what InsertMock hands the recorder's receiver.
 	switch effFormat {
 	case yaml.FormatJSON:
 		jsonDoc, handled, err := EncodeMockJSON(mock, ys.Logger)
@@ -954,13 +971,15 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 			}
 			return fmt.Errorf("%w (json): unsupported mock kind %q", models.ErrMockEncode, mock.Kind)
 		}
-		if err := json.NewEncoder(writer).Encode(jsonDoc); err != nil {
+		if err := json.NewEncoder(buf).Encode(jsonDoc); err != nil {
 			return fmt.Errorf("failed to encode mock json: %w", err)
 		}
 		// json.Encoder appends the trailing '\n' — NDJSON-ready.
+		if _, err := writer.Write(buf.Bytes()); err != nil {
+			return fmt.Errorf("failed to write mock json: %w", err)
+		}
 	default:
-		// YAML path — keeps streaming via yamlLib.Encoder for wire
-		// compatibility with pre-existing mocks.yaml files.
+		// YAML path.
 		// The version header is keyed off isFileEmpty, which CreateFileF only
 		// reports true for the call that CREATED the file. So it has exactly one
 		// chance: skip it here and the whole test set loses its provenance
@@ -977,44 +996,64 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		// skippable failure returns below and the deferred flush commits
 		// whatever is already buffered, so writing "---" first injected a stray
 		// empty YAML document into mocks.yaml for every dropped mock.
-		mockYaml, err := EncodeMock(mock, ys.Logger)
-		if err != nil {
-			// Only keploy's own encoders are pure enough to be skippable. A
-			// registered mapper can fail for environmental reasons, so those stay
-			// fatal — see errMapperEncode.
-			if errors.Is(err, errMapperEncode) {
-				return fmt.Errorf("failed to encode mock (yaml): %w", err)
+		//
+		// A kind whose spec can be marshaled in place is written in one pass
+		// (encode_inplace.go); the others through EncodeMock's yaml.Node.
+		// Either way the document is made in memory first: marshaling in
+		// place can fail partway (a value YAML cannot marshal), and what the
+		// emitter had streamed by then would be half a document in the file.
+		if v, inPlace := encodeMockInPlace(mock); inPlace {
+			// A mock that holds a string a block scalar cannot carry is
+			// written with it double-quoted (yaml.EncodeQuoted): as the
+			// literal block yaml.v3 picks, it would not read back, and
+			// the file would stop loading from it on.
+			if yaml.NeedsQuoting(v) {
+				q, err := yaml.EncodeQuoted(v)
+				if err != nil {
+					return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+				}
+				v = q
 			}
-			return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+			if err := encodeYAMLDoc(buf, v); err != nil {
+				// A payload fault, as EncodeMock's Node encode of the same
+				// value is: skippable.
+				return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+			}
+		} else {
+			doc, err := EncodeMock(mock, ys.Logger)
+			if err != nil {
+				// Only keploy's own encoders are pure enough to be skippable. A
+				// registered mapper can fail for environmental reasons, so those
+				// stay fatal — see errMapperEncode.
+				if errors.Is(err, errMapperEncode) {
+					return fmt.Errorf("failed to encode mock (yaml): %w", err)
+				}
+				return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+			}
+			if err := encodeYAMLDoc(buf, &doc); err != nil {
+				return fmt.Errorf("failed to encode mock yaml: %w", err)
+			}
 		}
 		if !isFileEmpty {
 			if _, err := writer.WriteString("---\n"); err != nil {
 				return fmt.Errorf("failed to write document separator: %w", err)
 			}
 		}
-		encoder := yamlLib.NewEncoder(writer)
-		if err := encoder.Encode(&mockYaml); err != nil {
-			_ = encoder.Close()
-			return fmt.Errorf("failed to encode mock yaml: %w", err)
-		}
-		if err := encoder.Close(); err != nil {
-			return fmt.Errorf("failed to close yaml encoder: %w", err)
+		if _, err := writer.Write(buf.Bytes()); err != nil {
+			return fmt.Errorf("failed to write mock yaml: %w", err)
 		}
 	}
 
-	// Always flush — never gate on ctx here. Once encoder.Encode has
-	// run, yamlLib has already streamed bytes into the bufio buffer
-	// (and auto-flushed full pages to the file). Skipping Flush would
-	// leave the file truncated at an arbitrary mid-stream byte offset,
-	// which is exactly the recorder-shutdown-flush truncation bug:
-	// the last mock in flight when SIGINT cancels the recorder ctx
-	// would lose its trailing bytes (rows 2/3 of a multi-row MySQL
-	// binary result set, missing rowNullBuffer, no FinalResponse
-	// marker), tripping wire-encode validation at replay time.
+	// Always flush — never gate on ctx here. The document is in the bufio
+	// buffer, and part of it already in the file when it was larger than the
+	// buffer. Skipping Flush would leave the file truncated mid-mock, which is
+	// the recorder-shutdown-flush truncation bug: the last mock in flight when
+	// SIGINT cancels the recorder ctx lost its trailing bytes (rows 2/3 of a
+	// multi-row MySQL binary result set, missing rowNullBuffer, no
+	// FinalResponse marker), tripping wire-encode validation at replay time.
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("failed to flush mock writer: %w", err)
 	}
-
 	return nil
 }
 

@@ -152,7 +152,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		doc.Curl = tc.Curl
 
 		httpSchema := buildHTTPSchema(tc, logger)
-		err := doc.Spec.Encode(httpSchema)
+		err := yaml.EncodeNode(&doc.Spec, httpSchema)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 			return nil, err
@@ -170,7 +170,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 		// Create a new YAML node and encode the gRPC schema
 		var node yamlLib.Node
-		err := node.Encode(grpcSpec)
+		err := yaml.EncodeNode(&node, grpcSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode gRPC schema to YAML node")
 			return nil, err

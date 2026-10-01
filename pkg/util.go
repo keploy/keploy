@@ -162,6 +162,78 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 	return header
 }
 
+// ToYamlHTTPHeaderLineLengths is the other half of ToYamlHTTPHeader for a
+// header keploy will send back out: for each name that arrived on more than one
+// line, the length of each line's value, in arrival order. ToYamlHTTPHeader's
+// join cannot be undone without them (see models.HeaderLineLengths). nil when
+// every name arrived on one line, so the recording is stored as it always was.
+func ToYamlHTTPHeaderLineLengths(httpHeader http.Header) models.HeaderLineLengths {
+	var lineLengths models.HeaderLineLengths
+	for name, values := range httpHeader {
+		if len(values) < 2 {
+			continue
+		}
+		lengths := make([]int, len(values))
+		for i, value := range values {
+			lengths[i] = len(value)
+		}
+		if lineLengths == nil {
+			lineLengths = models.HeaderLineLengths{}
+		}
+		lineLengths[name] = lengths
+	}
+	return lineLengths
+}
+
+// ToWireHTTPHeader is ToHTTPHeader for a recorded header keploy sends back out:
+// a test case's request, a mock's response. A value recorded from several lines
+// goes out on those lines again, in their order, as long as it is still exactly
+// those lines joined by ","; anything else goes out as ToHTTPHeader sends it,
+// one line per name.
+func ToWireHTTPHeader(header map[string]string, lineLengths models.HeaderLineLengths) http.Header {
+	wire := ToHTTPHeader(header)
+	for name, lengths := range lineLengths {
+		value, ok := header[name]
+		if !ok {
+			continue
+		}
+		if lines, ok := splitHeaderLines(value, lengths); ok {
+			wire[name] = lines
+		}
+	}
+	return wire
+}
+
+// splitHeaderLines cuts value back into the lines ToYamlHTTPHeader joined, or
+// reports false when value is not len(lengths) lines of those lengths joined by
+// ",": a value rewritten since it was recorded (a template rendered, a secret
+// decrypted to something else, an edit) is not split by a guess.
+func splitHeaderLines(value string, lengths []int) ([]string, bool) {
+	if len(lengths) < 2 {
+		return nil, false
+	}
+	lines := make([]string, 0, len(lengths))
+	pos := 0
+	for i, n := range lengths {
+		if n < 0 || n > len(value)-pos {
+			return nil, false
+		}
+		lines = append(lines, value[pos:pos+n])
+		pos += n
+		if i == len(lengths)-1 {
+			break
+		}
+		if pos >= len(value) || value[pos] != ',' {
+			return nil, false
+		}
+		pos++
+	}
+	if pos != len(value) {
+		return nil, false
+	}
+	return lines, true
+}
+
 // CompareMultiValueHeaders compares a mock header value (as a comma-separated string)
 // with an input header value (as a slice of strings). It normalizes whitespace,
 // splits the mock header value by commas, trims spaces, sorts both sets of values,
@@ -224,13 +296,12 @@ func ToHTTPHeader(mockHeader map[string]string) http.Header {
 		// Starlette failure mode reproducible during replay even when
 		// the original client sent exactly one Accept header.
 		//
-		// Trade-off: a recording whose on-wire request actually used
-		// repeated same-name headers (rare on the request side; common
-		// only for Set-Cookie which is a response header and never
-		// built by this helper) replays as a single comma-folded
-		// header. Per RFC 7230 §3.2.2 the receiver-side parse is
-		// semantically equivalent for list-valued headers, so this
-		// folding is wire-safe for the headers that actually matter.
+		// A value that really did arrive on several lines is folded
+		// here too. That is right for comparing and matching, and wrong
+		// for sending: an app reading the first of `X-A: a` twice gets
+		// "a", and of `X-A: a,a` gets "a,a". Code that sends a
+		// recorded header uses ToWireHTTPHeader, which puts the lines
+		// back.
 		header[i] = []string{j}
 	}
 	return header
@@ -326,6 +397,85 @@ type SimulationConfig struct {
 	// relaxing TLS verification globally. Default nil preserves the
 	// stdlib system-pool behaviour.
 	TLSConfig *tls.Config
+	// AppPortReachability, when non-nil, is asked about a test request that
+	// was refused, reset or dropped before an answer: an address the app can
+	// never be reached at fails the test at once, saying why, instead of
+	// being re-sent as an app still starting.
+	AppPortReachability AppPortReachability
+}
+
+// AppPortReachability is implemented by an instrumentation that can tell a
+// failed connection to an address the app can NEVER be reached at from one to
+// an app that is still starting. In Docker mode the host reaches the app only
+// through the ports its docker command publishes, and replay sends each test
+// from the host to the port it was recorded on, so a test recorded on a port
+// the command does not publish is refused every time (the app calling its own
+// in-container server is recorded as ingress on such a port). A test on a
+// published port where the app listens only on 127.0.0.1 inside the container
+// fails every time too, as a dropped connection: docker accepts it, finds
+// nothing listening on the container's own address, and drops it.
+type AppPortReachability interface {
+	// UnreachableAppPort explains why a connection to host:port cannot reach
+	// the app, and how to fix that, as a clause that reads after "the app's
+	// port N cannot be reached from the host: ". It returns "" when the
+	// address can reach the app or it cannot tell.
+	//
+	// It bounds its own wait: it is asked from a recording's insert loop, a
+	// readiness gate and a failing test, with whatever context they hold.
+	UnreachableAppPort(ctx context.Context, host string, port uint16) string
+}
+
+// UnreachableAppPortError is a test request that failed to connect at an
+// address the app can never be reached at. It unwraps to the refusal or reset,
+// so it still classifies as one everywhere that matters; the one thing that
+// must not act on it is a re-send (see IsUnreachableAppPort).
+type UnreachableAppPortError struct {
+	Port   uint16
+	Reason string
+	Err    error
+}
+
+func (e *UnreachableAppPortError) Error() string {
+	return fmt.Sprintf("the app's port %d cannot be reached from the host: %s: %v", e.Port, e.Reason, e.Err)
+}
+
+func (e *UnreachableAppPortError) Unwrap() error { return e.Err }
+
+// IsUnreachableAppPort reports whether err is a test request sent to an address
+// the app can never be reached at: re-sending it cannot help.
+func IsUnreachableAppPort(err error) bool {
+	var u *UnreachableAppPortError
+	return errors.As(err, &u)
+}
+
+// unreachableAppPort asks reach, if set, whether the address a connection
+// failed at is one the app can never be reached at, and returns the error to
+// fail with if it is.
+func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, port string, refused error) error {
+	if reach == nil {
+		return nil
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return nil
+	}
+	reason := reach.UnreachableAppPort(ctx, host, uint16(n))
+	if reason == "" {
+		return nil
+	}
+	return &UnreachableAppPortError{Port: uint16(n), Reason: reason, Err: refused}
+}
+
+// urlHostPort is the host and port a request to u dials.
+func urlHostPort(u *url.URL) (string, string) {
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if u.Scheme == "https" {
+			port = "443"
+		}
+	}
+	return u.Hostname(), port
 }
 
 // preparedHTTPRequest holds the prepared HTTP request and client for execution.
@@ -538,7 +688,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
 	}
-	req.Header = ToHTTPHeader(tc.HTTPReq.Header)
+	req.Header = ToWireHTTPHeader(tc.HTTPReq.Header, tc.HTTPReq.HeaderLineLengths)
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
@@ -674,14 +824,31 @@ func IsTransportConnReset(err error) bool {
 // pre-response connection-refused (bounded, ctx-aware backoff, request body
 // rewound via GetBody). Any other error, or a real response, returns
 // immediately — so a genuinely crashed/unreachable app still fails fast after
-// the bounded retries, and a mid-response reset is never retried.
-func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request) (*http.Response, error) {
+// the bounded retries, and a mid-response reset is never retried. A refusal,
+// reset or drop at an address reach says the app can never be reached at fails
+// at once, saying why, as an *UnreachableAppPortError.
+func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability) (*http.Response, error) {
+	asked := false
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err == nil {
 			return resp, nil
 		}
-		if attempt >= maxConnRefusedRetries || !isPreResponseConnRefused(err) {
+		refused := isPreResponseConnRefused(err)
+		// A reset or drop is asked about too: at a published port where the
+		// app listens only on 127.0.0.1 in its container, docker accepts the
+		// connection and drops it, every time.
+		if !asked && (refused || IsTransportConnReset(err)) {
+			asked = true
+			host, port := urlHostPort(req.URL)
+			if unreachable := unreachableAppPort(ctx, reach, host, port, err); unreachable != nil {
+				return nil, unreachable
+			}
+		}
+		if !refused {
+			return nil, err
+		}
+		if attempt >= maxConnRefusedRetries {
 			return nil, err
 		}
 		// Only retry if we can faithfully re-send the body; otherwise stop so we
@@ -721,7 +888,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -798,7 +965,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -2489,10 +2656,11 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 func MakeCurlCommand(tc models.HTTPReq) string {
 	curl := fmt.Sprintf("curl --request %s \\\n", string(tc.Method))
 	curl = curl + fmt.Sprintf("  --url %s \\\n", tc.URL)
-	header := ToHTTPHeader(tc.Header)
-
-	for k, v := range ToYamlHTTPHeader(header) {
-		if k != "Content-Length" {
+	for k, lines := range ToWireHTTPHeader(tc.Header, tc.HeaderLineLengths) {
+		if k == "Content-Length" {
+			continue
+		}
+		for _, v := range lines {
 			curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
 		}
 	}

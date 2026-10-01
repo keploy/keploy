@@ -1,17 +1,27 @@
 package conn
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 // trackCloser wraps a response body and records whether Close was called.
@@ -288,4 +298,116 @@ func TestCaptureGRPC_SchemaKeyStamping(t *testing.T) {
 			t.Fatal("expected a captured test case")
 		}
 	})
+}
+
+// A request header that arrived on several lines is replayed on those lines,
+// in their order — recorded, written to disk, read back and sent. Folding them
+// into one comma-joined line is not the same request: an app that reads the
+// first value of `X_tenant: acme` twice gets "acme", while
+// `X_tenant: acme,acme` gets "acme,acme" and rejects it, as a production
+// service's header validation did for every such recorded test.
+//
+// A single line that carries commas stays one line: splitting `Accept: a, b`
+// into two lines breaks servers that map headers into a dict.
+func TestARepeatedRequestHeaderReplaysOnItsRecordedLines(t *testing.T) {
+	type seen struct{ tenant, accept, cookie []string }
+	var (
+		mu  sync.Mutex
+		got seen
+	)
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got = seen{r.Header.Values("X_tenant"), r.Header.Values("Accept"), r.Header.Values("Cookie")}
+		mu.Unlock()
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer app.Close()
+	appURL, err := url.Parse(app.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var appPort uint16
+	if _, err := fmt.Sscanf(appURL.Port(), "%d", &appPort); err != nil {
+		t.Fatal(err)
+	}
+
+	// Lines as the wire carried them. The two Cookie values carry commas of
+	// their own, which a length-free split could not put back.
+	wire := "GET /v1/session HTTP/1.1\r\n" +
+		"Host: " + appURL.Host + "\r\n" +
+		"X_tenant: acme\r\n" +
+		"Accept: a, b\r\n" +
+		"Cookie: a=1,2\r\n" +
+		"X_tenant: acme\r\n" +
+		"Cookie: b=3\r\n\r\n"
+	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(wire)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok"))}
+
+	tcChan := make(chan *models.TestCase, 1)
+	Capture(context.Background(), zap.NewNop(), tcChan, req, resp, time.Now(), time.Now(), models.IncomingOptions{}, false, false, appPort)
+	var recorded *models.TestCase
+	select {
+	case recorded = <-tcChan:
+	default:
+		t.Fatal("Capture emitted no test case")
+	}
+
+	// The recording as the test file stores it, and as replay reads it back.
+	doc, err := testdb.EncodeTestcase(*recorded, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := yamlLib.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var readBack yaml.NetworkTrafficDoc
+	if err := yamlLib.Unmarshal(onDisk, &readBack); err != nil {
+		t.Fatal(err)
+	}
+	tc, err := testdb.Decode(&readBack, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := pkg.SimulateHTTP(context.Background(), tc, "test-set-0", zap.NewNop(), pkg.SimulationConfig{APITimeout: 5}); err != nil {
+		t.Fatalf("SimulateHTTP: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := seen{tenant: []string{"acme", "acme"}, accept: []string{"a, b"}, cookie: []string{"a=1,2", "b=3"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the app got X_tenant %q, Accept %q, Cookie %q; recorded %q, %q, %q\n%s",
+			got.tenant, got.accept, got.cookie, want.tenant, want.accept, want.cookie, onDisk)
+	}
+}
+
+// A recording with no header on more than one line is stored exactly as it
+// always was: nothing new appears on disk for the common case.
+func TestARecordingWithoutRepeatedHeadersGainsNothingOnDisk(t *testing.T) {
+	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(
+		"GET /v1/session HTTP/1.1\r\nHost: localhost:8080\r\nAccept: a, b\r\nX_tenant: acme\r\n\r\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Set-Cookie": {"a=1", "b=2"}}, Body: io.NopCloser(strings.NewReader("ok"))}
+	tcChan := make(chan *models.TestCase, 1)
+	Capture(context.Background(), zap.NewNop(), tcChan, req, resp, time.Now(), time.Now(), models.IncomingOptions{}, false, false, 8080)
+	tc := <-tcChan
+	doc, err := testdb.EncodeTestcase(*tc, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := yamlLib.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The response is never re-sent, so its repeated Set-Cookie changes
+	// nothing either: a test case's response is only compared.
+	if bytes.Contains(onDisk, []byte("header_line_lengths")) {
+		t.Errorf("a recording without a repeated request header stores something new:\n%s", onDisk)
+	}
 }

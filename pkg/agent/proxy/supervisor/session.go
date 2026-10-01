@@ -174,6 +174,13 @@ type Session struct {
 	// parsers). nil ⇒ the package-global manager (single-session default).
 	Mgr *syncMock.SyncMockManager
 
+	// Orphans, when set, receives the spans this connection could not record
+	// (RecordOrphanWindow, OpenOrphanWindow) instead of Mgr. A caller whose
+	// test cases are checked against spans kept elsewhere sets it: a DaemonSet
+	// agent keeps them per pod, since its test cases can only ride their own
+	// pod's connections. nil ⇒ Mgr, as before.
+	Orphans OrphanSpans
+
 	// --- Internal bookkeeping ---
 
 	mockIncomplete   atomic.Bool
@@ -273,11 +280,22 @@ func (s *Session) RecordOrphanWindow(start, end time.Time) {
 	if s == nil {
 		return
 	}
+	if s.Orphans != nil {
+		s.Orphans.Record(start, end)
+		return
+	}
 	mgr := s.Mgr
 	if mgr == nil {
 		mgr = syncMock.Get()
 	}
 	mgr.RecordOrphanWindow(start, end)
+}
+
+// OrphanSpans is where a Session's unrecordable spans go instead of its manager
+// (Session.Orphans). *syncMock.Spans is one.
+type OrphanSpans interface {
+	Record(start, end time.Time)
+	Open(start time.Time) func()
 }
 
 // OpenOrphanWindow is the open-ended twin of RecordOrphanWindow, for a hole
@@ -291,6 +309,9 @@ func (s *Session) RecordOrphanWindow(start, end time.Time) {
 func (s *Session) OpenOrphanWindow(start time.Time) func() {
 	if s == nil {
 		return func() {}
+	}
+	if s.Orphans != nil {
+		return s.Orphans.Open(start)
 	}
 	mgr := s.Mgr
 	if mgr == nil {

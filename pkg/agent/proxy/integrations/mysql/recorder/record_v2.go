@@ -1634,8 +1634,10 @@ func assembleTextResultSetV2(ctx context.Context, logger *zap.Logger, sess *supe
 		}
 		row, _, err := rowscols.DecodeTextRow(ctx, logger, buf, rs.Columns)
 		if err != nil {
-			logger.Debug("V2: decode text row failed", zap.Error(err))
-			continue
+			// Not skipped: a mock without this row replays a different
+			// answer than the server gave. The error retires the parser, and
+			// the supervisor names the test cases the connection leaves out.
+			return ts, fmt.Errorf("decode text row %d: %w", len(rs.Rows), err)
 		}
 		rs.Rows = append(rs.Rows, row)
 	}
@@ -1680,8 +1682,8 @@ func assembleBinaryResultSetV2(ctx context.Context, logger *zap.Logger, sess *su
 		}
 		row, _, err := rowscols.DecodeBinaryRow(ctx, logger, buf, rs.Columns)
 		if err != nil {
-			logger.Debug("V2: decode binary row failed", zap.Error(err))
-			continue
+			// Not skipped, for the reason given in assembleTextResultSetV2.
+			return ts, fmt.Errorf("decode binary row %d: %w", len(rs.Rows), err)
 		}
 		rs.Rows = append(rs.Rows, row)
 	}

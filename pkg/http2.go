@@ -24,6 +24,7 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -535,20 +536,50 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 	return false
 }
 
+// unreachableGRPCAuthority is err, or, when a gRPC call lost its connection
+// after the dial went through (Unavailable) at an address reach says the app
+// can never be reached at, the *UnreachableAppPortError saying why: docker
+// accepts a connection to a published port and drops it when the app listens
+// only on 127.0.0.1 in its container.
+func unreachableGRPCAuthority(ctx context.Context, reach AppPortReachability, authority string, err error) error {
+	if reach == nil || status.Code(err) != codes.Unavailable {
+		return err
+	}
+	host, port, splitErr := net.SplitHostPort(authority)
+	if splitErr != nil {
+		return err
+	}
+	if unreachable := unreachableAppPort(ctx, reach, host, port, err); unreachable != nil {
+		return unreachable
+	}
+	return err
+}
+
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
 // dialTCPWithConnRefusedRetry dials authority over TCP, retrying a pure
 // connection-refused (the app is still coming up) up to maxConnRefusedRetries
 // with the shared growing backoff. A refused dial sent zero bytes and consumed
 // zero mocks, so the re-dial is idempotent; any other dial error, exhaustion of
-// the attempts, or a cancelled context returns immediately.
-func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, authority string) (net.Conn, error) {
+// the attempts, or a cancelled context returns immediately, and so does a
+// refusal at an address reach says the app can never be reached at.
+func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, authority string, reach AppPortReachability) (net.Conn, error) {
 	for attempt := 0; ; attempt++ {
 		conn, err := net.Dial("tcp", authority)
 		if err == nil {
 			return conn, nil
 		}
-		if attempt >= maxConnRefusedRetries || !isPreResponseConnRefused(err) {
+		if !isPreResponseConnRefused(err) {
+			return nil, err
+		}
+		if attempt == 0 {
+			if host, port, splitErr := net.SplitHostPort(authority); splitErr == nil {
+				if unreachable := unreachableAppPort(ctx, reach, host, port, err); unreachable != nil {
+					return nil, unreachable
+				}
+			}
+		}
+		if attempt >= maxConnRefusedRetries {
 			return nil, err
 		}
 		logger.Debug("gRPC dial refused; the app may still be coming up — retrying",
@@ -620,7 +651,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// consumed zero mocks, so the re-dial is safe. Mirrors the HTTP replay path's
 	// doRequestWithConnRefusedRetry — a genuinely-down app still fails fast after
 	// the bounded attempts.
-	conn, err := dialTCPWithConnRefusedRetry(ctx, logger, authority)
+	conn, err := dialTCPWithConnRefusedRetry(ctx, logger, authority, cfg.AppPortReachability)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
@@ -686,7 +717,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		ClientStreams: true,
 	}, path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stream: %w", err)
+		return nil, fmt.Errorf("failed to create stream: %w", unreachableGRPCAuthority(ctx, cfg.AppPortReachability, authority, err))
 	}
 
 	// Send every recorded request message, in order.
@@ -724,7 +755,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// Read the response headers
 	respHeaders, err := stream.Header()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get response headers: %w", err)
+		return nil, fmt.Errorf("failed to get response headers: %w", unreachableGRPCAuthority(ctx, cfg.AppPortReachability, authority, err))
 	}
 
 	// Drain the response stream to io.EOF.

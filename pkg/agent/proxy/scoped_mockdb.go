@@ -137,6 +137,46 @@ func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
 	return 0
 }
 
+// RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
+// pass straight through.
+func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
+	if r, ok := s.MockMemDb.(integrations.RecordedWindowsReader); ok {
+		return r.RecordedWindows()
+	}
+	return nil
+}
+
+// WindowChanged of a manager without the signal returns nil, a channel that
+// never fires — the same "no signal" a consumer sees when the assertion fails.
+func (s *scopedMockDb) WindowChanged() <-chan struct{} {
+	if p, ok := s.MockMemDb.(integrations.WindowPacer); ok {
+		return p.WindowChanged()
+	}
+	return nil
+}
+
+// The carry-over tier is a read tier like the others, so it goes through keep().
+func (s *scopedMockDb) GetCarryOverMocks() ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {
+		return s.keep(r.GetCarryOverMocks())
+	}
+	return nil, nil
+}
+
+func (s *scopedMockDb) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {
+		return s.keep(r.GetCarryOverMocksByKind(kind))
+	}
+	return nil, nil
+}
+
+func (s *scopedMockDb) StagingEpoch() uint64 {
+	if p, ok := s.MockMemDb.(integrations.WindowPacer); ok {
+		return p.StagingEpoch()
+	}
+	return 0
+}
+
 func (s *scopedMockDb) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
 	if bk, ok := s.MockMemDb.(interface {
 		GetFilteredMocksByKind(models.Kind) ([]*models.Mock, error)

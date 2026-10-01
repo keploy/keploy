@@ -2352,6 +2352,42 @@ func (a *AgentClient) BeginTestErrorCapture(ctx context.Context) error {
 	return nil
 }
 
+// PendingBefore asks the agent whether it may still hand over a test case or a
+// mock captured before `before` (GET /agent/record/pending). known is false when
+// it cannot tell: an agent that predates the route, or a capture without a
+// watermark (proxy mode). A recording's stop then goes by its streams' quiet
+// alone.
+func (a *AgentClient) PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error) {
+	if a.conf.Agent.AgentURI == "" {
+		return false, false, nil
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	url := fmt.Sprintf("%s/record/pending?before=%d", a.conf.Agent.AgentURI, before.UnixNano())
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, false, err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return false, false, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return false, false, nil // 404 (older agent), 501 (cannot tell)
+	}
+	var out struct {
+		Pending bool `json:"pending"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, false, err
+	}
+	return out.Pending, true, nil
+}
+
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
 // This should be called before cancelling contexts during application shutdown.
 // When the flag is set, connection errors will be logged as debug instead of error.
