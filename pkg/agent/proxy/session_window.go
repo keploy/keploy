@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"sort"
-	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -19,18 +18,23 @@ import (
 //
 // The index is built once per tree, by buildTier as it inserts: each
 // entry's tree ID in request-time order, and the entries with no request time,
-// which are in every window. A lookup resolves the IDs through the
-// tree, so it returns the mocks the tree holds NOW: a point update keeps the
-// mock's ID (it re-stamps the sort order), a deleted mock is skipped.
+// which are in every window. It belongs to that TreeDb and lives under its
+// lock (TreeDb.win). A lookup holds the tree's read lock from reading the index
+// to resolving its IDs, so it returns the mocks the tree holds NOW: a point
+// update keeps the mock's ID (it re-stamps the sort order), a deleted mock is
+// skipped.
 //
-// The only thing it cannot follow is a point update that changes a mock's ID or
-// request time, which nothing in the replay path does. stale records that one
-// happened, and GetSessionMocksInWindow then walks the tree as before.
+// An insert, or an update that stores a mock under another ID or at a request
+// time the index does not file its ID under, drops the index under the write
+// lock it takes to change the tree, and lookups on that tree walk it from then
+// on. Whether an update keeps the index right is decided against what the
+// index files, not against the mock the tree held before: a caller may have
+// edited that mock in place, and then it no longer says where the index filed
+// it.
 type sessionWindowIndex struct {
 	at      []time.Time // recorded request times, ascending
 	ids     []int       // ids[i] is the tree ID of the mock recorded at at[i]
 	undated []int       // tree IDs of the mocks with no request time
-	stale   atomic.Bool
 }
 
 // windowEntry is one mock as buildTier inserts it: its tree ID and its
@@ -39,6 +43,27 @@ type sessionWindowIndex struct {
 type windowEntry struct {
 	at time.Time
 	id int
+}
+
+// files reports whether the index files tree ID id under request time t.
+func (ix *sessionWindowIndex) files(id int, t time.Time) bool {
+	if t.IsZero() {
+		for _, u := range ix.undated {
+			if u == id {
+				return true
+			}
+		}
+		return false
+	}
+	// at and ids are sorted by (time, ID); find the first entry at or after
+	// (t, id).
+	i := sort.Search(len(ix.at), func(i int) bool {
+		if !ix.at[i].Equal(t) {
+			return ix.at[i].After(t)
+		}
+		return ix.ids[i] >= id
+	})
+	return i < len(ix.at) && ix.at[i].Equal(t) && ix.ids[i] == id
 }
 
 func newSessionWindowIndex(entries []windowEntry) *sessionWindowIndex {
@@ -99,20 +124,16 @@ func (m *MockManager) GetSessionMocksInWindow(start, end time.Time) ([]*models.M
 		return nil, err
 	}
 	m.treesMu.RLock()
-	tree, ix := m.unfiltered, m.unfilteredWindows
+	tree := m.unfiltered
 	m.treesMu.RUnlock()
 
-	var session []*models.Mock
-	if ix == nil || ix.stale.Load() {
+	session, indexed := tree.valuesInWindow(start, end)
+	if !indexed {
 		tree.rangeValues(func(v interface{}) bool {
 			if mk, ok := v.(*models.Mock); ok && mk != nil && recordedIn(mk, start, end) {
 				session = append(session, mk)
 			}
 			return true
-		})
-	} else {
-		session = tree.valuesInTreeOrder(ix.idsIn(start, end), func(mk *models.Mock) bool {
-			return recordedIn(mk, start, end)
 		})
 	}
 

@@ -54,9 +54,6 @@ type MockManager struct {
 	// legacy "all" trees (kept for compatibility with existing callers)
 	filtered   *TreeDb
 	unfiltered *TreeDb
-	// unfilteredWindows indexes unfiltered by recorded request time; it is
-	// built with the tree and swapped with it (see sessionWindowIndex).
-	unfilteredWindows *sessionWindowIndex
 
 	// startup tier (Wave 2) holds app-bootstrap traffic recorded BEFORE
 	// the first test window fires — Flyway migrations, Hibernate
@@ -2061,7 +2058,6 @@ type tierBuild struct {
 	stateless    map[models.Kind]map[string][]*models.Mock
 	touched      map[models.Kind]struct{}
 	maxSortOrder int64
-	windows      []windowEntry
 	inputs       int
 	v3Names      []string // filtered tier, for the DEBUG_TRACE line
 	v3Trace      bool
@@ -2075,8 +2071,9 @@ func (m *MockManager) buildTier(mocks []*models.Mock, filtered bool) tierBuild {
 		touched:   map[models.Kind]struct{}{},
 		inputs:    len(mocks),
 	}
+	var windows []windowEntry
 	if !filtered {
-		b.windows = make([]windowEntry, 0, len(mocks))
+		windows = make([]windowEntry, 0, len(mocks))
 	}
 	// DEBUG_TRACE: collect PostgresV3 mock names in the main loop only
 	// when Debug logging is enabled, so non-Debug runs don't allocate
@@ -2097,7 +2094,7 @@ func (m *MockManager) buildTier(mocks []*models.Mock, filtered bool) tierBuild {
 		mock.TestModeInfo.ID = index
 		b.tree.insert(mock.TestModeInfo, mock)
 		if !filtered {
-			b.windows = append(b.windows, windowEntry{at: mock.Spec.ReqTimestampMock, id: index})
+			windows = append(windows, windowEntry{at: mock.Spec.ReqTimestampMock, id: index})
 		}
 		k := mock.Kind
 		td := b.byKind[k]
@@ -2118,6 +2115,10 @@ func (m *MockManager) buildTier(mocks []*models.Mock, filtered bool) tierBuild {
 		if b.v3Trace && mock.Kind == models.PostgresV3 {
 			b.v3Names = append(b.v3Names, mock.Name)
 		}
+	}
+	if !filtered {
+		// Attached after the inserts, which would drop it.
+		b.tree.setWindowIndex(newSessionWindowIndex(windows))
 	}
 	return b
 }
@@ -2178,7 +2179,6 @@ func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
 		b.touched[k] = struct{}{}
 	}
 	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = b.tree, b.byKind, b.stateless
-	m.unfilteredWindows = newSessionWindowIndex(b.windows)
 	m.treesMu.Unlock()
 	if bump {
 		for k := range b.touched {
@@ -2193,20 +2193,11 @@ func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
 	// Snapshot the legacy tree pointer safely
 	m.treesMu.RLock()
-	globalTree, windows := m.unfiltered, m.unfilteredWindows
+	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
-	// The window index files a mock under its ID and request time. An update
-	// that changes either one moves the mock somewhere the index cannot follow,
-	// so the index stands down before the tree changes: a lookup racing the
-	// update walks the tree rather than read an index that is about to be
-	// wrong. A caller that edited the mock in place and passes it as both old
-	// and new hides any such change, so that counts as one.
-	if windows != nil && (old == new || new.TestModeInfo.ID != old.TestModeInfo.ID ||
-		!new.Spec.ReqTimestampMock.Equal(old.Spec.ReqTimestampMock)) {
-		windows.stale.Store(true)
-	}
 	new.MarkPooled() // matchers can reach it from here on; see models.Mock.pooled
-	// Update legacy/global tree first
+	// Update legacy/global tree first (it keeps its window index right; see
+	// TreeDb.update)
 	updatedGlobal := globalTree.update(old.TestModeInfo, new.TestModeInfo, new, *old)
 
 	oldK, newK := old.Kind, new.Kind
