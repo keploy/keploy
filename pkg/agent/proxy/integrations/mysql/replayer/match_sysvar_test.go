@@ -215,9 +215,9 @@ func TestBuildSessionVarResponse_UnknownVar_ReturnsNil(t *testing.T) {
 }
 
 // TestRejectsCrossVariableRead pins the blast radius of the pure-system-variable
-// rejection in matchQuery.
+// rejection in matchQueryLive.
 //
-// matchQuery is the SHARED MySQL replay path: proxy (MITM) and DaemonSet recordings
+// matchQueryLive is the SHARED MySQL replay path: proxy (MITM) and DaemonSet recordings
 // run through it too, not only the proxyless capture this work targets. The
 // rejection is subtractive, so it must fire ONLY when the candidate reads a
 // DIFFERENT variable. Rejecting on any textual difference would make a recorded

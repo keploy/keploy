@@ -33,8 +33,9 @@ const stmtIdentityCacheSize = 2048
 var stmtIdentityCache = newStmtIdentityCache()
 
 // newStmtIdentityCache builds the memo as a 2Q cache, not a plain LRU, for the
-// reason spelled out on newQuerySigCache: matchQuery re-derives the LIVE query's
-// identity once per candidate while scanning the pool, so under plain-LRU
+// reason spelled out on newQuerySigCache: the COM_STMT_EXECUTE and
+// COM_STMT_CLOSE comparisons re-derive the LIVE statement's identity once per
+// candidate while scanning the pool, so under plain-LRU
 // recency a pool holding more distinct texts than the cap would evict it between
 // candidates and re-scan it N times per command.
 func newStmtIdentityCache() *lru.TwoQueueCache[string, string] {
@@ -648,7 +649,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	)
 
 	// liveStatement is the incoming statement stripped of its inert leading
-	// comment — the same identity matchQuery compares on. It is the yardstick
+	// comment — the same identity matchQueryLive compares on. It is the yardstick
 	// for nearestMock below.
 	liveStatement := ""
 	switch m := req.Message.(type) {
@@ -1098,7 +1099,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// "SELECT @@... AS <var>, ..." captured every session variable in one
 		// result set. Serve <var>'s REAL recorded value as a correctly-framed
 		// single-column result set, instead of cross-serving a different var's
-		// mock (see Part A in matchQuery). Same spirit as the graceful
+		// mock (see rejectsCrossVariableRead). Same spirit as the graceful
 		// control-statement OK just below — deterministic, recorded data, no
 		// fabrication. Only runs when no exact mock matched, so recorded
 		// system-var reads are unaffected.
@@ -1106,7 +1107,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			if qp, ok := req.Message.(*mysql.QueryPacket); ok {
 				// First: an unrecorded single system-variable read is resolved
 				// from the connection-setup probe (see the block comment above
-				// and Part A in matchQuery). Ordered BEFORE the control-statement
+				// and rejectsCrossVariableRead). Ordered BEFORE the control-statement
 				// OK so the read is answered with its REAL recorded value rather
 				// than a bare OK.
 				if varName, isVarRead := parseSingleSystemVarRead(qp.Query); isVarRead {
@@ -1546,7 +1547,7 @@ func getQueryStructure(sql string) (string, error) {
 	return strings.Join(structureParts, "->"), nil
 }
 
-// Scores returned by matchQuery. Anything above zero makes the candidate
+// Scores returned by matchQueryLive. Anything above zero makes the candidate
 // servable in matchCommand, so only evidence that the two texts are the SAME
 // STATEMENT may score.
 const (
@@ -1691,7 +1692,7 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 	// sqlparser.IsDML parse that already runs per candidate just below.
 	//
 	// The rejection is narrowed to a DIFFERENT variable rather than applied to any
-	// textual difference. matchQuery is the SHARED MySQL replay path, used by proxy
+	// textual difference. matchQueryLive is the SHARED MySQL replay path, used by proxy
 	// (MITM) and DaemonSet recordings as well as the proxyless capture this change
 	// targets, and rejecting on text alone is subtractive: a recorded read of the
 	// SAME variable whose text differs only cosmetically (extra whitespace, a
@@ -1885,7 +1886,7 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 	// Query logic:
 	queryMatched := false
 	queryExactMatched := false
-	// Same identity rule as matchQuery: a leading observability prologue is not
+	// Same identity rule as matchQueryLive: a leading observability prologue is not
 	// part of the prepared statement. Without this an app that traces its
 	// statements would never register a query-exact EXECUTE, and the read-back
 	// FIFO in matchCommand — which keys off queryExactMatched — would fall back
@@ -2435,7 +2436,7 @@ func matchCloseWithQuery(expected, actual mysql.PacketBundle, expectedQuery, act
 // "SELECT @@session.transaction_read_only" value, which is the defect behind
 // "Could not map transaction isolation '0'".
 //
-// It deliberately compares parsed variable NAMES rather than raw text. matchQuery
+// It deliberately compares parsed variable NAMES rather than raw text. matchQueryLive
 // is the shared MySQL replay path used by proxy (MITM) and DaemonSet recordings as
 // well as proxyless capture, and rejecting on any textual difference would be
 // subtractive: a recorded read of the SAME variable differing only cosmetically (a
@@ -2446,10 +2447,9 @@ func matchCloseWithQuery(expected, actual mysql.PacketBundle, expectedQuery, act
 // recorded result set, so an existing recording that passes today could start
 // failing.
 //
-// Returns false for identical text, which is the common case and costs one string
-// comparison.
-// rejectsCrossVariableRead takes the live query's parseSingleSystemVarRead result
-// (actualVar, isPureVarRead), which the caller derives once per command.
+// actualVar and isPureVarRead are parseSingleSystemVarRead(actualQuery), which
+// the caller derives once per command. Returns false for identical text, which is
+// the common case and costs one string comparison.
 func rejectsCrossVariableRead(expectedQuery, actualQuery, actualVar string, isPureVarRead bool) bool {
 	if expectedQuery == actualQuery {
 		return false
