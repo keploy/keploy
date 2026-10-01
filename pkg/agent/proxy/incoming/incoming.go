@@ -38,6 +38,9 @@ type IngressHook interface {
 type IngressProxyManager struct {
 	mu     sync.Mutex
 	active map[uint16]proxyStop
+	// appAddr caches, per relocated port, the address the application is
+	// actually listening on when it is NOT loopback. See dialApp.
+	appAddr map[uint16]string
 	logger *zap.Logger
 	hooks  agent.Hooks
 	tcChan chan *models.TestCase
@@ -89,6 +92,7 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		hooks:       h,
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
+		appAddr:     make(map[uint16]string),
 		synchronous: cfg.Agent.Synchronous,
 		mapping:     !cfg.DisableMapping,
 		sampling:    false,
@@ -476,7 +480,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 	if util.IsTLSClientHello(preface) {
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
-		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
+		upConn, err := pm.dialApp(finalAppAddr, logger)
 		if err != nil {
 			logger.Error("Failed to connect to upstream application for a TLS connection. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
 				zap.String("final_app_addr", finalAppAddr),
@@ -503,7 +507,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// (the original) instead.
 		actualPort := appPort
 
-		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
+		upConn, err := pm.dialApp(finalAppAddr, logger)
 		if err != nil {
 			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
 				zap.String("final_app_addr", finalAppAddr),
