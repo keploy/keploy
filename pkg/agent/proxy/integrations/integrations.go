@@ -341,12 +341,13 @@ type MockReader interface {
 	// session / per-test pools.
 	GetConnectionMocks(connID string) ([]*models.Mock, error)
 
-	// SessionMockHitCounts returns per-mock atomic HitCount values for
-	// session- and connection-scoped mocks. Used by replay summary
-	// output and "which reusable mocks actually got reused?" telemetry.
-	// Key is mock.Name; value is the atomic counter's current read.
-	// Inherently racy as a snapshot — counters may increment during
-	// iteration — but that's tolerable for observability.
+	// SessionMockHitCounts returns the match counts of the session- and
+	// connection-scoped mocks in the pool, counted by MarkMockAsUsed over
+	// the current test set. Used by replay summary output and "which
+	// reusable mocks actually got reused?" telemetry. Key is mock.Name
+	// (mocks sharing a name share a count). Inherently racy as a
+	// snapshot — counters may increment during iteration — but that's
+	// tolerable for observability.
 	SessionMockHitCounts() map[string]uint64
 }
 

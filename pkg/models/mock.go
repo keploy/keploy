@@ -171,12 +171,11 @@ func (m *Mock) HydrateResponse() error {
 // struct is the right home for cached derived state that must not bleed
 // into recordings.
 //
-// Lifetime and HitCount were added by the unification plan: Lifetime is
-// the typed, cached form of the on-disk Spec.Metadata["type"] tag so
-// hot-path matchers never probe the metadata map; HitCount is an atomic
-// reuse counter used for telemetry of session/connection-scoped mocks
-// (how many times was this reusable mock actually matched across the
-// test run).
+// Lifetime was added by the unification plan: it is the typed, cached form
+// of the on-disk Spec.Metadata["type"] tag so hot-path matchers never probe
+// the metadata map. Match counts are not kept here: matchers copy pooled mocks
+// whole while other connections count matches against them, so the replay
+// mock manager keeps the counts itself.
 type TestModeInfo struct {
 	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
 	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
@@ -198,15 +197,6 @@ type TestModeInfo struct {
 	// runs at every ingest site (disk load, StoreMocks, syncMock).
 	// Runtime-only, untagged; re-derived fresh on each reload.
 	LifetimeDerived bool `json:"-" bson:"-"`
-
-	// HitCount is incremented atomically on every successful match of
-	// session- or connection-scoped mocks (per-test mocks are consumed
-	// on match so their count is always 0 or 1). Zero-cost when idle
-	// (single LOCK XADD on x86, ~1 ns). Surfaced via MockMemDb's
-	// SessionMockHitCounts for "which reusable mocks actually got
-	// used?" observability — non-zero helps confirm tagging; zero for
-	// a long-lived mock hints at dead recordings worth re-capturing.
-	HitCount uint64 `json:"-" bson:"-"`
 
 	// IsStartup marks startup-window traffic: a mock captured either before
 	// the first inbound request (classic app-bootstrap, e.g. an AWS Secret
@@ -929,34 +919,16 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 
 	// Copy top-level fields explicitly to avoid copying embedded lock fields.
-	// HitCount is intentionally NOT carried over: the counter is bound to
-	// the live mock pool instance (it tracks matches against *this*
-	// agent's in-memory pool), so a deep copy starts with a fresh counter.
-	// Callers who want cumulative counts across copies should aggregate at
-	// the MockMemDb level, not via clones. Lifetime + LifetimeDerived ARE
-	// carried over — they're classification state, not runtime counters;
-	// skipping LifetimeDerived would cause DeriveLifetime to re-run on
-	// the copy and double-increment LegacyKindFallbackFires for untagged
-	// kinds.
-	id := m.TestModeInfo.ID
-	isFiltered := m.TestModeInfo.IsFiltered
-	sortOrder := m.TestModeInfo.SortOrder
-	lifetime := m.TestModeInfo.Lifetime
-	lifetimeDerived := m.TestModeInfo.LifetimeDerived
-	isStartup := m.TestModeInfo.IsStartup
+	// TestModeInfo is carried over whole: Lifetime + LifetimeDerived are
+	// classification state, and skipping LifetimeDerived would cause
+	// DeriveLifetime to re-run on the copy and double-increment
+	// LegacyKindFallbackFires for untagged kinds.
 	c := Mock{
-		Version: m.Version,
-		Name:    m.Name,
-		Kind:    m.Kind,
-		Spec:    m.Spec,
-		TestModeInfo: TestModeInfo{
-			ID:              id,
-			IsFiltered:      isFiltered,
-			SortOrder:       sortOrder,
-			Lifetime:        lifetime,
-			LifetimeDerived: lifetimeDerived,
-			IsStartup:       isStartup,
-		},
+		Version:      m.Version,
+		Name:         m.Name,
+		Kind:         m.Kind,
+		Spec:         m.Spec,
+		TestModeInfo: m.TestModeInfo,
 		ConnectionID: m.ConnectionID,
 	}
 

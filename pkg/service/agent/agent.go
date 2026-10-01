@@ -712,11 +712,11 @@ func (a *Agent) loadAsyncIntoProxy(asyncMocks []*models.Mock) {
 // Caveat: because the stored slices carry pointer copies (not deep
 // copies) of the caller's mocks, DeriveLifetime's write to
 // TestModeInfo.Lifetime is visible through the caller's slice as
-// well. This is the intended semantic — there's exactly ONE Mock
-// object per name per session and every consumer of it (including
-// the caller) benefits from the cached Lifetime. Do NOT introduce a
-// deep copy here unless a concrete mutation-safety regression lands
-// first.
+// well. This is the intended semantic — the agent's storage shares the
+// caller's objects, so the caller benefits from the cached Lifetime too
+// (the proxy's pools hold the copies UpdateMockParams' filters make of
+// them). Do NOT introduce a deep copy here unless a concrete
+// mutation-safety regression lands first.
 func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
 	storage := &ClientMockStorage{
 		filtered:   make([]*models.Mock, len(filtered)),
@@ -725,13 +725,11 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 
 	// Shallow copy the slices — only the outer backing array is
 	// duplicated, the *models.Mock pointers are shared with the
-	// caller's slices. This is INTENTIONAL and load-bearing: matchers
-	// look up mocks via pointer identity in MockManager's trees and
-	// per-connID pools, and HitCount/Lifetime are bumped on the shared
-	// Mock object so observability is consistent across the stack (see
-	// the caveat block before this function for the full rationale).
-	// Do NOT switch to a deep copy without coordinated updates at
-	// every downstream site.
+	// caller's slices, so the DeriveLifetime below classifies the
+	// caller's mocks too (see the caveat block before this function).
+	// The proxy's pools hold the copies UpdateMockParams' filters make
+	// of these objects (pkg/util.go), except when a call carries no
+	// test window and the filters pass them through.
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
 
