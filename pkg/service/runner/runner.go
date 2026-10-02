@@ -443,13 +443,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 
 	// Disk fetch uses the widest window; per-test containment is
 	// enforced by the agent via UpdateMockParams at step time.
-	filtered, err := r.mockDB.GetFilteredMocks(gCtx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	filtered, unfiltered, err := r.loadMocks(gCtx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get filtered mocks: %w", err)
-	}
-	unfiltered, err := r.mockDB.GetUnFilteredMocks(gCtx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
+		return nil, err
 	}
 
 	// mockKindByName lets the mismatch-reporting path filter DNS
@@ -527,6 +523,29 @@ func (r *Runner) strictMockWindow() bool {
 		return true
 	}
 	return r.config.Test.StrictMockWindow
+}
+
+// loadMocks returns the test set's per-test and session pools over the widest
+// window, from one read of its mock file when the mock store can (see
+// keployPkg.TestSetMocksReader), otherwise with one read per pool.
+func (r *Runner) loadMocks(ctx context.Context, testSetID string, mocksThatHaveMappings, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, err error) {
+	if reader, ok := r.mockDB.(keployPkg.TestSetMocksReader); ok {
+		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+		if err != nil {
+			// The pass that failed is the one the per-test pool was read in.
+			return nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+		}
+		return set.Filtered, set.Unfiltered, nil
+	}
+	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+	}
+	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
+	}
+	return filtered, unfiltered, nil
 }
 
 // loadMappingsForSet returns the full per-test-case mapping and the

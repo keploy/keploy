@@ -1,15 +1,18 @@
 package proxy
 
 import (
+	"cmp"
+	"math"
+	"slices"
 	"sort"
-	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// sessionWindowIndex finds the session-tree mocks recorded inside a time window
-// without walking the tree.
+// windowIndex finds a tree's entries recorded inside a time window without
+// walking the tree.
 //
 // Lax mode promotes a recording's per-test MySQL data mocks into the session
 // tier, so the session tree holds every test's traffic. A matcher that wants the
@@ -17,70 +20,145 @@ import (
 // walk grew with each test the set held: a replay's total cost grew with the
 // square of its length.
 //
-// The index is built once per tree, by setUnFilteredMocks as it inserts: each
-// entry's tree ID in request-time order, and the entries with no request time,
-// which are in every window. A lookup resolves the IDs through the
-// tree, so it returns the mocks the tree holds NOW: a point update keeps the
-// mock's ID (it re-stamps the sort order), a deleted mock is skipped.
+// The index belongs to one TreeDb and lives under its lock (TreeDb.win). It is
+// built from the tree's own entries by the first windowed lookup on that tree,
+// so a staging whose session tree nobody looks up by window (a replay without
+// MySQL traffic, or a test that issues no query) never pays for it. A lookup
+// holds the tree's lock from reading the index to resolving its IDs, so it
+// returns the mocks the tree holds NOW: a point update keeps the mock's ID (it
+// re-stamps the sort order), a deleted mock is skipped.
 //
-// The only thing it cannot follow is a point update that changes a mock's ID or
-// request time, which nothing in the replay path does. stale records that one
-// happened, and GetSessionMocksInWindow then walks the tree as before.
-type sessionWindowIndex struct {
-	at      []time.Time // recorded request times, ascending
-	ids     []int       // ids[i] is the tree ID of the mock recorded at at[i]
-	undated []int       // tree IDs of the mocks with no request time
-	stale   atomic.Bool
+// An insert, or an update that stores a mock under another ID or at a request
+// time the index does not file its ID under, drops the index under the write
+// lock it takes to change the tree, and the next lookup builds it again.
+// Whether an update keeps the index right is decided against what the index
+// files, not against the mock the tree held before: a caller may have edited
+// that mock in place, and then it no longer says where the index filed it.
+//
+// A lookup resolves IDs through the tree's ID index, which holds one entry per
+// ID. When some entry cannot be resolved that way (an update moved a mock onto
+// an ID another entry held, or one of two entries sharing an ID off it; no
+// matcher does either), the index is built walk-only: lookups walk the tree
+// until the next staging.
+//
+// Times are kept as Unix nanoseconds, which compare far faster than time.Time.
+// Recorded request times are decoded, so they carry no monotonic reading and
+// their order is their wall-clock order, the order recordedIn compares in.
+type windowIndex struct {
+	dated   []windowEntry // ascending by request time, then tree ID
+	undated []int         // tree IDs of the entries with no request time: in every window
+	// odd holds the tree IDs of the entries whose request time Unix
+	// nanoseconds cannot hold (before 1677-09-21T00:12:43.145224192Z or after
+	// 2262-04-11T23:47:16.854775807Z); every lookup checks them one by one.
+	odd []int
+	// walk is set when some entry of the tree cannot be resolved through the
+	// tree's ID index, which holds one entry per ID (an update moved a mock
+	// onto an ID another entry held, or one of two entries sharing an ID off
+	// it): lookups walk the tree instead.
+	walk bool
 }
 
-// windowEntry is one mock as setUnFilteredMocks inserts it: its tree ID and its
-// recorded request time. It is captured at insertion rather than read back from
-// the mock, because the same *Mock listed twice is inserted under two IDs.
+// byTimeThenID orders dated entries.
+func byTimeThenID(a, b windowEntry) int {
+	if c := cmp.Compare(a.ns, b.ns); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.id, b.id)
+}
+
+// files reports whether the index files tree ID id under request time t.
+func (ix *windowIndex) files(id int, t time.Time) bool {
+	if t.IsZero() {
+		return slices.Contains(ix.undated, id)
+	}
+	ns, ok := unixNs(t)
+	if !ok {
+		return slices.Contains(ix.odd, id)
+	}
+	_, found := slices.BinarySearchFunc(ix.dated, windowEntry{ns, id}, byTimeThenID)
+	return found
+}
+
+// windowEntry is one dated tree entry: its request time and its tree ID.
 type windowEntry struct {
-	at time.Time
+	ns int64
 	id int
 }
 
-func newSessionWindowIndex(entries []windowEntry) *sessionWindowIndex {
-	ix := &sessionWindowIndex{}
-	dated := make([]windowEntry, 0, len(entries))
-	for _, e := range entries {
-		if e.at.IsZero() {
-			ix.undated = append(ix.undated, e.id)
+var (
+	minNsTime = time.Unix(0, math.MinInt64)
+	maxNsTime = time.Unix(0, math.MaxInt64)
+)
+
+// unixNs reports t as Unix nanoseconds, and whether they can hold it.
+func unixNs(t time.Time) (int64, bool) {
+	if t.Before(minNsTime) || t.After(maxNsTime) {
+		return 0, false
+	}
+	return t.UnixNano(), true
+}
+
+// buildWindowIndexLocked indexes db's entries. db.mu must be held for writing.
+func (db *TreeDb) buildWindowIndexLocked() *windowIndex {
+	// Every ID index entry maps an ID to a live key with that ID: the tree's
+	// changes remove the ID they remove. So the ID index has an entry for each
+	// of the tree's entries exactly when they are as many, and otherwise some
+	// entry cannot be resolved by its ID.
+	if len(db.idIndex) != db.rbt.Size() {
+		return &windowIndex{walk: true}
+	}
+	ix := &windowIndex{dated: make([]windowEntry, 0, db.rbt.Size())}
+	it := db.rbt.Iterator()
+	for it.Next() {
+		key, ok := it.Key().(models.TestModeInfo)
+		if !ok {
 			continue
 		}
-		dated = append(dated, e)
-	}
-	// The staging path sorts the reusable pool by request time, so in strict
-	// mode this is a check, not a sort. In lax mode the per-test mocks it
-	// promotes are appended after that pool, and the entries are sorted here.
-	less := func(i, j int) bool {
-		if dated[i].at.Equal(dated[j].at) {
-			return dated[i].id < dated[j].id
+		mk, ok := it.Value().(*models.Mock)
+		if !ok || mk == nil {
+			continue
 		}
-		return dated[i].at.Before(dated[j].at)
+		at := mk.Spec.ReqTimestampMock
+		if at.IsZero() {
+			ix.undated = append(ix.undated, key.ID)
+			continue
+		}
+		ns, ok := unixNs(at)
+		if !ok {
+			ix.odd = append(ix.odd, key.ID)
+			continue
+		}
+		ix.dated = append(ix.dated, windowEntry{ns, key.ID})
 	}
-	if !sort.SliceIsSorted(dated, less) {
-		sort.Slice(dated, less)
-	}
-	ix.at = make([]time.Time, len(dated))
-	ix.ids = make([]int, len(dated))
-	for i, e := range dated {
-		ix.at[i], ix.ids[i] = e.at, e.id
+	// The tree walks in sort order, which a staged pool takes from its request
+	// times, so this is usually one ordered pass. Lax mode appends the
+	// per-test mocks it promotes after the reusable pool, two ordered runs.
+	if !slices.IsSortedFunc(ix.dated, byTimeThenID) {
+		slices.SortFunc(ix.dated, byTimeThenID)
 	}
 	return ix
 }
 
-// idsIn returns the tree IDs of the mocks recorded in [start, end] and of the
-// undated ones.
-func (ix *sessionWindowIndex) idsIn(start, end time.Time) []int {
-	lo := sort.Search(len(ix.at), func(i int) bool { return !ix.at[i].Before(start) })
-	hi := sort.Search(len(ix.at), func(i int) bool { return ix.at[i].After(end) })
-	out := make([]int, 0, len(ix.undated)+max(hi-lo, 0))
-	if hi > lo {
-		out = append(out, ix.ids[lo:hi]...)
+// idsIn returns the tree IDs that can hold an entry recorded in [start, end]:
+// the dated ones inside it, the undated ones and the odd ones.
+func (ix *windowIndex) idsIn(start, end time.Time) []int {
+	lo, hi := 0, len(ix.dated)
+	if ns, ok := unixNs(start); ok {
+		lo = sort.Search(len(ix.dated), func(i int) bool { return ix.dated[i].ns >= ns })
+	} else if start.After(maxNsTime) {
+		lo = len(ix.dated)
 	}
-	return append(out, ix.undated...)
+	if ns, ok := unixNs(end); ok {
+		hi = sort.Search(len(ix.dated), func(i int) bool { return ix.dated[i].ns > ns })
+	} else if end.Before(minNsTime) {
+		hi = 0
+	}
+	out := make([]int, 0, len(ix.undated)+len(ix.odd)+max(hi-lo, 0))
+	for i := lo; i < hi; i++ {
+		out = append(out, ix.dated[i].id)
+	}
+	out = append(out, ix.undated...)
+	return append(out, ix.odd...)
 }
 
 // recordedIn reports whether mk belongs to the window [start, end]: its request
@@ -99,22 +177,10 @@ func (m *MockManager) GetSessionMocksInWindow(start, end time.Time) ([]*models.M
 		return nil, err
 	}
 	m.treesMu.RLock()
-	tree, ix := m.unfiltered, m.unfilteredWindows
+	tree := m.unfiltered
 	m.treesMu.RUnlock()
 
-	var session []*models.Mock
-	if ix == nil || ix.stale.Load() {
-		tree.rangeValues(func(v interface{}) bool {
-			if mk, ok := v.(*models.Mock); ok && mk != nil && recordedIn(mk, start, end) {
-				session = append(session, mk)
-			}
-			return true
-		})
-	} else {
-		session = tree.valuesInTreeOrder(ix.idsIn(start, end), func(mk *models.Mock) bool {
-			return recordedIn(mk, start, end)
-		})
-	}
+	session := tree.valuesInWindow(start, end)
 
 	// The same union GetSessionMocks builds, over the narrowed halves: the
 	// predicate is per mock, so filtering before or after the union keeps the
@@ -137,4 +203,40 @@ func (m *MockManager) GetSessionMocksInWindow(start, end time.Time) ([]*models.M
 		}
 	}
 	return out, nil
+}
+
+// RangeSessionMocksWithKey implements integrations.SessionKeyReader: the
+// GetSessionMocks snapshot narrowed to the mocks ix files under key, in the
+// same order, found through the startup and session trees' key indexes.
+func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	m.treesMu.RLock()
+	startup, session := m.startup, m.unfiltered
+	m.treesMu.RUnlock()
+	// GetSessionMocks dedups by pointer only when the startup tier holds
+	// anything, and then across both tiers.
+	if startup == nil || startup.size() == 0 {
+		session.rangeKeyed(ix, key, fn)
+		return nil
+	}
+	var seen map[*models.Mock]struct{}
+	stopped := false
+	visit := func(mk *models.Mock) bool {
+		if _, dup := seen[mk]; dup {
+			return true
+		}
+		if seen == nil {
+			seen = make(map[*models.Mock]struct{}, 8)
+		}
+		seen[mk] = struct{}{}
+		if !fn(mk) {
+			stopped = true
+			return false
+		}
+		return true
+	}
+	startup.rangeKeyed(ix, key, visit)
+	if !stopped {
+		session.rangeKeyed(ix, key, visit)
+	}
+	return nil
 }

@@ -6,8 +6,10 @@ package proxy
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/emirpasic/gods/trees/redblacktree"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -32,6 +34,13 @@ type TreeDb struct {
 	rbt     *redblacktree.Tree
 	idIndex map[int]models.TestModeInfo // O(1) lookup by ID
 	mu      sync.RWMutex                // RWMutex: many reads, few writes
+	// win indexes the tree's entries by recorded request time once a
+	// windowed lookup has asked for it. Built, read and dropped under mu; see
+	// windowIndex.
+	win *windowIndex
+	// keyed holds a keyIndex per integrations.MockIndex a lookup has used.
+	// Built, read and dropped under mu.
+	keyed map[*integrations.MockIndex]*keyIndex
 }
 
 func NewTreeDb(comparator func(a, b interface{}) int) *TreeDb {
@@ -43,6 +52,8 @@ func NewTreeDb(comparator func(a, b interface{}) int) *TreeDb {
 
 func (db *TreeDb) insert(key interface{}, obj interface{}) {
 	db.mu.Lock()
+	db.win = nil   // an entry the window index does not know
+	db.keyed = nil // nor do the key indexes
 	db.rbt.Put(key, obj)
 	// Update ID index
 	if info, ok := key.(models.TestModeInfo); ok {
@@ -137,6 +148,8 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 		found = false
 	}
 	if found {
+		db.dropWindowUnlessFiled(oldInfo.ID, newInfo.ID, newObj)
+		db.followKeyedLocked(oldKey, newKey, cur, newObj)
 		db.rbt.Remove(oldKey)
 		db.rbt.Put(newKey, newObj)
 		// Update ID index
@@ -176,6 +189,8 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 	}
 
 	// Found by ID, update it
+	db.dropWindowUnlessFiled(currentKey.ID, newInfo.ID, newObj)
+	db.followKeyedLocked(currentKey, newKey, cur, newObj)
 	db.rbt.Remove(currentKey)
 	db.rbt.Put(newKey, newObj)
 	delete(db.idIndex, oldInfo.ID)
@@ -189,7 +204,16 @@ func (db *TreeDb) deleteAll() {
 	db.mu.Lock()
 	db.rbt.Clear()
 	db.idIndex = make(map[int]models.TestModeInfo) // Reset ID index
+	db.win = nil
+	db.keyed = nil
 	db.mu.Unlock()
+}
+
+// size returns the number of entries the tree holds.
+func (db *TreeDb) size() int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.rbt.Size()
 }
 
 // rangeValues iterates without allocating a []interface{} snapshot.
@@ -204,16 +228,62 @@ func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
 	db.mu.RUnlock()
 }
 
-// valuesInTreeOrder resolves tree IDs to the mocks the tree holds under them now
-// and returns those keep accepts, in tree order. An ID that is no longer in the
-// tree is skipped.
-func (db *TreeDb) valuesInTreeOrder(ids []int, keep func(*models.Mock) bool) []*models.Mock {
-	type hit struct {
-		key interface{}
-		mk  *models.Mock
+// dropWindowUnlessFiled drops the window index unless it stays right once
+// newObj is stored under newID in place of the entry under oldID: the ID does
+// not change, and the index files it under newObj's request time. db.mu must
+// be held for writing.
+func (db *TreeDb) dropWindowUnlessFiled(oldID, newID int, newObj interface{}) {
+	if db.win == nil || db.win.walk {
+		return // a walk-only index holds nothing an update can make wrong
 	}
+	n, ok := newObj.(*models.Mock)
+	if oldID != newID || !ok || n == nil || !db.win.files(newID, n.Spec.ReqTimestampMock) {
+		db.win = nil
+	}
+}
+
+// valuesInWindow returns, in tree order, the mocks the tree holds recorded in
+// [start, end] or undated, found through the window index, which the first
+// lookup after a staging or a change builds. It holds the tree's lock from
+// reading the index to resolving its IDs, so no change can land in between.
+func (db *TreeDb) valuesInWindow(start, end time.Time) []*models.Mock {
 	db.mu.RLock()
-	hits := make([]hit, 0, len(ids))
+	if db.win == nil {
+		db.mu.RUnlock()
+		db.mu.Lock()
+		if db.win == nil {
+			db.win = db.buildWindowIndexLocked()
+		}
+		hits := db.windowHitsLocked(start, end)
+		db.mu.Unlock()
+		return db.inTreeOrder(hits)
+	}
+	hits := db.windowHitsLocked(start, end)
+	db.mu.RUnlock()
+	return db.inTreeOrder(hits)
+}
+
+type windowHit struct {
+	key interface{}
+	mk  *models.Mock
+}
+
+// windowHitsLocked resolves the index's candidates for [start, end] to the
+// mocks the tree holds under them and keeps those recorded in the window.
+// db.mu must be held, and db.win set.
+func (db *TreeDb) windowHitsLocked(start, end time.Time) []windowHit {
+	if db.win.walk {
+		var hits []windowHit
+		it := db.rbt.Iterator()
+		for it.Next() {
+			if mk, isMock := it.Value().(*models.Mock); isMock && mk != nil && recordedIn(mk, start, end) {
+				hits = append(hits, windowHit{it.Key(), mk})
+			}
+		}
+		return hits
+	}
+	ids := db.win.idsIn(start, end)
+	hits := make([]windowHit, 0, len(ids))
 	for _, id := range ids {
 		key, ok := db.idIndex[id]
 		if !ok {
@@ -223,12 +293,17 @@ func (db *TreeDb) valuesInTreeOrder(ids []int, keep func(*models.Mock) bool) []*
 		if !found {
 			continue
 		}
-		if mk, isMock := v.(*models.Mock); isMock && mk != nil && keep(mk) {
-			hits = append(hits, hit{key, mk})
+		if mk, isMock := v.(*models.Mock); isMock && mk != nil && recordedIn(mk, start, end) {
+			hits = append(hits, windowHit{key, mk})
 		}
 	}
+	return hits
+}
+
+// inTreeOrder sorts hits by the tree's comparator, which never changes, so it
+// needs no lock.
+func (db *TreeDb) inTreeOrder(hits []windowHit) []*models.Mock {
 	cmp := db.rbt.Comparator
-	db.mu.RUnlock()
 	sort.Slice(hits, func(i, j int) bool { return cmp(hits[i].key, hits[j].key) < 0 })
 	out := make([]*models.Mock, len(hits))
 	for i, h := range hits {

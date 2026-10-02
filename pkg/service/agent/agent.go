@@ -712,11 +712,11 @@ func (a *Agent) loadAsyncIntoProxy(asyncMocks []*models.Mock) {
 // Caveat: because the stored slices carry pointer copies (not deep
 // copies) of the caller's mocks, DeriveLifetime's write to
 // TestModeInfo.Lifetime is visible through the caller's slice as
-// well. This is the intended semantic — there's exactly ONE Mock
-// object per name per session and every consumer of it (including
-// the caller) benefits from the cached Lifetime. Do NOT introduce a
-// deep copy here unless a concrete mutation-safety regression lands
-// first.
+// well. This is the intended semantic — the agent's storage shares the
+// caller's objects, so the caller benefits from the cached Lifetime too
+// (the proxy's pools hold the copies UpdateMockParams' filters make of
+// them). Do NOT introduce a deep copy here unless a concrete
+// mutation-safety regression lands first.
 func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
 	storage := &ClientMockStorage{
 		filtered:   make([]*models.Mock, len(filtered)),
@@ -725,13 +725,11 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 
 	// Shallow copy the slices — only the outer backing array is
 	// duplicated, the *models.Mock pointers are shared with the
-	// caller's slices. This is INTENTIONAL and load-bearing: matchers
-	// look up mocks via pointer identity in MockManager's trees and
-	// per-connID pools, and HitCount/Lifetime are bumped on the shared
-	// Mock object so observability is consistent across the stack (see
-	// the caveat block before this function for the full rationale).
-	// Do NOT switch to a deep copy without coordinated updates at
-	// every downstream site.
+	// caller's slices, so the DeriveLifetime below classifies the
+	// caller's mocks too (see the caveat block before this function).
+	// The proxy's pools hold the copies UpdateMockParams' filters make
+	// of these objects (pkg/util.go), except when a call carries no
+	// test window and the filters pass them through.
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
 
@@ -882,6 +880,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		disk.Finalize()
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
 			zap.Int("onDisk", disk.Len()),
+			zap.Int("spilledResponses", disk.SpilledResponses()),
 			zap.Int64("diskBytes", disk.DiskBytes()),
 			zap.Int("residentPerTest", len(storage.filtered)),
 			zap.Int("residentConfig", len(storage.unfiltered)))
@@ -1387,7 +1386,13 @@ func (a *Agent) ReadsConsumedForPerTestOnly(svc Service) bool {
 	return ok && s == a
 }
 
-// filterOutDeleted filters out deleted mocks based on totalConsumedMocks
+// filterOutDeleted filters out deleted mocks based on totalConsumedMocks.
+//
+// A surviving mock whose recorded consumption state differs is returned as a
+// copy carrying that state; the input is never written. The filters hand it
+// fresh copies, but with no test window they pass the stored mocks through, and
+// a stored mock staged by an earlier call is in the proxy's pools, where
+// matchers read it concurrently.
 func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[string]models.MockState) []*models.Mock {
 	filtered := make([]*models.Mock, 0, len(mocks))
 	for _, m := range mocks {
@@ -1399,7 +1404,8 @@ func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[st
 		// we are picking mocks that are not consumed till now (not present in map),
 		// and, mocks that are updated.
 		if k, ok := totalConsumedMocks[m.Name]; !ok || k.Usage != models.Deleted {
-			if ok {
+			if ok && (m.TestModeInfo.IsFiltered != k.IsFiltered || m.TestModeInfo.SortOrder != k.SortOrder) {
+				m = m.ShallowCopy()
 				m.TestModeInfo.IsFiltered = k.IsFiltered
 				m.TestModeInfo.SortOrder = k.SortOrder
 			}

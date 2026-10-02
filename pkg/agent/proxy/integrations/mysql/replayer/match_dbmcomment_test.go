@@ -35,7 +35,7 @@ const (
 )
 
 // queryBundle builds a COM_QUERY PacketBundle whose PayloadLength is the real
-// wire length (1 command byte + the SQL text), which is what matchQuery
+// wire length (1 command byte + the SQL text), which is what matchQueryLive
 // compares.
 func queryBundle(sql string) mysql.PacketBundle {
 	return mysql.PacketBundle{

@@ -216,6 +216,8 @@ type prInstr struct {
 	// the last answer, cleared by a store as the real client clears it.
 	perTestScope bool
 	scopeSaid    bool
+	// storedFiltered and storedUnfiltered are the pools of the last store.
+	storedFiltered, storedUnfiltered []*models.Mock
 }
 
 func (f *prInstr) AgentReadsConsumedPerTestOnly() bool {
@@ -257,10 +259,11 @@ func (f *prInstr) BeforeTestSetCompose(context.Context, string, string, bool) er
 func (f *prInstr) AfterTestRun(context.Context, string, []string, models.TestCoverage) error {
 	return nil
 }
-func (f *prInstr) StoreMocks(context.Context, []*models.Mock, []*models.Mock) error {
+func (f *prInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.scopeSaid = false
+	f.storedFiltered, f.storedUnfiltered = filtered, unfiltered
 	return nil
 }
 func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {

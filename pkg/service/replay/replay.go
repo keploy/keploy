@@ -1477,6 +1477,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// (the same reason DNS mocks are excluded). MockEntry carries no tier, so
 	// we derive it from the loaded mocks (which do, via TestModeInfo.Lifetime).
 	reusableMockNames := make(map[string]bool)
+	// mockLookup maps a mock's name to its summary, protocol and target, for
+	// the report: the per-test and session mocks as recorded. Built as the
+	// mocks are loaded (loadTestSetMocks), or below, before the tests run,
+	// when they are not loaded here.
+	var mockLookup map[string]mockDisplayInfo
 	addKinds := func(mocks []*models.Mock) {
 		for _, m := range mocks {
 			mockKindByName[m.Name] = m.Kind
@@ -1645,10 +1650,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+		filteredMocks, unfilteredMocks, lookup, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		mockLookup = lookup
 
 		addKinds(filteredMocks)
 		addKinds(unfilteredMocks)
@@ -1783,10 +1789,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+		filteredMocks, unfilteredMocks, lookup, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		mockLookup = lookup
 		addKinds(filteredMocks)
 		addKinds(unfilteredMocks)
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
@@ -2087,15 +2094,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	for k, v := range totalConsumedMocks {
 		allConsumedAcrossCycles[k] = v
 	}
-	// Build a lookup of mock name -> summary, protocol and target from the mock
-	// registry (once per test set). `target` is added for the DepResult writer:
-	// neither models.MockEntry (the mapping side) nor models.MockState (the
-	// consumed side) carries a destination, so the only place a human-meaningful
-	// target exists is the loaded *models.Mock. Can legitimately stay empty —
-	// r.mockDB may be nil and GetUnFilteredMocks errors are swallowed here — so
-	// every consumer must degrade gracefully rather than assume a hit.
-	mockLookup := map[string]mockDisplayInfo{}
-
 	// Test-set-scoped dependency-assertion bookkeeping.
 	//
 	// depMissingTests collects the tests that lost a recorded outgoing call so
@@ -2113,16 +2111,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// per test.
 	depMissingTests := map[string]models.TestStatus{}
 	depAssertionInertWarned := false
-	if r.mockDB != nil {
-		if allMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now(), nil, nil); err == nil {
-			for _, mock := range allMocks {
-				mockLookup[mock.Name] = mockDisplayInfo{
-					summary:  models.MockSummaryFromSpec(mock),
-					protocol: string(mock.Kind),
-					target:   mockTargetFromSpec(mock),
-				}
-			}
-		}
+	// The lookup of mock name -> summary, protocol and target from the mock
+	// registry (once per test set). `target` is added for the DepResult writer:
+	// neither models.MockEntry (the mapping side) nor models.MockState (the
+	// consumed side) carries a destination, so the only place a human-meaningful
+	// target exists is the loaded *models.Mock. Can legitimately stay empty —
+	// r.mockDB may be nil and the lookup's reads swallow their errors — so
+	// every consumer must degrade gracefully rather than assume a hit.
+	if mockLookup == nil {
+		// Not built with the mocks above: they were not loaded here.
+		mockLookup = r.readMockLookup(runTestSetCtx, testSetID)
 	}
 
 	// Separate replay into regular and streaming buckets. Regular tests can use the
@@ -4018,6 +4016,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 }
 
 func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, err error) {
+	if reader, ok := r.mockDB.(pkg.TestSetMocksReader); ok {
+		set, err := r.getTestSetMocks(ctx, reader, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
+		return set.Filtered, set.Unfiltered, err
+	}
 	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get filtered mocks")
@@ -4029,6 +4031,113 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 		return nil, nil, err
 	}
 	return filtered, unfiltered, err
+}
+
+// getTestSetMocks reads both of the test set's pools, and its session pool
+// before the mapping prune, in one pass over its mock file.
+func (r *Replayer) getTestSetMocks(ctx context.Context, reader pkg.TestSetMocksReader, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error) {
+	set, err := reader.GetTestSetMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
+	if err != nil {
+		// The pass that failed is the one the per-test pool was read in.
+		utils.LogError(r.logger, err, "failed to get filtered mocks")
+		return models.TestSetMocks{}, err
+	}
+	return set, nil
+}
+
+// loadTestSetMocks is GetMocks over the run's whole window, plus the report's
+// mock lookup: the test set's per-test and session mocks as recorded.
+// RunTestSet used to read the set's mock file once per pool and once more for
+// the lookup, three full decodes before the first test. A store that reads
+// every pool in one pass (pkg.TestSetMocksReader) gives the lookup from that
+// read: the per-test candidates and the session pool before the mapping prune
+// and the window filter. A store that reads one pool per call gives the
+// per-test half from the pool it loaded, which the prune never takes a mock a
+// running test expects from, and the session half from the session pool it
+// loaded when the prune had nothing to drop, else from a read of its own.
+//
+// The lookup is built here, before AfterGetMocks may change the mocks in place
+// (a mutator decrypts them, for one), so it describes them as they are on disk.
+func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, err error) {
+	reader, ok := r.mockDB.(pkg.TestSetMocksReader)
+	if !ok {
+		filtered, unfiltered, err = r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		allSession := unfiltered
+		if len(mocksThatHaveMappings) > 0 {
+			allSession, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
+			if err != nil {
+				r.logger.Debug("failed to read the session mocks for the report's mock lookup; the report will not describe them",
+					zap.String("testSetID", testSetID), zap.Error(err))
+				allSession = nil
+			}
+		}
+		return filtered, unfiltered, newMockLookup(filtered, allSession), nil
+	}
+	set, err := r.getTestSetMocks(ctx, reader, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), nil
+}
+
+// readMockLookup reads the report's mock lookup for a test set whose mocks
+// RunTestSet does not load: its per-test and session mocks, in one read when
+// the store can, else in one read per pool. A read that fails leaves its pool
+// out of the lookup.
+func (r *Replayer) readMockLookup(ctx context.Context, testSetID string) map[string]mockDisplayInfo {
+	if r.mockDB == nil {
+		return map[string]mockDisplayInfo{}
+	}
+	logFailed := func(pool string, err error) {
+		r.logger.Debug("failed to read the "+pool+" mocks for the report's mock lookup; the report will not describe them",
+			zap.String("testSetID", testSetID), zap.Error(err))
+	}
+	if reader, ok := r.mockDB.(pkg.TestSetMocksReader); ok {
+		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
+		if err != nil {
+			logFailed("per-test and session", err)
+			return map[string]mockDisplayInfo{}
+		}
+		return newMockLookup(set.AllPerTest, set.AllSession)
+	}
+	// No window: the per-test reader then filters nothing out, so the lookup
+	// gets every per-test mock as recorded, as AllPerTest gives it above.
+	perTest, err := r.mockDB.GetFilteredMocks(ctx, testSetID, time.Time{}, time.Time{}, nil, nil)
+	if err != nil {
+		logFailed("per-test", err)
+		perTest = nil
+	}
+	session, err := r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
+	if err != nil {
+		logFailed("session", err)
+		session = nil
+	}
+	return newMockLookup(perTest, session)
+}
+
+// newMockLookup builds the report's mock lookup from a test set's per-test and
+// session mocks. A name in both, which the gob store's PostgresV2 mocks are,
+// keeps the session mock's entry, as the lookup did when it held only those.
+func newMockLookup(perTest, session []*models.Mock) map[string]mockDisplayInfo {
+	lookup := make(map[string]mockDisplayInfo, len(perTest)+len(session))
+	addMockDisplayInfo(lookup, perTest)
+	addMockDisplayInfo(lookup, session)
+	return lookup
+}
+
+// addMockDisplayInfo adds each mock's display info to the lookup, keyed by
+// name; a later mock of the same name replaces an earlier one.
+func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock) {
+	for _, mock := range mocks {
+		lookup[mock.Name] = mockDisplayInfo{
+			summary:  models.MockSummaryFromSpec(mock),
+			protocol: string(mock.Kind),
+			target:   mockTargetFromSpec(mock),
+		}
+	}
 }
 
 // consumedForAgent is the consumed history to send with filter params: only the

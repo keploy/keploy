@@ -76,8 +76,7 @@ jobs:
       
       - name: Installing build Essentials and gcc
         run: |
-          sudo timeout 600 apt-get -y update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120
-          sudo timeout 600 apt-get -y install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 build-essential gcc libc-dev  \
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" build-essential gcc libc-dev \
             pkg-config \
             libgl1-mesa-dev          \
             libxi-dev libxcursor-dev \
@@ -119,8 +118,8 @@ jobs:
       - name: Running Unit Tests (compose library)
         run: go test -tags composelib -count=1 ./pkg/client/app/... ./pkg/platform/docker/...
 
-      # The mock-manager's concurrency guards — the tier-key/HitCount race and
-      # the hitMu/treesMu lock order — are only meaningful under -race: without
+      # The mock-manager's concurrency guards — the match-count race and the
+      # hitMu/treesMu lock order — are only meaningful under -race: without
       # it their tests pass on a build that races, so they read as coverage
       # while proving nothing. That applies past the mock manager: util/ keeps the
       # loopback fallback's process-wide atomic.Bool, and syncMock, supervisor and

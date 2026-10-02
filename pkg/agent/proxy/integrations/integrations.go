@@ -245,6 +245,32 @@ type SessionWindowReader interface {
 	GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error)
 }
 
+// MockIndex files mocks under the keys Keys gives them, so a matcher can find
+// its candidates in a large pool without walking it (see SessionKeyReader).
+//
+// Keys must depend only on what a mock recorded and how replay classified it
+// (its Lifetime and its "type" metadata), never on its place in a pool: a
+// store builds one index per MockIndex value and pool, and keeps it while the
+// pool lasts. So pass the same *MockIndex to every lookup, and declare it
+// once, at package level.
+type MockIndex struct {
+	Keys func(*models.Mock) []string
+}
+
+// SessionKeyReader is an optional MockMemDb extension: the GetSessionMocks
+// snapshot narrowed to the mocks an index files under one key, without
+// walking the rest of it. A replay's reusable pool holds every test's traffic
+// in lax mode, so a matcher that walked it for each command would cost more
+// with every test the set holds.
+type SessionKeyReader interface {
+	// RangeSessionMocksWithKey calls fn with each mock of the session tier
+	// that ix files under key, in GetSessionMocks order, until fn returns
+	// false. fn is called without the store's locks held, so it may call
+	// back into the store; the walk then sees the tier as it is by the time
+	// it gets there, as successive reads would.
+	RangeSessionMocksWithKey(ix *MockIndex, key string, fn func(*models.Mock) bool) error
+}
+
 // MockReader is the read-only facet of MockMemDb. Parsers that need
 // to enumerate mocks from the in-memory pool but never mutate or
 // consume on match should take this interface directly. Includes both
@@ -341,12 +367,13 @@ type MockReader interface {
 	// session / per-test pools.
 	GetConnectionMocks(connID string) ([]*models.Mock, error)
 
-	// SessionMockHitCounts returns per-mock atomic HitCount values for
-	// session- and connection-scoped mocks. Used by replay summary
-	// output and "which reusable mocks actually got reused?" telemetry.
-	// Key is mock.Name; value is the atomic counter's current read.
-	// Inherently racy as a snapshot — counters may increment during
-	// iteration — but that's tolerable for observability.
+	// SessionMockHitCounts returns the match counts of the session- and
+	// connection-scoped mocks in the pool, counted by MarkMockAsUsed over
+	// the current test set. Used by replay summary output and "which
+	// reusable mocks actually got reused?" telemetry. Key is mock.Name
+	// (mocks sharing a name share a count). Inherently racy as a
+	// snapshot — counters may increment during iteration — but that's
+	// tolerable for observability.
 	SessionMockHitCounts() map[string]uint64
 }
 

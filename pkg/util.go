@@ -3020,6 +3020,16 @@ func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client
 	return resp.StatusCode == http.StatusOK
 }
 
+// TestSetMocksReader is an optional extension of the mock store a replay, the
+// runner or the mock service loads a test set's mocks from: both of its pools,
+// the session pool before the mapping prune, and the per-test candidates
+// before the prune and the window filter, from ONE read of the set's mock file
+// (models.TestSetMocks). A store without it is asked for each pool
+// separately, and *mockdb.MockYaml reads and decodes the whole file for each.
+type TestSetMocksReader interface {
+	GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
 // ConsumedScopeReader is an optional extension of the instrumentation a replay
 // or a runner talks to the agent through: whether the agent has said it reads
 // the consumed-mock history only for the per-test mocks it stages
@@ -3205,7 +3215,7 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 // rev3,rev4,rev1,rev2.
 //
 // That matters because downstream reads this pool as a SEQUENCE, not a set. The
-// slice order becomes TestModeInfo.SortOrder in MockManager.setUnFilteredMocks,
+// slice order becomes TestModeInfo.SortOrder in MockManager.buildTier,
 // which keys the RB-tree that GetUnFilteredMocksByKind walks in order — so a
 // replayer that walks a recorded revision sequence (a cluster-config poll, a
 // bootstrap handshake) is handed it backwards.
