@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -198,6 +200,217 @@ func TestRunTestSetReportsMocksAsRecordedNotAsMutated(t *testing.T) {
 			}
 			if strings.Contains(matched[0].Summary, "plaintext") {
 				t.Fatalf("the report carries the mutated mock: %q", matched[0].Summary)
+			}
+		})
+	}
+}
+
+// perTestGRPCMock is a per-test mock: a gRPC call, a kind the YAML store
+// routes by its per-test tag whatever the strict-window setting, which it does
+// not do for HTTP, MySQL or Postgres.
+func perTestGRPCMock(destAddr, operation string) *models.Mock {
+	ts := time.Date(2024, 1, 2, 10, 0, 0, 0, time.UTC)
+	return &models.Mock{
+		Version: models.GetVersion(),
+		Kind:    models.GRPC_EXPORT,
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "mocks", "destAddr": destAddr, "operation": operation},
+			GRPCReq:          &models.GrpcReq{},
+			GRPCResp:         &models.GrpcResp{},
+			ReqTimestampMock: ts,
+			ResTimestampMock: ts.Add(time.Millisecond),
+		},
+	}
+}
+
+// mappedTests is a mapping store holding one recorded mapping, so the run
+// takes the mapping-based path whose per-test dependency rows the report
+// carries.
+type mappedTests struct {
+	*prMappingDB
+	tests map[string][]models.MockEntry
+}
+
+func (m mappedTests) Get(context.Context, string) (map[string][]models.MockEntry, bool, error) {
+	return m.tests, true, nil
+}
+
+// useGobMocks makes the harness load its mocks from a mocks.gob in the run's
+// directory, through the YAML mock store, which reads a gob file before a
+// text one. Its per-test pool goes through the window filter, as a YAML
+// file's does not.
+func useGobMocks(t *testing.T, h *prRun, mocks ...*models.Mock) {
+	t.Helper()
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	ys := mockdb.New(zap.NewNop(), h.replayer.config.Path, "mocks")
+	for _, m := range mocks {
+		if err := ys.InsertMock(context.Background(), m, "test-set-0"); err != nil {
+			t.Fatalf("InsertMock: %v", err)
+		}
+	}
+	// The gob writer is asynchronous; Close drains it to the file.
+	if err := ys.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	h.replayer.mockDB = mockdb.New(zap.NewNop(), h.replayer.config.Path, "mocks")
+}
+
+// The report names the per-test mocks of a failed test, not only its session
+// mocks: a matched call's summary and a missing dependency's target come from
+// the lookup RunTestSet builds from the mocks it loads, and that lookup held
+// the session pool alone, so a per-test mock (the pool a test's own calls are
+// recorded in, and the only tier a dependency row is written for) was
+// reported with an empty summary and a row with no target. The lookup
+// describes the mocks as recorded: before a MockMutator changes them in
+// place, and whether or not the window filter kept them for the agent.
+func TestRunTestSetReportsTheFailedTestsPerTestMocks(t *testing.T) {
+	const (
+		ordersOp = "/orders.Orders/Get"
+		chargeOp = "/payments.Payments/Charge"
+		mutated  = "?token=plaintext"
+	)
+	for _, tc := range []struct {
+		store string
+		// decodes is how many times the run decodes the mock file; 0 for a
+		// gob file, which the probe cannot count.
+		decodes int64
+	}{
+		{"one read", 1},
+		// The per-test pool, the session pool, and the session pool before
+		// the prune, as before.
+		{"a read per pool", 3},
+		// mock-1's response is stamped before its request, so the window
+		// filter keeps it from the agent; the recording still maps it to
+		// test-1.
+		{"a gob file", 0},
+	} {
+		t.Run(tc.store, func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0)
+			// mock-0 is the call test-1 made; mock-1 is one it was recorded
+			// making and did not make this time.
+			orders := perTestGRPCMock("orders.internal:50051", ordersOp)
+			charge := perTestGRPCMock("payments.internal:50051", chargeOp)
+			switch tc.store {
+			case "a gob file":
+				charge.Spec.ResTimestampMock = charge.Spec.ReqTimestampMock.Add(-time.Millisecond)
+				useGobMocks(t, h, orders, charge)
+			case "a read per pool":
+				h.replayer.mockDB = perPoolStore{useYAMLMocks(t, h, orders, charge)}
+			default:
+				useYAMLMocks(t, h, orders, charge)
+			}
+			before := decodeProbeCount.Load()
+			h.replayer.mappingDB = mappedTests{prMappingDB: h.mappings, tests: map[string][]models.MockEntry{
+				"test-1": {{Name: "mock-0", Kind: string(models.GRPC_EXPORT)}, {Name: "mock-1", Kind: string(models.GRPC_EXPORT)}},
+			}}
+			h.replayer.hookImpl = mutatingHooks{
+				prHooks: prHooks{
+					consumed:  []models.MockState{{Name: "mock-0", Kind: models.GRPC_EXPORT}},
+					wrongBody: map[string]bool{"test-1": true},
+				},
+				mutate: func(filtered, _ []*models.Mock) {
+					for _, m := range filtered {
+						if m.Kind == models.GRPC_EXPORT {
+							m.Spec.Metadata["operation"] += mutated
+						}
+					}
+				},
+			}
+
+			_ = h.run(t)
+
+			if tc.decodes != 0 {
+				if got := decodeProbeCount.Load() - before; got != tc.decodes {
+					t.Fatalf("the run decoded its mock file %d times; want %d", got, tc.decodes)
+				}
+			}
+			agentGot := map[string]string{}
+			for _, m := range h.instr.storedFiltered {
+				agentGot[m.Name] = m.Spec.Metadata["operation"]
+			}
+			wantAgent := map[string]string{"mock-0": ordersOp + mutated, "mock-1": chargeOp + mutated}
+			if tc.store == "a gob file" {
+				delete(wantAgent, "mock-1")
+			}
+			if !reflect.DeepEqual(agentGot, wantAgent) {
+				t.Fatalf("precondition: the agent's per-test pool is %v; want %v", agentGot, wantAgent)
+			}
+			var got *models.TestResult
+			for i := range h.report.results {
+				if h.report.results[i].TestCaseID == "test-1" {
+					got = &h.report.results[i]
+				}
+			}
+			// The missing mock-1 makes the failed test OBSOLETE; the report
+			// carries a test's matched calls when it is either.
+			if got == nil || (got.Status != models.TestStatusFailed && got.Status != models.TestStatusObsolete) {
+				t.Fatalf("precondition: want test-1 FAILED or OBSOLETE in the report, got %+v", got)
+			}
+			matched := got.FailureInfo.MatchedCalls
+			if len(matched) != 1 || matched[0].MockName != "mock-0" {
+				t.Fatalf("want test-1's one matched call, mock-0, in the report, got %+v", matched)
+			}
+			if want := "gRPC " + ordersOp; matched[0].Summary != want {
+				t.Fatalf("the report describes test-1's per-test mock-0 as %q; want it as recorded, %q", matched[0].Summary, want)
+			}
+			var rows []string
+			for _, row := range got.Result.DepResult {
+				rows = append(rows, row.Name)
+			}
+			want := models.DepRowName(1, models.DepTypeGRPC, "payments.internal:50051 "+chargeOp)
+			if len(rows) != 1 || rows[0] != want {
+				t.Fatalf("test-1's dependency rows are %q; want the missing per-test mock-1 named with its target as recorded, %q", rows, want)
+			}
+		})
+	}
+}
+
+// A test set whose mocks RunTestSet does not load (a compose app with no agent
+// to load them into) has its lookup read on its own, and it too names the
+// per-test mocks.
+func TestRunTestSetReportsPerTestMocksItDoesNotLoad(t *testing.T) {
+	const ordersOp = "/orders.Orders/Get"
+	for _, tc := range []struct {
+		store   string
+		decodes int64
+	}{
+		{"one read", 1},
+		// One read per pool: the per-test pool can come from no other read.
+		{"a read per pool", 2},
+	} {
+		t.Run(tc.store, func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.instrument = false
+			h.replayer.config.CommandType = string(utils.DockerCompose)
+			ys := useYAMLMocks(t, h, perTestGRPCMock("orders.internal:50051", ordersOp))
+			if tc.store == "a read per pool" {
+				h.replayer.mockDB = perPoolStore{ys}
+			}
+			before := decodeProbeCount.Load()
+			h.replayer.hookImpl = prHooks{
+				consumed:  []models.MockState{{Name: "mock-0", Kind: models.GRPC_EXPORT}},
+				wrongBody: map[string]bool{"test-1": true},
+			}
+
+			_ = h.run(t)
+
+			if h.instr.storedFiltered != nil || h.instr.storedUnfiltered != nil {
+				t.Fatalf("precondition: the run loaded mocks into the agent; this is the path that does not")
+			}
+			if got := decodeProbeCount.Load() - before; got != tc.decodes {
+				t.Fatalf("the lookup decoded the mock file %d times; want %d", got, tc.decodes)
+			}
+			var matched []models.MatchedCall
+			for _, r := range h.report.results {
+				if r.TestCaseID == "test-1" {
+					matched = r.FailureInfo.MatchedCalls
+				}
+			}
+			if len(matched) != 1 || matched[0].MockName != "mock-0" {
+				t.Fatalf("want test-1's one matched call, mock-0, in the report, got %+v", matched)
+			}
+			if want := "gRPC " + ordersOp; matched[0].Summary != want {
+				t.Fatalf("the report describes test-1's per-test mock-0 as %q; want %q", matched[0].Summary, want)
 			}
 		})
 	}

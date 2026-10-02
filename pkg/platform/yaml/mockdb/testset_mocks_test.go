@@ -332,6 +332,16 @@ func readersAgree(t *testing.T, ys *MockYaml, c testSetMocksCase) models.TestSet
 	if err != nil {
 		t.Fatalf("GetUnFilteredMocks(nil, nil): %v", err)
 	}
+	// No window filters nothing, so the per-test reader with no window and
+	// no mapping maps returns every per-test candidate, sorted by request
+	// time; AllPerTest keeps them in file order.
+	allPerTest, err := ys.GetFilteredMocks(ctx, "set-0", time.Time{}, time.Time{}, nil, nil)
+	if err != nil {
+		t.Fatalf("GetFilteredMocks(no window, nil, nil): %v", err)
+	}
+	if g, w := sortedPoolString(got.AllPerTest), sortedPoolString(allPerTest); g != w {
+		t.Errorf("AllPerTest is not every per-test candidate:\n got %s\nwant %s", g, w)
+	}
 	for _, pool := range []struct {
 		name      string
 		got, want []*models.Mock
@@ -382,6 +392,21 @@ func TestGetTestSetMocksMatchesTheSinglePoolReaders(t *testing.T) {
 			}
 		})
 	}
+}
+
+// sortedPoolString is poolString of the pool's mocks sorted by name, kind and
+// URL or request time, for comparing pools whose order differs.
+func sortedPoolString(pool []*models.Mock) string {
+	sorted := append([]*models.Mock(nil), pool...)
+	key := func(m *models.Mock) string {
+		k := m.Name + "/" + string(m.Kind) + "/" + m.Spec.ReqTimestampMock.String()
+		if m.Spec.HTTPReq != nil {
+			k += "/" + m.Spec.HTTPReq.URL
+		}
+		return k
+	}
+	sort.SliceStable(sorted, func(i, j int) bool { return key(sorted[i]) < key(sorted[j]) })
+	return poolString(sorted)
 }
 
 // poolsShareNoMock: the gob reader puts PostgresV2 mocks in both pools. Read

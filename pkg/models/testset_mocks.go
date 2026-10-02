@@ -13,4 +13,10 @@ type TestSetMocks struct {
 	// GetUnFilteredMocks returns with no mapping maps. Unfiltered holds the
 	// same *Mock values, not copies, so read it and do not change it.
 	AllSession []*Mock
+	// AllPerTest is every per-test candidate in the file, in file order,
+	// before the mapping prune and the window filter: the per-test mocks as
+	// recorded, which Filtered is drawn from. It holds the decoded *Mock
+	// values Filtered holds or was copied from, so read it and do not change
+	// it.
+	AllPerTest []*Mock
 }

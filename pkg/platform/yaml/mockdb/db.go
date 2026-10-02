@@ -1447,8 +1447,9 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 }
 
 // GetTestSetMocks returns, from ONE read of the test set's mock file, what
-// GetFilteredMocks and GetUnFilteredMocks return for the same arguments, and
-// what GetUnFilteredMocks returns without the mapping maps (AllSession).
+// GetFilteredMocks and GetUnFilteredMocks return for the same arguments, what
+// GetUnFilteredMocks returns without the mapping maps (AllSession), and every
+// per-test candidate before the prune and the window filter (AllPerTest).
 //
 // A replay needs both pools of every test set it runs. Fetched through the two
 // methods above, each of which reads and decodes the whole file, the file was
@@ -1456,7 +1457,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 // decoded it a third time; decoding a large mocks.yaml is most of a replay's
 // start-up.
 func (ys *MockYaml) GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error) {
-	return ys.readMockPools(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed, poolPerTest|poolSession|poolAllSession)
+	return ys.readMockPools(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed, poolPerTest|poolSession|poolAllSession|poolAllPerTest)
 }
 
 // Callers find GetTestSetMocks through this optional interface, so a signature
@@ -1473,6 +1474,8 @@ const (
 	poolSession
 	// poolAllSession builds TestSetMocks.AllSession.
 	poolAllSession
+	// poolAllPerTest builds TestSetMocks.AllPerTest.
+	poolAllPerTest
 )
 
 // mockRouter sorts a mock file's mocks into the candidate lists of the pools
@@ -1489,6 +1492,9 @@ type mockRouter struct {
 	// inBoth indexes the session candidates that are per-test candidates
 	// too (gob PostgresV2 mocks of session or connection lifetime).
 	inBoth []int
+	// allPerTest is every per-test candidate, pruned or not, in file order,
+	// when poolAllPerTest is wanted.
+	allPerTest []*models.Mock
 }
 
 // pruned reports whether the mapping prune drops the named mock: it is mapped
@@ -1503,7 +1509,7 @@ func (r *mockRouter) pruned(name string) bool {
 // whose per-test pool keeps the PostgresV2 dual-pool quirk.
 func (r *mockRouter) route(mock *models.Mock, fromGob bool) {
 	pruned := r.pruned(mock.Name)
-	if pruned && r.want&poolAllSession == 0 {
+	if pruned && r.want&(poolAllSession|poolAllPerTest) == 0 {
 		return
 	}
 	// Unification (Phase 3): resolve the mock's typed Lifetime once via
@@ -1524,6 +1530,9 @@ func (r *mockRouter) route(mock *models.Mock, fromGob bool) {
 	inPerTest := lifetime == models.LifetimePerTest || (fromGob && mock.Kind == models.PostgresV2)
 	toPerTest := inPerTest && !pruned && r.want&poolPerTest != 0
 	toSession := inSession && (r.want&poolAllSession != 0 || (!pruned && r.want&poolSession != 0))
+	if inPerTest && r.want&poolAllPerTest != 0 {
+		r.allPerTest = append(r.allPerTest, mock)
+	}
 	if toPerTest {
 		r.perTest = append(r.perTest, mock)
 	}
@@ -1615,6 +1624,8 @@ func (r *mockRouter) sessionPools(ctx context.Context, logger *zap.Logger, after
 //   - Unfiltered (poolSession): the session and connection mocks, through the
 //     lax FilterConfigMocks.
 //   - AllSession (poolAllSession): Unfiltered without the mapping prune.
+//   - AllPerTest (poolAllPerTest): the per-test candidates Filtered is drawn
+//     from, before the mapping prune and the window filter.
 //
 // The mapping prune drops a mock that is mapped to a specific test this run
 // does not need; Filtered and Unfiltered apply it.
@@ -1657,6 +1668,7 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			return models.TestSetMocks{}, err
 		}
 		r.sessionPools(ctx, ys.Logger, afterTime, beforeTime, &out)
+		out.AllPerTest = r.allPerTest
 		return out, nil
 	}
 
@@ -1673,6 +1685,7 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 				out.Filtered = pkg.FilterTcsMocks(ctx, ys.Logger, r.perTest, afterTime, beforeTime, false)
 			}
 			r.sessionPools(ctx, ys.Logger, afterTime, beforeTime, &out)
+			out.AllPerTest = r.allPerTest
 			return out, nil
 		}
 		msg := "failed to read the mocks from config file"
@@ -1768,6 +1781,7 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 		return models.TestSetMocks{}, err
 	}
 	r.sessionPools(ctx, ys.Logger, afterTime, beforeTime, &out)
+	out.AllPerTest = r.allPerTest
 	return out, nil
 }
 

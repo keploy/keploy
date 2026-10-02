@@ -3022,8 +3022,9 @@ func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client
 
 // TestSetMocksReader is an optional extension of the mock store a replay, the
 // runner or the mock service loads a test set's mocks from: both of its pools,
-// and the session pool before the mapping prune, from ONE read of the set's
-// mock file (models.TestSetMocks). A store without it is asked for each pool
+// the session pool before the mapping prune, and the per-test candidates
+// before the prune and the window filter, from ONE read of the set's mock file
+// (models.TestSetMocks). A store without it is asked for each pool
 // separately, and *mockdb.MockYaml reads and decodes the whole file for each.
 type TestSetMocksReader interface {
 	GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
