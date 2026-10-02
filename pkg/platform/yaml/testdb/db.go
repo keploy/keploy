@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -246,6 +245,10 @@ func (ts *TestYaml) nextSlugIndex(tcsPath, slug string) (int, error) {
 	}
 	return seed, nil
 }
+
+// replaceFile puts a written test case in place of its file
+// (yaml.ReplaceFile); tests swap it to make the replace fail.
+var replaceFile = yaml.ReplaceFile
 
 type tcsInfo struct {
 	name string
@@ -679,39 +682,35 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 
 	// Replace the destination with the freshly-written temp file.
 	//
-	// On POSIX, os.Rename atomically replaces an existing target —
-	// which is what we want, because claimName has already created
-	// a zero-byte placeholder at outPath that holds the name
-	// reservation. Skipping the explicit pre-rename Remove on POSIX
-	// keeps that reservation alive throughout the swap, so a
-	// concurrent recorder running claimName can't O_EXCL-claim the
-	// same filename in the gap (and the deferred placeholder
-	// cleanup can't accidentally delete a rival's reservation if
-	// the rename later fails).
+	// The rename replaces an existing target in one step, on POSIX and
+	// on Windows alike (os.Rename there is MoveFileEx with
+	// MOVEFILE_REPLACE_EXISTING). That is what we want, because
+	// claimName has already created a zero-byte placeholder at outPath
+	// that holds the name reservation: replacing it rather than
+	// removing it first keeps that reservation alive throughout the
+	// swap, so a concurrent recorder running claimName can't
+	// O_EXCL-claim the same filename in the gap (and the deferred
+	// placeholder cleanup can't accidentally delete a rival's
+	// reservation if the rename later fails).
 	//
-	// Windows' Rename can't replace an existing file (it errors
-	// EEXIST), so the Stat+Remove dance is still required there.
-	// That platform retains a narrow race between Remove and
-	// Rename which we accept as a stdlib limitation; the
-	// concurrent-recorder scenario this addresses is rare on
-	// Windows in practice.
+	// When the rename cannot replace the target (a read-only file, or
+	// one a scanner holds open), yaml.ReplaceFile moves the target
+	// aside and back, so a replace that still fails leaves the existing
+	// test case where it was. While the target is aside the name is
+	// free, and a concurrent recorder can claim it; the delete-first
+	// replace this branch used to do on Windows left that gap on every
+	// write, and lost both the old and the new test case when the
+	// rename after the delete failed.
+	//
+	// An error from the replace means outPath was not replaced, so the
+	// deferred placeholder cleanup only ever removes the placeholder,
+	// never the test case just put in place.
 	//
 	// outPath carries the configured ts.Format extension (yaml or
 	// json), so this works equally for both storage formats.
-	if runtime.GOOS == "windows" {
-		if _, statErr := os.Stat(outPath); statErr == nil {
-			if err := os.Remove(outPath); err != nil {
-				os.Remove(tmpPath)
-				return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to remove existing testcase: %w", err)
-			}
-		} else if !os.IsNotExist(statErr) {
-			os.Remove(tmpPath)
-			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to stat existing testcase: %w", statErr)
-		}
-	}
-	if err := os.Rename(tmpPath, outPath); err != nil {
+	if err := replaceFile(ts.logger, tmpPath, outPath); err != nil {
 		os.Remove(tmpPath)
-		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to rename temp file: %w", err)
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to replace the testcase file with its temp file: %w", err)
 	}
 
 	writeSucceeded = true
@@ -768,9 +767,9 @@ const maxNameClaimAttempts = 256
 // scan and the create), it rescans the directory for a new index and
 // retries. The zero-length file created here is only a name
 // reservation: upsert later writes the encoded testcase body into a
-// sibling temp file and replaces the reservation in place via
-// os.Rename (POSIX atomically replaces; Windows requires the explicit
-// remove-then-rename guarded in upsert).
+// sibling temp file and replaces the reservation with it via
+// yaml.ReplaceFile, whose rename replaces it in one step on POSIX and
+// Windows alike.
 func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, error) {
 	// Modes match yaml.CreateYamlFile (0o755 directories, 0o644
 	// files). The effective file mode is further masked by the
