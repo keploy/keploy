@@ -433,7 +433,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		}
 		m, err := DecodeMocksJSON(jsonDocs, ys.Logger)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), err)
 		}
 		mocks = m
 	} else {
@@ -451,7 +451,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		}
 		m, err := DecodeMocks(mockYamls, ys.Logger)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), err)
 		}
 		mocks = m
 	}
@@ -823,7 +823,7 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 		}
 		mocks, err = DecodeMocksJSON(jsonDocs, ys.Logger)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to decode the mocks in %s for noise persistence: %w", reader.Path(), err)
 		}
 	} else {
 		var docs []*yaml.NetworkTrafficDoc
@@ -839,7 +839,7 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 		}
 		mocks, err = DecodeMocks(docs, ys.Logger)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to decode the mocks in %s for noise persistence: %w", reader.Path(), err)
 		}
 	}
 
@@ -1705,7 +1705,7 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			mocks, err = DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{jsonDoc}, ys.Logger)
 			if err != nil {
 				utils.LogError(ys.Logger, err, "failed to decode the config mocks from json doc", zap.String("session", filepath.Base(path)))
-				return models.TestSetMocks{}, err
+				return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), err)
 			}
 		} else {
 			doc, err := reader.ReadNextDoc()
@@ -1719,7 +1719,7 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			mocks, err = DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
 			if err != nil {
 				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
-				return models.TestSetMocks{}, err
+				return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), err)
 			}
 		}
 

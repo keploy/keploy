@@ -2,10 +2,12 @@ package mockdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -441,6 +443,141 @@ func TestGetTestSetMocksFailsACorruptTailAsTheSinglePoolReadersDo(t *testing.T) 
 	}
 	if !reflect.DeepEqual(set, models.TestSetMocks{}) {
 		t.Fatalf("a failed read returned mocks: %s %s %s", poolString(set.Filtered), poolString(set.Unfiltered), poolString(set.AllSession))
+	}
+}
+
+// A mock file cut off mid-write ends inside a document, and YAML cannot tell
+// most such documents from complete ones. One that stops after a packet's
+// "- header:" line holds a packet with no header, which the MySQL and Mongo
+// decoders dereferenced: the replay's read panicked. Cut at every line, a real
+// MySQL recording and a file of every kind the corpus writes (Mongo among
+// them) must never panic GetTestSetMocks. Cut after a packet's "- header:",
+// every reader of the file fails it as a corrupt tail is failed, naming the
+// file and the mock. Cut at a document boundary, the file reads as the whole
+// documents before the cut. The other cuts are only held to not panicking:
+// the format has no end-of-document marker, so most of them decode into a
+// partial mock, and nothing here asserts that they should.
+func TestReadersFailAMockFileCutMidDocumentInsteadOfPanicking(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	mysqlRecording, err := os.ReadFile(filepath.Join("testdata", "mysql_capture_starved_mocks.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	corpusDir := t.TempDir()
+	writeTestSetMocks(t, corpusDir, "yaml")
+	corpus, err := os.ReadFile(filepath.Join(corpusDir, "set-0", "mocks.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []struct {
+		name string
+		data []byte
+		// headerCuts is how many cuts end after a packet's "- header:".
+		headerCuts int
+	}{
+		{name: "mysql recording", data: mysqlRecording, headerCuts: 8},
+		{name: "every kind", data: corpus, headerCuts: 8},
+	} {
+		t.Run(file.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "set-0"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mockFile := filepath.Join(dir, "set-0", "mocks.yaml")
+			ys := New(zap.NewNop(), dir, "mocks")
+			ctx := context.Background()
+			lines := strings.SplitAfter(string(file.data), "\n")
+			// complete holds the names of the documents a "---" has closed;
+			// current is the name of the open document, "" between documents.
+			var complete []string
+			current, inDoc := "", false
+			cut, headerCuts, boundaryCuts := 0, 0, 0
+			for n := 0; n <= len(lines); n++ {
+				last := ""
+				if n > 0 {
+					last = lines[n-1]
+					cut += len(last)
+					switch {
+					case last == "---\n":
+						complete = append(complete, current)
+						current, inDoc = "", false
+					case strings.HasPrefix(last, "#") && !inDoc:
+					default:
+						inDoc = true
+						if strings.HasPrefix(last, "name: ") {
+							current = strings.TrimSpace(strings.TrimPrefix(last, "name: "))
+						}
+					}
+				}
+				if err := os.WriteFile(mockFile, file.data[:cut], 0o644); err != nil {
+					t.Fatal(err)
+				}
+				var got models.TestSetMocks
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							t.Fatalf("cut after line %d (%q), inside %s: GetTestSetMocks panicked: %v", n, last, current, r)
+						}
+					}()
+					got, err = ys.GetTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+				}()
+
+				atBoundary := !inDoc || n == len(lines) || lines[n] == "---\n"
+				switch {
+				case last == "        - header:\n":
+					headerCuts++
+					if !errors.Is(err, errPacketWithoutHeader) {
+						t.Fatalf("cut after line %d, inside %s: want a packet-without-header error, got %v", n, current, err)
+					}
+					for _, want := range []string{mockFile, fmt.Sprintf("mock %q", current)} {
+						if !strings.Contains(err.Error(), want) {
+							t.Fatalf("cut after line %d: the error does not name %s: %v", n, want, err)
+						}
+					}
+					if !reflect.DeepEqual(got, models.TestSetMocks{}) {
+						t.Fatalf("cut after line %d: a failed read returned mocks: %s %s %s", n, poolString(got.Filtered), poolString(got.Unfiltered), poolString(got.AllSession))
+					}
+					_, errFiltered := ys.GetFilteredMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+					_, errUnfiltered := ys.GetUnFilteredMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+					if errFiltered == nil || errUnfiltered == nil || errFiltered.Error() != err.Error() || errUnfiltered.Error() != err.Error() {
+						t.Fatalf("cut after line %d: the readers fail differently:\n GetTestSetMocks:    %v\n GetFilteredMocks:   %v\n GetUnFilteredMocks: %v", n, err, errFiltered, errUnfiltered)
+					}
+					// The prune and the noise persistence decode the whole file
+					// too; neither may panic or rewrite it.
+					errPrune := ys.UpdateMocks(ctx, "set-0", map[string]models.MockState{}, time.Now(), time.Time{})
+					errNoise := ys.PersistMockNoise(ctx, "set-0", map[string]models.MockState{"mock-0": {ReqBodyNoise: map[string][]string{"body": {"id"}}}})
+					for _, e := range []error{errPrune, errNoise} {
+						if !errors.Is(e, errPacketWithoutHeader) || !strings.Contains(e.Error(), mockFile) || !strings.Contains(e.Error(), fmt.Sprintf("mock %q", current)) {
+							t.Fatalf("cut after line %d: want the prune and the noise persistence to fail naming %s and %s, got %v and %v", n, mockFile, current, errPrune, errNoise)
+						}
+					}
+					if onDisk, err := os.ReadFile(mockFile); err != nil || string(onDisk) != string(file.data[:cut]) {
+						t.Fatalf("cut after line %d: a failed read rewrote the file (err %v)", n, err)
+					}
+				case atBoundary:
+					boundaryCuts++
+					if err != nil {
+						t.Fatalf("cut after line %d, at a document boundary: %v", n, err)
+					}
+					want := append([]string(nil), complete...)
+					if inDoc {
+						want = append(want, current)
+					}
+					var names []string
+					for _, m := range append(append([]*models.Mock(nil), got.Filtered...), got.AllSession...) {
+						names = append(names, m.Name)
+					}
+					sort.Strings(want)
+					sort.Strings(names)
+					if strings.Join(names, " ") != strings.Join(want, " ") {
+						t.Fatalf("cut after line %d, at a document boundary: want the mocks %v, got %v", n, want, names)
+					}
+				}
+			}
+			if headerCuts != file.headerCuts || boundaryCuts < 3 {
+				t.Fatalf("want %d cuts after a packet's header line and a few at document boundaries, got %d and %d", file.headerCuts, headerCuts, boundaryCuts)
+			}
+		})
 	}
 }
 

@@ -229,6 +229,11 @@ func (r *MockReader) ReadNextDocJSON() (*NetworkTrafficDocJSON, error) {
 	return &doc, nil
 }
 
+// Path returns the path of the file the reader reads.
+func (r *MockReader) Path() string {
+	return r.path
+}
+
 // Close closes the file.
 func (r *MockReader) Close() error {
 	if r.file != nil {

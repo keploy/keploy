@@ -562,6 +562,13 @@ const (
 // corrupts replay.
 var errPostgresV3NilPayload = errors.New("postgres_v3 mock missing typed payload")
 
+// errPacketWithoutHeader is a MySQL or Mongo packet whose document has no
+// header. The recorders write one for every packet, and the header types the
+// packet's message, so the mock cannot be decoded. A mock file cut off
+// mid-write ends this way: YAML cannot tell a document that stops after a
+// packet's "- header:" from a complete one, so the decode is where it shows.
+var errPacketWithoutHeader = errors.New("packet has no header; the document is incomplete, as a mock file cut off mid-write leaves it")
+
 // postgresV3YamlSpec is the single on-disk envelope for v3 Postgres
 // mocks. The typed sub-pointer lives under `spec.postgresV3` with its
 // discriminator under `spec.postgresV3.type`. There is no per-sub-type
@@ -705,7 +712,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 
 			mockSpec, err := decodeMongoMessage(&mongoSpec, logger)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("mock %q (%s): %w", m.Name, m.Kind, err)
 			}
 			mock.Spec = *mockSpec
 		case models.GRPC_EXPORT:
@@ -764,7 +771,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 
 			mockSpec, err := decodeMySQLMessage(context.Background(), logger, &mySQLSpec)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("mock %q (%s): %w", m.Name, m.Kind, err)
 			}
 			mock.Spec = *mockSpec
 		case models.HTTP2:
@@ -843,7 +850,10 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 	// Decode the requests
 
 	requests := []mysql.Request{}
-	for _, v := range yamlSpec.Requests {
+	for i, v := range yamlSpec.Requests {
+		if v.Header == nil {
+			return nil, fmt.Errorf("mysql request %d: %w", i, errPacketWithoutHeader)
+		}
 		req := mysql.Request{
 			PacketBundle: mysql.PacketBundle{
 				Header: v.Header,
@@ -1031,8 +1041,10 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 	// Decode the responses
 
 	responses := []mysql.Response{}
-	for _, v := range yamlSpec.Response {
-
+	for i, v := range yamlSpec.Response {
+		if v.Header == nil {
+			return nil, fmt.Errorf("mysql response %d: %w", i, errPacketWithoutHeader)
+		}
 		resp := mysql.Response{
 			PacketBundle: mysql.PacketBundle{
 				Header: v.Header,
@@ -1153,7 +1165,10 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 
 	// mongo request
 	requests := []models.MongoRequest{}
-	for _, v := range yamlSpec.Requests {
+	for i, v := range yamlSpec.Requests {
+		if v.Header == nil {
+			return nil, fmt.Errorf("mongo request %d: %w", i, errPacketWithoutHeader)
+		}
 		req := models.MongoRequest{
 			Header:    v.Header,
 			ReadDelay: v.ReadDelay,
@@ -1193,7 +1208,10 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 
 	// mongo response
 	responses := []models.MongoResponse{}
-	for _, v := range yamlSpec.Response {
+	for i, v := range yamlSpec.Response {
+		if v.Header == nil {
+			return nil, fmt.Errorf("mongo response %d: %w", i, errPacketWithoutHeader)
+		}
 		resp := models.MongoResponse{
 			Header:    v.Header,
 			ReadDelay: v.ReadDelay,
