@@ -5,15 +5,27 @@ name: HTTP Stale-Pool Race Regression (Linux)
 # than the backend's keep-alive (gunicorn 2s default).
 #
 # The matrix runs the same bursty-load test against two keploy
-# binaries:
-#   - record_with_build  → uses the PR's binary. MUST pass.
-#   - record_with_latest → uses the published `latest`. Demonstrates
-#                          the bug on releases that pre-date the fix
-#                          (~25-50% drop rate). Marked
-#                          continue-on-error so it documents the bug
-#                          without blocking PR merges; flip to a hard
-#                          gate once a release containing the fix is
-#                          published as `latest`.
+# binaries, each with its own pass condition. Both legs are now
+# REQUIRED (no continue-on-error) — the asymmetric thresholds make
+# each leg meaningful on its own AND form a tripwire when reality
+# changes:
+#
+#   record_with_build  (uses PR's binary, MAX_DROP_PCT=5)
+#     PASS condition: drop rate <= 5% (the fix is working)
+#     FAIL means:     the fix regressed under the PR being tested
+#
+#   record_with_latest (uses published keploy:latest, MIN_DROP_PCT=10)
+#     PASS condition: drop rate >= 10% (the bug is reproducing in
+#                     a stock release without the fix)
+#     FAIL means:     either (a) the regression test stopped
+#                     reproducing the bug for some other reason
+#                     (burst parameters drifted), OR (b) a release
+#                     containing the fix has shipped as `latest` and
+#                     this matrix entry is now redundant.
+#
+# When (b) eventually fires, follow the cleanup checklist in #4169:
+# remove the record_with_latest matrix entry. The CI failure IS the
+# tripwire that prompts the cleanup — that's intentional.
 on:
   workflow_call:
     inputs:
@@ -38,20 +50,22 @@ jobs:
         config:
           - job: record_with_build
             record_src: build
-            # The PR's binary MUST keep the test green. If this
-            # leg fails, either the fix regressed or the burst
-            # parameters drift from what reproduces the race.
-            continue_on_error: false
+            # The PR's binary must show ~0% drops. PASS gate is
+            # MAX_DROP_PCT=5; no MIN floor.
+            max_drop_pct: "5"
+            min_drop_pct: ""
           - job: record_with_latest
             record_src: latest
-            # The published `latest` is expected to fail this test
-            # until a release containing the fix ships. Marked
-            # continue-on-error so the failure is visible but does
-            # not block the PR.
-            continue_on_error: true
+            # The published `latest` (pre-fix) shows ~25-50% drops.
+            # PASS gate is MIN_DROP_PCT=10 (the bug is still
+            # reproducing). MAX is set to 100 so the gate is purely
+            # the floor. When a release containing the fix ships as
+            # `latest`, drops collapse to ~0 and this leg fails the
+            # MIN check — that's the tripwire from #4169 firing.
+            max_drop_pct: "100"
+            min_drop_pct: "10"
     name: stale-pool-race (${{ matrix.config.job }})
     timeout-minutes: 15
-    continue-on-error: ${{ matrix.config.continue_on_error }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -71,6 +85,8 @@ jobs:
       - name: Run regression test
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
+          MAX_DROP_PCT: ${{ matrix.config.max_drop_pct }}
+          MIN_DROP_PCT: ${{ matrix.config.min_drop_pct }}
         # Run via `bash <script>` rather than `source` so the
         # script's intentional avoidance of `set -e` is not overridden
         # by the workflow step's default `-eo pipefail`. The script's
