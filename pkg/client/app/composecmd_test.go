@@ -93,20 +93,62 @@ func TestComposeLaunchPlan(t *testing.T) {
 	})
 }
 
-// TestKeepAgentTokenThroughSudo: `sudo docker compose up` is a spelling keploy
-// recognises as compose, and sudo's env_reset drops the control-plane token
-// the generated agent service asks compose for. Without --preserve-env that
-// agent comes up with no token at all.
-func TestKeepAgentTokenThroughSudo(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{"sudo docker compose up", "sudo --preserve-env=KEPLOY_AGENT_TOKEN docker compose up"},
-		{"sudo -E docker compose up", "sudo --preserve-env=KEPLOY_AGENT_TOKEN -E docker compose up"},
-		{"  sudo docker-compose up", "  sudo --preserve-env=KEPLOY_AGENT_TOKEN docker-compose up"},
-		{"docker compose up", "docker compose up"},
-		{"sudoku up", "sudoku up"},
+// TestAgentTokenCommand: `sudo docker compose up` is a spelling keploy
+// recognises as compose, and sudo's env_reset (or doas's) drops the
+// control-plane token the generated agent service asks compose for. A root
+// keploy needs no sudo, so it drops a plain one and runs compose with the
+// token itself. Any other keploy tells sudo to keep that one variable.
+func TestAgentTokenCommand(t *testing.T) {
+	const keep = "sudo --preserve-env=KEPLOY_AGENT_TOKEN "
+	for _, tc := range []struct {
+		in          string
+		root        bool
+		want        string
+		wantViaSudo bool
+	}{
+		{in: "sudo docker compose up", want: keep + "docker compose up", wantViaSudo: true},
+		{in: "sudo -E docker compose up", want: keep + "-E docker compose up", wantViaSudo: true},
+		{in: "  sudo docker-compose up", want: "  " + keep + "docker-compose up", wantViaSudo: true},
+		{in: "sudo\tdocker compose up", want: keep + "docker compose up", wantViaSudo: true},
+		{in: "doas docker compose up", want: "doas docker compose up"},
+		{in: "docker compose up", want: "docker compose up"},
+		{in: "sudoku up", want: "sudoku up"},
+		{in: "sudo", want: "sudo"},
+
+		{in: "sudo docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo -E docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo --preserve-env -E  docker compose up", root: true, want: "docker compose up"},
+		{in: "  sudo\tdocker-compose up", root: true, want: "  docker-compose up"},
+		{in: "doas docker compose up", root: true, want: "docker compose up"},
+		{in: "docker compose up", root: true, want: "docker compose up"},
+		{in: "sudoku up", root: true, want: "sudoku up"},
+		// Options that do nothing for root either: no password to ask for,
+		// on a terminal (-n) or on stdin (-S), and the end of the options.
+		{in: "sudo -n docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo -S docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo --non-interactive --stdin docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo -- docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo -n -- docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo -EnS docker compose up", root: true, want: "docker compose up"},
+		{in: "doas -n docker compose up", root: true, want: "docker compose up"},
+		{in: "doas -- docker compose up", root: true, want: "docker compose up"},
+		// Not a plain elevation to root: kept, and told to keep the token.
+		{in: "sudo -u app docker compose up", root: true, want: keep + "-u app docker compose up", wantViaSudo: true},
+		{in: "sudo -nu app docker compose up", root: true, want: keep + "-nu app docker compose up", wantViaSudo: true},
+		{in: "sudo -H docker compose up", root: true, want: keep + "-H docker compose up", wantViaSudo: true},
+		{in: "sudo - docker compose up", root: true, want: keep + "- docker compose up", wantViaSudo: true},
+		{in: "sudo --preserve-env=HOME docker compose up", root: true, want: keep + "--preserve-env=HOME docker compose up", wantViaSudo: true},
+		{in: "sudo -E", root: true, want: keep + "-E", wantViaSudo: true},
+		{in: "sudo -n --", root: true, want: keep + "-n --", wantViaSudo: true},
+		{in: "doas -u app docker compose up", root: true, want: "doas -u app docker compose up"},
+		{in: "doas -E docker compose up", root: true, want: "doas -E docker compose up"},
+		// Not root: every sudo is needed, whatever its options.
+		{in: "sudo -n -- docker compose up", want: keep + "-n -- docker compose up", wantViaSudo: true},
+		{in: "doas -n docker compose up", want: "doas -n docker compose up"},
 	} {
-		if got := keepAgentTokenThroughSudo(tc.in); got != tc.want {
-			t.Errorf("keepAgentTokenThroughSudo(%q) = %q, want %q", tc.in, got, tc.want)
+		got, viaSudo := agentTokenCommand(tc.in, tc.root)
+		if got != tc.want || viaSudo != tc.wantViaSudo {
+			t.Errorf("agentTokenCommand(%q, root=%v) = %q, %v; want %q, %v", tc.in, tc.root, got, viaSudo, tc.want, tc.wantViaSudo)
 		}
 	}
 }
@@ -116,6 +158,7 @@ func TestKeepAgentTokenThroughSudo(t *testing.T) {
 // compose file names — through a leading sudo too. Under every other kind the
 // app command is the application under test, which is handed nothing.
 func TestWithAgentToken_OnlyTheComposeCommandIsGivenTheAgentToken(t *testing.T) {
+	setEffectiveUID(t, 1000)
 	const cmd = "sudo docker compose -f docker-compose-tmp.yaml up"
 	gotCmd, gotEnv := (&App{kind: utils.DockerCompose}).withAgentToken(cmd)
 	if want := []string{token.Env + "=" + token.Session()}; !slices.Equal(gotEnv, want) {
