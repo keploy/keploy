@@ -28,6 +28,16 @@ jobs:
     timeout-minutes: 60
     name: Analyze
     runs-on: ubuntu-latest
+    env:
+      # Pin the CodeQL CLI's diagnostics export on. It defaults to true today
+      # (Feature.ExportDiagnosticsEnabled in codeql-action src/feature-flags.ts),
+      # but that default is a server-side feature flag GitHub can flip; an
+      # explicit "true" is checked in getOfflineValue and returns before the API
+      # is consulted. Without the diagnostics in the SARIF, the extraction guard
+      # below has nothing to read - and it is written to fail rather than pass
+      # in that case, so this pin is what keeps a flag flip from turning every
+      # run red.
+      CODEQL_ACTION_EXPORT_DIAGNOSTICS: "true"
     permissions:
       actions: read
       contents: read
@@ -87,7 +97,240 @@ jobs:
     #   make release
 
     - name: Perform CodeQL Analysis
+      id: analyze
       uses: github/codeql-action/analyze@v3
+
+    # The Go extractor can stop understanding this repository without failing
+    # anything. It is not hypothetical: building this tree with go.mod at
+    # go 1.27.0 against the current bundle (codeql-bundle-v2.26.3, whose Go
+    # extractor is itself built with go1.26.5) produced 97
+    # go/diagnostics/extraction-errors covering 90 of the 91 first-party Go
+    # package directories - and the analyze step still reported
+    # executionSuccessful: true, still uploaded the same 5 results, and the job
+    # was still green. Nothing in the run said the scan had stopped seeing the
+    # code. This repo has a documented history of jobs that display green while
+    # doing nothing, and that is the failure being closed here.
+    #
+    # Two checks, and the split matters.
+    #   - The gate case is decided from the CAUSE, not the symptom: the Go the
+    #     extractor was built with, against the go directive in go.mod. The Go
+    #     extractor embeds a go/types from one release and refuses any module
+    #     declaring a newer language version, so this is deterministic, decided
+    #     before a query runs, and has no message to reword.
+    #   - Every OTHER extraction failure is invisible to that comparison, so
+    #     the SARIF is classified too. Only a recognised, in-checkout,
+    #     non-gate failure fails the job.
+    #
+    # Calibration, learned on this repository rather than assumed: the errors
+    # ARE in runs[].invocations[].toolExecutionNotifications[] under autobuild
+    # (job 97406057233 carried 95). What is NOT there is the descriptor's entry
+    # in runs[].tool.driver.notifications[] - a hand-run `codeql database
+    # analyze` writes that catalogue, autobuild does not. An earlier version of
+    # this step demanded the catalogue entry as a positive control and failed
+    # every single run because of it. Hence: absence is never fatal here, and
+    # anything unreadable is a warning.
+    - name: Guard against silent Go extraction failure
+      env:
+        SARIF_DIR: ${{ steps.analyze.outputs.sarif-output }}
+        # This repository moved to Go 1.27 (#4473) while the bundle in the
+        # runner toolcache (codeql-bundle-v2.26.3) shipped a Go extractor built
+        # with go1.26.5, so the language-version gate is not hypothetical: main
+        # is emitting ~96 extraction errors per run and still reporting success.
+        #
+        # The upstream fix has now shipped. codeql-bundle-v2.26.4 (2026-08-26)
+        # carries a Go extractor built with go1.27.0 - verified by reading the
+        # toolchain stamped into the binary:
+        #
+        #   $ go version codeql/go/tools/linux64/go-extractor
+        #   codeql/go/tools/linux64/go-extractor: go1.27.0     # v2.26.4
+        #   codeql/go/tools/linux64/go-extractor: go1.26.5     # v2.26.3
+        #
+        # So this needs no code change to resolve, only for CI to pick the new
+        # bundle up. codeql-action prefers a compatible bundle already present
+        # in the runner image's toolcache, so the switch lands when that image
+        # refreshes rather than immediately - the run on 2026-08-27 still used
+        # "CodeQL CLI version 2.26.3 from toolcache". Passing `tools: linked`
+        # to the init step would force the action's own bundled version now, at
+        # the cost of a ~600MB download every run; not worth it for a window
+        # this short, but that is the lever if it drags on.
+        #
+        # Hence the dated acknowledgement, now dated for the toolcache refresh
+        # rather than for an unknown upstream fix. Unset would turn main red
+        # today, and CodeQL is not a required check here, so a red nobody is
+        # blocked by is a red that gets ignored and then deleted. Clear this
+        # back to "" once a run reports 2.26.4 or later; the guard fails if it
+        # is unset, unparseable, or expired, so it cannot rot quietly either
+        # way.
+        GO_VERSION_GATE_ACK_UNTIL: "2026-09-30"
+      run: |
+        set -euo pipefail
+
+        die() { echo "::error::CodeQL extraction guard: $*"; exit 1; }
+
+        # --------------------------------------------------------------------------
+        # Check the CAUSE, not the symptom.
+        #
+        # The first version of this guard parsed go/diagnostics/extraction-errors out
+        # of the analyze step's SARIF. That works when you drive `codeql database
+        # create` by hand; it does not work here. Measured on this repository, both on
+        # a pull request (job 97401055619) and on a push to main (job 97386346026):
+        # the extractor logs ~96-98 "requires newer Go version" lines, and the SARIF
+        # still reports "Found 3 raw diagnostic messages", none of which is an
+        # extraction error. The signal simply is not in that file under
+        # github/codeql-action/autobuild, so a guard built on it fails on every run -
+        # noise, which gets a step deleted rather than fixed.
+        #
+        # What is deterministic is the cause. The Go extractor embeds a go/types built
+        # from a specific Go release, and it refuses any module declaring a newer
+        # language version. So compare the two directly: the Go the extractor was
+        # built with, against the go directive in go.mod. No message parsing, nothing
+        # to reword, and it is decided before a single query runs.
+        # --------------------------------------------------------------------------
+
+        extractor_root=""
+        if command -v codeql > /dev/null 2>&1; then
+          extractor_root="$(codeql resolve languages --format=json 2>/dev/null | jq -r '.go[0] // empty')"
+        fi
+        if [ -z "$extractor_root" ]; then
+          # /opt/hostedtoolcache/CodeQL/<version>/<arch>/codeql/go is five levels
+          # down, and -L because the toolcache entry can be a symlink.
+          extractor_root="$(find -L /opt/hostedtoolcache/CodeQL -maxdepth 5 -type d -path '*/codeql/go' 2>/dev/null | sort -V | tail -1)"
+        fi
+        if [ -z "$extractor_root" ] || [ ! -d "$extractor_root" ]; then
+          die "could not locate the CodeQL Go extractor (tried 'codeql resolve languages' and the runner toolcache). This check cannot verify the analysis is seeing your code - fix it, do not delete it."
+        fi
+
+        bin=""
+        for candidate in "$extractor_root"/tools/*/go-extractor "$extractor_root"/tools/*/go-extractor.exe; do
+          [ -x "$candidate" ] && bin="$candidate" && break
+        done
+        [ -n "$bin" ] || die "found the Go extractor root at '$extractor_root' but no go-extractor binary under tools/. The bundle layout changed - fix this guard, do not delete it."
+
+        # `go version <binary>` reads the toolchain stamped into any Go executable.
+        # This is the same number the autobuilder prints as "Autobuilder was built
+        # with goX.Y.Z".
+        extractor_go="$(go version "$bin" 2>/dev/null | awk '{print $2}' | sed 's/^go//')"
+        case "$extractor_go" in
+          [0-9]*.[0-9]*) : ;;
+          *) die "could not read the Go version from '$bin' (got '${extractor_go:-}'). Fix this guard, do not delete it." ;;
+        esac
+
+        repo_go="$(sed -n 's/^go \([0-9][0-9.]*\).*$/\1/p' go.mod | head -1)"
+        case "$repo_go" in
+          [0-9]*.[0-9]*) : ;;
+          *) die "could not read the go directive from go.mod (got '${repo_go:-}')." ;;
+        esac
+
+        ex_mm="$(echo "$extractor_go" | cut -d. -f1,2)"
+        repo_mm="$(echo "$repo_go" | cut -d. -f1,2)"
+
+        echo "CodeQL Go extractor built with go$extractor_go; this module declares go$repo_go."
+        {
+          echo "### CodeQL Go extraction"
+          echo ""
+          echo "| | |"
+          echo "| --- | --- |"
+          echo "| extractor built with | go$extractor_go |"
+          echo "| go.mod declares | go$repo_go |"
+        } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+        degraded=0
+        if [ "$ex_mm" != "$repo_mm" ] && [ "$(printf '%s\n%s\n' "$ex_mm" "$repo_mm" | sort -V | head -1)" = "$ex_mm" ]; then
+          degraded=1
+        fi
+
+        # Second check, from the SARIF. The version gate above cannot see extraction
+        # failures with any OTHER cause, and those are the ones nobody would ever
+        # notice - so classify what the SARIF carries.
+        #
+        # Two calibration notes, both learned the hard way on this repository:
+        #   - The errors ARE here, in runs[].invocations[].toolExecutionNotifications[],
+        #     as "Extraction failed in <path> with error <msg>" (job 97406057233
+        #     carried 95 of them). What is NOT here is the descriptor's entry in
+        #     runs[].tool.driver.driver.notifications[] - a hand-run `codeql database
+        #     analyze` writes that catalogue, autobuild does not. An earlier version of
+        #     this step required the catalogue entry as a positive control and failed
+        #     every run because of it.
+        #   - So absence is never fatal here. Only a recognised, attributable,
+        #     non-gate first-party failure fails the job; anything this cannot read is
+        #     a warning, and the deterministic version check above is what carries the
+        #     gate case.
+        other_files=0
+        if [ -n "${SARIF_DIR:-}" ] && [ -d "$SARIF_DIR" ]; then
+          shopt -s nullglob
+          sarifs=("$SARIF_DIR"/*.sarif)
+          if [ "${#sarifs[@]}" -gt 0 ]; then
+            work="$(mktemp -d)"
+            trap 'rm -rf "$work"' EXIT
+            if jq -r '.runs[]?.invocations[]?.toolExecutionNotifications[]?
+                      | select(.descriptor.id? == "go/diagnostics/extraction-errors")
+                      | (.message.text? // "" | tostring) | gsub("[\r\n\t]+"; " / ")' \
+                 "${sarifs[@]}" 2>/dev/null | sort -u > "$work/msgs"; then
+              total="$(grep -c . "$work/msgs" || true)"
+              if [ "$total" -gt 0 ]; then
+                # A path counts as first-party only if that file is really in the
+                # checkout. Everything else - stdlib, toolchain, module cache, or a
+                # message shape this does not recognise - is reported, not gated.
+                : > "$work/other"
+                : > "$work/unreadable"
+                while IFS= read -r line; do
+                  case "$line" in
+                    "Extraction failed in "*)
+                      path="${line#Extraction failed in }"; path="${path%% with error *}"
+                      rest="${line#*with error }"
+                      if [ -f "${GITHUB_WORKSPACE:-$PWD}/${path#./}" ]; then
+                        case "$rest" in
+                          *"requires newer Go version"*) : ;;   # the version gate, handled above
+                          *) printf '%s\t%s\n' "$path" "$rest" >> "$work/other" ;;
+                        esac
+                      fi
+                      ;;
+                    *) printf '%s\n' "$line" >> "$work/unreadable" ;;
+                  esac
+                done < "$work/msgs"
+
+                other_files="$(cut -f1 "$work/other" | sort -u | grep -c . || true)"
+                unreadable="$(grep -c . "$work/unreadable" || true)"
+                echo "SARIF carried $total distinct extraction-error message(s): $other_files first-party file(s) failed for a reason other than the version gate, $unreadable message(s) in a shape this check does not parse."
+
+                if [ "$unreadable" -gt 0 ]; then
+                  echo "::warning::CodeQL extraction guard: $unreadable extraction-error message(s) did not match the shape this check parses. Not gated - the version check above is what carries this job - but the classifier below is blind to them:"
+                  sed -n '1,10p' "$work/unreadable" | sed 's/^/  /'
+                fi
+              fi
+            fi
+          fi
+        fi
+
+        if [ "$other_files" -gt 0 ]; then
+          echo "::error::CodeQL extraction guard: $other_files first-party Go file(s) failed extraction for a reason unrelated to the Go language-version gate. CodeQL is not analysing that code and the analyze step still exits 0, so nothing else will tell you. There is no acknowledgement window for this class."
+          sort -u "$work/other" | sed 's/^/  /'
+          exit 1
+        fi
+
+        if [ "$degraded" -eq 0 ]; then
+          echo "Extractor is at or ahead of the module's language version; extraction is not gated."
+          exit 0
+        fi
+
+        why="the CodeQL bundle's Go extractor is built with go$extractor_go but this module declares go$repo_go, so the extractor's own go/types refuses first-party packages and CodeQL analyses almost none of this repository - while github/codeql-action/analyze still exits 0"
+
+        ack="${GO_VERSION_GATE_ACK_UNTIL:-}"
+        if [ -z "$ack" ]; then
+          echo "::error::CodeQL extraction guard: $why. Neither setup-go nor a 'tools:' pin fixes this - the constraint is the extractor's embedded go/types, and only a newer CodeQL bundle resolves it. If you are knowingly shipping ahead of the bundle, set GO_VERSION_GATE_ACK_UNTIL in this workflow to the date through which you accept it; leaving it unset keeps this red on purpose."
+          exit 1
+        fi
+        if ! ack_epoch="$(date -u -d "$ack + 1 day" +%s 2>/dev/null)"; then
+          echo "::error::CodeQL extraction guard: GO_VERSION_GATE_ACK_UNTIL is '$ack', which this check cannot parse as a date. An acknowledgement nobody can read is not an acknowledgement."
+          exit 1
+        fi
+        if [ "$(date -u +%s)" -ge "$ack_epoch" ]; then
+          echo "::error::CodeQL extraction guard: $why, and the acknowledgement window closed at the end of $ack. Either the bundle caught up and this can be cleared, or it did not and someone has to decide - it is not going to go quiet on its own."
+          exit 1
+        fi
+
+        echo "::warning::CodeQL extraction guard: $why. Acknowledged through $ack, after which this becomes a failure."
+        exit 0
 
     - name: Create a folder for security reports
       run: mkdir -p reports
