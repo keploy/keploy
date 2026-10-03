@@ -308,15 +308,23 @@ func (p *Proxy) recordViaSupervisor(
 		// would tell the user their recording is broken at the exact
 		// moment they are reading the logs, on every clean stop.
 		shuttingDown := result.Status == supervisor.StatusCanceled && ctx.Err() != nil
+		// A parser that stopped on purpose and reported why where it did, at
+		// WARN and rate-limited across connections (supervisor.ErrReported),
+		// has said what the WARN below would. Logged here as well, once per
+		// connection, one fault on hundreds of pooled connections would log
+		// hundreds of lines. Only that line is skipped: the Debug line after
+		// it still carries the error, and the span below is opened all the
+		// same.
+		reported := result.Status == supervisor.StatusError && errors.Is(result.Err, supervisor.ErrReported)
 
-		if !shuttingDown {
+		if !shuttingDown && !reported {
 			// Warn, not Debug. This is permanent, silent capture loss for
 			// the rest of a connection's life, and several of the exits
 			// that land here (StatusError, StatusMemCap) log nothing of
 			// their own — so at Debug a whole recording could come back
 			// unreplayable without a single line above Debug to explain
 			// it. Bounded: one line per connection, only on a retired
-			// parser.
+			// parser that has not reported its stop itself.
 			//
 			// result.Err is deliberately NOT attached here. For
 			// StatusPanicked it reads "supervisor: parser panic: ..."

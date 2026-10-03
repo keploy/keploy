@@ -337,6 +337,14 @@ func TestRecordV2_UndecodableResponseIsAnError(t *testing.T) {
 			if errors.Is(err, io.EOF) {
 				t.Fatalf("RecordV2 = %v: an io.EOF passes for the connection closing", err)
 			}
+			// A definition or row that does not decode, behind a header whose
+			// sequence id checked out, is lost framing: a misread header that
+			// passed the check, or a packet short of bytes. It is reported as
+			// lost framing is: once, at WARN, rate-limited across connections,
+			// not again at ERROR for every connection it stops.
+			if !errors.Is(err, ErrFramingLost) {
+				t.Fatalf("RecordV2 = %v, want ErrFramingLost", err)
+			}
 			if len(recorded) != 0 {
 				t.Fatalf("recorded %d %s mocks for a response that did not decode (the first has %d of 3 parts)", len(recorded), c.op, c.parts(recorded[0]))
 			}

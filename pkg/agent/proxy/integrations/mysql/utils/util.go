@@ -92,6 +92,49 @@ func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([
 	return packet, nil
 }
 
+// MaxPacketPayload is the largest payload one packet carries (16 MiB - 1). A
+// payload of exactly this length continues in the next packet.
+const MaxPacketPayload = 1<<24 - 1
+
+// ReadPacketBufferChecked reads one MySQL packet as the protocol frames it: a
+// payload of MaxPacketPayload bytes continues in the next packet, and so on to
+// one that is shorter, each with the next sequence id. It hands every header
+// to check before it reads that header's payload, and returns check's error,
+// with nothing read past that header, when check refuses one: a reader that
+// knows which sequence id comes next refuses a misframed header before
+// waiting for the megabytes a header read out of row data can claim. The
+// packet is returned under its first header, with every payload joined.
+func ReadPacketBufferChecked(ctx context.Context, logger *zap.Logger, conn net.Conn, check func(header []byte) error) ([]byte, error) {
+	var packet []byte
+	for {
+		header, err := util.ReadRequiredBytes(ctx, logger, conn, 4)
+		if err != nil {
+			return nil, err
+		}
+		if check != nil {
+			if err := check(header); err != nil {
+				return nil, err
+			}
+		}
+		payloadLength := GetPayloadLength(header[:3])
+		if packet == nil {
+			packet = header
+		}
+		if payloadLength > 0 {
+			packet, err = util.AppendRequiredBytes(ctx, logger, conn, packet, int(payloadLength))
+			if err != nil {
+				if err == io.EOF {
+					return nil, err
+				}
+				return packet[:4], err // the first header: a partial payload is not a packet
+			}
+		}
+		if payloadLength < MaxPacketPayload {
+			return packet, nil
+		}
+	}
+}
+
 // BytesToMySQLPacket converts a byte slice to a MySQL packet
 func BytesToMySQLPacket(buffer []byte) (mysql.Packet, error) {
 	if len(buffer) < 4 {
