@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,6 +42,8 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 		t.logger.Info("Processing specified test sets", zap.Strings("testSets", testSets))
 	}
 
+	var errs []error
+
 	for _, testSetID := range testSets {
 		// Check for context cancellation
 		select {
@@ -55,6 +58,7 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 		if err != nil {
 			t.logger.Error("Could not locate test set directory; skipping",
 				zap.String("testSetID", testSetID), zap.Error(err))
+			errs = append(errs, fmt.Errorf("test set %s: %w", testSetID, err))
 			continue
 		}
 		t.logger.Info("Sanitizing test set",
@@ -74,8 +78,13 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 				zap.String("testSetID", testSetID),
 				zap.String("dir", testSetDir),
 				zap.Error(err))
+			errs = append(errs, fmt.Errorf("test set %s: %w", testSetID, err))
 			continue
 		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to sanitize test set(s): %w", errors.Join(errs...))
 	}
 
 	t.logger.Info("Sanitize process completed")
