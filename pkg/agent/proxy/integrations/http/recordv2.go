@@ -38,9 +38,13 @@ import (
 //
 // recordV2 loops over request/response pairs for HTTP/1.1 keepalive /
 // pipelining. It exits cleanly on either stream reaching EOF or Close,
-// on ctx cancellation, or on a malformed-HTTP decode error (in which
-// case it marks the session's mock incomplete so the supervisor can
-// abort and fall through to passthrough).
+// on ctx cancellation, or on a malformed-HTTP decode error (the error is
+// returned, and the supervisor falls through to passthrough). An exchange
+// it stops on and cannot record (a request or response that does not
+// decode, a mock that cannot be built) is reported first, as every parser
+// reports the exchange it stops on (Session.ReportStoppedOn). A request the
+// server's stream ends without answering is not: with no response there is
+// no mock to lose.
 func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 	if sess == nil {
 		return errors.New("recordV2: nil supervisor session")
@@ -100,7 +104,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			sess.MarkMockIncomplete("http decode error: request read failed: " + err.Error())
+			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: request read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to read full request")
 			return err
 		}
@@ -121,19 +125,38 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		firstRespChunk, err := sess.DestStream.ReadChunk()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
-				sess.MarkMockIncomplete("http decode error: server closed before response")
+				// The stream ended with nothing of a response, so there is
+				// no mock to lose and nothing is reported. The server
+				// closed without answering: the keep-alive idle-close race,
+				// in which the app's HTTP client retries the request on a
+				// new connection, where it is recorded. Or, in an
+				// observe-only capture, the client gave up and closed. Or
+				// the session closed the stream: the supervisor's abort,
+				// whose fallthrough leaves out the rest of the connection,
+				// or the recording's stop.
+				//
+				// A mark on the incomplete-mock flag does not make it a loss
+				// either. Response bytes the capture lost stopped this
+				// connection's capture, as this parser cannot re-align
+				// after a hole, and the capture leaves out the test cases
+				// the connection carries from the loss on itself (the
+				// relay's OnCaptureDesync). A write the relay could not
+				// make (write_error) is a request the server never got:
+				// the same race, when the app writes its request in more
+				// than one piece.
 				logger.Debug("V2 HTTP record: dest stream ended before response", zap.Error(err))
 				return nil
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			sess.MarkMockIncomplete("http decode error: initial response read failed: " + err.Error())
+			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: initial response read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: initial response read failed")
 			return err
 		}
 		if len(firstRespChunk.Bytes) == 0 {
-			sess.MarkMockIncomplete("http decode error: empty initial response chunk")
+			// The channel's close sentinel: the stream ran out with no
+			// response, as io.EOF above, and nothing is reported.
 			return nil
 		}
 		finalResp := append([]byte(nil), firstRespChunk.Bytes...)
@@ -163,7 +186,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				sess.MarkMockIncomplete("http decode error: response read failed: " + err.Error())
+				sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: response read failed: "+err.Error())
 				utils.LogError(logger, err, "V2 HTTP record: failed to read full response")
 				return err
 			}
@@ -180,16 +203,24 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
 		}, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
-			sess.MarkMockIncomplete("http decode error: " + err.Error())
+			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to build mock")
 			return err
 		}
 		if mock != nil {
+			// EmitMock takes the incomplete-mock flag itself. Clearing it
+			// again here would wipe a mark set while EmitMock delivered
+			// (AddMock can block for its send budget): that mark is the
+			// next exchange's, whose mock would then be recorded with
+			// nothing reporting it.
 			if emitErr := sess.EmitMock(mock); emitErr != nil {
 				return emitErr
 			}
+		} else {
+			// Nothing recorded for this exchange (a passthrough), so a mark
+			// set during it must not leave out the next exchange's mock.
+			sess.MarkMockComplete()
 		}
-		sess.MarkMockComplete()
 	}
 }
 

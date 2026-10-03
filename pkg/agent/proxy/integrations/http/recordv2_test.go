@@ -409,8 +409,8 @@ func runLegacyParseFinalHTTP(t *testing.T, h *HTTP, reqBuf, respBuf []byte, dest
 	return nil
 }
 
-// TestRecordV2_MalformedRequest marks the mock incomplete and returns
-// an error rather than emitting a partial mock.
+// TestRecordV2_MalformedRequest reports the exchange as left out and
+// returns an error rather than emitting a partial mock.
 func TestRecordV2_MalformedRequest(t *testing.T) {
 	t.Parallel()
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
@@ -427,8 +427,9 @@ func TestRecordV2_MalformedRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	err := h.recordV2(ctx, sess)
-	// Expect a decode error surfaced up the stack. Incomplete flag was
-	// set; EmitMock drops silently so no mock should land on the chan.
+	// Expect a decode error surfaced up the stack, and no mock on the
+	// chan: the exchange is reported as left out instead
+	// (TestRecordV2_ReportsAnExchangeItStopsOn).
 	if err == nil {
 		t.Fatal("recordV2 returned nil error for malformed request")
 	}
@@ -488,6 +489,101 @@ func TestRecordV2_Keepalive_TwoCycles(t *testing.T) {
 	wantSecond := base.Add(10 * time.Millisecond)
 	if !second.Spec.ReqTimestampMock.Equal(wantSecond) {
 		t.Errorf("second ReqTs = %v, want %v", second.Spec.ReqTimestampMock, wantSecond)
+	}
+}
+
+// A mark the relay sets while EmitMock delivers a mock (a short write on the
+// next exchange, say) is the next mock's. EmitMock has already taken the flag,
+// so the mark stays set, and the next mock is left out and reported over its
+// own exchange. Before, the parser cleared the flag after every EmitMock. That
+// wiped the mark, so the next mock was recorded and nothing reported it.
+func TestRecordV2_AMarkSetWhileAMockIsEmittedLeavesOutTheNextMock(t *testing.T) {
+	t.Parallel()
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
+	spans := &syncMock.Spans{}
+	sess.Orphans = spans
+	hooked := 0
+	sess.AddPostRecordHook(func(*models.Mock) {
+		hooked++
+		if hooked == 1 {
+			// EmitMock runs its hooks after it has taken the flag and
+			// before it delivers, so a mark set here lands mid-delivery.
+			sess.MarkMockIncomplete("short_write")
+		}
+	})
+
+	base := time.Unix(1_700_005_000, 0)
+	sendReq(canonicalRequest, base, base)
+	sendResp(canonicalResponse, base.Add(time.Millisecond), base.Add(time.Millisecond))
+	second, answered := base.Add(10*time.Millisecond), base.Add(11*time.Millisecond)
+	sendReq([]byte("GET /second HTTP/1.1\r\nHost: ex\r\n\r\n"), second, second)
+	sendResp([]byte("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"), answered, answered)
+	closeReq()
+	closeResp()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := h.recordV2(ctx, sess); err != nil {
+		t.Fatalf("recordV2 error: %v", err)
+	}
+	close(mocks)
+	var urls []string
+	for m := range mocks {
+		urls = append(urls, m.Spec.HTTPReq.URL)
+	}
+	if len(urls) != 1 || urls[0] != "/hello" {
+		t.Fatalf("recorded mocks %q, want only /hello: the mock whose capture was marked incomplete was recorded", urls)
+	}
+	if c, o := spans.Counts(); c != 1 || o != 0 {
+		t.Fatalf("the spans hold (closed=%d, open=%d), want the one exchange left out", c, o)
+	}
+	if over, _ := spans.Overlaps(second, answered); !over {
+		t.Fatal("a test case over the exchange left out is not left out")
+	}
+	if over, _ := spans.Overlaps(base, base.Add(time.Millisecond)); over {
+		t.Fatal("a test case over the exchange recorded is left out")
+	}
+	if sess.IsMockIncomplete() {
+		t.Fatal("the flag is still set after the mock it voided was left out")
+	}
+}
+
+// A mark set during an exchange the parser records nothing for (a passthrough)
+// is that exchange's. The parser clears it, so the next exchange's mock is
+// recorded and not left out in its place.
+func TestRecordV2_AMarkSetDuringAPassthroughIsCleared(t *testing.T) {
+	t.Parallel()
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
+	sess.Opts.PassThroughHosts = []models.PassThroughRule{{Host: "skip.example", Mode: models.PassThroughSkip}}
+	spans := &syncMock.Spans{}
+	sess.Orphans = spans
+
+	base := time.Unix(1_700_006_000, 0)
+	sess.MarkMockIncomplete("short_write")
+	sendReq([]byte("GET /skipped HTTP/1.1\r\nHost: skip.example\r\n\r\n"), base, base)
+	sendResp([]byte("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"), base.Add(time.Millisecond), base.Add(time.Millisecond))
+	sendReq(canonicalRequest, base.Add(10*time.Millisecond), base.Add(10*time.Millisecond))
+	sendResp(canonicalResponse, base.Add(11*time.Millisecond), base.Add(11*time.Millisecond))
+	closeReq()
+	closeResp()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := h.recordV2(ctx, sess); err != nil {
+		t.Fatalf("recordV2 error: %v", err)
+	}
+	close(mocks)
+	var urls []string
+	for m := range mocks {
+		urls = append(urls, m.Spec.HTTPReq.URL)
+	}
+	if len(urls) != 1 || urls[0] != "/hello" {
+		t.Fatalf("recorded mocks %q, want only /hello: the passthrough's mark left out the next mock", urls)
+	}
+	if c, o := spans.Counts(); c != 0 || o != 0 {
+		t.Fatalf("the spans hold (closed=%d, open=%d), want none: nothing was left out", c, o)
 	}
 }
 

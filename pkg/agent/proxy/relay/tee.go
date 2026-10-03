@@ -136,12 +136,14 @@ type tee struct {
 	// length header and then that many bytes), so a hole does not cost one
 	// message — the next header is read from the middle of a body and every
 	// subsequent frame on that connection is garbage. onDrop's per-mock
-	// [Session.MarkMockIncomplete] is therefore not enough: it is cleared by
-	// MarkMockComplete after each cycle, while the damage is permanent and
+	// [Session.MarkMockIncomplete] is therefore not enough: the next mock
+	// emitted takes it (Session.EmitMock), while the damage is permanent and
 	// connection-scoped. This hook exists so the owner can mark the span and
 	// suppress the test cases recorded in it, instead of shipping them
-	// mock-less for replay to fail on.
-	onDesync func(reason string)
+	// mock-less for replay to fail on. It returns whether the hole costs the
+	// owner's recording anything, and the tee warns of the hole only then
+	// (see [Config.OnCaptureDesync]).
+	onDesync func(reason string) bool
 	// desynced makes onDesync and its log fire once, not once per chunk.
 	// It is also the latch push consults for [DropDesynced]: it is set for
 	// good on the first desyncing drop and never cleared, which is exactly
@@ -420,7 +422,21 @@ func (t *tee) drop(reason string) {
 	// this warning on every normal abort and cancel a relay that is already
 	// shutting down.
 	if isDesyncingDrop(reason) && !t.desynced.Swap(true) {
-		if t.logger != nil {
+		// Report the hole first, so the owner can suppress the test cases
+		// that overlap it instead of shipping them mock-less: the owner
+		// stops the connection's recording at the hole, and the span of
+		// what it carries from then on is open before the WARN below is
+		// written. Reported after it, the traffic carried while the WARN
+		// was written was in no span.
+		costs := true
+		if t.onDesync != nil {
+			costs = t.onDesync(reason)
+		}
+		// Warned of only when it costs the recording something: a hole as
+		// the owner's recording stops is the end of the connection, and the
+		// WARN would say that every test case recorded from then on is left
+		// out when none is.
+		if costs && t.logger != nil {
 			// Say what the owner actually does: onDesync starts suppression
 			// that follows the connection's ACTIVITY
 			// (syncMock.UnrecordedConn), not the test cases that used it.
@@ -439,11 +455,6 @@ func (t *tee) drop(reason string) {
 				zap.String("reason", reason),
 				zap.String("next_step", next),
 			)
-		}
-		// Report the hole so the owner can suppress the test cases that
-		// overlap it, instead of shipping them mock-less.
-		if t.onDesync != nil {
-			t.onDesync(reason)
 		}
 	}
 	if t.logger != nil && n&(n-1) == 0 {

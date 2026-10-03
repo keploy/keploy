@@ -394,7 +394,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
 	var tcsSentSoFar int       // TCs sent to CLI this session
-	var tcsSuppressedSoFar int // TCs suppressed: pressure OR resync-hole overlapped the TC's HTTP window, or its mock was capacity-dropped
+	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's HTTP window, or its mock was capacity-dropped
 	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
 	// send checks one test case and streams it unless it is left out. It
 	// reports false once the stream is broken.
@@ -407,10 +407,18 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// mock's goroutine runs relative to this handler.
 		tcRespTime := t.HTTPResp.Timestamp
 		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
-		// A mongo/v2 reassembly resync hole strands a delivered-but-unframable
-		// op: its TC records mock-less though no pressure range covers it. The
-		// enterprise parser reports the hole via Session.RecordOrphanWindow;
-		// suppress any TC whose window overlaps it, same as for pressure.
+		// An exchange a connection carried but did not record as a mock
+		// strands its TC mock-less, whether or not a pressure range covers
+		// it: a parser's hole (a mongo/v2 reassembly resync), an exchange a
+		// parser left out (a MySQL response it cannot frame), a mock the
+		// incomplete flag left out, a connection that can no longer be
+		// recorded. Each is reported as an orphan span
+		// (Session.RecordOrphanWindow lists them); suppress any TC whose
+		// window overlaps one, same as for pressure. A span its parser
+		// reports once it gets to the exchange, behind the traffic, reaches
+		// only the TCs checked after it: without a watermark (the hold
+		// below), a TC streamed before it is saved without the mock, as the
+		// WARN that reports the exchange says.
 		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
 		// A capacity drop (outChan overflow / already-closed channel)
 		// feeds nothing into pressureRanges, so the pressure-overlap check
@@ -422,12 +430,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 		if hasPressure || hasOrphan || mockDropped {
 			tcsSuppressedSoFar++
-			a.logger.Debug("agent: TC suppressed — memory pressure / resync-hole overlapped TC window or a mock was capacity-dropped, not sent to CLI",
+			a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
 				zap.String("tc_name", t.Name),
 				zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
 				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 				zap.Int("pressure_overlaps", pressureOverlaps),
-				zap.Int("resync_orphan_overlaps", orphanOverlaps),
+				zap.Int("orphan_overlaps", orphanOverlaps),
 				zap.Bool("capacity_drop", mockDropped),
 				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 			)
@@ -622,6 +630,25 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					zap.Int("orphan_spans_closed", orphanClosed),
 					zap.Int("orphan_ranges_still_open", orphanOpen),
 					zap.Int64("mocks_dropped_by_pressure", finalDropped),
+					// Every mock a parser left out, the exchange it stopped
+					// on included, each reported with Session.ReportLeftOut
+					// (Session.ReportStoppedOn for the one it stopped on):
+					// for the incomplete-mock flag (a chunk the relay
+					// dropped, a short write, a decode error), or for a
+					// reason of the parser's own. A MySQL command that does
+					// not decode, that the replayer cannot serve, or whose
+					// response cannot be framed is left out alone, and the
+					// connection's recording goes on. An HTTP/1 request or
+					// response that does not decode stops the parser, and
+					// so does a MySQL command in which the framing of the
+					// client's stream is lost, or whose response cannot be
+					// framed with no way to take the connection up again
+					// after it (a client that pipelines its commands, say).
+					// Their WARN is rate-limited, so this is where each is
+					// counted. What a connection carried after its
+					// recording stopped is in the orphan spans above, not
+					// here: it was never parsed into mocks to count.
+					zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()),
 					zap.Int64("mocks_added_successfully", finalAdded),
 					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
 					zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),

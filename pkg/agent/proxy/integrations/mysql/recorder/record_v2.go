@@ -125,13 +125,12 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 		if errors.Is(err, ErrFramingLost) {
 			// A first command of 16 MiB or more on a connection joined
 			// mid-stream continued with a packet out of sequence: client bytes
-			// were lost. Its exchange runs on to now, and is left out as
-			// leaveOutInFlight leaves one out; the loss is reported as every
-			// other framing loss is.
+			// were lost. Its exchange is the one the recording stops in
+			// (leaveOutInFlight), from where the command began
+			// (firstCmdAt), and the loss is logged as every other framing
+			// loss is.
 			warnFramingLost(logger, sess, "V2: mysql client packet out of sequence; the connection is no longer recorded", err)
-			start := sess.ClientStream.LastReadTime()
-			sess.RecordOrphanWindow(start, stoppedAt(start))
-			return err
+			return leaveOutInFlight(sess, handshake.firstCmdAt, err)
 		}
 		utils.LogError(logger, err, "V2: failed to handle initial mysql handshake")
 		return err
@@ -188,6 +187,12 @@ type v2HandshakeResult struct {
 	// firstCmdRespSeq is the sequence id firstCmd's response starts at: 1, or
 	// more when the command continued over several packets (packetChain).
 	firstCmdRespSeq byte
+	// firstCmdAt is when the first client packet the post-TLS handshake reads
+	// began: the capture time of the chunk its first header came in. Set as
+	// that header is read, so it is there when reading the packet fails:
+	// when a continuation of it was lost, the exchange the recording stops in
+	// began there, not at the chunk read after the loss.
+	firstCmdAt time.Time
 }
 
 // handleInitialHandshakeV2 walks the MySQL connection phase on the V2
@@ -302,7 +307,10 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 			clientFlush = len(clientFirst)
 		}
 		if err := performTLSUpgradeV2(ctx, logger, sess, clientFlush); err != nil {
-			sess.MarkMockIncomplete("tls upgrade failed")
+			// No mark on the incomplete-mock flag: the recorder returns,
+			// and no mock is emitted after it to take one. The supervisor
+			// falls through on the error and leaves out the rest of the
+			// connection.
 			return res, err
 		}
 
@@ -347,7 +355,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		// no relay behind it (observe-only proxyless capture, unit
 		// harnesses) there is no one to answer it.
 		if err := releaseClientHoldV2(ctx, logger, sess); err != nil {
-			sess.MarkMockIncomplete("client hold release failed")
+			// No mark, as for a failed TLS upgrade above.
 			return res, err
 		}
 	}
@@ -454,7 +462,12 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	// joined here, as handleCommandsV2 joins every later command, and its
 	// response starts at the sequence id after the last of them.
 	var firstChain packetChain
-	firstBuf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, firstChain.take)
+	firstBuf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, func(header []byte) error {
+		if !firstChain.started {
+			res.firstCmdAt = sess.ClientStream.LastReadTime()
+		}
+		return firstChain.take(header)
+	})
 	if err != nil {
 		return res, fmt.Errorf("post-TLS V2: read first client packet: %w", err)
 	}
@@ -1500,7 +1513,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	var held *heldPrepare
 	defer func() {
 		if held != nil {
-			held.leaveOut(logger, sess, notRecorded("the recording stopped before a packet settled the %s response's framing", held.what))
+			held.leaveOut(sess, notRecorded("the recording stopped before a packet settled the %s response's framing", held.what))
 		}
 	}()
 	// carry is the first packet of the response about to be read, read by
@@ -1543,9 +1556,12 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// stops in no exchange (leaveOutInFlight). Lost framing leaves the
 	// exchange out alone, from its command to the last byte of its answer read
 	// (the test case that sent the command is recorded over that), and the
-	// recording goes on from the next command: fail returns nil. Any other
-	// error, or lost framing of a pipelining client's response, stops the
-	// recording in the exchange (leaveOutInFlight).
+	// recording goes on from the next command: fail returns nil. The exchange
+	// is counted as every exchange the recorder leaves out is (leaveOut),
+	// beside reportFault's line for it, and nothing stamps the connection's
+	// stop for it: the connection goes on being recorded. Any other error, or
+	// lost framing of a pipelining client's response, stops the recording in
+	// the exchange (leaveOutInFlight).
 	fail := func(reqTs time.Time, err error) error {
 		if err == nil || streamEnded(err) {
 			return err
@@ -1559,12 +1575,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// with the rest of this exchange: nothing settles its framing.
 			h := held
 			held = nil
-			h.leaveOut(logger, sess, notRecorded("the response after the %s response was not framed, so nothing settles its framing", h.what))
+			h.leaveOut(sess, notRecorded("the response after the %s response was not framed, so nothing settles its framing", h.what))
 		}
 		carry = nil
 		decodeCtx.LastOp.Store(clientKey, wire.RESET)
-		sess.RecordOrphanWindow(reqTs, later(reqTs, sess.DestStream.LastReadTime()))
-		clearPending(sess)
+		leaveOut(sess, reqTs, later(reqTs, sess.DestStream.LastReadTime()), leftOutAlone(err))
 		reportFault(logger, sess, err, true)
 		lastEnd = later(lastEnd, reqTs)
 		clientRealign, serverRealign = true, true
@@ -1620,8 +1635,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			if err != nil {
 				if errors.Is(err, ErrFramingLost) {
 					warnFramingLost(logger, sess, "V2: mysql client stream cannot be taken up after a response left out; the connection is no longer recorded", err)
-					// From the exchange left out on, as for client bytes lost.
-					sess.RecordOrphanWindow(lastEnd, stoppedAt(lastEnd))
+					// The command it could not take up was sent after the
+					// exchange left out: its exchange is the one the recording
+					// stops in (leaveOutInFlight), from then, as for client
+					// bytes lost.
+					return leaveOutInFlight(sess, lastEnd, err)
 				}
 				return err
 			}
@@ -1643,14 +1661,10 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				if errors.Is(err, ErrFramingLost) {
 					warnFramingLost(logger, sess, "V2: mysql client packet out of sequence; the connection is no longer recorded", err)
 					// The command whose bytes were lost was sent after the
-					// last exchange (or the handshake) ended, and its exchange
-					// runs on to now, where the supervisor's count of what the
-					// connection carries next starts (leaveOutInFlight).
-					start := lastEnd
-					if start.IsZero() {
-						start = sess.ClientStream.LastReadTime()
-					}
-					sess.RecordOrphanWindow(start, stoppedAt(start))
+					// last exchange (or the handshake) ended: its exchange
+					// is the one the recording stops in (leaveOutInFlight),
+					// from then.
+					return leaveOutInFlight(sess, lastEnd, err)
 				}
 				return err
 			}
@@ -1695,7 +1709,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					}
 					continue
 				}
-				leaveOut(logger, sess, reqTs, resTs, fmt.Errorf("a %s that does not decode: %w", mysql.CommandStatusToString(op), err))
+				leaveOut(sess, reqTs, resTs, fmt.Errorf("a %s that does not decode: %w", mysql.CommandStatusToString(op), err))
 				lastEnd = later(reqTs, resTs)
 				continue
 			}
@@ -1713,7 +1727,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			lastEnd = reqTs
 			if joined {
 				// COM_STMT_SEND_LONG_DATA can carry 16 MiB or more.
-				leaveOut(logger, sess, reqTs, reqTs, oversizedNotRecorded(cmdPkt.Header.Type, "command"))
+				leaveOut(sess, reqTs, reqTs, oversizedNotRecorded(cmdPkt.Header.Type, "command"))
 				continue
 			}
 			emit := func() {
@@ -1752,7 +1766,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				decodeCtx.LastOp.Store(clientKey, wire.RESET)
 				resTs := sess.DestStream.LastReadTime()
 				lastEnd = later(reqTs, resTs)
-				leaveOut(logger, sess, reqTs, resTs, notRecorded("the replayer cannot serve a cursor's COM_STMT_FETCH"))
+				leaveOut(sess, reqTs, resTs, notRecorded("the replayer cannot serve a cursor's COM_STMT_FETCH"))
 				continue
 			}
 			shape, known := singlePacketReply[cmdBuf[4]]
@@ -1787,7 +1801,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			decodeCtx.LastOp.Store(clientKey, wire.RESET)
 			resTs := sess.DestStream.LastReadTime()
 			lastEnd = later(reqTs, resTs)
-			leaveOut(logger, sess, reqTs, resTs, fmt.Errorf("command %s has no decoder", cmdPkt.Header.Type))
+			leaveOut(sess, reqTs, resTs, fmt.Errorf("command %s has no decoder", cmdPkt.Header.Type))
 			continue
 		}
 
@@ -1814,7 +1828,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		}
 		if errors.Is(err, errNotRecorded) {
 			decodeCtx.LastOp.Store(clientKey, wire.RESET)
-			leaveOut(logger, sess, reqTs, resTs, err)
+			leaveOut(sess, reqTs, resTs, err)
 			lastEnd = later(reqTs, resTs)
 			continue
 		}

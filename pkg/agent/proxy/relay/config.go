@@ -231,10 +231,14 @@ type Config struct {
 	OnMarkMockIncomplete func(reason string)
 
 	// OnCaptureDesync is invoked at most once per direction, the first time
-	// a chunk is dropped on that tee. Nil is safe.
+	// a chunk is dropped on that tee. It returns whether the hole costs the
+	// owner's recording anything, and the tee warns of the hole only then. An
+	// owner whose recording is stopping loses nothing at a hole: the
+	// connection is torn down with the recording. Nil is safe, and every
+	// hole is warned of.
 	//
-	// It is NOT a louder OnMarkMockIncomplete. That one is per-mock and is
-	// cleared by Session.MarkMockComplete after each cycle; this one reports
+	// It is NOT a louder OnMarkMockIncomplete. That one is per-mock and the
+	// next mock emitted takes it (Session.EmitMock); this one reports
 	// that the connection's byte stream now has a hole, which no later mock
 	// recovers from. Downstream parsers frame by length prefix, so after a
 	// hole the next header is read mid-body and every subsequent frame on
@@ -249,7 +253,11 @@ type Config struct {
 	// stopped being recorded; one that can re-aligns at some later message,
 	// but when is known only once it gets there, possibly a full queue behind
 	// the traffic, by when the test cases in between have been streamed.
-	OnCaptureDesync func(reason string)
+	//
+	// It is called first, on the forwarder's goroutine as the chunk is lost,
+	// before the tee logs the hole: an owner that stops the connection's
+	// recording here stops it at the hole. It must not block.
+	OnCaptureDesync func(reason string) bool
 
 	// OnClientChunkTeed is invoked after each successful tee of a
 	// client-to-dest chunk into the parser's FakeConn. Callers wire

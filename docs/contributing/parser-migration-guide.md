@@ -76,13 +76,18 @@ The V2 session (`*supervisor.Session`) exposes:
 | `sess.Directives chan<- directive.Directive` | Send control messages (TLS upgrade, abort, finalize). |
 | `sess.Acks <-chan directive.Ack` | Receive acks for directives. |
 | `sess.Mocks chan<- *models.Mock` | Low-level mock channel (prefer `EmitMock`). |
-| `sess.EmitMock(m) error` | Emit a mock (runs hook chain, respects incomplete-mock gate). |
-| `sess.MarkMockIncomplete(reason)` | Drop the in-flight mock. |
-| `sess.MarkMockComplete()` | Clear the incomplete flag. |
-| `sess.IsMockIncomplete() bool` | Query before expensive work. |
+| `sess.EmitMock(m) error` | Emit a mock (runs hook chain). If the incomplete-mock flag is set, it takes the flag, leaves the mock out and reports it. |
+| `sess.MarkMockIncomplete(reason)` | Set the incomplete-mock flag: the next mock emitted is left out and reported. If you know which exchange you cannot record, report it with `ReportLeftOut` instead: the flag leaves out the next mock, which may be a healthy one. On a path that returns, report it with `ReportStoppedOn`: no mock is emitted after it to take the mark, and the exchange would go unreported. A request whose response never starts, because the server's stream ended first, is not an exchange you cannot record: there is no mock to lose, so report nothing (see below). |
+| `sess.IsMockIncomplete() bool` | Query before expensive work. A mock you then drop goes through `LeaveOutIfIncomplete`. |
+| `sess.LeaveOutIfIncomplete(m) bool` | Drop a mock without emitting it: takes the flag and reports the mock (its kind and times are enough). |
+| `sess.TakeMockIncomplete() (string, bool)` | Take the flag yourself, to scope a mark to the exchanges it hit. You must then report each exchange you leave out with `ReportLeftOut`. |
+| `sess.ReportLeftOut(m, reason)` | Report an exchange you leave out (its kind and times are enough): after `TakeMockIncomplete`, once per exchange the mark hit, with the reason you took; or, without the flag, for an exchange you know you cannot record, with your own reason. Reports its span (`[ReqTimestampMock, ResTimestampMock]`; none for a mock with no request time, which is still counted), counts it, logs the rate-limited WARN and clears pending work; does not touch the flag. `RecordOrphanWindow` alone counts and logs nothing. |
+| `sess.ReportStoppedOn(kind, reqTs, reason)` | Report the exchange you stop on, just before you return with an error on it (a request or response that does not decode, framing you lost in it). One rule for every parser: reported as `ReportLeftOut` reports one, spanned from its request to the stop (`StoppedAt`: the first of your stop, your death or retirement and a capture hole, where the span of what the connection carries after it starts, open from the moment the stop is stamped), and under the relay's mark when one is on the flag, which it takes. Without it, the exchange you were in and every exchange queued behind it are lost with no span and no count. Not for the end of a stream or a recording's stop, which leave nothing out. |
+| `sess.MarkMockComplete()` | Clear the flag after an exchange you record nothing for. Never after `EmitMock`, which takes the flag itself: a mark set while it delivered is the next mock's. |
 | `sess.AddPostRecordHook(h)` | Front-of-chain wrapper hook. |
 | `sess.Logger *zap.Logger` | Pre-scoped with connection fields. |
 | `sess.Ctx context.Context` | Supervisor-managed lifetime. Respect it. |
+| `sess.RecordingStopping() bool` | Whether the recording itself is stopping. A stop of your connection then costs the recording nothing: it ends with the recording, and no span opens after it. If your error wraps `supervisor.ErrReported`, your own log of the stop takes the place of the dispatcher's `parser retired` WARN: log it at WARN only while this is false, and at Debug once it is true, as the dispatcher does. |
 | `sess.Opts models.OutgoingOptions` | Config (bypass rules, passwords, TLS configs, noise). |
 
 #### Reading request/response bytes
@@ -100,6 +105,17 @@ if err != nil {
 }
 // chunk.ReadAt is the canonical request-first-byte timestamp.
 ```
+
+The same holds when `DestStream` ends before any of a request's response:
+return cleanly and report nothing, even with the incomplete-mock flag set.
+There is no response, so no mock is lost. It is most often the keep-alive
+idle-close race (the upstream closes a pooled connection as idle as the app
+sends on it), and the app's client retries on a new connection, where the
+call is recorded. Reporting it (`ReportStoppedOn`) would leave out every test
+case in flight at that moment. Response bytes the capture lost are not yours
+to report there: a parser that cannot re-align after a hole is no longer fed,
+and the capture leaves out the test cases the connection carries from the
+loss on itself.
 
 For byte-stream-oriented protocols (HTTP/1), you can pass the FakeConn
 to a `bufio.Reader` — it satisfies `net.Conn`. Caveat:
@@ -170,7 +186,9 @@ case <-sess.Ctx.Done():
     return sess.Ctx.Err()
 }
 if !ack.OK {
-    sess.MarkMockIncomplete("tls upgrade failed")
+    // The supervisor falls through to passthrough on the error, which
+    // leaves out the rest of the connection and says so. No mark on the
+    // incomplete-mock flag: no mock is emitted after this to take it.
     return fmt.Errorf("tls upgrade: %w", ack.Err)
 }
 

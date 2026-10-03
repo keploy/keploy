@@ -250,6 +250,13 @@ type SyncMockManager struct {
 	pressureDropped atomic.Int64
 	totalAdded      atomic.Int64
 
+	// leftOut counts the mocks a session routed here left out
+	// because a parser could not record them: their capture was incomplete,
+	// or they could not be decoded or served (NoteMockLeftOut), for the
+	// recording's summary: their warnings are rate-limited, so this is the
+	// one place each is counted.
+	leftOut atomic.Int64
+
 	// outChanClosedDrops counts mocks that were already counted in
 	// totalAdded (they passed the pressure gate) but were then dropped
 	// because the outChan was already closed by CloseOutChan — i.e.
@@ -289,24 +296,36 @@ type SyncMockManager struct {
 	pressure      Spans
 	closePressure func()
 
-	// orphans are the spans over which a mock could NOT be framed for a reason
-	// OTHER than the memory-guard pause: a mongo/v2 reassembly resync hole (a
-	// dropped chunk desyncs the framer, so a message delivered during the hole
-	// is DELIVERED, not dropped, yet never turned into a mock), or a connection
-	// that can no longer be recorded at all (see unrecorded.go). Like
-	// the pressure spans they feed a suppressor query, WasMockOrphanedInWindow,
-	// which record.go checks alongside WasPressureActiveInWindow, so record.go
-	// suppresses every TC whose window overlaps one rather than shipping it
-	// mock-less (replay would report match_phase=no_mocks). Kept SEPARATE from
-	// the pressure spans, so each suppression is put down to its real cause.
+	// orphans are the spans over which a connection carried traffic that was
+	// not recorded as a mock, whatever the cause: a hole a parser reports
+	// (a mongo/v2 reassembly resync hole, where a dropped chunk desyncs the
+	// framer, so a message delivered during the hole is DELIVERED, not
+	// dropped, yet never turned into a mock), a mock the session's
+	// incomplete-mock flag left out or its parser reported it could not
+	// record, the exchange it stopped on included (supervisor.Session's
+	// ReportLeftOut, ReportStoppedOn), or a connection that can no longer be
+	// recorded at all (see unrecorded.go). Like the pressure spans they feed a suppressor
+	// query, WasMockOrphanedInWindow, which record.go checks alongside
+	// WasPressureActiveInWindow, so record.go suppresses every TC whose window
+	// overlaps one rather than shipping it mock-less (replay would report
+	// match_phase=no_mocks).
 	//
-	// Closed spans come from RecordOrphanWindow (the enterprise mongo parser's
-	// orphanWindowRecorder), open ones from OpenOrphanWindow: a connection that
-	// is CURRENTLY un-capturable and may stay that way for the rest of the
-	// session. RecordOrphanWindow can only be called once a hole's width is
-	// known, and by then the test cases inside it have already been streamed:
-	// the suppressor in routes/record.go reads these spans as each TC is
-	// streamed, not afterwards.
+	// Kept SEPARATE from the pressure spans, which say only when the memory
+	// guard paused recording. A pause also costs connections exchanges (a
+	// chunk the relay's tee gates voids the next mock the connection's parser
+	// emits, and desyncs the connection's capture, which unrecorded.go then
+	// follows), and those land here too: an orphan span is what a connection
+	// lost, the pressure spans are when pressure was on.
+	//
+	// Closed spans come from RecordOrphanWindow, open ones from
+	// OpenOrphanWindow: a connection that is CURRENTLY un-capturable and may
+	// stay that way for the rest of the session. RecordOrphanWindow can only be
+	// called once a hole's width is known, when the parser gets to it, and a
+	// parser runs behind the traffic: by then test cases inside it may have
+	// been streamed already. The suppressor in routes/record.go reads these
+	// spans as each TC is streamed, not afterwards, so those are saved without
+	// the mock. Only a capture with a watermark (settle.go) holds its test
+	// cases until the spans that could overlap them are known.
 	//
 	// Spans bounds their number, not their width: a suppression is
 	// session-global for every TC whose window overlaps a span, so keeping a
@@ -1278,6 +1297,30 @@ func (m *SyncMockManager) GetDropStats() (pressureActive bool, pressureDropped i
 	return
 }
 
+// NoteMockLeftOut counts a mock that a session whose mocks go to m left out
+// because a parser could not record it: for the incomplete-mock flag (a chunk
+// the relay dropped, a short write, a message that does not decode), or
+// reported by its parser for a reason of its own, such as an exchange the
+// replayer cannot serve or the exchange the parser stopped on
+// (supervisor.Session's ReportLeftOut, ReportStoppedOn). Nil-safe.
+func (m *SyncMockManager) NoteMockLeftOut() {
+	if m == nil {
+		return
+	}
+	m.leftOut.Add(1)
+}
+
+// MocksLeftOut returns how many mocks NoteMockLeftOut has counted: the mocks
+// left out because a parser could not record them, over the manager's life,
+// like the drop counters (GetDropStats). Exposed for the recording's summary
+// in routes/record.go.
+func (m *SyncMockManager) MocksLeftOut() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.leftOut.Load()
+}
+
 // WasPressureActiveInWindow returns (true, overlapCount) if memory pressure
 // was active at any moment during [start, end].
 //
@@ -1312,12 +1355,13 @@ func (m *SyncMockManager) WasPressureActiveInWindow(start, end time.Time) (bool,
 	return m.pressure.Overlaps(start, end)
 }
 
-// WasMockOrphanedInWindow returns (true, overlapCount) if any recorded
-// resync-hole orphan window (see RecordOrphanWindow) overlaps [start, end]. It
-// is the orphan-window twin of WasPressureActiveInWindow: routes/record.go
+// WasMockOrphanedInWindow returns (true, overlapCount) if any orphan span
+// (see RecordOrphanWindow and OpenOrphanWindow) overlaps [start, end]. It is
+// the orphan-window twin of WasPressureActiveInWindow: routes/record.go
 // queries BOTH before forwarding a TC and suppresses it if EITHER overlaps, so
-// a TC stranded by a mongo/v2 reassembly resync hole — a delivered-but-
-// unframable op that was never turned into a mock — is never shipped mock-less
+// a TC stranded by an exchange its connection did not record as a mock — a
+// delivered-but-unframable op, a mock the incomplete flag left out, a
+// connection that can no longer be recorded — is never shipped mock-less
 // (replay would report match_phase=no_mocks).
 //
 // Kept as a SEPARATE method rather than folded into WasPressureActiveInWindow
@@ -1355,16 +1399,24 @@ func (m *SyncMockManager) OpenOrphanWindow(start time.Time) func() {
 	return m.orphans.Open(start)
 }
 
-// RecordOrphanWindow records a [start,end] interval during which a mock could
-// not be framed for a NON-pressure reason (currently a mongo/v2 reassembly
-// resync hole). It feeds WasMockOrphanedInWindow so record.go suppresses every
-// TC whose window overlaps the hole — the same coverage-for-stability tradeoff
-// the memory-pressure suppressor makes — instead of shipping that TC mock-less
-// (replay would then report match_phase=no_mocks). This satisfies the enterprise
-// mongo parser's OPTIONAL orphanWindowRecorder capability (integrations
-// pkg/mongo/v2): older keploy pins that lack this method degrade the parser's
-// resync-orphan suppression to a no-op rather than failing to compile. A zero
-// start is dropped (no wire ts to attribute); an end before start is clamped.
+// RecordOrphanWindow records a [start,end] interval over which a connection
+// carried an exchange that was not recorded as a mock: a hole a parser reports
+// once it knows its width (a mongo/v2 reassembly resync hole), or a mock the
+// session's incomplete-mock flag left out, whatever set the flag, memory
+// pressure included, or that its parser reported it could not record, the
+// exchange it stopped on included (supervisor.Session.RecordOrphanWindow
+// lists them). It feeds
+// WasMockOrphanedInWindow so record.go suppresses every TC whose window
+// overlaps the span — the same coverage-for-stability tradeoff the
+// memory-pressure suppressor makes — instead of shipping that TC mock-less
+// (replay would then report match_phase=no_mocks). Only a TC checked after
+// the span is recorded: one record.go streamed before is saved without the
+// mock (see orphans). The keploy/integrations mongo/v2 parser reaches it
+// through supervisor.Session.RecordOrphanWindow, which it calls directly:
+// that method's name and signature are an API across the two repositories
+// (Session.RecordOrphanWindow lists the session methods the integrations
+// parsers call). A zero start is dropped (no wire ts to attribute); an end
+// before start is clamped.
 func (m *SyncMockManager) RecordOrphanWindow(start, end time.Time) {
 	if m == nil {
 		return
@@ -1395,11 +1447,19 @@ func (m *SyncMockManager) pressureActiveAtLocked(t time.Time) bool {
 // OrphanRangeCount returns how many orphan intervals have been recorded, and
 // how many spans hold them now, split into closed and still-open. Exposed for
 // the session-summary log in routes/record.go so a run with a high
-// tcs_suppressed_total says WHICH suppressor fired: memory pressure
-// (PressureRangeCount) or a connection that could no longer be captured
-// (this). Without the split, an operator seeing most of their tests suppressed
-// has no way to tell the two apart, and a still-open interval is the one that
+// tcs_suppressed_total says WHICH suppressor fired: the spans over which the
+// memory guard paused recording (PressureRangeCount), or the spans over which a
+// connection lost exchanges (this). A still-open interval is the one that
 // keeps suppressing to the end of the session — worth surfacing separately.
+//
+// The two are not exclusive causes. An orphan span is an exchange a
+// connection lost, whatever lost it, and a pause loses some too: a chunk the
+// relay's tee gates voids the next mock its parser emits
+// (Session.LeaveOutIfIncomplete reports it here), and desyncs the
+// connection's capture (unrecorded.go). So orphan spans with no pressure spans
+// are loss pressure did not cause; beside pressure spans, part of them may be
+// pressure's, and the WARN that reports a mock left out for the incomplete
+// flag says why the flag was set.
 //
 // recorded is how often the suppressor fired. closed and open are after
 // joining: intervals that overlap or touch are one span, and past the cap

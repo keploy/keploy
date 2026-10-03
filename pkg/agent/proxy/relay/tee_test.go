@@ -792,7 +792,7 @@ func TestAnUnintendedDropReportsCaptureDesync(t *testing.T) {
 		var desyncs []string
 		pressure := false
 		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, func() bool { return pressure }, nil, nil)
-		tt.onDesync = func(reason string) { desyncs = append(desyncs, reason) }
+		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
 		t.Cleanup(tt.close)
 
 		// Capture is underway: this is the connection a reconnect can rescue.
@@ -823,7 +823,7 @@ func TestAnUnintendedDropReportsCaptureDesync(t *testing.T) {
 		var desyncs []string
 		// Cap admits the first chunk and refuses the second.
 		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, nil, nil, nil)
-		tt.onDesync = func(reason string) { desyncs = append(desyncs, reason) }
+		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
 		t.Cleanup(tt.close)
 
 		if !tt.push(fakeconn.Chunk{Bytes: []byte("abcd")}) {
@@ -842,7 +842,7 @@ func TestAnUnintendedDropReportsCaptureDesync(t *testing.T) {
 		t.Parallel()
 		var desyncs []string
 		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil, nil)
-		tt.onDesync = func(reason string) { desyncs = append(desyncs, reason) }
+		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
 		t.Cleanup(tt.close)
 
 		tt.setPaused(true)
@@ -887,7 +887,7 @@ func TestTee_DesyncedTeeStopsFeedingAParserThatCannotResync(t *testing.T) {
 		desyncs := 0
 		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, nil, rec.record, nil)
 		tt.parserCanResync = canResync
-		tt.onDesync = func(string) { desyncs++ }
+		tt.onDesync = func(string) bool { desyncs++; return true }
 		t.Cleanup(tt.close)
 
 		if !tt.push(mkChunk("abcd")) {

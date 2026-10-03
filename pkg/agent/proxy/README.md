@@ -63,9 +63,69 @@ Split responsibilities:
     breach triggers abort.
   - Goroutine accounting — parser-spawned helpers register for cancel
     on abort.
-  - Incomplete-mock gate — if any chunk is dropped at the tee,
-    `MarkMockIncomplete` is set; subsequent `EmitMock` calls on that
-    session are silently dropped so partial mocks never reach storage.
+  - Incomplete-mock gate — if a chunk is dropped at the tee (or a
+    parser cannot decode an exchange cleanly), `MarkMockIncomplete` sets
+    the session's flag. The next mock `EmitMock` is handed, or that a
+    parser drops through `LeaveOutIfIncomplete`, takes the flag and is
+    left out, so a partial mock never reaches storage. It is reported,
+    not silent (`ReportLeftOut`): `RecordOrphanWindow` over its
+    `[ReqTimestampMock, ResTimestampMock]`, a count in the recording's
+    summary (`mocks_left_out`), and a WARN with the reason,
+    rate-limited per cause (the reason up to its first colon). The span
+    leaves out the test cases over the exchange that are not saved yet
+    when the parser gets to it. The parser runs behind the traffic (a
+    full capture buffer behind, for `per_conn_cap`), and proxy mode
+    checks each test case as it streams it, so one streamed before then
+    is saved without the mock and fails replay with `no_mocks`; the WARN
+    says so. The flag leaves out the next mock emitted, which, behind a
+    full buffer, can be an exchange from before the lost chunk. A parser
+    that takes the flag itself (`TakeMockIncomplete`) calls
+    `ReportLeftOut` for each exchange it leaves out; one that knows
+    which exchange it cannot record calls `ReportLeftOut` for it instead
+    of setting the flag, as the MySQL recorder does for a command that
+    does not decode or that the replayer cannot serve. The mock after it
+    is recorded as usual. A parser that returns on an exchange it cannot
+    record, instead of going on to the next, reports that exchange with
+    `ReportStoppedOn` before it returns, as the HTTP recorder does for a
+    request or response that does not decode, and the MySQL recorder for
+    the command it stops recording a connection in (lost framing of the
+    client's stream, or a response it cannot frame and cannot take the
+    connection up again after, as from a client that pipelines its
+    commands; a response it cannot frame otherwise costs that exchange
+    alone, reported with `ReportLeftOut`, and the recording goes on from
+    the client's next command). That is one rule for
+    every parser: the exchange is counted in `mocks_left_out` and said at
+    WARN like any mock left out; its span runs from its request to the
+    stop, since what the parser had not read yet is lost with it; and a
+    mark on the flag is taken with it and names the cause, since no
+    later `EmitMock` takes it. A mark set instead reports nothing. The
+    connection is left out from the stop on, from the moment the stop is
+    stamped: `Session.StoppedAt`, the first of the parser's stop, its
+    death or retirement, and a capture hole, read from the clock once,
+    tells `Session.OnStop`, and the dispatcher opens that span there,
+    before the supervisor or the dispatcher logs the stop. That span
+    does not cover the exchange the parser, behind the traffic, stopped
+    on; the exchange's span ends at the same instant, so they meet. A
+    parser that stops without reporting the exchange (it panics, hangs,
+    or returns an error without `ReportStoppedOn`) loses what it had
+    captured and not recorded, the exchange it was in and every exchange
+    queued behind it, with no span and no count. The stop is logged
+    apart from it (the dispatcher's `parser retired` WARN, or the
+    parser's own when its error wraps `ErrReported`), at WARN only while
+    the recording runs: as the recording itself stops
+    (`Session.RecordingStopping`), the connection ends with it, no span
+    opens after the stop, and neither WARN goes out. A request the
+    server's stream ends without answering is not such an exchange, and
+    the HTTP recorder reports nothing for it, mark or not: with no
+    response there is no mock to lose. It is most often the keep-alive
+    idle-close race, which the app's HTTP client retries on a new
+    connection, where it is recorded. Response bytes the capture lost
+    stopped the connection's capture, which leaves out the test cases it
+    carries from the loss on itself, and a request the relay could not
+    write to the server (`write_error`) is that same race.
+    `MarkMockComplete` is never called after `EmitMock`: it would clear
+    a mark set while `EmitMock` delivered, and the mock that mark was
+    for would be recorded partial.
 - **`proxy_v2.go::recordViaSupervisor`** — dispatcher entry for V2
   parsers. Builds the relay + supervisor + session, invokes the
   parser, and on `FallthroughToPassthrough` drops the parser while
@@ -84,7 +144,7 @@ Numbered to match `PLAN.md` at the repo root.
 | I1 | Transparent forwarding: every byte reaches its peer in order, or the connection is torn down by the peer's own timeout — never by keploy. | Split ownership. Relay is sole writer. FakeConn.Write is a runtime error. |
 | I2 | Parser failures are local: panics / hangs / OOM in a parser never affect other connections, and never affect the faulting connection's byte path. | Supervisor panic firewall + activity watchdog + memory cap. |
 | I3 | Fallback always available: any connection can drop to raw passthrough at any instant. | On `FallthroughToPassthrough`, `recordViaSupervisor` drops the parser but keeps the existing relay forwarding raw bytes end-to-end until peer close — no handoff gap, no replacement read loop. |
-| I4 | Partial mocks are dropped. | `MarkMockIncomplete` + `EmitMock` gate. Chunk-drop in the tee sets the flag. |
+| I4 | Partial mocks are left out, and each is reported. | `MarkMockIncomplete` + the `EmitMock` / `LeaveOutIfIncomplete` gate, which reports the mock it leaves out (`ReportLeftOut`: `RecordOrphanWindow`, a count, a rate-limited WARN). Chunk-drop in the tee sets the flag. A parser that knows which exchange it cannot record reports it with `ReportLeftOut` itself, and one that returns on one with `ReportStoppedOn`: every mock a parser leaves out is counted, the exchange it stopped on included; what a connection carried after its recording stopped is in the orphan spans. The span leaves out only the test cases not saved by the time the parser reports it; one saved before lacks the mock, and the WARN says so. |
 | I5 | Timestamp monotonicity per connection. | `Chunk.ReadAt` / `Chunk.WrittenAt` stamped at the syscall boundary in the relay; parsers must read these, never call `time.Now()` themselves. Lint rule at `tools/lint/no_timestamp_in_parser/` enforces. |
 | I6 | Bounded resources per connection. | `Config.PerConnCap` on the relay tee. Supervisor tracks parser-owned bytes. |
 | I7 | Kill-switchable. | `util.DefaultKillSwitch` — env `KEPLOY_DISABLE_PARSING=1`, `SIGUSR1`, or `Trip()`. Consulted per new connection in `handleConnection`. |
@@ -115,9 +175,10 @@ Numbered to match `PLAN.md` at the repo root.
    - For mid-stream TLS, send
      `directive.UpgradeTLS(destCfg, clientCfg, reason)` on
      `sess.Directives` and wait for an `Ack` on `sess.Acks`.
-     On `!ack.OK`, call `sess.MarkMockIncomplete("tls upgrade failed")`
-     and return the error — the supervisor aborts and the dispatcher
-     falls through to passthrough.
+     On `!ack.OK`, return the error — the supervisor aborts and the
+     dispatcher falls through to passthrough, which leaves out the rest
+     of the connection and says so. Do not mark the incomplete-mock flag
+     first: no mock is emitted after the return to take the mark.
    - Emit mocks via `sess.EmitMock`. The gate and post-record hook
      chain run automatically.
 

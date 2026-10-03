@@ -137,38 +137,23 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		carriedBySplit = false
 	)
 
-	// flushMock reports whether the mock was DROPPED rather than emitted.
-	// The split path needs that answer: a capture the relay holed must
-	// lose its carried half too, and the incomplete flag can be set by
-	// the relay's goroutine after any check this function's caller made.
-	flushMock := func() (dropped bool) {
+	// flushMock reports whether the mock was LEFT OUT for the incomplete
+	// flag rather than emitted, and the reason the flag was set for. The
+	// split path needs that answer: a capture the relay holed must lose
+	// its carried half too, which is reported for the same reason, and the
+	// incomplete flag can be set by the relay's goroutine after any check
+	// this function's caller made.
+	flushMock := func() (leftOutFor string, leftOut bool) {
 		if len(genericRequests) == 0 || len(genericResponses) == 0 {
-			return false
+			return "", false
 		}
-		// Drop the in-flight mock if the relay has flagged it incomplete
-		// (dropped chunk upstream, memory pressure, short write, etc.).
-		// EmitMock also honours this flag, but checking here avoids
-		// building and allocating the mock for nothing.
-		if sess.IsMockIncomplete() {
+		reset := func() {
 			genericRequests = nil
 			genericResponses = nil
 			reqReadAt = nil
 			resHeadWrittenAt = time.Time{}
 			reqTimestampMock = time.Time{}
 			resTimestampMock = time.Time{}
-			// Clear the incomplete flag so the next cycle has a fresh
-			// chance, matching EmitMock's own reset semantics.
-			sess.MarkMockComplete()
-			// Clear pending work — the parser has consumed the input
-			// even though the mock is being abandoned. Without this
-			// the hang watchdog stays armed on the supervisor side
-			// and can fire spurious aborts after the connection goes
-			// idle. EmitMock's drop path does the same; this early
-			// return would skip it if we didn't replicate it here.
-			if sess.OnPendingCleared != nil {
-				sess.OnPendingCleared()
-			}
-			return true
 		}
 
 		metadata := map[string]string{
@@ -190,6 +175,18 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 				Metadata:         metadata,
 			},
 		}
+		// Leave the mock out if the relay has flagged the capture
+		// incomplete (dropped chunk upstream, memory pressure, short
+		// write, etc.). EmitMock honours the flag too, but the split path
+		// needs to know, and with what reason, so the flag is taken here.
+		// ReportLeftOut reports the exchange as one the connection could
+		// not record, counts it and clears the session's pending work, as
+		// EmitMock would have.
+		if reason, ok := sess.TakeMockIncomplete(); ok {
+			sess.ReportLeftOut(mock, reason)
+			reset()
+			return reason, true
+		}
 		// EmitMock runs sess.OnMockRecorded before sending on sess.Mocks
 		// and short-circuits if the incomplete flag is set. Any error
 		// from EmitMock (ctx cancellation mid-send) is logged but does
@@ -198,13 +195,8 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		if err := sess.EmitMock(mock); err != nil && logger != nil {
 			logger.Debug("generic v2: EmitMock returned error", zap.Error(err))
 		}
-		genericRequests = nil
-		genericResponses = nil
-		reqReadAt = nil
-		resHeadWrittenAt = time.Time{}
-		reqTimestampMock = time.Time{}
-		resTimestampMock = time.Time{}
-		return false
+		reset()
+		return "", false
 	}
 
 	// Drain every event the two reader goroutines produce. The closer
@@ -348,13 +340,29 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 					reqReadAt = reqReadAt[:i]
 					genericResponses = append(genericResponses, encodePayload(ev.bytes, models.FromServer))
 					resTimestampMock = ev.writtenAt
-					if flushMock() {
+					if reason, leftOut := flushMock(); leftOut {
 						// The relay holed this capture — possibly
 						// between our check and this flush, so the
 						// answer has to come from the flush itself.
 						// Let the carried half go with it rather
 						// than record the surviving half of a
-						// recording known to be missing bytes.
+						// recording known to be missing bytes, and
+						// report it for the same reason, as the
+						// flush reported the first half: an
+						// exchange the connection could not record,
+						// counted. Its answer is yet to come, so it
+						// spans its requests' reads, first to last,
+						// which every test case that made one spans.
+						carried := &models.Mock{Name: "mocks", Kind: models.GENERIC}
+						carried.Spec.ReqTimestampMock = heldAt[0]
+						carried.Spec.ResTimestampMock = heldAt[len(heldAt)-1]
+						sess.ReportLeftOut(carried, reason)
+						if logger != nil {
+							logger.Debug("generic v2: dropped the half a split carried out of a holed exchange",
+								zap.Int("requestsDropped", len(heldReqs)),
+								zap.Time("firstRequestReadAt", heldAt[0]),
+								zap.Time("lastRequestReadAt", heldAt[len(heldAt)-1]))
+						}
 						prevChunkWasReq = false
 						continue
 					}
