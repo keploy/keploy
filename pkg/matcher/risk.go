@@ -40,6 +40,13 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
+	added, grown := splitArrayLengthChanges(added, expMaps)
+	removed, shrunk := splitArrayLengthChanges(removed, actMaps)
+	valueChanges = append(append(valueChanges, grown...), shrunk...)
+
+	added, removed = reportPaths(added), reportPaths(removed)
+	typeChanges, valueChanges = reportPaths(typeChanges), reportPaths(valueChanges)
+
 	assess := &models.FailureAssessment{
 		AddedFields:   added,
 		RemovedFields: removed,
@@ -160,14 +167,14 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, e
 	for _, group := range [][]string{valueChanges, typeChanges, removed} {
 		for _, p := range group {
 			if keep(p) {
-				out = append(out, p)
+				out = append(out, reportPath(p))
 			}
 		}
 	}
 	if len(out) == 0 {
 		return nil
 	}
-	return out
+	return reportPaths(out)
 }
 
 // JSONFieldDiffs returns field-level diffs between two JSON documents with
@@ -227,7 +234,7 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 	var out []models.MockFieldDiff
 	for _, p := range valueChanges {
 		out = append(out, models.MockFieldDiff{
-			Path:     pathPrefix + p,
+			Path:     pathPrefix + reportPath(p),
 			Kind:     models.DiffKindValueChanged,
 			Expected: trunc(expMaps.values[p]),
 			Actual:   trunc(actMaps.values[p]),
@@ -235,7 +242,7 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 	}
 	for _, p := range typeChanges {
 		out = append(out, models.MockFieldDiff{
-			Path:     pathPrefix + p,
+			Path:     pathPrefix + reportPath(p),
 			Kind:     models.DiffKindTypeChanged,
 			Expected: trunc(expMaps.types[p] + ": " + expMaps.values[p]),
 			Actual:   trunc(actMaps.types[p] + ": " + actMaps.values[p]),
@@ -243,14 +250,14 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 	}
 	for _, p := range removed {
 		out = append(out, models.MockFieldDiff{
-			Path:     pathPrefix + p,
+			Path:     pathPrefix + reportPath(p),
 			Kind:     models.DiffKindMissingInLive,
 			Expected: trunc(expMaps.values[p]),
 		})
 	}
 	for _, p := range added {
 		out = append(out, models.MockFieldDiff{
-			Path:   pathPrefix + p,
+			Path:   pathPrefix + reportPath(p),
 			Kind:   models.DiffKindMissingInMock,
 			Actual: trunc(actMaps.values[p]),
 		})
@@ -258,8 +265,56 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 	return out
 }
 
+const arrayIndexMark = "\x00"
+
+func reportPath(key string) string {
+	if !strings.Contains(key, arrayIndexMark) {
+		return key
+	}
+	var b strings.Builder
+	for i := 0; i < len(key); i++ {
+		if key[i] != arrayIndexMark[0] {
+			b.WriteByte(key[i])
+			continue
+		}
+		for i+1 < len(key) && key[i+1] >= '0' && key[i+1] <= '9' {
+			i++
+		}
+	}
+	return b.String()
+}
+
+func splitArrayLengthChanges(keys []string, other pathMaps) (fields, lengthChanges []string) {
+	otherPaths := make(map[string]struct{}, len(other.types))
+	for k := range other.types {
+		otherPaths[reportPath(k)] = struct{}{}
+	}
+	for _, k := range keys {
+		if _, ok := otherPaths[reportPath(k)]; ok && strings.Contains(k, arrayIndexMark) {
+			lengthChanges = append(lengthChanges, k)
+			continue
+		}
+		fields = append(fields, k)
+	}
+	return fields, lengthChanges
+}
+
+func reportPaths(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		p := reportPath(k)
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
 func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
-	keyLower := strings.ToLower(path)
+	keyLower := strings.ToLower(reportPath(path))
 	if regs, noisy := ni.match(keyLower); noisy {
 		// An entry with no patterns ignores the whole subtree. A pattern-guarded
 		// entry ignores only the values it describes, so it must be evaluated
@@ -294,8 +349,8 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 		} else {
 			p = "[]"
 		}
-		for _, e := range t {
-			collectJSON(e, p, ni, out)
+		for i, e := range t {
+			collectJSON(e, p+arrayIndexMark+strconv.Itoa(i), ni, out)
 		}
 	case string:
 		out.types[path] = "string"
