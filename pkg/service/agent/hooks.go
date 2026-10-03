@@ -4,6 +4,10 @@ import (
 	"context"
 	"time"
 
+	"go.uber.org/zap"
+
+	"go.keploy.io/server/v3/config"
+
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
@@ -109,6 +113,22 @@ func SetEbpfProxyPortOverride(port uint32) {
 
 func SetSkipProxyListener(skip bool) {
 	coreAgent.SkipProxyListener = skip
+}
+
+// SetHooksFactory installs a factory for a non-kernel Hooks implementation,
+// replacing the eBPF-backed hooks the agent would otherwise build.
+//
+// A factory rather than an instance: it receives the process logger and the
+// fully-parsed config from the composition root, and a nil func is
+// unambiguously "no override" (a nil implementation pointer stored in an
+// interface is not). See coreAgent.HooksFactory for the contract the returned
+// value must satisfy.
+//
+// The value is read ONCE, when the agent is composed. Calling this afterwards
+// has no effect — the constructed Hooks is already wired into the proxy, the
+// ingress manager and the agent.
+func SetHooksFactory(f func(*zap.Logger, *config.Config) coreAgent.Hooks) {
+	coreAgent.HooksFactory = f
 }
 
 // SetAgentInfoCustomizer registers a callback that mutates AgentInfo
