@@ -100,7 +100,7 @@ func TestCertCacheHit(t *testing.T) {
 		t.Fatalf("helperClientHello(%q): %v", hostname, err)
 	}
 
-	warmCert, err := CertForClient(logger, warmHello, caKey, caCert, time.Time{})
+	warmCert, err := CertForClient(logger, warmHello, caKey, caCert, time.Time{}, "")
 	warmCleanup()
 	if err != nil {
 		t.Fatalf("CertForClient warm-up(%q): %v", hostname, err)
@@ -131,7 +131,7 @@ func TestCertCacheHit(t *testing.T) {
 			}
 			defer cleanup()
 
-			cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{})
+			cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{}, "")
 			if err != nil {
 				errCount.Add(1)
 				return
@@ -189,7 +189,7 @@ func TestCertCacheDistinctHostnames(t *testing.T) {
 		if err != nil {
 			t.Fatalf("helperClientHello(%q): %v", h, err)
 		}
-		cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{})
+		cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{}, "")
 		cleanup()
 		if err != nil {
 			t.Fatalf("CertForClient(%q): %v", h, err)
@@ -223,7 +223,7 @@ func TestCertCacheEmptyServerName(t *testing.T) {
 	}
 	defer cleanup()
 
-	cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{})
+	cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func BenchmarkCertForClient(b *testing.B) {
 		if hErr != nil {
 			b.Fatal(hErr)
 		}
-		_, _ = CertForClient(logger, hello, caKey, caCert, time.Time{})
+		_, _ = CertForClient(logger, hello, caKey, caCert, time.Time{}, "")
 		cleanup()
 	}
 }

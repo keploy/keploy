@@ -1421,7 +1421,7 @@ func getCertCache() *expirable.LRU[string, *tls.Certificate] {
 	return certCache
 }
 
-func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
+func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, destHost string) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
 	/*
@@ -1445,10 +1445,21 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// client already knows the target from the CONNECT request), fall back to
 	// the hostname stored by handleConnectTunnel in SrcPortToDstURL.
 	dstURL := clientHello.ServerName
-	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
-	sourcePort := remoteAddr.Port
 
-	if dstURL == "" {
+	// Not every caller hands us a real socket: the v2 relay upgrades a
+	// fakeconn, whose RemoteAddr is a placeholder rather than a *net.TCPAddr,
+	// and an unchecked assertion here takes the whole agent down with it.
+	// Zero is this file's existing "no usable source port" sentinel —
+	// publishMITM already no-ops on it — so reuse it rather than inventing a
+	// second convention. The port-keyed map is then skipped entirely, because
+	// filing every such connection under key 0 would have them read each
+	// other's destination.
+	sourcePort := 0
+	if tcpAddr, ok := clientHello.Conn.RemoteAddr().(*net.TCPAddr); ok {
+		sourcePort = tcpAddr.Port
+	}
+
+	if dstURL == "" && sourcePort != 0 {
 		if stored, ok := SrcPortToDstURL.Load(sourcePort); ok {
 			if s, ok := stored.(string); ok && s != "" {
 				dstURL = s
@@ -1456,7 +1467,22 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		}
 	}
 
-	SrcPortToDstURL.Store(sourcePort, dstURL)
+	// Transparent (eBPF) egress leaves both of the above empty: the app dialled
+	// an IP literal, so Go sent no SNI, and no CONNECT tunnel pre-filed a host
+	// for this source port. destHost is the connection's real destination,
+	// handed down from the handshake call site via tls.WithDestHost.
+	//
+	// It matters that this is a bare host and not "ip:port": the SAN kind is
+	// decided by net.ParseIP inside cfssl, which returns nil for "10.0.0.1:443"
+	// (and for a bracketed "[::1]"), silently demoting the leaf to a DNS SAN and
+	// reproducing the no-IP-SAN failure this exists to fix.
+	if dstURL == "" {
+		dstURL = destHost
+	}
+
+	if sourcePort != 0 {
+		SrcPortToDstURL.Store(sourcePort, dstURL)
+	}
 
 	// Check the cert cache before generating a new certificate.
 	if dstURL != "" {
