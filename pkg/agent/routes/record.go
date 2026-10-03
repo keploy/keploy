@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
+	"go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -383,6 +384,17 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return // Important: return after handling the error
 	}
 
+	// Kept requests the mock manager leaves out this session because their
+	// window was given up while they were in flight (syncMock.Window.Keep),
+	// less those a later request is recorded in the place of
+	// (Window.Replaced). The manager serves every session of the agent's
+	// life, and a loss told in an earlier one can be taken back in this one,
+	// so this session's are on a tally of its own. Opened before the headers
+	// go out: once they are flushed the client may act on the open session,
+	// and a loss told then is this session's.
+	leftOut := syncmgr.Get().OpenLossTally()
+	defer leftOut.Close()
+
 	a.logger.Debug("Streaming incoming test cases to client")
 
 	w.WriteHeader(http.StatusOK)
@@ -399,6 +411,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// send checks one test case and streams it unless it is left out. It
 	// reports false once the stream is broken.
 	send := func(t *models.TestCase) bool {
+		// Whether t is streamed, left out or lost to a broken stream, this
+		// is the last that sees it.
+		defer discardUpload(a.logger, t)
 		// Skip this test case if memory pressure overlapped its HTTP window
 		// [request, response]: under pressure the paired mock may have been
 		// dropped, so sending the TC would orphan it at replay. We check the
@@ -495,9 +510,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					}
 					f.Close()
 					a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
-
-					// Cleanup temp file
-					os.Remove(path)
 				}
 			}
 		}
@@ -524,6 +536,13 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	var hold *syncmgr.TestCaseHold
 	if w := syncmgr.Get().Watermark(); w != nil {
 		hold = syncmgr.NewTestCaseHold(w, syncmgr.TestCaseHoldMax, syncmgr.TestCaseHoldBytes)
+		// A stream that ends while it holds test cases (its client went
+		// away, or it broke) sends none of them.
+		defer func() {
+			for _, t := range hold.Drain() {
+				discardUpload(a.logger, t)
+			}
+		}()
 	}
 	var holdTick *time.Ticker
 	defer func() {
@@ -535,7 +554,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// release sends what the hold lets go, and keeps a ticker going while it
 	// holds any. It reports false once the stream is broken.
 	release := func() bool {
-		for _, h := range hold.Release() {
+		released := hold.Release()
+		for i, h := range released {
 			if h.Unsettled {
 				tcsUnsettled++
 				// What held it, for the first of this recording and then
@@ -548,6 +568,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if !send(h.TC) {
+				for _, rest := range released[i+1:] {
+					discardUpload(a.logger, rest.TC)
+				}
 				return false
 			}
 		}
@@ -611,6 +634,19 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					tcsSuppressedSoFar*100/total >= massSuppressionPercent {
 					logRecordingComplete = a.logger.Warn
 				}
+				// Read once: the warning and the summary say the same.
+				leftOutInFlight := leftOut.LeftOut()
+				if leftOutInFlight > 0 {
+					// Never captured, so never counted above: each stayed in
+					// flight while the mocks the agent held for the requests
+					// in flight passed their budget, or memory pressure let
+					// them go, and was left out rather than recorded without
+					// its mocks. The manager warns of the first and every
+					// 1024th; this is the session's count.
+					a.logger.Warn("agent: some test cases were left out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
+						zap.Uint64("test_cases", leftOutInFlight),
+						zap.Int64("hold_bound_bytes", syncmgr.MaxHeldBytes))
+				}
 				if tcsUnsettled > 0 {
 					// The capture's parsers ran more than the hold's bound
 					// behind: these were checked against what was known then.
@@ -653,6 +689,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
 					zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
 					zap.Int("tcs_released_unsettled", tcsUnsettled),
+					zap.Uint64("tcs_left_out_in_flight", leftOutInFlight),
 				)
 				return
 			}
@@ -671,6 +708,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+}
+
+// discardUpload deletes the files t's upload was written to (conn.Capture): t
+// owns them, and once its stream is done with it, streamed or not, nothing
+// else will.
+func discardUpload(logger *zap.Logger, t *models.TestCase) {
+	if t != nil && t.HasBinaryFile {
+		conn.RemoveFormFiles(logger, t.HTTPReq.Form)
 	}
 }
 

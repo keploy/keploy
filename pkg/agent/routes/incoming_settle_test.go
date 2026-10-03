@@ -364,3 +364,170 @@ func TestHandleIncoming_AMockLeftOutReachesOnlyTestCasesNotYetStreamed(t *testin
 		t.Fatalf("streamed %q, want nothing more: a test case over the exchange left out was streamed after it was reported", got)
 	}
 }
+
+// leaveOutOnGlobalManager has the process's mock manager give up a request in
+// flight (the hold's budget) and then decides it kept: one test case left out,
+// told. It returns the request's window.
+func leaveOutOnGlobalManager(t *testing.T) *syncmgr.Window {
+	t.Helper()
+	mgr := syncmgr.Get()
+	mgr.SetFirstRequestSignaled()
+	old := time.Now().Add(-time.Hour)
+	for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+		mgr.ResolveRange(old, old, "", true, false) // past the startup window: no mock is rescued as boot traffic
+	}
+	start := time.Now().Add(-time.Minute)
+	w := mgr.OpenWindow(start, nil)
+	// Seventeen mocks of a sixteenth of the hold's budget each (the body is
+	// shared; each mock is sized with it).
+	body := strings.Repeat("b", int(syncmgr.MaxHeldBytes/16))
+	for i := 0; i <= 16; i++ {
+		mgr.AddMock(&models.Mock{Kind: models.HTTP,
+			Spec:         models.MockSpec{ReqTimestampMock: start.Add(time.Duration(i) * time.Microsecond), HTTPResp: &models.HTTPResp{Body: body}},
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}})
+	}
+	n := time.Now()
+	mgr.ResolveRange(n, n, "", true, false) // stale: held for it, past the budget
+	if w.Keep() {
+		t.Fatal("fixture: the window was not given up")
+	}
+	w.Close()
+	return w
+}
+
+// pauseCore holds up the logger's caller at the entry whose message is msg
+// until release is closed: a test's way to hold a handler at a known point.
+type pauseCore struct {
+	zapcore.Core
+	msg     string
+	release <-chan struct{}
+}
+
+func (c pauseCore) With(f []zapcore.Field) zapcore.Core {
+	return pauseCore{Core: c.Core.With(f), msg: c.msg, release: c.release}
+}
+
+func (c pauseCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if e.Message == c.msg {
+		<-c.release
+	}
+	return c.Core.Check(e, ce)
+}
+
+// incomingSummary runs one /incoming session, calls during while it is open,
+// and returns the session's recording-complete summary and its warnings about
+// test cases left out.
+//
+// during runs once the client has the stream's headers, with the handler held
+// right after it flushed them (at its "headers flushed" line) until during has
+// returned: the earliest the client can act on an open session, and the
+// latest the handler can have reached. What during does belongs to the
+// session wherever the handler is in between.
+func incomingSummary(t *testing.T, during func()) (summary map[string]interface{}, leftOutWarns []observer.LoggedEntry) {
+	t.Helper()
+	core, logs := observer.New(zap.DebugLevel)
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	held := pauseCore{Core: core, msg: "Incoming stream connection established and headers flushed", release: release}
+	tcs := make(chan *models.TestCase)
+	a := &Agent{logger: zap.New(held), svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	during()
+	close(release)
+	released = true
+	close(tcs)
+	_ = streamedNames(t, resp)
+	deadline := time.Now().Add(5 * time.Second)
+	for logs.FilterMessage("agent: recording complete").Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no recording-complete summary")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return logs.FilterMessage("agent: recording complete").All()[0].ContextMap(),
+		logs.FilterLevelExact(zap.WarnLevel).FilterMessageSnippet("left out of the recording").All()
+}
+
+// A kept request the mock manager left out of the recording — it stayed in
+// flight while the mocks held for the requests in flight passed their budget —
+// is never captured, so no other count sees it. The session's summary says how
+// many, at warning level: the manager's own warning is sampled.
+func TestHandleIncoming_SaysHowManyTestCasesWereLeftOutInFlight(t *testing.T) {
+	leaveOutOnGlobalManager(t) // an earlier session's loss: not this session's
+
+	// A request in flight on the recording's manager, given up by the hold's
+	// budget, and then kept: this session's one loss.
+	summary, warns := incomingSummary(t, func() { leaveOutOnGlobalManager(t) })
+	if got := summary["tcs_left_out_in_flight"]; got != uint64(1) {
+		t.Fatalf("summary tcs_left_out_in_flight = %v, want 1", got)
+	}
+	if len(warns) != 1 || warns[0].ContextMap()["test_cases"] != uint64(1) {
+		t.Fatalf("the left-out test case is not warned of in the session's summary: %v", warns)
+	}
+}
+
+// A loss told before the session began can be taken back during it (a later
+// request recorded in the left-out one's place, syncMock.Window.Replaced): the
+// manager's count then stands below what it was when the session began. The
+// session lost nothing, and its summary says so: none, not the count wrapped
+// around.
+func TestHandleIncoming_ALossTakenBackDuringTheSessionIsNotItsLoss(t *testing.T) {
+	earlier := leaveOutOnGlobalManager(t)
+	summary, warns := incomingSummary(t, earlier.Replaced)
+	if got := summary["tcs_left_out_in_flight"]; got != uint64(0) {
+		t.Fatalf("summary tcs_left_out_in_flight = %v, want 0", got)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("a session that left nothing out warned of test cases left out: %v", warns[0].ContextMap())
+	}
+}
+
+// The mock manager and a deduper that runs for the agent's life (--static-dedup
+// at boot, a sidecar agent serving one stream per recording) outlive a
+// session: a loss told in an earlier session can be taken back in this one,
+// next to a loss of this session's own. The session lost one test case, and
+// its summary, the only report of that second loss (the manager's warning is
+// sampled), says so: the earlier loss's take-back does not cancel it.
+func TestHandleIncoming_AnEarlierLossTakenBackDoesNotHideThisSessionsLoss(t *testing.T) {
+	earlier := leaveOutOnGlobalManager(t) // told in an earlier session
+	summary, warns := incomingSummary(t, func() {
+		earlier.Replaced()         // its kind recorded in this session
+		leaveOutOnGlobalManager(t) // this session's own loss
+	})
+	if got := summary["tcs_left_out_in_flight"]; got != uint64(1) {
+		t.Fatalf("summary tcs_left_out_in_flight = %v, want 1: this session's loss is hidden by an earlier one's take-back", got)
+	}
+	if len(warns) != 1 || warns[0].ContextMap()["test_cases"] != uint64(1) {
+		t.Fatalf("this session's loss is not warned of in its summary: %v", warns)
+	}
+}
+
+// A session's own loss taken back during it (its kind recorded later in the
+// session) is no loss of the session's, and the session's tally of losses
+// goes with it: the handler closes it on its way out.
+func TestHandleIncoming_ItsOwnLossTakenBackIsNoLoss(t *testing.T) {
+	summary, warns := incomingSummary(t, func() {
+		leaveOutOnGlobalManager(t).Replaced()
+	})
+	if got := summary["tcs_left_out_in_flight"]; got != uint64(0) {
+		t.Fatalf("summary tcs_left_out_in_flight = %v, want 0", got)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("a session whose loss was taken back warned of test cases left out: %v", warns[0].ContextMap())
+	}
+	if n := syncmgr.Get().OpenLossTallies(); n != 0 {
+		t.Fatalf("%d loss tallies still open after the session ended", n)
+	}
+}
