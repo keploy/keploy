@@ -165,3 +165,37 @@ func TestComputeDiffMixedChanges(t *testing.T) {
 		t.Fatalf("expected 1 unchanged test case, got %d", len(diff.Unchanged))
 	}
 }
+
+func TestComputeDiffAddedAndRemovedTestCases(t *testing.T) {
+	report1 := &models.TestReport{
+		Tests: []models.TestResult{
+			{TestCaseID: "tc-1", Status: models.TestStatusPassed},
+			{TestCaseID: "tc-deleted", Status: models.TestStatusPassed},
+		},
+	}
+	report2 := &models.TestReport{
+		Tests: []models.TestResult{
+			{TestCaseID: "tc-1", Status: models.TestStatusPassed},
+			{TestCaseID: "tc-added", Status: models.TestStatusFailed},
+		},
+	}
+
+	diff := ComputeDiff(report1, report2)
+	if len(diff.Unchanged) != 1 {
+		t.Fatalf("expected 1 unchanged test case, got %d", len(diff.Unchanged))
+	}
+	if len(diff.StatusTransitions) != 2 {
+		t.Fatalf("expected 2 status transitions (1 added, 1 removed), got %d", len(diff.StatusTransitions))
+	}
+	for _, transition := range diff.StatusTransitions {
+		if transition.TestCaseID == "tc-added" {
+			if transition.Before != "ABSENT" || transition.After != models.TestStatusFailed {
+				t.Fatalf("expected ABSENT -> FAILED for tc-added, got %s -> %s", transition.Before, transition.After)
+			}
+		} else if transition.TestCaseID == "tc-deleted" {
+			if transition.Before != models.TestStatusPassed || transition.After != "ABSENT" {
+				t.Fatalf("expected PASSED -> ABSENT for tc-deleted, got %s -> %s", transition.Before, transition.After)
+			}
+		}
+	}
+}
