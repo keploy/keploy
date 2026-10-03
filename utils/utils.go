@@ -499,14 +499,17 @@ func Recover(logger *zap.Logger) {
 		fmt.Println(Emoji + "Failed to recover from panic. Logger is nil.")
 		return
 	}
-	sentry.Flush(2 * time.Second)
+	// No flush on a clean return: Recover is deferred on hot goroutines, and a
+	// flush waits on the process's one Sentry transport worker. Only a
+	// recovered panic has an event to flush (below).
 	if r := recover(); r != nil {
 		HandleRecovery(logger, r, "Recovered from panic")
+		// Before Stop: the process may exit as soon as the global context ends.
+		sentry.Flush(2 * time.Second)
 		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
 			LogError(logger, err, "failed to stop the global context")
 		}
-		sentry.Flush(2 * time.Second)
 	}
 }
 

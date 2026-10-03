@@ -13,6 +13,10 @@ import (
 
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset_column_definition.html
 
+// columnFixedTailLen is the length of a column definition's fixed-length
+// fields after its six length-encoded strings.
+const columnFixedTailLen = 13
+
 func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefinition41, int, error) {
 	packet := &mysql.ColumnDefinition41{
 		Header: mysql.Header{},
@@ -75,6 +79,14 @@ func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefi
 	packet.OrgName = string(orgName)
 	pos += n
 
+	// The fixed-length tail: [0x0c], character_set(2), column_length(4),
+	// type(1), flags(2), decimals(1), filler(2). A column definition cut
+	// short (misframed, or a capture hole) must fail here, not panic below:
+	// a panic kills the recorder for the rest of its connection.
+	if len(b)-pos < columnFixedTailLen {
+		return nil, pos, fmt.Errorf("column definition truncated: %d of its %d fixed-length bytes present", max(len(b)-pos, 0), columnFixedTailLen)
+	}
+
 	// skip [0x0c] (length of fixed-length fields)
 	packet.FixedLength = 0x0c
 	pos++
@@ -103,20 +115,23 @@ func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefi
 	packet.Filler = b[pos : pos+2]
 	pos += 2
 
-	//if more data, command was field list
-	if packet.Header.PayloadLength > uint32(pos) {
+	// If more data, the command was COM_FIELD_LIST: a default value follows.
+	// pos counts the 4-byte header, PayloadLength does not.
+	if packet.Header.PayloadLength > uint32(pos-4) {
 		//length of default value lenenc-int
 		defaultValueLength, _, n := utils.ReadLengthEncodedInteger(b[pos:])
+		if n == 0 {
+			return nil, pos, fmt.Errorf("column definition truncated before its default value's length")
+		}
 		pos += n
 
-		if pos+int(defaultValueLength) > len(b) {
-
-			return nil, pos, fmt.Errorf("malformed packet: %v", err)
+		if defaultValueLength > uint64(len(b)-pos) {
+			return nil, pos, fmt.Errorf("column definition's default value (%d bytes) overruns the packet", defaultValueLength)
 		}
 
 		//default value string[$len]
 		packet.DefaultValue = string(b[pos:(pos + int(defaultValueLength))])
-		pos--
+		pos += int(defaultValueLength)
 	}
 
 	return packet, pos, nil

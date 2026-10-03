@@ -2,17 +2,22 @@ package replay
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // This file exists because the two statements that make the partial-run fix
@@ -43,26 +48,72 @@ func (f *prTestDB) UpdateTestCase(context.Context, *models.TestCase, string, boo
 func (f *prTestDB) DeleteTests(context.Context, string, []string) error                  { return nil }
 func (f *prTestDB) DeleteTestSet(context.Context, string) error                          { return nil }
 
-type prMockDB struct{}
+// prMockDB counts UpdateMocks calls. UpdateMocks is the destructive prune: it
+// deletes every recorded mock outside the keep-set and the startup window, so
+// whether a run reached it at all is what the prune tests below assert.
+type prMockDB struct {
+	mu          sync.Mutex
+	updateCalls int
+	// kept is the keep-set of the last prune.
+	kept map[string]models.MockState
+	// filtered is the set's per-test mocks; none by default.
+	filtered []*models.Mock
+}
 
-func (prMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+func (m *prMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	return m.filtered, nil
+}
+func (*prMockDB) GetUnFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
 	return nil, nil
 }
-func (prMockDB) GetUnFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
-	return nil, nil
-}
-func (prMockDB) UpdateMocks(context.Context, string, map[string]models.MockState, time.Time, time.Time) error {
+func (m *prMockDB) UpdateMocks(_ context.Context, _ string, keep map[string]models.MockState, _ time.Time, _ time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateCalls++
+	m.kept = keep
 	return nil
 }
+func (m *prMockDB) pruneCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.updateCalls
+}
 
-type prMappingDB struct{}
+// prMappingDB counts Insert calls. Every mappings.yaml write goes through
+// Insert: the create-if-absent write, StoreMappings and the startup backfill.
+// By default no file exists, the shape of a DaemonSet recording; exists makes
+// Exists report one, which is what the StoreMappings merge path writes into.
+type prMappingDB struct {
+	mu          sync.Mutex
+	inserts     int
+	exists      bool
+	existsCalls int
+	// last is the mapping of the last Insert.
+	last *models.Mapping
+}
 
-func (prMappingDB) Insert(context.Context, *models.Mapping) error { return nil }
-func (prMappingDB) Get(context.Context, string) (map[string][]models.MockEntry, bool, error) {
+func (m *prMappingDB) Insert(_ context.Context, mapping *models.Mapping) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inserts++
+	m.last = mapping
+	return nil
+}
+func (*prMappingDB) Get(context.Context, string) (map[string][]models.MockEntry, bool, error) {
 	return nil, false, nil
 }
-func (prMappingDB) GetStartup(context.Context, string) ([]models.MockEntry, error) { return nil, nil }
-func (prMappingDB) Exists(context.Context, string) (bool, error)                   { return false, nil }
+func (*prMappingDB) GetStartup(context.Context, string) ([]models.MockEntry, error) { return nil, nil }
+func (m *prMappingDB) Exists(context.Context, string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.existsCalls++
+	return m.exists, nil
+}
+func (m *prMappingDB) insertCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.inserts
+}
 
 // prReportDB records the report the run persisted. That report — not the CLI
 // log line — is what the YAML, JUnit, --format json and the cloud UI render,
@@ -72,15 +123,31 @@ type prReportDB struct {
 	results     []models.TestResult
 	report      *models.TestReport
 	failInserts bool
+	// failInsertOf fails only the named test's result insert, with that error.
+	failInsertOf map[string]error
+	// Read-back faults: onRead runs first (a test cancels the run from it),
+	// dropOnRead leaves the named test's result out, as a store that lost or
+	// paged away a result does, and readErr fails the read alongside whatever it
+	// returned.
+	onRead     func()
+	readErr    error
+	dropOnRead string
 }
 
 func (f *prReportDB) GetAllTestRunIDs(context.Context) ([]string, error) { return nil, nil }
 func (f *prReportDB) GetTestCaseResults(context.Context, string, string) ([]models.TestResult, error) {
+	if f.onRead != nil {
+		f.onRead()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]models.TestResult, len(f.results))
-	copy(out, f.results)
-	return out, nil
+	out := make([]models.TestResult, 0, len(f.results))
+	for _, r := range f.results {
+		if r.TestCaseID != f.dropOnRead {
+			out = append(out, r)
+		}
+	}
+	return out, f.readErr
 }
 func (f *prReportDB) GetReport(context.Context, string, string) (*models.TestReport, error) {
 	return nil, nil
@@ -91,6 +158,9 @@ func (f *prReportDB) InsertTestCaseResult(_ context.Context, _ string, _ string,
 	defer f.mu.Unlock()
 	if f.failInserts {
 		return fmt.Errorf("report store is unwritable")
+	}
+	if err := f.failInsertOf[r.TestCaseID]; err != nil {
+		return err
 	}
 	f.results = append(f.results, *r)
 	return nil
@@ -133,9 +203,27 @@ type prInstr struct {
 	// the set, the way a crash or an OOM kill does. 0 = it stays up.
 	stopAppAfterNUpdates int
 	appStopped           chan struct{}
+	// stopErr is how the app exits; ErrAppStopped when empty.
+	stopErr models.AppErrorType
 	// lastParams is the filter-params payload of the most recent send, so a
 	// test can assert what the agent was actually told.
 	lastParams models.MockFilterParams
+	// allParams is every send, in order.
+	allParams []models.MockFilterParams
+	// perTestScope makes the stand-in agent answer each send the way an agent
+	// that reads the consumed history only for its per-test mocks does
+	// (models.ConsumedScopeHeader); scopeSaid is what the client has taken from
+	// the last answer, cleared by a store as the real client clears it.
+	perTestScope bool
+	scopeSaid    bool
+	// storedFiltered and storedUnfiltered are the pools of the last store.
+	storedFiltered, storedUnfiltered []*models.Mock
+}
+
+func (f *prInstr) AgentReadsConsumedPerTestOnly() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.scopeSaid
 }
 
 func (f *prInstr) Setup(context.Context, string, models.SetupOptions) error     { return nil }
@@ -151,8 +239,12 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 	case <-ctx.Done():
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1}
 	case <-f.appStopped:
+		errType := models.ErrAppStopped
+		if f.stopErr != "" {
+			errType = f.stopErr
+		}
 		return models.AppError{
-			AppErrorType: models.ErrAppStopped,
+			AppErrorType: errType,
 			ExitCode:     1,
 			AppLogs:      "panic: runtime error: out of memory\n",
 		}
@@ -167,12 +259,20 @@ func (f *prInstr) BeforeTestSetCompose(context.Context, string, string, bool) er
 func (f *prInstr) AfterTestRun(context.Context, string, []string, models.TestCoverage) error {
 	return nil
 }
-func (f *prInstr) StoreMocks(context.Context, []*models.Mock, []*models.Mock) error { return nil }
+func (f *prInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scopeSaid = false
+	f.storedFiltered, f.storedUnfiltered = filtered, unfiltered
+	return nil
+}
 func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastParams = params
+	f.allParams = append(f.allParams, params)
 	f.updateCalls++
+	f.scopeSaid = f.perTestScope
 	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates {
 		close(f.appStopped) // the application exits mid-set
 		// Wait for the replayer to ACTUALLY observe the exit rather than
@@ -203,10 +303,33 @@ func (f *prInstr) NotifyGracefulShutdown(context.Context) error         { return
 func (f *prInstr) ComposeDownOnSetupFailure(context.Context) error      { return nil }
 
 // prHooks answers every simulated request with the test case's own recorded
-// response, so a test that runs, passes.
-type prHooks struct{ wrongType bool }
+// response, so a test that runs, passes. simErr makes the named tests fail the
+// way SimulateHTTP does when no response comes back; streamErr fails the named
+// streaming tests while their body is read.
+type prHooks struct {
+	wrongType bool
+	simErr    map[string]error
+	streamErr map[string]error
+	// consumed is what every GetConsumedMocks call returns, unless consumedFor
+	// is set, which is then asked on every call.
+	consumed    []models.MockState
+	consumedFor func() []models.MockState
+	// wrongBody answers the named tests with a body that does not match, so
+	// they fail on the response comparison.
+	wrongBody map[string]bool
+	// consumedFailsOnStop fails GetConsumedMocks once the run's context is
+	// cancelled, as the real agent call does after the app exits.
+	consumedFailsOnStop bool
+}
 
 func (h prHooks) SimulateRequest(_ context.Context, tc *models.TestCase, _ string) (interface{}, error) {
+	if err := h.simErr[tc.Name]; err != nil {
+		return nil, err
+	}
+	if err := h.streamErr[tc.Name]; err != nil {
+		return &pkg.StreamingHTTPResponse{StatusCode: 200, Header: tc.HTTPResp.Header,
+			Reader: io.NopCloser(iotest.ErrReader(err)), StreamConfig: pkg.DetectHTTPStreamConfig(tc, nil)}, nil
+	}
 	if h.wrongType {
 		// Answer with the OTHER kind's response type, so the assertion in the
 		// replay loop fails for whichever arm this test case takes.
@@ -220,9 +343,20 @@ func (h prHooks) SimulateRequest(_ context.Context, tc *models.TestCase, _ strin
 		return &resp, nil
 	}
 	resp := tc.HTTPResp
+	if h.wrongBody[tc.Name] {
+		resp.Body = `{"ok":false}`
+	}
 	return &resp, nil
 }
-func (prHooks) GetConsumedMocks(context.Context) ([]models.MockState, error)     { return nil, nil }
+func (h prHooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	if h.consumedFailsOnStop && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if h.consumedFor != nil {
+		return h.consumedFor(), nil
+	}
+	return h.consumed, nil
+}
 func (prHooks) GetNoisyTestCaseNames(string) []string                            { return nil }
 func (prHooks) BeforeTestRun(context.Context, string) error                      { return nil }
 func (prHooks) BeforeTestSetCompose(context.Context, string, string, bool) error { return nil }
@@ -283,7 +417,11 @@ type prRun struct {
 	replayer *Replayer
 	report   *prReportDB
 	instr    *prInstr
+	mocks    *prMockDB
+	mappings *prMappingDB
 	cases    []*models.TestCase
+	// cancel stops the run from outside, as a SIGINT does; set by run.
+	cancel context.CancelFunc
 }
 
 func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
@@ -309,11 +447,13 @@ func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
 	cfg.Test.Host = "127.0.0.1"
 	reportDB := &prReportDB{}
 	instr := &prInstr{failUpdateFromNth: failUpdateFromNth, appStopped: make(chan struct{})}
+	mocks := &prMockDB{}
+	mappings := &prMappingDB{}
 	r := &Replayer{
 		logger:          prLogger(),
 		testDB:          &prTestDB{cases: cases},
-		mockDB:          prMockDB{},
-		mappingDB:       prMappingDB{},
+		mockDB:          mocks,
+		mappingDB:       mappings,
 		reportDB:        reportDB,
 		testSetConf:     prTestSetConf{},
 		telemetry:       prTelemetry{},
@@ -327,14 +467,28 @@ func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
 		completeTestReport:   make(map[string]TestReportVerdict),
 		failedTCsBySetID:     make(map[string][]string),
 		mockMismatchFailures: NewTestFailureStore(),
+		consumedMockNames:    make(map[string]struct{}),
 	}
-	return &prRun{replayer: r, report: reportDB, instr: instr, cases: cases}
+	return &prRun{replayer: r, report: reportDB, instr: instr, mocks: mocks, mappings: mappings, cases: cases}
+}
+
+// streaming makes the named cases NDJSON streams, which RunTestSet takes out of
+// its first phase and runs afterwards, one at a time.
+func (p *prRun) streaming(names ...string) {
+	for _, tc := range p.cases {
+		for _, n := range names {
+			if tc.Name == n {
+				tc.HTTPResp.Header = map[string]string{"Content-Type": "application/x-ndjson"}
+			}
+		}
+	}
 }
 
 func (p *prRun) run(t *testing.T) models.TestSetStatus {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
 	defer cancel()
+	p.cancel = cancel
 	status, err := p.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", false)
 	if err != nil {
 		t.Fatalf("RunTestSet returned an error, which is a different path from the one under test: %v", err)
@@ -349,8 +503,13 @@ func (p *prRun) run(t *testing.T) models.TestSetStatus {
 // TestRunTestSetHealthyRunPasses is the control. Without it every assertion
 // below is satisfiable by a harness that never reaches the loop at all, and by
 // a downgrade that fires unconditionally.
+//
+// It is also the control for the prune tests: with RemoveUnusedMocks on (what
+// k8s-proxy auto-replay sets), a complete, fully passing run must still prune
+// exactly once, or the guards below are satisfiable by never pruning at all.
 func TestRunTestSetHealthyRunPasses(t *testing.T) {
 	h := newPartialRunHarness(t, 4, 0) // never fail
+	h.replayer.config.Test.RemoveUnusedMocks = true
 	status := h.run(t)
 
 	if status != models.TestSetStatusPassed {
@@ -358,6 +517,515 @@ func TestRunTestSetHealthyRunPasses(t *testing.T) {
 	}
 	if got := len(h.report.results); got != 4 {
 		t.Fatalf("recorded %d test results; want 4 — the loop did not run every test", got)
+	}
+	if got := h.mocks.pruneCalls(); got != 1 {
+		t.Fatalf("a complete, passing run with RemoveUnusedMocks made %d UpdateMocks calls; want 1 — "+
+			"the prune must stay exactly as it was for a run that scored every test", got)
+	}
+}
+
+// TestRunTestSetPartialRunDoesNotPruneMocks: a run that stopped before scoring
+// every test must not prune. The keep-set holds only what the tests that ran
+// consumed, so every mock of a test the run never reached looks unused. Only
+// mappings.yaml protects those, and a recording without one (a DaemonSet
+// recording has none) lost them all.
+func TestRunTestSetPartialRunDoesNotPruneMocks(t *testing.T) {
+	h := newPartialRunHarness(t, 4, 3) // test-1 runs, test-2 is refused, tests 2-4 never run
+	h.replayer.config.Test.RemoveUnusedMocks = true
+	_ = h.run(t)
+
+	if h.report.report == nil {
+		t.Fatal("no report was persisted")
+	}
+	if scored := h.report.report.Success + h.report.report.Failure; scored >= 4 {
+		t.Fatalf("precondition: the run scored %d of 4 tests; it was supposed to stop part-way", scored)
+	}
+	if got := h.mocks.pruneCalls(); got != 0 {
+		t.Fatalf("a run that stopped after %d of 4 tests made %d UpdateMocks calls; it must make none — "+
+			"the tests it never reached would lose every mock outside the startup window",
+			h.report.report.Success+h.report.report.Failure, got)
+	}
+}
+
+// prClientTimeoutErr returns the error net/http itself produces when the app
+// accepts a request and never answers before the client gives up, so the test
+// classifies the exact text SimulateHTTP hands to CreateFailedTestResult.
+func prClientTimeoutErr(t *testing.T) error {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	resp, err := (&http.Client{Timeout: 50 * time.Millisecond}).Get(srv.URL)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("a server that never answers produced a response")
+	}
+	return err
+}
+
+// prCanceledErr returns the error net/http produces for a request whose context
+// was cancelled, which is what a stop does to the request in flight.
+func prCanceledErr(t *testing.T) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:1/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("a cancelled request produced a response")
+	}
+	return err
+}
+
+// TestRunTestSetNoAnswerFailuresDoNotPruneMocks: a run that scored every test,
+// but where the app never answered some of them, must not prune. A request that
+// timed out or was cancelled consumed nothing for want of an answer, not for
+// want of need, so its test's mocks look unused and PreserveFailedMocks=false
+// (what k8s-proxy auto-replay sets) would let the prune delete them.
+func TestRunTestSetNoAnswerFailuresDoNotPruneMocks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  func(*testing.T) error
+	}{
+		{"client timeout", prClientTimeoutErr},
+		{"context canceled", prCanceledErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.err(t)
+			h := newPartialRunHarness(t, 4, 0)
+			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-2": err, "test-3": err, "test-4": err}}
+			h.replayer.config.Test.RemoveUnusedMocks = true
+			_ = h.run(t)
+
+			rep := h.report.report
+			if rep == nil || rep.Success != 1 || rep.Failure != 3 {
+				t.Fatalf("precondition: want a complete run with 1 pass and 3 failures, got %+v", rep)
+			}
+			if got := h.mocks.pruneCalls(); got != 0 {
+				t.Fatalf("3 of 4 tests got no answer (%v) and the run still made %d UpdateMocks calls; "+
+					"it must make none", err, got)
+			}
+		})
+	}
+}
+
+// TestRunTestSetUnrunStreamingTestsBlockThePrune: streaming tests are taken out
+// of testsToRun and run in a second phase, so stoppedEarly never counts them.
+// Every way that phase is cut short or skipped leaves streaming tests that
+// consumed nothing, and without mappings.yaml nothing else keeps their mocks
+// out of the delete.
+func TestRunTestSetUnrunStreamingTestsBlockThePrune(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		failUpdateNth int // agent refuses filter params from this call (1 before the loop, then 1 per test)
+		stopAppNth    int // the app exits during this filter-params call
+		failOnStop    bool
+		wantPrunes    int
+	}{
+		// The replaced-agent shape (#4614), refusing the first streaming test.
+		{name: "agent refuses the first streaming test", failUpdateNth: 4},
+		{name: "agent refuses the second streaming test", failUpdateNth: 5},
+		// The app exits during the last non-streaming test. With the agent call
+		// failing on the stop, the loop sets exitLoop and the phase never starts;
+		// without it, the phase starts and breaks on the exit signal.
+		{name: "app exits and the streaming phase is skipped", stopAppNth: 3, failOnStop: true},
+		{name: "app exits and the streaming phase breaks", stopAppNth: 3},
+		// Control: every streaming test ran, so the run is complete and prunes.
+		{name: "every streaming test ran", wantPrunes: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 4, tc.failUpdateNth)
+			h.streaming("test-3", "test-4")
+			h.instr.stopAppAfterNUpdates = tc.stopAppNth
+			h.replayer.hookImpl = prHooks{consumedFailsOnStop: tc.failOnStop}
+			h.replayer.config.Test.RemoveUnusedMocks = true
+			_ = h.run(t)
+
+			rep := h.report.report
+			if rep == nil {
+				t.Fatal("no report was persisted")
+			}
+			ran := rep.Success + rep.Failure + rep.Obsolete
+			if complete := ran == 4; complete != (tc.wantPrunes == 1) {
+				t.Fatalf("precondition: %d of 4 tests produced a verdict (%+v)", ran, rep)
+			}
+			if got := h.mocks.pruneCalls(); got != tc.wantPrunes {
+				t.Fatalf("%d of 4 tests produced a verdict and the run made %d UpdateMocks calls; want %d",
+					ran, got, tc.wantPrunes)
+			}
+		})
+	}
+}
+
+// TestRunTestSetNoAnswerInTheStreamingPhaseBlocksThePrune pins the two
+// streaming-phase sites where a transport error becomes a synthetic result:
+// the request itself, and the body read after the headers arrived.
+func TestRunTestSetNoAnswerInTheStreamingPhaseBlocksThePrune(t *testing.T) {
+	timeout := prClientTimeoutErr(t)
+	for _, tc := range []struct {
+		name  string
+		hooks prHooks
+	}{
+		{"request timed out", prHooks{simErr: map[string]error{"test-4": timeout}}},
+		{"body read timed out", prHooks{streamErr: map[string]error{"test-4": timeout}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 4, 0)
+			h.streaming("test-4")
+			h.replayer.hookImpl = tc.hooks
+			h.replayer.config.Test.RemoveUnusedMocks = true
+			_ = h.run(t)
+
+			rep := h.report.report
+			if rep == nil || rep.Success != 3 || rep.Failure != 1 {
+				t.Fatalf("precondition: want a complete run with 3 passes and 1 failure, got %+v", rep)
+			}
+			if got := h.mocks.pruneCalls(); got != 0 {
+				t.Fatalf("the streaming test got no answer and the run made %d UpdateMocks calls; want 0", got)
+			}
+		})
+	}
+}
+
+// TestRunTestSetLostResultBlocksThePrune: when a result insert fails the report
+// is short of that result, so a rule that reads the report back cannot see why
+// the test failed. The run is INTERNAL_ERR and must not prune.
+func TestRunTestSetLostResultBlocksThePrune(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  func(*testing.T) error
+	}{
+		{"client timeout", prClientTimeoutErr},
+		{"connection refused", func(*testing.T) error {
+			return errors.New(`Get "http://127.0.0.1:8080/test-2": dial tcp 127.0.0.1:8080: connect: connection refused`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-2": tc.err(t)}}
+			h.report.failInserts = true
+			h.replayer.config.Test.RemoveUnusedMocks = true
+			_ = h.run(t)
+
+			rep := h.report.report
+			if rep == nil || rep.Success != 1 || rep.Failure != 1 {
+				t.Fatalf("precondition: want both tests scored, 1 pass and 1 failure, got %+v", rep)
+			}
+			if got := h.mocks.pruneCalls(); got != 0 {
+				t.Fatalf("test-2's result never reached the report and the run made %d UpdateMocks calls; want 0", got)
+			}
+		})
+	}
+}
+
+// TestRunTestSetOrdinaryFailureStillPrunes is the other side of the no-answer
+// rule: a test that failed for any other reason is an ordinary failure, and
+// with PreserveFailedMocks=false (what k8s-proxy auto-replay sets) the run
+// prunes exactly as before. That includes a failure whose recorded body was too
+// large to keep: the synthetic result then carries no body at all, and that is
+// not evidence that the app never answered.
+func TestRunTestSetOrdinaryFailureStillPrunes(t *testing.T) {
+	for _, bodySkipped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recorded body skipped=%v", bodySkipped), func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0)
+			h.cases[1].HTTPResp.BodySkipped = bodySkipped
+			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-2": errors.New(`Get "http://127.0.0.1:8080/test-2": net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00\x00"`)}}
+			h.replayer.config.Test.RemoveUnusedMocks = true
+			_ = h.run(t)
+
+			rep := h.report.report
+			if rep == nil || rep.Success != 1 || rep.Failure != 1 {
+				t.Fatalf("precondition: want a complete run with 1 pass and 1 failure, got %+v", rep)
+			}
+			if got := h.mocks.pruneCalls(); got != 1 {
+				t.Fatalf("a complete run with one ordinary failure made %d UpdateMocks calls; want 1", got)
+			}
+		})
+	}
+}
+
+// TestRunTestSetIncompleteRunDoesNotCreateMappings: with UpdateTestMapping off
+// (the default) a run creates mappings.yaml only when none exists, and never
+// touches it again. A run that left tests without a verdict or an answer has no
+// entries for them, so creating the file from it leaves those tests out for
+// good. The startup-only backfill would create the file just the same.
+// --update-test-mapping writes a run with an unanswered test either way:
+// mapdb.Insert replaces only the entries this run has, so into an existing file
+// the unanswered test keeps its own, and a new file gains it on the next such
+// run. A run that stopped early writes nothing under either flag.
+func TestRunTestSetIncompleteRunDoesNotCreateMappings(t *testing.T) {
+	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
+	timeout := prClientTimeoutErr(t)
+	for _, tc := range []struct {
+		name          string
+		failNth       int
+		simErr        map[string]error
+		stopAppNth    int
+		stopErr       models.AppErrorType
+		updateMapping bool
+		fileExists    bool
+		wantInserts   int
+	}{
+		{name: "stopped early", failNth: 3},
+		{name: "a request got no answer", simErr: map[string]error{"test-4": timeout}},
+		{name: "a request was refused", simErr: map[string]error{"test-4": errors.New(
+			`Get "http://127.0.0.1:8080/test-4": dial tcp 127.0.0.1:8080: connect: connection refused`)}},
+		// The app runner fails with an internal error during test-4's filter call,
+		// and test-4 still runs: every verdict and result is in, the set is
+		// INTERNAL_ERR.
+		{name: "keploy hit an internal error", stopAppNth: 5, stopErr: models.ErrInternal},
+		{name: "every test answered", wantInserts: 1},
+		// Into a file that exists, only the startup backfill writes.
+		{name: "a request got no answer, file exists", simErr: map[string]error{"test-4": timeout},
+			fileExists: true, wantInserts: 1},
+		{name: "--update-test-mapping, stopped early, file exists", failNth: 3, updateMapping: true, fileExists: true},
+		{name: "--update-test-mapping, stopped early", failNth: 3, updateMapping: true},
+		{name: "--update-test-mapping, a request got no answer", simErr: map[string]error{"test-4": timeout},
+			updateMapping: true, wantInserts: 1},
+		{name: "--update-test-mapping, a request got no answer, file exists", simErr: map[string]error{"test-4": timeout},
+			updateMapping: true, fileExists: true, wantInserts: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 4, tc.failNth)
+			h.replayer.hookImpl = prHooks{consumed: session, simErr: tc.simErr}
+			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
+			h.mappings.exists = tc.fileExists
+			h.instr.stopAppAfterNUpdates, h.instr.stopErr = tc.stopAppNth, tc.stopErr
+			_ = h.run(t)
+
+			if h.report.report == nil {
+				t.Fatal("no report was persisted")
+			}
+			if tc.stopErr == models.ErrInternal && (h.report.report.Status != string(models.TestSetStatusInternalErr) ||
+				h.report.report.Success != 4 || len(h.report.results) != 4) {
+				t.Fatalf("precondition: want an INTERNAL_ERR set with all 4 tests passed and recorded, got %+v", h.report.report)
+			}
+			if got := h.mappings.insertCalls(); got != tc.wantInserts {
+				t.Fatalf("mappings.yaml writes = %d, want %d", got, tc.wantInserts)
+			}
+			if h.mappings.existsCalls > 1 {
+				t.Fatalf("the run asked whether mappings.yaml exists %d times; once is enough", h.mappings.existsCalls)
+			}
+		})
+	}
+}
+
+// TestRunTestSetSubsetRunDoesNotPruneOrWriteMappings: the prune keeps only what
+// this run's tests consumed, so it is sound only when every loaded, non-ignored
+// test got a verdict. A run over part of the set leaves the rest's mocks
+// unconsumed, and stoppedEarly cannot see it: it counts against the cycle's own
+// testsToRun, which the selection already narrowed. That covers a selected-test
+// list (a rerun of the failed tests) and a selection loop that broke on a failed
+// result insert. Such a run writes no mappings.yaml either: no create, no
+// --update-test-mapping merge, no startup backfill. Holding a create or an
+// asked-for write is logged; a default subset run on a mapped set stays quiet.
+func TestRunTestSetSubsetRunDoesNotPruneOrWriteMappings(t *testing.T) {
+	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
+	for _, tc := range []struct {
+		name          string
+		selected      []string
+		ignored       []string
+		failInsertOf  map[string]error
+		updateMapping bool
+		fileExists    bool
+		want          int // UpdateMocks calls, and mappings.yaml writes
+		quiet         bool
+	}{
+		{name: "selected tests narrow the set", selected: []string{"test-1", "test-2"}},
+		{name: "a rerun of the failed test", selected: []string{"test-3"}},
+		{name: "a subset with --update-test-mapping", selected: []string{"test-1", "test-2"},
+			updateMapping: true, fileExists: true},
+		{name: "a subset on a set that has mappings.yaml", selected: []string{"test-1", "test-2"},
+			fileExists: true, quiet: true},
+		// The selection loop inserts the ignored test's result and breaks when that
+		// insert fails, so test-3 and test-4 never enter the run. Cancelled, the
+		// insert error leaves the status off INTERNAL_ERR.
+		{name: "the selection loop broke on a cancelled insert", ignored: []string{"test-2"},
+			failInsertOf: map[string]error{"test-2": fmt.Errorf("report store: %w", context.Canceled)}},
+		{name: "the selection loop broke on a failed insert", ignored: []string{"test-2"},
+			failInsertOf: map[string]error{"test-2": errors.New("report store is unwritable")}},
+		// Controls. A selection that covers the set is not a subset, and an
+		// ignored test is out of the count.
+		{name: "every test selected", selected: []string{"test-1", "test-2", "test-3", "test-4"}, want: 1},
+		{name: "an ignored test", ignored: []string{"test-2"}, want: 1},
+		{name: "a complete run with --update-test-mapping", updateMapping: true, fileExists: true, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			h := newPartialRunHarness(t, 4, 0)
+			h.replayer.logger = zap.New(core)
+			h.replayer.hookImpl = prHooks{consumed: session}
+			h.replayer.config.Test.RemoveUnusedMocks = true
+			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
+			h.mappings.exists = tc.fileExists
+			if tc.selected != nil {
+				h.replayer.config.Test.SelectedTests = map[string][]string{"test-set-0": tc.selected}
+			}
+			if tc.ignored != nil {
+				h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": tc.ignored}
+			}
+			h.report.failInsertOf = tc.failInsertOf
+			_ = h.run(t)
+
+			rep := h.report.report
+			if rep == nil || rep.Success == 0 || rep.Failure != 0 || rep.Obsolete != 0 {
+				t.Fatalf("precondition: want every test that ran to pass, got %+v", rep)
+			}
+			if got := h.mocks.pruneCalls(); got != tc.want {
+				t.Fatalf("%d of the set's %d non-ignored tests got a verdict and the run made %d UpdateMocks calls; want %d",
+					rep.Success, 4-len(tc.ignored), got, tc.want)
+			}
+			if got := h.mappings.insertCalls(); got != tc.want {
+				t.Fatalf("%d of the set's %d non-ignored tests got a verdict and the run wrote mappings.yaml %d times; want %d",
+					rep.Success, 4-len(tc.ignored), got, tc.want)
+			}
+			if h.mappings.existsCalls > 1 {
+				t.Fatalf("the run asked whether mappings.yaml exists %d times; once is enough", h.mappings.existsCalls)
+			}
+			held := len(logs.FilterMessage("not writing mappings.yaml").All())
+			if wantHeld := tc.want == 0 && !tc.quiet; (held == 1) != wantHeld || held > 1 {
+				t.Fatalf("\"not writing mappings.yaml\" warnings = %d, want %v", held, wantHeld)
+			}
+		})
+	}
+}
+
+// TestRunTestSetUnreadableResultsBlockThePrune: the connection-error rule reads
+// the results back, so a read that fails or comes back short blinds it, and the
+// prune went ahead on a run whose refused request it could not see. A read that
+// errors or is short of the verdicts refuses the prune and the mappings.yaml
+// create (fail closed).
+func TestRunTestSetUnreadableResultsBlockThePrune(t *testing.T) {
+	refused := map[string]error{"test-4": errors.New(
+		`Get "http://127.0.0.1:8080/test-4": dial tcp 127.0.0.1:8080: connect: connection refused`)}
+	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
+	for _, tc := range []struct {
+		name    string
+		simErr  map[string]error
+		fault   func(*prRun)
+		ignored bool // add a fifth test, ignored
+	}{
+		{name: "the read came back short", simErr: refused, fault: func(h *prRun) { h.report.dropOnRead = "test-4" }},
+		// The ignored test's own result must not stand in for the lost one.
+		{name: "the read came back short beside an ignored result", simErr: refused, ignored: true,
+			fault: func(h *prRun) { h.report.dropOnRead = "test-4" }},
+		// A stop landing after the last verdict cancels the read. Its error is
+		// then swallowed and the status left as it was.
+		{name: "the read was cancelled part-way", simErr: refused, fault: func(h *prRun) {
+			h.report.onRead = func() { h.cancel() }
+			h.report.readErr = context.Canceled
+			h.report.dropOnRead = "test-4"
+		}},
+		{name: "the read was cancelled with every result", fault: func(h *prRun) {
+			h.report.onRead = func() { h.cancel() }
+			h.report.readErr = context.Canceled
+		}},
+		{name: "the read failed", simErr: refused, fault: func(h *prRun) { h.report.readErr = errors.New("report store is unreadable") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := 4
+			if tc.ignored {
+				n = 5
+			}
+			h := newPartialRunHarness(t, n, 0)
+			if tc.ignored {
+				h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-5"}}
+			}
+			h.replayer.hookImpl = prHooks{consumed: session, simErr: tc.simErr}
+			h.replayer.config.Test.RemoveUnusedMocks = true
+			tc.fault(h)
+			_ = h.run(t)
+
+			rep := h.report.report
+			if rep == nil || rep.Success+rep.Failure != 4 || rep.Failure != len(tc.simErr) {
+				t.Fatalf("precondition: want every test scored, failing only %v, got %+v", tc.simErr, rep)
+			}
+			if got := h.mocks.pruneCalls(); got != 0 {
+				t.Fatalf("the results were unreadable and the run made %d UpdateMocks calls; want 0", got)
+			}
+			if got := h.mappings.insertCalls(); got != 0 {
+				t.Fatalf("the results were unreadable and the run created mappings.yaml (%d writes); want 0", got)
+			}
+		})
+	}
+}
+
+// TestRunTestSetPruneRefusalNamesTheRule: the one "skipping mock pruning" line a
+// set logs names the rule that refused and, for requests that got no answer,
+// the tests. A set where one test keeps timing out is never pruned again, and
+// this line is the only place that says why.
+func TestRunTestSetPruneRefusalNamesTheRule(t *testing.T) {
+	timeout := prClientTimeoutErr(t)
+	refused := errors.New(`Get "http://127.0.0.1:8080/test-4": dial tcp 127.0.0.1:8080: connect: connection refused`)
+	ordinary := errors.New(`net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00"`)
+	for _, tc := range []struct {
+		name     string
+		setup    func(*prRun)
+		reason   string
+		noAnswer string
+	}{
+		{"a subset run", func(h *prRun) {
+			h.replayer.config.Test.SelectedTests = map[string][]string{"test-set-0": {"test-1"}}
+		}, "not_every_test_got_a_verdict", ""},
+		{"a stopped run", func(h *prRun) { h.instr.failUpdateFromNth = 3 }, "not_every_test_got_a_verdict", ""},
+		{"a lost result insert", func(h *prRun) {
+			h.report.failInsertOf = map[string]error{"test-1": errors.New("report store is unwritable")}
+		}, "internal_error", ""},
+		{"an internal error with every result in", func(h *prRun) {
+			h.instr.stopAppAfterNUpdates, h.instr.stopErr = 5, models.ErrInternal
+		}, "internal_error", ""},
+		{"a short read", func(h *prRun) { h.report.dropOnRead = "test-4" }, "results_unreadable", ""},
+		{"requests that got no answer", func(h *prRun) {
+			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-2": timeout, "test-4": timeout}}
+		}, "no_answer", "[test-2 test-4]"},
+		{"a refused request", func(h *prRun) {
+			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-4": refused}}
+		}, "app_unreachable", ""},
+		{"no test passed", func(h *prRun) {
+			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-1": ordinary, "test-2": ordinary, "test-3": ordinary, "test-4": ordinary}}
+		}, "no_test_passed", ""},
+		{"preserveFailedMocks", func(h *prRun) {
+			h.replayer.config.Test.PreserveFailedMocks = true
+			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-4": ordinary}}
+		}, "preserve_failed_mocks", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			h := newPartialRunHarness(t, 4, 0)
+			h.replayer.logger = zap.New(core)
+			h.replayer.config.Test.RemoveUnusedMocks = true
+			tc.setup(h)
+			_ = h.run(t)
+
+			if got := h.mocks.pruneCalls(); got != 0 {
+				t.Fatalf("precondition: the run made %d UpdateMocks calls; want 0", got)
+			}
+			warns := logs.FilterMessageSnippet("skipping mock pruning").All()
+			if len(warns) != 1 {
+				t.Fatalf("want one \"skipping mock pruning\" warning for the set, got %d", len(warns))
+			}
+			fields := warns[0].ContextMap()
+			if got := fields["reason"]; got != tc.reason {
+				t.Fatalf("the warning's reason = %v, want %q (fields %v)", got, tc.reason, fields)
+			}
+			got, named := fields["noAnswerTests"]
+			if tc.noAnswer == "" && named {
+				t.Fatalf("the warning names no-answer tests %v for a run where every request got an answer", got)
+			}
+			if tc.noAnswer != "" && fmt.Sprint(got) != tc.noAnswer {
+				t.Fatalf("the warning's noAnswerTests = %v, want %s", got, tc.noAnswer)
+			}
+		})
 	}
 }
 
@@ -602,7 +1270,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	// Baseline: with a trustworthy agent history the flag is honoured and the
 	// CLI's map is NOT sent. Without this the assertion below proves nothing.
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, time.Time{}); err != nil {
+		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if !h.instr.lastParams.AgentOwnsConsumed {
@@ -614,7 +1282,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	r.rewindConsumedForRetryCycle(map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
 
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, time.Time{}); err != nil {
+		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if h.instr.lastParams.AgentOwnsConsumed {

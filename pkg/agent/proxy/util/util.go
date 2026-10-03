@@ -505,167 +505,152 @@ const (
 //     is bounded at 150ms — substantially tighter than the 500ms sleep
 //     Track D removed — so the record hot path perf win is preserved.
 //   - Non-EOF errors are always authoritative and surface immediately.
+//
+// It reads on the calling goroutine, as ReadRequiredBytes does. It used to start
+// a goroutine per Read and wait for it over a channel, which could not return
+// any earlier on a cancelled context (its deferred errgroup Wait still waited
+// for the Read), and a Read that panicked was recovered on that goroutine and
+// never answered, so the caller waited forever. ctx is checked before every
+// Read; a panic in Read ends the read with an error.
 func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
+	// One scratch buffer per call, and the message appended from it, so what is
+	// returned is sized to the message as it always was.
+	scratch := make([]byte, 1024)
 	var buffer []byte
 	emptyEOFRetries := 0
-
-	// Channel to communicate read results. Buffered with capacity 1 so the
-	// read goroutine's send never blocks even if the outer select has already
-	// returned on ctx.Done — otherwise the deferred g.Wait() could deadlock
-	// waiting for a goroutine that is itself blocked sending on an
-	// unbuffered channel.
-	readResult := make(chan struct {
-		n   int
-		err error
-		buf []byte
-	}, 1)
-
-	g, ctx := errgroup.WithContext(ctx)
-
-	defer func() {
-		err := g.Wait()
-		if err != nil {
-			utils.LogError(logger, err, "failed to read the request message in proxy")
-		}
-		close(readResult)
-	}()
-
 	for {
-		// Start a goroutine to perform the read operation
-		g.Go(func() error {
-			defer Recover(logger, nil, nil)
-			buf := make([]byte, 1024)
-			n, err := reader.Read(buf)
-			if ctx.Err() != nil {
-				return nil
-			}
-			readResult <- struct {
-				n   int
-				err error
-				buf []byte
-			}{n, err, buf}
-			return nil
-		})
-
-		// Use a select statement to wait for either the read result or context cancellation
-		select {
-		case <-ctx.Done():
+		if err := ctx.Err(); err != nil {
+			return buffer, err
+		}
+		n, err := readContained(logger, reader, scratch)
+		if ctx.Err() != nil {
+			// As before: a read that returns after the context ended is not
+			// taken.
 			return buffer, ctx.Err()
-		case result := <-readResult:
-			if result.n > 0 {
-				buffer = append(buffer, result.buf[:result.n]...)
-			}
+		}
+		if n > 0 {
+			buffer = append(buffer, scratch[:n]...)
+		}
 
-			if result.err != nil {
-				// Non-EOF errors always surface immediately.
-				if result.err != io.EOF {
-					return buffer, result.err
-				}
-				// EOF with data already collected in this call is
-				// authoritative (short-data-then-EOF / mid-stream peer
-				// close on a clean message boundary). Fast-return as
-				// Track D intended.
-				if len(buffer) > 0 {
-					return buffer, result.err
-				}
-				// Zero-byte EOF on an empty buffer: apply the
-				// bounded handshake retry budget. This protects the
-				// Postgres v3 handshake race where the replayer's
-				// startup response is still being written when the
-				// app issues its first Read. Budget is capped so
-				// mid-stream closes surface within 150ms.
-				if emptyEOFRetries >= HandshakeEOFRetryMax {
-					return buffer, result.err
-				}
-				emptyEOFRetries++
-				select {
-				case <-ctx.Done():
-					return buffer, ctx.Err()
-				case <-time.After(HandshakeEOFRetrySleep):
-				}
-				continue
+		if err != nil {
+			// Non-EOF errors always surface immediately.
+			if err != io.EOF {
+				return buffer, err
 			}
-			if result.n < len(result.buf) {
-				return buffer, nil
+			// EOF with data already collected in this call is
+			// authoritative (short-data-then-EOF / mid-stream peer
+			// close on a clean message boundary). Fast-return as
+			// Track D intended.
+			if len(buffer) > 0 {
+				return buffer, err
 			}
+			// Zero-byte EOF on an empty buffer: apply the
+			// bounded handshake retry budget. This protects the
+			// Postgres v3 handshake race where the replayer's
+			// startup response is still being written when the
+			// app issues its first Read. Budget is capped so
+			// mid-stream closes surface within 150ms.
+			if emptyEOFRetries >= HandshakeEOFRetryMax {
+				return buffer, err
+			}
+			emptyEOFRetries++
+			select {
+			case <-ctx.Done():
+				return buffer, ctx.Err()
+			case <-time.After(HandshakeEOFRetrySleep):
+			}
+			continue
+		}
+		if n < len(scratch) {
+			return buffer, nil
 		}
 	}
 }
 
-// ReadRequiredBytes ReadBytes function is utilized to read the required number of bytes from the reader.
-// It returns the content as a byte array.
+// ReadRequiredBytes reads exactly numBytes from reader, returning fewer only
+// with the error that stopped it. Empty io.EOF reads are retried (maxEmptyReads,
+// 100ms apart) before EOF is believed, and ctx is checked before every read.
+//
+// It reads on the calling goroutine. It used to start a goroutine per Read
+// (with a deferred Recover that flushed Sentry) and wait for it over a
+// channel, which could not return any earlier: its deferred errgroup Wait
+// still waited for the Read. A MySQL recorder frames every packet with two of
+// these reads, so the goroutine, channel and flush were paid per packet on the
+// capture hot path. A panic in Read now ends the read with an error; the
+// helper goroutine used to swallow it and leave this function waiting.
 func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, numBytes int) ([]byte, error) {
-	var buffer []byte
+	b, err := AppendRequiredBytes(ctx, logger, reader, nil, numBytes)
+	if len(b) == 0 {
+		return nil, err // nothing read: nil, as callers have always seen it
+	}
+	return b, err
+}
+
+// readGrowStep is the most AppendRequiredBytes allocates ahead of the bytes it
+// has received while the buffer is small; past it the buffer at most doubles.
+//
+// A declared length is only a claim. A misframed MySQL header declares up to
+// 16 MiB, and allocating that up front held 16 MiB (32 MiB once the packet
+// was copied behind its header) outside every capture bound, until that much
+// data arrived: minutes on a pooled connection.
+const readGrowStep = 64 << 10
+
+// AppendRequiredBytes is ReadRequiredBytes appending the numBytes to dst. The
+// buffer grows only as bytes arrive, so what it allocates is bounded by what
+// was read (at most twice that, or readGrowStep), never by numBytes. On an
+// error it returns dst with whatever was read appended.
+func AppendRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, dst []byte, numBytes int) ([]byte, error) {
 	const maxEmptyReads = 5
+	if numBytes <= 0 {
+		return dst, nil
+	}
+	want := len(dst) + numBytes
 	emptyReads := 0
-
-	// Channel to communicate read results
-	readResult := make(chan struct {
-		n   int
-		err error
-		buf []byte
-	})
-
-	g, ctx := errgroup.WithContext(ctx)
-
-	defer func() {
-		err := g.Wait()
-		if err != nil {
-			utils.LogError(logger, err, "failed to read the request message in proxy")
+	for len(dst) < want {
+		if err := ctx.Err(); err != nil {
+			return dst, err
 		}
-		close(readResult)
-	}()
-
-	for numBytes > 0 {
-		// Start a goroutine to perform the read operation
-		g.Go(func() error {
-			defer Recover(logger, nil, nil)
-			buf := make([]byte, numBytes)
-			n, err := reader.Read(buf)
-			if ctx.Err() != nil {
-				return nil
-			}
-			readResult <- struct {
-				n   int
-				err error
-				buf []byte
-			}{n, err, buf}
-			return nil
-		})
-
-		// Use a select statement to wait for either the read result or context cancellation with timeout
+		if len(dst) == cap(dst) {
+			grown := make([]byte, len(dst), min(want, max(len(dst)+readGrowStep, 2*len(dst))))
+			copy(grown, dst)
+			dst = grown
+		}
+		n, err := readContained(logger, reader, dst[len(dst):min(cap(dst), want)])
+		if n > 0 {
+			dst = dst[:len(dst)+n]
+			emptyReads = 0
+		}
+		if err == nil || (err == io.EOF && len(dst) == want) {
+			continue
+		}
+		if err != io.EOF {
+			return dst, err
+		}
+		if emptyReads++; emptyReads >= maxEmptyReads {
+			return dst, err // several EOFs in a row: a true EOF
+		}
 		select {
 		case <-ctx.Done():
-			return buffer, ctx.Err()
-		// case <-time.After(5 * time.Second):
-		// 	logger.Error("timeout occurred while reading the packet")
-		// 	return buffer, context.DeadlineExceeded
-		case result := <-readResult:
-			if result.n > 0 {
-				buffer = append(buffer, result.buf[:result.n]...)
-				numBytes -= result.n
-				emptyReads = 0 // Reset the counter because we got some data
-			}
-
-			if result.err != nil {
-				if result.err == io.EOF {
-					emptyReads++
-					if emptyReads >= maxEmptyReads {
-						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
-					}
-					time.Sleep(time.Millisecond * 100) // Sleep before trying again
-					continue
-				}
-				return buffer, result.err
-			}
-
-			if numBytes == 0 {
-				return buffer, nil
-			}
+			return dst, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
+	return dst, nil
+}
 
-	return buffer, nil
+// readContained is reader.Read with a panic turned into an error, reported
+// like any recovered parser panic (RecoverWithoutClose).
+func readContained(logger *zap.Logger, reader io.Reader, p []byte) (n int, err error) {
+	panicked := true
+	defer func() {
+		if panicked {
+			n, err = 0, errors.New("read panicked")
+		}
+	}()
+	defer RecoverWithoutClose(logger)
+	n, err = reader.Read(p)
+	panicked = false
+	return n, err
 }
 
 // ReadFromPeer function is used to read the buffer from the peer connection. The peer can be either the client or the destination.
@@ -1004,7 +989,9 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		return
 	}
 
-	sentry.Flush(2 * time.Second)
+	// Flush only after a recovered panic (below), as RecoverWithoutClose does: this
+	// is deferred once per parser read, and a flush on the clean path made every
+	// read wait on the process's one Sentry transport worker.
 	if r := recover(); r != nil {
 		logger.Error("Recovered from panic in parser, closing active connections")
 		if client != nil {

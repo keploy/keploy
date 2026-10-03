@@ -36,7 +36,7 @@ $GoRetryTransient = 'stream error: stream id|INTERNAL_ERROR; received from peer|
 # whole module graph, and flipping all of it to direct makes a renamed,
 # deleted or retagged upstream fail PERMANENTLY where the proxy would still
 # serve it — the same reason check-deprecated-deps.sh pins
-# GO_RETRY_DIRECT_FROM=99 for `go list -m -u all`.
+# GO_RETRY_DIRECT_FROM=99 for its `go list -m -u` of the direct dependencies.
 function Invoke-GoWithRetry {
   param(
     [string[]]$GoArgs,

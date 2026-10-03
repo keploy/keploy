@@ -125,6 +125,7 @@ func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
 
 type noiseEntry struct {
 	keyLower string
+	key      string           // as configured; orders entries whose keyLower is the same
 	regexps  []*regexp.Regexp // empty => ignore subtree
 }
 type noiseIndex struct {
@@ -139,6 +140,7 @@ func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
 	for k, arr := range mp {
 		out.entries = append(out.entries, noiseEntry{
 			keyLower: strings.ToLower(k),
+			key:      k,
 			regexps:  compilePatterns(arr, logger),
 		})
 	}
@@ -150,11 +152,18 @@ func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
 	// test pass or fail depending on the run. Order most-specific first so the
 	// winner is both deterministic and the one a user writing "user.id" and
 	// "order.user.id" would expect.
+	// Two keys that differ only in case ("createdAt", "CreatedAt") lower to the
+	// same entry key; the smaller configured key wins that tie, as it does for
+	// global keys (globalNoiseKeys), or the entry that wins, and with it the
+	// verdict, would change from call to call.
 	sort.Slice(out.entries, func(i, j int) bool {
 		if len(out.entries[i].keyLower) != len(out.entries[j].keyLower) {
 			return len(out.entries[i].keyLower) > len(out.entries[j].keyLower)
 		}
-		return out.entries[i].keyLower < out.entries[j].keyLower
+		if out.entries[i].keyLower != out.entries[j].keyLower {
+			return out.entries[i].keyLower < out.entries[j].keyLower
+		}
+		return out.entries[i].key < out.entries[j].key
 	})
 	return out
 }
@@ -251,20 +260,34 @@ func SplitNoise(noise map[string][]string, logger *zap.Logger) (bodyNoise map[st
 		}
 	}
 
+	// Dotted keys whose paths differ only in case ("body.createdAt",
+	// "body.CreatedAt") name one entry once lowered. The smallest configured key
+	// wins, as it does in the matcher (globalNoiseKeys, buildNoiseIndex); in map
+	// order the entry kept, and with it the verdict, changed from call to call.
+	bodyFrom, headerFrom := map[string]string{}, map[string]string{}
 	for field, regexArr := range noise {
 		parts := strings.Split(field, ".")
 		if len(parts) < 2 {
 			continue
 		}
-		// Copy the value slice: the destination map is a clone the caller is
-		// free to mutate, so it must not alias the test case's own noise.
-		regexes := append([]string(nil), regexArr...)
+		var dst string
+		var from map[string]string
+		var out map[string][]string
 		switch strings.ToLower(parts[0]) {
 		case "body":
-			bodyNoise[strings.ToLower(strings.Join(parts[1:], "."))] = regexes
+			dst, from, out = strings.ToLower(strings.Join(parts[1:], ".")), bodyFrom, bodyNoise
 		case "header":
-			headerNoise[strings.ToLower(parts[len(parts)-1])] = regexes
+			dst, from, out = strings.ToLower(parts[len(parts)-1]), headerFrom, headerNoise
+		default:
+			continue
 		}
+		if won, ok := from[dst]; ok && won < field {
+			continue
+		}
+		from[dst] = field
+		// Copy the value slice: the destination map is a clone the caller is
+		// free to mutate, so it must not alias the test case's own noise.
+		out[dst] = append([]string(nil), regexArr...)
 	}
 
 	return bodyNoise, headerNoise, skipBody
@@ -330,22 +353,47 @@ func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]st
 	pathNoise := make(map[string][]string)
 	globalKeys := make(map[string][]*regexp.Regexp)
 
+	// A key with no dots is a Global Key, ignored everywhere. Its patterns are
+	// carried through: a global key is by far the most common shape
+	// (http.Match strips the "body." prefix, so "body.status" arrives here as
+	// the dot-free "status"), and dropping them here would leave every such
+	// entry an unconditional skip no matter what the caller wrote.
+	for lk, k := range globalNoiseKeys(noise) {
+		globalKeys[lk] = compilePatterns(noise[k], logger)
+	}
+	// A key with a dot is path-specific noise (e.g. "body.data.timestamp").
 	for k, v := range noise {
-		// If a key has no dots, treat it as a Global Key to be ignored everywhere.
-		// Its patterns are carried through: a global key is by far the most common
-		// shape (http.Match strips the "body." prefix, so "body.status" arrives
-		// here as the dot-free "status"), and dropping them here would leave every
-		// such entry an unconditional skip no matter what the caller wrote.
-		if !strings.Contains(k, ".") {
-			globalKeys[strings.ToLower(k)] = compilePatterns(v, logger)
-		} else {
-			// Otherwise, it's a path-specific noise (e.g. "body.data.timestamp")
+		if strings.Contains(k, ".") {
 			pathNoise[k] = v
 		}
 	}
 
 	idx := buildNoiseIndex(pathNoise, logger)
 	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering, false)
+}
+
+// globalNoiseKeys maps each global (dot-free) noise key, lowercased, to the
+// configured key whose entry applies to it. Keys that differ only in case
+// ("CreatedAt", "createdAt") lower to one entry; the smallest configured key
+// wins, as buildNoiseIndex orders path keys. Taking whichever came last in Go's
+// map order made the same pair pass in one call and fail in the next when the
+// two carried different patterns.
+func globalNoiseKeys(noise map[string][]string) map[string]string {
+	var out map[string]string
+	for k := range noise {
+		if strings.Contains(k, ".") {
+			continue
+		}
+		lk := strings.ToLower(k)
+		if won, ok := out[lk]; ok && won < k {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(noise))
+		}
+		out[lk] = k
+	}
+	return out
 }
 
 // matchJSONWithNoiseHandlingIndexed now accepts globalKeys to skip specific keys at any depth.

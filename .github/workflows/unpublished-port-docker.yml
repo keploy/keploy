@@ -1,0 +1,60 @@
+name: Unpublished App Port (Docker)
+# Guard: in Docker mode, a test recorded on an app port the host cannot reach
+# (the app calling its own in-container server, on a port the docker command
+# does not publish, or on a published one it listens behind only on
+# 127.0.0.1) is named at record time, with what would make it reachable, and
+# at replay fails at once saying why the port cannot be reached from the host,
+# instead of being re-sent as an app "not yet accepting connections" or a
+# transient reset and, when it comes first in the set, costing the readiness
+# gate its whole ceiling.
+#
+# Runs only the `build` (PR) binary and image, for record and replay, like
+# the other guards of a feature the published `latest` does not have
+# (startup-mock-capture-linux.yml, mock_linux.yml). The script asserts both
+# halves in one run: the recorder's warning and the replayer's failure. A
+# `latest` recorder warns of nothing and a `latest` replayer says nothing of
+# the port, so a leg with `latest` on either side tests nothing of this
+# change and fails by construction.
+on:
+  workflow_call:
+
+jobs:
+  unpublished_port_docker:
+    # The PR's agent image is only built for non-fork runs.
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    name: unpublished-port (record_build_replay_build)
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run unpublished-port guard
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        # `bash <script>` (not `source`) so the script's intentional `set +e`
+        # is not overridden by the step's default `-eo pipefail`.
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/unpublished-port/python-docker.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unpublished-port-logs
+          path: |
+            .github/workflows/test_workflow_scripts/python/unpublished-port/*.txt
+            .github/workflows/test_workflow_scripts/python/unpublished-port/keploy/
+          if-no-files-found: warn
+          retention-days: 7

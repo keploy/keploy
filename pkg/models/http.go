@@ -16,6 +16,23 @@ type BodyRef struct {
 	Size int64  `json:"size" yaml:"size"` // original content size in bytes
 }
 
+// HeaderLineLengths records, for each header name that arrived on more than one
+// wire line, the length in bytes of each line's value, in arrival order.
+//
+// Header keeps one value per name, the lines joined with "," (RFC 9110 §5.3),
+// because matching, noise and templating all work on that form. The join alone
+// cannot be undone: `X-A: a` twice and `X-A: a,a` once both store "a,a",
+// and a value can carry commas of its own. The lengths say where each line
+// ends, so replay sends the lines again (pkg.ToWireHTTPHeader) instead of one
+// folded line, which is a different request to an app that reads the first
+// value.
+//
+// Lengths rather than a second copy of the values, so nothing that a secret
+// encryptor or obfuscator rewrites in Header survives here in plain text. A
+// Header value that no longer fits its lengths (edited, templated, obfuscated)
+// is sent as one line, as a recording without lengths always was.
+type HeaderLineLengths map[string][]int
+
 type HTTPReq struct {
 	Method     Method            `json:"method" yaml:"method"`
 	ProtoMajor int               `json:"proto_major" yaml:"proto_major"` // e.g. 1
@@ -28,6 +45,12 @@ type HTTPReq struct {
 	Binary     string            `json:"binary" yaml:"binary,omitempty"`
 	Form       []FormData        `json:"form" yaml:"form,omitempty"`
 	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
+
+	// HeaderLineLengths holds the wire lines behind a Header value that arrived
+	// on more than one line (see the type). Absent for every other request, so
+	// a recording without a repeated header is unchanged.
+	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
+
 	// NOTE: schema-noise (req_body_noise) is NOT stored here. It lives on the
 	// kind-agnostic MockSpec.ReqBodyNoise for every parser, HTTP included, so the
 	// learn/enforce flow is uniform across protocols (see pkg/agent/proxy/
@@ -65,6 +88,10 @@ type HTTPResp struct {
 	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
 	Binary        string            `json:"binary" yaml:"binary,omitempty"`
 	Timestamp     time.Time         `json:"timestamp" yaml:"timestamp"`
+
+	// HeaderLineLengths: as on HTTPReq. Recorded for a mock's response, the
+	// one recorded response keploy sends back out at replay.
+	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
 }
 
 // MongoDB's BSON DateTime is an int64 count of milliseconds, so the default
@@ -96,6 +123,8 @@ type httpReqBSON struct {
 	Binary     string            `bson:"binary"`
 	Form       []FormData        `bson:"form"`
 	Timestamp  string            `bson:"timestamp"`
+
+	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
 }
 
 type httpReqBSONReader struct {
@@ -110,6 +139,8 @@ type httpReqBSONReader struct {
 	Binary     string            `bson:"binary"`
 	Form       []FormData        `bson:"form"`
 	Timestamp  bson.RawValue     `bson:"timestamp"`
+
+	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
 }
 
 // MarshalBSON writes HTTPReq with the Timestamp field serialised as an
@@ -128,6 +159,8 @@ func (h HTTPReq) MarshalBSON() ([]byte, error) {
 		Binary:     h.Binary,
 		Form:       h.Form,
 		Timestamp:  FormatMockTimestamp(h.Timestamp),
+
+		HeaderLineLengths: h.HeaderLineLengths,
 	})
 }
 
@@ -157,6 +190,8 @@ func (h *HTTPReq) UnmarshalBSON(data []byte) error {
 		Binary:     raw.Binary,
 		Form:       raw.Form,
 		Timestamp:  ts,
+
+		HeaderLineLengths: raw.HeaderLineLengths,
 	}
 	return nil
 }
@@ -173,6 +208,8 @@ type httpRespBSON struct {
 	ProtoMinor    int               `bson:"protominor"`
 	Binary        string            `bson:"binary"`
 	Timestamp     string            `bson:"timestamp"`
+
+	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
 }
 
 type httpRespBSONReader struct {
@@ -187,6 +224,8 @@ type httpRespBSONReader struct {
 	ProtoMinor    int               `bson:"protominor"`
 	Binary        string            `bson:"binary"`
 	Timestamp     bson.RawValue     `bson:"timestamp"`
+
+	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
 }
 
 // MarshalBSON — see the HTTPReq version above. Same rationale.
@@ -203,6 +242,8 @@ func (h HTTPResp) MarshalBSON() ([]byte, error) {
 		ProtoMinor:    h.ProtoMinor,
 		Binary:        h.Binary,
 		Timestamp:     FormatMockTimestamp(h.Timestamp),
+
+		HeaderLineLengths: h.HeaderLineLengths,
 	})
 }
 
@@ -229,6 +270,8 @@ func (h *HTTPResp) UnmarshalBSON(data []byte) error {
 		ProtoMinor:    raw.ProtoMinor,
 		Binary:        raw.Binary,
 		Timestamp:     ts,
+
+		HeaderLineLengths: raw.HeaderLineLengths,
 	}
 	return nil
 }

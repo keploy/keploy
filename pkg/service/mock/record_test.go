@@ -1,16 +1,23 @@
 package mock
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/v3/utils"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/pkg/service/record"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -220,5 +227,108 @@ func TestAnInterruptedRecordingIsNotAFailure(t *testing.T) {
 				t.Fatalf("an interrupted recording failed: %v", err)
 			}
 		})
+	}
+}
+
+// sendsInstrumentation is a runner whose run emits mocks, the way the agent's
+// stream delivers a recording's dependency calls.
+type sendsInstrumentation struct {
+	Instrumentation // embedded: nil, so any unexpected call panics loudly
+
+	out   chan *models.Mock
+	mocks []*models.Mock
+}
+
+func (s *sendsInstrumentation) Setup(context.Context, string, models.SetupOptions) error { return nil }
+func (s *sendsInstrumentation) GetOutgoing(context.Context, models.OutgoingOptions) (<-chan *models.Mock, error) {
+	return s.out, nil
+}
+func (s *sendsInstrumentation) Run(context.Context, models.RunOptions) models.AppError {
+	for _, m := range s.mocks {
+		s.out <- m
+	}
+	close(s.out)
+	return models.AppError{}
+}
+func (s *sendsInstrumentation) NotifyGracefulShutdown(context.Context) error { return nil }
+
+// countingMockDB wraps a MockYaml the way k8s-proxy's does: it embeds it and
+// overrides InsertMock only.
+type countingMockDB struct {
+	*mockdb.MockYaml
+	inserted atomic.Int64
+}
+
+func (c *countingMockDB) InsertMock(ctx context.Context, m *models.Mock, set string) error {
+	c.inserted.Add(1)
+	return c.MockYaml.InsertMock(ctx, m, set)
+}
+
+// encodedHooks keeps a copy of every document AfterMockInsert is handed.
+type encodedHooks struct {
+	record.BaseRecordHooks
+	mu      sync.Mutex
+	docs    [][]byte
+	formats []string
+}
+
+func (h *encodedHooks) AfterMockInsert(_ context.Context, info *record.MockContext) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.docs = append(h.docs, append([]byte(nil), info.Encoded...))
+	h.formats = append(h.formats, info.EncodedFormat)
+	return nil
+}
+
+// `keploy mock record` hands the AfterMockInsert hooks the document the MockDB
+// wrote for each mock, as the test recorder does: byte for byte what is in
+// mocks.yaml, through a MockDB wrapped the way k8s-proxy wraps one.
+func TestRecord_AfterMockInsertGetsTheDocumentInMocksYAML(t *testing.T) {
+	ts := time.Date(2026, 9, 30, 8, 42, 54, 0, time.UTC)
+	var mocks []*models.Mock
+	for i, body := range []string{`{"ok":true}`, "\tleading tab\nx", "line one\nline two\n"} {
+		mocks = append(mocks, &models.Mock{
+			Version: models.GetVersion(), Kind: models.HTTP, Name: fmt.Sprintf("temp-%d", i),
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "config"},
+				HTTPReq:          &models.HTTPReq{Method: "GET", ProtoMajor: 1, ProtoMinor: 1, URL: "http://orders.shop/x", Timestamp: ts},
+				HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: body, Timestamp: ts},
+				ReqTimestampMock: ts, ResTimestampMock: ts,
+			},
+		})
+	}
+	inst := &sendsInstrumentation{out: make(chan *models.Mock, len(mocks)), mocks: mocks}
+	dir := t.TempDir()
+	db := &countingMockDB{MockYaml: mockdb.New(zap.NewNop(), dir, "mocks")}
+	hooks := &encodedHooks{}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "handed"
+	cfg.Path = dir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+
+	if err := New(zap.NewNop(), inst, db, nil, FileStore{}, hooks, cfg).Record(context.Background()); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if got := db.inserted.Load(); got != int64(len(mocks)) {
+		t.Fatalf("the wrapper's InsertMock ran for %d of %d mocks: Record went around it", got, len(mocks))
+	}
+	file, err := os.ReadFile(filepath.Join(dir, "handed", "mocks.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks.mu.Lock()
+	defer hooks.mu.Unlock()
+	if len(hooks.docs) != len(mocks) {
+		t.Fatalf("AfterMockInsert ran for %d of %d mocks", len(hooks.docs), len(mocks))
+	}
+	for i, doc := range hooks.docs {
+		if len(doc) == 0 || hooks.formats[i] != "yaml" {
+			t.Fatalf("AfterMockInsert got %d bytes as %q for mock %d, want its YAML document", len(doc), hooks.formats[i], i)
+		}
+	}
+	want := append([]byte(utils.GetVersionAsComment()), bytes.Join(hooks.docs, []byte("---\n"))...)
+	if !bytes.Equal(want, file) {
+		t.Fatalf("the documents AfterMockInsert got are not what is in mocks.yaml\ngot:\n%s\nmocks.yaml:\n%s", want, file)
 	}
 }

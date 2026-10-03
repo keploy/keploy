@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -77,6 +78,21 @@ type AgentClient struct {
 	// re-creating it - which needs all of this.
 	fromContainerSpec        *sourceContainerSpec
 	restoreFromContainerOnce sync.Once
+
+	// consumedPerTest holds what the agent's last /updatemockparams answer said
+	// about how it reads the consumed history (models.ConsumedScopeHeader).
+	// StoreMocks clears it: a store addresses an agent, possibly a fresh one,
+	// whose answer this client has not seen yet.
+	consumedPerTest atomic.Bool
+}
+
+// AgentReadsConsumedPerTestOnly reports whether the agent's last
+// /updatemockparams answer said it reads the consumed history only for the
+// per-test mocks it stages (models.ConsumedScopePerTest). Until an answer has
+// said so, and again after every StoreMocks, it is false and the whole history
+// must be sent.
+func (a *AgentClient) AgentReadsConsumedPerTestOnly() bool {
+	return a.consumedPerTest.Load()
 }
 
 // var initStopScript []byte
@@ -826,6 +842,7 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 // predates the large-corpus recordings streaming exists for — so the fallback
 // is safe; a genuine bad-request 400 simply fails again on the retry.
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	a.consumedPerTest.Store(false)
 	// A dedicated cancelable context for the stream request: cancelling it tears
 	// down the transport's read of the io.Pipe body, which unblocks the encoder
 	// goroutine's pw.Write if the agent responded (e.g. 400) before consuming the
@@ -987,6 +1004,9 @@ func decodeStoreMocksResp(res *http.Response) error {
 }
 
 func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	// Only a successful answer that says so sets it again below; a call that
+	// fails at any point leaves the client believing nothing.
+	a.consumedPerTest.Store(false)
 	requestBody := models.UpdateMockParamsReq{
 		FilterParams: params,
 	}
@@ -1020,7 +1040,11 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 		return fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
 	}
 
-	return agentRespErr("update mock params", res, rawBody)
+	if err := agentRespErr("update mock params", res, rawBody); err != nil {
+		return err
+	}
+	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
+	return nil
 }
 
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
@@ -2350,6 +2374,42 @@ func (a *AgentClient) BeginTestErrorCapture(ctx context.Context) error {
 		return fmt.Errorf("begin test error capture returned status %d: %s", res.StatusCode, string(body))
 	}
 	return nil
+}
+
+// PendingBefore asks the agent whether it may still hand over a test case or a
+// mock captured before `before` (GET /agent/record/pending). known is false when
+// it cannot tell: an agent that predates the route, or a capture without a
+// watermark (proxy mode). A recording's stop then goes by its streams' quiet
+// alone.
+func (a *AgentClient) PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error) {
+	if a.conf.Agent.AgentURI == "" {
+		return false, false, nil
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	url := fmt.Sprintf("%s/record/pending?before=%d", a.conf.Agent.AgentURI, before.UnixNano())
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, false, err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return false, false, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return false, false, nil // 404 (older agent), 501 (cannot tell)
+	}
+	var out struct {
+		Pending bool `json:"pending"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, false, err
+	}
+	return out.Pending, true, nil
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.

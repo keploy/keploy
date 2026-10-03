@@ -26,6 +26,11 @@ type DiskMocks struct {
 	finalize bool
 	logger   *zap.Logger
 	closed   bool
+
+	// carry indexes the entries of RegisterCarryOver kinds (models.IsCarryOver
+	// at Add), sorted with entries, so the lookahead load reads only them.
+	// Empty while no kind is registered.
+	carry []diskEntry
 }
 
 // diskEntry locates one on-disk mock (~56 B resident). For spilled HTTP/Mongo
@@ -145,6 +150,9 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	e := diskEntry{reqTsNano: m.Spec.ReqTimestampMock.UnixNano(), off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
+	if models.IsCarryOver(m) {
+		d.carry = append(d.carry, e)
+	}
 	d.finalize = false
 	return nil
 }
@@ -168,6 +176,7 @@ func (d *DiskMocks) Finalize() {
 		return
 	}
 	sort.Slice(d.entries, func(i, j int) bool { return d.entries[i].reqTsNano < d.entries[j].reqTsNano })
+	sort.Slice(d.carry, func(i, j int) bool { return d.carry[i].reqTsNano < d.carry[j].reqTsNano })
 	d.finalize = true
 }
 
@@ -247,6 +256,30 @@ func (d *DiskMocks) LoadWindow(start, end time.Time) ([]*models.Mock, error) {
 	sel := make([]diskEntry, 0)
 	for ; i < len(d.entries) && d.entries[i].reqTsNano <= hi; i++ {
 		sel = append(sel, d.entries[i])
+	}
+	d.mu.Unlock()
+	return d.decodeAll(sel)
+}
+
+// LoadCarryOver returns the mocks of RegisterCarryOver kinds with request
+// timestamp in [from, to] (inclusive), for the agent's lookahead load of the
+// carry-over tier. It reads only those entries, whatever else the range holds.
+func (d *DiskMocks) LoadCarryOver(from, to time.Time) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if !d.finalize {
+		d.mu.Unlock()
+		d.Finalize()
+		d.mu.Lock()
+	}
+	lo, hi := from.UnixNano(), to.UnixNano()
+	i := sort.Search(len(d.carry), func(k int) bool { return d.carry[k].reqTsNano >= lo })
+	sel := make([]diskEntry, 0)
+	for ; i < len(d.carry) && d.carry[i].reqTsNano <= hi; i++ {
+		sel = append(sel, d.carry[i])
 	}
 	d.mu.Unlock()
 	return d.decodeAll(sel)
@@ -338,6 +371,20 @@ func (d *DiskMocks) Len() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.entries)
+}
+
+// SpilledResponses returns how many on-disk mocks keep their response apart
+// (EligibleForResponseSpill), to be loaded only when served (diagnostics/tests).
+func (d *DiskMocks) SpilledResponses() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, e := range d.entries {
+		if e.respOff >= 0 {
+			n++
+		}
+	}
+	return n
 }
 
 // DiskBytes returns total bytes written to the file (diagnostics/tests).

@@ -92,6 +92,13 @@ type IngressEvent struct {
 	_           uint16 // Padding
 }
 
+// AppListenAddrs is the agent's answer to where the app's sockets listen on one
+// of its ports (GET /agent/app/listen-addrs): each address as net/netip prints
+// it, "0.0.0.0" and "::" for a wildcard. Empty when nothing listens there yet.
+type AppListenAddrs struct {
+	Addrs []string `json:"addrs"`
+}
+
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
