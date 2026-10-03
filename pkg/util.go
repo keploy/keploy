@@ -34,6 +34,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/andybalholm/brotli"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -161,6 +162,78 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 	return header
 }
 
+// ToYamlHTTPHeaderLineLengths is the other half of ToYamlHTTPHeader for a
+// header keploy will send back out: for each name that arrived on more than one
+// line, the length of each line's value, in arrival order. ToYamlHTTPHeader's
+// join cannot be undone without them (see models.HeaderLineLengths). nil when
+// every name arrived on one line, so the recording is stored as it always was.
+func ToYamlHTTPHeaderLineLengths(httpHeader http.Header) models.HeaderLineLengths {
+	var lineLengths models.HeaderLineLengths
+	for name, values := range httpHeader {
+		if len(values) < 2 {
+			continue
+		}
+		lengths := make([]int, len(values))
+		for i, value := range values {
+			lengths[i] = len(value)
+		}
+		if lineLengths == nil {
+			lineLengths = models.HeaderLineLengths{}
+		}
+		lineLengths[name] = lengths
+	}
+	return lineLengths
+}
+
+// ToWireHTTPHeader is ToHTTPHeader for a recorded header keploy sends back out:
+// a test case's request, a mock's response. A value recorded from several lines
+// goes out on those lines again, in their order, as long as it is still exactly
+// those lines joined by ","; anything else goes out as ToHTTPHeader sends it,
+// one line per name.
+func ToWireHTTPHeader(header map[string]string, lineLengths models.HeaderLineLengths) http.Header {
+	wire := ToHTTPHeader(header)
+	for name, lengths := range lineLengths {
+		value, ok := header[name]
+		if !ok {
+			continue
+		}
+		if lines, ok := splitHeaderLines(value, lengths); ok {
+			wire[name] = lines
+		}
+	}
+	return wire
+}
+
+// splitHeaderLines cuts value back into the lines ToYamlHTTPHeader joined, or
+// reports false when value is not len(lengths) lines of those lengths joined by
+// ",": a value rewritten since it was recorded (a template rendered, a secret
+// decrypted to something else, an edit) is not split by a guess.
+func splitHeaderLines(value string, lengths []int) ([]string, bool) {
+	if len(lengths) < 2 {
+		return nil, false
+	}
+	lines := make([]string, 0, len(lengths))
+	pos := 0
+	for i, n := range lengths {
+		if n < 0 || n > len(value)-pos {
+			return nil, false
+		}
+		lines = append(lines, value[pos:pos+n])
+		pos += n
+		if i == len(lengths)-1 {
+			break
+		}
+		if pos >= len(value) || value[pos] != ',' {
+			return nil, false
+		}
+		pos++
+	}
+	if pos != len(value) {
+		return nil, false
+	}
+	return lines, true
+}
+
 // CompareMultiValueHeaders compares a mock header value (as a comma-separated string)
 // with an input header value (as a slice of strings). It normalizes whitespace,
 // splits the mock header value by commas, trims spaces, sorts both sets of values,
@@ -223,13 +296,12 @@ func ToHTTPHeader(mockHeader map[string]string) http.Header {
 		// Starlette failure mode reproducible during replay even when
 		// the original client sent exactly one Accept header.
 		//
-		// Trade-off: a recording whose on-wire request actually used
-		// repeated same-name headers (rare on the request side; common
-		// only for Set-Cookie which is a response header and never
-		// built by this helper) replays as a single comma-folded
-		// header. Per RFC 7230 §3.2.2 the receiver-side parse is
-		// semantically equivalent for list-valued headers, so this
-		// folding is wire-safe for the headers that actually matter.
+		// A value that really did arrive on several lines is folded
+		// here too. That is right for comparing and matching, and wrong
+		// for sending: an app reading the first of `X-A: a` twice gets
+		// "a", and of `X-A: a,a` gets "a,a". Code that sends a
+		// recorded header uses ToWireHTTPHeader, which puts the lines
+		// back.
 		header[i] = []string{j}
 	}
 	return header
@@ -325,6 +397,85 @@ type SimulationConfig struct {
 	// relaxing TLS verification globally. Default nil preserves the
 	// stdlib system-pool behaviour.
 	TLSConfig *tls.Config
+	// AppPortReachability, when non-nil, is asked about a test request that
+	// was refused, reset or dropped before an answer: an address the app can
+	// never be reached at fails the test at once, saying why, instead of
+	// being re-sent as an app still starting.
+	AppPortReachability AppPortReachability
+}
+
+// AppPortReachability is implemented by an instrumentation that can tell a
+// failed connection to an address the app can NEVER be reached at from one to
+// an app that is still starting. In Docker mode the host reaches the app only
+// through the ports its docker command publishes, and replay sends each test
+// from the host to the port it was recorded on, so a test recorded on a port
+// the command does not publish is refused every time (the app calling its own
+// in-container server is recorded as ingress on such a port). A test on a
+// published port where the app listens only on 127.0.0.1 inside the container
+// fails every time too, as a dropped connection: docker accepts it, finds
+// nothing listening on the container's own address, and drops it.
+type AppPortReachability interface {
+	// UnreachableAppPort explains why a connection to host:port cannot reach
+	// the app, and how to fix that, as a clause that reads after "the app's
+	// port N cannot be reached from the host: ". It returns "" when the
+	// address can reach the app or it cannot tell.
+	//
+	// It bounds its own wait: it is asked from a recording's insert loop, a
+	// readiness gate and a failing test, with whatever context they hold.
+	UnreachableAppPort(ctx context.Context, host string, port uint16) string
+}
+
+// UnreachableAppPortError is a test request that failed to connect at an
+// address the app can never be reached at. It unwraps to the refusal or reset,
+// so it still classifies as one everywhere that matters; the one thing that
+// must not act on it is a re-send (see IsUnreachableAppPort).
+type UnreachableAppPortError struct {
+	Port   uint16
+	Reason string
+	Err    error
+}
+
+func (e *UnreachableAppPortError) Error() string {
+	return fmt.Sprintf("the app's port %d cannot be reached from the host: %s: %v", e.Port, e.Reason, e.Err)
+}
+
+func (e *UnreachableAppPortError) Unwrap() error { return e.Err }
+
+// IsUnreachableAppPort reports whether err is a test request sent to an address
+// the app can never be reached at: re-sending it cannot help.
+func IsUnreachableAppPort(err error) bool {
+	var u *UnreachableAppPortError
+	return errors.As(err, &u)
+}
+
+// unreachableAppPort asks reach, if set, whether the address a connection
+// failed at is one the app can never be reached at, and returns the error to
+// fail with if it is.
+func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, port string, refused error) error {
+	if reach == nil {
+		return nil
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return nil
+	}
+	reason := reach.UnreachableAppPort(ctx, host, uint16(n))
+	if reason == "" {
+		return nil
+	}
+	return &UnreachableAppPortError{Port: uint16(n), Reason: reason, Err: refused}
+}
+
+// urlHostPort is the host and port a request to u dials.
+func urlHostPort(u *url.URL) (string, string) {
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if u.Scheme == "https" {
+			port = "443"
+		}
+	}
+	return u.Hostname(), port
 }
 
 // preparedHTTPRequest holds the prepared HTTP request and client for execution.
@@ -537,7 +688,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
 	}
-	req.Header = ToHTTPHeader(tc.HTTPReq.Header)
+	req.Header = ToWireHTTPHeader(tc.HTTPReq.Header, tc.HTTPReq.HeaderLineLengths)
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
@@ -673,14 +824,31 @@ func IsTransportConnReset(err error) bool {
 // pre-response connection-refused (bounded, ctx-aware backoff, request body
 // rewound via GetBody). Any other error, or a real response, returns
 // immediately — so a genuinely crashed/unreachable app still fails fast after
-// the bounded retries, and a mid-response reset is never retried.
-func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request) (*http.Response, error) {
+// the bounded retries, and a mid-response reset is never retried. A refusal,
+// reset or drop at an address reach says the app can never be reached at fails
+// at once, saying why, as an *UnreachableAppPortError.
+func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability) (*http.Response, error) {
+	asked := false
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err == nil {
 			return resp, nil
 		}
-		if attempt >= maxConnRefusedRetries || !isPreResponseConnRefused(err) {
+		refused := isPreResponseConnRefused(err)
+		// A reset or drop is asked about too: at a published port where the
+		// app listens only on 127.0.0.1 in its container, docker accepts the
+		// connection and drops it, every time.
+		if !asked && (refused || IsTransportConnReset(err)) {
+			asked = true
+			host, port := urlHostPort(req.URL)
+			if unreachable := unreachableAppPort(ctx, reach, host, port, err); unreachable != nil {
+				return nil, unreachable
+			}
+		}
+		if !refused {
+			return nil, err
+		}
+		if attempt >= maxConnRefusedRetries {
 			return nil, err
 		}
 		// Only retry if we can faithfully re-send the body; otherwise stop so we
@@ -720,7 +888,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -797,7 +965,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -2488,10 +2656,11 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 func MakeCurlCommand(tc models.HTTPReq) string {
 	curl := fmt.Sprintf("curl --request %s \\\n", string(tc.Method))
 	curl = curl + fmt.Sprintf("  --url %s \\\n", tc.URL)
-	header := ToHTTPHeader(tc.Header)
-
-	for k, v := range ToYamlHTTPHeader(header) {
-		if k != "Content-Length" {
+	for k, lines := range ToWireHTTPHeader(tc.Header, tc.HeaderLineLengths) {
+		if k == "Content-Length" {
+			continue
+		}
+		for _, v := range lines {
 			curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
 		}
 	}
@@ -2767,7 +2936,12 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 	return err
 }
 
-// AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
+// AgentHealthTicker continuously monitors the agent health endpoint at specified intervals.
+//
+// When an agent first becomes healthy it also kicks off verifyControlPlaneGuarded
+// for it, off this goroutine and after the readiness signal, so the check never
+// spends the caller's readiness budget. That check can log at error level, which
+// keploy's CI treats as fatal.
 // and signals on the provided channel when the agent becomes available or unavailable.
 // It respects the context timeout and returns when the context is cancelled.
 func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
@@ -2792,6 +2966,16 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 				agentStarted = true
 				select {
 				case agentReadyCh <- true:
+					// Only now, and off this goroutine. The check is a
+					// diagnostic: every caller races this send against a
+					// readiness deadline, and spending any of that budget on
+					// it could fail the user's run with "did not become ready"
+					// against an agent that had just answered its health
+					// check. Detached from ctx for the same reason it runs at
+					// all — the caller cancels this context as soon as it has
+					// its answer, which would cancel the check before it could
+					// report anything.
+					go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
 					return
 				case <-ctx.Done():
 					return
@@ -2834,6 +3018,74 @@ func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client
 	logger.Debug("Agent health check response", zap.Int("status_code", resp.StatusCode), zap.String("body", string(body)))
 
 	return resp.StatusCode == http.StatusOK
+}
+
+// TestSetMocksReader is an optional extension of the mock store a replay, the
+// runner or the mock service loads a test set's mocks from: both of its pools,
+// the session pool before the mapping prune, and the per-test candidates
+// before the prune and the window filter, from ONE read of the set's mock file
+// (models.TestSetMocks). A store without it is asked for each pool
+// separately, and *mockdb.MockYaml reads and decodes the whole file for each.
+type TestSetMocksReader interface {
+	GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
+// ConsumedScopeReader is an optional extension of the instrumentation a replay
+// or a runner talks to the agent through: whether the agent has said it reads
+// the consumed-mock history only for the per-test mocks it stages
+// (models.ConsumedScopeHeader), so filter params may carry just their entries
+// (ConsumedForAgent). Without it the whole history is sent.
+type ConsumedScopeReader interface {
+	AgentReadsConsumedPerTestOnly() bool
+}
+
+// PerTestRegion is the set of names of the per-test mocks a test set hands the
+// agent: the filtered half of its StoreMocks.
+func PerTestRegion(filtered []*models.Mock) map[string]struct{} {
+	region := make(map[string]struct{}, len(filtered))
+	for _, m := range filtered {
+		if m != nil {
+			region[m.Name] = struct{}{}
+		}
+	}
+	return region
+}
+
+// ConsumedForAgent narrows a test set's consumed-mock history to the entries
+// the agent can read: those of the per-test mocks in region.
+//
+// The agent consults MockFilterParams.TotalConsumedMocks in one place,
+// filterOutDeleted, and only for the per-test mocks it is about to stage, every
+// one of which comes from the per-test half of the set's StoreMocks (resident,
+// parked on disk, or carried over). An entry for any other mock, such as each
+// session, connection or config mock the replay served, is never looked up.
+// Sending those entries anyway re-encoded the whole history for every test, so
+// the payload grew with each test; in a replay whose data mocks are reusable
+// (lax-mode MySQL) all of it was dead weight. The agent's verdict is the same
+// with the narrowed map. Only send it to an agent that says it reads the
+// history that way (models.ConsumedScopeHeader): agents from v3.0.0-beta1
+// through v3.3.22 also applied it to the session pool.
+//
+// A nil region means the per-test half is not known: total is returned as is.
+func ConsumedForAgent(total map[string]models.MockState, region map[string]struct{}) map[string]models.MockState {
+	if region == nil || total == nil {
+		return total
+	}
+	out := make(map[string]models.MockState, min(len(total), len(region)))
+	if len(region) < len(total) {
+		for name := range region {
+			if st, ok := total[name]; ok {
+				out[name] = st
+			}
+		}
+		return out
+	}
+	for name, st := range total {
+		if _, ok := region[name]; ok {
+			out[name] = st
+		}
+	}
+	return out
 }
 
 // FilterTcsMocks applies the per-test time-window filter to candidate
@@ -2963,7 +3215,7 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 // rev3,rev4,rev1,rev2.
 //
 // That matters because downstream reads this pool as a SEQUENCE, not a set. The
-// slice order becomes TestModeInfo.SortOrder in MockManager.setUnFilteredMocks,
+// slice order becomes TestModeInfo.SortOrder in MockManager.buildTier,
 // which keys the RB-tree that GetUnFilteredMocksByKind walks in order — so a
 // replayer that walks a recorded revision sequence (a cluster-config poll, a
 // bootstrap handshake) is handed it backwards.
@@ -4144,3 +4396,96 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 	logger.Debug("Final resolved target", zap.String("target", finalTarget))
 	return finalTarget, nil
 }
+
+// controlPlaneProbed records the agents that have already given a conclusive
+// answer to the check below, keyed by the launch that started each one.
+//
+// Per agent, not per process: a docker-compose `keploy test` restarts the agent
+// for each test-set. A process-wide latch would check the first agent and none
+// of the others, and a handoff that breaks on a later agent and not the first
+// would go unseen. Per launch rather than per address, because those agents
+// share one: the port is fixed in the compose file generated once for the
+// session, so keyed by address alone each later agent would inherit its
+// predecessor's answer and never be checked. The app records a launch every
+// time it runs compose (App.withAgentToken in pkg/client/app).
+var controlPlaneProbed sync.Map
+
+// verifyControlPlaneGuarded checks that an agent this process launched is
+// really enforcing the control-plane token it was handed.
+//
+// A token that never reaches the agent fails OPEN rather than closed: an agent
+// started with no --token-file natively, or whose docker or compose client did
+// not pass the variable through to the container, has no token, and serves its
+// whole control plane — live TLS session keys included — to anything that can
+// reach the port, while this process keeps sending a header nothing checks.
+// Every request still succeeds, so nothing downstream notices and no test of a
+// working flow can tell.
+//
+// One request settles it: a token that is wrong by construction must be
+// refused. It runs here, at the readiness gate, because this is the one point
+// every mode passes through — native, `docker run` and docker compose, where
+// the agent is a service in the compose project keploy rewrites and is started
+// by the user's own `docker compose up`, not by this process directly.
+//
+// Only for an agent this process launched (token.Launched). A process that
+// drives an agent something else started — a sidecar k8s-proxy injected, whose
+// token (if it has one) k8s-proxy put in its pod spec, or a pinned agent image
+// that predates the token — made no handoff of its own, and blaming one that
+// never happened is a false alarm at error level. A sidecar without a token
+// says for itself that it is running unauthenticated; an image that predates
+// the token says nothing, as it checks nothing.
+//
+// Reported rather than fatal: an agent that could not be given a token still
+// records and replays, and refusing to run would be the worse outcome. It is
+// logged at error level so that it reaches the operator and fails keploy's own
+// CI, which treats any ERROR in a run as fatal.
+func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI string) {
+	launch, launched := token.Launched(agentURI)
+	if !launched {
+		logger.Debug("not checking the control-plane authentication of an agent this process did not launch",
+			zap.String("agent", agentURI))
+		return
+	}
+	key := fmt.Sprintf("%s#%d", agentURI, launch)
+	if _, done := controlPlaneProbed.Load(key); done {
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agentURI+token.ProbePath, nil)
+	if err != nil {
+		logger.Debug("could not build the agent authentication probe", zap.Error(err))
+		return
+	}
+	// Wrong by construction, and a bare client: a request carrying the real
+	// token would be accepted by a guarded agent and prove nothing.
+	req.Header.Set("Authorization", "Bearer not-the-session-token")
+
+	resp, err := (&http.Client{Timeout: controlPlaneProbeTimeout}).Do(req)
+	if err != nil {
+		// The agent answered its health check a moment ago, so a failure here
+		// is not evidence either way. Saying nothing beats crying wolf with an
+		// error that fails CI — and this attempt is deliberately NOT recorded,
+		// so a later readiness gate for the same agent tries again.
+		logger.Debug("agent authentication probe did not complete", zap.Error(err))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Only an answer counts. Marking earlier would let an attempt that proved
+	// nothing retire the check for this agent.
+	controlPlaneProbed.Store(key, struct{}{})
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		logger.Debug("agent control-plane authentication verified", zap.String("agent", agentURI))
+		return
+	}
+
+	utils.LogError(logger, nil, "the agent is NOT enforcing control-plane authentication: it accepted a request carrying an invalid token",
+		zap.Int("probe_status", resp.StatusCode),
+		zap.String("impact", "/agent/pcap/keylog streams live TLS session keys and /agent/stop and /agent/storemocks alter this session; any local user or neighbouring container that can reach the agent port can use them"),
+		zap.String("next_step", "the token this keploy process handed to the agent did not reach it — check that the agent was started with --token-file (native), or that "+token.Env+" reached the docker or docker compose client's environment (docker), and report this if you did not change how keploy starts its agent"))
+}
+
+// controlPlaneProbeTimeout bounds the check above. Generous: the agent answered
+// a health check with a 500ms budget immediately before it runs.
+const controlPlaneProbeTimeout = 5 * time.Second

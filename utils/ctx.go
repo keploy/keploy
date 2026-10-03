@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,9 +31,12 @@ var cancel context.CancelFunc
 // gives a definitive answer to "did the agent have unsent mocks at
 // the moment of shutdown" without depending on the structured logger.
 //
-// Hooks MUST be fast (no blocking I/O, no network calls) — they run
-// on the signal-delivery goroutine and any blocking work delays the
-// cancellation and increases the chance of SIGKILL truncation.
+// Hooks MUST be bounded, and well inside the stop grace the process is
+// given before it is killed (10s under docker and compose) — they run on
+// the signal-delivery goroutine and any blocking work delays the
+// cancellation and increases the chance of SIGKILL truncation. A hook
+// that has to do I/O bounds it itself, as the agent's replay-outcome
+// write does (pkg/service/agent, leaveStopOutcome: 3s).
 var (
 	preCancelMu    sync.Mutex
 	preCancelHooks []func()
@@ -51,6 +55,61 @@ func RegisterPreCancelHook(fn func()) {
 	preCancelMu.Unlock()
 }
 
+// interrupted records that a SIGNAL ended this process, as opposed to the CLI
+// cancelling its own root context during ordinary teardown.
+//
+// The two are the same context. `keploy mock record|replay` calls ExecCancel()
+// from a defer once the run is over -- that is how its background goroutines
+// are torn down -- so by the time the root command returns, ctx.Err() is
+// non-nil on every mock run, successful or not. A caller that read ctx.Err()
+// as "a signal ended this" therefore reported every recording the VS Code
+// extension made as interrupted, and the panel told the user their recording
+// had been cut short over a recording that had just succeeded.
+var interrupted atomic.Bool
+
+// Interrupted reports whether NewCtx's handler stopped this run on a signal:
+// SIGINT, SIGTERM, or SIGHUP where NewCtx listens for it (see notifyHangups
+// and DieOnHangup).
+func Interrupted() bool { return interrupted.Load() }
+
+// MarkInterrupted records that a signal ended this run. The signal handler
+// below calls it; a build that installs its own handler, and a test that
+// simulates one, call it instead of cancelling a context and hoping the two
+// are read as the same thing.
+func MarkInterrupted() { interrupted.Store(true) }
+
+// ClearInterrupted is for tests, which share one process across cases.
+func ClearInterrupted() { interrupted.Store(false) }
+
+// interruptedAgain is closed when a second interrupt (SIGINT or SIGTERM)
+// arrives after the one that stopped the run: the user asking a stop that is
+// still finishing its work (a recording draining what the agent captured) to
+// give that up. InterruptedAgain returns it.
+type interruptLatch struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+var interruptedAgain atomic.Pointer[interruptLatch]
+
+func init() { ResetInterruptedAgain() }
+
+// InterruptedAgain is closed once a second interrupt has arrived. Work a stop
+// waits on for as long as it makes progress (a recording's drain) selects on
+// it, so the user can always end it.
+func InterruptedAgain() <-chan struct{} { return interruptedAgain.Load().ch }
+
+// MarkInterruptedAgain is what a second interrupt does; for tests.
+func MarkInterruptedAgain() {
+	l := interruptedAgain.Load()
+	l.once.Do(func() { close(l.ch) })
+}
+
+// ResetInterruptedAgain is for tests, which share one process across cases.
+func ResetInterruptedAgain() {
+	interruptedAgain.Store(&interruptLatch{ch: make(chan struct{})})
+}
+
 func NewCtx() context.Context {
 	// Create a context that can be canceled
 	ctx, cancel := context.WithCancel(context.Background())
@@ -61,11 +120,37 @@ func NewCtx() context.Context {
 	// os.Interrupt is more portable than syscall.SIGINT
 	// there is no equivalent for syscall.SIGTERM in os.Signal
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	hangups := notifyHangups()
 
 	// Start a goroutine that will cancel the context when a signal is received
 	go func() {
-		sig := <-sigs // this received signal will be inside keploy docker container if running in docker else on the host.
+		var sig os.Signal // this received signal will be inside keploy docker container if running in docker else on the host.
+		select {
+		case sig = <-sigs:
+		case sig = <-hangups:
+		}
+		MarkInterrupted()
 		fmt.Printf("Signal received: %s, canceling context...\n", sig)
+
+		// Where NewCtx listens for SIGHUP (not under nohup: see
+		// notifyHangups), every SIGHUP from here on changes nothing, and
+		// says so, unless DieOnHangup has given SIGHUP its default action
+		// back. One hang-up can deliver two. VS Code's Stop sends one to
+		// the process on the task's terminal and then closes the terminal,
+		// which has the kernel send another to its session leader: both
+		// reach keploy when the shell ran it in its own place, as `zsh -c`
+		// does. Closing the window of an interactive shell has the shell
+		// forward one to its job and the kernel send the job another as the
+		// shell exits. SIGHUP stays registered, so none of them is the
+		// default action -- death, half way through the shutdown the first
+		// one started.
+		if hangups != nil {
+			go func() {
+				for hup := range hangups {
+					fmt.Printf("Signal received: %s, ignored: Keploy is already handling %s\n", hup, sig)
+				}
+			}()
+		}
 
 		// App-managed graceful-shutdown drain (Kubernetes sidecar path).
 		// When the injecting webhook runs in app-managed-drain mode it sets
@@ -126,9 +211,55 @@ func NewCtx() context.Context {
 		}
 
 		cancel()
+
+		// The stop can take a while: a recording drains what the agent
+		// captured before it, for as long as that keeps coming. A second
+		// interrupt gives that up (InterruptedAgain); without this, SIGINT
+		// stayed registered and unread, so Ctrl+C did nothing and only
+		// SIGKILL, which skips all cleanup, could end the process.
+		for sig2 := range sigs {
+			fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
+			MarkInterruptedAgain()
+		}
 	}()
 
 	return ctx
+}
+
+// notifyHangups has a hang-up stop keploy as SIGTERM does: NewCtx takes the
+// same path for it -- marks the run interrupted, runs the pre-cancel hooks and
+// cancels the root context -- so the command stops what it started and
+// reports the run as it reports one ended by SIGTERM, and main's deferred
+// cleanup runs. It returns the channel SIGHUP arrives on, or nil, on which
+// nothing ever arrives, when SIGHUP was ignored as this process started:
+// `nohup keploy record ...` asked to outlive its terminal, and a Notify would
+// undo that.
+//
+// A hang-up is how the VS Code extension's Stop ends a run: it terminates
+// the task, which sends the process on the task's terminal SIGHUP (node-pty's
+// kill()). Closing a terminal, or losing an ssh session, sends the same.
+// keploy listened for SIGINT and SIGTERM only, so SIGHUP killed it where it
+// stood: the test command it had started ran on, and none of the cleanup it
+// defers ran.
+func notifyHangups() chan os.Signal {
+	if signal.Ignored(syscall.SIGHUP) {
+		return nil
+	}
+	hangups := make(chan os.Signal, 1)
+	signal.Notify(hangups, syscall.SIGHUP)
+	return hangups
+}
+
+// DieOnHangup gives SIGHUP back the action it had before NewCtx heard it:
+// death, or nothing if it was ignored as this process started. It is for a
+// process whose owner counts on a hang-up killing it: `keploy agent`. The CLI
+// closes the terminal it started an agent on to stop it
+// (startNativeAgentWithPTY in pkg/platform/http), and the enterprise
+// self-update supervisor hands its agent the SIGHUPs it gets and counts a
+// death by one as a deliberate stop. A SIGHUP that arrives between NewCtx and
+// this call takes NewCtx's path, and stops the process gracefully instead.
+func DieOnHangup() {
+	signal.Reset(syscall.SIGHUP)
 }
 
 // Stop requires a reason to stop the server.

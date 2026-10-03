@@ -3,6 +3,9 @@ package mock
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,6 +35,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 		mockErrors    []models.UnmatchedCall
 		errorsErr     error
 		wantExit      int
+		wantErr       bool // Replay returns keploy's own failure, not just an exit code
 		wantLogs      []string
 		unwantLogs    []string
 		wantFields    map[string]any
@@ -51,6 +55,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			consumedErr: errors.New("connection refused"),
 			errorsErr:   errors.New("connection refused"),
 			wantExit:    1,
+			wantErr:     true,
 			wantLogs:    []string{"incomplete", "could not be proven"},
 			wantFields:  map[string]any{"consumed": "unknown", "missed": "unknown"},
 		},
@@ -73,6 +78,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			consumedMocks: twoConsumed,
 			errorsErr:     errors.New("connection refused"),
 			wantExit:      1,
+			wantErr:       true,
 			wantLogs:      []string{"incomplete", "could not be proven"},
 			wantFields:    map[string]any{"consumed": int64(2), "missed": "unknown"},
 		},
@@ -117,8 +123,15 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			t.Cleanup(func() { RegisterReplayOutcomeReporter(nil) })
 
 			svc := New(zap.New(core), instr, stubMockDB{}, nil, nil, nil, cfg)
-			if err := svc.Replay(context.Background()); err != nil {
-				t.Fatalf("Replay: %v", err)
+			// A run --strict could not verify is keploy's failure, and is
+			// returned as one: a bare exit 1 is what a failing suite exits
+			// with too, and a caller could not tell the two apart.
+			err := svc.Replay(context.Background())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Replay returned %v, want an error: %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "--strict could not verify") {
+				t.Fatalf("Replay returned %q, which does not say what failed", err)
 			}
 
 			if utils.ErrCode != tc.wantExit {
@@ -163,6 +176,127 @@ func TestReplayOutcomeReporting(t *testing.T) {
 				if strings.Contains(joined, unwanted) {
 					t.Errorf("logged %q, which is not true of this run; got:\n%s", unwanted, joined)
 				}
+			}
+		})
+	}
+}
+
+// Under docker compose the agent is a service in the project, and compose
+// stops it the moment the runner exits -- so there is no agent left to ask by
+// the time the replay reads its outcome, and every compose replay reported
+// consumed -1 / missed -1, was never isolated, and failed --strict. The agent
+// now leaves its account as it is stopped, and that account is what the
+// replay is judged on.
+func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
+	twoConsumed := []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
+	oneMiss := []models.UnmatchedCall{{Protocol: "http", Destination: "dep:9411"}}
+	for _, tc := range []struct {
+		name         string
+		left         models.MockOutcome
+		leftErr      error
+		wantExit     int
+		wantErr      bool
+		wantIsolated bool
+		wantFields   map[string]any
+		wantLogs     []string
+		unwantLogs   []string
+	}{
+		{
+			name:         "the agent left its account: the run is proven",
+			left:         models.MockOutcome{Consumed: twoConsumed},
+			wantIsolated: true,
+			wantFields:   map[string]any{"consumed": int64(2), "missed": int64(0)},
+			wantLogs:     []string{"this replay ran with every dependency answered from the recording"},
+			unwantLogs:   []string{"incomplete", "could not be proven"},
+		},
+		{
+			name:       "a miss it left fails --strict as the suite's contract, not as keploy's error",
+			left:       models.MockOutcome{Consumed: twoConsumed, Missed: oneMiss},
+			wantExit:   1,
+			wantFields: map[string]any{"consumed": int64(2), "missed": int64(1)},
+			wantLogs:   []string{"recorded dependency calls were missed"},
+			unwantLogs: []string{"incomplete"},
+		},
+		{
+			name:       "no account: unknown, and why, and --strict fails as keploy's own error",
+			leftErr:    errors.New("the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"),
+			wantExit:   1,
+			wantErr:    true,
+			wantFields: map[string]any{"consumed": "unknown", "missed": "unknown", "reason": "the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
+			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "could not be proven"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortAgentBudget(t)
+			core, logs := observer.New(zapcore.DebugLevel)
+			instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrAppStopped})
+			instr.runUntilReady = true
+			// The agent is gone: compose stopped it with the runner. Asking it
+			// over HTTP is what used to happen, and it can never answer.
+			instr.consumedErr = errors.New("connection refused")
+			instr.mockErrorsErr = errors.New("connection refused")
+			instr.leftOutcome, instr.leftOutcomeErr = tc.left, tc.leftErr
+
+			cfg := instrConfig(instr, utils.DockerCompose, "docker compose up")
+			cfg.Mock.Strict = true
+			cfg.Mock.OnMiss = string(models.MissFail)
+			cfg.Path = t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cfg.Path, "set"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+
+			err := New(zap.New(core), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Replay returned %v, want an error: %v", err, tc.wantErr)
+			}
+			if utils.ErrCode != tc.wantExit {
+				t.Errorf("exit code %d, want %d", utils.ErrCode, tc.wantExit)
+			}
+
+			var printed []string
+			var summary map[string]any
+			for _, e := range logs.All() {
+				printed = append(printed, e.Message+" "+fmt.Sprint(e.ContextMap()))
+				if strings.HasPrefix(e.Message, "mock replay summary") {
+					summary = e.ContextMap()
+				}
+			}
+			joined := strings.Join(printed, "\n")
+			if summary == nil {
+				t.Fatalf("no replay summary was logged; got:\n%s", joined)
+			}
+			for field, want := range tc.wantFields {
+				if got := summary[field]; got != want {
+					t.Errorf("summary %s = %v (%T), want %v (%T)", field, got, got, want, want)
+				}
+			}
+			for _, want := range tc.wantLogs {
+				if !strings.Contains(joined, want) {
+					t.Errorf("no log mentioning %q; got:\n%s", want, joined)
+				}
+			}
+			for _, unwanted := range tc.unwantLogs {
+				if strings.Contains(joined, unwanted) {
+					t.Errorf("logged %q, which is not true of this run; got:\n%s", unwanted, joined)
+				}
+			}
+
+			r, rerr := ReadReceipt(cfg.Path, "set")
+			if rerr != nil || r == nil {
+				t.Fatalf("no receipt: %v", rerr)
+			}
+			if r.Isolated != tc.wantIsolated {
+				t.Errorf("receipt isolated = %v (%s), want %v", r.Isolated, r.IsolationNote, tc.wantIsolated)
+			}
+			wantConsumed, wantMissed := len(tc.left.Consumed), len(tc.left.Missed)
+			if tc.leftErr != nil {
+				wantConsumed, wantMissed = -1, -1
+			}
+			if r.Consumed != wantConsumed || r.Missed != wantMissed {
+				t.Errorf("receipt consumed/missed = %d/%d, want %d/%d", r.Consumed, r.Missed, wantConsumed, wantMissed)
 			}
 		})
 	}

@@ -196,7 +196,7 @@ func replicaConfig(src container.InspectResponse, agentContainer string) (*conta
 	// Only net.* sysctls are namespace-scoped; keeping them would have the
 	// replacement try to write settings that belong to the agent's namespace.
 	hostCfg.Sysctls = nonNetSysctls(hostCfg.Sysctls)
-	hostCfg.Mounts = mountsFrom(src, hostCfg.Mounts)
+	hostCfg.Mounts = MountsFrom(src, hostCfg.Mounts)
 	// Binds and VolumesFrom are both superseded by the reconstructed Mounts;
 	// leaving them would double-declare the same destinations.
 	hostCfg.Binds = nil
@@ -222,18 +222,35 @@ func replicaConfig(src container.InspectResponse, agentContainer string) (*conta
 	return &cfg, &hostCfg
 }
 
-// mountsFrom reconstructs the container's real mounts from the inspect result.
+// MountsFrom reconstructs the container's real mounts from the inspect result.
 //
 // src.Mounts is the only place the NAMES of anonymous volumes appear - neither
 // Config.Volumes nor HostConfig.Binds carries them - so a create built without
 // it silently hands the app brand new empty volumes and orphans its data.
-func mountsFrom(src container.InspectResponse, declared []mount.Mount) []mount.Mount {
-	// Anything the user declared as a Mount is already in the right shape and
-	// already authoritative; only fill in what src.Mounts adds.
+//
+// Exported because the teardown path re-creates the user's own container and
+// needs exactly this: two implementations of it would drift, and the symptom of
+// the drift is a user's data quietly detached from their app.
+func MountsFrom(src container.InspectResponse, declared []mount.Mount) []mount.Mount {
+	// src.Mounts is the only place the NAMES of anonymous volumes appear, so it
+	// is indexed first: a declared mount is authoritative about SHAPE, but an
+	// anonymous volume is declared with no source at all (compose writes
+	// `- /data` as {Type: volume, Target: /data}), and keeping that verbatim
+	// hands the container a brand new empty volume and orphans its data.
+	byTarget := make(map[string]container.MountPoint, len(src.Mounts))
+	for _, mp := range src.Mounts {
+		byTarget[mp.Destination] = mp
+	}
+
 	seen := make(map[string]bool, len(declared))
 	out := make([]mount.Mount, 0, len(declared)+len(src.Mounts))
 	for _, m := range declared {
 		seen[m.Target] = true
+		if m.Type == mount.TypeVolume && m.Source == "" {
+			if mp, ok := byTarget[m.Target]; ok {
+				m.Source = mp.Name
+			}
+		}
 		out = append(out, m)
 	}
 	for _, mp := range src.Mounts {

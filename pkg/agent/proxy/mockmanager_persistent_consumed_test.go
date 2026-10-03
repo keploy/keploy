@@ -95,3 +95,62 @@ func TestGetPersistentConsumed_NotDrained(t *testing.T) {
 		t.Fatalf("persistent map must survive GetConsumedMocks drains; got %#v", p)
 	}
 }
+
+// TestPersistentConsumed_ClearedAtTestSetBoundary is the equivalence the flag is
+// actually held to: the agent's map must behave like the client's, and the
+// client's is re-allocated for every test set (RunTestSet).
+//
+// It matters because mock names are unique only WITHIN a set — mockdb numbers
+// them from a per-store counter, so every set has a mock-1 — while
+// filterOutDeleted keys purely on the name. Carried across a boundary, the map
+// drops the next set's mock-1 because the previous set's unrelated mock-1 was
+// consumed, and it does so silently, as an ordinary mock miss.
+func TestPersistentConsumed_ClearedAtTestSetBoundary(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	// Test set 0 consumes two mocks. mock-2 is deliberately NOT Deleted:
+	// MarkMockAsUsed records Usage: Updated for the stateful protocols, and
+	// filterOutDeleted copies a surviving entry's IsFiltered/SortOrder onto the
+	// mock it matches by name. So a clear that only swept Deleted entries would
+	// still stamp set 0's ordering onto set 1's mock-2 — quieter than the drop,
+	// and worse on a stateful protocol.
+	if err := mm.flagMockAsUsed(models.MockState{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted}); err != nil {
+		t.Fatalf("flagMockAsUsed: %v", err)
+	}
+	if err := mm.flagMockAsUsed(models.MockState{
+		Name: "mock-2", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 7,
+	}); err != nil {
+		t.Fatalf("flagMockAsUsed: %v", err)
+	}
+	if p := mm.GetPersistentConsumed(); len(p) != 2 {
+		t.Fatalf("precondition: want both recorded within the set, got %#v", p)
+	}
+
+	// Test-set boundary.
+	mm.ResetForReplaySession()
+
+	if p := mm.GetPersistentConsumed(); len(p) != 0 {
+		t.Fatalf("the previous test set's consumption survived the boundary: %#v — the next set's "+
+			"mock-1 is a DIFFERENT mock and would be dropped as already-consumed, and its mock-2 would "+
+			"inherit the previous set's SortOrder", p)
+	}
+}
+
+// ...and within a set it must still survive drains, which is the whole reason
+// the map exists. Without this, clearing it unconditionally would pass the test
+// above and destroy the feature.
+func TestPersistentConsumed_SurvivesDrainsWithinASet(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	if err := mm.flagMockAsUsed(models.MockState{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted}); err != nil {
+		t.Fatalf("flagMockAsUsed: %v", err)
+	}
+	_ = mm.GetConsumedMocks()
+	_ = mm.GetConsumedMocks()
+
+	if p := mm.GetPersistentConsumed(); len(p) != 1 || p["mock-1"].Usage != models.Deleted {
+		t.Fatalf("the map must survive drains within a test set; got %#v", p)
+	}
+}

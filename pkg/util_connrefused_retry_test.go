@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -56,7 +57,7 @@ func TestDoRequestWithConnRefusedRetry_RecoversTransientRefusal(t *testing.T) {
 	rt := &scriptedRT{errs: []error{connRefusedErr("http://x/a"), connRefusedErr("http://x/a")}}
 	client := &http.Client{Transport: rt}
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", "http://x/a", nil)
-	resp, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req)
+	resp, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil)
 	if err != nil {
 		t.Fatalf("expected recovery after 2 refusals, got error: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestDoRequestWithConnRefusedRetry_StopsAfterMaxWithoutFabricating(t *testin
 	rt := &scriptedRT{errs: errs}
 	client := &http.Client{Transport: rt}
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", "http://x/a", nil)
-	_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req)
+	_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil)
 	if err == nil {
 		t.Fatal("expected an error after exhausting retries — must not fabricate a result")
 	}
@@ -123,7 +124,7 @@ func TestDoRequestWithConnRefusedRetry_DoesNotRetryReset(t *testing.T) {
 	rt := &scriptedRT{errs: []error{connResetErr("http://x/a")}}
 	client := &http.Client{Transport: rt}
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", "http://x/a", nil)
-	_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req)
+	_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil)
 	if err == nil {
 		t.Fatal("expected the reset error to propagate without retry")
 	}
@@ -139,10 +140,70 @@ func TestDoRequestWithConnRefusedRetry_RewindsBody(t *testing.T) {
 	rt := &scriptedRT{errs: []error{connRefusedErr("http://x/a")}}
 	client := &http.Client{Transport: rt}
 	req, _ := http.NewRequestWithContext(context.Background(), "POST", "http://x/a", strings.NewReader(body))
-	if _, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req); err != nil {
+	if _, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), client, req, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if rt.lastBody != body {
 		t.Fatalf("retried request body not rewound: want %q, got %q", body, rt.lastBody)
+	}
+}
+
+// answerReach is an AppPortReachability with a fixed answer that records the
+// addresses it was asked about.
+type answerReach struct {
+	reason string
+	asked  []string
+}
+
+func (a *answerReach) UnreachableAppPort(_ context.Context, host string, port uint16) string {
+	a.asked = append(a.asked, net.JoinHostPort(host, strconv.Itoa(int(port))))
+	return a.reason
+}
+
+// Asking whether the app can be reached changes nothing when it can: the app
+// is still starting, and the refusal is re-sent exactly as without the
+// question. The question is asked once, about the address dialed, with the
+// scheme's port when the URL names none.
+func TestDoRequestWithConnRefusedRetry_ReachablePortStillRetries(t *testing.T) {
+	for _, u := range []struct{ url, asked string }{
+		{"http://x:8095/a", "x:8095"},
+		{"http://x/a", "x:80"},
+		{"https://x/a", "x:443"},
+	} {
+		rt := &scriptedRT{errs: []error{connRefusedErr(u.url), connRefusedErr(u.url)}}
+		reach := &answerReach{}
+		req, _ := http.NewRequestWithContext(context.Background(), "GET", u.url, nil)
+		resp, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), &http.Client{Transport: rt}, req, reach)
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("%s: expected recovery after 2 refusals, got (%v, %v)", u.url, resp, err)
+		}
+		if got := atomic.LoadInt32(&rt.attempts); got != 3 {
+			t.Errorf("%s: expected 3 attempts, got %d", u.url, got)
+		}
+		if len(reach.asked) != 1 || reach.asked[0] != u.asked {
+			t.Errorf("%s: asked %v, want [%s]", u.url, reach.asked, u.asked)
+		}
+	}
+}
+
+// A refusal at an address the app can never be reached at is not re-sent, and
+// the error says why while still being the refusal underneath.
+func TestDoRequestWithConnRefusedRetry_UnreachablePortFailsAtOnce(t *testing.T) {
+	rt := &scriptedRT{errs: []error{connRefusedErr("http://localhost:8096/a"), connRefusedErr("http://localhost:8096/a")}}
+	reach := &answerReach{reason: "it is not published on the host"}
+	req, _ := http.NewRequestWithContext(context.Background(), "GET", "http://localhost:8096/a", nil)
+	_, err := doRequestWithConnRefusedRetry(context.Background(), zap.NewNop(), &http.Client{Transport: rt}, req, reach)
+	var unreachable *UnreachableAppPortError
+	if !errors.As(err, &unreachable) || unreachable.Port != 8096 {
+		t.Fatalf("want an UnreachableAppPortError for 8096, got %v", err)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Errorf("the refusal is lost from the chain: %v", err)
+	}
+	if want := "the app's port 8096 cannot be reached from the host: it is not published on the host: "; !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("error %q does not start with %q", err, want)
+	}
+	if got := atomic.LoadInt32(&rt.attempts); got != 1 {
+		t.Errorf("re-sent to an unreachable port: %d attempts", got)
 	}
 }

@@ -21,10 +21,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/token"
+
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/errdefs"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	ptls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -48,17 +55,44 @@ type AgentClient struct {
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	apps         sync.Map
 	client       http.Client
-	conf         *config.Config
-	agentCmd     *exec.Cmd             // Track the agent process
-	agentPTY     *agentUtils.PTYHandle // Track the PTY handle for interactive commands
-	mu           sync.Mutex
-	agentCancel  context.CancelFunc // Function to cancel the agent context
+	// hookClient serves the /hooks/* calls, which want a request deadline.
+	// Built here, not at the call sites, so it carries the bearer token like
+	// every other request to the agent.
+	hookClient  http.Client
+	conf        *config.Config
+	agentCmd    *exec.Cmd             // Track the agent process
+	agentPTY    *agentUtils.PTYHandle // Track the PTY handle for interactive commands
+	mu          sync.Mutex
+	agentCancel context.CancelFunc // Function to cancel the agent context
 	// --from-container only. The user's own container is stopped for the
 	// duration of the session, so SOMETHING has to start it again on every way
 	// out. restoreOnce makes that safe to call from each of them.
-	fromContainer            string
-	fromContainerWasRunning  bool
+	fromContainer           string
+	fromContainerWasRunning bool
+	// Everything needed to put the user's container back as it was. Captured
+	// before it is stopped, because the container does not survive the session
+	// intact: Docker drops its network endpoint while it sits stopped and the
+	// agent holds the same network under the app's own alias, and a container
+	// with no endpoint can neither publish its ports nor resolve a service
+	// name. Re-attaching in place does not stick, so repairing it means
+	// re-creating it - which needs all of this.
+	fromContainerSpec        *sourceContainerSpec
 	restoreFromContainerOnce sync.Once
+
+	// consumedPerTest holds what the agent's last /updatemockparams answer said
+	// about how it reads the consumed history (models.ConsumedScopeHeader).
+	// StoreMocks clears it: a store addresses an agent, possibly a fresh one,
+	// whose answer this client has not seen yet.
+	consumedPerTest atomic.Bool
+}
+
+// AgentReadsConsumedPerTestOnly reports whether the agent's last
+// /updatemockparams answer said it reads the consumed history only for the
+// per-test mocks it stages (models.ConsumedScopePerTest). Until an answer has
+// said so, and again after every StoreMocks, it is false and the whole history
+// must be sent.
+func (a *AgentClient) AgentReadsConsumedPerTestOnly() bool {
+	return a.consumedPerTest.Load()
 }
 
 // var initStopScript []byte
@@ -68,7 +102,8 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 	return &AgentClient{
 		logger:       logger,
 		dockerClient: client,
-		client:       http.Client{},
+		client:       agentHTTPClient(token.Session()),
+		hookClient:   agentHTTPClientWithTimeout(token.Session(), agentHookTimeout),
 		conf:         c,
 	}
 }
@@ -634,8 +669,7 @@ func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.hookClient.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-simulate"), zap.Error(err))
 		return nil
@@ -670,8 +704,7 @@ func (a *AgentClient) AfterSimulate(ctx context.Context, tcName string, testSetI
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.hookClient.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-simulate"), zap.Error(err))
 		return nil
@@ -705,8 +738,7 @@ func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.hookClient.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-run"), zap.Error(err))
 		return nil
@@ -742,8 +774,7 @@ func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.hookClient.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-set-compose"), zap.Error(err))
 		return nil
@@ -780,8 +811,7 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.hookClient.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-test-run"), zap.Error(err))
 		return nil
@@ -812,6 +842,7 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 // predates the large-corpus recordings streaming exists for — so the fallback
 // is safe; a genuine bad-request 400 simply fails again on the retry.
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	a.consumedPerTest.Store(false)
 	// A dedicated cancelable context for the stream request: cancelling it tears
 	// down the transport's read of the io.Pipe body, which unblocks the encoder
 	// goroutine's pw.Write if the agent responded (e.g. 400) before consuming the
@@ -973,6 +1004,9 @@ func decodeStoreMocksResp(res *http.Response) error {
 }
 
 func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	// Only a successful answer that says so sets it again below; a call that
+	// fails at any point leaves the client believing nothing.
+	a.consumedPerTest.Store(false)
 	requestBody := models.UpdateMockParamsReq{
 		FilterParams: params,
 	}
@@ -1006,7 +1040,11 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 		return fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
 	}
 
-	return agentRespErr("update mock params", res, rawBody)
+	if err := agentRespErr("update mock params", res, rawBody); err != nil {
+		return err
+	}
+	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
+	return nil
 }
 
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
@@ -1048,6 +1086,98 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState,
 	}
 
 	return consumedMocks, nil
+}
+
+// GetServedMocks returns the mocks served so far this session, keyed by name.
+//
+// Unlike GetConsumedMocks this is safe to call repeatedly while the run is in
+// flight: the agent answers from its never-drained map, so polling it does not
+// consume the state that the end-of-run outcome report and --strict depend on.
+func (a *AgentClient) GetServedMocks(ctx context.Context) (map[string]models.MockState, error) {
+	url := fmt.Sprintf("%s/mock/served", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %s", err.Error())
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request for served mocks: %s", err.Error())
+	}
+
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for getservedmocks")
+		}
+	}()
+
+	// Status before decode, for the reason spelled out in GetConsumedMocks: a
+	// failure arrives as an error object and decoding it into the map would
+	// report the decoder's confusion instead of the agent's reason.
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get served mocks", res, rawBody)
+	}
+
+	served := map[string]models.MockState{}
+	if err := json.NewDecoder(res.Body).Decode(&served); err != nil {
+		return nil, fmt.Errorf("failed to decode response body for getservedmocks: %s", err.Error())
+	}
+
+	return served, nil
+}
+
+// GetMockStats fetches the agent's non-draining mock-session snapshot
+// (GET /mock/stats): the number of mocks stored on this agent process, plus
+// the running consumed/missed totals. The replay setup calls it after the
+// docker-compose bring-up to verify the agent still holds what the session
+// stored before any test fires: a replacement agent (the bring-up retry
+// recreates the stack, agent included) reports a loaded count of zero.
+func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error) {
+	url := fmt.Sprintf("%s/mock/stats", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return models.MockStats{}, fmt.Errorf("failed to create request: %s", err.Error())
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return models.MockStats{}, fmt.Errorf("failed to send request for mock stats: %s", err.Error())
+	}
+
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for getmockstats")
+		}
+	}()
+
+	// Status before decode, for the same reason as GetServedMocks: a failure
+	// arrives as an error object and decoding it into the struct would report
+	// the decoder's confusion instead of the agent's reason.
+	// An agent that CANNOT answer is not an agent that answered "nothing
+	// stored". 404 is an agent older than this route; 501 is one whose service
+	// does not implement the reader. Both are reported as a distinct, typed
+	// condition so the caller can skip its check instead of concluding the
+	// agent was replaced — otherwise ordinary version skew fails every
+	// docker-compose test set.
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return models.MockStats{}, fmt.Errorf("%w: agent returned %d", models.ErrMockStatsUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return models.MockStats{}, agentRespErr("get mock stats", res, rawBody)
+	}
+
+	var stats models.MockStats
+	if err := json.NewDecoder(res.Body).Decode(&stats); err != nil {
+		return models.MockStats{}, fmt.Errorf("failed to decode response body for getmockstats: %s", err.Error())
+	}
+
+	return stats, nil
 }
 
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppError {
@@ -1099,13 +1229,19 @@ func (a *AgentClient) GetRecentAppLogs(ctx context.Context) string {
 	return app.RecentLogs(ctx)
 }
 
-// startAgent starts the keploy agent process and handles its lifecycle
-func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts models.SetupOptions) error {
+// startAgent starts the keploy agent process and handles its lifecycle.
+//
+// The returned channel receives the agent process's exit exactly once — nil
+// for a clean exit — so the readiness wait in Setup can stop the moment the
+// agent is gone instead of polling a dead port for the whole ready budget.
+func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts models.SetupOptions) (<-chan error, error) {
 	// Get the errgroup from context
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
-		return fmt.Errorf("failed to get errorgroup from the context")
+		return nil, fmt.Errorf("failed to get errorgroup from the context")
 	}
+	// Buffered: the exit is reported whether or not anyone is still waiting.
+	exited := make(chan error, 1)
 
 	// Create a context for the agent that can be cancelled independently
 	agentCtx, cancel := context.WithCancel(ctx)
@@ -1115,19 +1251,16 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	}
 	opts.ExtraArgs = agent.StartupAgentHook.GetArgs(ctx)
 	if isDockerCmd {
-		// Helper check to ensure the binary running inside docker has the required capabilities
-		if err := utils.CheckRequiredPermissions(); err != nil {
-			a.logger.Error("Failed to start Keploy Agent", zap.Error(err))
-			// Distinct exit code: a caller must be able to tell "Keploy needs
-			// kernel privileges" from "your tests failed", both of which used to
-			// be a bare 1. See utils/exitcodes.go.
-			utils.SetExitCodeOnce(utils.ExitPrivilegeRequired)
-			return err
-		}
+		// This process's own privileges were checked before Setup changed
+		// anything (checkDockerModePrivileges).
 		// Start the agent in Docker container using errgroup
 		grp.Go(func() error {
 			defer cancel() // Cancel agent context when Docker agent stops
-			if err := a.startInDocker(agentCtx, a.logger, opts); err != nil && !errors.Is(agentCtx.Err(), context.Canceled) {
+			err := a.startInDocker(agentCtx, a.logger, opts)
+			// `docker run` exits with the agent's own status, so this carries
+			// the reason an agent that could not start gave for it.
+			exited <- err
+			if err != nil && !errors.Is(agentCtx.Err(), context.Canceled) {
 				a.logger.Error("failed to start Docker agent", zap.Error(err))
 				return err
 			}
@@ -1135,10 +1268,10 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 		})
 	} else {
 		// Start the agent as a native process
-		err := a.startNativeAgent(agentCtx, opts)
+		err := a.startNativeAgent(agentCtx, opts, exited)
 		if err != nil {
 			cancel()
-			return err
+			return nil, err
 		}
 	}
 
@@ -1148,24 +1281,13 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 		return nil
 	})
 
-	return nil
+	return exited, nil
 }
 
-// startNativeAgent starts the keploy agent as a native process
-func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOptions) error {
-
-	// Get the errgroup from context
-	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	if !ok {
-		return fmt.Errorf("failed to get errorgroup from the context")
-	}
-
-	keployBin, err := utils.GetCurrentBinaryPath()
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to get current keploy binary path")
-		return err
-	}
-
+// nativeAgentArgs builds the `keploy agent` argv for a natively spawned agent,
+// the control-plane token file included, and records the launch
+// (token.RecordLaunch) so the client holds that agent to the token.
+func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// Build args (binary is passed separately to utils)
 	args := []string{
 		"agent",
@@ -1266,6 +1388,30 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
 
+	// Recorded apart from the handoff, so an agent that did not get its token
+	// is still one this process launched, and still checked for it.
+	token.RecordLaunch(opts.AgentURI)
+	return appendTokenFileArg(a.logger, args)
+}
+
+// startNativeAgent starts the keploy agent as a native process. The process's
+// exit is sent on exited.
+func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOptions, exited chan<- error) error {
+
+	// Get the errgroup from context
+	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return fmt.Errorf("failed to get errorgroup from the context")
+	}
+
+	keployBin, err := utils.GetCurrentBinaryPath()
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to get current keploy binary path")
+		return err
+	}
+
+	args := a.nativeAgentArgs(opts)
+
 	// The PTY and the cached-credentials probe both exist for one reason: sudo
 	// may prompt for a password. On a platform where the agent is never
 	// elevated (darwin) there is no prompt, and taking the PTY path anyway is
@@ -1282,7 +1428,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 
 	if elevates && agentUtils.NeedsPTY() && !sudoCached {
-		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp)
+		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp, exited)
 	}
 
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
@@ -1308,6 +1454,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		defer utils.Recover(a.logger)
 
 		err := cmd.Wait()
+		// Reported BEFORE the error is returned below: returning it cancels
+		// the group, and the readiness wait must find the exit already here
+		// when it sees that cancellation.
+		exited <- err
 		// If ctx wasn't cancelled, bubble up unexpected exits
 		if err != nil && ctx.Err() == nil {
 			a.logger.Error("agent process exited with error", zap.Error(err))
@@ -1349,7 +1499,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 }
 
 // startNativeAgentWithPTY starts the agent with PTY support for interactive input (e.g., sudo password)
-func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin string, args []string, grp *errgroup.Group) error {
+func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin string, args []string, grp *errgroup.Group, exited chan<- error) error {
 	// Create command configured for PTY
 	cmd := agentUtils.NewAgentCommandForPTY(keployBin, args)
 
@@ -1374,6 +1524,8 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 		defer utils.Recover(a.logger)
 
 		err := ptyHandle.Wait()
+		// Before the return below, for the reason given in startNativeAgent.
+		exited <- err
 		// If ctx wasn't cancelled, bubble up unexpected exits
 		if err != nil && ctx.Err() == nil {
 			a.logger.Error("agent process exited with error", zap.Error(err))
@@ -1507,6 +1659,220 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 	}
 }
 
+// agentStoppedBeforeReady is Setup's error for an agent process that ended
+// before it ever reported ready: nothing will answer, so there is nothing
+// left to wait for.
+//
+// The agent's exit status says why when it knows (cli/agent.go arms it from
+// utils.ExitCodeFor), and it is re-armed here as this process's own code: the
+// agent is a separate process, and its status is the only thing that crosses
+// back. Without that, an agent that could not start for want of privileges
+// and one that could not start for want of tracefs both ended the run with the
+// same bare failure -- and before this wait watched the process at all, with
+// a readiness timeout five and a half minutes later.
+func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) error {
+	var cause error
+	// An *exec.ExitError for an agent keploy started itself, an
+	// *agentContainerExit for one compose started.
+	var ee interface{ ExitCode() int }
+	if errors.As(exitErr, &ee) {
+		switch ee.ExitCode() {
+		case utils.ExitPrivilegeRequired:
+			cause = utils.ErrPrivilegeRequired
+		case utils.ExitEnvironmentUnsupported:
+			cause = utils.ErrEnvironmentUnsupported
+		}
+	}
+	if cause == nil {
+		if exitErr == nil {
+			return errors.New("the keploy agent exited before it became ready")
+		}
+		return fmt.Errorf("the keploy agent exited before it became ready: %w", exitErr)
+	}
+	utils.SetExitCodeOnce(utils.ExitCodeFor(cause))
+	a.logger.Error("the keploy agent could not start", zap.Error(cause), zap.String("next_step", agentStartRemedy(cause, isDockerCmd, runtime.GOOS)))
+	return fmt.Errorf("%w: the keploy agent could not start (%v)", cause, exitErr)
+}
+
+// agentStartRemedy is what the user can do about an agent that could not start
+// for cause, which depends on where it ran.
+//
+// It ran as root either way. Only the Linux agent tags a privilege failure
+// (its eBPF load), and the native one is elevated before it starts (see
+// agentUtils.NewAgentCommand), while the agent container runs as root with the
+// capabilities keploy starts it with. So a privilege the kernel still refused
+// is not one sudo or setcap can give: it is the container's, or the Docker
+// daemon's, to grant -- or, on a machine that is not a container, kernel
+// lockdown or a security policy refused root itself. All this process has is
+// the agent's exit status, which does not say which of those refused it, so
+// the remedy names the candidates rather than picking one.
+//
+// Tracefs is a Linux agent's to need, and all a native one can report
+// missing: it is reached over loopback, so it needs no network, and no remedy
+// may send the user to connect one. No macOS or Windows agent reports anything
+// missing today; the branch for them (goos, the runtime.GOOS it ran on) is
+// there so that one that ever does is not told to mount tracefs, and can only
+// point at its log. The agent container is the one agent that needs a
+// network address, because its hooks send the application's connections to
+// its container's own address: keploy starts it on the network the
+// application's command names, and --network none leaves it none.
+func agentStartRemedy(cause error, isDockerCmd bool, goos string) string {
+	switch {
+	case errors.Is(cause, utils.ErrPrivilegeRequired) && isDockerCmd:
+		return "keploy starts its agent container as root with --cap-add BPF, PERFMON, NET_ADMIN, SYS_RESOURCE and SYS_PTRACE, and the kernel still refused it eBPF. A rootless Docker or Podman cannot grant those capabilities at all; with a rootful daemon, look for what else denies it: an SELinux or AppArmor policy, a Docker whose default seccomp profile predates CAP_BPF, or kernel lockdown. The agent's log above names the operation the kernel refused"
+	case errors.Is(cause, utils.ErrPrivilegeRequired):
+		return "the agent already ran as root and the kernel still refused it eBPF, as it does inside a container that does not grant it: start that container with --privileged, or with --cap-add BPF --cap-add PERFMON --cap-add NET_ADMIN --cap-add SYS_RESOURCE --cap-add SYS_PTRACE, and with tracefs mounted into it (-v /sys/kernel/tracing:/sys/kernel/tracing). A rootless container runtime cannot grant these at all. Outside a container, look for what denies root eBPF: kernel lockdown, or an SELinux or AppArmor policy. The agent's log above names the operation the kernel refused"
+	case isDockerCmd:
+		return "mount debugfs on the machine Docker runs on (mount -t debugfs nodev /sys/kernel/debug): keploy's agent container reaches tracefs through it. Or, if the log says it found no non-loopback IP: keploy starts its agent container on the network the application's command names, and --network none leaves it no address. The agent's log above names which one is missing"
+	case goos != "linux":
+		return "the agent's log above names what is missing"
+	default:
+		return "mount tracefs (mount -t tracefs nodev /sys/kernel/tracing; into a container, -v /sys/kernel/tracing:/sys/kernel/tracing). The agent's log above names what is missing"
+	}
+}
+
+// waitForAgent blocks until the agent started by startAgent answers its health
+// check (nil), its process ends (exited), its ready budget runs out, or ctx is
+// cancelled.
+func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isDockerCmd bool, opts models.SetupOptions) error {
+	// Wait up to the agent's own healthcheck budget for it to become ready.
+	// Under heavy CI docker-daemon contention the agent container can take
+	// well over a minute just to start (observed: a local-image `docker run`
+	// taking 126s), so a 60s wait gave up prematurely and tore down a
+	// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
+	readyTimeout := pkg.AgentReadyTimeout()
+	if opts.AgentReadyTimeout > 0 {
+		readyTimeout = opts.AgentReadyTimeout
+	}
+	agentCtx, cancel := context.WithTimeout(ctx, readyTimeout)
+	defer cancel()
+
+	agentReadyCh := make(chan bool, 1)
+	go pkg.AgentHealthTicker(agentCtx, a.logger, a.conf.Agent.AgentURI, agentReadyCh, 1*time.Second)
+
+	// agentCtx is ctx's child, so its Done covers the caller's cancellation
+	// as well as the budget running out, and the ticker closes agentReadyCh
+	// (ready == false) on either. Which of those it was is decided below, in
+	// order, rather than by whichever case the select happens to pick when
+	// several are ready at once.
+	var ready bool
+	select {
+	case exitErr := <-exited:
+		return a.agentStoppedBeforeReady(exitErr, isDockerCmd)
+	case <-agentCtx.Done():
+	case ready = <-agentReadyCh:
+	}
+	if ready {
+		return nil
+	}
+	if ctx.Err() != nil {
+		// The caller's Ctrl+C -- or a goroutine in the caller's errgroup
+		// failing, which cancels ctx too. The one waiting on the agent
+		// process is such a goroutine, and it reports the exit before it
+		// fails the group, so when that is what happened the exit is already
+		// here. Otherwise the cause says which it was: ctx.Err() is "context
+		// canceled" for both, and a caller could not tell keploy failing
+		// from the user stopping it.
+		select {
+		case exitErr := <-exited:
+			return a.agentStoppedBeforeReady(exitErr, isDockerCmd)
+		default:
+		}
+		return context.Cause(ctx)
+	}
+	// The agent never reported healthy. Setup's cleanup defer is not in
+	// scope yet, so without this the wedged agent container and its
+	// goroutine leak — and any retry inherits the mess. Dump the container's
+	// own logs first: the CLI otherwise shows the full readiness window of
+	// silence followed by a bare error, with nothing to root-cause from.
+	if isDockerCmd {
+		a.logAgentContainerDiagnostics(opts.KeployContainer)
+	}
+	a.stopAgent()
+	// Sentinel so the caller can retry a fresh bring-up on this specific,
+	// nondeterministic stall without retrying deterministic failures.
+	return fmt.Errorf("%w", pkg.ErrAgentNotReady)
+}
+
+// perfEventParanoidPath is the kernel knob docker mode relaxes for its agent's
+// tracepoints. It is not namespaced: read or written from inside a container,
+// it is the host's.
+//
+// A variable so a test can point it at a file of its own.
+var perfEventParanoidPath = "/proc/sys/kernel/perf_event_paranoid"
+
+// The remedies checkDockerModePrivileges logs, one for each thing it can be
+// refused. Both are for a process that may already be root: a CI job
+// container runs keploy as root, and /proc/sys is read-only to root in any
+// container that is not --privileged, whatever capabilities it was given.
+const (
+	dockerModeCapabilitiesRemedy = "keploy's docker mode needs the capabilities named above in the process that runs it. Run keploy as root on the machine Docker runs on, or, inside a container, start that container with --privileged. --cap-add for each of them works too, but leaves /proc/sys read-only, so then set kernel.perf_event_paranoid to 2 or lower on the host first (sysctl -w kernel.perf_event_paranoid=2), which keploy would otherwise do itself"
+	perfEventParanoidRemedy      = "keploy's docker mode lowers kernel.perf_event_paranoid to 2 so its agent can attach to syscall tracepoints, and this process may not write it. Set it on the host first (sysctl -w kernel.perf_event_paranoid=2) and keploy leaves it as it is; or run keploy as root on the host, or inside a container started with --privileged"
+)
+
+// checkDockerModePrivileges fails, with ErrPrivilegeRequired and the privilege
+// exit code armed, when this process cannot run keploy's docker mode: it lacks
+// the capabilities the check below asks for, or it may not relax
+// perf_event_paranoid for the agent's tracepoints. That relaxing is the one
+// change it makes, and the first one docker mode makes.
+func (a *AgentClient) checkDockerModePrivileges(opts models.SetupOptions) error {
+	// docker run, docker start and --from-container start the agent container
+	// from this process, and have always been held to the capability check;
+	// docker compose starts it as a service of the user's own project, and
+	// never was.
+	if utils.CmdType(opts.CommandType) != utils.DockerCompose {
+		if err := utils.CheckRequiredPermissions(); err != nil {
+			return a.dockerModeRefused(fmt.Errorf("%w: %w", utils.ErrPrivilegeRequired, err), dockerModeCapabilitiesRemedy)
+		}
+	}
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	err := relaxPerfEventParanoid()
+	if errors.Is(err, utils.ErrPrivilegeRequired) {
+		return a.dockerModeRefused(err, perfEventParanoidRemedy)
+	}
+	if err != nil {
+		a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+	}
+	return err
+}
+
+// dockerModeRefused arms the privilege exit code for err and logs it with the
+// remedy. Distinct exit code: a caller must be able to tell "Keploy needs
+// kernel privileges" from "your tests failed", both of which used to be a bare
+// 1. See utils/exitcodes.go.
+func (a *AgentClient) dockerModeRefused(err error, remedy string) error {
+	utils.SetExitCodeOnce(utils.ExitPrivilegeRequired)
+	a.logger.Error("keploy cannot run in docker mode here", zap.Error(err), zap.String("next_step", remedy))
+	return err
+}
+
+// relaxPerfEventParanoid makes sure perf_event_paranoid is at most 2, which
+// lets the agent's eBPF programs attach to syscall tracepoints like sys_socket
+// via perf_event_open: the Debian and Ubuntu defaults (3 and 4) block this for
+// unprivileged users. The value is written straight to the procfs knob instead
+// of shelling out to the `sysctl` binary, which isn't guaranteed to be present
+// in minimal images.
+//
+// A value that already allows it is left as it is. Writing 2 over it would
+// tighten a host set lower, and the write needs what a container that is not
+// --privileged never has, a writable /proc/sys, so a host set up in advance
+// is how such a container gets to run keploy's docker mode at all. A write
+// this process is not allowed to make is tagged ErrPrivilegeRequired.
+func relaxPerfEventParanoid() error {
+	if current, err := os.ReadFile(perfEventParanoidPath); err == nil {
+		if level, err := strconv.Atoi(strings.TrimSpace(string(current))); err == nil && level <= 2 {
+			return nil
+		}
+	}
+	err := os.WriteFile(perfEventParanoidPath, []byte("2\n"), 0644)
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS) {
+		return fmt.Errorf("%w: %w", utils.ErrPrivilegeRequired, err)
+	}
+	return err
+}
+
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
@@ -1551,6 +1917,16 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		zap.Uint32("dns-port", dnsPort))
 
 	if isDockerCmd {
+		// Whether docker mode can run here at all is settled before anything
+		// is changed for it: the user's --from-container container stopped,
+		// the host's perf_event_paranoid written. Both used to come first, so
+		// keploy run as root in an unprivileged container -- a CI job's, with
+		// the host's Docker socket -- stopped the user's container and then
+		// failed with a bare 1 on the read-only /proc/sys, never reaching the
+		// capability check that says why.
+		if err := a.checkDockerModePrivileges(opts); err != nil {
+			return err
+		}
 
 		var origCmd = cmd
 		a.logger.Debug("Application command provided :", zap.String("cmd", cmd))
@@ -1576,6 +1952,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// anything else happens. This is why the stop lives here and not in
 			// App.Setup, which runs after the agent is already up.
 			opts.FromContainerWasRunning, err = a.releaseSourceContainer(ctx, opts.FromContainer)
+			// Registered before the error is acted on, because the stop has
+			// already been issued by the time this returns one: the only thing
+			// that can put the container back is gated on these fields.
+			a.fromContainer = opts.FromContainer
+			a.fromContainerWasRunning = opts.FromContainerWasRunning
 			if err != nil {
 				return fmt.Errorf("failed to stop %q: %w", opts.FromContainer, err)
 			}
@@ -1590,8 +1971,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// here never touch - a Ctrl+C during the readiness wait returns
 			// ctx.Err() and an unhealthy agent returns ErrAgentNotReady, both
 			// with the local still nil.
-			a.fromContainer = opts.FromContainer
-			a.fromContainerWasRunning = opts.FromContainerWasRunning
 			defer func() {
 				if err := recover(); err != nil {
 					a.RestoreFromContainer()
@@ -1614,62 +1993,19 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				zap.String("cmd", cmd),
 			)
 		}
-
-		// Lower perf_event_paranoid to allow eBPF programs to attach to syscall tracepoints
-		// like sys_socket via perf_event_open. Ubuntu/Debian default (4) blocks this for
-		// unprivileged users, so setting 2 relaxes the restriction and enables tracing.
-		// Write the value straight to the procfs knob instead of shelling out to the
-		// `sysctl` binary, which isn't guaranteed to be present in minimal images.
-		if runtime.GOOS == "linux" {
-			const perfEventParanoidPath = "/proc/sys/kernel/perf_event_paranoid"
-			if err := os.WriteFile(perfEventParanoidPath, []byte("2\n"), 0644); err != nil {
-				a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
-				return err
-			}
-		}
 	}
 
 	if opts.CommandType != string(utils.DockerCompose) { // in case of docker compose, we will run the application command (our agent will run along with it)
 		opts.ClientNSPID = uint32(os.Getpid())
-		err = a.startAgent(ctx, isDockerCmd, opts)
+		var agentExited <-chan error
+		agentExited, err = a.startAgent(ctx, isDockerCmd, opts)
 		if err != nil {
 			return fmt.Errorf("failed to start agent: %w", err)
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		// Wait up to the agent's own healthcheck budget for it to become ready.
-		// Under heavy CI docker-daemon contention the agent container can take
-		// well over a minute just to start (observed: a local-image `docker run`
-		// taking 126s), so a 60s wait gave up prematurely and tore down a
-		// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
-		readyTimeout := pkg.AgentReadyTimeout()
-		if opts.AgentReadyTimeout > 0 {
-			readyTimeout = opts.AgentReadyTimeout
-		}
-		agentCtx, cancel := context.WithTimeout(ctx, readyTimeout)
-		defer cancel()
-
-		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, a.logger, a.conf.Agent.AgentURI, agentReadyCh, 1*time.Second)
-
-		select {
-		case <-ctx.Done():
-			// Parent context cancelled (user pressed Ctrl+C)
-			return ctx.Err()
-		case <-agentCtx.Done():
-			// The agent never reported healthy. The cleanup defer below is not in
-			// scope yet, so without this the wedged agent container and its
-			// goroutine leak — and any retry inherits the mess. Dump the container's
-			// own logs first: the CLI otherwise shows the full readiness window of
-			// silence followed by a bare error, with nothing to root-cause from.
-			if isDockerCmd {
-				a.logAgentContainerDiagnostics(opts.KeployContainer)
-			}
-			a.stopAgent()
-			// Sentinel so the caller can retry a fresh bring-up on this specific,
-			// nondeterministic stall without retrying deterministic failures.
-			return fmt.Errorf("%w", pkg.ErrAgentNotReady)
-		case <-agentReadyCh:
+		if err = a.waitForAgent(ctx, agentExited, isDockerCmd, opts); err != nil {
+			return err
 		}
 	}
 
@@ -1693,24 +2029,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return err
 	}
 
-	// Mock mode: export the agent's scope-API address into the wrapped
-	// command's environment so a test-runner plugin / glue-code can mark
-	// per-test boundaries (POST {KEPLOY_MOCK_AGENT}/agent/scope/begin|end).
-	// The child inherits this process's environment. Native + docker-run put
-	// the child in the agent's netns, so localhost:<agentPort> reaches it;
-	// docker-compose shares the host loopback. Harmless when unused.
-	if opts.MockMode {
-		if err := os.Setenv("KEPLOY_MOCK_AGENT", fmt.Sprintf("http://localhost:%d", agentPort)); err != nil {
-			a.logger.Debug("failed to export KEPLOY_MOCK_AGENT", zap.Error(err))
-		}
-		session := "record"
-		if opts.Mode == models.MODE_TEST {
-			session = "replay"
-		}
-		if err := os.Setenv("KEPLOY_MOCK_SESSION", session); err != nil {
-			a.logger.Debug("failed to export KEPLOY_MOCK_SESSION", zap.Error(err))
-		}
-	}
+	exportMockScopeEnv(a.logger, opts, agentPort)
 
 	err = usrApp.Setup(ctx)
 	if err != nil {
@@ -1720,6 +2039,51 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	a.logger.Debug("Keploy client setup completed successfully")
 	return nil
+}
+
+// exportMockScopeEnv exports the agent's scope-API address, and the token it
+// needs, into the wrapped command's environment in mock mode, so a test-runner
+// plugin / glue-code can mark per-test boundaries
+// (POST {KEPLOY_MOCK_AGENT}/agent/scope/begin|end). The child inherits this
+// process's environment. Native + docker-run put the child in the agent's
+// netns, so localhost:<agentPort> reaches it; docker-compose shares the host
+// loopback. Harmless when unused.
+//
+// Nothing at all outside mock mode: there the wrapped command is the
+// application under test, and it is handed nothing.
+func exportMockScopeEnv(logger *zap.Logger, opts models.SetupOptions, agentPort uint32) {
+	if !opts.MockMode {
+		return
+	}
+	if err := os.Setenv("KEPLOY_MOCK_AGENT", fmt.Sprintf("http://localhost:%d", agentPort)); err != nil {
+		logger.Debug("failed to export KEPLOY_MOCK_AGENT", zap.Error(err))
+	}
+	// The scope API is guarded like every other control-plane route, and
+	// this caller is not keploy — it is the user's test runner. Without a
+	// credential the advertised integration would simply 401.
+	//
+	// os.Setenv is process-wide, so strictly every child started after
+	// this inherits it, not only the wrapped runner. That is the same
+	// trust domain: in mock mode the wrapped process is the intended API
+	// client, and the incidental children are keploy's own docker and
+	// shell teardown commands. What matters is the guard above: only in
+	// mock mode, so the application under test in a record or test run is
+	// still handed nothing.
+	//
+	// A separate variable from token.Env, so a process that inherits it
+	// presents the token rather than adopting it as one to enforce.
+	if tok := token.Session(); tok != "" {
+		if err := os.Setenv(token.MockAgentTokenEnv, tok); err != nil {
+			logger.Debug("failed to export "+token.MockAgentTokenEnv, zap.Error(err))
+		}
+	}
+	session := "record"
+	if opts.Mode == models.MODE_TEST {
+		session = "replay"
+	}
+	if err := os.Setenv("KEPLOY_MOCK_SESSION", session); err != nil {
+		logger.Debug("failed to export KEPLOY_MOCK_SESSION", zap.Error(err))
+	}
 }
 
 func (a *AgentClient) getApp() (*app.App, error) {
@@ -1735,6 +2099,83 @@ func (a *AgentClient) getApp() (*app.App, error) {
 	}
 
 	return h, nil
+}
+
+// ComposeAgentOutcome is what the keploy-agent compose service served and
+// missed in a mock replay, as it wrote it on being stopped.
+//
+// Under docker compose it is the only way to learn either: compose stops the
+// agent service the moment the app exits, so the agent is gone before
+// GetConsumedMocks or GetMockErrors could reach it. The App reads the account
+// out of the stopped container before keploy's teardown removes it.
+func (a *AgentClient) ComposeAgentOutcome() (models.MockOutcome, error) {
+	ap, err := a.getApp()
+	if err != nil {
+		return models.MockOutcome{}, err
+	}
+	stopped, ok := ap.StoppedAgent()
+	if !ok {
+		return models.MockOutcome{}, errors.New("keploy did not read the keploy-agent container before it was removed")
+	}
+	return stopped.MockOutcome()
+}
+
+// agentContainerExit is a keploy-agent container that stopped, as docker
+// reports it. Its ExitCode is the agent's own status: the agent is the
+// container's process.
+type agentContainerExit struct {
+	container string
+	code      int
+	oomKilled bool
+}
+
+func (e *agentContainerExit) Error() string {
+	msg := fmt.Sprintf("the keploy-agent container %s exited with code %d", e.container, e.code)
+	if e.oomKilled {
+		msg += ", killed for running out of memory"
+	}
+	return msg
+}
+
+func (e *agentContainerExit) ExitCode() int { return e.code }
+
+// ComposeAgentFailure is the keploy-agent compose service stopping while the
+// app still needed it, as keploy's own failure -- and nil when it did not,
+// which is every run in which compose stopped the agent after the app exited.
+//
+// Under compose the agent is a service in the project, and when it stops
+// first, compose aborts the project over it: the exit that reaches keploy is
+// compose reporting the dependency it lost, or the test command's code after
+// compose stopped it, and neither is the test command's verdict. The agent's
+// container, read before keploy's teardown removes it, says which it was.
+//
+// An agent that stopped before the app ever started could not start at all,
+// and its exit status says why, exactly as a native agent's does
+// (agentStoppedBeforeReady): the specific code is armed, and the remedy
+// logged.
+func (a *AgentClient) ComposeAgentFailure() error {
+	ap, err := a.getApp()
+	if err != nil {
+		return nil
+	}
+	stopped, ok := ap.StoppedAgent()
+	if !ok {
+		return nil
+	}
+	return a.composeAgentFailure(stopped)
+}
+
+// composeAgentFailure is ComposeAgentFailure for what keploy read from the
+// stopped agent's container.
+func (a *AgentClient) composeAgentFailure(stopped app.StoppedAgent) error {
+	if !stopped.AgentFailed() {
+		return nil
+	}
+	exit := &agentContainerExit{container: stopped.Container, code: stopped.Agent.ExitCode, oomKilled: stopped.Agent.OOMKilled}
+	if !stopped.AppStarted() {
+		return a.agentStoppedBeforeReady(exit, true)
+	}
+	return fmt.Errorf("the keploy agent stopped while the test command was running: %w", exit)
 }
 
 // ComposeDownOnSetupFailure tears down the managed docker-compose stack so a
@@ -1803,7 +2244,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return nil
 	}
 
-	logger.Debug("running the following command to start agent in docker", zap.String("command", cmd.String()))
+	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
 	// Check if we need PTY for interactive input (e.g., sudo password on Linux)
 	if agentUtils.NeedsPTY() {
@@ -1933,6 +2374,42 @@ func (a *AgentClient) BeginTestErrorCapture(ctx context.Context) error {
 		return fmt.Errorf("begin test error capture returned status %d: %s", res.StatusCode, string(body))
 	}
 	return nil
+}
+
+// PendingBefore asks the agent whether it may still hand over a test case or a
+// mock captured before `before` (GET /agent/record/pending). known is false when
+// it cannot tell: an agent that predates the route, or a capture without a
+// watermark (proxy mode). A recording's stop then goes by its streams' quiet
+// alone.
+func (a *AgentClient) PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error) {
+	if a.conf.Agent.AgentURI == "" {
+		return false, false, nil
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	url := fmt.Sprintf("%s/record/pending?before=%d", a.conf.Agent.AgentURI, before.UnixNano())
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, false, err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return false, false, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return false, false, nil // 404 (older agent), 501 (cannot tell)
+	}
+	var out struct {
+		Pending bool `json:"pending"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, false, err
+	}
+	return out.Pending, true, nil
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
@@ -2329,9 +2806,10 @@ func (a *AgentClient) releaseSourceContainer(ctx context.Context, name string) (
 	if err != nil {
 		return false, err
 	}
-	if inspect.State == nil || !inspect.State.Running {
+	if inspect.ContainerJSONBase == nil || inspect.State == nil || !inspect.State.Running {
 		return false, nil
 	}
+	a.fromContainerSpec = specFromInspect(inspect)
 	a.logger.Info("stopping your container so keploy can run a copy of it under its own namespaces",
 		zap.String("container", name))
 	stopCtx, cancel := context.WithTimeout(ctx, fromContainerStopBudget)
@@ -2342,34 +2820,547 @@ func (a *AgentClient) releaseSourceContainer(ctx context.Context, name string) (
 	return true, nil
 }
 
-// restoreSourceContainer starts the user's container again after a
-// --from-container bring-up failed before App took ownership of it.
+// sourceContainerSpec is the user's container as it was before keploy touched
+// it: enough to build it again, including the compose labels that keep
+// `docker compose` recognising it as its own.
+type sourceContainerSpec struct {
+	name       string
+	config     *container.Config
+	hostConfig *container.HostConfig
+	networks   map[string]*network.EndpointSettings
+	// imageID pins the image by digest. Config.Image is a TAG, and a tag can
+	// stop resolving between the capture and the re-create - rebuilt, retagged,
+	// pruned - while the id it resolved to is still on the machine.
+	imageID string
+	// mounts is the only place anonymous volume NAMES appear. Without it a
+	// re-create hands the app brand new empty volumes and orphans its data.
+	mounts []mount.Mount
+	// platform matters on a machine whose default differs from the container's,
+	// which is every Apple Silicon host running an amd64 image.
+	platform *ocispec.Platform
+	// id is what says the container answering to this name later is the same
+	// one keploy stopped. Names get reused; a rebuild is destructive.
+	id string
+}
+
+// backupSuffix marks the container while its replacement is built. The user's
+// container is renamed aside rather than removed, so a failed re-create can put
+// it back instead of leaving them with nothing.
 //
-// Best-effort and deliberately on a background context: it runs from a deferred
-// failure path, where the context that failed is usually already cancelled.
+// The name carries a timestamp because it has to be free: a backup stranded by
+// an earlier failed run would otherwise take the one name this can use and
+// block the repair for good.
+const backupSuffix = "-keploy-restore-backup"
+
+func backupNameFor(name string) string {
+	return fmt.Sprintf("%s%s-%d", name, backupSuffix, time.Now().UnixNano())
+}
+
+// recreateBudget is the destructive sequence's OWN budget, never inherited.
+// The restore loop can spend most of its budget waiting for the agent to
+// release the app's ports, and a stop/create/start sequence that runs out of
+// time halfway is how a container gets lost.
+//
+// A variable so a test can exhaust it: what a rollback does once the budget has
+// run out is the whole reason it has a context of its own.
+var recreateBudget = 45 * time.Second
+
+// rollbackBudget is separate again, because a rollback exists to run after
+// something has already overrun: reusing the budget that just expired means the
+// daemon refuses every call and the container stays under a name the user never
+// chose.
+const rollbackBudget = 30 * time.Second
+
+func specFromInspect(inspect container.InspectResponse) *sourceContainerSpec {
+	if inspect.ContainerJSONBase == nil || inspect.Config == nil || inspect.HostConfig == nil {
+		return nil
+	}
+	spec := &sourceContainerSpec{
+		name:       strings.TrimPrefix(inspect.Name, "/"),
+		id:         inspect.ID,
+		config:     inspect.Config,
+		hostConfig: inspect.HostConfig,
+		imageID:    inspect.Image,
+		mounts:     app.MountsFrom(inspect, inspect.HostConfig.Mounts),
+	}
+	if inspect.NetworkSettings != nil {
+		spec.networks = inspect.NetworkSettings.Networks
+	}
+	if inspect.ImageManifestDescriptor != nil {
+		spec.platform = inspect.ImageManifestDescriptor.Platform
+	}
+	return spec
+}
+
+// primaryNetwork is the network the container is created on, so it is never
+// briefly attached to nothing. It returns the key into the endpoint map, which
+// NetworkMode is not always spelled as.
+//
+// NetworkMode reads "default" for a container on the default bridge, and can be
+// a network ID for one started with `--network <id>`. Either way it matches no
+// key in the map, leaving the primary endpoint's aliases behind - and the
+// aliases are how the rest of the project reaches this container by name.
+func primaryNetwork(hostConfig *container.HostConfig, networks map[string]*network.EndpointSettings) string {
+	mode := string(hostConfig.NetworkMode)
+	if _, ok := networks[mode]; ok {
+		return mode
+	}
+	for name, endpoint := range networks {
+		if endpoint != nil && endpoint.NetworkID == mode {
+			return name
+		}
+	}
+	if mode == "default" {
+		return "bridge"
+	}
+	return mode
+}
+
+// startWithinBudget starts a container, retrying until ctx is done. Every
+// failure worth retrying here is something letting go of a resource: the agent
+// releasing the app's published ports as it exits, or a network settling.
+func (a *AgentClient) startWithinBudget(ctx context.Context, id string) error {
+	for {
+		err := a.dockerClient.ContainerStart(ctx, id, container.StartOptions{})
+		if err == nil {
+			return nil
+		}
+		// A container that is not there will not appear, and a configuration
+		// the daemon refuses will be refused again.
+		if errdefs.IsNotFound(err) || errdefs.IsInvalidParameter(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// endpointFor keeps what the user declared and drops the identity of the
+// endpoint Docker discarded.
+//
+// The aliases are how the rest of the project reaches this container by name.
+// IPAMConfig, DriverOpts and GwPriority are declared too: GwPriority decides
+// which network carries the default route on a multi-network container, and the
+// daemon migrates per-endpoint sysctls into DriverOpts and then refuses the
+// top-level spelling, so that key has to be replayed where it was found.
+//
+// The endpoint id and assigned address belong to the dead endpoint and Docker
+// issues fresh ones. MacAddress is left behind with them: it is only an input
+// before the container runs, and reads back as whatever the daemon generated -
+// on a bridge that is derived from the assigned IP, so replaying it as a
+// request can pin a second interface to a MAC another container now holds.
+func endpointFor(settings *network.EndpointSettings) *network.EndpointSettings {
+	if settings == nil {
+		return &network.EndpointSettings{}
+	}
+	return &network.EndpointSettings{
+		Aliases:    settings.Aliases,
+		IPAMConfig: settings.IPAMConfig,
+		DriverOpts: settings.DriverOpts,
+		GwPriority: settings.GwPriority,
+	}
+}
+
+// restoreSourceContainer puts the user's container back after a
+// --from-container session.
+//
+// A plain start is tried first and then VERIFIED, because it is enough whenever
+// the container came through with its network intact. When it has not, the
+// container is rebuilt from the spec captured before it was stopped.
+//
+// Rebuilding is not the first choice - it is the only one that works. A
+// container that lost its network endpoint cannot be repaired in place: a
+// reconnect on the stopped container reports success and is gone again after
+// the start, and ports are published onto an endpoint, so no start or restart
+// will ever bind them. `docker compose up -d` fixes it precisely because it
+// re-creates.
 func (a *AgentClient) restoreSourceContainer(name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), fromContainerRestoreBudget)
 	defer cancel()
 
-	// The agent container publishes the app's ports on its behalf and holds
-	// them until it is gone, so an immediate start loses the bind with "port is
-	// already allocated". This is the mirror of the stop having to precede the
-	// agent: the start has to follow its teardown, and teardown is not
-	// something this function can wait on directly. Retry instead - the bind
-	// frees as soon as the agent exits.
+	// --from-container takes an id just as happily as a name, and a rebuilt
+	// container has a new one. Addressing it by name from here means the
+	// verification after a rebuild is not looking up the id that was removed.
+	if a.fromContainerSpec != nil && a.fromContainerSpec.name != "" {
+		name = a.fromContainerSpec.name
+	}
+
 	var lastErr error
+	recreated := false
+	explained := false
+	inspectFailed := false
 	for {
 		lastErr = a.dockerClient.ContainerStart(ctx, name, container.StartOptions{})
-		if lastErr == nil {
-			a.logger.Info("started your container again", zap.String("container", name))
-			return
+
+		// A container that is GONE cannot be started, so waiting for it to
+		// start is waiting for nothing. --rm is the ordinary way to get here:
+		// AutoRemove fires on any exit, including the stop that began the
+		// session, so the rebuild is the only thing that returns it at all.
+		if lastErr != nil && errdefs.IsNotFound(lastErr) {
+			switch {
+			case recreated || a.fromContainerSpec == nil:
+				utils.LogError(a.logger, lastErr, "your container no longer exists and keploy cannot rebuild it",
+					zap.String("container", name),
+					zap.String("next_step", "start it again: docker compose up -d, or docker run it as before"))
+				return
+			default:
+				recreated = true
+				a.logger.Info("your container was removed when it stopped; rebuilding it as it was",
+					zap.String("container", name))
+				if err := a.recreateSourceContainer(); err != nil {
+					utils.LogError(a.logger, err, "could not rebuild your container",
+						zap.String("container", name))
+					return
+				}
+				continue
+			}
 		}
+
+		if lastErr == nil {
+			problems, running, err := a.restoreShortfall(ctx, name)
+			switch {
+			case err != nil && !inspectFailed:
+				// One failed call is not an answer about the container, and
+				// every other transient in this loop is retried.
+				inspectFailed = true
+				a.logger.Debug("could not check on your container; trying once more",
+					zap.String("container", name), zap.Error(err))
+			case !running && err == nil:
+				// restoreShortfall has already reported the exit. Retrying
+				// would only start it again to no effect.
+				return
+			case err != nil:
+				a.logger.Warn("started your container again but could not verify its network and ports",
+					zap.String("container", name), zap.Error(err))
+				return
+			case len(problems) == 0:
+				a.logger.Info("started your container again", zap.String("container", name))
+				return
+			case recreated || a.fromContainerSpec == nil:
+				// Rebuilding was the repair, or there is no spec to rebuild
+				// from. Either way another pass cannot help, and looping would
+				// only stall teardown on a context Ctrl+C cannot reach.
+				a.logger.Warn("your container is running but not fully back",
+					zap.String("container", name), zap.Strings("problems", problems),
+					zap.String("next_step", "recreate it: docker compose up -d --force-recreate, or docker run it again"))
+				return
+			default:
+				recreated = true
+				a.logger.Info("your container came back without its network; rebuilding it as it was",
+					zap.String("container", name), zap.Strings("problems", problems))
+				if err := a.recreateSourceContainer(); err != nil {
+					utils.LogError(a.logger, err, "could not rebuild your container",
+						zap.String("container", name))
+					return
+				}
+				// Round again to verify. The rebuild has already started it,
+				// so its start is a no-op, while falling through to the wait
+				// below would sleep for nothing and report a start error that
+				// does not exist.
+				continue
+			}
+		}
+
+		if lastErr != nil && !explained {
+			// Otherwise this is a silent minute and a half at the end of a run.
+			// The usual cause is the agent still holding the published ports,
+			// which resolves itself as it exits.
+			explained = true
+			a.logger.Info("waiting to start your container again",
+				zap.String("container", name), zap.Error(lastErr))
+		}
+
 		select {
 		case <-ctx.Done():
-			a.logger.Error("could not start your container again after the session; start it by hand",
-				zap.String("container", name), zap.Error(lastErr))
+			utils.LogError(a.logger, lastErr, "could not restore your container's network and ports",
+				zap.String("container", name),
+				zap.String("next_step", "recreate it: docker compose up -d --force-recreate, or docker run it again"))
 			return
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// recreateSourceContainer rebuilds the user's container from the captured spec,
+// under its own name.
+//
+// The original is RENAMED ASIDE rather than removed, and only deleted once its
+// replacement is running. Removing first means every failure in between -
+// an image tag that no longer resolves, a config the daemon refuses, a deadline
+// running out - leaves the user with no container at all and the only copy of
+// its spec inside a process that is exiting. On any failure the original is put
+// back under its own name and restarted, which leaves the user with a container
+// that is running but unreachable - the same state the failed session left, and
+// one they can still recover by hand.
+func (a *AgentClient) recreateSourceContainer() error {
+	spec := a.fromContainerSpec
+	if spec == nil {
+		return errors.New("no captured spec for the source container")
+	}
+
+	// Its own budget, never the caller's remainder.
+	ctx, cancel := context.WithTimeout(context.Background(), recreateBudget)
+	defer cancel()
+
+	backup := ""
+	restoreBackup := func(cause error) error {
+		if backup == "" {
+			return cause
+		}
+		// Its own context: every path that reaches here may have exhausted the
+		// recreate budget, and a rollback on a dead context fails instantly and
+		// leaves the container under a name the user never chose.
+		ctx, cancel := context.WithTimeout(context.Background(), rollbackBudget)
+		defer cancel()
+		if err := a.dockerClient.ContainerRename(ctx, backup, spec.name); err != nil {
+			// The container is not lost, but it is neither where the user left
+			// it nor running, so the message has to carry both steps back.
+			if startErr := a.dockerClient.ContainerStart(ctx, backup, container.StartOptions{}); startErr != nil {
+				a.logger.Debug("could not start the container under its temporary name",
+					zap.String("container", backup), zap.Error(startErr))
+			}
+			utils.LogError(a.logger, err, "your container still exists, under a temporary name",
+				zap.String("container", backup), zap.String("expected_name", spec.name),
+				zap.String("next_step", fmt.Sprintf("docker rename %s %s && docker start %s", backup, spec.name, spec.name)))
+			return cause
+		}
+		if err := a.dockerClient.ContainerStart(ctx, spec.name, container.StartOptions{}); err != nil {
+			a.logger.Warn("put your container back but could not start it",
+				zap.String("container", spec.name), zap.Error(err),
+				zap.String("next_step", "docker start "+spec.name))
+		}
+		return cause
+	}
+
+	// A container started with --rm is already gone: AutoRemove fires on any
+	// exit, including the stop that began the session. There is nothing to set
+	// aside, and rebuilding is the only way the user gets it back at all.
+	//
+	// Only a NOT-FOUND means that. Any other inspect failure is a daemon
+	// problem, and reading it as "gone" would go on to create over a container
+	// that is still there.
+	inspect, inspectErr := a.dockerClient.ContainerInspect(ctx, spec.name)
+	switch {
+	case inspectErr != nil && !errdefs.IsNotFound(inspectErr):
+		return fmt.Errorf("could not check on %s before rebuilding it: %w", spec.name, inspectErr)
+	case inspectErr == nil:
+		// The name is all this has to go on otherwise, and a name can be taken
+		// by something else: a compose run in another terminal after keploy
+		// stopped the container, or a fresh container reusing a name --rm
+		// freed. Rebuilding then means force-removing a container keploy never
+		// captured and replacing it with a stale spec.
+		if spec.id != "" && inspect.ContainerJSONBase != nil && inspect.ID != spec.id {
+			return fmt.Errorf("%s is a different container than the one keploy stopped (%s); leaving it alone",
+				spec.name, inspect.ID)
+		}
+		backup = backupNameFor(spec.name)
+		if err := a.dockerClient.ContainerRename(ctx, spec.name, backup); err != nil {
+			return fmt.Errorf("could not set %s aside to rebuild it: %w", spec.name, err)
+		}
+		// The original is RUNNING at this point - the restore loop started it
+		// and the shortfall check confirmed it - and renaming does not stop it.
+		// Creating the replacement now would start a second container on the
+		// same volumes and the same host ports. It gets its own stop signal and
+		// grace period, because this is the user's app shutting down rather
+		// than a fault.
+		//
+		// On its own deadline, not a slice of the rebuild's: a container with a
+		// long stop grace period would otherwise spend the whole budget here
+		// and leave the create to fail on an expired context.
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), fromContainerStopBudget)
+		err := a.dockerClient.ContainerStop(stopCtx, backup, container.StopOptions{})
+		cancelStop()
+		if err != nil {
+			// Aborting rather than pressing on. The broken container publishes
+			// nothing, so nothing would refuse the replacement's ports either -
+			// two containers would end up on the same volumes, and the
+			// force-remove afterwards would SIGKILL one of them.
+			return restoreBackup(fmt.Errorf("could not stop %s before rebuilding it: %w", spec.name, err))
+		}
+	}
+
+	config := *spec.config
+	hostConfig := *spec.hostConfig
+	// Deprecated in favour of the per-endpoint field, and read back as whatever
+	// the daemon generated, so replaying it requests a MAC that was never asked
+	// for. Dropped for the same reason endpointFor drops its copy.
+	config.MacAddress = ""
+	// Mounts are authoritative; the create is refused if the same target
+	// arrives twice through Binds or the image's VOLUME set.
+	hostConfig.Mounts = spec.mounts
+	hostConfig.Binds = nil
+	hostConfig.VolumesFrom = nil
+	config.Volumes = nil
+	// Inspect rebuilds Links as `/child:/parent/alias` rather than what was
+	// asked for, so feeding it back produces an alias containing a slash and
+	// the daemon refuses the create. Dropped rather than guessed at: a legacy
+	// --link is recoverable by hand, a deleted container is not.
+	if len(hostConfig.Links) > 0 {
+		a.logger.Warn("your container used legacy --link, which cannot be reproduced exactly; rebuilding without it",
+			zap.String("container", spec.name), zap.Strings("links", hostConfig.Links))
+		hostConfig.Links = nil
+	}
+
+	endpoints := map[string]*network.EndpointSettings{}
+	primary := primaryNetwork(spec.hostConfig, spec.networks)
+	if settings, ok := spec.networks[primary]; ok {
+		endpoints[primary] = endpointFor(settings)
+	}
+
+	created, err := a.dockerClient.ContainerCreate(ctx, &config, &hostConfig,
+		&network.NetworkingConfig{EndpointsConfig: endpoints}, spec.platform, spec.name)
+	if err != nil && errdefs.IsNotFound(err) && spec.imageID != "" && config.Image != spec.imageID {
+		// The tag stopped resolving between the capture and now. The id it
+		// resolved to is still on the machine.
+		a.logger.Warn("could not rebuild from the image tag; using the image it was running",
+			zap.String("container", spec.name), zap.String("tag", config.Image),
+			zap.String("image", spec.imageID), zap.Error(err))
+		config.Image = spec.imageID
+		created, err = a.dockerClient.ContainerCreate(ctx, &config, &hostConfig,
+			&network.NetworkingConfig{EndpointsConfig: endpoints}, spec.platform, spec.name)
+	}
+	if err != nil {
+		return restoreBackup(fmt.Errorf("could not rebuild %s: %w", spec.name, err))
+	}
+
+	secondary := make([]string, 0, len(spec.networks))
+	for netName := range spec.networks {
+		if netName != primary {
+			secondary = append(secondary, netName)
+		}
+	}
+	sort.Strings(secondary)
+	for _, netName := range secondary {
+		if err := a.dockerClient.NetworkConnect(ctx, netName, created.ID, endpointFor(spec.networks[netName])); err != nil {
+			a.logger.Warn("could not put your container back on one of its networks",
+				zap.String("container", spec.name), zap.String("network", netName), zap.Error(err))
+		}
+	}
+
+	// Retried for as long as the budget allows, not attempted once. The agent
+	// container publishes the app's ports on its behalf and is stopped
+	// asynchronously, so a rebuild that reaches this point promptly can find
+	// 9410 still bound - and rolling back over a transient bind would abandon
+	// a repair that has already stopped the user's container.
+	err = a.startWithinBudget(ctx, created.ID)
+	if err != nil {
+		// The rebuilt container exists; only the start failed. It has to go
+		// before the original can have its name back. Its own context, for the
+		// same reason the rollback has one.
+		rmCtx, cancelRm := context.WithTimeout(context.Background(), rollbackBudget)
+		defer cancelRm()
+		if rmErr := a.dockerClient.ContainerRemove(rmCtx, created.ID, container.RemoveOptions{Force: true}); rmErr != nil {
+			// Not a detail: keploy's container is holding the name the user's
+			// container is about to be renamed back to, so that rename fails
+			// too and nothing else says where the name went.
+			utils.LogError(a.logger, rmErr, "could not remove the container keploy built; it is holding your container's name",
+				zap.String("container", spec.name))
+		}
+		return restoreBackup(fmt.Errorf("could not start the rebuilt %s: %w", spec.name, err))
+	}
+
+	if backup != "" {
+		// A fresh deadline for the same reason the rollback has one: by here the
+		// rebuild's budget has paid for an inspect, a rename, a stop, a create,
+		// the network connects and a start.
+		rmCtx, cancelRm := context.WithTimeout(context.Background(), rollbackBudget)
+		defer cancelRm()
+		// RemoveVolumes stays off: the replacement mounts those same volumes by
+		// name, and this copy is only the shell the data used to hang off.
+		if err := a.dockerClient.ContainerRemove(rmCtx, backup, container.RemoveOptions{Force: true}); err != nil {
+			// Harmless but visible: a stopped duplicate under a temporary name.
+			a.logger.Warn("rebuilt your container but could not remove the old copy; remove it by hand",
+				zap.String("container", backup), zap.Error(err))
+		}
+	}
+	return nil
+}
+
+// restoreShortfall reports what is still wrong with a restored container: the
+// networks it should be on but is not, and the ports it declares but has not
+// published. Empty means it really is back.
+func (a *AgentClient) restoreShortfall(ctx context.Context, name string) (problems []string, running bool, err error) {
+	inspect, err := a.dockerClient.ContainerInspect(ctx, name)
+	if err != nil {
+		return nil, false, err
+	}
+	if inspect.ContainerJSONBase == nil {
+		return nil, false, errors.New("docker returned an inspect with no container in it")
+	}
+
+	// A container that is not RUNNING looks exactly like the bug: no endpoint
+	// id, no published ports. Judging it here would rebuild a container that
+	// was never broken - including one that crashes on boot precisely because
+	// its dependency moved during the session, which is the case this is
+	// supposed to help with.
+	if inspect.State == nil || !inspect.State.Running {
+		exit := 0
+		if inspect.State != nil {
+			exit = inspect.State.ExitCode
+		}
+		a.logger.Warn("your container started and then exited; keploy has left it alone",
+			zap.String("container", name), zap.Int("exit_code", exit))
+		return nil, false, nil
+	}
+
+	attached := map[string]bool{}
+	if inspect.NetworkSettings != nil {
+		for netName, endpoint := range inspect.NetworkSettings.Networks {
+			// A dropped endpoint is still LISTED with nothing in it, so the
+			// endpoint id is what says whether it is really attached.
+			if endpoint != nil && endpoint.EndpointID != "" {
+				attached[netName] = true
+			}
+		}
+	}
+	var missingNets []string
+	if a.fromContainerSpec != nil {
+		for netName := range a.fromContainerSpec.networks {
+			if !attached[netName] {
+				missingNets = append(missingNets, netName)
+			}
+		}
+	}
+	sort.Strings(missingNets)
+	if len(missingNets) > 0 {
+		problems = append(problems, "not on "+strings.Join(missingNets, ", "))
+	}
+
+	// host and none ignore port bindings by design, so a container declaring
+	// both would report a shortfall it can never clear - and be rebuilt for
+	// nothing, repeatedly.
+	if inspect.HostConfig != nil && !inspect.HostConfig.NetworkMode.IsHost() && !inspect.HostConfig.NetworkMode.IsNone() {
+		bound := 0
+		if inspect.NetworkSettings != nil {
+			for _, bindings := range inspect.NetworkSettings.Ports {
+				bound += len(bindings)
+			}
+		}
+
+		var unpublished []string
+		for port, bindings := range inspect.HostConfig.PortBindings {
+			if len(bindings) == 0 {
+				continue
+			}
+			if inspect.NetworkSettings == nil || len(inspect.NetworkSettings.Ports[port]) == 0 {
+				unpublished = append(unpublished, string(port))
+			}
+		}
+		sort.Strings(unpublished)
+		if len(unpublished) > 0 {
+			problems = append(problems, "not publishing "+strings.Join(unpublished, ", "))
+		}
+
+		// `docker run -P` declares nothing in PortBindings - the daemon assigns
+		// a host port per exposed port - so there is no binding to compare and
+		// the loss would go unnoticed.
+		if inspect.HostConfig.PublishAllPorts && len(inspect.Config.ExposedPorts) > 0 && bound == 0 {
+			problems = append(problems, "not publishing any of its exposed ports")
+		}
+	}
+
+	return problems, true, nil
 }

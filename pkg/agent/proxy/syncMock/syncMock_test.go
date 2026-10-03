@@ -1024,9 +1024,25 @@ func drainChan(t *testing.T, ch chan *models.Mock, max int) {
 	}
 }
 
+// withPressure is a manager whose memory-pressure spans are ranges, recorded as
+// SetMemoryPressure records them; a range with a zero end is still open (and
+// pressure still on).
+func withPressure(ranges ...pressureRange) *SyncMockManager {
+	m := &SyncMockManager{}
+	for _, r := range ranges {
+		if r.end.IsZero() {
+			m.closePressure = m.pressure.Open(r.start)
+			m.memoryPause = true
+			continue
+		}
+		m.pressure.Record(r.start, r.end)
+	}
+	return m
+}
+
 // TestWasPressureActiveInWindow exercises the join-key for the Bug 0
 // TC-suppression fix. Every case is constructed by hand-setting
-// pressureRanges so the test does not depend on real wall-clock timing.
+// the pressure spans so the test does not depend on real wall-clock timing.
 func TestWasPressureActiveInWindow(t *testing.T) {
 	t.Parallel()
 
@@ -1124,7 +1140,7 @@ func TestWasPressureActiveInWindow(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mgr := &SyncMockManager{pressureRanges: tc.ranges}
+			mgr := withPressure(tc.ranges...)
 			gotOverlap, gotCount := mgr.WasPressureActiveInWindow(tc.windowStart, tc.windowEnd)
 			if gotOverlap != tc.wantOverlap || gotCount != tc.wantCount {
 				t.Fatalf("WasPressureActiveInWindow = (%v, %d), want (%v, %d)",
@@ -1141,7 +1157,7 @@ func TestWasPressureActiveInWindowRejectsZeroInputs(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	mgr := &SyncMockManager{pressureRanges: []pressureRange{{start: now.Add(-time.Second), end: now}}}
+	mgr := withPressure(pressureRange{start: now.Add(-time.Second), end: now})
 
 	if ok, c := mgr.WasPressureActiveInWindow(time.Time{}, now); ok || c != 0 {
 		t.Fatalf("zero start: got (%v, %d), want (false, 0)", ok, c)
@@ -1170,44 +1186,45 @@ func TestSetMemoryPressureRecordsRanges(t *testing.T) {
 
 	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
 
+	count := func() int { n, _ := mgr.PressureRangeCount(); return n }
 	// Initially no ranges
-	if got := mgr.PressureRangeCount(); got != 0 {
+	if got := count(); got != 0 {
 		t.Fatalf("initial range count: got %d, want 0", got)
 	}
 
 	// First false→true: opens one range
 	mgr.SetMemoryPressure(true)
-	if got := mgr.PressureRangeCount(); got != 1 {
+	if got := count(); got != 1 {
 		t.Fatalf("after first true: got %d ranges, want 1", got)
 	}
-	if !mgr.pressureRanges[0].end.IsZero() {
-		t.Fatalf("first range should be open (end zero), got end=%v", mgr.pressureRanges[0].end)
+	if _, open := mgr.pressure.Counts(); open != 1 {
+		t.Fatalf("first range should be open, got %d open", open)
 	}
 
 	// Redundant true call while already active: no-op for range tracking
 	mgr.SetMemoryPressure(true)
-	if got := mgr.PressureRangeCount(); got != 1 {
+	if got := count(); got != 1 {
 		t.Fatalf("after redundant true: got %d ranges, want still 1", got)
 	}
 
 	// true→false: closes the open range
 	mgr.SetMemoryPressure(false)
-	if got := mgr.PressureRangeCount(); got != 1 {
+	if got := count(); got != 1 {
 		t.Fatalf("after false: got %d ranges, want still 1", got)
 	}
-	if mgr.pressureRanges[0].end.IsZero() {
-		t.Fatalf("first range should be closed after false call, end still zero")
+	if closed, open := mgr.pressure.Counts(); closed != 1 || open != 0 {
+		t.Fatalf("first range should be closed after false call: %d closed, %d open", closed, open)
 	}
 
 	// Redundant false: no-op
 	mgr.SetMemoryPressure(false)
-	if got := mgr.PressureRangeCount(); got != 1 {
+	if got := count(); got != 1 {
 		t.Fatalf("after redundant false: got %d ranges, want still 1", got)
 	}
 
 	// Second cycle: opens a new range
 	mgr.SetMemoryPressure(true)
-	if got := mgr.PressureRangeCount(); got != 2 {
+	if got := count(); got != 2 {
 		t.Fatalf("after second true: got %d ranges, want 2", got)
 	}
 }
@@ -1697,10 +1714,8 @@ func TestSetMemoryPressurePreservesStartupMocks(t *testing.T) {
 	startup.TestModeInfo.IsStartup = true
 	pressureCaptured := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: inPressure}}
 
-	mgr := &SyncMockManager{
-		buffer:         []*models.Mock{pressureCaptured, startup},
-		pressureRanges: []pressureRange{{start: now.Add(-4 * time.Second), end: now.Add(-2 * time.Second)}},
-	}
+	mgr := withPressure(pressureRange{start: now.Add(-4 * time.Second), end: now.Add(-2 * time.Second)})
+	mgr.buffer = []*models.Mock{pressureCaptured, startup}
 
 	mgr.SetMemoryPressure(true)
 
@@ -1718,7 +1733,7 @@ func TestSetMemoryPressurePreservesStartupMocks(t *testing.T) {
 	}
 }
 
-// TestSetMemoryPressureRetainsClosedRanges asserts pressureRanges is retained by
+// TestSetMemoryPressureRetainsClosedRanges asserts the pressure spans are retained by
 // COUNT, not pruned by wall-clock age (the #4336 fix). A range that closed long
 // ago must survive so a lagging routes/record.go still finds it when it
 // belatedly checks the TC that range orphaned — age-pruning it (as the old code
@@ -1730,41 +1745,27 @@ func TestSetMemoryPressureRetainsClosedRanges(t *testing.T) {
 	now := time.Now()
 
 	// Two ranges that closed long ago + one recent. None may be dropped by age.
-	mgr := &SyncMockManager{
-		pressureRanges: []pressureRange{
-			{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)},
-			{start: now.Add(-30 * time.Second), end: now.Add(-20 * time.Second)},
-			{start: now.Add(-4 * time.Second), end: now.Add(-2 * time.Second)},
-		},
-	}
+	mgr := withPressure(
+		pressureRange{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)},
+		pressureRange{start: now.Add(-30 * time.Second), end: now.Add(-20 * time.Second)},
+		pressureRange{start: now.Add(-4 * time.Second), end: now.Add(-2 * time.Second)},
+	)
 	// memoryPause is already false, so this is a no-op transition — it must NOT
 	// drop any range by age.
 	mgr.SetMemoryPressure(false)
-	if got := len(mgr.pressureRanges); got != 3 {
+	if got, _ := mgr.pressure.Counts(); got != 3 {
 		t.Fatalf("closed ranges must be retained (not age-pruned); want 3, got %d", got)
 	}
 
 	// A still-open range (end == zero) is kept alongside a long-closed one.
-	mgr2 := &SyncMockManager{
-		memoryPause: true,
-		pressureRanges: []pressureRange{
-			{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)}, // closed, old → retained
-			{start: now.Add(-40 * time.Second)},                                  // open → kept
-		},
-	}
+	mgr2 := withPressure(
+		pressureRange{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)}, // closed, old → retained
+		pressureRange{start: now.Add(-40 * time.Second)},                                  // open → kept
+	)
 	// true→true: no new range opened, and no age-prune.
 	mgr2.SetMemoryPressure(true)
-	if got := len(mgr2.pressureRanges); got != 2 {
-		t.Fatalf("expected both the old closed range and the open range retained; got %d", got)
-	}
-	openFound := false
-	for _, r := range mgr2.pressureRanges {
-		if r.end.IsZero() {
-			openFound = true
-		}
-	}
-	if !openFound {
-		t.Fatal("the still-open range must be preserved")
+	if closed, open := mgr2.pressure.Counts(); closed != 1 || open != 1 {
+		t.Fatalf("expected both the old closed range and the open range retained; got %d closed, %d open", closed, open)
 	}
 }
 
@@ -1946,5 +1947,180 @@ func TestNonStartupMockPrunedFromDuplicateWindowResolve(t *testing.T) {
 	}
 	if len(mgr.buffer) != 0 {
 		t.Fatalf("pruned mock should leave the buffer; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// A late mock's fate is decided by the window that OWNS it, not by the resolve
+// or flush that happens to find it. With static dedup on, most resolves are
+// duplicates (keep=false), so deciding by the finder dropped a KEPT test's mock
+// whenever it finished decoding after its own window closed — routine for
+// decrypted-TLS mocks, which reach the manager after the plaintext ingress that
+// closes the window — and replay then had no mock for that test. The same rule
+// holds on every path that can find a late mock: ResolveRange's retroactive
+// bin, the periodic FlushOwnedWindows, and DeleteMocksStrictlyBefore.
+
+// httpMockAt builds a per-test outbound HTTP mock requested at reqTS. Whether
+// AddMock tags it IsStartup depends only on the manager's resolved-test count.
+func httpMockAt(reqTS time.Time) *models.Mock { return startupHTTPMock(reqTS) }
+
+// lateMockTestManager returns a manager wired to out and mapping, either inside
+// the startup window or past it.
+func lateMockTestManager(out chan *models.Mock, mapping chan models.TestMockMapping, inStartupWindow bool) *SyncMockManager {
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetOutputChannel(out)
+	mgr.SetMappingChannel(context.Background(), mapping)
+	mgr.SetFirstRequestSignaled()
+	if !inStartupWindow {
+		mgr.resolvedTestCount = models.StartupMockTestCaseWindow
+	}
+	return mgr
+}
+
+// lateMockIn resolves the owning window "test-1" with ownerKeep, then adds a
+// mock whose timestamp is inside it (the late decode). The caller then drives
+// whichever path should find it.
+func lateMockIn(t *testing.T, mgr *SyncMockManager, base time.Time, ownerKeep, startup bool) *models.Mock {
+	t.Helper()
+	mgr.ResolveRange(base, base.Add(5*time.Millisecond), "test-1", ownerKeep, true)
+	late := httpMockAt(base.Add(2 * time.Millisecond))
+	mgr.AddMock(late)
+	if got := mgr.buffer[len(mgr.buffer)-1].TestModeInfo.IsStartup; got != startup {
+		t.Fatalf("fixture: late mock IsStartup=%v, want %v", got, startup)
+	}
+	return late
+}
+
+// findLateMock drives one of the three paths that can find a late mock.
+func findLateMock(mgr *SyncMockManager, base time.Time, path string, finderKeep bool) {
+	switch path {
+	case "ResolveRange":
+		mgr.ResolveRange(base.Add(100*time.Millisecond), base.Add(105*time.Millisecond), "test-2", finderKeep, true)
+	case "ResolveRange, window containing it":
+		// A concurrent request whose window overlaps the owner's and contains
+		// the mock resolves after the owner did.
+		mgr.ResolveRange(base.Add(time.Millisecond), base.Add(60*time.Millisecond), "test-2", finderKeep, true)
+	case "FlushOwnedWindows":
+		mgr.FlushOwnedWindows()
+	case "DeleteMocksStrictlyBefore":
+		mgr.DeleteMocksStrictlyBefore(base.Add(100 * time.Millisecond))
+	}
+}
+
+func TestLateMockIsDecidedByItsOwningWindow(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name            string
+		path            string
+		ownerKeep       bool
+		finderKeep      bool
+		startup         bool
+		wantSent        bool
+		wantMappingTo   string // "" = no mapping for the late mock
+		regressionOfOld string
+	}{
+		{name: "kept owner, found by a duplicate's resolve", path: "ResolveRange", ownerKeep: true, finderKeep: false,
+			wantSent: true, wantMappingTo: "test-1",
+			regressionOfOld: "a kept test's late mock was dropped because a DUPLICATE's resolve found it"},
+		{name: "duplicate owner, found by a kept resolve", path: "ResolveRange", ownerKeep: false, finderKeep: true,
+			regressionOfOld: "a duplicate's late mock was persisted because a KEPT resolve found it"},
+		{name: "kept owner, found by an overlapping duplicate's resolve", path: "ResolveRange, window containing it",
+			ownerKeep: true, finderKeep: false, wantSent: true, wantMappingTo: "test-1",
+			regressionOfOld: "a kept test's mock was pruned because an overlapping DUPLICATE window contained it"},
+		{name: "duplicate owner, found by an overlapping kept resolve", path: "ResolveRange, window containing it",
+			ownerKeep: false, finderKeep: true, wantSent: true, wantMappingTo: "test-2"},
+		{name: "duplicate owner, startup mock, found by a duplicate's resolve", path: "ResolveRange", startup: true,
+			wantSent: true, regressionOfOld: "a startup-window mock of a duplicate was dropped for decoding late"},
+		{name: "kept owner, found by the flush tick", path: "FlushOwnedWindows", ownerKeep: true,
+			wantSent: true, wantMappingTo: "test-1"},
+		{name: "duplicate owner, found by the flush tick", path: "FlushOwnedWindows",
+			regressionOfOld: "the flush tick persisted a duplicate's late mock (and mapped it to the duplicate)"},
+		{name: "duplicate owner, startup mock, found by the flush tick", path: "FlushOwnedWindows", startup: true,
+			wantSent: true},
+		{name: "kept owner, found by a duplicate's cleanup", path: "DeleteMocksStrictlyBefore", ownerKeep: true,
+			wantSent: true, wantMappingTo: "test-1"},
+		{name: "duplicate owner, found by a duplicate's cleanup", path: "DeleteMocksStrictlyBefore",
+			regressionOfOld: "a duplicate window's debris was rescued as if its window were kept"},
+		{name: "duplicate owner, startup mock, found by a duplicate's cleanup", path: "DeleteMocksStrictlyBefore",
+			startup: true, wantSent: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := make(chan *models.Mock, 4)
+			mapping := make(chan models.TestMockMapping, 4)
+			mgr := lateMockTestManager(out, mapping, tc.startup)
+			base := time.Now().Add(-2 * time.Second)
+			late := lateMockIn(t, mgr, base, tc.ownerKeep, tc.startup)
+			findLateMock(mgr, base, tc.path, tc.finderKeep)
+
+			var sent *models.Mock
+			select {
+			case sent = <-out:
+			default:
+			}
+			if (sent != nil) != tc.wantSent {
+				t.Fatalf("late mock sent=%v, want %v (%s)", sent != nil, tc.wantSent, tc.regressionOfOld)
+			}
+			if sent != nil && !sent.Spec.ReqTimestampMock.Equal(late.Spec.ReqTimestampMock) {
+				t.Fatalf("flushed the wrong mock: %v", sent.Spec.ReqTimestampMock)
+			}
+			if len(mgr.buffer) != 0 {
+				t.Fatalf("buffer=%d, want the late mock handled", len(mgr.buffer))
+			}
+			var mappedTo []string
+			for len(mapping) > 0 {
+				m := <-mapping
+				for _, id := range m.MockIDs {
+					if sent != nil && id == sent.Name {
+						mappedTo = append(mappedTo, m.TestName)
+					}
+				}
+			}
+			switch {
+			case tc.wantMappingTo == "" && len(mappedTo) != 0:
+				t.Fatalf("late mock mapped to %v, want no mapping (a duplicate's testName is synthetic)", mappedTo)
+			case tc.wantMappingTo != "" && (len(mappedTo) != 1 || mappedTo[0] != tc.wantMappingTo):
+				t.Fatalf("late mock mapped to %v, want exactly [%s]", mappedTo, tc.wantMappingTo)
+			}
+		})
+	}
+}
+
+// Concurrent sync-mode requests can leave overlapping windows. When a kept
+// window contains a duplicate one, a mock in the overlap belongs to the kept
+// test: pruning it fails that test's replay, keeping it costs one extra mock.
+func TestLateMockInOverlappingWindowsGoesToTheKeptOne(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"ResolveRange", "ResolveRange, window containing it", "FlushOwnedWindows", "DeleteMocksStrictlyBefore"} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			out := make(chan *models.Mock, 4)
+			mapping := make(chan models.TestMockMapping, 4)
+			mgr := lateMockTestManager(out, mapping, false)
+			base := time.Now().Add(-2 * time.Second)
+			// The short duplicate resolves first, so it is the OLDER window.
+			mgr.ResolveRange(base.Add(20*time.Millisecond), base.Add(30*time.Millisecond), "test-0", false, true)
+			mgr.ResolveRange(base, base.Add(50*time.Millisecond), "test-1", true, true)
+			mgr.AddMock(httpMockAt(base.Add(25 * time.Millisecond)))
+			findLateMock(mgr, base, path, false)
+
+			select {
+			case sent := <-out:
+				var got []string
+				for len(mapping) > 0 {
+					m := <-mapping
+					for _, id := range m.MockIDs {
+						if id == sent.Name {
+							got = append(got, m.TestName)
+						}
+					}
+				}
+				if len(got) != 1 || got[0] != "test-1" {
+					t.Fatalf("overlap mock mapped to %v, want [test-1]", got)
+				}
+			default:
+				t.Fatal("a mock inside a kept window was pruned because an overlapping duplicate window resolved first")
+			}
+		})
 	}
 }

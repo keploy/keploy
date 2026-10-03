@@ -4,6 +4,7 @@ package docker
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"syscall"
 
@@ -19,6 +20,10 @@ func PrepareDockerCommand(ctx context.Context, keployAlias string) (*exec.Cmd, e
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
+	}
+	// The alias names the control-plane token without a value; see getAlias.
+	if extra := AgentTokenEnv(); len(extra) > 0 {
+		cmd.Env = append(os.Environ(), extra...)
 	}
 
 	return cmd, nil

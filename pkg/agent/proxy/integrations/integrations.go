@@ -228,6 +228,49 @@ type MockMemDb interface {
 	WindowAware
 }
 
+// SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
+// snapshot narrowed to the mocks recorded inside one test window, without
+// walking the rest of it.
+//
+// A replay re-stages every test's window but leaves the reusable pool whole,
+// and lax mode keeps a recording's per-test MySQL data mocks in that pool, so
+// it holds the traffic of every test in the set. A matcher that only wants the
+// current test's mocks would otherwise walk all of them on every command, and a
+// replay's total cost would grow with the square of its length.
+type SessionWindowReader interface {
+	// GetSessionMocksInWindow returns, in GetSessionMocks order, the mocks of
+	// that snapshot whose ReqTimestampMock lies in [start, end] (bounds
+	// included) or is unset: exactly GetSessionMocks filtered by that
+	// predicate.
+	GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error)
+}
+
+// MockIndex files mocks under the keys Keys gives them, so a matcher can find
+// its candidates in a large pool without walking it (see SessionKeyReader).
+//
+// Keys must depend only on what a mock recorded and how replay classified it
+// (its Lifetime and its "type" metadata), never on its place in a pool: a
+// store builds one index per MockIndex value and pool, and keeps it while the
+// pool lasts. So pass the same *MockIndex to every lookup, and declare it
+// once, at package level.
+type MockIndex struct {
+	Keys func(*models.Mock) []string
+}
+
+// SessionKeyReader is an optional MockMemDb extension: the GetSessionMocks
+// snapshot narrowed to the mocks an index files under one key, without
+// walking the rest of it. A replay's reusable pool holds every test's traffic
+// in lax mode, so a matcher that walked it for each command would cost more
+// with every test the set holds.
+type SessionKeyReader interface {
+	// RangeSessionMocksWithKey calls fn with each mock of the session tier
+	// that ix files under key, in GetSessionMocks order, until fn returns
+	// false. fn is called without the store's locks held, so it may call
+	// back into the store; the walk then sees the tier as it is by the time
+	// it gets there, as successive reads would.
+	RangeSessionMocksWithKey(ix *MockIndex, key string, fn func(*models.Mock) bool) error
+}
+
 // MockReader is the read-only facet of MockMemDb. Parsers that need
 // to enumerate mocks from the in-memory pool but never mutate or
 // consume on match should take this interface directly. Includes both
@@ -324,12 +367,13 @@ type MockReader interface {
 	// session / per-test pools.
 	GetConnectionMocks(connID string) ([]*models.Mock, error)
 
-	// SessionMockHitCounts returns per-mock atomic HitCount values for
-	// session- and connection-scoped mocks. Used by replay summary
-	// output and "which reusable mocks actually got reused?" telemetry.
-	// Key is mock.Name; value is the atomic counter's current read.
-	// Inherently racy as a snapshot — counters may increment during
-	// iteration — but that's tolerable for observability.
+	// SessionMockHitCounts returns the match counts of the session- and
+	// connection-scoped mocks in the pool, counted by MarkMockAsUsed over
+	// the current test set. Used by replay summary output and "which
+	// reusable mocks actually got reused?" telemetry. Key is mock.Name
+	// (mocks sharing a name share a count). Inherently racy as a
+	// snapshot — counters may increment during iteration — but that's
+	// tolerable for observability.
 	SessionMockHitCounts() map[string]uint64
 }
 
@@ -371,6 +415,64 @@ type MockConsumer interface {
 	// booting app's follow-on revalidation queries fail.
 	DeleteStartupMock(mock models.Mock) bool
 	MarkMockAsUsed(mock models.Mock) bool
+}
+
+// RecordedWindowsReader is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it). It exposes the recorded window of every
+// test of the set being replayed, selected or not, as the replayer seeded it at
+// staging (models.MockFilterParams.RecordedWindows).
+//
+// A parser whose protocol has traffic the test windows do not pace by
+// themselves — a broker's server push — uses it to hold that traffic until the
+// replay reaches the recorded window it belongs to:
+//
+//	sched := db.RecordedWindows()                 // nil: release everything
+//	start, _ := db.CurrentTestWindow()
+//	due := sched.Released(msg.Spec.ReqTimestampMock, start)
+//
+// The schedule is immutable; it is replaced (never mutated) at each set's
+// staging call, which also changes WindowPacer.StagingEpoch.
+//
+// The agent keeps the windows only while some kind has registered a carry-over
+// predicate (models.RegisterCarryOver); otherwise RecordedWindows is nil. A
+// parser that paces by them registers its kind, as the traffic it paces is
+// what carry-over exists for.
+type RecordedWindowsReader interface {
+	RecordedWindows() *models.WindowSchedule
+}
+
+// WindowPacer is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
+// MockManager implements it) for a parser that holds traffic until the replay
+// reaches a recorded window — FLOW permits that find nothing due yet — and must
+// serve it when the window moves, with no request of its own to wake it.
+//
+//   - WindowChanged returns a channel closed at the next test-window change,
+//     after the new window and trees are visible. Take it BEFORE reading the
+//     state it guards; each change hands out a fresh channel. It is also closed
+//     once when the manager is closed.
+//   - StagingEpoch changes at every staging call (a new set, or the set staged
+//     again for a replacement agent). State built from one staging snapshot,
+//     such as per-set delivery queues, is rebuilt when it changes.
+//
+// A MockMemDb without it gives no signal: serve held work at the connection's
+// next request instead.
+type WindowPacer interface {
+	WindowChanged() <-chan struct{}
+	StagingEpoch() uint64
+}
+
+// CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it) for a parser whose kind registered a
+// carry-over predicate (models.RegisterCarryOver). It returns, in recorded
+// order, the registered per-test mocks that are reachable outside their own
+// test window: loaded up to models.CarryOverLookahead ahead of their release
+// window, and kept after their window closes until consumed. Serve them after
+// the running test's own mocks (GetPerTestMocksInWindow), and consume them
+// through DeleteFilteredMock, which falls back per-test, then startup, then
+// carry-over, and reports a carry-over consume with MockState.CarryOver.
+type CarryOverReader interface {
+	GetCarryOverMocks() ([]*models.Mock, error)
+	GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error)
 }
 
 // WindowAware is the test-window facet of MockMemDb. Parsers that

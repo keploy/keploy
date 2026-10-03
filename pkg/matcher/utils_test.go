@@ -719,3 +719,71 @@ func TestCompareHeaders_DoesNotMutateCallerNoiseMap(t *testing.T) {
 		}
 	}
 }
+
+// exactUnderNoise is the verdict of the string entry points under noise:
+// ValidateAndMarshalJSON, then JSONDiffWithNoiseControl without ordering.
+func exactUnderNoise(exp, act string, noise map[string][]string) bool {
+	vj, err := ValidateAndMarshalJSON(zap.NewNop(), &exp, &act)
+	if err != nil || !vj.IsIdentical() {
+		return false
+	}
+	res, err := JSONDiffWithNoiseControl(vj, noise, false, zap.NewNop())
+	return err == nil && res.IsExact()
+}
+
+// Two noise keys that differ only in case lower to one entry key. Which of the
+// two applies used to follow Go's map order, so the same pair could pass in
+// one call and fail in the next. The smallest configured key now applies, for
+// path keys (buildNoiseIndex), global keys (dot-free, matched at any depth, the
+// most common shape) and the dotted keys SplitNoise lowers into its sections.
+func TestNoiseKeysDifferingOnlyInCaseApplyTheSameEntryEveryCall(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		noise    map[string][]string
+		exp, act string
+		exact    bool // the smallest key ("CreatedAt..." < "createdAt...") applies
+	}{
+		{"path keys", map[string][]string{"CreatedAt.data": {"^v[0-9]$"}, "createdAt.data": {}, "b.C": {}, "B.c": {"^x$"}},
+			`{"createdAt":{"data":"z"}}`, `{"createdAt":{"data":"y"}}`, false},
+		{"path keys, unconditional smallest", map[string][]string{"CreatedAt.data": {}, "createdAt.data": {"^v[0-9]$"}},
+			`{"createdAt":{"data":"z"}}`, `{"createdAt":{"data":"y"}}`, true},
+		{"global keys", map[string][]string{"CreatedAt": {}, "createdAt": {"^v[0-9]$"}},
+			`{"createdAt":"z"}`, `{"createdAt":"y"}`, true},
+		{"global keys, guarded smallest", map[string][]string{"CreatedAt": {"^v[0-9]$"}, "createdAt": {}},
+			`{"createdAt":"z"}`, `{"createdAt":"y"}`, false},
+		{"global keys, three spellings, nested", map[string][]string{"CREATEDAT": {"^y$"}, "CreatedAt": {}, "createdAt": {"^v[0-9]$"}},
+			`{"a":[{"createdAt":"z"}]}`, `{"a":[{"createdAt":"q"}]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantDiffs := len(JSONFieldDiffs(tc.exp, tc.act, tc.noise, "body.", 0))
+			for i := 0; i < 500; i++ {
+				if got := exactUnderNoise(tc.exp, tc.act, tc.noise); got != tc.exact {
+					t.Fatalf("call %d: exact=%v, want %v (the smallest configured key applies)", i, got, tc.exact)
+				}
+				if len(JSONFieldDiffs(tc.exp, tc.act, tc.noise, "body.", 0)) != wantDiffs {
+					t.Fatal("the reported diffs changed between calls")
+				}
+			}
+		})
+	}
+}
+
+// SplitNoise lowers the paths of dotted keys, so "body.CreatedAt" and
+// "body.createdAt" name one entry of its body section (and "header.X-Id" and
+// "header.x-id" one of its header section). The smallest configured key's
+// patterns apply there too, every call.
+func TestSplitNoiseKeysDifferingOnlyInCaseKeepTheSameEntryEveryCall(t *testing.T) {
+	noise := map[string][]string{
+		"body.createdAt": {"^v[0-9]$"}, "body.CreatedAt": {}, "Body.createdAt": {"^x$"},
+		"header.x-id": {}, "header.X-Id": {"^h$"},
+	}
+	for i := 0; i < 500; i++ {
+		body, header, _ := SplitNoise(noise, nil)
+		if got := body["createdat"]; got == nil || len(got) != 1 || got[0] != "^x$" {
+			t.Fatalf("call %d: body createdat = %q, want the entry of \"Body.createdAt\", the smallest key", i, got)
+		}
+		if got := header["x-id"]; len(got) != 1 || got[0] != "^h$" {
+			t.Fatalf("call %d: header x-id = %q, want the entry of \"header.X-Id\", the smallest key", i, got)
+		}
+	}
+}

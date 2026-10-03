@@ -142,6 +142,16 @@ type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
 }
 
+// ErrMockStatsUnsupported reports that an agent cannot answer /agent/mock/stats
+// at all — it predates the route, or its service does not implement the reader.
+// It lives here, not in the HTTP client, so the replay service can recognise the
+// condition without importing the concrete client it otherwise reaches only
+// through its Instrumentation interface.
+//
+// Callers must treat it as "unknown", never as "no mocks stored": a caller that
+// conflates the two reads an unreportable agent as a replaced one.
+var ErrMockStatsUnsupported = errors.New("agent cannot report mock stats")
+
 // MockStats is the body of GET /agent/mock/stats — a non-draining snapshot of
 // the mock session for the runner or the CLI end-of-run summary.
 type MockStats struct {
@@ -182,9 +192,19 @@ type MockFilterParams struct {
 	// Zero means "not supplied"; the cutoff then falls back to the fired
 	// windows, which is the pre-existing behaviour.
 	FirstRecordedTestStart time.Time `json:"firstRecordedTestStart,omitempty"`
-	BeforeTime             time.Time `json:"beforeTime,omitempty"`
-	MockMapping            []string  `json:"mockMapping,omitempty"`
-	UseMappingBased        bool      `json:"useMappingBased"`
+	// RecordedWindows is the [request, response] window of EVERY recorded test
+	// of the set being staged, the unselected and ignored ones included. Sent
+	// on the staging call only, beside FirstRecordedTestStart; the agent
+	// applies it through the proxy's optional SeedRecordedWindows capability,
+	// so traffic the test windows do not pace by themselves (a broker's server
+	// push, and what the application publishes while handling it) can be
+	// released by the recorded window it belongs to (models.WindowSchedule).
+	// Empty means "not supplied": everything is then released at once, which
+	// is the pre-existing behaviour.
+	RecordedWindows []TestWindow `json:"recordedWindows,omitempty"`
+	BeforeTime      time.Time    `json:"beforeTime,omitempty"`
+	MockMapping     []string     `json:"mockMapping,omitempty"`
+	UseMappingBased bool         `json:"useMappingBased"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase
@@ -203,6 +223,19 @@ type MockFilterParams struct {
 	// ("0") forces strict off regardless of the per-call flag.
 	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
 }
+
+// ConsumedScopeHeader is the /updatemockparams response header in which an agent
+// says how it reads MockFilterParams.TotalConsumedMocks. ConsumedScopePerTest
+// means only for the per-test mocks it stages, all of which the client handed
+// it as the filtered half of StoreMocks; a client may then send just their
+// entries. An agent that does not send the header, which includes every agent
+// released before it, may read entries of other mocks too and must be sent the
+// whole history: agents from v3.0.0-beta1 through v3.3.22 also applied it to the
+// session pool.
+const (
+	ConsumedScopeHeader  = "X-Keploy-Consumed-Scope"
+	ConsumedScopePerTest = "per-test"
+)
 
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`

@@ -122,6 +122,17 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if errors.Is(err, ErrFramingLost) {
+			// A first command of 16 MiB or more on a connection joined
+			// mid-stream continued with a packet out of sequence: client bytes
+			// were lost. Its exchange runs on to now, and is left out as
+			// leaveOutInFlight leaves one out; the loss is reported as every
+			// other framing loss is.
+			warnFramingLost(logger, sess, "V2: mysql client packet out of sequence; the connection is no longer recorded", err)
+			start := sess.ClientStream.LastReadTime()
+			sess.RecordOrphanWindow(start, stoppedAt(start))
+			return err
+		}
 		utils.LogError(logger, err, "V2: failed to handle initial mysql handshake")
 		return err
 	}
@@ -138,7 +149,7 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 		return nil
 	}
 
-	if err := handleCommandsV2(ctx, logger, sess, decodeCtx, clientKeyNetConn, handshake.firstCmd); err != nil {
+	if err := handleCommandsV2(ctx, logger, sess, decodeCtx, clientKeyNetConn, handshake.firstCmd, handshake.firstCmdRespSeq, handshake.resTimestamp); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 			return nil
 		}
@@ -174,6 +185,9 @@ type v2HandshakeResult struct {
 	// there is no auth exchange to consume, so the already-read command is
 	// handed to handleCommandsV2 as its first packet instead of being lost.
 	firstCmd []byte
+	// firstCmdRespSeq is the sequence id firstCmd's response starts at: 1, or
+	// more when the command continued over several packets (packetChain).
+	firstCmdRespSeq byte
 }
 
 // handleInitialHandshakeV2 walks the MySQL connection phase on the V2
@@ -213,6 +227,10 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		decodeCtx.ServerCaps = greeting.CapabilityFlags
 		decodeCtx.ServerGreetings.Store(clientKey, greeting)
 		serverID = greetingServerIdentity(greeting)
+		// A live greeting is the freshest word on what this server is, for any
+		// later connection to it that has to borrow one (see
+		// fetchServerGreetingShared). No-op without a handshake store.
+		rememberServerGreeting(ctx, sess.Opts, handshake, serverID)
 	}
 	pluginName, err := wire.GetPluginName(handshakePkt.Message)
 	if err != nil {
@@ -412,10 +430,10 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	}
 	clientKey := *clientKeyPtr
 
-	// 1. Pop the pre-TLS server greeting (+ SSLRequest) from TLSHandshakeStore.
-	//    The proxy/uprobe see different TCP connections, so the conn-specific
-	//    key usually misses in proxyless — fall back to the port-only key
-	//    (port:3306), the same convention the legacy handlePostTLSRecord uses.
+	// 1. Pop the pre-TLS server greeting (+ SSLRequest) from TLSHandshakeStore:
+	//    the raw leg queued it under the destination port's key (port:3306),
+	//    tagged with its connection, the same convention the legacy
+	//    handlePostTLSRecord uses (see resolvePreTLSGreeting).
 	dstPort := uint16(0)
 	if sess.Opts.DstCfg != nil {
 		dstPort = uint16(sess.Opts.DstCfg.Port)
@@ -424,28 +442,49 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	if hsStore == nil {
 		return res, fmt.Errorf("post-TLS V2: PostTLSModeKey is set but TLSHandshakeStore is missing from the context — the SSL/GoTLS reader callback must set models.TLSHandshakeStoreKey (same store the pre-TLS raw stream pushes the greeting into) before dispatching the decrypted tls-* stream")
 	}
+	// Read the first client packet BEFORE resolving the greeting: its sequence
+	// number decides whether there is a greeting worth waiting for. seq>=1 is
+	// a HandshakeResponse41, a fresh connection captured from its auth exchange.
+	// seq==0 is a command on a pooled connection that was authenticated before
+	// capture began (joined mid-stream). The client's bytes are buffered on
+	// ClientStream, so reading them first costs nothing, and a stream whose own
+	// bytes never arrive now fails here, before it can take a greeting from the
+	// shared port FIFO that a live connection needs.
+	// A command of 16 MiB or more continues over several packets: they are
+	// joined here, as handleCommandsV2 joins every later command, and its
+	// response starts at the sequence id after the last of them.
+	var firstChain packetChain
+	firstBuf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, firstChain.take)
+	if err != nil {
+		return res, fmt.Errorf("post-TLS V2: read first client packet: %w", err)
+	}
+	if len(firstBuf) < 4 {
+		return res, fmt.Errorf("post-TLS V2: first client packet too short (%d bytes)", len(firstBuf))
+	}
+	firstReadAt := sess.ClientStream.LastReadTime()
+	joinedMidStream := firstBuf[3] == 0
+
 	// The raw leg's push rides the SAME capture as this decrypted stream, so
 	// under CPU pressure it can land arbitrarily late — a short fixed timeout
 	// here converted that lateness into total capture loss (the CI "served but
-	// NOT recorded" shortfall). resolvePreTLSGreeting waits (bounded by ctx and
-	// by the store TTL) for this connection's own greeting, but falls back FAST
-	// to the port's last-greeting cache when the raw leg was genuinely dropped —
-	// so a dropped leg does not stall the whole overall window and push the
-	// COM_QUERY decode past the CI (2a) gate. Waiting is free: the client's
-	// post-TLS bytes are buffered on ClientStream and read only after this
-	// returns.
-	entry, source := resolvePreTLSGreeting(ctx, hsStore, sess.Opts.ConnKey, dstPort, sess.Opts.PassThroughScope, sess.Opts.DstCfg)
-	// A greetingShared entry came off the port-only FIFO, which is shared by
-	// every decrypted stream to this port — in proxyless that FIFO is the ONLY
-	// key that bridges the raw and decrypted legs, so all of them draw from it.
-	// Popping is destructive. If this stream then fails before producing a mock
-	// (the common case being a decrypted stream whose own bytes never arrive, so
-	// the first-client-packet read returns EOF), the greeting it consumed is
-	// gone and a LIVE connection that needed it is starved — silent decode loss,
-	// which is what made this a "served but not recorded" shortfall rather than
-	// an error. Put an unused entry back so the rightful owner still gets it;
-	// Push broadcasts the store's cond, so a sibling already blocked in
-	// resolvePreTLSGreeting wakes immediately.
+	// NOT recorded" shortfall). For a fresh connection resolvePreTLSGreeting
+	// waits (bounded by ctx and by the store TTL) for this connection's own
+	// greeting, but falls back FAST to the port's last-greeting cache when the
+	// raw leg was genuinely dropped — so a dropped leg does not stall the whole
+	// overall window and push the COM_QUERY decode past the CI (2a) gate. A
+	// connection that joined mid-stream does not wait at all: see
+	// resolvePreTLSGreeting.
+	entry, taker, source := resolvePreTLSGreeting(ctx, hsStore, models.HandshakeOwnerOf(sess.Opts), dstPort, sess.Opts.PassThroughScope, sess.Opts.NetNS, sess.Opts.DstCfg, joinedMidStream)
+	// A greetingShared entry came off the port's queue without being provably
+	// this connection's (the capture layer could not name its connection on one
+	// of the legs), so it may be another stream's, which draws from the same
+	// queue. Popping is destructive. If this stream then fails before producing
+	// a mock, the greeting it consumed is gone and a LIVE connection that
+	// needed it is starved — silent decode loss, which is what made this a
+	// "served but not recorded" shortfall rather than an error. Put an unused
+	// entry back, with the owner it was pushed with, so the rightful owner
+	// still gets it; PushFor broadcasts the store's cond, so a sibling already
+	// blocked in resolvePreTLSGreeting wakes immediately.
 	//
 	// Restore-if-UNUSED, not restore-if-error: the direct-fetch branch below
 	// discards a payload-less entry and can then SUCCEED, which must still give
@@ -484,7 +523,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 			if sharedAdopted && sharedUndecodable {
 				return
 			}
-			hsStore.Push(sharedKey, sharedEntry)
+			hsStore.PushFor(sharedKey, taker, sharedEntry)
 			logger.Debug("post-TLS V2: returned an unused shared greeting to the port FIFO",
 				zap.Uint16("dstPort", dstPort), zap.Error(err))
 		}()
@@ -512,11 +551,14 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	} else {
 		// The pre-TLS handshake was never captured (connection opened before
 		// interception started) and no greeting is cached for the port. Fetch
-		// the greeting directly, matching legacy. fetchServerGreeting refuses
+		// the greeting directly, matching legacy — once per destination, not
+		// once per connection, and remembered for the next one (see
+		// fetchServerGreetingShared: every fetch is an aborted handshake the
+		// server counts against the dialling host). fetchServerGreeting refuses
 		// fabricated destinations (see models.ConditionalDstCfg.AddrFabricated),
 		// so this cannot dial an address the capture layer merely invented.
 		var gErr error
-		greetingBuf, gErr = fetchServerGreeting(ctx, logger, sess.Opts)
+		greetingBuf, gErr = fetchServerGreetingShared(ctx, logger, hsStore, sess.Opts)
 		if gErr != nil {
 			return res, fmt.Errorf("post-TLS V2: no greeting in store (key port %d) and direct fetch failed: %w", dstPort, gErr)
 		}
@@ -574,30 +616,35 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		}
 	}
 
-	// 4. Read the first client packet. seq>=1 = HandshakeResponse41 (fresh
-	//    connection captured from the start); seq==0 = a command on a pre-warmed
-	//    pool connection joined mid-stream (already authed).
-	firstBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
-	if err != nil {
-		return res, fmt.Errorf("post-TLS V2: read first client packet: %w", err)
-	}
-	if len(firstBuf) < 4 {
-		return res, fmt.Errorf("post-TLS V2: first client packet too short (%d bytes)", len(firstBuf))
-	}
+	// 4. The first client packet, read above: seq>=1 = HandshakeResponse41
+	//    (fresh connection captured from the start); seq==0 = a command on a
+	//    pre-warmed pool connection joined mid-stream (already authed).
 	if res.reqTimestamp.IsZero() {
-		res.reqTimestamp = sess.ClientStream.LastReadTime()
+		res.reqTimestamp = firstReadAt
 	}
 
-	if firstBuf[3] == 0 {
+	if joinedMidStream {
 		// seq==0: existing connection, already authenticated. No HandshakeResponse41
-		// and no auth exchange to consume. Assume a modern client (every supported
-		// driver negotiates CLIENT_DEPRECATE_EOF) so the EOF-less result-set decode
-		// path is used, emit the config mock from the stored greeting + SSLRequest,
-		// and hand the command back to handleCommandsV2 as its first packet.
+		// and no auth exchange to consume. Emit the config mock from the stored
+		// greeting + SSLRequest, and hand the command back to handleCommandsV2 as
+		// its first packet.
 		logger.Debug("post-TLS V2: existing connection detected (seq=0), skipping auth; entering command phase",
 			zap.Uint16("dstPort", dstPort))
-		decodeCtx.ClientCaps = wire.CLIENT_DEPRECATE_EOF
-		decodeCtx.ClientCapabilities = wire.CLIENT_DEPRECATE_EOF
+		if caps, ok := ownClientCaps(source, sslReqPkt); ok {
+			// The connection's own SSLRequest: a client sends the same
+			// capability flags in its HandshakeResponse41, and the config mock
+			// declares them (buildSyntheticPostTLSConfig), so the connection is
+			// framed by them and nothing is assumed.
+			decodeCtx.ClientCaps = caps
+			decodeCtx.ClientCapabilities = caps
+		} else {
+			// No SSLRequest that is provably this connection's: assume a modern
+			// client (every supported driver negotiates CLIENT_DEPRECATE_EOF),
+			// and let the first packet that tells settle it (FramingAssumed).
+			decodeCtx.ClientCaps = wire.CLIENT_DEPRECATE_EOF
+			decodeCtx.ClientCapabilities = wire.CLIENT_DEPRECATE_EOF
+			decodeCtx.FramingAssumed = true
+		}
 		// firstBuf is a COMMAND, not a handshake response — but LastOp is still
 		// HandshakeV10 from the greeting seed above, and DecodePayload treats
 		// LastOp==HandshakeV10 as "expect HandshakeResponse41/SSLRequest". Reset
@@ -622,7 +669,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 				res.responseOperation = respOp
 			}
 		}
-		res.firstCmd = firstBuf
+		res.firstCmd, res.firstCmdRespSeq = firstBuf, firstChain.next
 		res.resTimestamp = res.reqTimestamp
 		return res, nil
 	}
@@ -955,19 +1002,21 @@ const (
 	// greetingNone: nothing available within the bounds — the caller must fetch
 	// the greeting directly or abort cleanly.
 	greetingNone preTLSGreetingSource = iota
-	// greetingOwn: this connection's own raw-leg stash, found under the
-	// conn-specific key. Carries the real per-connection salt + request timestamp.
+	// greetingOwn: this connection's own raw-leg stash: the entry its raw leg
+	// pushed under the same connection identity (models.HandshakeOwner.Is).
+	// Carries the real per-connection salt + request timestamp.
 	greetingOwn
-	// greetingShared: an entry taken from the port-only FIFO (e.g. "port:3306").
-	// That queue is CROSS-CONNECTION: in proxyless the raw and decrypted legs are
-	// different TCP connections, so this is the only key that bridges them, but
-	// the entry popped is not necessarily the one this connection's own raw leg
-	// pushed. Consuming it is destructive — every other decrypted stream waiting
-	// on that port is competing for the same FIFO — so a caller that fails before
-	// producing a mock MUST put it back (handlePostTLSHandshakeV2 does, via a
-	// defer on sharedAdopted). Otherwise a
-	// stream that pops one and then errors silently starves a live connection of
-	// the greeting it needed, which is decode loss with no diagnostic.
+	// greetingShared: an entry taken from the port's queue (e.g. "port:3306")
+	// that is not provably this connection's: one leg or the other carried no
+	// connection identity, so the store could only rule out other known
+	// connections and other processes, and gave the oldest that remained. The
+	// queue is shared by every stream to the port. Consuming it is destructive
+	// — every other decrypted stream waiting on that port may be competing for
+	// it — so a caller that fails before producing a mock MUST put it back
+	// (handlePostTLSHandshakeV2 does, via a defer on sharedAdopted). Otherwise
+	// a stream that pops one and then errors silently starves a live
+	// connection of the greeting it needed, which is decode loss with no
+	// diagnostic.
 	greetingShared
 	// greetingCached: another connection's most-recent greeting for the port,
 	// from the non-consuming last-greeting cache. Reusable for stitching
@@ -978,37 +1027,70 @@ const (
 )
 
 // resolvePreTLSGreeting obtains the pre-TLS greeting (+SSLRequest) for a
-// decrypted tls-* stream. It prefers THIS connection's own raw-leg stash, but a
-// genuinely-dropped raw leg must NOT block the full overall window before using
-// a reusable cached greeting — that stall could push the COM_QUERY decode past
-// the CI (2a) 30s "served but NOT recorded" gate. So the wait is two-phase:
+// decrypted tls-* stream, and the owner the stashed entry was pushed with. It
+// prefers THIS connection's own raw-leg stash, but a genuinely-dropped raw leg
+// must NOT block the full overall window before using a reusable cached
+// greeting — that stall could push the COM_QUERY decode past the CI (2a) 30s
+// "served but NOT recorded" gate. So the wait is two-phase:
 //
 //   - up to `primary` (short): wait for this connection's own entry, waking the
 //     instant a Push arrives (the store broadcasts its cond). A merely-late own
 //     leg is absorbed here and stitched with its real salt+timestamp.
-//   - once `primary` elapses AND a greeting is cached for the port: use the
-//     cache immediately (the dropped-leg fast path).
-//   - only when NO greeting is cached yet (the first connection to the port, or
+//   - once `primary` elapses AND a greeting is cached for the destination: use
+//     the cache immediately (the dropped-leg fast path).
+//   - only when nothing is cached yet (the first connection to the port, or
 //     every sibling leg also dropped) keep waiting for the own entry up to
-//     `overall`, since nothing better can serve this connection.
+//     `overall`, since nothing better can serve this connection. The caller
+//     then consults the per-server memo, and only then dials.
 //
 // ctx cancellation (stream/session teardown) cuts any wait short within one
 // poll slice. On a final miss it returns greetingNone so the caller can
-// fetchServerGreeting / abort cleanly.
+// fetchServerGreetingShared / abort cleanly.
 //
-// It checks the conn-specific key and the port-only key on every pass: in
-// proxyless the raw and decrypted legs are different TCP connections, so only
-// the port-only key (e.g. "port:3306") reliably bridges them — the raw leg
-// pushes under both (storePreTLSHandshakeV2).
-func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, connKey string, dstPort uint16, scope string, dst *models.ConditionalDstCfg) (models.TLSHandshakeEntry, preTLSGreetingSource) {
-	connSpecificKey := models.HandshakeStoreKey(connKey, dstPort)
+// Every raw leg pushes its entry once, under the destination port's key,
+// tagged with the connection identity the capture layer gave it (owner; see
+// models.HandshakeOwner). The store hands this stream its own entry when both
+// legs carry the same identity. Without one on either leg it hands the oldest
+// entry this stream may take: never another known connection's, never another
+// known process's.
+//
+// joinedMidStream (the stream's first decrypted client packet had seq==0) skips
+// the wait entirely: it returns this connection's own entry or a cached
+// greeting, and otherwise greetingNone at once. That signal is a fact about
+// THIS connection, not a guess about timing: a HandshakeResponse41 is always
+// the first thing a client sends after its TLS handshake, so a first decrypted
+// packet that is a command proves the session was authenticated before capture
+// of its plaintext began. A pooled connection opened before the recording is
+// exactly that, and its greeting went over the wire before its authentication.
+// Waiting cannot improve on what is already here, because what a wait delivers
+// is only ever useful to an auth exchange:
+//
+//   - The wait exists so a FRESH connection gets its own raw leg: the
+//     SSLRequest that precedes its HandshakeResponse41 in the config mock, and
+//     its real timestamp. A joined connection has no auth exchange on this
+//     stream to stitch them to. Its config mock is synthesized
+//     (buildSyntheticPostTLSConfig) from any SSLRequest of the same client,
+//     and a borrowed greeting's timestamp is never used: it is timed from its
+//     first command.
+//   - What its commands need from a greeting are the server's capability flags
+//     and auth plugin, which every greeting of the same server carries. The
+//     salt is never verified on the record or replay path.
+//
+// A joined connection takes from the port's queue ONLY an entry that is
+// provably its own: anything else there may be a fresh connection's own leg
+// that it has not reached yet. Otherwise it borrows the app-scoped cache (and,
+// in the caller, the per-server memo), which cannot hand it another server's
+// greeting. Main waited out the stash bound (30s default) per pooled
+// connection at every recording start, and took every entry that landed on the
+// port meanwhile.
+func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, owner models.HandshakeOwner, dstPort uint16, scope, netNS string, dst *models.ConditionalDstCfg, joinedMidStream bool) (models.TLSHandshakeEntry, models.HandshakeOwner, preTLSGreetingSource) {
 	portKey := models.HandshakeStoreKey("", dstPort)
 	// The cross-connection fallback has TWO keys. One names the destination: the
 	// fields it lets us reuse (capability flags, protocol version, auth plugin)
 	// are per-server, so an entry is only reusable for the same server. The key
 	// combines the app/session scope with the address so that a shared
 	// DaemonSet store cannot serve one app's greeting to another.
-	lastKey := models.HandshakeLastKey(scope, dst)
+	lastKey := lastGreetingKey(scope, netNS, dst)
 	// The decrypted leg's address is frequently a capture-layer stand-in, which
 	// can never match what the raw leg wrote. The port is agreed between the two
 	// legs, so it is the key that actually bridges them here.
@@ -1042,29 +1124,13 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 	overallDeadline := start.Add(overall)
 	primaryDeadline := start.Add(primary)
 
-	// popOwn returns this connection's own stashed entry (either key), if
-	// present, without blocking.
-	popOwn := func() (models.TLSHandshakeEntry, preTLSGreetingSource) {
-		if entry, ok := hsStore.PopWait(connSpecificKey, 0); ok {
-			// An empty connKey (the proxyless decrypted stream, which cannot know
-			// the raw leg's connection identity) collapses the conn-specific key
-			// onto the port-only key. The entry then came off the SHARED FIFO
-			// even though this branch read it, so it must be classified — and
-			// restored on failure — as shared.
-			if connSpecificKey == portKey {
-				return entry, greetingShared
-			}
-			return entry, greetingOwn
-		}
-		if portKey != connSpecificKey {
-			if entry, ok := hsStore.PopWait(portKey, 0); ok {
-				return entry, greetingShared
-			}
-		}
-		return models.TLSHandshakeEntry{}, greetingNone
-	}
 	// cachedGreeting returns the port's last-greeting cache entry, if usable.
+	// Every entry here was CAPTURED by a raw leg (it carries the SSLRequest): a
+	// greeting fetched from the server is remembered per server instead
+	// (fetchServerGreetingShared), and is consulted only where the fetch would
+	// be, after the overall wait.
 	cachedGreeting := func() (models.TLSHandshakeEntry, bool) {
+		usable := func(c models.TLSHandshakeEntry) bool { return len(c.RespPackets) > 0 }
 		// A latched port key is POSITIVE proof that this scope+port serves more
 		// than one server. Falling through to the address key would then quietly
 		// answer from the shared placeholder bucket — which carries no identity
@@ -1094,22 +1160,49 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 				// proven is not necessarily this connection's.
 				return models.TLSHandshakeEntry{}, false
 			}
-			if ok && len(c.RespPackets) > 0 {
+			if ok && usable(c) {
 				return c, true
 			}
 		}
 		if lastKey != "" {
-			if c, ok := hsStore.Last(lastKey); ok && len(c.RespPackets) > 0 {
+			if c, ok := hsStore.Last(lastKey); ok && usable(c) {
 				return c, true
 			}
 		}
 		return models.TLSHandshakeEntry{}, false
 	}
 
+	// take pops, within wait, this connection's own entry or (unless ownOnly)
+	// one it may take, and classifies it.
+	take := func(ownOnly bool, wait time.Duration) (models.TLSHandshakeEntry, models.HandshakeOwner, preTLSGreetingSource) {
+		entry, taker, ok := hsStore.PopWaitFor(portKey, owner, ownOnly, wait)
+		switch {
+		case !ok:
+			return models.TLSHandshakeEntry{}, models.HandshakeOwner{}, greetingNone
+		case owner.Is(taker):
+			return entry, taker, greetingOwn
+		default:
+			return entry, taker, greetingShared
+		}
+	}
+
+	if joinedMidStream {
+		// Only an entry provably its own; see above.
+		if owner.Conn != "" {
+			if entry, taker, src := take(true, 0); src != greetingNone {
+				return entry, taker, src
+			}
+		}
+		if entry, ok := cachedGreeting(); ok {
+			return entry, models.HandshakeOwner{}, greetingCached
+		}
+		return models.TLSHandshakeEntry{}, models.HandshakeOwner{}, greetingNone
+	}
+
 	for {
 		// 1. This connection's own entry is always preferred.
-		if entry, src := popOwn(); src != greetingNone {
-			return entry, src
+		if entry, taker, src := take(false, 0); src != greetingNone {
+			return entry, taker, src
 		}
 		now := time.Now()
 		// 2. Past the primary bound, a cached greeting is good enough — take it
@@ -1117,17 +1210,16 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 		//    fast path that keeps the decode inside the CI gate).
 		if !now.Before(primaryDeadline) {
 			if entry, ok := cachedGreeting(); ok {
-				return entry, greetingCached
+				return entry, models.HandshakeOwner{}, greetingCached
 			}
 		}
 		// 3. Overall bound / teardown.
 		if !now.Before(overallDeadline) || ctx.Err() != nil {
 			break
 		}
-		// 4. Block on the port-only key (the one the raw leg reliably lands
-		//    under), waking the moment a Push broadcasts the cond. Bound the
-		//    slice by the next deadline so the cache is re-checked promptly at
-		//    the primary boundary.
+		// 4. Block on the port's queue, waking the moment a Push broadcasts the
+		//    cond. Bound the slice by the next deadline so the cache is
+		//    re-checked promptly at the primary boundary.
 		nextEval := overallDeadline
 		if now.Before(primaryDeadline) && primaryDeadline.Before(nextEval) {
 			nextEval = primaryDeadline
@@ -1139,17 +1231,17 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 		if slice <= 0 {
 			continue
 		}
-		if entry, ok := hsStore.PopWait(portKey, slice); ok {
-			return entry, greetingShared
+		if entry, taker, src := take(false, slice); src != greetingNone {
+			return entry, taker, src
 		}
 	}
 
 	// Final miss on the own entry: the cache is the last resort before a direct
 	// fetch (it may have been populated by a sibling during the overall wait).
 	if entry, ok := cachedGreeting(); ok {
-		return entry, greetingCached
+		return entry, models.HandshakeOwner{}, greetingCached
 	}
-	return models.TLSHandshakeEntry{}, greetingNone
+	return models.TLSHandshakeEntry{}, models.HandshakeOwner{}, greetingNone
 }
 
 // greetingServerIdentity fingerprints the SERVER-STABLE parts of a HandshakeV10
@@ -1165,22 +1257,36 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 // server, and none of them is verified on the record or replay path (the
 // replayer skips AuthResponse comparison precisely because it is salt-derived).
 // Including them would make every connection look like a different server.
+//
+// It is computed for every recorded handshake (rememberServerGreeting), so it is
+// built by appending rather than with fmt, which cost most of that call. The
+// text is "v<proto>|<version>|caps=<caps>|cs=<charset>|<plugin>".
 func greetingServerIdentity(g *mysql.HandshakeV10Packet) string {
 	if g == nil {
 		return ""
 	}
-	return fmt.Sprintf("v%d|%s|caps=%d|cs=%d|%s",
-		g.ProtocolVersion, g.ServerVersion, g.CapabilityFlags, g.CharacterSet, g.AuthPluginName)
+	b := make([]byte, 0, 40+len(g.ServerVersion)+len(g.AuthPluginName))
+	b = append(b, 'v')
+	b = strconv.AppendUint(b, uint64(g.ProtocolVersion), 10)
+	b = append(b, '|')
+	b = append(b, g.ServerVersion...)
+	b = append(b, "|caps="...)
+	b = strconv.AppendUint(b, uint64(g.CapabilityFlags), 10)
+	b = append(b, "|cs="...)
+	b = strconv.AppendUint(b, uint64(g.CharacterSet), 10)
+	b = append(b, '|')
+	b = append(b, g.AuthPluginName...)
+	return string(b)
 }
 
 // storePreTLSHandshakeV2 pushes the pre-TLS MySQL server greeting and the
 // client SSLRequest into the shared TLSHandshakeStore so the decrypted
-// (uprobe) tls-* stream's handlePostTLSRecord can recover them. It mirrors
-// the legacy conn.go SkipTLSMITM branch exactly: it stores under both the
-// conn-specific key and the port-only fallback key, because the raw
-// observe-only stream and the decrypted uprobe stream are different TCP
-// connections with different connIDs — only the port-only key (port:3306)
-// reliably bridges the two.
+// (uprobe) tls-* stream's handlePostTLSHandshakeV2 can recover them. It mirrors
+// the legacy conn.go SkipTLSMITM branch exactly: it stores ONCE under the
+// destination port's key (port:3306), tagged with the connection's identity
+// (models.HandshakeOwnerOf), because the raw observe-only stream and the
+// decrypted uprobe stream reach the recorder as different streams, and the
+// identity the capture layer gives both is what pairs them.
 func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, greeting, sslRequest []byte, reqTimestamp time.Time, serverID string) error {
 	hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
 	if !ok || hsStore == nil {
@@ -1195,14 +1301,8 @@ func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *super
 		ReqPackets:   [][]byte{sslRequest},
 		ReqTimestamp: reqTimestamp,
 	}
-	storeKey := models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort)
-	hsStore.Push(storeKey, hsEntry)
-	// Port-only fallback: the proxy/uprobe see different ephemeral ports,
-	// so conn-specific keys won't match across the two streams.
 	portKey := models.HandshakeStoreKey("", dstPort)
-	if portKey != storeKey {
-		hsStore.Push(portKey, hsEntry)
-	}
+	hsStore.PushFor(portKey, models.HandshakeOwnerOf(sess.Opts), hsEntry)
 	// Seed the last-greeting cache too. Push/PopWait entries are CONSUMED, so a
 	// connection whose own raw leg never produced one — a pooled connection
 	// reused long after its handshake, or a leg the ringbuf dropped under load —
@@ -1219,7 +1319,7 @@ func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *super
 	// synthesized stand-in and could never match an address-keyed entry. See
 	// models.HandshakeLastPortKey.
 	scope := sess.Opts.PassThroughScope
-	hsStore.RememberLast(models.HandshakeLastKey(scope, sess.Opts.DstCfg), hsEntry)
+	hsStore.RememberLast(lastGreetingKey(scope, sess.Opts.NetNS, sess.Opts.DstCfg), hsEntry)
 	// The port-scoped copy is tagged with the SERVER's identity, taken from the
 	// greeting itself rather than from the address it arrived from. Address is
 	// the wrong identity here: in Kubernetes the same logical MySQL gets a new
@@ -1231,9 +1331,9 @@ func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *super
 	// reuse would genuinely be unsafe.
 	hsStore.RememberLastForPort(models.HandshakeLastPortKey(scope, dstPort), serverID, hsEntry)
 	logger.Debug("V2: pushed pre-TLS MySQL greeting + SSLRequest to TLSHandshakeStore for post-TLS stitch",
-		zap.String("key", storeKey),
 		zap.String("portKey", portKey),
 		zap.String("connKey", sess.Opts.ConnKey),
+		zap.String("connProc", sess.Opts.ConnProc),
 		zap.String("scope", scope),
 		zap.Uint16("dstPort", dstPort))
 	return nil
@@ -1377,23 +1477,92 @@ func buildClientTLSConfigV2(_ *supervisor.Session) *tls.Config {
 //     or a multi-packet result set / prepare OK), decodes it, and emits
 //     one mock matching the legacy path's shape.
 //
-// Exits cleanly on io.EOF / fakeconn.ErrClosed from either stream.
-func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKey net.Conn, firstCmd []byte) error {
+// A PREPARE whose response leaves an assumed framing open is held, with the
+// no-response mocks after it, until the next response settles the framing
+// (heldPrepare); the client is read on meanwhile.
+//
+// Exits cleanly on io.EOF / fakeconn.ErrClosed from either stream, and with
+// ErrFramingLost the moment it can no longer tell where the connection's
+// packets begin and end: a command or response packet out of sequence, a
+// response head, definition or row that does not decode, or a command whose
+// response it cannot size. Each of those used to be skipped, which left the rest of a response on
+// the server stream to be paired with the next command.
+//
+// handshakeEnd is when the handshake's last packet arrived: the first command
+// was sent after it.
+func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKey net.Conn, firstCmd []byte, firstCmdRespSeq byte, handshakeEnd time.Time) error {
+	// held is a PREPARE whose response left an assumed framing open, held
+	// until the next response settles it (heldPrepare).
+	var held *heldPrepare
+	defer func() {
+		if held != nil {
+			held.leaveOut(logger, sess, notRecorded("the recording stopped before a packet settled the %s response's framing", held.what))
+		}
+	}()
+	// carry is the first packet of the response about to be read, read by
+	// settleHeld to settle a held PREPARE.
+	var carry []byte
+	// settleHeld settles a held PREPARE with the first packet of the response
+	// to cmd, which starts at respFirst, before that response is read. The
+	// PREPARE is recorded, or left out, by the time it returns.
+	settleHeld := func(cmd, respFirst byte) error {
+		if held == nil {
+			return nil
+		}
+		h := held
+		held = nil
+		first, err := h.settle(ctx, logger, sess, decodeCtx, cmd, respFirst)
+		carry = first
+		return err
+	}
+	// lastEnd is when the last exchange handled ended (its command or its
+	// response, whichever was read later), or the handshake did: client bytes
+	// lost before the next command were sent after it.
+	lastEnd := handshakeEnd
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		var cmdBuf []byte
 		var err error
+		// The sequence id the response starts at: 1, or more after a command
+		// that continued over several packets.
+		var respFirst byte
+		joined := false
 		if firstCmd != nil {
 			// A command the post-TLS handshake pre-read off ClientStream to
 			// distinguish HandshakeResponse41 from a mid-stream command (see
 			// v2HandshakeResult.firstCmd). Consume it once, then fall back to
-			// reading the stream normally.
-			cmdBuf, firstCmd = firstCmd, nil
+			// reading the stream normally. It is a command by construction
+			// (the handshake hands one over only when its sequence id is 0).
+			cmdBuf, respFirst, firstCmd = firstCmd, firstCmdRespSeq, nil
+			joined = continues(cmdBuf)
 		} else {
-			cmdBuf, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+			var cs commandSeq
+			cmdBuf, err = mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, cs.take)
+			respFirst, joined = cs.next, cs.joined
 			if err != nil {
+				if held != nil && ctx.Err() == nil && (errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed)) {
+					// The client's stream ended with a PREPARE held: what the
+					// server sent after it is all on its stream.
+					h := held
+					held = nil
+					if endErr := h.end(ctx, logger, sess, decodeCtx); endErr != nil {
+						return endErr
+					}
+				}
+				if errors.Is(err, ErrFramingLost) {
+					warnFramingLost(logger, sess, "V2: mysql client packet out of sequence; the connection is no longer recorded", err)
+					// The command whose bytes were lost was sent after the
+					// last exchange (or the handshake) ended, and its exchange
+					// runs on to now, where the supervisor's count of what the
+					// connection carries next starts (leaveOutInFlight).
+					start := lastEnd
+					if start.IsZero() {
+						start = sess.ClientStream.LastReadTime()
+					}
+					sess.RecordOrphanWindow(start, stoppedAt(start))
+				}
 				return err
 			}
 		}
@@ -1404,50 +1573,151 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 
 		cmdPkt, err := wire.DecodePayload(ctx, logger, cmdBuf, clientKey, decodeCtx)
 		if err != nil {
-			logger.Debug("V2: failed to decode mysql command; resetting state", zap.Error(err))
-			decodeCtx.LastOp.Store(clientKey, wire.RESET)
-			continue
+			// Its response is on the server stream all the same: skipping the
+			// command paired the next one with it. A query's or an execute's
+			// response describes itself (OK, ERR, or a result set with its own
+			// column definitions), so it is framed and the exchange left out;
+			// any other's cannot be, and the recording stops.
+			if len(cmdBuf) > 4 && (cmdBuf[4] == mysql.COM_QUERY || cmdBuf[4] == mysql.COM_STMT_EXECUTE) {
+				op := cmdBuf[4]
+				if err := settleHeld(op, respFirst); err != nil {
+					return leaveOutInFlight(sess, reqTs, err)
+				}
+				decodeCtx.LastOp.Store(clientKey, op)
+				seq := responseSeq(mysql.CommandStatusToString(op), respFirst)
+				_, resTs, rerr := collectResponseV2(ctx, logger, sess, decodeCtx, clientKey, op, &seq, &carry)
+				decodeCtx.LastOp.Store(clientKey, wire.RESET)
+				if rerr != nil && !errors.Is(rerr, errNotRecorded) {
+					return leaveOutInFlight(sess, reqTs, rerr)
+				}
+				leaveOut(logger, sess, reqTs, resTs, fmt.Errorf("a %s that does not decode: %w", mysql.CommandStatusToString(op), err))
+				lastEnd = later(reqTs, resTs)
+				continue
+			}
+			err = framingLost("a command that does not decode (%v), whose response it cannot frame", err)
+			warnFramingLost(logger, sess, "V2: failed to decode mysql command; the connection is no longer recorded", err)
+			return leaveOutInFlight(sess, reqTs, err)
 		}
 
 		// No-response commands: emit immediately with empty response,
 		// matching the legacy recorder shape. Response timestamp is
 		// the command arrival time since no server response exists.
 		if wire.IsNoResponseCommand(cmdPkt.Header.Type) {
-			emitMockV2(ctx, sess, []mysql.Request{{PacketBundle: *cmdPkt}}, nil, "mocks",
-				cmdPkt.Header.Type, "NO Response Packet", reqTs, reqTs)
+			lastEnd = reqTs
+			if joined {
+				// COM_STMT_SEND_LONG_DATA can carry 16 MiB or more.
+				leaveOut(logger, sess, reqTs, reqTs, oversizedNotRecorded(cmdPkt.Header.Type, "command"))
+				continue
+			}
+			emit := func() {
+				emitMockV2(ctx, sess, []mysql.Request{{PacketBundle: *cmdPkt}}, nil, "mocks",
+					cmdPkt.Header.Type, "NO Response Packet", reqTs, reqTs)
+			}
+			if held != nil {
+				// Recorded behind the PREPARE, in the order sent.
+				held.queue(sess, emit)
+				continue
+			}
+			emit()
 			continue
 		}
 		if strings.HasPrefix(cmdPkt.Header.Type, "0x") {
-			// Unknown packet: treat as no-response to avoid desync.
-			emitMockV2(ctx, sess, []mysql.Request{{PacketBundle: *cmdPkt}}, nil, "mocks",
-				cmdPkt.Header.Type, "NO Response Packet", reqTs, reqTs)
+			// A command this recorder has no decoder for. It has a response
+			// (every command but the no-response ones above does): recording
+			// the command as answering nothing paired the next command with
+			// its response. One whose reply is a single packet is framed and
+			// left out, and so is a cursor's COM_STMT_FETCH, whose reply
+			// frames itself; any other's reply cannot be framed.
+			if cmdBuf[4] == comStmtFetch {
+				if err := settleHeld(comStmtFetch, respFirst); err != nil {
+					return leaveOutInFlight(sess, reqTs, err)
+				}
+				seq := responseSeq("COM_STMT_FETCH", respFirst)
+				if err := frameFetchReply(ctx, logger, sess, decodeCtx, &seq, &carry); err != nil {
+					return leaveOutInFlight(sess, reqTs, err)
+				}
+				decodeCtx.LastOp.Store(clientKey, wire.RESET)
+				resTs := sess.DestStream.LastReadTime()
+				lastEnd = later(reqTs, resTs)
+				leaveOut(logger, sess, reqTs, resTs, notRecorded("the replayer cannot serve a cursor's COM_STMT_FETCH"))
+				continue
+			}
+			shape, known := singlePacketReply[cmdBuf[4]]
+			if !known {
+				err := framingLost("command %s, whose response it cannot frame", cmdPkt.Header.Type)
+				warnFramingLost(logger, sess, "V2: unsupported mysql command; the connection is no longer recorded", err)
+				return leaveOutInFlight(sess, reqTs, err)
+			}
+			if err := settleHeld(cmdBuf[4], respFirst); err != nil {
+				return leaveOutInFlight(sess, reqTs, err)
+			}
+			seq := responseSeq(cmdPkt.Header.Type, respFirst)
+			reply, err := firstResponsePacket(ctx, logger, sess, &seq, &carry)
+			if err != nil {
+				return leaveOutInFlight(sess, reqTs, err)
+			}
+			if len(reply) < 5 || !shape(reply[4]) {
+				err := framingLost("command %s answered with a packet that is not its reply", cmdPkt.Header.Type)
+				warnFramingLost(logger, sess, "V2: mysql response framing lost; the connection is no longer recorded", err)
+				return leaveOutInFlight(sess, reqTs, err)
+			}
+			decodeCtx.LastOp.Store(clientKey, wire.RESET)
+			resTs := sess.DestStream.LastReadTime()
+			lastEnd = later(reqTs, resTs)
+			leaveOut(logger, sess, reqTs, resTs, fmt.Errorf("command %s has no decoder", cmdPkt.Header.Type))
 			continue
+		}
+
+		if err := settleHeld(cmdBuf[4], respFirst); err != nil {
+			return leaveOutInFlight(sess, reqTs, err)
 		}
 
 		// Load lastOp for response shape.
 		lastOp, _ := decodeCtx.LastOp.Load(clientKey)
 
-		respBundle, resTs, err := collectResponseV2(ctx, logger, sess, decodeCtx, clientKey, lastOp)
-		if err != nil {
-			return err
+		seq := responseSeq(cmdPkt.Header.Type, respFirst)
+		respBundle, resTs, err := collectResponseV2(ctx, logger, sess, decodeCtx, clientKey, lastOp, &seq, &carry)
+		if err == nil && (joined || seq.oversized) {
+			// Framed, so the connection's recording goes on; not replayable,
+			// so the exchange is left out.
+			what := "command"
+			if !joined {
+				what = "response packet"
+			}
+			err = oversizedNotRecorded(cmdPkt.Header.Type, what)
 		}
-		if respBundle == nil {
-			// Desync or benign decode failure — drop this exchange.
+		if errors.Is(err, errNotRecorded) {
+			decodeCtx.LastOp.Store(clientKey, wire.RESET)
+			leaveOut(logger, sess, reqTs, resTs, err)
+			lastEnd = later(reqTs, resTs)
 			continue
 		}
+		if err != nil {
+			return leaveOutInFlight(sess, reqTs, err)
+		}
+		lastEnd = later(reqTs, resTs)
 
 		mockType := "mocks"
 		if cmdPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_PREPARE) {
 			mockType = "connection"
 		}
 
-		emitMockV2(ctx, sess,
-			[]mysql.Request{{PacketBundle: *cmdPkt}},
-			[]mysql.Response{{PacketBundle: *respBundle}},
-			mockType,
-			cmdPkt.Header.Type,
-			respBundle.Header.Type,
-			reqTs, resTs)
+		record := func(resTs time.Time) {
+			emitMockV2(ctx, sess,
+				[]mysql.Request{{PacketBundle: *cmdPkt}},
+				[]mysql.Response{{PacketBundle: *respBundle}},
+				mockType,
+				cmdPkt.Header.Type,
+				respBundle.Header.Type,
+				reqTs, resTs)
+		}
+		if sp, ok := respBundle.Message.(*mysql.StmtPrepareOkPacket); ok && leavesFramingOpen(decodeCtx, sp) {
+			// Its response is read whole: holding it is no pending work.
+			held = &heldPrepare{what: seq.what, sp: sp, eofSeq: seq.next, reqTs: reqTs, resTs: resTs, record: record}
+			clearPending(sess)
+			continue
+		}
+		record(resTs)
 	}
 }
 
@@ -1456,20 +1726,33 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 // chunk that arrived. Single-packet responses (OK/ERR) are returned as
 // decoded. Multi-packet responses (result sets, stmt-prepare ok) are
 // assembled using the same state machine as the legacy async decoder.
-func collectResponseV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKey net.Conn, lastOp byte) (*mysql.PacketBundle, time.Time, error) {
-	firstBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+//
+// Every packet's sequence id is checked (packetSeq), and a head that does not
+// decode ends the recording with ErrFramingLost: it never returns a nil bundle
+// for the caller to skip, because the rest of a skipped response is still on
+// the stream.
+func collectResponseV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKey net.Conn, lastOp byte, seq *packetSeq, carry *[]byte) (*mysql.PacketBundle, time.Time, error) {
+	command := seq.what
+	firstBuf, err := firstResponsePacket(ctx, logger, sess, seq, carry)
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, sess.DestStream.LastReadTime(), err
 	}
 	firstPkt, err := wire.DecodePayload(ctx, logger, firstBuf, clientKey, decodeCtx)
 	if err != nil {
-		logger.Debug("V2: failed to decode mysql response head", zap.Error(err))
-		return nil, sess.DestStream.LastReadTime(), nil
+		err = framingLost("the %s response's first packet does not decode: %v", command, err)
+		warnFramingLost(logger, sess, "V2: failed to decode mysql response head; the connection is no longer recorded", err)
+		return nil, sess.DestStream.LastReadTime(), err
 	}
 
-	// Simple single-packet case: OK/ERR.
-	if firstPkt.Header.Type == mysql.StatusToString(mysql.OK) ||
-		firstPkt.Header.Type == mysql.StatusToString(mysql.ERR) {
+	// Simple single-packet case: OK/ERR. An OK that says more results follow
+	// is the first of several (the last result of a CALL is one).
+	if firstPkt.Header.Type == mysql.StatusToString(mysql.OK) {
+		if okMoreResults(firstBuf) {
+			return nil, sess.DestStream.LastReadTime(), moreResults(ctx, logger, sess, decodeCtx, seq, command)
+		}
+		return firstPkt, sess.DestStream.LastReadTime(), nil
+	}
+	if firstPkt.Header.Type == mysql.StatusToString(mysql.ERR) {
 		return firstPkt, sess.DestStream.LastReadTime(), nil
 	}
 
@@ -1478,79 +1761,225 @@ func collectResponseV2(ctx context.Context, logger *zap.Logger, sess *supervisor
 	case mysql.COM_QUERY:
 		rs, ok := firstPkt.Message.(*mysql.TextResultSet)
 		if !ok {
-			return firstPkt, sess.DestStream.LastReadTime(), nil
+			return nil, sess.DestStream.LastReadTime(), notAResponseHead(logger, sess, command, firstPkt)
 		}
-		ts, err := assembleTextResultSetV2(ctx, logger, sess, decodeCtx, firstPkt, rs)
+		ts, err := assembleTextResultSetV2(ctx, logger, sess, decodeCtx, firstPkt, rs, seq)
 		if err != nil {
 			return nil, ts, err
 		}
 		decodeCtx.LastOp.Store(clientKey, wire.RESET)
+		if rs.FinalResponse != nil && terminatorMoreResults(rs.FinalResponse.Data) {
+			return nil, ts, moreResults(ctx, logger, sess, decodeCtx, seq, command)
+		}
 		return firstPkt, ts, nil
 
 	case mysql.COM_STMT_EXECUTE:
 		rs, ok := firstPkt.Message.(*mysql.BinaryProtocolResultSet)
 		if !ok {
-			return firstPkt, sess.DestStream.LastReadTime(), nil
+			return nil, sess.DestStream.LastReadTime(), notAResponseHead(logger, sess, command, firstPkt)
 		}
-		ts, err := assembleBinaryResultSetV2(ctx, logger, sess, decodeCtx, firstPkt, rs)
+		ts, err := assembleBinaryResultSetV2(ctx, logger, sess, decodeCtx, firstPkt, rs, seq)
 		if err != nil {
 			return nil, ts, err
 		}
 		decodeCtx.LastOp.Store(clientKey, wire.RESET)
+		if rs.FinalResponse != nil && terminatorMoreResults(rs.FinalResponse.Data) {
+			return nil, ts, moreResults(ctx, logger, sess, decodeCtx, seq, command)
+		}
 		return firstPkt, ts, nil
 
 	case mysql.COM_STMT_PREPARE:
 		sp, ok := firstPkt.Message.(*mysql.StmtPrepareOkPacket)
 		if !ok {
-			return firstPkt, sess.DestStream.LastReadTime(), nil
+			return nil, sess.DestStream.LastReadTime(), notAResponseHead(logger, sess, command, firstPkt)
 		}
-		ts, err := assembleStmtPrepareV2(ctx, logger, sess, decodeCtx, sp)
+		ts, err := assembleStmtPrepareV2(ctx, logger, sess, decodeCtx, sp, seq)
 		if err != nil {
 			return nil, ts, err
 		}
 		decodeCtx.LastOp.Store(clientKey, mysql.OK)
 		return firstPkt, ts, nil
 
-	default:
-		// Unexpected multi-packet shape: treat as single.
+	case mysql.COM_STATISTICS, mysql.COM_DEBUG:
+		// Answered with one packet that is neither OK nor ERR: a string, an
+		// EOF.
 		return firstPkt, sess.DestStream.LastReadTime(), nil
+
+	default:
+		// Every other command is answered with OK or ERR. Anything else is the
+		// start of an exchange this recorder does not follow (the auth
+		// exchange inside COM_CHANGE_USER): recorded as the whole answer, it
+		// would be a mock short of its reply.
+		return nil, sess.DestStream.LastReadTime(), notAResponseHead(logger, sess, command, firstPkt)
 	}
 }
 
-func assembleTextResultSetV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, headPkt *mysql.PacketBundle, rs *mysql.TextResultSet) (time.Time, error) {
+// moreResults reads the rest of a response whose result (the one just read)
+// says more results follow: each result after it, to the one that does not, or
+// to an ERR. It frames them with the sequence ids checked, and reports the
+// exchange as not recorded: a mock holds one result, so a CALL's or a
+// multi-statement query's would replay a different answer than the server
+// gave.
+func moreResults(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, seq *packetSeq, command string) error {
+	for {
+		head, err := readResponsePacket(ctx, logger, sess, seq, "head of a further result")
+		if err != nil {
+			return err
+		}
+		if len(head) < 5 {
+			return framingLostAt(logger, sess, "the head of a further result of the %s response is empty", command)
+		}
+		switch head[4] {
+		case mysql.ERR:
+			return notRecorded("the %s response holds more than one result", command)
+		case mysql.OK:
+			if !okMoreResults(head) {
+				return notRecorded("the %s response holds more than one result", command)
+			}
+			continue
+		case mysql.EOF, mysql.LocalInFile:
+			return framingLostAt(logger, sess, "a %#x packet where a further result of the %s response must start", head[4], command)
+		}
+		cols, isNull, n := mysqlUtils.ReadLengthEncodedInteger(head[4:])
+		if isNull || n == 0 || 4+n != len(head) || cols == 0 {
+			return framingLostAt(logger, sess, "the head of a further result of the %s response is not a column count", command)
+		}
+		for i := uint64(0); i < cols; i++ {
+			if _, err := readResponsePacket(ctx, logger, sess, seq, "column definition"); err != nil {
+				return err
+			}
+		}
+		_, pending, err := afterDefinitions(ctx, logger, sess, decodeCtx, seq)
+		if err != nil {
+			return err
+		}
+		for {
+			row, err := nextPacket(ctx, logger, sess, seq, &pending, "row")
+			if err != nil {
+				return err
+			}
+			if rowIsAnError(row) {
+				return notRecorded("the %s response holds more than one result", command)
+			}
+			if mysqlUtils.IsResultSetTerminator(row, decodeCtx.DeprecateEOF()) {
+				if err := terminatorFits(logger, sess, decodeCtx, row, command); err != nil {
+					return err
+				}
+				if terminatorMoreResults(row) {
+					break
+				}
+				return notRecorded("the %s response holds more than one result", command)
+			}
+		}
+	}
+}
+
+// framingLostAt is framingLost, logged.
+func framingLostAt(logger *zap.Logger, sess *supervisor.Session, format string, args ...any) error {
+	err := framingLost(format, args...)
+	warnFramingLost(logger, sess, "V2: mysql response framing lost; the connection is no longer recorded", err)
+	return err
+}
+
+// undecodable ends the recording at a definition or a row that does not
+// decode. Its header's sequence id checked out, so it is lost framing all the
+// same: a header misread out of row data that passed the check by chance (1 in
+// 256), or a packet short of the bytes a hole took. It is reported as framing
+// loss is (ErrFramingLost, logged at WARN, rate-limited), not as an error of
+// the integration.
+func undecodable(logger *zap.Logger, sess *supervisor.Session, seq *packetSeq, part string, n any, err error) error {
+	return framingLostAt(logger, sess, "%s %v of the %s response does not decode: %v", part, n, seq.what, err)
+}
+
+// terminatorFits checks a result set's terminator against the framing the
+// connection negotiated. Under CLIENT_DEPRECATE_EOF the terminator is an OK
+// packet (at least 7 bytes), never a legacy 5-byte EOF: seeing one means the
+// client did not negotiate it (a connection joined mid-stream, whose framing
+// was assumed), and that EOF is the one that ends the column definitions, not
+// the rows.
+func terminatorFits(logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, buf []byte, command string) error {
+	if decodeCtx.DeprecateEOF() && mysqlUtils.IsEOFPacket(buf) {
+		return framingLostAt(logger, sess, "a legacy EOF in the rows of the %s response, on a connection framed for CLIENT_DEPRECATE_EOF", command)
+	}
+	return nil
+}
+
+// notAResponseHead ends the recording at a response whose first packet is
+// neither OK, ERR nor the head of the response its command gets (an EOF
+// where a result set must start): the packet belongs to something else.
+func notAResponseHead(logger *zap.Logger, sess *supervisor.Session, command string, head *mysql.PacketBundle) error {
+	err := framingLost("the %s response starts with a %s packet", command, head.Header.Type)
+	warnFramingLost(logger, sess, "V2: failed to decode mysql response head; the connection is no longer recorded", err)
+	return err
+}
+
+// readResponsePacket reads the next packet of a response off DestStream,
+// refusing it on its header when its sequence id is not the next one (see
+// packetSeq), before waiting for the payload that header claims.
+func readResponsePacket(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, seq *packetSeq, part string) ([]byte, error) {
+	buf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.DestStream, func(header []byte) error {
+		return seq.take(header, part)
+	})
+	if err != nil {
+		if errors.Is(err, ErrFramingLost) {
+			warnFramingLost(logger, sess, "V2: mysql response packet out of sequence; the connection is no longer recorded", err)
+		}
+		return nil, err
+	}
+	return buf, nil
+}
+
+// readEOFPacket reads the EOF packet that, without CLIENT_DEPRECATE_EOF, ends
+// a run of column (or parameter) definitions. Any other packet there means the
+// definitions were not where this recorder read them.
+func readEOFPacket(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, seq *packetSeq, part string) ([]byte, error) {
+	buf, err := readResponsePacket(ctx, logger, sess, seq, part)
+	if err != nil {
+		return nil, err
+	}
+	if !mysqlUtils.IsEOFPacket(buf) {
+		err := framingLost("the %s of the %s response is not an EOF packet", part, seq.what)
+		warnFramingLost(logger, sess, "V2: mysql response framing lost; the connection is no longer recorded", err)
+		return nil, err
+	}
+	return buf, nil
+}
+
+func assembleTextResultSetV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, headPkt *mysql.PacketBundle, rs *mysql.TextResultSet, seq *packetSeq) (time.Time, error) {
 	ts := sess.DestStream.LastReadTime()
 	// Read column definitions.
 	for i := uint64(0); i < rs.ColumnCount; i++ {
-		buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		buf, err := readResponsePacket(ctx, logger, sess, seq, "column definition")
 		if err != nil {
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
 		col, _, err := rowscols.DecodeColumn(ctx, logger, buf)
 		if err != nil {
-			return ts, fmt.Errorf("decode text column %d: %w", i, err)
+			return ts, undecodable(logger, sess, seq, "column definition", i, err)
 		}
 		rs.Columns = append(rs.Columns, col)
 	}
 
 	// EOF after columns unless CLIENT_DEPRECATE_EOF.
-	if !decodeCtx.DeprecateEOF() {
-		eofBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
-		if err != nil {
-			return ts, err
-		}
-		ts = sess.DestStream.LastReadTime()
-		rs.EOFAfterColumns = eofBuf
+	eofBuf, pending, err := afterDefinitions(ctx, logger, sess, decodeCtx, seq)
+	if err != nil {
+		return ts, err
 	}
+	ts = sess.DestStream.LastReadTime()
+	rs.EOFAfterColumns = eofBuf
 
 	// Rows until terminator.
 	for {
-		buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		buf, err := nextPacket(ctx, logger, sess, seq, &pending, "row")
 		if err != nil {
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
 		if mysqlUtils.IsResultSetTerminator(buf, decodeCtx.DeprecateEOF()) {
+			if err := terminatorFits(logger, sess, decodeCtx, buf, seq.what); err != nil {
+				return ts, err
+			}
 			respType := mysql.StatusToString(mysql.EOF)
 			if decodeCtx.DeprecateEOF() && mysqlUtils.IsOKReplacingEOF(buf) {
 				respType = mysql.StatusToString(mysql.OK)
@@ -1562,44 +1991,58 @@ func assembleTextResultSetV2(ctx context.Context, logger *zap.Logger, sess *supe
 			headPkt.Header.Type = string(mysql.Text)
 			return ts, nil
 		}
+		if rowIsAnError(buf) {
+			return ts, notRecorded("the %s response ends with an error after %d rows", seq.what, len(rs.Rows))
+		}
 		row, _, err := rowscols.DecodeTextRow(ctx, logger, buf, rs.Columns)
 		if err != nil {
-			logger.Debug("V2: decode text row failed", zap.Error(err))
-			continue
+			// Not skipped: a mock without this row replays a different
+			// answer than the server gave. The error retires the parser, and
+			// the supervisor names the test cases the connection leaves out.
+			return ts, undecodable(logger, sess, seq, "row", len(rs.Rows), err)
 		}
 		rs.Rows = append(rs.Rows, row)
 	}
 }
 
-func assembleBinaryResultSetV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, headPkt *mysql.PacketBundle, rs *mysql.BinaryProtocolResultSet) (time.Time, error) {
+func assembleBinaryResultSetV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, headPkt *mysql.PacketBundle, rs *mysql.BinaryProtocolResultSet, seq *packetSeq) (time.Time, error) {
 	ts := sess.DestStream.LastReadTime()
 	for i := uint64(0); i < rs.ColumnCount; i++ {
-		buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		buf, err := readResponsePacket(ctx, logger, sess, seq, "column definition")
 		if err != nil {
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
 		col, _, err := rowscols.DecodeColumn(ctx, logger, buf)
 		if err != nil {
-			return ts, fmt.Errorf("decode binary column %d: %w", i, err)
+			return ts, undecodable(logger, sess, seq, "column definition", i, err)
 		}
 		rs.Columns = append(rs.Columns, col)
 	}
-	if !decodeCtx.DeprecateEOF() {
-		eofBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
-		if err != nil {
-			return ts, err
-		}
-		ts = sess.DestStream.LastReadTime()
-		rs.EOFAfterColumns = eofBuf
+	eofBuf, pending, err := afterDefinitions(ctx, logger, sess, decodeCtx, seq)
+	if err != nil {
+		return ts, err
+	}
+	ts = sess.DestStream.LastReadTime()
+	rs.EOFAfterColumns = eofBuf
+	if opensCursor(eofBuf) {
+		// The execute opened a cursor: its rows stay on the server until the
+		// client asks for them (COM_STMT_FETCH), and the response ends here.
+		// Recorded as it is, with no rows and nothing after the EOF, it replays
+		// what the server answered.
+		headPkt.Header.Type = string(mysql.Binary)
+		return ts, nil
 	}
 	for {
-		buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		buf, err := nextPacket(ctx, logger, sess, seq, &pending, "row")
 		if err != nil {
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
 		if mysqlUtils.IsResultSetTerminator(buf, decodeCtx.DeprecateEOF()) {
+			if err := terminatorFits(logger, sess, decodeCtx, buf, seq.what); err != nil {
+				return ts, err
+			}
 			respType := mysql.StatusToString(mysql.EOF)
 			if decodeCtx.DeprecateEOF() && mysqlUtils.IsOKReplacingEOF(buf) {
 				respType = mysql.StatusToString(mysql.OK)
@@ -1608,64 +2051,107 @@ func assembleBinaryResultSetV2(ctx context.Context, logger *zap.Logger, sess *su
 			headPkt.Header.Type = string(mysql.Binary)
 			return ts, nil
 		}
+		if rowIsAnError(buf) {
+			return ts, notRecorded("the %s response ends with an error after %d rows", seq.what, len(rs.Rows))
+		}
 		row, _, err := rowscols.DecodeBinaryRow(ctx, logger, buf, rs.Columns)
 		if err != nil {
-			logger.Debug("V2: decode binary row failed", zap.Error(err))
-			continue
+			// Not skipped, for the reason given in assembleTextResultSetV2.
+			return ts, undecodable(logger, sess, seq, "row", len(rs.Rows), err)
 		}
 		rs.Rows = append(rs.Rows, row)
 	}
 }
 
-func assembleStmtPrepareV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, sp *mysql.StmtPrepareOkPacket) (time.Time, error) {
+func assembleStmtPrepareV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, sp *mysql.StmtPrepareOkPacket, seq *packetSeq) (time.Time, error) {
 	ts := sess.DestStream.LastReadTime()
+	// With one run of definitions and the framing only assumed, what follows
+	// the run is its EOF or the next command's answer: the response ends with
+	// the run, and the caller holds the PREPARE until the next response
+	// settles it (heldPrepare).
+	open := leavesFramingOpen(decodeCtx, sp)
 	// Param defs.
 	for i := uint16(0); i < sp.NumParams; i++ {
-		buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		buf, err := readResponsePacket(ctx, logger, sess, seq, "parameter definition")
 		if err != nil {
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
 		col, _, err := rowscols.DecodeColumn(ctx, logger, buf)
 		if err != nil {
-			return ts, fmt.Errorf("decode stmt param %d: %w", i, err)
+			return ts, undecodable(logger, sess, seq, "parameter definition", i, err)
 		}
 		sp.ParamDefs = append(sp.ParamDefs, col)
 	}
-	if sp.NumParams > 0 && !decodeCtx.DeprecateEOF() {
-		buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+	var pending []byte
+	if sp.NumParams > 0 && !open {
+		eofBuf, next, err := afterDefinitions(ctx, logger, sess, decodeCtx, seq)
 		if err != nil {
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
-		if mysqlUtils.IsEOFPacket(buf) {
-			sp.EOFAfterParamDefs = buf
-		}
+		sp.EOFAfterParamDefs, pending = eofBuf, next
 	}
 	// Column defs.
 	for i := uint16(0); i < sp.NumColumns; i++ {
-		buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		buf, err := nextPacket(ctx, logger, sess, seq, &pending, "column definition")
 		if err != nil {
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
 		col, _, err := rowscols.DecodeColumn(ctx, logger, buf)
 		if err != nil {
-			return ts, fmt.Errorf("decode stmt column %d: %w", i, err)
+			return ts, undecodable(logger, sess, seq, "column definition", i, err)
 		}
 		sp.ColumnDefs = append(sp.ColumnDefs, col)
 	}
 	if sp.NumColumns > 0 && !decodeCtx.DeprecateEOF() {
-		buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		buf, err := readEOFPacket(ctx, logger, sess, seq, "packet after the column definitions")
 		if err != nil {
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
-		if mysqlUtils.IsEOFPacket(buf) {
-			sp.EOFAfterColumnDefs = buf
-		}
+		sp.EOFAfterColumnDefs = buf
 	}
 	return ts, nil
+}
+
+// afterDefinitions reads what ends a run of definitions. With EOF framing that
+// is an EOF packet (eof). Under CLIENT_DEPRECATE_EOF it is nothing. When the
+// framing is only assumed (DecodeContext.FramingAssumed), the next packet
+// settles it: a legacy EOF means the client never negotiated
+// CLIENT_DEPRECATE_EOF, and the connection is framed with EOFs from here (eof);
+// anything else is the first packet after the definitions under
+// CLIENT_DEPRECATE_EOF, handed back to be read next (pending).
+func afterDefinitions(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, seq *packetSeq) (eof, pending []byte, err error) {
+	if !decodeCtx.DeprecateEOF() {
+		eof, err = readEOFPacket(ctx, logger, sess, seq, "packet after the definitions")
+		return eof, nil, err
+	}
+	if !decodeCtx.FramingAssumed {
+		return nil, nil, nil
+	}
+	buf, err := readResponsePacket(ctx, logger, sess, seq, "packet after the definitions")
+	if err != nil {
+		return nil, nil, err
+	}
+	decodeCtx.FramingAssumed = false
+	if mysqlUtils.IsEOFPacket(buf) {
+		decodeCtx.ClientCaps &^= wire.CLIENT_DEPRECATE_EOF
+		decodeCtx.ClientCapabilities &^= wire.CLIENT_DEPRECATE_EOF
+		return buf, nil, nil
+	}
+	return nil, buf, nil
+}
+
+// nextPacket is the packet a pending read handed back (afterDefinitions), or
+// the next one off the stream.
+func nextPacket(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, seq *packetSeq, pending *[]byte, part string) ([]byte, error) {
+	if buf := *pending; buf != nil {
+		*pending = nil
+		return buf, nil
+	}
+	return readResponsePacket(ctx, logger, sess, seq, part)
 }
 
 // emitMockV2 builds a models.Mock matching the legacy recordMock shape

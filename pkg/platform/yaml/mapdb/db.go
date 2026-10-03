@@ -296,19 +296,20 @@ func (db *MappingDb) DeleteMappingsForSet(ctx context.Context, testSetID string)
 	return nil
 }
 
-// Exists reports whether mappings.yaml is on disk for the given
-// test-set. Used by the test-mode create-if-not-present write path —
-// distinct from Get's second return (which is "has at least one
-// non-empty test entry"). A file with only empty entries should still
-// count as "exists" so we don't overwrite the operator's intentional
-// empty mapping.
+// Exists reports whether the given test-set has a mappings file on disk, in
+// either format, as Get, GetStartup, Insert and UpsertBatch find it. Used by
+// the test-mode create-if-not-present write path — distinct from Get's second
+// return (which is "has at least one non-empty test entry"). A file with only
+// empty entries should still count as "exists" so we don't overwrite the
+// operator's intentional empty mapping.
 func (db *MappingDb) Exists(ctx context.Context, testSetID string) (bool, error) {
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
 		fileName = "mappings"
 	}
-	return yaml.FileExists(ctx, db.logger, mappingPath, fileName)
+	exists, _, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	return exists, err
 }
 
 // decodeMapping reads and decodes a test-set's mappings file.

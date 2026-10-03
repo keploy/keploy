@@ -1,0 +1,8 @@
+mode: set
+example.com/cov/calc.go:3.26,3.40 1 1
+example.com/cov/calc.go:6.2,6.12 1 1
+example.com/cov/calc.go:7.3,8.1 1 0
+example.com/cov/calc.go:9.2,9.20 1 1
+example.com/cov/calc.go:13.2,14.25 2 0
+example.com/cov/calc.go:15.3,16.1 1 0
+example.com/cov/calc.go:17.2,17.10 1 0

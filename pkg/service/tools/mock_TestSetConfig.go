@@ -44,6 +44,36 @@ func (_m *MockTestSetConfig) Read(ctx context.Context, testSetID string) (*model
 	return r0, r1
 }
 
+// ReadForUpdate provides a mock function with given fields: ctx, testSetID
+func (_m *MockTestSetConfig) ReadForUpdate(ctx context.Context, testSetID string) (*models.TestSet, error) {
+	ret := _m.Called(ctx, testSetID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ReadForUpdate")
+	}
+
+	var r0 *models.TestSet
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string) (*models.TestSet, error)); ok {
+		return rf(ctx, testSetID)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string) *models.TestSet); ok {
+		r0 = rf(ctx, testSetID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*models.TestSet)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, testSetID)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
 // ReadSecret provides a mock function with given fields: ctx, testSetID
 func (_m *MockTestSetConfig) ReadSecret(ctx context.Context, testSetID string) (map[string]interface{}, error) {
 	ret := _m.Called(ctx, testSetID)

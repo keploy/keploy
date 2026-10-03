@@ -8,6 +8,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/docker/compose/v2/pkg/api"
+	"go.keploy.io/server/v3/pkg/agent/token"
+	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -134,6 +137,26 @@ func composeLaunchPlan(appCmd, newComposeFile, appComposePath, appServiceName st
 	return "", abs
 }
 
+// keepAgentTokenThroughSudo makes a compose command that runs under sudo keep
+// the agent's control-plane token. The generated keploy-agent service names
+// the token without a value and compose fills it in from its own environment
+// (see App.withAgentToken), but sudo's env_reset drops every variable it is
+// not told to keep — and `sudo docker compose up` is a spelling keploy
+// recognises as compose (utils.FindDockerCmd), so without this the agent would
+// come up with no token at all. --preserve-env names that one variable and
+// nothing else.
+//
+// Only a leading sudo is handled: that is the form keploy detects, and a
+// wrapper that calls sudo inside itself cannot be rewritten anyway.
+func keepAgentTokenThroughSudo(appCmd string) string {
+	trimmed := strings.TrimLeft(appCmd, " \t")
+	rest, ok := strings.CutPrefix(trimmed, "sudo ")
+	if !ok {
+		return appCmd
+	}
+	return appCmd[:len(appCmd)-len(trimmed)] + "sudo --preserve-env=" + token.Env + " " + rest
+}
+
 func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName string) string {
 	// Ensure newComposeFile starts with ./
 	if !strings.HasPrefix(newComposeFile, "./") {
@@ -250,4 +273,71 @@ func ensureComposeExitOnAppFailure(appCmd, serviceName string, preferFailureAbor
 
 	// Fallback: no explicit "up" token detected — do not append flags.
 	return appCmd
+}
+
+// composeUpSemantics reads the `up` flags that change what the run MEANS out of
+// the resolved command string.
+//
+// It parses the same string the shell-out would have executed rather than
+// re-deriving the flags from the compose document, so the in-process path and
+// the shell-out can never disagree: ensureComposeExitOnAppFailure leaves a
+// user-supplied --exit-code-from / --abort-* untouched, and only the final
+// string records which of the two decided them.
+func composeUpSemantics(cmd string) docker.ComposeUpOptions {
+	opts := docker.ComposeUpOptions{OnExit: api.CascadeIgnore}
+	parts := strings.Fields(cmd)
+	for i := 0; i < len(parts); i++ {
+		switch {
+		case parts[i] == "--abort-on-container-exit":
+			opts.OnExit = api.CascadeStop
+		case parts[i] == "--abort-on-container-failure":
+			opts.OnExit = api.CascadeFail
+		case parts[i] == "--exit-code-from" && i+1 < len(parts):
+			opts.ExitCodeFrom = parts[i+1]
+			i++
+		case strings.HasPrefix(parts[i], "--exit-code-from="):
+			opts.ExitCodeFrom = strings.TrimPrefix(parts[i], "--exit-code-from=")
+		}
+	}
+	// --exit-code-from IMPLIES --abort-on-container-exit. The CLI does this
+	// itself (compose v2.40.3 cmd/compose/up.go), and without it a command
+	// carrying only --exit-code-from would leave Up blocking after the app
+	// exited, where the shell-out returns. --abort-on-container-failure is the
+	// documented exception and keeps precedence.
+	//
+	// keploy's own generated commands always carry both flags
+	// (ensureComposeExitOnAppFailure), so nothing reaches this today — which is
+	// exactly why it is worth stating: the claim above is that the two paths
+	// cannot disagree, and that has to hold for inputs keploy does not
+	// currently produce, not only for the ones it does.
+	if opts.ExitCodeFrom != "" && opts.OnExit == api.CascadeIgnore {
+		opts.OnExit = api.CascadeStop
+	}
+	return opts
+}
+
+// composeProjectScope returns the -p/--project-name and --project-directory
+// values from the command, so the library resolves the SAME project the
+// shell-out would have. Both are empty when the command sets neither, which is
+// the normal case: compose then derives the name from the document or the
+// working directory.
+func composeProjectScope(cmd string) (projectName, projectDir string) {
+	parts := strings.Fields(cmd)
+	for i := 0; i < len(parts); i++ {
+		switch {
+		case (parts[i] == "-p" || parts[i] == "--project-name") && i+1 < len(parts):
+			projectName = parts[i+1]
+			i++
+		case strings.HasPrefix(parts[i], "-p="):
+			projectName = strings.TrimPrefix(parts[i], "-p=")
+		case strings.HasPrefix(parts[i], "--project-name="):
+			projectName = strings.TrimPrefix(parts[i], "--project-name=")
+		case parts[i] == "--project-directory" && i+1 < len(parts):
+			projectDir = parts[i+1]
+			i++
+		case strings.HasPrefix(parts[i], "--project-directory="):
+			projectDir = strings.TrimPrefix(parts[i], "--project-directory=")
+		}
+	}
+	return projectName, projectDir
 }

@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -199,6 +200,9 @@ func (d *trickleInstrumentation) GetOutgoing(ctx context.Context, _ models.Outgo
 }
 
 func (d *trickleInstrumentation) Run(_ context.Context, _ models.RunOptions) models.AppError {
+	// The calls behind these mocks were made while the runner ran: the agent
+	// is still handing them over after it exits.
+	captured := time.Now()
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
@@ -212,7 +216,7 @@ func (d *trickleInstrumentation) Run(_ context.Context, _ models.RunOptions) mod
 			select {
 			case <-d.captureCtx.Done():
 				return
-			case d.out <- &models.Mock{Name: "trickle-" + string(rune('a'+i)), Kind: models.HTTP}:
+			case d.out <- &models.Mock{Name: "trickle-" + string(rune('a'+i)), Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: captured}}:
 			}
 		}
 	}()
@@ -252,5 +256,197 @@ func TestRecord_DrainKeepsWaitingWhileMocksStillArrive(t *testing.T) {
 
 	if got := db.inserted(); len(got) != want {
 		t.Fatalf("persisted %d mock(s) %v, want %d — the drain stopped waiting while the agent was still handing mocks over", len(got), got, want)
+	}
+}
+
+// A backlog the agent is still handing over when the runner exits is drained
+// for as long as it keeps coming: a sink still draining is not cut off at a
+// fixed deadline (it used to be, at 5 s).
+func TestRecord_DrainIsNotCutOffWhileMocksStillArrive(t *testing.T) {
+	const want = 20
+	inst := &trickleInstrumentation{
+		out:     make(chan *models.Mock, want),
+		spacing: mockDrainQuiet - 150*time.Millisecond, // 20 of them: ~7 s
+		count:   want,
+	}
+	db := &recordingMockDB{}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "backlog-test"
+	if err := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background()); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	inst.wg.Wait()
+	if got := db.inserted(); len(got) != want {
+		t.Fatalf("persisted %d of %d mocks: the drain was cut off while the agent was still handing them over", len(got), want)
+	}
+}
+
+// Ctrl+C stops the recording, not the drain of what the agent already has.
+func TestRecord_InterruptStillDrainsWhatTheAgentHas(t *testing.T) {
+	inst := &drainInstrumentation{
+		out:       make(chan *models.Mock, 4),
+		emitAfter: 50 * time.Millisecond,
+	}
+	db := &recordingMockDB{}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "interrupt-test"
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the user interrupted; the runner has already exited
+	_ = New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(ctx)
+	inst.wg.Wait()
+	if got := db.inserted(); len(got) != 2 {
+		t.Fatalf("persisted %v after an interrupt, want both mocks the agent had", got)
+	}
+}
+
+// lingerInstrumentation leaves something running after the runner exits that
+// keeps making calls: their mocks were requested after the runner exited.
+type lingerInstrumentation struct {
+	trickleInstrumentation
+	stop chan struct{}
+}
+
+func (d *lingerInstrumentation) Run(_ context.Context, _ models.RunOptions) models.AppError {
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		defer close(d.out)
+		for i := 0; ; i++ {
+			select {
+			case <-d.stop:
+				return
+			case <-d.captureCtx.Done():
+				return
+			case <-time.After(mockDrainQuiet / 4):
+			}
+			select {
+			case <-d.captureCtx.Done():
+				return
+			case d.out <- &models.Mock{Name: "late", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: time.Now()}}:
+			}
+		}
+	}()
+	return models.AppError{}
+}
+
+// Calls something left running keeps making after the runner exits are not
+// what the agent held at the exit: they must not hold the drain open forever.
+func TestRecord_LingeringCallsDoNotHoldTheDrain(t *testing.T) {
+	inst := &lingerInstrumentation{
+		trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock, 4)},
+		stop:                   make(chan struct{}),
+	}
+	defer close(inst.stop)
+	cfg := &config.Config{}
+	cfg.Mock.Name = "linger-test"
+	done := make(chan error, 1)
+	go func() {
+		done <- New(zap.NewNop(), inst, &recordingMockDB{}, nil, FileStore{}, nil, cfg).Record(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Record never returned while something kept making calls after the runner exited")
+	}
+}
+
+// slowMockDB takes longer than the drain's quiet bound to persist each of the
+// first `slow` mocks: a 12 MB mock (RCA #2's 8,209 rows), or a disk stall.
+type slowMockDB struct {
+	recordingMockDB
+	slow  int
+	delay time.Duration
+}
+
+func (s *slowMockDB) InsertMock(ctx context.Context, m *models.Mock, set string) error {
+	s.mu.Lock()
+	n := len(s.names)
+	s.mu.Unlock()
+	if n < s.slow {
+		time.Sleep(s.delay)
+	}
+	return s.recordingMockDB.InsertMock(ctx, m, set)
+}
+
+// A consumer persisting one mock for longer than the drain's quiet bound is
+// still draining: the mocks the agent holds behind it must not be cut off. The
+// drain counted a mock when the consumer took it, so one slow write looked
+// like a quiet stream, and the capture was torn down with the agent still
+// holding the rest.
+func TestRecord_SlowPersistIsNotCutOff(t *testing.T) {
+	const want = 6
+	inst := &trickleInstrumentation{
+		out:     make(chan *models.Mock), // the agent's stream hands over one at a time
+		spacing: time.Millisecond,
+		count:   want,
+	}
+	db := &slowMockDB{slow: 2, delay: mockDrainQuiet + 400*time.Millisecond}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "slow-sink-test"
+	if err := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background()); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	inst.wg.Wait()
+	if got := db.inserted(); len(got) != want {
+		t.Fatalf("persisted %d of %d mocks the agent held: a slow write ended the drain", len(got), want)
+	}
+}
+
+// pendingInstrumentation is an agent whose parser is behind: a mock requested
+// before the runner exited comes only after a quiet stretch longer than the
+// drain's quiet bound, and the agent says it may still hand one over until
+// then (AgentClient.PendingBefore).
+type pendingInstrumentation struct {
+	trickleInstrumentation
+	quietFor time.Duration
+	pending  atomic.Bool
+	asked    atomic.Int32
+}
+
+func (p *pendingInstrumentation) PendingBefore(context.Context, time.Time) (bool, bool, error) {
+	p.asked.Add(1)
+	return p.pending.Load(), true, nil
+}
+
+func (p *pendingInstrumentation) Run(_ context.Context, _ models.RunOptions) models.AppError {
+	captured := time.Now()
+	p.pending.Store(true)
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		defer close(p.out)
+		select {
+		case <-time.After(p.quietFor):
+		case <-p.captureCtx.Done():
+			return
+		}
+		select {
+		case p.out <- &models.Mock{Name: "late", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: captured}}:
+		case <-p.captureCtx.Done():
+			return
+		}
+		p.pending.Store(false)
+	}()
+	return models.AppError{}
+}
+
+// Quiet is not proof that the agent has handed over what it captured before
+// the runner exited: a parser behind the traffic can be quiet for longer than
+// any grace. An agent that can tell is asked, and the drain goes on while it
+// says it may still hand a mock over.
+func TestRecord_DrainWaitsWhileTheAgentSaysItHoldsMore(t *testing.T) {
+	inst := &pendingInstrumentation{
+		trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)},
+		quietFor:               4 * mockDrainQuiet,
+	}
+	db := &recordingMockDB{}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "pending-test"
+	if err := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background()); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	inst.wg.Wait()
+	if got := db.inserted(); len(got) != 1 || inst.asked.Load() == 0 {
+		t.Fatalf("persisted %v (the agent was asked %d times): the drain ended while the agent said it still held a mock", got, inst.asked.Load())
 	}
 }

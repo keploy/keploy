@@ -32,6 +32,9 @@ type scopeTableSetter interface {
 type mockStatsReader interface {
 	MockStats(ctx context.Context) (models.MockStats, error)
 }
+type servedMockReader interface {
+	ServedMocks(ctx context.Context) (map[string]models.MockState, error)
+}
 type capturedMockDrainer interface {
 	DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error)
 }
@@ -129,16 +132,49 @@ func (a *Agent) HandleCapturedMocks(w http.ResponseWriter, r *http.Request) {
 // HandleMockStats returns a non-draining snapshot of the mock session.
 func (a *Agent) HandleMockStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	stats := models.MockStats{}
-	if s, ok := a.svc.(mockStatsReader); ok {
-		got, err := s.MockStats(r.Context())
-		if err != nil {
-			render.Status(r, http.StatusInternalServerError)
-			render.JSON(w, r, map[string]string{"error": err.Error()})
-			return
-		}
-		stats = got
+	s, ok := a.svc.(mockStatsReader)
+	if !ok {
+		// 501, not 200 with a zero count — the same reason HandleServedMocks
+		// gives below. A caller that treats "this agent cannot report" as
+		// "nothing is stored" reads an unreportable agent as a replaced one,
+		// and a caller that FAILS on a zero count then fails every run against
+		// an agent build without the reader.
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": "this agent cannot report mock stats"})
+		return
+	}
+	stats, err := s.MockStats(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, stats)
+}
+
+// HandleServedMocks reports which mocks have been served so far this session,
+// keyed by mock name. Safe to poll: it reads the agent's never-drained
+// persistent map, so unlike /consumedmocks it takes nothing away from the
+// end-of-run outcome report or the --strict verdict.
+func (a *Agent) HandleServedMocks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s, ok := a.svc.(servedMockReader)
+	if !ok {
+		// 501, not 200 with an empty map: a caller polling for progress has to
+		// be able to tell "this agent cannot report served mocks" from
+		// "nothing has been served yet", or it renders the first as the
+		// second and quietly reports every mock as unserved.
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": "this agent cannot report served mocks"})
+		return
+	}
+	served, err := s.ServedMocks(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, served)
 }
