@@ -359,7 +359,7 @@ func reattachDebugFileSink(logger *zap.Logger) *zap.Logger {
 	if sink == nil || sink.buffered == nil {
 		return logger
 	}
-	debugCore := newRedactingCore(consoleCore(LogCfg, sink.buffered, zap.NewAtomicLevelAt(zap.DebugLevel)))
+	debugCore := newRedactingCore(consoleCore(LogCfg, sink.buffered, debugSinkLevel{sink.capped}))
 	return logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 		return zapcore.NewTee(c, debugCore)
 	}))
@@ -499,6 +499,29 @@ func (s *cappedWriteSyncer) swap(inner zapcore.WriteSyncer) {
 	s.capped.Store(false)
 }
 
+// debugSinkLevel is the level filter of the debug-file branch: every level from
+// Debug up, for as long as the file has room.
+//
+// Once the cap trips, cappedWriteSyncer throws away every byte it is handed. But
+// zap encodes a record before any writer sees it, and encoding is most of what a
+// record costs, so a branch left enabled past the cap keeps paying that cost for
+// output that is dropped. A hot path that logs at Debug fills the file early in
+// a run and then spends the rest of it formatting records nobody can read.
+//
+// Reporting the branch disabled lets zap's level check skip it before encoding,
+// so a record costs nothing on a full sink. (A logger.With still adds its fields
+// to the branch, as it must: a Swap can re-enable the branch later, and the
+// child logger has to carry its fields into the new file.) Swap resets the cap,
+// which re-enables it.
+type debugSinkLevel struct{ capped *cappedWriteSyncer }
+
+func (l debugSinkLevel) Enabled(lvl zapcore.Level) bool {
+	if lvl < zapcore.DebugLevel {
+		return false
+	}
+	return l.capped == nil || !l.capped.Capped()
+}
+
 // DebugFileSink is the caller-side handle for the debug-level file sink
 // attached by AddDebugFileSink. It owns the buffered + capped writer
 // chain in front of the underlying file. Flush before closing the file
@@ -584,7 +607,7 @@ func AddDebugFileSink(logger *zap.Logger, file *os.File, capBytes int64) (*zap.L
 	// empty. 1s keeps the buffering performance benefit while
 	// bounding data-loss-on-crash to ~1s of records.
 	buffered := &zapcore.BufferedWriteSyncer{WS: capped, Size: 256 << 10, FlushInterval: time.Second}
-	debugCore := newRedactingCore(consoleCore(LogCfg, buffered, zap.NewAtomicLevelAt(zap.DebugLevel)))
+	debugCore := newRedactingCore(consoleCore(LogCfg, buffered, debugSinkLevel{capped}))
 	newLogger := logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 		return zapcore.NewTee(c, debugCore)
 	}))

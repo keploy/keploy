@@ -118,6 +118,10 @@ func (p *carryOverPool) file(candidates []*models.Mock, inTree map[carryKey]stru
 			res.leftOut++
 			continue
 		}
+		// Matchers can reach it from here on (see models.Mock.pooled). Every
+		// candidate today comes from a staging's own slices, which marked it
+		// already; this keeps a future caller's mock from being stamped.
+		mk.MarkPooled()
 		p.byKey[k] = carryEntry{mk: mk, size: size}
 		p.bytes += size
 		i := sort.Search(len(p.ordered), func(i int) bool { return recordedBefore(mk, p.ordered[i]) })

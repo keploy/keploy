@@ -56,10 +56,12 @@ type prMockDB struct {
 	updateCalls int
 	// kept is the keep-set of the last prune.
 	kept map[string]models.MockState
+	// filtered is the set's per-test mocks; none by default.
+	filtered []*models.Mock
 }
 
-func (*prMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
-	return nil, nil
+func (m *prMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	return m.filtered, nil
 }
 func (*prMockDB) GetUnFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
 	return nil, nil
@@ -208,6 +210,20 @@ type prInstr struct {
 	lastParams models.MockFilterParams
 	// allParams is every send, in order.
 	allParams []models.MockFilterParams
+	// perTestScope makes the stand-in agent answer each send the way an agent
+	// that reads the consumed history only for its per-test mocks does
+	// (models.ConsumedScopeHeader); scopeSaid is what the client has taken from
+	// the last answer, cleared by a store as the real client clears it.
+	perTestScope bool
+	scopeSaid    bool
+	// storedFiltered and storedUnfiltered are the pools of the last store.
+	storedFiltered, storedUnfiltered []*models.Mock
+}
+
+func (f *prInstr) AgentReadsConsumedPerTestOnly() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.scopeSaid
 }
 
 func (f *prInstr) Setup(context.Context, string, models.SetupOptions) error     { return nil }
@@ -243,13 +259,20 @@ func (f *prInstr) BeforeTestSetCompose(context.Context, string, string, bool) er
 func (f *prInstr) AfterTestRun(context.Context, string, []string, models.TestCoverage) error {
 	return nil
 }
-func (f *prInstr) StoreMocks(context.Context, []*models.Mock, []*models.Mock) error { return nil }
+func (f *prInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scopeSaid = false
+	f.storedFiltered, f.storedUnfiltered = filtered, unfiltered
+	return nil
+}
 func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastParams = params
 	f.allParams = append(f.allParams, params)
 	f.updateCalls++
+	f.scopeSaid = f.perTestScope
 	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates {
 		close(f.appStopped) // the application exits mid-set
 		// Wait for the replayer to ACTUALLY observe the exit rather than

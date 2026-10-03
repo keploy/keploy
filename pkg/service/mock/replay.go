@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/utils"
@@ -188,14 +189,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 4. Load the whole set and push it into the proxy.
 	empty := map[string]bool{}
-	filtered, err := m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), empty, empty)
+	filtered, unfiltered, failedPool, err := m.loadMocks(ctx, name, empty)
 	if err != nil {
-		utils.LogError(m.logger, err, "failed to load per-test mocks", zap.String("mock-set", name))
-		return err
-	}
-	unfiltered, err := m.mockDB.GetUnFilteredMocks(ctx, name, models.BaseTime, time.Now(), empty, empty)
-	if err != nil {
-		utils.LogError(m.logger, err, "failed to load session mocks", zap.String("mock-set", name))
+		utils.LogError(m.logger, err, "failed to load "+failedPool+" mocks", zap.String("mock-set", name))
 		return err
 	}
 	loaded := len(filtered) + len(unfiltered)
@@ -512,13 +508,43 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 	}
 }
 
+// loadMocks reads the mock set's per-test and session pools over the widest
+// window, in one pass over the set's mock file when the store can
+// (pkg.TestSetMocksReader), otherwise with one read per pool. failedPool names
+// the pool whose read failed ("per-test" or "session").
+func (m *mockService) loadMocks(ctx context.Context, name string, mapped map[string]bool) (filtered, unfiltered []*models.Mock, failedPool string, err error) {
+	if reader, ok := m.mockDB.(pkg.TestSetMocksReader); ok {
+		set, err := reader.GetTestSetMocks(ctx, name, models.BaseTime, time.Now(), mapped, mapped)
+		if err != nil {
+			// The pass that failed is the one the per-test pool was read in.
+			return nil, nil, "per-test", err
+		}
+		return set.Filtered, set.Unfiltered, "", nil
+	}
+	filtered, err = m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), mapped, mapped)
+	if err != nil {
+		return nil, nil, "per-test", err
+	}
+	unfiltered, err = m.mockDB.GetUnFilteredMocks(ctx, name, models.BaseTime, time.Now(), mapped, mapped)
+	if err != nil {
+		return nil, nil, "session", err
+	}
+	return filtered, unfiltered, "", nil
+}
+
 // highestMockIndex returns the largest N across the set's existing "mock-N"
 // names, or -1 when the set is empty / has no mock-N names. Seeding the counter
 // to this value makes the next InsertMock name its mock "mock-<N+1>".
 func (m *mockService) highestMockIndex(ctx context.Context, name string) int64 {
 	all := map[string]bool{}
-	filtered, _ := m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all)
-	unfiltered, _ := m.mockDB.GetUnFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all)
+	var filtered, unfiltered []*models.Mock
+	if reader, ok := m.mockDB.(pkg.TestSetMocksReader); ok {
+		set, _ := reader.GetTestSetMocks(ctx, name, models.BaseTime, time.Now(), all, all)
+		filtered, unfiltered = set.Filtered, set.Unfiltered
+	} else {
+		filtered, _ = m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all)
+		unfiltered, _ = m.mockDB.GetUnFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all)
+	}
 	highest := int64(-1)
 	consider := func(mocks []*models.Mock) {
 		for _, mk := range mocks {

@@ -184,3 +184,36 @@ func TestScopedMockDb_StartupTierIsScopedToTheWorker(t *testing.T) {
 		t.Fatal("worker A cannot see its own mock")
 	}
 }
+
+// A scoped worker's keyed walk of the session tier sees what its
+// GetSessionMocks sees, through the manager's index or, when the wrapped store
+// has none, through a walk of that snapshot.
+func TestScopedMockDb_KeyedSessionWalkIsScopedToTheWorker(t *testing.T) {
+	base := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
+	var session []*models.Mock
+	for i, n := range []string{"mine", "theirs", "shared", "mine-unkeyed"} {
+		mk := newMockForTest(n, base.Add(time.Duration(i)*time.Millisecond), models.LifetimeSession)
+		if n != "mine-unkeyed" {
+			mk.Noise = []string{"k"}
+		}
+		session = append(session, mk)
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.SetMocksWithWindow(nil, session, base, base.Add(time.Second))
+	allow := map[string]struct{}{"mine": {}, "mine-unkeyed": {}}
+	universe := map[string]struct{}{"mine": {}, "theirs": {}, "mine-unkeyed": {}}
+
+	walk := func(db integrations.SessionKeyReader) []string {
+		var got []string
+		require.NoError(t, db.RangeSessionMocksWithKey(keyedTestIndex, "k", func(mk *models.Mock) bool {
+			got = append(got, mk.Name)
+			return true
+		}))
+		return got
+	}
+	want := []string{"mine", "shared"}
+	require.Equal(t, want, walk(&scopedMockDb{MockMemDb: mm, allow: allow, universe: universe}))
+	// A wrapped store without the index: the filtered snapshot is walked.
+	require.Equal(t, want, walk(&scopedMockDb{MockMemDb: &fakeMockDb{mocks: session}, allow: allow, universe: universe}))
+}

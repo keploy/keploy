@@ -857,3 +857,88 @@ func BenchmarkBaseline_Write(b *testing.B) {
 		logger.Info("bench", zap.Int("i", i), zap.String("k", "value"))
 	}
 }
+
+// countingObject counts how often zap encodes it, so a test can tell an
+// encoded-then-discarded record from one that was never encoded.
+type countingObject struct{ n *int64 }
+
+func (c countingObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	atomic.AddInt64(c.n, 1)
+	enc.AddString("k", "v")
+	return nil
+}
+
+// A full debug sink must not cost an encode per record. The file branch used to
+// stay enabled past the cap, so every Debug call was formatted in full and then
+// dropped by the capped writer: in a long replay that is most of the agent's
+// logging, and all of it was wasted.
+func TestAddDebugFileSink_CappedSinkSkipsEncoding(t *testing.T) {
+	SetRedactor(nil)
+	console := &syncBuffer{}
+	logger := newConsoleLogger(console, zap.InfoLevel) // console never takes Debug
+
+	tmp, err := os.CreateTemp(t.TempDir(), "capenc-*.log")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	defer tmp.Close()
+	wrapped, sink := AddDebugFileSink(logger, tmp, 2*1024)
+
+	var encoded int64
+	probe := zap.Object("probe", countingObject{&encoded})
+
+	wrapped.Debug("before-cap", probe)
+	if got := atomic.LoadInt64(&encoded); got != 1 {
+		t.Fatalf("a Debug record below the cap was encoded %d times, want 1", got)
+	}
+
+	payload := strings.Repeat("x", 200)
+	for i := 0; i < 50; i++ {
+		wrapped.Debug(payload)
+	}
+	if err := sink.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if !sink.Capped() {
+		t.Fatalf("precondition: sink should be capped after %d bytes", 50*len(payload))
+	}
+
+	atomic.StoreInt64(&encoded, 0)
+	for i := 0; i < 10; i++ {
+		wrapped.Debug("after-cap", probe)
+	}
+	if got := atomic.LoadInt64(&encoded); got != 0 {
+		t.Errorf("a capped sink still encoded %d Debug records it can only discard", got)
+	}
+
+	// Info still reaches the console, which has its own level.
+	wrapped.Info("info-after-cap", probe)
+	if !strings.Contains(console.String(), "info-after-cap") {
+		t.Errorf("capping the file sink silenced the console: %q", console.String())
+	}
+
+	// Swap re-arms the sink: records are encoded and land in the new file.
+	next, err := os.CreateTemp(t.TempDir(), "capenc-next-*.log")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	defer next.Close()
+	if err := sink.Swap(next); err != nil {
+		t.Fatalf("swap: %v", err)
+	}
+	atomic.StoreInt64(&encoded, 0)
+	wrapped.Debug("after-swap", probe)
+	if got := atomic.LoadInt64(&encoded); got != 1 {
+		t.Errorf("after Swap a Debug record was encoded %d times, want 1", got)
+	}
+	if err := sink.Flush(); err != nil {
+		t.Fatalf("flush after swap: %v", err)
+	}
+	contents, err := os.ReadFile(next.Name())
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(contents), "after-swap") {
+		t.Errorf("Debug record missing from the swapped-in file: %q", contents)
+	}
+}
