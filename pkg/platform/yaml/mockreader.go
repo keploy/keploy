@@ -147,16 +147,28 @@ func (r *MockReader) readNextYAMLDocument() ([]byte, error) {
 			return nil, fmt.Errorf("failed to read line %d: %w", r.lineNum, err)
 		}
 
-		trimmedLine := strings.TrimSpace(line)
+		// A YAML document separator only separates at column 0. Anchoring the
+		// check with TrimSpace also stripped LEADING whitespace, so an indented
+		// "---" inside a block scalar -- e.g. a recorded request body that
+		// happens to contain markdown, YAML, or front matter -- was read as the
+		// start of a new document. The reader then handed the parser a fragment
+		// cut mid-scalar and the whole file failed to load, which meant keploy
+		// could not read back a mocks.yaml it had itself written.
+		//
+		// Only trailing whitespace and the line ending may be stripped here.
+		separatorCandidate := strings.TrimRight(line, " \t\r\n")
 
-		if trimmedLine == "---" {
+		if separatorCandidate == "---" {
 			if buffer.Len() == 0 {
 				continue
 			}
 			return buffer.Bytes(), nil
 		}
 
-		if isFirstDoc && buffer.Len() == 0 && strings.HasPrefix(trimmedLine, "#") {
+		// The leading-comment skip genuinely wants a leading-trimmed value, so
+		// it keeps its own: an indented comment above the first document is
+		// still a comment, whereas an indented "---" is not a separator.
+		if isFirstDoc && buffer.Len() == 0 && strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue
 		}
 
