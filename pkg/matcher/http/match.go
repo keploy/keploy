@@ -49,8 +49,16 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	for _, opt := range opts {
 		opt(&mo)
 	}
+
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
+	//
+	// This has to run BEFORE the assertion check below: AssertionMatch reads
+	// actualResponse.Body directly, and on main this clearing always happened
+	// first (it used to be the first thing in the function, with the
+	// assertion check only at the very end). Checking assertions before this
+	// would hand json_contains/json_equal the live, uncleared body for a
+	// BodySkipped test case — a behavior change nobody asked for.
 	var bodySizeResult models.IntResult
 	if tc.HTTPResp.BodySkipped {
 		actualBodySize := int64(len(actualResponse.Body))
@@ -75,6 +83,34 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 		// Clear actual body so body comparison below runs as empty vs empty
 		actualResponse.Body = ""
+	}
+
+	// When assertions are present, they alone decide the verdict (see
+	// AssertionMatch's doc comment) - handle that here, before any of the
+	// response-comparison logic below, so the printed "Testrun passed"/
+	// "Testrun failed" banner always matches the value actually returned.
+	// Previously the banner was printed from the response-comparison result
+	// and the assertion-based verdict was only applied afterwards, so a test
+	// case could print "passed" and still be reported as failed (or vice
+	// versa) whenever the two disagreed.
+	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
+		pass, res := AssertionMatch(tc, actualResponse, logger)
+		if emitFailureLogs {
+			newLogger := ppNew234()
+			newLogger.WithLineInfo = false
+			var banner string
+			if pass {
+				newLogger.SetColorScheme(models.GetPassingColorScheme())
+				banner = newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+			} else {
+				newLogger.SetColorScheme(models.GetFailingColorScheme())
+				banner = newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+			}
+			if _, err := newLogger.Printf(banner); err != nil {
+				utils.LogError(logger, err, "failed to print the logs")
+			}
+		}
+		return pass, res
 	}
 
 	bodyType := models.Plain
@@ -615,10 +651,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if err != nil {
 			utils.LogError(logger, err, "failed to print the logs")
 		}
-	}
-
-	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
-		return AssertionMatch(tc, actualResponse, logger)
 	}
 
 	return pass, res
