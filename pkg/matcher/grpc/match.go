@@ -390,6 +390,15 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		Assessment: bodyAssessment,
 	}
 
+	// When the test case carries assertions (anything beyond the noise entry),
+	// hand off to AssertionMatch — the assertions, not the recorded response,
+	// decide the outcome. This mirrors the HTTP matcher (see http/match.go);
+	// without it a gRPC test with assertions passed whenever the response
+	// matched the recording, silently ignoring the assertions (#4609).
+	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
+		return AssertionMatch(tc, actualResp, logger)
+	}
+
 	return matched, result
 }
 
