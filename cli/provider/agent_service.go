@@ -31,6 +31,7 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 	p := proxy.New(logger, h, cfg)
 	ip := incoming.New(logger, h, cfg)
 	p.SetLiveHandler(ip.ServeLive)
+	ip.SetDialHook(p.NoteListener)
 
 	instrumentation := agent.New(logger, h, p, client, ip, cfg)
 

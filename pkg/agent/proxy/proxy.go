@@ -4283,15 +4283,18 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	if err != nil {
 		return false, nil
 	}
-	owner, ok := listenerOwner(net.ParseIP(host), dest.Port)
+	ip := net.ParseIP(host)
+	owner, ok := listenerOwner(ip, dest.Port)
+	if !ok && ip != nil && ip.IsLoopback() && len(listenInodes(ip, dest.Port)) == 0 {
+		p.logger.Debug("nothing listens at the local destination yet; closing the call instead of mocking it", zap.String("destination", dstAddr))
+		return true, nil
+	}
 	if !ok || !descends(owner, int(p.appPID)) {
 		return false, nil
 	}
 	caller := int(dest.KernelPid)
 	if !descends(caller, owner) {
-		if prev, seen := p.owners.Swap(dest.Port, owner); !seen || prev.(int) != owner {
-			appstart.Note(uint32(owner), uint16(dest.Port))
-		}
+		p.noteOwner(owner, dest.Port)
 	}
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
@@ -4304,4 +4307,25 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	defer dstConn.Close()
 	util.RelayRawPassthrough(srcConn, dstConn)
 	return true, nil
+}
+
+func (p *Proxy) noteOwner(owner int, port uint32) {
+	if prev, seen := p.owners.Swap(port, owner); !seen || prev.(int) != owner {
+		appstart.Note(uint32(owner), uint16(port))
+		p.logger.Debug("an app started listening", zap.Int("pid", owner), zap.Uint32("port", port))
+	}
+}
+
+func (p *Proxy) NoteListener(addr string) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return
+	}
+	if owner, ok := listenerOwner(net.ParseIP(host), uint32(n)); ok && descends(owner, int(p.appPID)) {
+		p.noteOwner(owner, uint32(n))
+	}
 }
