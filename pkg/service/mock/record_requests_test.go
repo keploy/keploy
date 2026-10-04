@@ -120,7 +120,6 @@ func TestRecordRequestsTurnOffWhenTheyCannotBeRecorded(t *testing.T) {
 		warn  string
 	}{
 		{"no test-case store", nil, withRequests, "no test-case store"},
-		{"no app port", &memTestDB{}, func(cfg *config.Config) { cfg.Mock.RecordRequests = true }, "--pass-through-ports"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			core, logs := observer.New(zap.WarnLevel)
@@ -488,4 +487,13 @@ func TestAnAcceptedRecordReplacesTheSetAndLeavesNoCopy(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "only the set itself remains")
+}
+
+func TestRecordRequestsNeedNoAppPort(t *testing.T) {
+	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	require.NoError(t, recordSetWith(t, zap.NewNop(), instr, mapdb.New(zap.NewNop(), t.TempDir(), ""), &memTestDB{}, func(cfg *config.Config) { cfg.Mock.RecordRequests = true }))
+	opts, read := instr.setup()
+	require.True(t, opts.RecordRequests, "the tests' calls to the app are found at connect time, so no port is needed")
+	require.True(t, read)
 }

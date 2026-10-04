@@ -27,6 +27,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/appstart"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
@@ -247,6 +248,9 @@ type Proxy struct {
 	// paths these are ignored. See pkg/agent/proxy/tls/java_detect.go for
 	// the resolution order and rationale.
 	appPID     uint32
+	mockMode   bool
+	live       LiveHandler
+	owners     sync.Map
 	caJavaHome string
 
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
@@ -929,6 +933,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		IsDocker:                  opts.Agent.IsDocker,
 		EnableIPv6Redirect:        opts.Agent.EnableIPv6Redirect,
 		appPID:                    opts.Agent.ClientNSPID,
+		mockMode:                  opts.Agent.MockMode,
 		caJavaHome:                opts.Agent.CAJavaHome,
 		dnsCache:                  newDNSCache(),
 		recordedDNSMocks:          newRecordedDNSMocksCache(),
@@ -2312,6 +2317,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			utils.LogError(p.logger, err, "failed to handle the parser cleanUp")
 		}
 	}()
+
+	if served, err := p.serveTreeListener(parserCtx, srcConn, destInfo, dstAddr); served {
+		return err
+	}
 
 	// Opportunistic TLS intercept: a separate passthrough variant
 	// where we relay bytes verbatim AND peek for a TLS handshake;
@@ -4260,4 +4269,36 @@ func refusedLocally(err error) bool {
 	}
 	ip := net.ParseIP(host)
 	return host == "localhost" || (ip != nil && ip.IsLoopback())
+}
+
+type LiveHandler func(ctx context.Context, conn net.Conn, upstream string, port uint16)
+
+func (p *Proxy) SetLiveHandler(h LiveHandler) { p.live = h }
+
+func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string) (bool, error) {
+	if !p.mockMode || p.IsDocker || p.appPID == 0 {
+		return false, nil
+	}
+	host, _, err := net.SplitHostPort(dstAddr)
+	if err != nil {
+		return false, nil
+	}
+	owner, ok := listenerOwner(net.ParseIP(host), dest.Port)
+	if !ok || !descends(owner, int(p.appPID)) {
+		return false, nil
+	}
+	if prev, seen := p.owners.Swap(dest.Port, owner); !seen || prev.(int) != owner {
+		appstart.Note(uint32(owner), uint16(dest.Port))
+	}
+	caller := int(dest.KernelPid)
+	if p.live != nil && caller != owner && descends(owner, caller) {
+		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
+		return true, nil
+	}
+	dstConn, err := util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
+	if err != nil {
+		return true, err
+	}
+	defer dstConn.Close()
+	return true, p.globalPassThrough(ctx, srcConn, dstConn)
 }

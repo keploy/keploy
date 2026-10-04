@@ -491,3 +491,7 @@ func newReplayConn(initial []byte, c net.Conn) net.Conn {
 func (r *replayConn) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
+
+func (pm *IngressProxyManager) ServeLive(ctx context.Context, conn net.Conn, upstream string, port uint16) {
+	pm.handleConnection(ctx, conn, upstream, pm.logger, pm.tcChan, make(chan struct{}, 1), port)
+}

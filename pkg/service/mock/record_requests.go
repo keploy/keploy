@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
@@ -28,8 +27,6 @@ func (m *mockService) requests() bool {
 	switch {
 	case !ok || m.testDB == nil:
 		m.logger.Warn("the app's incoming requests are not recorded: this build has no test-case store or incoming stream for them")
-	case len(config.GetByPassPorts(m.config)) == 0:
-		m.logger.Warn("the app's incoming requests are not recorded: pass the app's port with --pass-through-ports so the tests' calls reach the app and are recorded as requests, not as mocks")
 	default:
 		return true
 	}

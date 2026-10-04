@@ -328,7 +328,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// compare the app's actual responses with the recorded cases. In mock mode the wrapped process is a
 	// test runner, so a failure to attach here only means no requests are recorded; the egress capture
 	// the run depends on goes ahead.
-	if (opts.Mode == models.MODE_RECORD && !setupOpts.MockMode) || (setupOpts.MockMode && setupOpts.RecordRequests) {
+	if (opts.Mode == models.MODE_RECORD && !setupOpts.MockMode) || (setupOpts.MockMode && setupOpts.RecordRequests && len(agent.GetPortToSendToKernel(ctx, opts.Rules)) > 0) {
 		if err := h.attachIngress(cGroupPath, objs); err != nil {
 			if !setupOpts.MockMode {
 				return err
