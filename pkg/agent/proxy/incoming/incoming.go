@@ -39,11 +39,12 @@ type IngressHook interface {
 }
 
 type IngressProxyManager struct {
-	mu     sync.Mutex
-	active map[uint16]proxyStop
-	logger *zap.Logger
-	hooks  agent.Hooks
-	tcChan chan *models.TestCase
+	mu       sync.Mutex
+	active   map[uint16]proxyStop
+	logger   *zap.Logger
+	hooks    agent.Hooks
+	tcChan   chan *models.TestCase
+	mockMode bool
 	// incomingOpts is read by ingress capture goroutines on every
 	// captured request (CaptureHook call sites in http.go) and written
 	// by IngressProxyManager.Start on every recorder (re)connect. Pre-
@@ -87,6 +88,7 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		hooks:       h,
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
+		mockMode:    cfg.Agent.MockMode,
 		synchronous: cfg.Agent.Synchronous,
 		mapping:     !cfg.DisableMapping,
 		sampling:    false,
@@ -223,6 +225,10 @@ func (pm *IngressProxyManager) StopAll() {
 
 func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 	eventChan, err := pm.hooks.WatchBindEvents(ctx)
+	if err != nil && pm.mockMode {
+		pm.logger.Debug("not watching app binds: the tests' calls to the app are found when they connect", zap.Error(err))
+		return
+	}
 	if err != nil {
 		pm.logger.Error("Failed to start watching for ingress events", zap.Error(err))
 		return
