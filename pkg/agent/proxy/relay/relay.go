@@ -231,6 +231,12 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	// See [Config.ParserCanResyncAfterGap] for why the default is "cannot".
 	r.teeC2D.parserCanResync = cfg.ParserCanResyncAfterGap
 	r.teeD2C.parserCanResync = cfg.ParserCanResyncAfterGap
+	// Whether a desynced tee ends its stream at the hole. See
+	// [Config.EndAtHole].
+	if end := cfg.EndAtHole; end != nil {
+		r.teeC2D.endAtHole = func(reason string) { end(fakeconn.FromClient, reason) }
+		r.teeD2C.endAtHole = func(reason string) { end(fakeconn.FromDest, reason) }
+	}
 
 	var localAddr, remoteAddr net.Addr
 	if src != nil {

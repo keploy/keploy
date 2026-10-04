@@ -144,11 +144,11 @@ type tee struct {
 	// owner's recording anything, and the tee warns of the hole only then
 	// (see [Config.OnCaptureDesync]).
 	onDesync func(reason string) bool
-	// desynced makes onDesync and its log fire once, not once per chunk.
-	// It is also the latch push consults for [DropDesynced]: it is set for
-	// good on the first desyncing drop and never cleared, which is exactly
-	// right — the stream position is lost permanently, so there is no event
-	// that could legitimately clear it.
+	// desynced is the latch push consults for [DropDesynced], and a stream
+	// ended at its hole ends on (drain): it is set for good on the first
+	// desyncing drop, once onDesync has returned, and never cleared, which
+	// is exactly right — the stream position is lost permanently, so there
+	// is no event that could legitimately clear it.
 	desynced atomic.Bool
 
 	// parserCanResync records whether the parser consuming this tee can
@@ -161,6 +161,21 @@ type tee struct {
 	// [New] sets it before the forwarder goroutines that call push exist,
 	// and the relay never changes it mid-connection.
 	parserCanResync bool
+
+	// endAtHole, set by [New] from [Config.EndAtHole] for this direction,
+	// ends the stream at its hole when the parser cannot re-align
+	// (endsAtHole): drain ends out once desynced is set and every chunk
+	// queued before the hole is delivered, calling it first with holeReason.
+	// The tee then marks no mock incomplete for the hole (drop). Nil keeps
+	// the stream open, fed nothing, until close. Read-only after
+	// construction, like parserCanResync.
+	endAtHole func(reason string)
+	// holeReason is why the chunk that desynced this tee was lost: the
+	// reason of its first desyncing drop. Storing it is what makes that drop
+	// the first, so onDesync and the WARN fire once, not once per chunk. It
+	// is stored before desynced is set, so a drain that sees desynced sees
+	// it.
+	holeReason atomic.Pointer[string]
 
 	// mu guards q, qBytes and closed. It is never held across a send on
 	// out, so a stalled consumer cannot block push.
@@ -402,9 +417,25 @@ func isDesyncingDrop(reason string) bool {
 	return reason == DropPerConnCap || reason == DropMemoryPressure
 }
 
+// firstHole reports whether a drop for reason is this tee's hole: its first
+// desyncing drop. It stores the reason (holeReason) when it is.
+func (t *tee) firstHole(reason string) bool {
+	if !isDesyncingDrop(reason) || t.desynced.Load() {
+		return false
+	}
+	r := reason
+	return t.holeReason.CompareAndSwap(nil, &r)
+}
+
 func (t *tee) drop(reason string) {
 	n := t.drops.Add(1)
-	if t.onDrop != nil {
+	// A stream ended at its hole tells its parser where the hole is (see
+	// [Config.EndAtHole]): a mark would void whichever mock the parser emits
+	// next, which is one from before the hole, since it runs behind its
+	// capture. So neither the chunk lost at the hole nor those refused after
+	// it mark one.
+	hole := isDesyncingDrop(reason) || reason == DropDesynced
+	if t.onDrop != nil && !(hole && t.endsAtHole()) {
 		t.onDrop(reason)
 	}
 	// The first UNINTENDED drop desyncs this connection's capture
@@ -421,17 +452,20 @@ func (t *tee) drop(reason string) {
 	// connection is already ending. Treating that as a desync would fire
 	// this warning on every normal abort and cancel a relay that is already
 	// shutting down.
-	if isDesyncingDrop(reason) && !t.desynced.Swap(true) {
+	if t.firstHole(reason) {
 		// Report the hole first, so the owner can suppress the test cases
 		// that overlap it instead of shipping them mock-less: the owner
 		// stops the connection's recording at the hole, and the span of
-		// what it carries from then on is open before the WARN below is
-		// written. Reported after it, the traffic carried while the WARN
-		// was written was in no span.
+		// what it carries from then on is open before push refuses what
+		// follows the hole (desynced), before a stream ended at its hole
+		// ends and its parser can return, and before the WARN below is
+		// written. Reported after them, the traffic in between was in no
+		// span.
 		costs := true
 		if t.onDesync != nil {
 			costs = t.onDesync(reason)
 		}
+		t.desynced.Store(true)
 		// Warned of only when it costs the recording something: a hole as
 		// the owner's recording stops is the end of the connection, and the
 		// WARN would say that every test case recorded from then on is left
@@ -455,6 +489,14 @@ func (t *tee) drop(reason string) {
 				zap.String("reason", reason),
 				zap.String("next_step", next),
 			)
+		}
+		// Wake a drain parked on an empty queue: a stream ended at its hole
+		// ends now if nothing before the hole is left to deliver.
+		if t.endsAtHole() {
+			select {
+			case t.wake <- struct{}{}:
+			default:
+			}
 		}
 	}
 	if t.logger != nil && n&(n-1) == 0 {
@@ -498,6 +540,21 @@ func (t *tee) drain() {
 	for {
 		t.mu.Lock()
 		if len(t.q) == 0 {
+			// A stream ended at its hole ends here: push queues nothing
+			// after the hole, so every chunk teed before it is delivered.
+			// Checked under mu, and before closed: a chunk queued before the
+			// hole is in q by the time desynced is set (the forwarder
+			// queues, then loses the next chunk), and a connection that
+			// closes after the hole still ends at it.
+			if t.endsAtHole() && t.desynced.Load() {
+				t.mu.Unlock()
+				reason := DropDesynced
+				if r := t.holeReason.Load(); r != nil {
+					reason = *r
+				}
+				t.endAtHole(reason)
+				return
+			}
 			if t.closed {
 				t.mu.Unlock()
 				return
@@ -812,3 +869,8 @@ func (t *tee) close() {
 // waitDone blocks until the drain goroutine has exited. Used by the relay
 // teardown and by tests.
 func (t *tee) waitDone() { <-t.done }
+
+// endsAtHole reports whether this tee ends its stream at its hole (see
+// [Config.EndAtHole]): its parser asked for it and cannot re-align, so it is
+// fed nothing after the hole.
+func (t *tee) endsAtHole() bool { return t.endAtHole != nil && !t.parserCanResync }

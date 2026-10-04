@@ -12,9 +12,11 @@ import (
 // The owner of a tee stops the connection's recording when the tee reports its
 // hole (Config.OnCaptureDesync), and the span of what the connection carries
 // from then on opens there. So the tee reports it first, as the chunk is lost:
-// before it writes the hole's WARN. Reported after it, what the connection
-// carried while the WARN was written, on a starved agent for a while, was in
-// no span.
+// before it writes the hole's WARN, and before it marks the stream desynced,
+// which a stream ended at its hole ends on. Reported after the WARN, what the
+// connection carried while the WARN was written, on a starved agent for a
+// while, was in no span; reported after the mark, a drain could end the
+// stream, and its parser return, before the recording was stopped at the hole.
 func TestTee_ReportsItsHoleBeforeAnythingElseSeesIt(t *testing.T) {
 	t.Parallel()
 	core, logs := observer.New(zapcore.DebugLevel)
@@ -24,9 +26,10 @@ func TestTee_ReportsItsHoleBeforeAnythingElseSeesIt(t *testing.T) {
 		tt.close()
 		tt.waitDone()
 	})
-	var warned []bool
+	type seen struct{ warned, desynced bool }
+	var at []seen
 	tt.onDesync = func(string) bool {
-		warned = append(warned, logs.FilterLevelExact(zapcore.WarnLevel).Len() > 0)
+		at = append(at, seen{warned: logs.FilterLevelExact(zapcore.WarnLevel).Len() > 0, desynced: tt.desynced.Load()})
 		return true
 	}
 
@@ -36,11 +39,14 @@ func TestTee_ReportsItsHoleBeforeAnythingElseSeesIt(t *testing.T) {
 	if tt.push(mkChunk("x")) {
 		t.Fatal("a chunk after the hole was admitted")
 	}
-	if len(warned) != 1 {
-		t.Fatalf("the hole was reported %d times, want once", len(warned))
+	if len(at) != 1 {
+		t.Fatalf("the hole was reported %d times, want once", len(at))
 	}
-	if warned[0] {
+	if at[0].warned {
 		t.Error("the hole was reported after its WARN was written")
+	}
+	if at[0].desynced {
+		t.Error("the hole was reported after the stream was marked desynced: a stream ended at its hole could end, and its parser return, before the recording was stopped there")
 	}
 	if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != 1 {
 		t.Errorf("%d WARNs for the hole, want one", n)

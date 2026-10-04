@@ -212,9 +212,12 @@ type Session struct {
 	// endedWithConnection, per fakeconn.Direction: that stream ended because
 	// its connection did (MarkEndedWithConnection).
 	endedWithConnection [2]atomic.Bool
-	hookMu              sync.Mutex
-	lastReqMu           sync.Mutex
-	lastReqTimestamp    time.Time // most recent ReqTimestampMock emitted on this session
+	// endedAtHole, per fakeconn.Direction: that stream ended at a capture
+	// hole, and why (MarkEndedAtHole). nil while it has not.
+	endedAtHole      [2]atomic.Pointer[string]
+	hookMu           sync.Mutex
+	lastReqMu        sync.Mutex
+	lastReqTimestamp time.Time // most recent ReqTimestampMock emitted on this session
 
 	// incomplete is the incomplete-mock flag (MarkMockIncomplete): nil while
 	// it is clear, else why it was set, the first reason since it was last
@@ -325,6 +328,42 @@ func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {
 		return false
 	}
 	return s.endedWithConnection[dir].Load()
+}
+
+// MarkEndedAtHole says dir's stream ended at a capture hole: a chunk of it was
+// lost, for reason (a relay drop reason, such as relay.DropPerConnCap), and the
+// capture delivers nothing after it, while the connection may go on. The stream
+// carries every byte captured before the hole. The caller calls it before it
+// ends the stream (closes its chunk channel), so a parser that reaches the end
+// of the stream sees it. The first reason is kept. Nil-safe.
+//
+// Like MarkEndedWithConnection, it is tied to the end of the stream, the one
+// place a parser that runs behind its capture can be sure of. A mark of the
+// incomplete-mock flag (MarkMockIncomplete) is set when the chunk is lost, and
+// the parser takes it, or EmitMock does, at its next chunk or mock, which can
+// be a full queue of chunks captured before the hole later. The relay calls it
+// for a parser that asks for it (relay.Config.EndAtHole,
+// integrations.EndAtHoleCapable), and marks no mock incomplete for the hole.
+func (s *Session) MarkEndedAtHole(dir fakeconn.Direction, reason string) {
+	if s == nil || int(dir) >= len(s.endedAtHole) {
+		return
+	}
+	r := reason
+	s.endedAtHole[dir].CompareAndSwap(nil, &r)
+}
+
+// EndedAtHole reports whether dir's stream ended at a capture hole, and why
+// (MarkEndedAtHole). A parser asks it once the stream has ended: an end with no
+// hole is the connection's, or the capture's. Nil-safe.
+func (s *Session) EndedAtHole(dir fakeconn.Direction) (reason string, ok bool) {
+	if s == nil || int(dir) >= len(s.endedAtHole) {
+		return "", false
+	}
+	r := s.endedAtHole[dir].Load()
+	if r == nil {
+		return "", false
+	}
+	return *r, true
 }
 
 // MarkMockComplete clears the incomplete-mock flag, and with it the mark that
@@ -455,7 +494,7 @@ func (s *Session) LeaveOutIfIncomplete(m *models.Mock) bool {
 // (ReportLeftOut). The keploy/integrations parsers call this session's methods
 // directly, not through an interface they probe for: mongo/v2 calls
 // RecordOrphanWindow, for its resync holes, and ReportLeftOut, and http2 calls
-// TakeMockIncomplete and ReportLeftOut (their tests also call
+// TakeMockIncomplete, ReportLeftOut and EndedAtHole (their tests also call
 // ResetLeftOutWarningsForTest and SyncMockManager.MocksLeftOut). So the names
 // and signatures of those methods are an API across the two repositories:
 // renaming one, or changing its signature, breaks the integrations build.

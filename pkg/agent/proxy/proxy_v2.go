@@ -280,6 +280,11 @@ func (p *Proxy) recordViaSupervisor(
 	// them at two sites is what let the hold ship switched off.
 	applyClientBrakes(&relayCfg, svSess, parser, logger, parserType)
 
+	// A parser that cannot re-align after a hole, and asks for it, gets a
+	// direction that lost a chunk ended where the hole is, with the session
+	// saying so. See relay.Config.EndAtHole.
+	applyEndAtHole(&relayCfg, svSess, parser)
+
 	r := relay.New(relayCfg, srcConn, dstConn)
 
 	svSess.ClientStream = r.ClientStream()
@@ -798,4 +803,31 @@ func parserClientBrakes(parser integrations.Integrations, logger *zap.Logger, pa
 func parserCanResyncAfterGap(parser integrations.Integrations) bool {
 	gr, ok := parser.(integrations.GapResyncCapable)
 	return ok && gr.CanResyncAfterGap()
+}
+
+// applyEndAtHole has the relay end a direction at its capture hole, and say so
+// on the session (Session.MarkEndedAtHole), for a parser that asks for it
+// (integrations.EndAtHoleCapable) and cannot re-align after a hole: cfg's
+// ParserCanResyncAfterGap is already set. A parser that re-aligns is fed the
+// bytes after the hole, so it has no hole to end at.
+//
+// It is one function with the relay's and the session's halves for the reason
+// applyClientBrakes is: an EndAtHole wired to anything but the session leaves
+// the parser an end it cannot tell from the connection's, and one never wired
+// leaves it waiting at the hole, with no test failing for either unless the
+// production path is driven.
+func applyEndAtHole(cfg *relay.Config, sess *supervisor.Session, parser integrations.Integrations) {
+	if cfg == nil || sess == nil || cfg.ParserCanResyncAfterGap || !parserCanEndAtHole(parser) {
+		return
+	}
+	cfg.EndAtHole = sess.MarkEndedAtHole
+}
+
+// parserCanEndAtHole reports whether parser asks for a direction that lost a
+// chunk to be ended at the hole (integrations.EndAtHoleCapable). Absent the
+// capability the answer is false: a parser that returns at its first io.EOF
+// would end the relay, and the application's connection, at a capture hole.
+func parserCanEndAtHole(parser integrations.Integrations) bool {
+	ep, ok := parser.(integrations.EndAtHoleCapable)
+	return ok && ep.CanEndAtHole()
 }

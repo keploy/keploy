@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
 )
 
@@ -255,8 +256,10 @@ type Config struct {
 	// the traffic, by when the test cases in between have been streamed.
 	//
 	// It is called first, on the forwarder's goroutine as the chunk is lost,
-	// before the tee logs the hole: an owner that stops the connection's
-	// recording here stops it at the hole. It must not block.
+	// before the tee refuses anything after the hole, logs it, or ends a
+	// stream at it (EndAtHole): an owner that stops the connection's
+	// recording here stops it at the hole, before its parser can learn of
+	// it. It must not block.
 	OnCaptureDesync func(reason string) bool
 
 	// OnClientChunkTeed is invoked after each successful tee of a
@@ -435,6 +438,27 @@ type Config struct {
 	// Either way the FORWARD path is untouched: the relay writes every byte
 	// to the real peer before it ever offers the chunk to a tee.
 	ParserCanResyncAfterGap bool
+
+	// EndAtHole, when set and ParserCanResyncAfterGap is false, ends a
+	// direction at its hole: once a tee has desynced and delivered every
+	// chunk it queued before the hole, it ends its FakeConn (io.EOF), and
+	// calls EndAtHole first, with the direction and the reason the chunk was
+	// lost ([DropPerConnCap] or [DropMemoryPressure]). The caller wires it to
+	// supervisor.Session.MarkEndedAtHole, so the parser that reaches the end
+	// learns it is the hole's and not the connection's. The tee then marks
+	// no mock incomplete (OnMarkMockIncomplete) for the lost chunk, nor for
+	// the chunks it refuses after it ([DropDesynced]): the parser learns of
+	// the hole where it is, and a mark would void whichever mock it emits
+	// next, one from before the hole. OnCaptureDesync fires as before.
+	//
+	// Nil (the default) keeps a desynced direction's FakeConn open, fed
+	// nothing, until the connection ends. Only a parser that reads each
+	// direction to its own end may have it set
+	// ([integrations.EndAtHoleCapable]): when a V2 parser returns, the
+	// dispatcher ends the relay, and the application's connection with it,
+	// so one that returns at its first io.EOF would cut the connection at a
+	// capture hole. The forward path is untouched either way.
+	EndAtHole func(dir fakeconn.Direction, reason string)
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields
