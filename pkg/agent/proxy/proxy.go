@@ -4313,7 +4313,8 @@ func (p *Proxy) watchListeners(ctx context.Context) {
 	for inode := range listenTable() {
 		seen[inode] = true
 	}
-	t := time.NewTicker(25 * time.Millisecond)
+	self := os.Getpid()
+	t := time.NewTicker(2 * time.Millisecond)
 	defer t.Stop()
 	for {
 		select {
@@ -4328,7 +4329,7 @@ func (p *Proxy) watchListeners(ctx context.Context) {
 			}
 			seen[inode] = true
 			owner, ok := ownerOf(inode)
-			if !ok || appstart.IsWorker(owner) || !descends(owner, int(p.appPID)) {
+			if !ok || owner == self || appstart.IsWorker(owner) || !descends(owner, int(p.appPID)) {
 				continue
 			}
 			appstart.Note(uint32(owner), uint16(port))
