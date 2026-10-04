@@ -96,6 +96,8 @@ test:
 record:
   recordTimer: 0s
   filters: []
+  # Record static assets and binary downloads as test cases as well as APIs.
+  includeStaticAssets: false
   sync: false
   memoryLimit: 0
   testCaseNaming: descriptive

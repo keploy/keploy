@@ -2061,7 +2061,8 @@ func (r *Recorder) Start(ctx context.Context) error {
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 	incomingOpts := models.IncomingOptions{
-		Filters: r.config.Record.Filters,
+		Filters:             r.config.Record.Filters,
+		IncludeStaticAssets: r.config.Record.IncludeStaticAssets,
 	}
 
 	// Create channels to receive incoming and outgoing data.

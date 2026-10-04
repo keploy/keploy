@@ -400,6 +400,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	case "record":
 		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
+		cmd.Flags().Bool("include-static-assets", c.cfg.Record.IncludeStaticAssets, "Record successful static asset and binary download responses as test cases (skipped by default)")
 		cmd.Flags().Int("enable-sampling", c.cfg.Record.EnableSampling, "Enable sampling of testcases")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
@@ -516,6 +517,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"goCoverage":                "go-coverage",
 		"fallBackOnMiss":            "fallBack-on-miss",
 		"basePath":                  "base-path",
+		"includeStaticAssets":       "include-static-assets",
 		"updateTemplate":            "update-template",
 		"mocking":                   "mocking",
 		"configPath":                "config-path",
