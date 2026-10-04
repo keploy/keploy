@@ -139,6 +139,8 @@ type ScopeWindow struct {
 	PID   uint32 `json:"pid,omitempty"`
 	Dir   string `json:"dir,omitempty"`
 	Suite bool   `json:"suite,omitempty"`
+	App   bool   `json:"app,omitempty"`
+	Port  uint16 `json:"port,omitempty"`
 }
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
@@ -253,4 +255,10 @@ type AfterTestRunReq struct {
 	TestRunID  string       `json:"testRunID"`
 	TestSetIDs []string     `json:"testSetIDs"`
 	Coverage   TestCoverage `json:"coverage"`
+}
+
+type AppStart struct {
+	At   time.Time `json:"at"`
+	PID  uint32    `json:"pid"`
+	Port uint16    `json:"port"`
 }

@@ -282,6 +282,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	if m.mappingDB != nil {
 		windows = m.agentWindows(persistCtx)
 	}
+	starts := appStarts(windows)
 	windows, suites := splitSuites(windows)
 	if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
@@ -305,12 +306,13 @@ func (m *mockService) Record(ctx context.Context) error {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
 				}
 			}
+			restarts := startsByTest(windows, starts)
 			for _, w := range windows {
-				if w.Dir == "" {
+				if w.Dir == "" && restarts[w.Name] == 0 {
 					continue
 				}
 				tc := byCase[w.Name]
-				tc.Dir = w.Dir
+				tc.Dir, tc.Starts = w.Dir, restarts[w.Name]
 				byCase[w.Name] = tc
 			}
 			m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded), suites)

@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/appstart"
 	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -236,6 +237,7 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 			zap.Uint16("Orig_App_Port", e.OrigAppPort),
 			zap.Uint16("New_App_Port", e.NewAppPort))
 
+		appstart.Note(e.PID, e.OrigAppPort)
 		pm.StartIngressProxy(ctx, e.OrigAppPort, e.NewAppPort)
 	}
 	pm.logger.Debug("Stopping ingress event listener as the event channel was closed.")

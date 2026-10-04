@@ -323,6 +323,9 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		if in.Dir != "" {
 			tc.Dir = in.Dir
 		}
+		if in.Starts > 0 {
+			tc.Starts = in.Starts
+		}
 	}
 	if len(suites) > 0 {
 		mapping.Suites = suites

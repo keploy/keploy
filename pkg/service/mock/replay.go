@@ -302,8 +302,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	// 10. Summarise what was served and missed.
+	all := m.agentWindows(ctx)
 	detail := replayDetail{
-		windows:  testWindows(m.agentWindows(ctx)),
+		windows:  testWindows(all),
+		starts:   appStarts(all),
 		expected: m.expectedMocks(ctx, name),
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),
@@ -594,7 +596,8 @@ type ReplayOutcome struct {
 	// Cases is each recorded request replayed, with the app's answer compared to the recording.
 	Cases []CaseOutcome
 	// Mocks is what each test used and missed, next to what it recorded.
-	Mocks []FlowMocks
+	Mocks  []FlowMocks
+	Starts map[string]int
 }
 
 // replayOutcomeReporter is installed by a wrapping build (enterprise) from
@@ -721,6 +724,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				Missed:   len(misses),
 				Cases:    pairCases(detail.windows, detail.recorded, detail.actual, m.compareCase),
 				Mocks:    attributeMocks(detail.windows, detail.expected, consumed, misses),
+				Starts:   startsByTest(detail.windows, detail.starts),
 			})
 		}
 	}

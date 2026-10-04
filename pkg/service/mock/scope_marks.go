@@ -72,6 +72,9 @@ func splitSuites(windows []models.ScopeWindow) ([]models.ScopeWindow, []models.S
 	var tests []models.ScopeWindow
 	var suites []models.SuiteSpan
 	for _, w := range windows {
+		if w.App {
+			continue
+		}
 		if w.Suite {
 			suites = append(suites, models.SuiteSpan{Dir: w.Dir, Start: w.Start, End: w.End})
 			continue
@@ -84,4 +87,32 @@ func splitSuites(windows []models.ScopeWindow) ([]models.ScopeWindow, []models.S
 func testWindows(windows []models.ScopeWindow) []models.ScopeWindow {
 	tests, _ := splitSuites(windows)
 	return tests
+}
+
+func appStarts(windows []models.ScopeWindow) []models.ScopeWindow {
+	var out []models.ScopeWindow
+	for _, w := range windows {
+		if w.App {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+func startsByTest(tests, starts []models.ScopeWindow) map[string]int {
+	var out map[string]int
+	for _, w := range tests {
+		if parentOf(tests, w.Name) != "" {
+			continue
+		}
+		for _, s := range starts {
+			if !s.Start.Before(w.Start) && !s.Start.After(w.End) {
+				if out == nil {
+					out = map[string]int{}
+				}
+				out[w.Name]++
+			}
+		}
+	}
+	return out
 }

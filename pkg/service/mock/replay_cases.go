@@ -42,6 +42,7 @@ type CaseReader interface {
 // replayDetail is everything the outcome needs to say what each test did this run.
 type replayDetail struct {
 	windows  []models.ScopeWindow
+	starts   []models.ScopeWindow
 	expected map[string][]models.MockEntry
 	recorded map[string][]*models.TestCase
 	actual   []*models.TestCase

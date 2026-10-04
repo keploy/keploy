@@ -170,3 +170,23 @@ func TestUpsertCasesKeepsTheSuites(t *testing.T) {
 		t.Fatalf("suites came back as %+v", mapping.Suites)
 	}
 }
+
+func TestUpsertCasesKeepsATestsRestarts(t *testing.T) {
+	dir := t.TempDir()
+	db := NewWithFormat(zap.NewNop(), dir, "", yaml.FormatYAML)
+	ctx := context.Background()
+	if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"orders.TestReload": {Starts: 2}}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := yaml.ReadFileF(ctx, zap.NewNop(), dir+"/set", "mappings", yaml.FormatYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping, err := DecodeMappingF(data, zap.NewNop(), yaml.FormatYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mapping.TestCases) != 1 || mapping.TestCases[0].Starts != 2 {
+		t.Fatalf("came back as %+v", mapping.TestCases)
+	}
+}
