@@ -29,6 +29,7 @@ func (p *Proxy) watchStarts(ctx context.Context) {
 		p.logger.Debug("app starts are not watched: the process event feed is not available", zap.Error(err))
 		return
 	}
+	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, 8<<20)
 	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Groups: cnIdxProc, Pid: uint32(os.Getpid())}); err != nil {
 		unix.Close(fd)
 		p.logger.Debug("app starts are not watched: the process event feed could not be joined", zap.Error(err))
@@ -58,12 +59,15 @@ func (p *Proxy) watchStarts(ctx context.Context) {
 		buf := make([]byte, 64*1024)
 		for {
 			n, _, err := unix.Recvfrom(fd, buf, 0)
-			if err != nil {
-				if ctx.Err() == nil && err != unix.EINTR {
-					p.logger.Debug("the process event feed stopped", zap.Error(err))
+			if err == unix.EINTR || err == unix.ENOBUFS {
+				if err == unix.ENOBUFS {
+					p.logger.Debug("the process event feed overflowed; some app starts may be missed")
 				}
-				if err == unix.EINTR {
-					continue
+				continue
+			}
+			if err != nil {
+				if ctx.Err() == nil {
+					p.logger.Debug("the process event feed stopped", zap.Error(err))
 				}
 				return
 			}
