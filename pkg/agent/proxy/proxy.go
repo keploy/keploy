@@ -250,7 +250,6 @@ type Proxy struct {
 	appPID     uint32
 	mockMode   bool
 	live       LiveHandler
-	owners     sync.Map
 	caJavaHome string
 
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
@@ -1611,6 +1610,9 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 
 // In proxy.go
 func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
+	if p.mockMode && !p.IsDocker && p.appPID != 0 {
+		go p.watchListeners(ctx)
+	}
 
 	// Skip the TCP listener if configured. DNS + parsers + session still run.
 	if agent.SkipProxyListener {
@@ -4293,9 +4295,6 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		return false, nil
 	}
 	caller := int(dest.KernelPid)
-	if !descends(caller, owner) {
-		p.noteOwner(owner, dest.Port)
-	}
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
 		return true, nil
@@ -4309,23 +4308,36 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	return true, nil
 }
 
-func (p *Proxy) noteOwner(owner int, port uint32) {
-	if prev, seen := p.owners.Swap(port, owner); !seen || prev.(int) != owner {
-		appstart.Note(uint32(owner), uint16(port))
-		p.logger.Debug("an app started listening", zap.Int("pid", owner), zap.Uint32("port", port))
+func (p *Proxy) watchListeners(ctx context.Context) {
+	seen := map[string]bool{}
+	for inode := range listenTable() {
+		seen[inode] = true
 	}
-}
-
-func (p *Proxy) NoteListener(addr string) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return
-	}
-	n, err := strconv.ParseUint(port, 10, 16)
-	if err != nil {
-		return
-	}
-	if owner, ok := listenerOwner(net.ParseIP(host), uint32(n)); ok && descends(owner, int(p.appPID)) {
-		p.noteOwner(owner, uint32(n))
+	t := time.NewTicker(25 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		table := listenTable()
+		for inode, port := range table {
+			if seen[inode] {
+				continue
+			}
+			seen[inode] = true
+			owner, ok := ownerOf(inode)
+			if !ok || appstart.IsWorker(owner) || !descends(owner, int(p.appPID)) {
+				continue
+			}
+			appstart.Note(uint32(owner), uint16(port))
+			p.logger.Debug("an app started listening", zap.Int("pid", owner), zap.Uint32("port", port))
+		}
+		for inode := range seen {
+			if _, ok := table[inode]; !ok {
+				delete(seen, inode)
+			}
+		}
 	}
 }

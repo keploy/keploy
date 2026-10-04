@@ -513,7 +513,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	actualPort := appPort
 
 	// Dial Upstream
-	upConn, err := pm.dialApp(ctx, finalAppAddr)
+	upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
 	if err != nil {
 		logger.Error("Failed to connect to upstream application. Verify the application is listening on the resolved address.",
 			zap.String("final_app_addr", finalAppAddr),
@@ -1154,9 +1154,6 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		upConn = newConn
 		upstreamReader = bufio.NewReader(upConn)
 		upConnHolder.Store(&connHolder{c: newConn})
-		if pm.onDial != nil {
-			pm.onDial(upstreamAddr)
-		}
 		return nil
 	}
 
