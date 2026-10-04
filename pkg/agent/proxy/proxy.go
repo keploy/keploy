@@ -4328,6 +4328,9 @@ func (p *Proxy) watchListeners(ctx context.Context) {
 		table := listenTable()
 		for inode, port := range table {
 			if seen[inode] {
+				if p.knownApp(port) {
+					p.noteListener(port, inode, self)
+				}
 				continue
 			}
 			seen[inode] = true
@@ -4344,7 +4347,15 @@ func (p *Proxy) watchListeners(ctx context.Context) {
 
 type appPort struct {
 	inode string
+	pid   int
 	up    bool
+}
+
+func (p *Proxy) knownApp(port uint32) bool {
+	p.appsMu.Lock()
+	defer p.appsMu.Unlock()
+	_, ok := p.apps[port]
+	return ok
 }
 
 func (p *Proxy) markDown(table map[string]uint32) {
@@ -4364,12 +4375,19 @@ func (p *Proxy) markDown(table map[string]uint32) {
 func (p *Proxy) noteListener(port uint32, inode string, self int) {
 	p.appsMu.Lock()
 	if st, known := p.apps[port]; known {
-		restarted := !st.up || st.inode != inode
-		st.inode, st.up = inode, true
+		same := st.up && st.inode == inode && ownedBy(st.pid, inode)
 		p.appsMu.Unlock()
-		if restarted {
-			appstart.Note(0, uint16(port))
-			p.logger.Debug("the app restarted", zap.Uint32("port", port))
+		if same {
+			return
+		}
+		owner, _ := treeOwnerOf(inode, int(p.appPID))
+		p.appsMu.Lock()
+		changed := !(st.up && st.inode == inode && ownedBy(st.pid, inode))
+		st.inode, st.pid, st.up = inode, owner, true
+		p.appsMu.Unlock()
+		if changed {
+			appstart.Note(uint32(owner), uint16(port))
+			p.logger.Debug("the app restarted", zap.Int("pid", owner), zap.Uint32("port", port))
 		}
 		return
 	}
@@ -4386,7 +4404,7 @@ func (p *Proxy) noteListener(port uint32, inode string, self int) {
 	if p.apps == nil {
 		p.apps = map[uint32]*appPort{}
 	}
-	p.apps[port] = &appPort{inode: inode, up: true}
+	p.apps[port] = &appPort{inode: inode, pid: owner, up: true}
 	p.appsMu.Unlock()
 	appstart.Note(uint32(owner), uint16(port))
 	p.logger.Debug("an app started listening", zap.Int("pid", owner), zap.Uint32("port", port))
