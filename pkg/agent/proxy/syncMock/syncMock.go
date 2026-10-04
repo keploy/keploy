@@ -2548,8 +2548,9 @@ func (m *SyncMockManager) NoteMockLeftOut() {
 
 // MocksLeftOut returns how many mocks NoteMockLeftOut has counted: the mocks
 // left out because a parser could not record them, over the manager's life,
-// like the drop counters (GetDropStats). Exposed for the recording's summary
-// in routes/record.go.
+// like the drop counters (GetDropStats). The count only grows, so what it grew
+// by over a recording session is that session's: routes/record.go's summary
+// reports that.
 func (m *SyncMockManager) MocksLeftOut() int64 {
 	if m == nil {
 		return 0

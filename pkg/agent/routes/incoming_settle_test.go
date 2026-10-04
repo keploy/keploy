@@ -266,43 +266,65 @@ func TestHandlePending(t *testing.T) {
 	}
 }
 
+// leaveOutIncomplete has a session of the default manager, as OSS's are
+// (Session.Mgr unset), leave the mock of the exchange [at, at+1ms] out for the
+// incomplete-mock flag.
+func leaveOutIncomplete(t *testing.T, at time.Time) {
+	t.Helper()
+	s := &supervisor.Session{Mocks: make(chan *models.Mock, 1), Ctx: context.Background()}
+	m := &models.Mock{Name: "left-out"}
+	m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(time.Millisecond)
+	s.MarkMockIncomplete("per_conn_cap")
+	if err := s.EmitMock(m); err != nil {
+		t.Fatalf("EmitMock: %v", err)
+	}
+	if len(s.Mocks) != 0 {
+		t.Fatal("the mock marked incomplete was emitted")
+	}
+}
+
 // The recording's summary counts the mocks a session left out because their
 // capture was marked incomplete: their WARN is rate-limited, so the summary is
-// the one place each is counted.
+// the one place each is counted. It counts the ones reported while the session
+// was open: the manager's count is of its life, and a mock left out before the
+// session began was counted in the summary of the session it was reported in.
 func TestHandleIncoming_TheSummaryCountsMocksLeftOut(t *testing.T) {
-	core, logs := observer.New(zapcore.InfoLevel)
-	tcs := make(chan *models.TestCase)
-	a := &Agent{logger: zap.New(core), svc: incomingSvc{tc: tcs}}
-	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
-	defer srv.Close()
-	body, _ := json.Marshal(models.IncomingReq{})
-	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	// A session of the default manager, as OSS's are (Session.Mgr unset).
-	before := syncmgr.Get().MocksLeftOut()
-	s := &supervisor.Session{Mocks: make(chan *models.Mock, 1), Ctx: context.Background()}
-	at := newStretch() // its spans must not reach another test's test cases
-	for i := 0; i < 3; i++ {
-		m := &models.Mock{Name: "left-out"}
-		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(time.Millisecond)
-		s.MarkMockIncomplete("per_conn_cap")
-		if err := s.EmitMock(m); err != nil {
-			t.Fatalf("EmitMock: %v", err)
+	at := newStretch()        // its spans must not reach another test's test cases
+	leaveOutIncomplete(t, at) // before the session: not this session's
+	summary, _ := incomingSummary(t, func() {
+		for i := 1; i <= 3; i++ {
+			leaveOutIncomplete(t, at.Add(time.Duration(i)*time.Second))
 		}
+	})
+	if got := summary["mocks_left_out"]; got != int64(3) {
+		t.Fatalf("the summary counts %v mocks left out, want this session's 3", got)
 	}
-	close(tcs)
-	streamedNames(t, resp) // to the end of the stream: the summary is logged before it
+}
 
-	done := logs.FilterMessage("agent: recording complete").All()
-	if len(done) != 1 {
-		t.Fatalf("%d recording summaries logged, want 1", len(done))
+// A session that loses a mock to the incomplete-mock flag and a test case to a
+// request left out in flight reports each in its summary under its own count,
+// once; the next session, which loses nothing, reports neither again.
+func TestHandleIncoming_EachLossIsInTheSummaryOfItsSessionOnce(t *testing.T) {
+	at := newStretch() // its spans must not reach another test's test cases
+	summary, warns := incomingSummary(t, func() {
+		leaveOutIncomplete(t, at)
+		leaveOutOnGlobalManager(t)
+	})
+	if summary["mocks_left_out"] != int64(1) || summary["tcs_left_out_in_flight"] != uint64(1) {
+		t.Fatalf("summary mocks_left_out = %v, tcs_left_out_in_flight = %v, want 1 each",
+			summary["mocks_left_out"], summary["tcs_left_out_in_flight"])
 	}
-	if got, _ := done[0].ContextMap()["mocks_left_out"].(int64); got != before+3 {
-		t.Fatalf("the summary counts %v mocks left out, want %d", done[0].ContextMap()["mocks_left_out"], before+3)
+	if len(warns) != 1 || warns[0].ContextMap()["test_cases"] != uint64(1) {
+		t.Fatalf("the test case left out in flight is not warned of once in the session's summary: %v", warns)
+	}
+
+	summary, warns = incomingSummary(t, func() {})
+	if summary["mocks_left_out"] != int64(0) || summary["tcs_left_out_in_flight"] != uint64(0) {
+		t.Fatalf("the next session's summary mocks_left_out = %v, tcs_left_out_in_flight = %v, want 0 each: it counts the earlier session's losses again",
+			summary["mocks_left_out"], summary["tcs_left_out_in_flight"])
+	}
+	if len(warns) != 0 {
+		t.Fatalf("a session that left nothing out warned of test cases left out: %v", warns[0].ContextMap())
 	}
 }
 

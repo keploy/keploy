@@ -394,6 +394,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// and a loss told then is this session's.
 	leftOut := syncmgr.Get().OpenLossTally()
 	defer leftOut.Close()
+	// The mocks parsers leave out this session (Session.ReportLeftOut), from
+	// the same point and for the same reason: the manager counts them over its
+	// life. None is ever taken back, so this session's are what that count
+	// grows by from here.
+	mocksLeftOutBefore := syncmgr.Get().MocksLeftOut()
 
 	a.logger.Debug("Streaming incoming test cases to client")
 
@@ -681,10 +686,13 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					// framed with no way to take the connection up again
 					// after it (a client that pipelines its commands, say).
 					// Their WARN is rate-limited, so this is where each is
-					// counted. What a connection carried after its
-					// recording stopped is in the orphan spans above, not
-					// here: it was never parsed into mocks to count.
-					zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()),
+					// counted: the ones reported while this session was
+					// open, as tcs_left_out_in_flight counts its test cases
+					// left out in flight, so a later session's summary does
+					// not count them again. What a connection carried after
+					// its recording stopped is in the orphan spans above,
+					// not here: it was never parsed into mocks to count.
+					zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()-mocksLeftOutBefore),
 					zap.Int64("mocks_added_successfully", finalAdded),
 					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
 					zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
