@@ -2146,11 +2146,16 @@ func TestEachRecorderWarningIsLimitedByItsOwnMessage(t *testing.T) {
 	if d := logs.FilterLevelExact(zapcore.DebugLevel).All(); len(d) != 2 || d[0].ContextMap()["reason"] != "mysql exchange not recorded: a test" || d[1].Message != lost {
 		t.Fatalf("%d DEBUG lines for the two held back, want the exchange left out and then the framing loss: one left no trace", len(d))
 	}
-	// Another message is not held back.
+	// Another message is not held back, nor counts the one held back of the
+	// first as its own.
 	logs.TakeAll()
 	const outOfSequence = "V2: mysql response packet out of sequence; the connection is no longer recorded"
 	warnFramingLost(logger, sess, outOfSequence, errors.New("a test"))
-	if w := warns(); len(w) != 1 || w[0].Message != outOfSequence {
+	w = warns()
+	if len(w) != 1 || w[0].Message != outOfSequence {
 		t.Fatalf("logged %d WARN lines, want the out-of-sequence one: it was held back behind another message", len(w))
+	}
+	if held, ok := w[0].ContextMap()["sameWarningsHeldBack"]; ok {
+		t.Fatalf("the out-of-sequence WARN says %v of the same warning were held back: it counts the framing loss held back before it", held)
 	}
 }
