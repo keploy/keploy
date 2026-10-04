@@ -248,6 +248,8 @@ type Proxy struct {
 	// the resolution order and rationale.
 	appPID     uint32
 	mockMode   bool
+	startsMu   sync.Mutex
+	pending    map[int]time.Time
 	live       LiveHandler
 	caJavaHome string
 
@@ -4302,6 +4304,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	if err != nil {
 		return true, err
 	}
+	p.CheckStarts()
 	defer dstConn.Close()
 	util.RelayRawPassthrough(srcConn, dstConn)
 	return true, nil

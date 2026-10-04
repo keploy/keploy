@@ -44,6 +44,7 @@ type IngressProxyManager struct {
 	hooks    agent.Hooks
 	tcChan   chan *models.TestCase
 	mockMode bool
+	onDial   func()
 	// incomingOpts is read by ingress capture goroutines on every
 	// captured request (CaptureHook call sites in http.go) and written
 	// by IngressProxyManager.Start on every recorder (re)connect. Pre-
@@ -461,7 +462,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// (the original) instead.
 		actualPort := appPort
 
-		upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
+		upConn, err := pm.dialApp(ctx, finalAppAddr)
 		if err != nil {
 			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
 				zap.String("final_app_addr", finalAppAddr),
@@ -498,4 +499,14 @@ func (r *replayConn) Read(p []byte) (int, error) {
 
 func (pm *IngressProxyManager) ServeLive(ctx context.Context, conn net.Conn, upstream string, port uint16) {
 	pm.handleConnection(ctx, conn, upstream, pm.logger, pm.tcChan, make(chan struct{}, 1), port)
+}
+
+func (pm *IngressProxyManager) SetDialHook(f func()) { pm.onDial = f }
+
+func (pm *IngressProxyManager) dialApp(ctx context.Context, addr string) (net.Conn, error) {
+	conn, err := dialIngressTarget(ctx, addr, ingressTargetListenTimeout)
+	if err == nil && pm.onDial != nil {
+		pm.onDial()
+	}
+	return conn, err
 }

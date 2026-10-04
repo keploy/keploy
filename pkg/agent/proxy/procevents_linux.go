@@ -84,8 +84,6 @@ func (p *Proxy) watchStarts(ctx context.Context) {
 		}
 	}()
 
-	self := os.Getpid()
-	pending := map[int]time.Time{}
 	t := time.NewTicker(250 * time.Microsecond)
 	defer t.Stop()
 	for {
@@ -96,26 +94,37 @@ func (p *Proxy) watchStarts(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if pid != self && descends(pid, int(p.appPID)) {
-				pending[pid] = time.Now()
+			if pid != os.Getpid() && descends(pid, int(p.appPID)) {
+				p.startsMu.Lock()
+				if p.pending == nil {
+					p.pending = map[int]time.Time{}
+				}
+				p.pending[pid] = time.Now()
+				p.startsMu.Unlock()
 			}
 		case <-t.C:
-			if len(pending) == 0 {
-				continue
-			}
-			table := listenTable()
-			for pid, at := range pending {
-				port, listening, alive := listensOn(pid, table)
-				switch {
-				case !alive || time.Since(at) > 2*time.Minute:
-					delete(pending, pid)
-				case listening:
-					delete(pending, pid)
-					if !appstart.IsWorker(pid) {
-						appstart.NoteAt(at, uint32(pid), uint16(port))
-						p.logger.Debug("an app started", zap.Int("pid", pid), zap.Uint32("port", port))
-					}
-				}
+			p.CheckStarts()
+		}
+	}
+}
+
+func (p *Proxy) CheckStarts() {
+	p.startsMu.Lock()
+	defer p.startsMu.Unlock()
+	if len(p.pending) == 0 {
+		return
+	}
+	table := listenTable()
+	for pid, at := range p.pending {
+		port, listening, alive := listensOn(pid, table)
+		switch {
+		case !alive || time.Since(at) > 2*time.Minute:
+			delete(p.pending, pid)
+		case listening:
+			delete(p.pending, pid)
+			if !appstart.IsWorker(pid) {
+				appstart.NoteAt(at, uint32(pid), uint16(port))
+				p.logger.Debug("an app started", zap.Int("pid", pid), zap.Uint32("port", port))
 			}
 		}
 	}
