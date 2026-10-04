@@ -3,6 +3,7 @@ package mapdb
 import (
 	"context"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -19,10 +20,10 @@ func TestUpsertCasesRoundTripsThroughDisk(t *testing.T) {
 			if err := db.UpsertBatch(ctx, "set", map[string][]models.MockEntry{"t1": {{Name: "mock-0"}}}); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"t1": {Cases: []string{"test-1"}}, "t2": {Cases: []string{"test-2"}}}, nil); err != nil {
+			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"t1": {Cases: []string{"test-1"}}, "t2": {Cases: []string{"test-2"}}}, nil, nil); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"t1": {Cases: []string{"test-1", "test-3"}}}, nil); err != nil {
+			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"t1": {Cases: []string{"test-1", "test-3"}}}, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			cases, err := db.GetCases(ctx, "set")
@@ -74,12 +75,12 @@ func TestUpsertCasesWritesCaseMocksStepsAndStartup(t *testing.T) {
 			}
 			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{
 				"t1": {Cases: []string{"test-1"}, CaseMocks: map[string][]string{"test-1": {"mock-1"}}, CaseSteps: map[string]string{"test-1": "create"}},
-			}, []models.MockEntry{{Name: "mock-0"}}); err != nil {
+			}, []models.MockEntry{{Name: "mock-0"}}, nil); err != nil {
 				t.Fatal(err)
 			}
 			if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{
 				"t1": {Cases: []string{"test-2"}, CaseSteps: map[string]string{"test-2": ""}},
-			}, nil); err != nil {
+			}, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			data, err := yaml.ReadFileF(ctx, zap.NewNop(), dir+"/set", "mappings", format)
@@ -126,7 +127,7 @@ func TestUpsertCasesKeepsEachTestsFolder(t *testing.T) {
 				"t1": {Cases: []string{"test-1"}, Dir: "/repo/e2e/orders"},
 				"t2": {Dir: "/repo/e2e/payments"},
 			}
-			if err := db.UpsertCases(ctx, "set", in, nil); err != nil {
+			if err := db.UpsertCases(ctx, "set", in, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			data, err := yaml.ReadFileF(ctx, zap.NewNop(), dir+"/set", "mappings", format)
@@ -145,5 +146,27 @@ func TestUpsertCasesKeepsEachTestsFolder(t *testing.T) {
 				t.Fatalf("folders came back as %v", got)
 			}
 		})
+	}
+}
+
+func TestUpsertCasesKeepsTheSuites(t *testing.T) {
+	dir := t.TempDir()
+	db := NewWithFormat(zap.NewNop(), dir, "", yaml.FormatYAML)
+	ctx := context.Background()
+	at := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
+	suites := []models.SuiteSpan{{Dir: "/repo/e2e/orders", Start: at, End: at.Add(3 * time.Second)}}
+	if err := db.UpsertCases(ctx, "set", map[string]models.MappedTestCase{"t1": {Dir: "/repo/e2e/orders"}}, nil, suites); err != nil {
+		t.Fatal(err)
+	}
+	data, err := yaml.ReadFileF(ctx, zap.NewNop(), dir+"/set", "mappings", yaml.FormatYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping, err := DecodeMappingF(data, zap.NewNop(), yaml.FormatYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mapping.Suites) != 1 || mapping.Suites[0].Dir != "/repo/e2e/orders" || mapping.Suites[0].End.Sub(mapping.Suites[0].Start) != 3*time.Second {
+		t.Fatalf("suites came back as %+v", mapping.Suites)
 	}
 }

@@ -277,8 +277,8 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 }
 
 // UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
-func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry) error {
-	if len(byTest) == 0 && len(startup) == 0 {
+func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error {
+	if len(byTest) == 0 && len(startup) == 0 && len(suites) == 0 {
 		return nil
 	}
 	mappingPath := filepath.Join(db.path, testSetID)
@@ -323,6 +323,9 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		if in.Dir != "" {
 			tc.Dir = in.Dir
 		}
+	}
+	if len(suites) > 0 {
+		mapping.Suites = suites
 	}
 	if len(startup) > 0 {
 		mapping.Startup = startup

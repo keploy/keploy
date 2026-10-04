@@ -282,6 +282,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	if m.mappingDB != nil {
 		windows = m.agentWindows(persistCtx)
 	}
+	windows, suites := splitSuites(windows)
 	if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
 		m.logger.Error(err.Error())
@@ -312,7 +313,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				tc.Dir = w.Dir
 				byCase[w.Name] = tc
 			}
-			m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded))
+			m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded), suites)
 		}
 	}
 
@@ -426,8 +427,8 @@ func (m *mockService) deleteCases(ctx context.Context, name string, ids []string
 }
 
 // upsertCases writes which test cases each flow produced into the mapping.
-func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[string]models.MappedTestCase, startup []models.MockEntry) {
-	if len(byCase) == 0 && len(startup) == 0 {
+func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) {
+	if len(byCase) == 0 && len(startup) == 0 && len(suites) == 0 {
 		return
 	}
 	mapper, ok := m.mappingDB.(CaseMapper)
@@ -435,7 +436,7 @@ func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[s
 		m.logger.Warn("the mapping store cannot record test cases per flow", zap.String("mock-set", name))
 		return
 	}
-	if err := mapper.UpsertCases(ctx, name, byCase, startup); err != nil {
+	if err := mapper.UpsertCases(ctx, name, byCase, startup, suites); err != nil {
 		m.logger.Warn("failed to write per-flow test cases", zap.Error(err))
 		return
 	}

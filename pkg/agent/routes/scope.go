@@ -53,8 +53,8 @@ func endScope(ctx context.Context, svc any, req models.ScopeReq) error {
 	return nil
 }
 
-type scopeDirNoter interface {
-	NoteScopeDir(name string, pid int, dir string)
+type scopeNoter interface {
+	NoteScope(name string, pid int, dir string, suite bool)
 }
 
 type scopeWindowReader interface {
@@ -80,8 +80,8 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-begin request: %v", err), http.StatusBadRequest)
 		return
 	}
-	if s, ok := a.svc.(scopeDirNoter); ok {
-		s.NoteScopeDir(req.Name, req.Pid, req.Dir)
+	if s, ok := a.svc.(scopeNoter); ok {
+		s.NoteScope(req.Name, req.Pid, req.Dir, req.Suite)
 	}
 	if err := beginScope(r.Context(), a.svc, req); err != nil {
 		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))

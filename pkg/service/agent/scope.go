@@ -101,8 +101,8 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) {
 	start, ok := a.workerOpen[k]
 	if ok {
 		delete(a.workerOpen, k)
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: a.scopeDirs[k]})
-		delete(a.scopeDirs, k)
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: a.scopeMeta[k].dir, Suite: a.scopeMeta[k].suite})
+		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
 }
@@ -208,14 +208,19 @@ func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 	return models.MockStats{Loaded: loaded}, nil
 }
 
-func (a *Agent) NoteScopeDir(name string, pid int, dir string) {
-	if name == "" || dir == "" {
+type scopeMeta struct {
+	dir   string
+	suite bool
+}
+
+func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {
+	if name == "" || (dir == "" && !suite) {
 		return
 	}
 	a.scopeMu.Lock()
-	if a.scopeDirs == nil {
-		a.scopeDirs = make(map[scopeKey]string)
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
 	}
-	a.scopeDirs[scopeKey{pid: uint32(pid), name: name}] = dir
+	a.scopeMeta[scopeKey{pid: uint32(pid), name: name}] = scopeMeta{dir: dir, suite: suite}
 	a.scopeMu.Unlock()
 }

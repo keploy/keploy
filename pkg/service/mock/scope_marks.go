@@ -67,3 +67,21 @@ func repeatedScope(windows []models.ScopeWindow, existed bool) error {
 	}
 	return nil
 }
+
+func splitSuites(windows []models.ScopeWindow) ([]models.ScopeWindow, []models.SuiteSpan) {
+	var tests []models.ScopeWindow
+	var suites []models.SuiteSpan
+	for _, w := range windows {
+		if w.Suite {
+			suites = append(suites, models.SuiteSpan{Dir: w.Dir, Start: w.Start, End: w.End})
+			continue
+		}
+		tests = append(tests, w)
+	}
+	return tests, suites
+}
+
+func testWindows(windows []models.ScopeWindow) []models.ScopeWindow {
+	tests, _ := splitSuites(windows)
+	return tests
+}

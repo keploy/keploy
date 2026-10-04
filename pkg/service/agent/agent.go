@@ -137,7 +137,7 @@ type Agent struct {
 	scopeMu      sync.Mutex
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
-	scopeDirs    map[scopeKey]string
+	scopeMeta    map[scopeKey]scopeMeta
 	scopeTable   map[string][]string // replay: test name -> mock names (from mappings.yaml)
 	loadedMocks  int                 // replay: count of mocks stored, for /agent/mock/stats
 }

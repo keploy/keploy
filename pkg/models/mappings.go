@@ -70,6 +70,7 @@ type Mapping struct {
 	// omitempty so an existing mappings.yaml round-trips byte-identically until a
 	// startup mock is actually recorded; every older reader ignores the key.
 	Startup []MockEntry `json:"startup,omitempty" yaml:"startup,omitempty" bson:"startup,omitempty"`
+	Suites  []SuiteSpan `json:"suites,omitempty" yaml:"suites,omitempty" bson:"suites,omitempty"`
 }
 
 // StartupMockNames returns the names of the test-set-scoped startup mocks. Callers
@@ -367,4 +368,10 @@ func MergeStartupMockNames(perTest []MockEntry, startup []string) []string {
 		add(n)
 	}
 	return out
+}
+
+type SuiteSpan struct {
+	Dir   string    `json:"dir" yaml:"dir" bson:"dir"`
+	Start time.Time `json:"start" yaml:"start" bson:"start"`
+	End   time.Time `json:"end" yaml:"end" bson:"end"`
 }
