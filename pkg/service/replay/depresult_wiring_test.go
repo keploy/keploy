@@ -681,27 +681,41 @@ func TestOutcomeDrivesTheRunVerdict(t *testing.T) {
 // degrade to `deps[0] postgres (presence)` — five calls to one service
 // distinguishable only by an unstable index, which is the finding this lookup
 // field exists to fix.
+//
+// RunTestSet's lookup is filled by addMockDisplayInfo, from the read that loads
+// the mocks (loadTestSetMocks) or from a read of its own, so the site is pinned
+// across replay.go: one literal, in addMockDisplayInfo.
 func TestMockLookupCarriesATarget(t *testing.T) {
-	fset, fn := runTestSetSource(t)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "replay.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse replay.go: %v", err)
+	}
 
 	var found []string
-	ast.Inspect(fn, func(n ast.Node) bool {
-		lit, ok := n.(*ast.CompositeLit)
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
 		if !ok {
-			return true
+			continue
 		}
-		ident, ok := lit.Type.(*ast.Ident)
-		if !ok || ident.Name != "mockDisplayInfo" {
+		ast.Inspect(fn, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			ident, ok := lit.Type.(*ast.Ident)
+			if !ok || ident.Name != "mockDisplayInfo" {
+				return true
+			}
+			found = append(found, fn.Name.Name+": "+printNode(t, fset, lit))
 			return true
-		}
-		found = append(found, printNode(t, fset, lit))
-		return true
-	})
+		})
+	}
 
 	if len(found) != 1 {
-		t.Fatalf("expected exactly one mockDisplayInfo literal in RunTestSet, found %d: %v", len(found), found)
+		t.Fatalf("expected exactly one mockDisplayInfo literal in replay.go, found %d: %v", len(found), found)
 	}
-	const want = "mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), }"
+	const want = "addMockDisplayInfo: mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), }"
 	if found[0] != want {
 		t.Fatalf("the mock display lookup is now %s, want %s.\n\n"+
 			"WHY THIS MATTERS: `target` is the only human-meaningful destination a dependency row "+

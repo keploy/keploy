@@ -423,21 +423,39 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	}
 }
 
+// withResponse returns m with its recorded response in Spec: m itself, or, when
+// the agent's disk store kept the response apart from the mock (strict mock
+// windows; see Mock.HasSpilledResponse), a copy of m with the response loaded.
+// m is a pooled mock that other connections may be matching or copying, and
+// HydrateResponse writes the mock it runs on, so it runs on the copy.
+func withResponse(m *models.Mock) (*models.Mock, error) {
+	if m == nil || !m.HasSpilledResponse() {
+		return m, nil
+	}
+	loaded := m.ShallowCopy()
+	if err := loaded.HydrateResponse(); err != nil {
+		return nil, fmt.Errorf("http: load the recorded response of mock %q: %w", m.Name, err)
+	}
+	return loaded, nil
+}
+
 // buildMockResponseBytes serializes a recorded HTTP mock's response to raw
 // wire bytes (status line + headers + recomputed Content-Length + body,
 // compressing the body when Content-Encoding is set). It lives here (not in
 // async.go) because it is the shared serializer for BOTH the ordinary
 // matched-mock path and the async serving branch.
+// A response still kept apart from its mock is loaded first (withResponse).
 func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	name := ""
 	if stub != nil {
 		name = stub.Name
 	}
+	stub, err := withResponse(stub)
+	if err != nil {
+		return nil, err
+	}
 	if stub == nil || stub.Spec.HTTPResp == nil {
 		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
-	}
-	if err := stub.HydrateResponse(); err != nil {
-		return nil, err
 	}
 	protoMajor, protoMinor := 1, 1
 	if stub.Spec.HTTPReq != nil {

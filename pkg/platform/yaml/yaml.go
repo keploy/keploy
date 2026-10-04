@@ -256,7 +256,8 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 	// zero-length or mid-document file. The previous O_TRUNC + streaming write left
 	// exactly that window — on overlay/NFS/container-mounted volumes a reader could
 	// catch the file empty or half-written and either hard-fail or silently decode a
-	// partial document. Mirrors mockdb.writeMocksAtomically / testdb.upsert.
+	// partial document. The mock rewrites in mockdb replace their files the
+	// same way.
 	tmpFile, err := os.CreateTemp(path, fileName+".*.tmp")
 	if err != nil {
 		utils.LogError(logger, err, "failed to create temp file for atomic write", zap.String("path directory", path), zap.String("file", fileName))
@@ -295,7 +296,7 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 	if err = os.Chmod(tmpPath, mode); err != nil {
 		return err
 	}
-	if err = atomicReplaceFile(tmpPath, filePath); err != nil {
+	if err = ReplaceFile(logger, tmpPath, filePath); err != nil {
 		utils.LogError(logger, err, "failed to atomically replace the file", zap.String("file", filePath))
 		return err
 	}
@@ -303,29 +304,80 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 	return nil
 }
 
-// atomicReplaceFile renames src over dst. POSIX rename atomically replaces an
-// existing target; on Windows rename fails when dst already exists, so fall back
-// to remove-then-rename. Mirrors mockdb.replaceFile so reports/config/mappings
-// get the same crash- and reader-safe replace the mock/testcase writers have.
-func atomicReplaceFile(src, dst string) error {
-	if err := os.Rename(src, dst); err == nil {
+// ReplaceFile puts src in place of dst. A rename atomically replaces an
+// existing target; when it fails over one (a read-only dst on Windows, or a
+// scanner holding a file open), the fallback moves dst aside, renames src
+// into place and removes the aside copy. If src still cannot be put in place,
+// dst is moved back, so a failed replace leaves the original where it was;
+// deleting it before the retry, as this fallback once did, lost both files
+// when the retry failed too.
+//
+// An error means dst was not replaced. Once src is in place the replace has
+// succeeded: an aside copy that cannot then be removed (on Windows, one
+// another process holds open without sharing delete) is logged as a warning
+// naming it, not returned, since callers clean up after a failed replace and
+// would delete the file just put in place. WriteFile, the test case writer in
+// testdb and the yaml/json mock rewrites in mockdb (the prune and the noise
+// write-back) use it.
+func ReplaceFile(logger *zap.Logger, src, dst string) error {
+	return ReplaceFileWith(logger, os.Rename, src, dst)
+}
+
+// ReplaceFileWith is ReplaceFile with every rename made through rename, so a
+// test can make the platform refuse one (a file held open, a read-only
+// target) and check what a replace leaves behind.
+func ReplaceFileWith(logger *zap.Logger, rename func(src, dst string) error, src, dst string) error {
+	renameErr := rename(src, dst)
+	if renameErr == nil {
 		return nil
-	} else {
-		renameErr := err
-		if _, statErr := os.Stat(dst); statErr != nil {
-			if os.IsNotExist(statErr) {
-				return renameErr
-			}
-			return fmt.Errorf("failed to stat target after rename error: %v; initial rename error: %w", statErr, renameErr)
+	}
+	if _, statErr := os.Stat(dst); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return renameErr
 		}
-		if removeErr := os.Remove(dst); removeErr != nil {
-			return fmt.Errorf("failed to remove target for replace: %v; initial rename error: %w", removeErr, renameErr)
+		return fmt.Errorf("failed to stat target after rename error: %v; initial rename error: %w", statErr, renameErr)
+	}
+
+	aside, err := asidePath(dst)
+	if err != nil {
+		return fmt.Errorf("failed to name the target's aside copy for replace: %v; initial rename error: %w", err, renameErr)
+	}
+	if err := rename(dst, aside); err != nil {
+		return fmt.Errorf("failed to move target aside for replace: %v; initial rename error: %w", err, renameErr)
+	}
+	if retryErr := rename(src, dst); retryErr != nil {
+		if restoreErr := rename(aside, dst); restoreErr != nil {
+			return fmt.Errorf("failed to replace file (%v), and failed to restore the original from %s: %v; initial rename error: %w", retryErr, aside, restoreErr, renameErr)
 		}
-		if retryErr := os.Rename(src, dst); retryErr != nil {
-			return fmt.Errorf("failed to replace file after removing existing target: %v; initial rename error: %w", retryErr, renameErr)
+		return fmt.Errorf("failed to replace file after moving the existing target aside, original restored: %v; initial rename error: %w", retryErr, renameErr)
+	}
+	if err := os.Remove(aside); err != nil && !os.IsNotExist(err) {
+		if logger == nil {
+			logger = zap.L()
 		}
+		logger.Warn("replaced the file, but could not remove its previous version, which is left beside it; delete it once nothing holds it open",
+			zap.String("file", dst), zap.String("previousVersion", aside), zap.Error(err))
 	}
 	return nil
+}
+
+// asidePath returns an unused name beside dst for ReplaceFile to move dst to.
+func asidePath(dst string) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".replaced.*")
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	// Free the name for the rename: a rename that fails over an existing file
+	// would fail onto it.
+	if err := os.Remove(name); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 func ReadFile(ctx context.Context, logger *zap.Logger, path, name string) ([]byte, error) {

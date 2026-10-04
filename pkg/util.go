@@ -3020,6 +3020,74 @@ func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client
 	return resp.StatusCode == http.StatusOK
 }
 
+// TestSetMocksReader is an optional extension of the mock store a replay, the
+// runner or the mock service loads a test set's mocks from: both of its pools,
+// the session pool before the mapping prune, and the per-test candidates
+// before the prune and the window filter, from ONE read of the set's mock file
+// (models.TestSetMocks). A store without it is asked for each pool
+// separately, and *mockdb.MockYaml reads and decodes the whole file for each.
+type TestSetMocksReader interface {
+	GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
+// ConsumedScopeReader is an optional extension of the instrumentation a replay
+// or a runner talks to the agent through: whether the agent has said it reads
+// the consumed-mock history only for the per-test mocks it stages
+// (models.ConsumedScopeHeader), so filter params may carry just their entries
+// (ConsumedForAgent). Without it the whole history is sent.
+type ConsumedScopeReader interface {
+	AgentReadsConsumedPerTestOnly() bool
+}
+
+// PerTestRegion is the set of names of the per-test mocks a test set hands the
+// agent: the filtered half of its StoreMocks.
+func PerTestRegion(filtered []*models.Mock) map[string]struct{} {
+	region := make(map[string]struct{}, len(filtered))
+	for _, m := range filtered {
+		if m != nil {
+			region[m.Name] = struct{}{}
+		}
+	}
+	return region
+}
+
+// ConsumedForAgent narrows a test set's consumed-mock history to the entries
+// the agent can read: those of the per-test mocks in region.
+//
+// The agent consults MockFilterParams.TotalConsumedMocks in one place,
+// filterOutDeleted, and only for the per-test mocks it is about to stage, every
+// one of which comes from the per-test half of the set's StoreMocks (resident,
+// parked on disk, or carried over). An entry for any other mock, such as each
+// session, connection or config mock the replay served, is never looked up.
+// Sending those entries anyway re-encoded the whole history for every test, so
+// the payload grew with each test; in a replay whose data mocks are reusable
+// (lax-mode MySQL) all of it was dead weight. The agent's verdict is the same
+// with the narrowed map. Only send it to an agent that says it reads the
+// history that way (models.ConsumedScopeHeader): agents from v3.0.0-beta1
+// through v3.3.22 also applied it to the session pool.
+//
+// A nil region means the per-test half is not known: total is returned as is.
+func ConsumedForAgent(total map[string]models.MockState, region map[string]struct{}) map[string]models.MockState {
+	if region == nil || total == nil {
+		return total
+	}
+	out := make(map[string]models.MockState, min(len(total), len(region)))
+	if len(region) < len(total) {
+		for name := range region {
+			if st, ok := total[name]; ok {
+				out[name] = st
+			}
+		}
+		return out
+	}
+	for name, st := range total {
+		if _, ok := region[name]; ok {
+			out[name] = st
+		}
+	}
+	return out
+}
+
 // FilterTcsMocks applies the per-test time-window filter to candidate
 // mocks. Pass strict=true for Option-1 containment (out-of-window
 // non-config mocks are dropped instead of promoted to the cross-test
@@ -3147,7 +3215,7 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 // rev3,rev4,rev1,rev2.
 //
 // That matters because downstream reads this pool as a SEQUENCE, not a set. The
-// slice order becomes TestModeInfo.SortOrder in MockManager.setUnFilteredMocks,
+// slice order becomes TestModeInfo.SortOrder in MockManager.buildTier,
 // which keys the RB-tree that GetUnFilteredMocksByKind walks in order — so a
 // replayer that walks a recorded revision sequence (a cluster-config poll, a
 // bootstrap handshake) is handed it backwards.
