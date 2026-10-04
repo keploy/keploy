@@ -249,8 +249,8 @@ type Proxy struct {
 	// the resolution order and rationale.
 	appPID     uint32
 	mockMode   bool
-	ownersMu   sync.Mutex
-	owners     map[uint32]int
+	appsMu     sync.Mutex
+	apps       map[uint32]string
 	live       LiveHandler
 	caJavaHome string
 
@@ -4331,11 +4331,7 @@ func (p *Proxy) watchListeners(ctx context.Context) {
 				continue
 			}
 			seen[inode] = true
-			owner, ok := treeOwnerOf(inode, int(p.appPID))
-			if ok && owner == self {
-				continue
-			}
-			p.noteOwner(owner, port, ok)
+			p.noteListener(port, inode, self)
 		}
 		for inode := range seen {
 			if _, ok := table[inode]; !ok {
@@ -4345,25 +4341,35 @@ func (p *Proxy) watchListeners(ctx context.Context) {
 	}
 }
 
-func (p *Proxy) noteOwner(owner int, port uint32, found bool) {
-	if found && appstart.IsWorker(owner) {
-		return
-	}
-	p.ownersMu.Lock()
-	defer p.ownersMu.Unlock()
-	prev, seen := p.owners[port]
-	if !found {
-		if !seen || prev == 0 {
-			return
+func (p *Proxy) noteListener(port uint32, inode string, self int) {
+	p.appsMu.Lock()
+	last, known := p.apps[port]
+	if known {
+		if last != inode {
+			p.apps[port] = inode
 		}
-		owner = 0
-	} else if seen && prev == owner {
+		p.appsMu.Unlock()
+		if last != inode {
+			appstart.Note(0, uint16(port))
+			p.logger.Debug("the app restarted", zap.Uint32("port", port))
+		}
 		return
 	}
-	if p.owners == nil {
-		p.owners = map[uint32]int{}
+	p.appsMu.Unlock()
+	owner, ok := treeOwnerOf(inode, int(p.appPID))
+	if !ok || owner == self || appstart.IsWorker(owner) {
+		return
 	}
-	p.owners[port] = owner
+	p.appsMu.Lock()
+	if _, known := p.apps[port]; known {
+		p.appsMu.Unlock()
+		return
+	}
+	if p.apps == nil {
+		p.apps = map[uint32]string{}
+	}
+	p.apps[port] = inode
+	p.appsMu.Unlock()
 	appstart.Note(uint32(owner), uint16(port))
 	p.logger.Debug("an app started listening", zap.Int("pid", owner), zap.Uint32("port", port))
 }
@@ -4380,10 +4386,7 @@ func (p *Proxy) NoteListener(addr string) {
 	if err != nil {
 		return
 	}
-	ip := net.ParseIP(host)
-	for inode := range listenInodes(ip, uint32(n)) {
-		if owner, ok := treeOwnerOf(inode, int(p.appPID)); ok {
-			p.noteOwner(owner, uint32(n), true)
-		}
+	for inode := range listenInodes(net.ParseIP(host), uint32(n)) {
+		p.noteListener(uint32(n), inode, os.Getpid())
 	}
 }
