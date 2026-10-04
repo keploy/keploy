@@ -13,9 +13,11 @@ var (
 	workers = map[int]bool{}
 )
 
-func Note(pid uint32, port uint16) {
+func Note(pid uint32, port uint16) { NoteAt(time.Now(), pid, port) }
+
+func NoteAt(at time.Time, pid uint32, port uint16) {
 	mu.Lock()
-	starts = append(starts, models.AppStart{At: time.Now(), PID: pid, Port: port})
+	starts = append(starts, models.AppStart{At: at, PID: pid, Port: port})
 	mu.Unlock()
 }
 

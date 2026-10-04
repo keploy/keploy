@@ -64,48 +64,6 @@ func listenTable() map[string]uint32 {
 	return out
 }
 
-func treeOwnerOf(inode string, root int) (int, bool) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return 0, false
-	}
-	want := "socket:[" + inode + "]"
-	for _, e := range entries {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || !descends(pid, root) {
-			continue
-		}
-		fds, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
-		if err != nil {
-			continue
-		}
-		for _, fd := range fds {
-			if link, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, fd.Name())); err == nil && link == want {
-				return pid, true
-			}
-		}
-	}
-	return 0, false
-}
-
-func ownedBy(pid int, inode string) bool {
-	if pid <= 0 {
-		return false
-	}
-	dir := fmt.Sprintf("/proc/%d/fd", pid)
-	fds, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	want := "socket:[" + inode + "]"
-	for _, fd := range fds {
-		if link, err := os.Readlink(dir + "/" + fd.Name()); err == nil && link == want {
-			return true
-		}
-	}
-	return false
-}
-
 func listenInodes(ip net.IP, port uint32) map[string]bool {
 	out := map[string]bool{}
 	for _, file := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {

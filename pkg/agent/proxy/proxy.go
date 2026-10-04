@@ -27,7 +27,6 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
-	"go.keploy.io/server/v3/pkg/agent/appstart"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
@@ -249,8 +248,6 @@ type Proxy struct {
 	// the resolution order and rationale.
 	appPID     uint32
 	mockMode   bool
-	appsMu     sync.Mutex
-	apps       map[uint32]*appPort
 	live       LiveHandler
 	caJavaHome string
 
@@ -1613,7 +1610,7 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 // In proxy.go
 func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	if p.mockMode && !p.IsDocker && p.appPID != 0 {
-		go p.watchListeners(ctx)
+		go p.watchStarts(ctx)
 	}
 
 	// Skip the TCP listener if configured. DNS + parsers + session still run.
@@ -4308,121 +4305,4 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	defer dstConn.Close()
 	util.RelayRawPassthrough(srcConn, dstConn)
 	return true, nil
-}
-
-func (p *Proxy) watchListeners(ctx context.Context) {
-	seen := map[string]bool{}
-	for inode := range listenTable() {
-		seen[inode] = true
-	}
-
-	self := os.Getpid()
-	t := time.NewTicker(2 * time.Millisecond)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		table := listenTable()
-		for inode, port := range table {
-			if seen[inode] {
-				if p.knownApp(port) {
-					p.noteListener(port, inode, self)
-				}
-				continue
-			}
-			seen[inode] = true
-			p.noteListener(port, inode, self)
-		}
-		for inode := range seen {
-			if _, ok := table[inode]; !ok {
-				delete(seen, inode)
-			}
-		}
-		p.markDown(table)
-	}
-}
-
-type appPort struct {
-	inode string
-	pid   int
-	up    bool
-}
-
-func (p *Proxy) knownApp(port uint32) bool {
-	p.appsMu.Lock()
-	defer p.appsMu.Unlock()
-	_, ok := p.apps[port]
-	return ok
-}
-
-func (p *Proxy) markDown(table map[string]uint32) {
-	listening := map[uint32]bool{}
-	for _, port := range table {
-		listening[port] = true
-	}
-	p.appsMu.Lock()
-	for port, st := range p.apps {
-		if !listening[port] {
-			st.up = false
-		}
-	}
-	p.appsMu.Unlock()
-}
-
-func (p *Proxy) noteListener(port uint32, inode string, self int) {
-	p.appsMu.Lock()
-	if st, known := p.apps[port]; known {
-		same := st.up && st.inode == inode && ownedBy(st.pid, inode)
-		p.appsMu.Unlock()
-		if same {
-			return
-		}
-		owner, _ := treeOwnerOf(inode, int(p.appPID))
-		p.appsMu.Lock()
-		changed := !(st.up && st.inode == inode && ownedBy(st.pid, inode))
-		st.inode, st.pid, st.up = inode, owner, true
-		p.appsMu.Unlock()
-		if changed {
-			appstart.Note(uint32(owner), uint16(port))
-			p.logger.Debug("the app restarted", zap.Int("pid", owner), zap.Uint32("port", port))
-		}
-		return
-	}
-	p.appsMu.Unlock()
-	owner, ok := treeOwnerOf(inode, int(p.appPID))
-	if !ok || owner == self || appstart.IsWorker(owner) {
-		return
-	}
-	p.appsMu.Lock()
-	if _, known := p.apps[port]; known {
-		p.appsMu.Unlock()
-		return
-	}
-	if p.apps == nil {
-		p.apps = map[uint32]*appPort{}
-	}
-	p.apps[port] = &appPort{inode: inode, pid: owner, up: true}
-	p.appsMu.Unlock()
-	appstart.Note(uint32(owner), uint16(port))
-	p.logger.Debug("an app started listening", zap.Int("pid", owner), zap.Uint32("port", port))
-}
-
-func (p *Proxy) NoteListener(addr string) {
-	if !p.mockMode || p.IsDocker || p.appPID == 0 {
-		return
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return
-	}
-	n, err := strconv.ParseUint(port, 10, 16)
-	if err != nil {
-		return
-	}
-	for inode := range listenInodes(net.ParseIP(host), uint32(n)) {
-		p.noteListener(uint32(n), inode, os.Getpid())
-	}
 }

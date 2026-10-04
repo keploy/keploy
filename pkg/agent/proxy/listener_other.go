@@ -11,7 +11,3 @@ func descends(int, int) bool { return false }
 func listenInodes(net.IP, uint32) map[string]bool { return nil }
 
 func listenTable() map[string]uint32 { return nil }
-
-func treeOwnerOf(string, int) (int, bool) { return 0, false }
-
-func ownedBy(int, string) bool { return false }
