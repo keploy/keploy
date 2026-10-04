@@ -1467,10 +1467,20 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		}
 	}
 
+	if sourcePort != 0 {
+		// Store the CAPTURED value only — the client's SNI or the CONNECT
+		// tunnel's host — never the destHost fallback below. This map's
+		// consumers (the v2 relay, the MySQL recorder, the upstream dialers)
+		// read it as "what the client itself named", and an IP the client never
+		// sent masquerading as that broke the contract.
+		SrcPortToDstURL.Store(sourcePort, dstURL)
+	}
+
 	// Transparent (eBPF) egress leaves both of the above empty: the app dialled
 	// an IP literal, so Go sent no SNI, and no CONNECT tunnel pre-filed a host
 	// for this source port. destHost is the connection's real destination,
-	// handed down from the handshake call site via tls.WithDestHost.
+	// handed down from the handshake call site via tls.WithDestHost. It names
+	// the CERTIFICATE (and keys its cache) only — see the Store above.
 	//
 	// It matters that this is a bare host and not "ip:port": the SAN kind is
 	// decided by net.ParseIP inside cfssl, which returns nil for "10.0.0.1:443"
@@ -1478,10 +1488,6 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// reproducing the no-IP-SAN failure this exists to fix.
 	if dstURL == "" {
 		dstURL = destHost
-	}
-
-	if sourcePort != 0 {
-		SrcPortToDstURL.Store(sourcePort, dstURL)
 	}
 
 	// Check the cert cache before generating a new certificate.

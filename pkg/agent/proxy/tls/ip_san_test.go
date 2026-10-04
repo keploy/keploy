@@ -208,3 +208,31 @@ func TestCertForClient_NonTCPRemoteAddrDoesNotTouchPortMap(t *testing.T) {
 		t.Errorf("port 0 was written to the destination map: %v", v)
 	}
 }
+
+// destHost may NAME the certificate, but it must not masquerade as a captured
+// SNI: SrcPortToDstURL is the captured-SNI/CONNECT-host bookkeeping, and before
+// this pin the IP fallback was written into it, so every consumer of the map
+// saw a value the client never sent.
+func TestCertForClient_DestHostDoesNotPolluteCapturedSNI(t *testing.T) {
+	key, ca := testCA(t)
+	logger := zap.NewNop()
+	const port = 40777
+
+	SrcPortToDstURL.Delete(port)
+	cert, err := CertForClient(logger, helloFrom(t, "", port), key, ca, time.Time{}, "10.9.9.9")
+	if err != nil {
+		t.Fatalf("CertForClient: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+	if len(leaf.IPAddresses) == 0 || leaf.IPAddresses[0].String() != "10.9.9.9" {
+		t.Fatalf("the leaf must still carry the destination IP SAN, got %v", leaf.IPAddresses)
+	}
+	if v, ok := SrcPortToDstURL.Load(port); ok {
+		if s, _ := v.(string); s == "10.9.9.9" {
+			t.Fatalf("destHost leaked into SrcPortToDstURL as a captured SNI: %q", s)
+		}
+	}
+}

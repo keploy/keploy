@@ -41,9 +41,9 @@ type IngressProxyManager struct {
 	// appAddr caches, per relocated port, the address the application is
 	// actually listening on when it is NOT loopback. See dialApp.
 	appAddr map[uint16]string
-	logger *zap.Logger
-	hooks  agent.Hooks
-	tcChan chan *models.TestCase
+	logger  *zap.Logger
+	hooks   agent.Hooks
+	tcChan  chan *models.TestCase
 	// incomingOpts is read by ingress capture goroutines on every
 	// captured request (CaptureHook call sites in http.go) and written
 	// by IngressProxyManager.Start on every recorder (re)connect. Pre-
