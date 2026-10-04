@@ -2339,7 +2339,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// the damage is done by the handshake itself: the app rejects keploy's leaf
 	// and never completes a call.
 	if host := hostFromAddr(dstAddr); p.noIntercept.matches(host) {
-		dstConn, err = util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
+		dstConn, err = dialNoIntercept(parserCtx, p.logger, dstAddr, func(dctx context.Context, addr string) (net.Conn, error) {
+			return util.DialDestination(dctx, p.logger, "tcp", util.DialTarget{Addr: addr})
+		})
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to dial a no-intercept destination", zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 			return err

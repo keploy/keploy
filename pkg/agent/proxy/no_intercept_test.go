@@ -1,7 +1,11 @@
 package proxy
 
 import (
+	"context"
+	"errors"
+	"net"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -93,5 +97,51 @@ func TestHostFromAddr_StripsPortAndBrackets(t *testing.T) {
 		if got := hostFromAddr(addr); got != want {
 			t.Errorf("hostFromAddr(%q) = %q, want %q", addr, got, want)
 		}
+	}
+}
+
+// A no-intercept destination that blackholes its SYN must not pin the
+// connection goroutine indefinitely. This is exactly what happens when the
+// pod runs under an egress-deny NetworkPolicy — keploy's own replay sandbox
+// applies one — and before the bound, the dial sat in kernel SYN-retry with
+// no log line before it and the error line after it unreachable, so the hang
+// produced zero evidence.
+func TestNoInterceptDial_IsBounded(t *testing.T) {
+	blackhole := func(ctx context.Context, addr string) (net.Conn, error) {
+		<-ctx.Done() // a dropped SYN returns only when the dial context dies
+		return nil, ctx.Err()
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := dialNoIntercept(context.Background(), zap.NewNop(), "203.0.113.9:443", blackhole)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a blackholed dial returned no error")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected a deadline error naming the bound, got: %v", err)
+		}
+	case <-time.After(noInterceptDialTimeout + 5*time.Second):
+		t.Fatal("the no-intercept dial is not bounded: it outlived its own timeout budget")
+	}
+}
+
+// The bound must cost a healthy destination nothing: an immediately-accepting
+// dial comes back with its connection and no error.
+func TestNoInterceptDial_HealthyDestinationUnaffected(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	conn, err := dialNoIntercept(context.Background(), zap.NewNop(), "10.96.0.1:443", func(ctx context.Context, addr string) (net.Conn, error) {
+		return c1, nil
+	})
+	if err != nil {
+		t.Fatalf("healthy dial failed: %v", err)
+	}
+	if conn != c1 {
+		t.Fatal("helper did not hand back the dialed connection")
 	}
 }

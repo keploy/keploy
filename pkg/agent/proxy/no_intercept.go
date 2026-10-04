@@ -1,9 +1,14 @@
 package proxy
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -107,4 +112,53 @@ func (s *noInterceptSet) matches(host string) bool {
 		}
 	}
 	return false
+}
+
+// noInterceptDialTimeout bounds the TCP CONNECT to a no-intercept destination.
+//
+// It bounds only the connect, never the relay: an in-cluster API server
+// answers a SYN in milliseconds, so a destination that cannot complete the
+// handshake in this budget is down for any practical purpose. Fifteen seconds
+// is deliberately generous so record mode — where the destination is real and
+// reachable — can never feel it.
+const noInterceptDialTimeout = 15 * time.Second
+
+// dialNoIntercept opens the real connection for a destination the proxy has
+// decided never to intercept (see noInterceptSet). The dial func is a seam so
+// tests can stand in for the network; production passes util.DialDestination.
+//
+// Two things here exist because their absence cost a real investigation:
+//
+//   - The Debug line fires BEFORE the dial. The branch's only other lines are
+//     an error after a failed dial and the "relaying" line after a successful
+//     one, so a dial that neither failed nor returned — a blackholed SYN —
+//     produced no evidence that the branch had run at all.
+//   - The dial is bounded. This relay is deliberately REAL egress, and the one
+//     environment keploy itself builds for replay is a pod under a deny-all
+//     egress NetworkPolicy. When the two meet, the SYN is dropped and an
+//     unbounded dial pins the goroutine in kernel SYN-retry for minutes while
+//     the app times out on its own, with nothing logged. Observed exactly so:
+//     a replayed k8s-proxy dialing its API server through this branch.
+func dialNoIntercept(ctx context.Context, logger *zap.Logger, dstAddr string, dial func(context.Context, string) (net.Conn, error)) (net.Conn, error) {
+	if logger != nil {
+		logger.Debug("dialing a no-intercept destination",
+			zap.String("server address", dstAddr),
+			zap.Duration("connect_budget", noInterceptDialTimeout))
+	}
+	dctx, cancel := context.WithTimeout(ctx, noInterceptDialTimeout)
+	defer cancel()
+	conn, err := dial(dctx, dstAddr)
+	if err != nil {
+		// Name what was observed, not a diagnosis: the destination may simply
+		// be down. The egress-policy pointer is there because policy matches
+		// the POST-DNAT endpoint address, which is the non-obvious half.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(dctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("no-intercept destination %s did not answer a TCP connect within %s; "+
+				"if this pod runs under an egress policy (keploy's replay sandbox applies a deny-all one), "+
+				"the policy must allow the destination's ENDPOINT address, not its ClusterIP: %w",
+				dstAddr, noInterceptDialTimeout, context.DeadlineExceeded)
+		}
+		return nil, err
+	}
+	return conn, nil
 }
