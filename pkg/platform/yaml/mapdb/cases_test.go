@@ -112,3 +112,38 @@ func TestAMappingWrittenBeforeCaseMocksStillDecodes(t *testing.T) {
 		t.Fatalf("decoded as %+v", mapping)
 	}
 }
+
+func TestUpsertCasesKeepsEachTestsFolder(t *testing.T) {
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(string(format), func(t *testing.T) {
+			dir := t.TempDir()
+			db := NewWithFormat(zap.NewNop(), dir, "", format)
+			ctx := context.Background()
+			if err := db.UpsertBatch(ctx, "set", map[string][]models.MockEntry{"t1": {{Name: "mock-0"}}}); err != nil {
+				t.Fatal(err)
+			}
+			in := map[string]models.MappedTestCase{
+				"t1": {Cases: []string{"test-1"}, Dir: "/repo/e2e/orders"},
+				"t2": {Dir: "/repo/e2e/payments"},
+			}
+			if err := db.UpsertCases(ctx, "set", in, nil); err != nil {
+				t.Fatal(err)
+			}
+			data, err := yaml.ReadFileF(ctx, zap.NewNop(), dir+"/set", "mappings", format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mapping, err := DecodeMappingF(data, zap.NewNop(), format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{}
+			for _, tc := range mapping.TestCases {
+				got[tc.ID] = tc.Dir
+			}
+			if got["t1"] != "/repo/e2e/orders" || got["t2"] != "/repo/e2e/payments" {
+				t.Fatalf("folders came back as %v", got)
+			}
+		})
+	}
+}

@@ -137,8 +137,9 @@ type Agent struct {
 	scopeMu      sync.Mutex
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
-	scopeTable   map[string][]string    // replay: test name -> mock names (from mappings.yaml)
-	loadedMocks  int                    // replay: count of mocks stored, for /agent/mock/stats
+	scopeDirs    map[scopeKey]string
+	scopeTable   map[string][]string // replay: test name -> mock names (from mappings.yaml)
+	loadedMocks  int                 // replay: count of mocks stored, for /agent/mock/stats
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {

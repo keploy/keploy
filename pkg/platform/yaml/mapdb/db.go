@@ -320,6 +320,9 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		tc.Cases = mergeNames(tc.Cases, in.Cases)
 		tc.CaseMocks = mergeMaps(tc.CaseMocks, in.CaseMocks)
 		tc.CaseSteps = mergeMaps(tc.CaseSteps, in.CaseSteps)
+		if in.Dir != "" {
+			tc.Dir = in.Dir
+		}
 	}
 	if len(startup) > 0 {
 		mapping.Startup = startup

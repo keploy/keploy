@@ -101,7 +101,8 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) {
 	start, ok := a.workerOpen[k]
 	if ok {
 		delete(a.workerOpen, k)
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid)})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: a.scopeDirs[k]})
+		delete(a.scopeDirs, k)
 	}
 	a.scopeMu.Unlock()
 }
@@ -205,4 +206,16 @@ func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 	loaded := a.loadedMocks
 	a.scopeMu.Unlock()
 	return models.MockStats{Loaded: loaded}, nil
+}
+
+func (a *Agent) NoteScopeDir(name string, pid int, dir string) {
+	if name == "" || dir == "" {
+		return
+	}
+	a.scopeMu.Lock()
+	if a.scopeDirs == nil {
+		a.scopeDirs = make(map[scopeKey]string)
+	}
+	a.scopeDirs[scopeKey{pid: uint32(pid), name: name}] = dir
+	a.scopeMu.Unlock()
 }

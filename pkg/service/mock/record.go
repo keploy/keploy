@@ -304,6 +304,14 @@ func (m *mockService) Record(ctx context.Context) error {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
 				}
 			}
+			for _, w := range windows {
+				if w.Dir == "" {
+					continue
+				}
+				tc := byCase[w.Name]
+				tc.Dir = w.Dir
+				byCase[w.Name] = tc
+			}
 			m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded))
 		}
 	}
