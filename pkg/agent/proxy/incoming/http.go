@@ -1002,6 +1002,12 @@ func writeBadGateway(c net.Conn) {
 	_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 }
 
+func (pm *IngressProxyManager) appGone(c net.Conn) {
+	if !pm.mockMode {
+		writeBadGateway(c)
+	}
+}
+
 // writeBadRequest is the client-side counterpart to writeBadGateway:
 // 400-class so the failure isn't misattributed to the upstream by
 // downstream proxies / monitoring. Used when we detect a malformed
@@ -1213,7 +1219,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if rerr := redial(); rerr != nil {
 					logger.Error("Upstream redial before upgrade failed. Verify the application is still listening on the resolved address.",
 						zap.String("upstream", upstreamAddr), zap.Error(rerr))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 			}
@@ -1224,7 +1230,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					zap.String("upgrade", req.Header.Get("Upgrade")),
 					zap.String("upstream", upstreamAddr),
 					zap.Error(err))
-				writeBadGateway(clientConn)
+				pm.appGone(clientConn)
 				return
 			}
 			// Drain bytes already buffered in our bufio readers before
@@ -1263,9 +1269,13 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			logger.Debug("Stale upstream pool entry detected (FIN in queue); redialing",
 				zap.String("upstream", upstreamAddr))
 			if err := redial(); err != nil {
-				logger.Error("Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
-					zap.String("upstream", upstreamAddr), zap.Error(err))
-				writeBadGateway(clientConn)
+				if pm.mockMode {
+					logger.Debug("the app is not listening after a restart; closing the call as the app would", zap.String("upstream", upstreamAddr), zap.Error(err))
+				} else {
+					logger.Error("Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
+						zap.String("upstream", upstreamAddr), zap.Error(err))
+				}
+				pm.appGone(clientConn)
 				if req.Body != nil {
 					_ = req.Body.Close()
 				}
@@ -1382,7 +1392,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if rerr := redial(); rerr != nil {
 					logger.Error("Replay redial after request-write failure failed. Verify the upstream application is still listening on the resolved address.",
 						zap.String("upstream", upstreamAddr), zap.Error(rerr))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 				// Replay from the pre-buffered body (or no body if
@@ -1397,7 +1407,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if rerr := req.Write(upConn); rerr != nil {
 					logger.Error("Replay of idempotent request failed after redial; upstream may be unhealthy or rejecting writes. Check application status and recent restarts on the resolved address.",
 						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 				if req.Body != nil {
@@ -1414,7 +1424,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					zap.Bool("idempotent", isIdempotentMethod(req.Method)),
 					zap.Int64("content_length", req.ContentLength),
 					zap.Error(err))
-				writeBadGateway(clientConn)
+				pm.appGone(clientConn)
 				return
 			}
 		} else if req.Body != nil {
@@ -1442,7 +1452,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if rerr := redial(); rerr != nil {
 					logger.Error("Replay redial after empty-response failed. Verify the upstream application is still listening on the resolved address.",
 						zap.String("upstream", upstreamAddr), zap.Error(rerr))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 				if preBufferedReqBody != nil {
@@ -1453,7 +1463,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if rerr := req.Write(upConn); rerr != nil {
 					logger.Error("Replay request write failed after redial; upstream may be unhealthy. Check application status on the resolved address.",
 						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 				if req.Body != nil {
@@ -1463,7 +1473,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if err != nil {
 					logger.Error("Replay response read failed; upstream returned no response on the redialed connection either. Check application logs for crashes/restarts.",
 						zap.String("upstream", upstreamAddr), zap.Error(err))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 			} else {
@@ -1478,7 +1488,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					zap.Int64("content_length", req.ContentLength),
 					zap.Duration("time_since_request", time.Since(reqTimestamp)),
 					zap.Error(err))
-				writeBadGateway(clientConn)
+				pm.appGone(clientConn)
 				return
 			}
 		}
