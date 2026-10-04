@@ -899,6 +899,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.GlobalPassthrough {
 		command = append(command, "--global-passthrough")
 	}
+	if opts.DisableHandshakeHold {
+		command = append(command, "--disable-handshake-hold")
+	}
 	if opts.CapturePackets {
 		command = append(command, "--capture-packets")
 	}

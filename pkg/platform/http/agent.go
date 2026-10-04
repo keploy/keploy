@@ -1324,6 +1324,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
+	if opts.DisableHandshakeHold {
+		args = append(args, "--disable-handshake-hold")
+	}
 	if opts.CapturePackets {
 		args = append(args, "--capture-packets")
 	}

@@ -257,6 +257,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable test-mock mapping production during record")
 		}
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Bool("disable-handshake-hold", false, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers (a refused or unreachable dependency then reads as EOF, not a connect error)")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
@@ -339,6 +340,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Bool("disable-handshake-hold", c.cfg.Agent.DisableHandshakeHold, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers")
 		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
 		// Agent-side mirrors of the record command's upstream-TLS flags.
@@ -531,6 +533,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"fromContainer":             "from-container",
 		"networkName":               "network-name",
 		"passThroughPorts":          "pass-through-ports",
+		"disableHandshakeHold":      "disable-handshake-hold",
 		"memoryLimit":               "memory-limit",
 		"maxMemoryPerConnection":    "max-memory-per-conn",
 		"queueSize":                 "queue-size",
@@ -1758,6 +1761,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
+		// The flag, when given, wins over keploy.yml's record.disableHandshakeHold.
+		if cmd.Flags().Changed("disable-handshake-hold") {
+			disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
+			if err != nil {
+				errMsg := "failed to read the disable-handshake-hold flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Record.DisableHandshakeHold = disableHandshakeHold
+		}
+
 		if cmd.Name() == "record" {
 			opportunisticTLSIntercept, err := cmd.Flags().GetBool("opportunistic-tls-intercept")
 			if err != nil {
@@ -1854,6 +1868,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.GlobalPassthrough = globalPassthrough
+
+		disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
+		if err != nil {
+			errMsg := "failed to read the disable-handshake-hold flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.DisableHandshakeHold = disableHandshakeHold
 
 		capturePackets, err := cmd.Flags().GetBool("capture-packets")
 		if err != nil {
@@ -2257,6 +2279,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server")
 	cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Destination ports to leave untouched (never mocked)")
 	cmd.Flags().Bool("local", c.cfg.Mock.Local, "Use the local file-backed mock store even when a cloud registry is configured")
+	cmd.Flags().Bool("disable-handshake-hold", false, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers")
 
 	switch cmd.Name() {
 	case "record":
@@ -2438,6 +2461,16 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return errors.New("failed to get the local flag")
 	}
 	c.cfg.Mock.Local = local
+
+	// The flag, when given, wins over keploy.yml's record.disableHandshakeHold.
+	if cmd.Flags().Changed("disable-handshake-hold") {
+		disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to read the disable-handshake-hold flag")
+			return errors.New("failed to read the disable-handshake-hold flag")
+		}
+		c.cfg.Record.DisableHandshakeHold = disableHandshakeHold
+	}
 
 	switch cmd.Name() {
 	case "record":
