@@ -249,6 +249,8 @@ type Proxy struct {
 	// the resolution order and rationale.
 	appPID     uint32
 	mockMode   bool
+	ownersMu   sync.Mutex
+	owners     map[uint32]int
 	live       LiveHandler
 	caJavaHome string
 
@@ -4313,7 +4315,7 @@ func (p *Proxy) watchListeners(ctx context.Context) {
 	for inode := range listenTable() {
 		seen[inode] = true
 	}
-	apps := map[uint32]bool{}
+
 	self := os.Getpid()
 	t := time.NewTicker(2 * time.Millisecond)
 	defer t.Stop()
@@ -4330,20 +4332,58 @@ func (p *Proxy) watchListeners(ctx context.Context) {
 			}
 			seen[inode] = true
 			owner, ok := treeOwnerOf(inode, int(p.appPID))
-			if ok && (owner == self || appstart.IsWorker(owner)) {
+			if ok && owner == self {
 				continue
 			}
-			if !ok && !apps[port] {
-				continue
-			}
-			apps[port] = true
-			appstart.Note(uint32(owner), uint16(port))
-			p.logger.Debug("an app started listening", zap.Int("pid", owner), zap.Uint32("port", port))
+			p.noteOwner(owner, port, ok)
 		}
 		for inode := range seen {
 			if _, ok := table[inode]; !ok {
 				delete(seen, inode)
 			}
+		}
+	}
+}
+
+func (p *Proxy) noteOwner(owner int, port uint32, found bool) {
+	if found && appstart.IsWorker(owner) {
+		return
+	}
+	p.ownersMu.Lock()
+	defer p.ownersMu.Unlock()
+	prev, seen := p.owners[port]
+	if !found {
+		if !seen || prev == 0 {
+			return
+		}
+		owner = 0
+	} else if seen && prev == owner {
+		return
+	}
+	if p.owners == nil {
+		p.owners = map[uint32]int{}
+	}
+	p.owners[port] = owner
+	appstart.Note(uint32(owner), uint16(port))
+	p.logger.Debug("an app started listening", zap.Int("pid", owner), zap.Uint32("port", port))
+}
+
+func (p *Proxy) NoteListener(addr string) {
+	if !p.mockMode || p.IsDocker || p.appPID == 0 {
+		return
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return
+	}
+	ip := net.ParseIP(host)
+	for inode := range listenInodes(ip, uint32(n)) {
+		if owner, ok := treeOwnerOf(inode, int(p.appPID)); ok {
+			p.noteOwner(owner, uint32(n), true)
 		}
 	}
 }
