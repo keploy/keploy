@@ -39,7 +39,7 @@ func TestListenTableAndOwnerOfFindANewListener(t *testing.T) {
 		if p != port {
 			continue
 		}
-		if pid, ok := ownerOf(inode); ok && pid == os.Getpid() {
+		if pid, ok := treeOwnerOf(inode, os.Getppid()); ok && pid == os.Getpid() {
 			return
 		}
 	}

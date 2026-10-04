@@ -64,15 +64,23 @@ func listenTable() map[string]uint32 {
 	return out
 }
 
-func ownerOf(inode string) (int, bool) {
-	procs, err := filepath.Glob("/proc/[0-9]*/fd/*")
+func treeOwnerOf(inode string, root int) (int, bool) {
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return 0, false
 	}
 	want := "socket:[" + inode + "]"
-	for _, fd := range procs {
-		if link, err := os.Readlink(fd); err == nil && link == want {
-			if pid, err := strconv.Atoi(strings.Split(fd, "/")[2]); err == nil {
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || !descends(pid, root) {
+			continue
+		}
+		fds, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			if link, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, fd.Name())); err == nil && link == want {
 				return pid, true
 			}
 		}

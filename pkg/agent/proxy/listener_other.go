@@ -12,4 +12,4 @@ func listenInodes(net.IP, uint32) map[string]bool { return nil }
 
 func listenTable() map[string]uint32 { return nil }
 
-func ownerOf(string) (int, bool) { return 0, false }
+func treeOwnerOf(string, int) (int, bool) { return 0, false }
