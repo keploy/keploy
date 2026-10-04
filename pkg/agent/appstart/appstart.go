@@ -8,9 +8,8 @@ import (
 )
 
 var (
-	mu      sync.Mutex
-	starts  []models.AppStart
-	workers = map[int]bool{}
+	mu     sync.Mutex
+	starts []models.AppStart
 )
 
 func Note(pid uint32, port uint16) { NoteAt(time.Now(), pid, port) }
@@ -25,16 +24,4 @@ func List() []models.AppStart {
 	mu.Lock()
 	defer mu.Unlock()
 	return append([]models.AppStart(nil), starts...)
-}
-
-func Worker(pid int) {
-	mu.Lock()
-	workers[pid] = true
-	mu.Unlock()
-}
-
-func IsWorker(pid int) bool {
-	mu.Lock()
-	defer mu.Unlock()
-	return workers[pid]
 }

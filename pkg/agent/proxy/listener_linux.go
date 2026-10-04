@@ -37,33 +37,6 @@ func listenerOwner(ip net.IP, port uint32) (int, bool) {
 	return 0, false
 }
 
-func listenTable() map[string]uint32 {
-	out := map[string]uint32{}
-	for _, file := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		f, err := os.Open(file)
-		if err != nil {
-			continue
-		}
-		sc := bufio.NewScanner(f)
-		sc.Scan()
-		for sc.Scan() {
-			fields := strings.Fields(sc.Text())
-			if len(fields) < 10 || fields[3] != "0A" {
-				continue
-			}
-			_, p, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			if n, err := strconv.ParseUint(p, 16, 32); err == nil {
-				out[fields[9]] = uint32(n)
-			}
-		}
-		f.Close()
-	}
-	return out
-}
-
 func listenInodes(ip net.IP, port uint32) map[string]bool {
 	out := map[string]bool{}
 	for _, file := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {

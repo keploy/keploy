@@ -262,3 +262,9 @@ type AppStart struct {
 	PID  uint32    `json:"pid"`
 	Port uint16    `json:"port"`
 }
+
+type AppStartReq struct {
+	Port int       `json:"port"`
+	Pid  int       `json:"pid,omitempty"`
+	At   time.Time `json:"at,omitzero"`
+}

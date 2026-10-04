@@ -88,9 +88,6 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 
 // openWindow remembers when a test said it started, in either mode, so a client can read the windows later.
 func (a *Agent) openWindow(name string, pid int, at time.Time) {
-	if pid > 0 {
-		appstart.Worker(pid)
-	}
 	a.scopeMu.Lock()
 	if a.workerOpen == nil {
 		a.workerOpen = make(map[scopeKey]time.Time)

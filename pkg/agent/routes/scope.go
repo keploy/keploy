@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/render"
+	"go.keploy.io/server/v3/pkg/agent/appstart"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -210,4 +211,23 @@ func (a *Agent) HandleServedMocks(w http.ResponseWriter, r *http.Request) {
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, served)
+}
+
+func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {
+	var req models.AppStartReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid app-start request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if req.Port <= 0 || req.Port > 65535 {
+		http.Error(w, "invalid app-start request: port must be the port the app listens on", http.StatusBadRequest)
+		return
+	}
+	at := req.At
+	if at.IsZero() {
+		at = time.Now()
+	}
+	appstart.NoteAt(at, uint32(req.Pid), uint16(req.Port))
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]string{"status": "ok"})
 }
