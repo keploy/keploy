@@ -82,7 +82,7 @@ func (p *Proxy) watchStarts(ctx context.Context) {
 
 	self := os.Getpid()
 	pending := map[int]time.Time{}
-	t := time.NewTicker(time.Millisecond)
+	t := time.NewTicker(250 * time.Microsecond)
 	defer t.Stop()
 	for {
 		select {
