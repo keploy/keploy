@@ -23,7 +23,7 @@ func TestListenerOwnerFindsThisProcessListening(t *testing.T) {
 		t.Fatal("descends must follow parents only")
 	}
 	l.Close()
-	if _, ok := listenerOwner(net.ParseIP("127.0.0.1"), port); ok {
+	if pid, listening := listenerOwner(net.ParseIP("127.0.0.1"), port); listening || pid != 0 {
 		t.Fatal("a closed port has no owner")
 	}
 }

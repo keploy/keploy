@@ -20,7 +20,7 @@ func listenerOwner(ip net.IP, port uint32) (int, bool) {
 	}
 	procs, err := filepath.Glob("/proc/[0-9]*/fd/*")
 	if err != nil {
-		return 0, false
+		return 0, true
 	}
 	for _, fd := range procs {
 		link, err := os.Readlink(fd)
@@ -34,7 +34,7 @@ func listenerOwner(ip net.IP, port uint32) (int, bool) {
 			}
 		}
 	}
-	return 0, false
+	return 0, true
 }
 
 func listenInodes(ip net.IP, port uint32) map[string]bool {

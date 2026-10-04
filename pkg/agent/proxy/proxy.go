@@ -4282,12 +4282,12 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		return false, nil
 	}
 	ip := net.ParseIP(host)
-	owner, ok := listenerOwner(ip, dest.Port)
-	if !ok && ip != nil && ip.IsLoopback() && len(listenInodes(ip, dest.Port)) == 0 {
+	owner, listening := listenerOwner(ip, dest.Port)
+	if !listening && ip != nil && ip.IsLoopback() {
 		p.logger.Debug("nothing listens at the local destination yet; closing the call instead of mocking it", zap.String("destination", dstAddr))
 		return true, nil
 	}
-	if !ok || !descends(owner, int(p.appPID)) {
+	if owner == 0 || !descends(owner, int(p.appPID)) {
 		return false, nil
 	}
 	caller := int(dest.KernelPid)
