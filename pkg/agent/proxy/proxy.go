@@ -250,7 +250,7 @@ type Proxy struct {
 	appPID     uint32
 	mockMode   bool
 	appsMu     sync.Mutex
-	apps       map[uint32]string
+	apps       map[uint32]*appPort
 	live       LiveHandler
 	caJavaHome string
 
@@ -4338,18 +4338,36 @@ func (p *Proxy) watchListeners(ctx context.Context) {
 				delete(seen, inode)
 			}
 		}
+		p.markDown(table)
 	}
+}
+
+type appPort struct {
+	inode string
+	up    bool
+}
+
+func (p *Proxy) markDown(table map[string]uint32) {
+	listening := map[uint32]bool{}
+	for _, port := range table {
+		listening[port] = true
+	}
+	p.appsMu.Lock()
+	for port, st := range p.apps {
+		if !listening[port] {
+			st.up = false
+		}
+	}
+	p.appsMu.Unlock()
 }
 
 func (p *Proxy) noteListener(port uint32, inode string, self int) {
 	p.appsMu.Lock()
-	last, known := p.apps[port]
-	if known {
-		if last != inode {
-			p.apps[port] = inode
-		}
+	if st, known := p.apps[port]; known {
+		restarted := !st.up || st.inode != inode
+		st.inode, st.up = inode, true
 		p.appsMu.Unlock()
-		if last != inode {
+		if restarted {
 			appstart.Note(0, uint16(port))
 			p.logger.Debug("the app restarted", zap.Uint32("port", port))
 		}
@@ -4366,9 +4384,9 @@ func (p *Proxy) noteListener(port uint32, inode string, self int) {
 		return
 	}
 	if p.apps == nil {
-		p.apps = map[uint32]string{}
+		p.apps = map[uint32]*appPort{}
 	}
-	p.apps[port] = inode
+	p.apps[port] = &appPort{inode: inode, up: true}
 	p.appsMu.Unlock()
 	appstart.Note(uint32(owner), uint16(port))
 	p.logger.Debug("an app started listening", zap.Int("pid", owner), zap.Uint32("port", port))
