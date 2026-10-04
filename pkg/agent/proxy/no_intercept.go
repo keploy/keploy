@@ -152,7 +152,11 @@ func dialNoIntercept(ctx context.Context, logger *zap.Logger, dstAddr string, di
 		// Name what was observed, not a diagnosis: the destination may simply
 		// be down. The egress-policy pointer is there because policy matches
 		// the POST-DNAT endpoint address, which is the non-obvious half.
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(dctx.Err(), context.DeadlineExceeded) {
+		// Deliberately ONLY the dial's own error: checking dctx.Err() as well
+		// re-labeled any failure that merely raced the budget (a refused
+		// connection at second fifteen) as a timeout, pointing the operator at
+		// a policy that had nothing to do with it.
+		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("no-intercept destination %s did not answer a TCP connect within %s; "+
 				"if this pod runs under an egress policy (keploy's replay sandbox applies a deny-all one), "+
 				"the policy must allow the destination's ENDPOINT address, not its ClusterIP: %w",

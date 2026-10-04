@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,5 +144,28 @@ func TestNoInterceptDial_HealthyDestinationUnaffected(t *testing.T) {
 	}
 	if conn != c1 {
 		t.Fatal("helper did not hand back the dialed connection")
+	}
+}
+
+// A dial failure that merely RACES the budget must come back as itself, not as
+// the egress-policy hint: a refused connection at second 15 has nothing to do
+// with NetworkPolicy, and the hint would send the operator to the wrong system.
+func TestNoInterceptDial_DoesNotRelabelForeignErrorsAsTimeout(t *testing.T) {
+	refused := errors.New("connect: connection refused")
+	parent, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	dial := func(ctx context.Context, addr string) (net.Conn, error) {
+		<-ctx.Done() // the budget has expired by the time the error surfaces
+		return nil, refused
+	}
+	_, err := dialNoIntercept(parent, zap.NewNop(), "10.96.0.1:443", dial)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, refused) {
+		t.Fatalf("the dial's own error must survive, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "egress policy") {
+		t.Fatalf("a non-deadline failure must not carry the egress-policy hint: %v", err)
 	}
 }
