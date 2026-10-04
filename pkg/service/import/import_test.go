@@ -3,7 +3,59 @@ package postmanimport
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
+
+func TestReplaceTemplateVars(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		variables map[string]string
+		expected  string
+	}{
+		{
+			name:      "replaces a hyphenated variable",
+			input:     "{{base-url}}/users",
+			variables: map[string]string{"base-url": "https://example.com"},
+			expected:  "https://example.com/users",
+		},
+		{
+			name:      "replaces an underscored variable",
+			input:     "{{base_url}}/users",
+			variables: map[string]string{"base_url": "https://example.com"},
+			expected:  "https://example.com/users",
+		},
+		{
+			name:      "allows whitespace around a hyphenated variable",
+			input:     "{{ base-url }}/users",
+			variables: map[string]string{"base-url": "https://example.com"},
+			expected:  "https://example.com/users",
+		},
+		{
+			name:      "keeps an unknown variable unchanged",
+			input:     "{{missing-url}}/users",
+			variables: map[string]string{"base-url": "https://example.com"},
+			expected:  "{{missing-url}}/users",
+		},
+		{
+			name:  "replaces multiple variables",
+			input: "{{scheme}}://{{api-host}}/{{resource_name}}",
+			variables: map[string]string{
+				"scheme":        "https",
+				"api-host":      "example.com",
+				"resource_name": "users",
+			},
+			expected: "https://example.com/users",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.expected, replaceTemplateVars(test.input, test.variables))
+		})
+	}
+}
 
 func TestItemsContainerUnmarshal_DoesNotTreatFoldersAsRequests(t *testing.T) {
 	data := []byte(`[
