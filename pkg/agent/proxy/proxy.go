@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
@@ -2130,7 +2131,11 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 					if isShutdownError(err) || isNetworkClosedErr(err) {
 						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
 					} else {
-						utils.LogError(p.logger, err, "failed to handle the client connection")
+						if refusedLocally(err) {
+							p.logger.Debug("failed to handle the client connection: nothing is listening at the local destination yet", zap.Error(err))
+						} else {
+							utils.LogError(p.logger, err, "failed to handle the client connection")
+						}
 					}
 				}
 				return nil
@@ -3089,6 +3094,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstConn, err = util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
 			probeDial(p.logger, "plain-tcp", clientConnID, dstAddr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 			if err != nil {
+				if refusedLocally(err) {
+					logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstAddr))
+					return err
+				}
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 				return err
 			}
@@ -4235,4 +4244,20 @@ func isShutdownError(err error) bool {
 		return true
 	}
 	return false
+}
+
+func refusedLocally(err error) bool {
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return false
+	}
+	var op *net.OpError
+	if !errors.As(err, &op) || op.Addr == nil {
+		return false
+	}
+	host, _, splitErr := net.SplitHostPort(op.Addr.String())
+	if splitErr != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return host == "localhost" || (ip != nil && ip.IsLoopback())
 }
