@@ -4300,5 +4300,6 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		return true, err
 	}
 	defer dstConn.Close()
-	return true, p.globalPassThrough(ctx, srcConn, dstConn)
+	util.RelayRawPassthrough(srcConn, dstConn)
+	return true, nil
 }
