@@ -2253,6 +2253,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
+	// Name the MITM leaf after the real destination when the app sent no SNI,
+	// which is every TLS dial to an IP literal (RFC 6066). Stamped on ctx HERE —
+	// before parserCtx derives from it — so every client-side TLS upgrade
+	// inherits it: the main handshake below, the opportunistic sniff-and-hijack,
+	// and the parser STARTTLS upgrades (MySQL et al.), whose flows never pass
+	// through the main handshake site. hostFromAddr strips the port and the
+	// IPv6 brackets that dstAddr carries; cfssl then classifies the bare IP
+	// into an IP SAN. A no-op when SNI is present, since CertForClient prefers
+	// clientHello.ServerName.
+	ctx = pTls.WithDestHost(ctx, hostFromAddr(dstAddr))
+
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
@@ -2312,6 +2323,39 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
+	// Relay, never intercept, the destinations whose clients pin a trust store
+	// keploy cannot add its CA to — the Kubernetes API server above all. See
+	// noInterceptSet for why this is not a kernel-side bypass and why mocking
+	// this traffic was not worth keeping.
+	//
+	// Placed ahead of EVERY dispatch below — the opportunistic sniff-and-hijack
+	// included, which returns before anything after it — because the damage is
+	// done by the handshake itself: the app rejects keploy's leaf and never
+	// completes a call, in any mode. A pinned-trust destination is never MITM'd.
+	if host := hostFromAddr(dstAddr); p.noIntercept.matches(host) {
+		dstConn, err = dialNoIntercept(parserCtx, p.logger, dstAddr, func(dctx context.Context, addr string) (net.Conn, error) {
+			return util.DialDestination(dctx, p.logger, "tcp", util.DialTarget{Addr: addr})
+		})
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to dial a no-intercept destination", zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+			return err
+		}
+		// The relay carries indefinitely-lived streams (API-server watches).
+		// RelayRawPassthrough's abandoned-copier contract assumes the caller
+		// armed the connCloser, so parserCtx cancellation — recording stop,
+		// agent shutdown — severs both halves; without it the pair lived until
+		// the stream EOF'd on its own.
+		startConnCloser()
+		// Debug, not Warn: unlike a parser decline this is a configured
+		// decision, it holds for every connection to this destination, and the
+		// set is already logged once at startup. A Warn per API-server call
+		// would bury the log.
+		p.logger.Debug("relaying a no-intercept destination without interception",
+			zap.String("server address", dstAddr))
+		util.RelayRawPassthrough(srcConn, dstConn)
+		return nil
+	}
+
 	// Opportunistic TLS intercept: a separate passthrough variant
 	// where we relay bytes verbatim AND peek for a TLS handshake;
 	// when one shows up, we hijack and MITM both halves so the keys
@@ -2327,32 +2371,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				zap.String("server address", dstAddr))
 			return err
 		}
-		return nil
-	}
-
-	// Relay, never intercept, the destinations whose clients pin a trust store
-	// keploy cannot add its CA to — the Kubernetes API server above all. See
-	// noInterceptSet for why this is not a kernel-side bypass and why mocking
-	// this traffic was not worth keeping.
-	//
-	// Placed ahead of every dispatch below, including the TLS upgrade, because
-	// the damage is done by the handshake itself: the app rejects keploy's leaf
-	// and never completes a call.
-	if host := hostFromAddr(dstAddr); p.noIntercept.matches(host) {
-		dstConn, err = dialNoIntercept(parserCtx, p.logger, dstAddr, func(dctx context.Context, addr string) (net.Conn, error) {
-			return util.DialDestination(dctx, p.logger, "tcp", util.DialTarget{Addr: addr})
-		})
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to dial a no-intercept destination", zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
-			return err
-		}
-		// Debug, not Warn: unlike a parser decline this is a configured
-		// decision, it holds for every connection to this destination, and the
-		// set is already logged once at startup. A Warn per API-server call
-		// would bury the log.
-		p.logger.Debug("relaying a no-intercept destination without interception",
-			zap.String("server address", dstAddr))
-		util.RelayRawPassthrough(srcConn, dstConn)
 		return nil
 	}
 
@@ -2798,12 +2816,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					zap.String("sniHost", sniHost), zap.Uint32("dstPort", destInfo.Port))
 			}
 		}
-		// Name the MITM leaf after the real destination when the app sent no
-		// SNI, which is every TLS dial to an IP literal (RFC 6066). hostFromAddr
-		// strips the port and the IPv6 brackets that dstAddr carries; cfssl then
-		// classifies the bare IP into an IP SAN. A no-op when SNI is present,
-		// since CertForClient prefers clientHello.ServerName.
-		hsCtx = pTls.WithDestHost(hsCtx, hostFromAddr(dstAddr))
+		// The destination host for SNI-less leaf naming is already on ctx (and
+		// so on hsCtx) — stamped once above, before parserCtx derives, so the
+		// opportunistic and parser STARTTLS upgrades inherit the same value.
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),
