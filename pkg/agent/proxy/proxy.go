@@ -4287,10 +4287,12 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	if !ok || !descends(owner, int(p.appPID)) {
 		return false, nil
 	}
-	if prev, seen := p.owners.Swap(dest.Port, owner); !seen || prev.(int) != owner {
-		appstart.Note(uint32(owner), uint16(dest.Port))
-	}
 	caller := int(dest.KernelPid)
+	if !descends(caller, owner) {
+		if prev, seen := p.owners.Swap(dest.Port, owner); !seen || prev.(int) != owner {
+			appstart.Note(uint32(owner), uint16(dest.Port))
+		}
+	}
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
 		return true, nil
