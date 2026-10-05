@@ -2421,6 +2421,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			ReqTimestampMock: models.FormatMockTimestamp(new.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(new.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
+			RequestDrift:     new.ServedRequestDrift,
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2472,6 +2473,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+			RequestDrift:     mock.ServedRequestDrift,
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2527,6 +2529,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 				ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
 				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+				RequestDrift:     mock.ServedRequestDrift,
 				CarryOver:        true,
 			}); err != nil {
 				m.logger.Error("failed to flag carry-over mock as used", zap.Error(err))
@@ -2576,6 +2579,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+			RequestDrift:     mock.ServedRequestDrift,
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2671,6 +2675,7 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
+			RequestDrift:     mk.ServedRequestDrift,
 			// A registered kind's startup-band mock first consumed after a
 			// test fired (a startup push to a consumer created lazily, or
 			// held back by its permits) is consumed outside its own window,
@@ -2859,6 +2864,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		// (e.g. Pulsar) that consume via MarkMockAsUsed rather than the
 		// Delete*/Update* paths, so UpdateMocks can persist it back to disk.
 		ReqBodyNoise: reqBodyNoiseOf(mock.Spec),
+		RequestDrift: mock.ServedRequestDrift,
 		// A registered kind's per-test mock consumed outside the current
 		// window (a server push delivered late) belongs to its own window.
 		CarryOver: m.consumedOutOfWindow(mock),
@@ -3050,6 +3056,9 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	m.consumedMu.Lock()
 	if idx, exists := m.consumedIndex[mock.Name]; exists {
 		mock.Timestamp = m.consumedList[idx].Timestamp
+		// A mock served more than once since the last drain (a session mock,
+		// say) keeps the drift of every serve, not only the latest one.
+		mock.RequestDrift = mergeRequestDrift(m.consumedList[idx].RequestDrift, mock.RequestDrift)
 		m.consumedList[idx] = mock // update state, preserve position and first use
 	} else {
 		m.consumedIndex[mock.Name] = len(m.consumedList)
@@ -3076,6 +3085,27 @@ func (m *MockManager) ServedCounts() map[string]uint64 {
 	out := make(map[string]uint64, len(m.servedCount))
 	for k, v := range m.servedCount {
 		out[k] = v
+	}
+	return out
+}
+
+// mergeRequestDrift unions two request-drift lists, keeping the first diff seen
+// per path, so repeated serves of one mock report each drifted field once.
+func mergeRequestDrift(a, b []models.MockFieldDiff) []models.MockFieldDiff {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]models.MockFieldDiff, 0, len(a)+len(b))
+	for _, d := range append(append([]models.MockFieldDiff(nil), a...), b...) {
+		if _, dup := seen[d.Path]; dup {
+			continue
+		}
+		seen[d.Path] = struct{}{}
+		out = append(out, d)
 	}
 	return out
 }

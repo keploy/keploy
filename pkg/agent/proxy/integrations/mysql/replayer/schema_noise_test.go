@@ -633,3 +633,15 @@ func TestQueryShapeCacheMemoIsStable(t *testing.T) {
 		}
 	}
 }
+
+// MySQL reports which statement fields changed, never their values: the drift
+// shows on every passing test and SQL parameters are user data.
+func TestDriftWithoutValuesKeepsOnlyTheFields(t *testing.T) {
+	got := driftWithoutValues([]models.MockFieldDiff{{Path: "body.args[0]", Expected: "a@x.io", Actual: "b@x.io"}})
+	if len(got) != 1 || got[0].Path != "body.args[0]" || got[0].Expected != "" || got[0].Actual != "" {
+		t.Fatalf("want the path without values; got %+v", got)
+	}
+	if driftWithoutValues(nil) != nil {
+		t.Fatal("no drift stays no drift")
+	}
+}

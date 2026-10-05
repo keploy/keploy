@@ -965,7 +965,7 @@ func TestUpdateMock_DoesNotMutatePoolPointer(t *testing.T) {
 	beforeIsFiltered := original.TestModeInfo.IsFiltered
 	beforeSortOrder := original.TestModeInfo.SortOrder
 
-	if ok := h.updateMock(context.TODO(), original, db, nil); !ok {
+	if ok := h.updateMock(context.TODO(), original, db, nil, nil); !ok {
 		t.Fatalf("updateMock returned false; expected true from stubbed UpdateUnFilteredMock")
 	}
 
@@ -1020,7 +1020,7 @@ func TestUpdateMock_PerTestPrefersDelete(t *testing.T) {
 		},
 	}
 
-	if ok := h.updateMock(context.TODO(), original, db, nil); !ok {
+	if ok := h.updateMock(context.TODO(), original, db, nil, nil); !ok {
 		t.Fatalf("updateMock returned false; expected true from stubbed DeleteFilteredMock")
 	}
 	if db.deletedFiltered == nil {

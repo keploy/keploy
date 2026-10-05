@@ -1410,10 +1410,12 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			}
 			if chosen != nil {
 				var detected map[string][]string
+				var drift []models.MockFieldDiff
 				if liveBodyOK {
 					detected, _ = noiseEngine.Detect(chosen, liveBody, userBodyNoise)
+					drift = driftWithoutValues(noiseEngine.ServedDrift(chosen, liveBody, userBodyNoise))
 				}
-				updateMock(ctx, logger, chosen, mockDb, detected)
+				updateMock(ctx, logger, chosen, mockDb, detected, drift)
 			}
 			logger.Debug("Accepting COM_STMT_SEND_LONG_DATA (no-response command)",
 				zap.Bool("consumed_recorded_mock", chosen != nil))
@@ -1596,7 +1598,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// (utility commands). The learn is carried out on fresh copies inside
 	// updateMock, never on the shared pooled mock.
 	var detectedNoise map[string][]string
+	// With detection off (a replay that reports rather than learns), the same
+	// drift is reported on the consumed mock as a DriftedCall instead.
+	var servedDrift []models.MockFieldDiff
 	if liveBodyOK {
+		servedDrift = driftWithoutValues(noiseEngine.ServedDrift(matchedMock, liveBody, userBodyNoise))
 		detectedNoise, _ = noiseEngine.Detect(matchedMock, liveBody, userBodyNoise)
 		if len(detectedNoise) > 0 {
 			paths := make([]string, 0, len(detectedNoise))
@@ -1612,7 +1618,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 
 	// Update the mock in the database BEFORE modifying the response
 	// This ensures we update using the original mock state
-	if okk := updateMock(ctx, logger, matchedMock, mockDb, detectedNoise); !okk {
+	if okk := updateMock(ctx, logger, matchedMock, mockDb, detectedNoise, servedDrift); !okk {
 		logger.Debug("failed to update the matched mock")
 		// Re-fetch once to avoid spin
 		return nil, false, nil, fmt.Errorf("failed to update matched mock")
@@ -2365,8 +2371,22 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // see the HTTP updateMock's concurrency note, the same pooled-pointer race
 // applies here) and reaches persistence through the same
 // DeleteFilteredMock/UpdateUnFilteredMock paths as HTTP's learned noise.
-func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
+// driftWithoutValues keeps which statement fields changed and drops their
+// values. The drift is reported on every passing test, and SQL parameters are
+// user data (emails, tokens) with no field names to redact them by — unlike a
+// miss report, which fires only on a failure.
+func driftWithoutValues(d []models.MockFieldDiff) []models.MockFieldDiff {
+	for i := range d {
+		d[i].Expected, d[i].Actual = "", ""
+	}
+	return d
+}
+
+func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, drift []models.MockFieldDiff) bool {
 	updatedMock := *matchedMock
+	// This serve's request drift rides on the copies, never the pooled mock
+	// (mirrors HTTP's updateMock).
+	updatedMock.ServedRequestDrift = drift
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 	if len(detectedNoise) > 0 {
@@ -2404,6 +2424,7 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	// carries the detected noise on a fresh ReqBodyNoise map — this is how
 	// the noise gets reported on the consumed per-test mock (mirrors HTTP).
 	deleteMock := *matchedMock
+	deleteMock.ServedRequestDrift = drift
 	if len(detectedNoise) > 0 {
 		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
 	}

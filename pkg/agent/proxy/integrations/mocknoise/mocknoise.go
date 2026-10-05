@@ -35,6 +35,7 @@ package mocknoise
 import (
 	"encoding/json"
 	"maps"
+	"sort"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -171,6 +172,71 @@ func (e *Engine) Detect(m *models.Mock, liveBody []byte, userNoise map[string][]
 	return e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), nil, true, e.adapter.RecordedValueIsNoise(m))
 }
 
+// servedDriftMaxValueLen caps each recorded/live value a served-drift diff
+// carries, as the protocols' miss reports cap theirs.
+const servedDriftMaxValueLen = 96
+
+// ServedDrift reports, with recorded (Expected) and live (Actual) values, the
+// fields of a live request body that differ from mock m's recorded body
+// outside known noise, for a mock about to be served although they differ.
+// It is what a replay reports as a models.DriftedCall: a served mock hides the
+// change from the response check, so this is where the change shows.
+//
+// Nil when detection is on — the auto-replay that learns noise is learning
+// such drift, not reporting it — when the mock has no recorded body, or when
+// nothing outside known noise drifted. Bodies the adapter cannot compare field
+// by field that still differ are reported as one changed "body" field. The
+// fields are exactly the ones Detect/StrictReject would name (the adapter's
+// Diff against the same known-noise set); the values come from a JSON walk of
+// the two bodies, and a drifted field the walk cannot name is reported
+// without values rather than dropped. Callers redact as their protocol needs.
+func (e *Engine) ServedDrift(m *models.Mock, liveBody []byte, userNoise map[string][]string) []models.MockFieldDiff {
+	if e == nil || e.detection {
+		return nil
+	}
+	recorded, ok := e.adapter.RecordedBody(m)
+	if !ok || string(recorded) == string(liveBody) {
+		return nil
+	}
+	known := e.KnownNoise(m, userNoise)
+	// The same comparison StrictReject makes (learned paths type-strict, value
+	// and type changes alike), so a lenient serve reports what strict would
+	// have refused.
+	drift, comparable := e.adapter.Diff(m, recorded, liveBody, known, e.learnedTypeStrict(m, userNoise), false, e.adapter.RecordedValueIsNoise(m))
+	if !comparable {
+		return []models.MockFieldDiff{{Path: "body", Kind: models.DiffKindValueChanged}}
+	}
+	if len(drift) == 0 {
+		return nil
+	}
+	var out []models.MockFieldDiff
+	named := make(map[string]struct{}, len(drift))
+	for _, d := range matcher.JSONFieldDiffs(string(recorded), string(liveBody), known, "body.", servedDriftMaxValueLen) {
+		if _, drifted := drift[d.Path]; drifted {
+			// The JSON walk folds every element of an array into one "[]"
+			// path, so its values are one element's, not necessarily the one
+			// that changed: report the field without them rather than a
+			// misleading pair.
+			if strings.Contains(d.Path, "[]") {
+				d.Expected, d.Actual = "", ""
+			}
+			out = append(out, d)
+			named[d.Path] = struct{}{}
+		}
+	}
+	var rest []string
+	for p := range drift {
+		if _, ok := named[p]; !ok {
+			rest = append(rest, p)
+		}
+	}
+	sort.Strings(rest)
+	for _, p := range rest {
+		out = append(out, models.MockFieldDiff{Path: p, Kind: models.DiffKindValueChanged})
+	}
+	return out
+}
+
 // Learn merges newly-detected drift into the mock's stored noise (monotonic —
 // existing entries win) and writes it back through the adapter. Returns the
 // number of newly-added field paths; 0 (and no write) when nothing is new.
@@ -235,6 +301,27 @@ func (e *Engine) StrictReject(m *models.Mock, liveBody []byte, userNoise map[str
 	// typeStrict, still fully exclude learned noise; typeStrict additionally marks
 	// them so a JSON parser type-enforces rather than fully ignores (collectJSON
 	// consults typeStrict first). User-configured noise stays full-ignore/regex.
+	typeStrict := e.learnedTypeStrict(m, userNoise)
+	d, comparable := e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), typeStrict, false, e.adapter.RecordedValueIsNoise(m))
+	if !comparable {
+		// No field structure to diff — fall back to byte equality so unequal
+		// opaque bodies are a real mismatch rather than a silent pass.
+		if string(recorded) == string(liveBody) {
+			return true, nil
+		}
+		return false, map[string][]string{"body": nil}
+	}
+	if len(d) == 0 {
+		return true, nil
+	}
+	return false, d
+}
+
+// learnedTypeStrict is the set of LEARNED body paths (prefix-stripped) a JSON
+// parser type-enforces rather than fully ignores: every path the auto-noising
+// learned on m, except one the user also configured as noise, which keeps the
+// user's full-ignore/value-regex intent.
+func (e *Engine) learnedTypeStrict(m *models.Mock, userNoise map[string][]string) map[string]struct{} {
 	learned := StripBodyPrefix(e.adapter.StoredNoise(m))
 	// User body noise is lowercased at ingest (decode.go), while learned noise
 	// keeps the recorded JSON case (e.g. "userId"), so the exclusion must compare
@@ -255,19 +342,7 @@ func (e *Engine) StrictReject(m *models.Mock, liveBody []byte, userNoise map[str
 		}
 		typeStrict[k] = struct{}{}
 	}
-	d, comparable := e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), typeStrict, false, e.adapter.RecordedValueIsNoise(m))
-	if !comparable {
-		// No field structure to diff — fall back to byte equality so unequal
-		// opaque bodies are a real mismatch rather than a silent pass.
-		if string(recorded) == string(liveBody) {
-			return true, nil
-		}
-		return false, map[string][]string{"body": nil}
-	}
-	if len(d) == 0 {
-		return true, nil
-	}
-	return false, d
+	return typeStrict
 }
 
 // DetectJSONDrift compares a recorded request body against the live one and
