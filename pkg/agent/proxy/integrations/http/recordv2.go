@@ -37,7 +37,14 @@ import (
 // the legacy path uses.
 //
 // recordV2 loops over request/response pairs for HTTP/1.1 keepalive /
-// pipelining. It exits cleanly on either stream reaching EOF or Close,
+// pipelining. Each request starts where Session.NextRequest finds it, so its
+// response is what the server sent after the request was captured: server
+// bytes captured before it (the answer to a request in flight when the capture
+// began or the agent restarted, a 408 the server sent on its own) are never
+// paired with it, and NextRequest says which of them it reports: it ends
+// with Session.EndExchanges, however it ends, so they are reported though it
+// never reads the server's stream past them. It exits
+// cleanly on either stream reaching EOF or Close,
 // on ctx cancellation, or on a malformed-HTTP decode error (the error is
 // returned, and the supervisor falls through to passthrough). An exchange
 // it stops on and cannot record (a request or response that does not
@@ -49,6 +56,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 	if sess == nil {
 		return errors.New("recordV2: nil supervisor session")
 	}
+	defer sess.EndExchanges()
 	logger := sess.Logger
 	if logger == nil {
 		logger = h.Logger
@@ -71,7 +79,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// First chunk's ReadAt is the request arrival timestamp. We grab
 		// it via ReadChunk so the timestamp is carried regardless of
 		// what ReadBytes does underneath.
-		firstChunk, err := sess.ClientStream.ReadChunk()
+		firstChunk, err := nextRequestV2(sess)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				logger.Debug("V2 HTTP record: client stream ended at start of request", zap.Error(err))
@@ -82,10 +90,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			}
 			utils.LogError(logger, err, "V2 HTTP record: initial request read failed")
 			return err
-		}
-		if len(firstChunk.Bytes) == 0 {
-			// Empty synthetic chunk (channel close sentinel): treat as EOF.
-			return nil
 		}
 		reqTs := firstChunk.ReadAt
 		finalReq := append([]byte(nil), firstChunk.Bytes...)
@@ -154,11 +158,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			utils.LogError(logger, err, "V2 HTTP record: initial response read failed")
 			return err
 		}
-		if len(firstRespChunk.Bytes) == 0 {
-			// The channel's close sentinel: the stream ran out with no
-			// response, as io.EOF above, and nothing is reported.
-			return nil
-		}
 		finalResp := append([]byte(nil), firstRespChunk.Bytes...)
 		resTs := firstRespChunk.WrittenAt
 
@@ -224,6 +223,32 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 	}
 }
 
+// nextRequestV2 starts the next exchange (Session.NextRequest) and takes its
+// request's first chunk. A chunk with no request bytes, nothing but empty
+// lines (emptyLinesBefore), is no part of a request, so it is taken first, and
+// the request starts at the client's next chunk: its response is what the
+// server sent after that one was captured, and it is the connection's first
+// request when the capture began after the CRLF of a request it does not have.
+// The request's first chunk therefore always holds request bytes.
+func nextRequestV2(sess *supervisor.Session) (fakeconn.Chunk, error) {
+	for {
+		c, err := sess.ClientStream.Peek()
+		if err != nil {
+			return fakeconn.Chunk{}, err
+		}
+		if emptyLinesBefore(c.Bytes) < len(c.Bytes) {
+			break
+		}
+		if _, err := sess.ClientStream.ReadChunk(); err != nil {
+			return fakeconn.Chunk{}, err
+		}
+	}
+	if _, err := sess.NextRequest(models.HTTP, false); err != nil {
+		return fakeconn.Chunk{}, err
+	}
+	return sess.ClientStream.ReadChunk()
+}
+
 // readRequestV2 is the V2 counterpart of HandleChunkedRequests. It
 // consumes the remainder of an HTTP/1 request from stream, appending
 // bytes to *finalReq. Unlike HandleChunkedRequests it uses ReadChunk
@@ -245,9 +270,6 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 		if err != nil {
 			return err
 		}
-		if len(chunk.Bytes) == 0 {
-			return io.EOF
-		}
 		*finalReq = append(*finalReq, chunk.Bytes...)
 	}
 	bodyStart -= dropEmptyLinesBeforeRequest(finalReq)
@@ -267,9 +289,6 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 			chunk, err := stream.ReadChunk()
 			if err != nil {
 				return err
-			}
-			if len(chunk.Bytes) == 0 {
-				return io.EOF
 			}
 			*finalReq = append(*finalReq, chunk.Bytes...)
 			remaining -= len(chunk.Bytes)
@@ -297,9 +316,6 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 			chunk, err := stream.ReadChunk()
 			if err != nil {
 				return err
-			}
-			if len(chunk.Bytes) == 0 {
-				return io.EOF
 			}
 			*finalReq = append(*finalReq, chunk.Bytes...)
 		}
@@ -344,9 +360,6 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		if !chunk.WrittenAt.IsZero() {
 			lastWr = chunk.WrittenAt
 		}
-		if len(chunk.Bytes) == 0 {
-			return lastWr, io.EOF
-		}
 		*finalResp = append(*finalResp, chunk.Bytes...)
 	}
 
@@ -374,9 +387,6 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 			}
 			if !chunk.WrittenAt.IsZero() {
 				lastWr = chunk.WrittenAt
-			}
-			if len(chunk.Bytes) == 0 {
-				return lastWr, io.EOF
 			}
 			*finalResp = append(*finalResp, chunk.Bytes...)
 			remaining -= len(chunk.Bytes)
@@ -407,9 +417,6 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 			if !chunk.WrittenAt.IsZero() {
 				lastWr = chunk.WrittenAt
 			}
-			if len(chunk.Bytes) == 0 {
-				return lastWr, io.EOF
-			}
 			*finalResp = append(*finalResp, chunk.Bytes...)
 		}
 	}
@@ -427,9 +434,6 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		}
 		if !chunk.WrittenAt.IsZero() {
 			lastWr = chunk.WrittenAt
-		}
-		if len(chunk.Bytes) == 0 {
-			return lastWr, io.EOF
 		}
 		*finalResp = append(*finalResp, chunk.Bytes...)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,6 +44,19 @@ func makeStream(t *testing.T, dir fakeconn.Direction, buf int) (
 	func(),
 ) {
 	t.Helper()
+	return makeStreamOf(t, dir, buf, new(atomic.Uint64))
+}
+
+// makeStreamOf is makeStream for one direction of a connection whose chunks
+// captured counts across both directions: each chunk sent is numbered
+// (fakeconn.Chunk.ConnSeq) in the order sent, as a producer numbers them in
+// the order it captured them.
+func makeStreamOf(t *testing.T, dir fakeconn.Direction, buf int, captured *atomic.Uint64) (
+	*fakeconn.FakeConn,
+	func(b []byte, readAt, writtenAt time.Time),
+	func(),
+) {
+	t.Helper()
 	ch := make(chan fakeconn.Chunk, buf)
 	local := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
 	remote := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 2}
@@ -52,6 +66,7 @@ func makeStream(t *testing.T, dir fakeconn.Direction, buf int) (
 		seq++
 		ch <- fakeconn.Chunk{
 			Dir:       dir,
+			ConnSeq:   fakeconn.ConnSeqOf(captured.Add(1)),
 			Bytes:     append([]byte(nil), b...),
 			ReadAt:    readAt,
 			WrittenAt: writtenAt,
@@ -86,8 +101,9 @@ func newTestSession(t *testing.T) (
 	mocks chan *models.Mock,
 ) {
 	t.Helper()
-	client, sendReq, closeReq := makeStream(t, fakeconn.FromClient, 16)
-	dest, sendResp, closeResp := makeStream(t, fakeconn.FromDest, 16)
+	var captured atomic.Uint64
+	client, sendReq, closeReq := makeStreamOf(t, fakeconn.FromClient, 16, &captured)
+	dest, sendResp, closeResp := makeStreamOf(t, fakeconn.FromDest, 16, &captured)
 	mocks = make(chan *models.Mock, 8)
 	sess = &supervisor.Session{
 		ClientStream: client,

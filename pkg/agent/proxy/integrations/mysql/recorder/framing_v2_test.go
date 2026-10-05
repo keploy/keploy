@@ -246,21 +246,36 @@ func (o *orphanSpans) last() ([2]time.Time, bool) {
 	return o.windows[len(o.windows)-1], true
 }
 
+// handshakeChunks is how many chunks recordChunks' handshake takes: the
+// server's greeting, the client's response and the server's OK, numbered 1 to
+// 3 as they were captured (fakeconn.Chunk.ConnSeq). The chunks its caller
+// hands it are numbered on from them.
+const handshakeChunks = 3
+
 // recordConn runs RecordV2 over a connection: its handshake, then client and
 // server (each delivered in the given chunks, the way a capture hands them
 // over, stamped as they are pushed). closeAtEnd closes both streams after the
 // last chunk, as a connection that ended does; without it they stay open, as a
 // pooled connection's do.
+//
+// The two byte streams do not say how their chunks were interleaved, so they
+// are numbered every client chunk first, then the server's: no server chunk
+// is taken for one captured before the command it answers, and no command's
+// floor drops one (Session.NextRequest). These tests frame packets; capture
+// order has tests of its own.
 func recordConn(t *testing.T, client, server [][]byte, closeAtEnd bool, deadline time.Duration) recording {
 	t.Helper()
+	seq := uint64(handshakeChunks)
 	chunks := func(bufs [][]byte, dir fakeconn.Direction) []fakeconn.Chunk {
 		out := make([]fakeconn.Chunk, len(bufs))
 		for i, b := range bufs {
-			out[i] = fakeconn.Chunk{Dir: dir, Bytes: b}
+			seq++
+			out[i] = fakeconn.Chunk{Dir: dir, ConnSeq: fakeconn.ConnSeqOf(seq), Bytes: b}
 		}
 		return out
 	}
-	return recordChunks(t, chunks(client, fakeconn.FromClient), chunks(server, fakeconn.FromDest), closeAtEnd, deadline)
+	c := chunks(client, fakeconn.FromClient)
+	return recordChunks(t, c, chunks(server, fakeconn.FromDest), closeAtEnd, deadline)
 }
 
 // wireBase is when the chunks onTheWire lays out are captured from: after the
@@ -268,23 +283,29 @@ func recordConn(t *testing.T, client, server [][]byte, closeAtEnd bool, deadline
 var wireBase = time.Date(2026, 10, 2, 10, 47, 0, 0, time.UTC)
 
 // onTheWire lays the exchanges out as a capture of a client that waits for
-// each answer before its next command stamps them: each command in a chunk of
-// its own, sent before its answer, then the answer in reads of n bytes, every
-// one of them before the next command (the server sends nothing more until it
-// arrives). An exchange with no command (nil) is more of the answer before it;
-// one with no reply, a command the server does not answer.
+// each answer before its next command numbers and stamps them: each command
+// in a chunk of its own, captured before its answer, then the answer in reads
+// of n bytes, every one of them before the next command (the server sends
+// nothing more until it arrives). An exchange with no command (nil) is more of
+// the answer before it; one with no reply, a command the server does not
+// answer.
 func onTheWire(xs []exchange, n int) (client, server []fakeconn.Chunk) {
 	tick := 0
 	at := func() time.Time {
 		tick++
 		return wireBase.Add(time.Duration(tick) * time.Microsecond)
 	}
+	seq := uint64(handshakeChunks)
+	next := func() uint32 {
+		seq++
+		return fakeconn.ConnSeqOf(seq)
+	}
 	for _, x := range xs {
 		if len(x.command) > 0 {
-			client = append(client, fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: x.command, ReadAt: at()})
+			client = append(client, fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: next(), Bytes: x.command, ReadAt: at()})
 		}
 		for _, c := range chunked(bytes.Join(x.reply, nil), n) {
-			server = append(server, fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: c, ReadAt: at()})
+			server = append(server, fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: next(), Bytes: c, ReadAt: at()})
 		}
 	}
 	return client, server
@@ -297,10 +318,18 @@ func recordWire(t *testing.T, xs []exchange, n int, closeAtEnd bool, deadline ti
 	return recordChunks(t, client, server, closeAtEnd, deadline)
 }
 
-// recordChunks is recordConn over chunks: one with no capture time is stamped
-// as it is pushed, client and server alike.
+// recordChunks is recordConn over chunks its caller numbered, from
+// handshakeChunks on: the two directions are pushed concurrently, so the order
+// they were captured in is their numbers', never the order they are pushed
+// in. One with no capture time is stamped as it is pushed, client and server
+// alike.
 func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool, deadline time.Duration) recording {
 	t.Helper()
+	for _, c := range append(append([]fakeconn.Chunk{}, client...), server...) {
+		if c.ConnSeq == 0 {
+			t.Fatal("fixture: a chunk with no capture number, which the recorder refuses (fakeconn.ErrUnnumbered)")
+		}
+	}
 	core, logs := observer.New(zapcore.DebugLevel)
 	logger := zap.New(core)
 	h := newV2Harness(t)
@@ -347,7 +376,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 	pushers.Add(2)
 	go func() {
 		defer pushers.Done()
-		h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: cannedHandshakeResponse41(t, 1, false), ReadAt: at()}
+		h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: 2, Bytes: cannedHandshakeResponse41(t, 1, false), ReadAt: at()}
 		for _, c := range client {
 			if c.ReadAt.IsZero() {
 				c.ReadAt = at()
@@ -361,8 +390,8 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 	}()
 	go func() {
 		defer pushers.Done()
-		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: greetingBuf, ReadAt: at()}
-		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: cannedOK(t, 2, greeting.CapabilityFlags), ReadAt: at()}
+		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: 1, Bytes: greetingBuf, ReadAt: at()}
+		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: handshakeChunks, Bytes: cannedOK(t, 2, greeting.CapabilityFlags), ReadAt: at()}
 		for _, c := range server {
 			if c.ReadAt.IsZero() {
 				c.ReadAt = at()
@@ -821,9 +850,10 @@ func TestRecordV2_AResponseOfSeveralResultsIsLeftOut(t *testing.T) {
 }
 
 // joinedMidStream is a decrypted TLS stream of a pooled connection the capture
-// joined mid-stream: no handshake on it, so its framing is assumed
-// (CLIENT_DEPRECATE_EOF, which the server here offers). run starts RecordV2 on
-// it and returns what it recorded once it returns, or fails after a minute.
+// joined mid-stream, as its producer says (Session.JoinedMidConnection): no
+// handshake on it, so its framing is assumed (CLIENT_DEPRECATE_EOF, which the
+// server here offers). run starts RecordV2 on it and returns what it recorded
+// once it returns, or fails after a minute.
 type joinedMidStream struct {
 	h    *v2Harness
 	caps uint32
@@ -851,6 +881,7 @@ func newJoinedMidStream(t *testing.T) *joinedMidStream {
 	}
 	greeting := wrapPacket(gb, 0)
 	sslReq := cannedSSLRequest(t, 1)
+	h.sess.JoinedMidConnection = true
 	h.sess.Opts.NetNS = testNetNS
 	ctx := postTLSCtx(t, greeting, sslReq, base, 3306)
 	store, _ := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)

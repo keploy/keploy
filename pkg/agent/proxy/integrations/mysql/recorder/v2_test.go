@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,6 +132,10 @@ type v2Harness struct {
 	dirs     chan directive.Directive
 	acks     chan directive.Ack
 	sess     *supervisor.Session
+	// captured numbers the chunks pushed, across both directions, in the
+	// order they are pushed (fakeconn.Chunk.ConnSeq): the order a producer
+	// captured them in.
+	captured atomic.Uint64
 }
 
 func newV2Harness(t *testing.T) *v2Harness {
@@ -164,11 +169,13 @@ func newV2Harness(t *testing.T) *v2Harness {
 }
 
 func (h *v2Harness) pushClient(payload []byte, ts time.Time) {
-	h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
+	h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: fakeconn.ConnSeqOf(h.captured.Add(1)),
+		Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
 }
 
 func (h *v2Harness) pushDest(payload []byte, ts time.Time) {
-	h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
+	h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: fakeconn.ConnSeqOf(h.captured.Add(1)),
+		Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
 }
 
 func (h *v2Harness) closeStreams() {

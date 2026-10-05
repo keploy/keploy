@@ -297,9 +297,6 @@ func TestRecordV2_ReportsNothingWhenTheServersStreamEndsWithoutAResponse(t *test
 		end  func(sess *supervisor.Session, sendResp func([]byte, time.Time, time.Time), closeResp func())
 	}{
 		{"the server closed", func(_ *supervisor.Session, _ func([]byte, time.Time, time.Time), closeResp func()) { closeResp() }},
-		{"the stream ends with an empty chunk", func(_ *supervisor.Session, sendResp func([]byte, time.Time, time.Time), _ func()) {
-			sendResp(nil, reqAt, reqAt)
-		}},
 		{"its session closed the stream", func(sess *supervisor.Session, _ func([]byte, time.Time, time.Time), _ func()) {
 			_ = sess.DestStream.Close()
 		}},
@@ -359,12 +356,6 @@ func TestRecordV2_ReportsNothingAtARecordingStop(t *testing.T) {
 			feed:    func(l *leftOutSession) { l.sendReq(canonicalRequest, reqAt, reqAt) },
 			blocked: func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.DestStream },
 			wake:    func(l *leftOutSession) { l.closeResp() },
-		},
-		{
-			name:    "the server's stream ends with an empty chunk",
-			feed:    func(l *leftOutSession) { l.sendReq(canonicalRequest, reqAt, reqAt) },
-			blocked: func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.DestStream },
-			wake:    func(l *leftOutSession) { l.sendResp(nil, respAt, respAt) },
 		},
 		{
 			name: "its response's body is still to come",

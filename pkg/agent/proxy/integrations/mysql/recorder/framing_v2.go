@@ -127,16 +127,28 @@ func answered(command byte) bool {
 // pending work, which a connection that then sits idle must not leave armed
 // (clearPending).
 //
+// Every packet is read from where Session.NextRequest finds it, as the command
+// loop reads every command: the chunk it starts in is numbered
+// (fakeconn.ErrUnnumbered otherwise), and the server stream's floor is set at
+// it. Only the client is read here, so a floor set at a packet passed over is
+// replaced at the next packet before the server's stream is read again, and
+// the one in force is the returned command's.
+//
 // A client that waits for each answer before its next command sends that
-// command on its own, so it starts a chunk of the capture. One that does not
-// (in the middle of a chunk) is not where the client's stream can be taken up
-// again: lost framing.
+// command on its own, so it starts a chunk of the capture
+// (fakeconn.FakeConn.AtChunkBoundary: no chunk read in part; the chunk
+// NextRequest found and has not taken is whole). One that does not (in the
+// middle of a chunk) is not where the client's stream can be taken up again:
+// lost framing.
 func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) (cmdBuf []byte, respFirst byte, joined bool, err error) {
 	// prevSeq and prevData: the last packet passed over ended at sequence id
 	// prevSeq, and carried data (one has been passed over: passed).
 	var prevSeq byte
 	prevData, passed := false, false
 	for {
+		if _, err := sess.NextRequest(models.MySQL, false); err != nil {
+			return nil, 0, false, err
+		}
 		atChunk := sess.ClientStream.AtChunkBoundary()
 		var cs commandSeq
 		inExchange := false

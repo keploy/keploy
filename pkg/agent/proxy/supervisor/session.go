@@ -107,6 +107,24 @@ type Session struct {
 	// is every path today except MySQL under the V2 relay.
 	ClientWritesHeld bool
 
+	// JoinedMidConnection reports that this capture of the connection began
+	// after the connection was established: the agent started, or restarted,
+	// or a TLS hook attached, while the connection was open, so a request in
+	// flight then was not captured and its answer may start the server
+	// stream. The producer sets it once, when it makes the session, from what
+	// it saw: false when it saw the connection open (the relay, which carries
+	// a connection from its first byte, never sets it), true otherwise.
+	// Session.NextRequest reports the server bytes it drops as the answer to
+	// a request the capture does not have only when it is set. A producer
+	// that sets it ends the server stream (closes DestStream's channel) as
+	// the connection ends and as Ctx does: a parser that has not read that
+	// stream past its start waits on it as it returns (EndExchanges). In
+	// proxy mode every session's stream ends so: the relay ends it with the
+	// connection and with the recording's context, which Ctx derives from,
+	// and the supervisor closes it as it cancels Ctx on its own (a hang, the
+	// memory cap).
+	JoinedMidConnection bool
+
 	// RouteMocksViaSyncMock, when true, makes EmitMock deliver the
 	// mock via the package-singleton syncMock.SyncMockManager
 	// (AddMock) instead of directly sending on s.Mocks. Production
@@ -209,6 +227,8 @@ type Session struct {
 
 	// --- Internal bookkeeping ---
 
+	// exchanges is NextRequest's state.
+	exchanges exchanges
 	// endedWithConnection, per fakeconn.Direction: that stream ended because
 	// its connection did (MarkEndedWithConnection).
 	endedWithConnection [2]atomic.Bool
@@ -784,7 +804,7 @@ var leftOutWarns = NewWarnLimiters(leftOutWarnEvery)
 func ResetLeftOutWarningsForTest() { leftOutWarns.Reset() }
 
 // ReportLeftOut reports m as a mock left out of the recording, for reason: an
-// exchange its connection could not record. It has four callers, and each
+// exchange its connection could not record. It has five callers, and each
 // emits nothing for the exchange it reports:
 //   - LeaveOutIfIncomplete (and so EmitMock), for the mock it leaves out for
 //     the incomplete-mock flag, with the reason that set the flag;
@@ -792,7 +812,16 @@ func ResetLeftOutWarningsForTest() { leftOutWarns.Reset() }
 //     exchange it leaves out for the mark, with the reason it took;
 //   - a parser that knows which exchange it cannot record, with its own
 //     reason, instead of marking the flag (MarkMockIncomplete);
-//   - ReportStoppedOn, for the exchange a parser stops on as it returns.
+//   - ReportStoppedOn, for the exchange a parser stops on as it returns;
+//   - NextRequest's floor (dropped), for the server bytes at the start of a
+//     connection the capture joined mid-way that answer a request the
+//     capture does not have.
+//
+// Each reports its exchange whenever the parser gets to it, after the
+// recording stopped too: its bytes were captured, and it is not recorded.
+// RecordingStopping decides only what follows a stop (the span after it, and
+// the WARNs that say every later test case is left out), never whether such
+// an exchange is reported.
 //
 // m needs only the mock's Kind and its exchange's Spec.ReqTimestampMock and
 // Spec.ResTimestampMock: a minimal mock is enough. It does not touch the flag:
@@ -1040,11 +1069,12 @@ func leftOutCause(reason string) string {
 	return reason
 }
 
-// The classes of cause the incomplete-mock flag is set for, each with its own
-// next_step (leftOutNextStep). The first three are the relay's drop reasons
+// The classes of cause a mock is left out for, each with its own next_step
+// (leftOutNextStep). The first three are the relay's drop reasons
 // (relay.DropMemoryPressure, relay.DropPerConnCap, relay.DropDesynced), which
-// it hands MarkMockIncomplete verbatim. A class also keys the WARN limit for a
-// cause past the first maxOpenKinds (WarnLimiters.AllowOr).
+// it hands MarkMockIncomplete verbatim; the fourth is NextRequest's. A class
+// also keys the WARN limit for a cause past the first maxOpenKinds
+// (WarnLimiters.AllowOr).
 const (
 	leftOutMemoryPressure = "memory_pressure"
 	leftOutPerConnCap     = "per_conn_cap"
@@ -1056,14 +1086,20 @@ const (
 	// before the loss: the next one is left out for it. Its knob is the
 	// loss's, which a re-run with --debug does not show.
 	leftOutDesynced = "desynced"
-	leftOutOther    = "other"
+	// leftOutUnansweredCause is the cause of the server bytes the floor drops
+	// where the server stream of a connection the capture joined mid-way
+	// (JoinedMidConnection) starts, before its first request (NextRequest):
+	// the answer to a request the capture does not have. Nothing about the
+	// recording's settings caused it.
+	leftOutUnansweredCause = "server bytes that answer no captured request"
+	leftOutOther           = "other"
 )
 
 // leftOutClass is the class of a cause (leftOutCause) the incomplete-mock
 // flag was set for: the knob that fits it.
 func leftOutClass(cause string) string {
 	switch cause {
-	case leftOutMemoryPressure, leftOutPerConnCap, leftOutDesynced:
+	case leftOutMemoryPressure, leftOutPerConnCap, leftOutDesynced, leftOutUnansweredCause:
 		return cause
 	}
 	return leftOutOther
@@ -1105,6 +1141,10 @@ func leftOutNextStep(class string, spanned bool) string {
 			"relay's \"capture dropped a chunk\" WARN carry reason=per_conn_cap or reason=memory_pressure): for " +
 			"per_conn_cap, raise record.recordBuffer.maxMemoryPerConnection (env KEPLOY_RECORD_MAX_MEMORY_PER_CONN); for " +
 			"memory_pressure, give the agent more memory (raise --memory-limit)"
+	case leftOutUnansweredCause:
+		return next + "The request these bytes answer was in flight when the capture of this already open connection " +
+			"began (the recording started, a TLS hook attached, or the agent restarted, while it was sent), so it was never " +
+			"captured: there is no setting to change, and the connection's later exchanges are recorded each with its own answer"
 	}
 	return next + "Re-run with --debug to see each mock left out and why it could not be recorded"
 }

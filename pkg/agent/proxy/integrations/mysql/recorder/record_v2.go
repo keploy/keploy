@@ -60,10 +60,17 @@ import (
 //     HandshakeResponse41 and continues.
 //   - On OK==false, calls sess.MarkMockIncomplete and returns the err;
 //     the supervisor falls through to raw passthrough.
+//
+// Each command starts where Session.NextRequest finds it, and RecordV2 ends
+// with Session.EndExchanges, however it ends: server bytes captured before the
+// connection's first command (the answer to one in flight when the capture of
+// a pooled connection began) are reported once, though it never reads the
+// server's stream past them (a pool that sends COM_QUIT and closes).
 func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) error {
 	if sess == nil {
 		return errors.New("recorder: nil supervisor session")
 	}
+	defer sess.EndExchanges()
 	if logger == nil {
 		logger = sess.Logger
 	}
@@ -188,8 +195,8 @@ type v2HandshakeResult struct {
 	// more when the command continued over several packets (packetChain).
 	firstCmdRespSeq byte
 	// firstCmdAt is when the first client packet the post-TLS handshake reads
-	// began: the capture time of the chunk its first header came in. Set as
-	// that header is read, so it is there when reading the packet fails:
+	// began: the capture time of the chunk Session.NextRequest found it in.
+	// Set before the packet is read, so it is there when reading it fails:
 	// when a continuation of it was lost, the exchange the recording stops in
 	// began there, not at the chunk read after the loss.
 	firstCmdAt time.Time
@@ -461,13 +468,17 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	// A command of 16 MiB or more continues over several packets: they are
 	// joined here, as handleCommandsV2 joins every later command, and its
 	// response starts at the sequence id after the last of them.
+	// It starts where Session.NextRequest finds it, as every later command
+	// does: what the server sent before it was captured (the answer to a
+	// command in flight when a pooled connection's capture began) is not its
+	// answer.
 	var firstChain packetChain
-	firstBuf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, func(header []byte) error {
-		if !firstChain.started {
-			res.firstCmdAt = sess.ClientStream.LastReadTime()
-		}
-		return firstChain.take(header)
-	})
+	first, err := sess.NextRequest(models.MySQL, false)
+	var firstBuf []byte
+	if err == nil {
+		res.firstCmdAt = first.ReadAt
+		firstBuf, err = mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, firstChain.take)
+	}
 	if err != nil {
 		return res, fmt.Errorf("post-TLS V2: read first client packet: %w", err)
 	}
@@ -1484,7 +1495,9 @@ func buildClientTLSConfigV2(_ *supervisor.Session) *tls.Config {
 
 // handleCommandsV2 drives the MySQL command phase on the V2 path. Each
 // iteration:
-//  1. Reads one command packet from ClientStream.
+//  1. Reads one command packet from ClientStream, from where
+//     Session.NextRequest finds it: its response is what the server sent
+//     after the command was captured.
 //  2. Emits a no-response mock for COM_STMT_CLOSE / COM_STMT_SEND_LONG_DATA.
 //  3. Otherwise, collects the server's response (single OK/ERR packet
 //     or a multi-packet result set / prepare OK), decodes it, and emits
@@ -1544,6 +1557,24 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// per connection; past it the capture loses bytes as it does for any
 	// parser behind its connection, and counts what the connection carries
 	// from there as not recorded.
+	//
+	// Two rules then meet on the server's stream at that command. realignAnswer
+	// cuts it by capture time (SkipThrough), and the floor every command sets,
+	// this one included (Session.NextRequest), drops what was captured before
+	// the command, by capture number. The cut by time comes first: SkipThrough
+	// takes the stream as it was captured, before the floor, so what it
+	// discards, and when it refuses, are what they are with no floor. The
+	// floor then drops only what that cut left that was numbered before the
+	// command: nothing, when the capture's times and numbers agree, since the
+	// cut has discarded it already. So no byte leaves the stream twice, and
+	// the floor takes nothing the capture numbered after the command. Where
+	// the server's stream starts, before the recorder has read a byte of it
+	// (a first command whose response it finds it cannot frame at once), what
+	// the cut discards of what was captured before the first command is
+	// counted in the floor's run there (SkipThrough), which ends at the first
+	// byte of that command's response: an answer in flight when the capture
+	// joined the connection is reported once all the same, over its own bytes
+	// (Session.NextRequest), and the response is the exchange left out here.
 	clientRealign, serverRealign := false, false
 	// lastAnswerEnd is when the last byte of the last answer read was
 	// captured. pipelined: the client once sent a command not after that, so
@@ -1645,7 +1676,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			}
 		} else {
 			var cs commandSeq
-			cmdBuf, err = mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, cs.take)
+			// While a PREPARE is held, the server's bytes after its
+			// definitions are still its own (heldPrepare).
+			if _, err = sess.NextRequest(models.MySQL, held != nil); err == nil {
+				cmdBuf, err = mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, cs.take)
+			}
 			respFirst, joined = cs.next, cs.joined
 			if err != nil {
 				if held != nil && ctx.Err() == nil && (errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed)) {
@@ -1855,7 +1890,10 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				reqTs, resTs)
 		}
 		if sp, ok := respBundle.Message.(*mysql.StmtPrepareOkPacket); ok && leavesFramingOpen(decodeCtx, sp) {
-			// Its response is read whole: holding it is no pending work.
+			// Its response is read whole: holding it is no pending work. The
+			// EOF after its definitions, if the server sent one, was captured
+			// before the client's next command: the floor stays below it
+			// while the PREPARE is held (Session.NextRequest's answerUnread).
 			held = &heldPrepare{what: seq.what, sp: sp, eofSeq: seq.next, reqTs: reqTs, resTs: resTs, record: record}
 			clearPending(sess)
 			continue

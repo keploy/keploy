@@ -117,6 +117,54 @@ to report there: a parser that cannot re-align after a hole is no longer fed,
 and the capture leaves out the test cases the connection carries from the
 loss on itself.
 
+#### Pairing a request with its response: `NextRequest`
+
+A request/response parser starts every exchange with
+`sess.NextRequest(kind, false)`: it waits for the client's next request
+and returns its first chunk without taking it (read the request on as
+you would), and it sets the server stream's floor to that chunk. Server
+bytes captured before a request are never its answer, and the floor
+drops them however late they reach you. On a connection whose capture
+began after it was established (`Session.JoinedMidConnection`, which
+the producer sets once, when it makes the session), where the server
+stream starts with them, captured before the connection's first
+request, they answer a request the capture does not have (one in flight
+when the capture began): that run is reported once (`ReportLeftOut`).
+Every other run is dropped with a Debug line, with nothing left out for
+it there. It answers no request: on a connection captured from its first
+byte (the relay's), nothing was sent before the capture began, so bytes
+before its first request are the server's own, and a later run was sent
+between two requests (an error or a timeout the server sent on its own,
+such as MySQL's ERR at `wait_timeout` or an idle-close 408). Or it is
+what is left of an answer you stopped reading and left out, which you
+report yourself (`ReportLeftOut`) as you do: the MySQL recorder leaves
+out a response it cannot frame, goes on from the client's next command,
+and skips the rest of that response by capture time first
+(`fakeconn.FakeConn.SkipThrough`, which cuts the stream before the
+floor); the floor drops only what that skip left. The bytes captured
+before the connection's first request are the server stream's start,
+in the floor's run there however they leave the stream (the floor's
+read or such a skip), and nothing captured after that request is in
+that run, whatever floor is in force when you first read the stream:
+an answer in flight is reported over its own bytes. A parser that
+returns without reading the server's stream past its start (a client
+that sends only requests with no answer and closes, such as a pool's
+COM_QUIT, or closes in the middle of a request) never has the floor
+drop it there, so `defer sess.EndExchanges()` where your parser
+starts, to run however it returns: on a joined connection it reads the
+server's stream on until its start is behind it, and the answer in
+flight is reported all the same. A connection on which the client
+sends no request at all reports nothing: with no request, nothing
+orders the server's bytes against one. The order is
+the chunks' connection-wide capture sequence (`fakeconn.Chunk.ConnSeq`),
+which every producer numbers (`fakeconn.ConnSeqOf`): a client chunk after
+every byte the server had sent the producer when the chunk was read, read
+yet or not (the relay: `connseq.Upstream`); never compare timestamps to
+order the two directions. A parser that goes on to a
+request with an earlier answer still to read (MySQL's held PREPARE)
+passes `true` for as long as that is so, and the floor stays where it
+is. See the HTTP/1 and MySQL V2 recorders.
+
 For byte-stream-oriented protocols (HTTP/1), you can pass the FakeConn
 to a `bufio.Reader` — it satisfies `net.Conn`. Caveat:
 `bufio.Reader.ReadBytes` can over-consume past your framing boundary
@@ -208,8 +256,8 @@ for the reference pattern.
 ### Step 5 — Handle protocol-specific lifecycles
 
 - **HTTP/1 keepalive / pipelining**: loop reading request → response
-  pairs until `ClientStream.ReadChunk` returns `io.EOF` or
-  `ErrClosed`. See `pkg/agent/proxy/integrations/http/recordv2.go`.
+  pairs, each started with `sess.NextRequest`, until it returns
+  `io.EOF` or `ErrClosed`. See `pkg/agent/proxy/integrations/http/recordv2.go`.
 - **MySQL / Postgres multi-phase**: explicit state machine — handshake,
   optional TLS upgrade, auth, query loop. Reuse existing wire decoders
   that accept a `net.Conn` or `io.Reader` — they work on FakeConn
