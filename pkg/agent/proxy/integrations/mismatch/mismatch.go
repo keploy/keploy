@@ -256,6 +256,14 @@ var mockMode atomic.Bool
 // SetMockMode is called by the agent at setup with its --mock-mode flag.
 func SetMockMode(on bool) { mockMode.Store(on) }
 
+// MockMode reports whether the agent serves a `keploy mock` session. A
+// protocol that writes its own hint with WithNextSteps uses it to leave out
+// advice a mock run cannot act on, such as test.globalNoise: `keploy mock
+// replay` sends the agent no NoiseConfig (its MockOutgoing options in
+// pkg/service/mock/replay.go), so noise from keploy.yml never reaches a
+// matcher there.
+func MockMode() bool { return mockMode.Load() }
+
 // RecordCommand is the command that records this run again. A protocol that
 // writes its own hint with WithNextSteps names the command through it, so a
 // mock run never points at `keploy record`.

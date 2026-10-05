@@ -57,8 +57,8 @@ func TestHintTextInMockMode(t *testing.T) {
 			t.Errorf("%s: mock-mode hint:\n got  %q\n want %q", name, r.NextSteps, want[name])
 		}
 	}
-	if got := RecordCommand(); got != "keploy mock record" {
-		t.Errorf("RecordCommand in mock mode = %q", got)
+	if got := RecordCommand(); got != "keploy mock record" || !MockMode() {
+		t.Errorf("RecordCommand in mock mode = %q, MockMode = %v", got, MockMode())
 	}
 	// --on-miss is acted on by the HTTP parser alone; other protocols are told only to re-record.
 	other := NewReport(ProtocolGeneric, "opaque exchange").
@@ -74,8 +74,8 @@ func TestHintTextInMockMode(t *testing.T) {
 func TestHintsAreUnchangedOutsideMockMode(t *testing.T) {
 	SetMockMode(true)
 	SetMockMode(false)
-	if got := RecordCommand(); got != "keploy record" {
-		t.Errorf("RecordCommand outside mock mode = %q", got)
+	if got := RecordCommand(); got != "keploy record" || MockMode() {
+		t.Errorf("RecordCommand outside mock mode = %q, MockMode = %v", got, MockMode())
 	}
 	want := map[string]string{
 		"no mocks":             "No recorded mocks were available to match against for this protocol in the selected test set. Re-record the test set with 'keploy record'.",
