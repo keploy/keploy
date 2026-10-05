@@ -2,7 +2,10 @@ package postmanimport
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 func TestItemsContainerUnmarshal_DoesNotTreatFoldersAsRequests(t *testing.T) {
@@ -65,5 +68,30 @@ func TestItemsContainerUnmarshal_KeepsRootRequests(t *testing.T) {
 	}
 	if got.TestDataItems[0].Name != "Health check" {
 		t.Fatalf("request name = %q, want Health check", got.TestDataItems[0].Name)
+	}
+}
+
+func TestProcessFormdataBody_FileAndExportedEntries(t *testing.T) {
+	var body []map[string]interface{}
+	err := json.Unmarshal([]byte(`[
+		{"key": "name", "value": "om", "type": "text"},
+		{"key": "avatar", "type": "file", "src": "/tmp/avatar.png"},
+		{"key": "docs", "type": "file", "src": ["a.pdf", "b.pdf"]},
+		{"key": "tags", "values": ["x", "y"]}
+	]`), &body)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	got := processFormdataBody(body)
+
+	want := []models.FormData{
+		{Key: "name", Values: []string{"om"}},
+		{Key: "avatar", Paths: []string{"/tmp/avatar.png"}},
+		{Key: "docs", Paths: []string{"a.pdf", "b.pdf"}},
+		{Key: "tags", Values: []string{"x", "y"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("processFormdataBody() = %+v, want %+v", got, want)
 	}
 }
