@@ -4319,7 +4319,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	ip := net.ParseIP(host)
 	owner, listening := listenerOwner(ip, dest.Port)
 	if !listening && ip != nil && ip.IsLoopback() && (!recorded.has(dest.Port) || recorded.child(dest.Port)) {
-		p.logger.Debug("nothing listens at the local destination and the recording never called it; closing the call instead of mocking it", zap.String("destination", dstAddr))
+		p.logger.Debug("nothing listens at the local destination yet; closing the call as the connect would have been refused", zap.String("destination", dstAddr))
 		return true, nil
 	}
 	if owner == 0 || !descends(owner, int(p.appPID)) {
