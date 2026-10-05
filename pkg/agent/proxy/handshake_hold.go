@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -221,11 +222,11 @@ var errHandshakeAbandoned = errors.New("the application closed the connecting so
 // with a shorter connect timeout gives up first, and its retries would each
 // leave a dial — and a held SYN — running for that whole time; so the dial
 // is abandoned as soon as the application's connecting socket is gone.
-func (p *Proxy) dialWhileHeld(ctx context.Context, lookup agent.HandshakeDestInfo, client, proxy netip.AddrPort, addr string) (net.Conn, error) {
+func (p *Proxy) dialWhileHeld(ctx context.Context, lookup agent.HandshakeDestInfo, client, proxy netip.AddrPort, addr string) (*connseq.Upstream, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type result struct {
-		conn net.Conn
+		conn *connseq.Upstream
 		err  error
 	}
 	res := make(chan result, 1)
@@ -234,8 +235,7 @@ func (p *Proxy) dialWhileHeld(ctx context.Context, lookup agent.HandshakeDestInf
 		r := result{err: errors.New("the dial did not complete")}
 		defer func() { res <- r }()
 		defer utils.Recover(p.logger)
-		var d net.Dialer
-		r.conn, r.err = d.DialContext(ctx, "tcp", addr)
+		r.conn, r.err = util.DialUpstream(ctx, nil, "tcp", addr)
 	}()
 	t := time.NewTicker(handshakeRecheck)
 	defer t.Stop()

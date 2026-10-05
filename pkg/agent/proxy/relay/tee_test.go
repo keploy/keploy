@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
 )
@@ -753,7 +754,7 @@ func TestNewWiresTheStallGraceIntoBothTees(t *testing.T) {
 	d1, d2 := net.Pipe()
 	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close(); _ = d1.Close(); _ = d2.Close() })
 
-	r := New(Config{ConsumerStallGrace: want, Logger: zap.NewNop()}, c1, d1)
+	r := New(Config{ConsumerStallGrace: want, Logger: zap.NewNop()}, c1, connseq.NewUpstream(d1))
 	t.Cleanup(func() { r.teeC2D.close(); r.teeD2C.close() })
 
 	if got := r.teeC2D.stallGrace; got != want {
@@ -765,7 +766,7 @@ func TestNewWiresTheStallGraceIntoBothTees(t *testing.T) {
 	}
 
 	// And the zero-config path must land on the default, not on zero.
-	r2 := New(Config{Logger: zap.NewNop()}, c2, d2)
+	r2 := New(Config{Logger: zap.NewNop()}, c2, connseq.NewUpstream(d2))
 	t.Cleanup(func() { r2.teeC2D.close(); r2.teeD2C.close() })
 	if got := r2.teeC2D.stallGrace; got != DefaultConsumerStallGrace {
 		t.Errorf("zero-config stallGrace = %v, want %v", got, DefaultConsumerStallGrace)
@@ -1057,7 +1058,7 @@ func TestNewWiresParserCanResyncIntoBothTees(t *testing.T) {
 		_ = destSvc.Close()
 	})
 
-	def := New(Config{Logger: zap.NewNop()}, srcProxy, dstProxy)
+	def := New(Config{Logger: zap.NewNop()}, srcProxy, connseq.NewUpstream(dstProxy))
 	if def.teeC2D.parserCanResync || def.teeD2C.parserCanResync {
 		t.Fatalf("default parserCanResync = (c2d=%v, d2c=%v), want both false: a parser that "+
 			"never heard of the capability is the one least likely to have a resync path, "+
@@ -1065,7 +1066,7 @@ func TestNewWiresParserCanResyncIntoBothTees(t *testing.T) {
 			def.teeC2D.parserCanResync, def.teeD2C.parserCanResync)
 	}
 
-	on := New(Config{Logger: zap.NewNop(), ParserCanResyncAfterGap: true}, srcProxy, dstProxy)
+	on := New(Config{Logger: zap.NewNop(), ParserCanResyncAfterGap: true}, srcProxy, connseq.NewUpstream(dstProxy))
 	if !on.teeC2D.parserCanResync || !on.teeD2C.parserCanResync {
 		t.Fatalf("with ParserCanResyncAfterGap=true, got (c2d=%v, d2c=%v), want both true",
 			on.teeC2D.parserCanResync, on.teeD2C.parserCanResync)

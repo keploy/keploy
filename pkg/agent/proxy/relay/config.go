@@ -151,6 +151,10 @@ type Config struct {
 	// stallClock measures ConsumerStallGrace (see stallMeter); nil is the
 	// process's own clocks. Tests set it to drive the window.
 	stallClock stallClock
+	// beforeTee, when set, runs on a forwarder after it has written a chunk
+	// on and before it tees it. Tests set it to hold one direction's tee
+	// back, so the other direction's later capture is teed first.
+	beforeTee func(fakeconn.Direction)
 
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
@@ -75,7 +76,7 @@ func TestRecordViaSupervisor_AnUpstreamIdleCloseLeavesNothingOut(t *testing.T) {
 	started := time.Now()
 	done := make(chan error, 1)
 	go func() {
-		done <- p.recordViaSupervisor(ctx, srcConn, dstConn, httpint.New(logger), integrations.HTTP,
+		done <- p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), httpint.New(logger), integrations.HTTP,
 			make(chan *models.Mock, 8), &errgroup.Group{}, logger, 1, 2, models.OutgoingOptions{})
 	}()
 
@@ -181,7 +182,7 @@ func TestRecordViaSupervisor_TheExchangeAParserStopsOnMeetsTheSpanAfterIt(t *tes
 
 	done := make(chan error, 1)
 	go func() {
-		done <- p.recordViaSupervisor(ctx, srcConn, dstConn, httpint.New(logger), integrations.HTTP,
+		done <- p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), httpint.New(logger), integrations.HTTP,
 			make(chan *models.Mock, 8), &errgroup.Group{}, logger, 1, 2, models.OutgoingOptions{})
 	}()
 
