@@ -6,10 +6,11 @@ import (
 )
 
 type Map struct {
-	mu   sync.Mutex
-	next map[string]string
-	prev map[string]string
-	rep  *strings.Replacer
+	mu     sync.Mutex
+	next   map[string]string
+	prev   map[string]string
+	banned map[string]bool
+	rep    *strings.Replacer
 }
 
 var Default = &Map{}
@@ -21,15 +22,29 @@ func (m *Map) Add(old, cur string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.next == nil {
-		m.next, m.prev = map[string]string{}, map[string]string{}
+		m.next, m.prev, m.banned = map[string]string{}, map[string]string{}, map[string]bool{}
 	}
-	if _, ok := m.next[old]; ok {
+	if m.banned[old] || m.banned[cur] {
 		return
 	}
-	if _, ok := m.prev[cur]; ok {
+	if was, ok := m.next[old]; ok {
+		if was != cur {
+			m.ban(old, was)
+		}
+		return
+	}
+	if was, ok := m.prev[cur]; ok {
+		m.ban(was, cur)
 		return
 	}
 	m.next[old], m.prev[cur] = cur, old
+	m.rep = nil
+}
+
+func (m *Map) ban(old, cur string) {
+	delete(m.next, old)
+	delete(m.prev, cur)
+	m.banned[old], m.banned[cur] = true, true
 	m.rep = nil
 }
 
@@ -70,7 +85,7 @@ func (m *Map) Rewrite(s string) string {
 func (m *Map) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.next, m.prev, m.rep = nil, nil, nil
+	m.next, m.prev, m.banned, m.rep = nil, nil, nil, nil
 }
 
 func New(pairs map[string]string) *Map {

@@ -10,13 +10,25 @@ func TestRewriteSwapsEveryKnownID(t *testing.T) {
 	}
 }
 
-func TestAddKeepsThePairsOneToOne(t *testing.T) {
+func TestAConflictingPairDropsTheIDInsteadOfGuessing(t *testing.T) {
 	m := &Map{}
 	m.Add("aaaa", "bbbb")
-	m.Add("aaaa", "cccc")
-	m.Add("dddd", "bbbb")
+	m.Add("aaaa", "bbbb")
 	m.Add("eeee", "ff")
 	if got := m.Pairs(); len(got) != 1 || got["aaaa"] != "bbbb" {
 		t.Fatalf("pairs = %v", got)
+	}
+	m.Add("aaaa", "cccc")
+	if got := m.Pairs(); len(got) != 0 {
+		t.Fatalf("an id seen paired two ways must not be swapped at all: %v", got)
+	}
+	m.Add("aaaa", "bbbb")
+	if got := m.Pairs(); len(got) != 0 {
+		t.Fatalf("a dropped id stays dropped: %v", got)
+	}
+	m.Add("1111", "2222")
+	m.Add("3333", "2222")
+	if got := m.Pairs(); len(got) != 0 {
+		t.Fatalf("two recorded ids claiming one new id are both dropped: %v", got)
 	}
 }
