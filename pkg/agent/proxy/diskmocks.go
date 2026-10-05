@@ -55,9 +55,13 @@ func NewDiskMocks(logger *zap.Logger) (*DiskMocks, error) {
 	if err != nil {
 		return nil, fmt.Errorf("disk mocks: create temp file: %w", err)
 	}
+	path := f.Name()
+	if os.Remove(path) == nil {
+		path = ""
+	}
 	return &DiskMocks{
 		f:      f,
-		path:   f.Name(),
+		path:   path,
 		byName: make(map[string]diskEntry),
 		logger: logger,
 	}, nil
@@ -360,9 +364,16 @@ func (d *DiskMocks) Close() error {
 		if err := d.f.Close(); err != nil {
 			firstErr = err
 		}
-		if err := os.Remove(d.path); err != nil && firstErr == nil {
+		if err := removeIfNamed(d.path); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+func removeIfNamed(path string) error {
+	if path == "" {
+		return nil
+	}
+	return os.Remove(path)
 }
