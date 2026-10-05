@@ -280,3 +280,21 @@ func TestUnmarkedProcessesInTheTreeAreDependenciesOnceAnAppIsMarked(t *testing.T
 		t.Fatal("a new run starts unmarked")
 	}
 }
+
+func TestOnMarkRunsOnceWhenTheFirstAppIsMarked(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	f.spawn(100, 1, at(0), "orders.test")
+	r.Begin(100, "/r/e2e/orders", "/r/e2e/orders", true, at(10))
+	f.spawn(102, 100, at(30), "shop")
+	calls := make(chan struct{}, 4)
+	r.OnMark(func() { calls <- struct{}{} })
+	r.Mark(102, at(31))
+	r.Ready(102, 8080, at(40))
+	<-calls
+	select {
+	case <-calls:
+		t.Fatal("the hook runs only for the first mark")
+	case <-time.After(50 * time.Millisecond):
+	}
+}

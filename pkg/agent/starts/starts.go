@@ -68,6 +68,7 @@ type Registry struct {
 	sets     map[string]models.SetTable
 	universe map[string]struct{}
 	marked   bool
+	onMark   []func()
 }
 
 func New(p Proc, slack time.Duration) *Registry {
@@ -203,7 +204,7 @@ func (r *Registry) Ready(pid uint32, port uint16, at time.Time) {
 	s.Ready = at
 	s.Port = port
 	s.App = true
-	r.marked = true
+	r.firstMark()
 }
 
 func (r *Registry) Mark(pid uint32, at time.Time) {
@@ -220,7 +221,23 @@ func (r *Registry) Mark(pid uint32, at time.Time) {
 		return
 	}
 	s.App = true
+	r.firstMark()
+}
+
+func (r *Registry) OnMark(f func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onMark = append(r.onMark, f)
+}
+
+func (r *Registry) firstMark() {
+	if r.marked {
+		return
+	}
 	r.marked = true
+	for _, f := range r.onMark {
+		go f()
+	}
 }
 
 func (r *Registry) Dependency(pid uint32) bool {

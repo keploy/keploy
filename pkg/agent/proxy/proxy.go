@@ -250,6 +250,8 @@ type Proxy struct {
 	appPID     uint32
 	mockMode   bool
 	live       LiveHandler
+	treeMu     sync.Mutex
+	tree       map[net.Conn]int
 	caJavaHome string
 
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
@@ -4276,7 +4278,35 @@ func refusedLocally(err error) bool {
 
 type LiveHandler func(ctx context.Context, conn net.Conn, upstream string, port uint16)
 
-func (p *Proxy) SetLiveHandler(h LiveHandler) { p.live = h }
+func (p *Proxy) SetLiveHandler(h LiveHandler) {
+	p.live = h
+	starts.Default.OnMark(p.closeDependencyConns)
+}
+
+func (p *Proxy) trackTree(conn net.Conn, owner int) func() {
+	p.treeMu.Lock()
+	if p.tree == nil {
+		p.tree = map[net.Conn]int{}
+	}
+	p.tree[conn] = owner
+	p.treeMu.Unlock()
+	return func() {
+		p.treeMu.Lock()
+		delete(p.tree, conn)
+		p.treeMu.Unlock()
+	}
+}
+
+func (p *Proxy) closeDependencyConns() {
+	p.treeMu.Lock()
+	defer p.treeMu.Unlock()
+	for conn, owner := range p.tree {
+		if starts.Default.Dependency(uint32(owner)) {
+			p.logger.Debug("closing a connection opened before the app was marked to a process that turned out to be a dependency", zap.Int("owner", owner))
+			_ = conn.Close()
+		}
+	}
+}
 
 func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, conn string) (bool, error) {
 	if !p.mockMode || p.IsDocker || p.appPID == 0 {
@@ -4302,6 +4332,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		return false, nil
 	}
 	caller := int(dest.KernelPid)
+	defer p.trackTree(srcConn, owner)()
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
 		return true, nil
