@@ -61,7 +61,7 @@ func TestCLIExitCodes(t *testing.T) {
 		{name: "root help", args: []string{"--help"}, want: 0},
 		{name: "subcommand help", args: []string{"test", "--help"}, want: 0},
 		{name: "version flag", args: []string{"--version"}, want: 0},
-		{name: "unknown command", args: []string{"bogus-cmd"}, want: 1},
+		{name: "unknown command", args: []string{"bogus-cmd"}, want: utils.ExitUsageError},
 		{name: "unknown flag", args: []string{"test", "--nope"}, want: 1},
 		{name: "invalid flag value", args: []string{"test", "--delay", "abc"}, want: 1},
 	}
