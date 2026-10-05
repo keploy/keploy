@@ -442,9 +442,17 @@ func exitCodeForCmdErr(err error, w io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
+	unknownCmd := strings.HasPrefix(err.Error(), "unknown command")
+	if unknownCmd || strings.HasPrefix(err.Error(), "unknown shorthand") {
 		fmt.Fprintln(w, "Error: ", err.Error())
 		fmt.Fprintln(w, "Run 'keploy --help' for usage.")
 	}
-	return 1
+	if unknownCmd {
+		// A mistyped or unknown command/verb is a usage error, not a Keploy
+		// failure — the command never ran. EX_USAGE (64) lets CI tell that apart
+		// from a real failure (1). Covers unknown `mock` verbs, which previously
+		// printed help and exited 0 (design §P0b).
+		return utils.ExitUsageError
+	}
+	return utils.ExitKeployError
 }
