@@ -286,11 +286,30 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.Duration("stalledFor", mockDrainStall))
 	}
 
-	if parent.Err() != nil { // user Ctrl+C
-		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
-			m.logger.Debug("failed to discard staging set after interrupt", zap.String("staging", staging), zap.Error(derr))
+	if parent.Err() != nil { // user stopped the recording (Ctrl+C, or a session stop)
+		// An interrupt is the NORMAL way to end `mock record`: whatever was
+		// captured before the stop is the recording the user asked for, so commit
+		// it by promoting the staged set (this matches the pre-staging behaviour,
+		// which streamed straight to the set and kept it on Ctrl+C). Only an empty
+		// capture is discarded, leaving any existing set untouched; a promote
+		// failure likewise leaves the existing set intact. (Discarding a non-empty
+		// capture here was the regression that lost a from-container recording,
+		// which stops via this path.)
+		if mockCount == 0 {
+			if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+				m.logger.Debug("failed to discard an empty staging set after interrupt", zap.String("staging", staging), zap.Error(derr))
+			}
+			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged", zap.String("mock-set", name))
+			return nil
 		}
-		m.logger.Info("recording stopped; the existing mock set was left unchanged", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+		if err := m.mockDB.PromoteStagedSet(persistCtx, staging, name); err != nil {
+			if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+				m.logger.Debug("failed to discard staging set after a failed promote on interrupt", zap.String("staging", staging), zap.Error(derr))
+			}
+			utils.LogError(m.logger, err, "recording stopped, but saving the captured mocks failed", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+			return nil
+		}
+		m.logger.Info("recording stopped; captured mocks saved", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return nil
 	}
 	// Not the user: the agent died under the test command. What was captured

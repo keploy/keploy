@@ -195,3 +195,90 @@ func TestRecord_DirtyStagingBaseAbortsAndPreservesSet(t *testing.T) {
 		t.Fatalf("a failed pre-capture clean must leave the existing set %q intact; got %v", set, got)
 	}
 }
+
+// captureThenInterruptInstrumentation captures two mocks and then simulates the
+// user stopping the recording (Ctrl+C, or a session stop) by cancelling the
+// parent context — the normal way `mock record` ends, and the path a
+// from-container recording stops through.
+type captureThenInterruptInstrumentation struct {
+	Instrumentation // nil embed: any unexpected call panics loudly
+
+	out    chan *models.Mock
+	cancel context.CancelFunc
+	mocks  int // how many mocks to capture before the interrupt
+}
+
+func (c *captureThenInterruptInstrumentation) Setup(context.Context, string, models.SetupOptions) error {
+	return nil
+}
+
+func (c *captureThenInterruptInstrumentation) GetOutgoing(context.Context, models.OutgoingOptions) (<-chan *models.Mock, error) {
+	return c.out, nil
+}
+
+func (c *captureThenInterruptInstrumentation) Run(context.Context, models.RunOptions) models.AppError {
+	for i := 0; i < c.mocks; i++ {
+		c.out <- &models.Mock{Name: fmt.Sprintf("mock-%d", i), Kind: models.HTTP}
+	}
+	close(c.out)
+	c.cancel() // the user stops the recording
+	return models.AppError{}
+}
+
+func (c *captureThenInterruptInstrumentation) NotifyGracefulShutdown(context.Context) error {
+	return nil
+}
+
+// TestRecord_InterruptAfterCaptureSavesMocks guards the from-container regression
+// (keploy#4684 CI): stopping a recording after mocks were captured must SAVE them
+// (promote the staged set), not discard them. An interrupt is the normal way
+// `mock record` ends — the pre-staging code streamed straight to the set and kept
+// what was captured on Ctrl+C; discarding here lost the recording.
+func TestRecord_InterruptAfterCaptureSavesMocks(t *testing.T) {
+	const set = "orders"
+
+	db := newStatefulMockDB() // no prior recording
+	ctx, cancel := context.WithCancel(context.Background())
+	inst := &captureThenInterruptInstrumentation{out: make(chan *models.Mock, 4), cancel: cancel, mocks: 2}
+
+	cfg := &config.Config{}
+	cfg.Mock.Name = set
+
+	svc := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg)
+
+	if err := svc.Record(ctx); err != nil {
+		t.Fatalf("Record returned an error: %v", err)
+	}
+
+	if got := db.get(set); len(got) != 2 {
+		t.Fatalf("an interrupt after capturing 2 mocks must save them (promote); got %v (want 2). "+
+			"Discarding here loses a recording stopped the normal way, e.g. from-container.", got)
+	}
+}
+
+// TestRecord_InterruptWithoutCaptureDoesNotDestroyExistingSet guards the
+// data-safety sub-path of the interrupt handler: a recording stopped before it
+// captured anything must NOT destroy the existing set — staging is discarded and
+// the prior recording stays intact.
+func TestRecord_InterruptWithoutCaptureDoesNotDestroyExistingSet(t *testing.T) {
+	const set = "orders"
+
+	db := newStatefulMockDB()
+	db.sets[set] = []string{"keep-0", "keep-1"} // a good prior recording
+
+	ctx, cancel := context.WithCancel(context.Background())
+	inst := &captureThenInterruptInstrumentation{out: make(chan *models.Mock, 4), cancel: cancel, mocks: 0}
+
+	cfg := &config.Config{}
+	cfg.Mock.Name = set
+
+	svc := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg)
+
+	if err := svc.Record(ctx); err != nil {
+		t.Fatalf("Record returned an error: %v", err)
+	}
+
+	if got := db.get(set); len(got) != 2 {
+		t.Fatalf("an interrupt with no capture must leave the existing set %q intact; got %v (want the 2 prior mocks)", set, got)
+	}
+}
