@@ -241,3 +241,18 @@ func hasAny(rank map[string]int, names ...string) bool {
 	}
 	return false
 }
+
+func TestStampWritesTheDestinationOfTheCall(t *testing.T) {
+	r := New(newFake(), 0)
+	r.Dest("7", "127.0.0.1:9000")
+	m := &models.Mock{ConnectionID: "7"}
+	r.Stamp(m)
+	if got := m.Spec.Metadata["destAddr"]; got != "127.0.0.1:9000" {
+		t.Fatalf("destAddr = %q", got)
+	}
+	kept := &models.Mock{ConnectionID: "7", Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "db:3306"}}}
+	r.Stamp(kept)
+	if got := kept.Spec.Metadata["destAddr"]; got != "db:3306" {
+		t.Fatalf("a recorder's own destAddr must stay, got %q", got)
+	}
+}

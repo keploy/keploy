@@ -1,0 +1,48 @@
+package proxy
+
+import (
+	"sync"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+type recordedPorts struct {
+	mu      sync.RWMutex
+	ports   map[uint32]struct{}
+	unknown bool
+}
+
+func (r *recordedPorts) add(sets ...[]*models.Mock) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, mocks := range sets {
+		for _, m := range mocks {
+			if m == nil || m.Kind == models.DNS {
+				continue
+			}
+			addr := m.Spec.Metadata["destAddr"]
+			if addr == "" {
+				addr, _ = m.RecordedDestination()
+			}
+			port, ok := portFromAddr(addr)
+			if !ok {
+				r.unknown = true
+				continue
+			}
+			if r.ports == nil {
+				r.ports = map[uint32]struct{}{}
+			}
+			r.ports[port] = struct{}{}
+		}
+	}
+}
+
+func (r *recordedPorts) has(port uint32) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.unknown {
+		return true
+	}
+	_, ok := r.ports[port]
+	return ok
+}

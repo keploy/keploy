@@ -133,6 +133,7 @@ type Proxy struct {
 	// handshake during record, and derived from the loaded mocks'
 	// destAddr metadata during replay. See mysql_detect.go.
 	mysqlPorts *mysqlPortRegistry
+	recorded   recordedPorts
 
 	// activeTestErrors accumulates mock-not-found errors during active test
 	// execution. The continuous drain goroutine routes errors here when non-nil.
@@ -2258,6 +2259,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
+	starts.Default.Dest(fmt.Sprint(clientConnID), dstAddr)
 
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
@@ -3786,6 +3788,7 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 	// are published, so a connection that wakes on SetFilteredMocks
 	// already sees the derived ports.
 	p.deriveMysqlPorts(filtered, unFiltered)
+	p.recorded.add(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
 		m.SetFilteredMocks(filtered)
 		m.SetUnFilteredMocks(unFiltered)
@@ -3806,6 +3809,7 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 // oldWindow) view. Used to satisfy the WindowedProxy extension interface.
 func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
 	p.deriveMysqlPorts(filtered, unFiltered)
+	p.recorded.add(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 		p.dnsCache.Purge()
@@ -4285,8 +4289,8 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	}
 	ip := net.ParseIP(host)
 	owner, listening := listenerOwner(ip, dest.Port)
-	if !listening && ip != nil && ip.IsLoopback() {
-		p.logger.Debug("nothing listens at the local destination yet; closing the call instead of mocking it", zap.String("destination", dstAddr))
+	if !listening && ip != nil && ip.IsLoopback() && !p.recorded.has(dest.Port) {
+		p.logger.Debug("nothing listens at the local destination and the recording never called it; closing the call instead of mocking it", zap.String("destination", dstAddr))
 		return true, nil
 	}
 	if owner == 0 || !descends(owner, int(p.appPID)) {

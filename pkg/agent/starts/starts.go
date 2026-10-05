@@ -61,6 +61,7 @@ type Registry struct {
 	byProc   map[procKey]*Start
 	byPID    map[uint32]*Start
 	conns    map[string]uint32
+	dests    map[string]string
 	root     string
 	sets     map[string]models.SetTable
 	universe map[string]struct{}
@@ -79,6 +80,7 @@ func (r *Registry) Reset() {
 	r.byProc = nil
 	r.byPID = nil
 	r.conns = nil
+	r.dests = nil
 	r.root = ""
 	r.sets = nil
 	r.universe = nil
@@ -156,6 +158,18 @@ func (r *Registry) Note(conn string, pid uint32, at time.Time) {
 	r.startOf(pid, at)
 }
 
+func (r *Registry) Dest(conn, addr string) {
+	if conn == "" || addr == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.dests == nil {
+		r.dests = map[string]string{}
+	}
+	r.dests[conn] = addr
+}
+
 func (r *Registry) Ready(pid uint32, port uint16, at time.Time) {
 	if pid == 0 {
 		return
@@ -179,12 +193,18 @@ func (r *Registry) Stamp(m *models.Mock) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	id := m.ConnectionID
+	if id == "" && m.Spec.Metadata != nil {
+		id = m.Spec.Metadata["connID"]
+	}
+	if addr := r.dests[id]; addr != "" && m.Spec.Metadata["destAddr"] == "" {
+		if m.Spec.Metadata == nil {
+			m.Spec.Metadata = map[string]string{}
+		}
+		m.Spec.Metadata["destAddr"] = addr
+	}
 	pid := m.SourcePID
 	if pid == 0 {
-		id := m.ConnectionID
-		if id == "" && m.Spec.Metadata != nil {
-			id = m.Spec.Metadata["connID"]
-		}
 		pid = r.conns[id]
 	}
 	if pid == 0 {
