@@ -30,3 +30,17 @@ func TestRecordedPortsTreatsAnUnknownDestinationAsAnyPort(t *testing.T) {
 		t.Fatal("a mock with no known destination could be for any port")
 	}
 }
+
+func TestADeadPortIsAChildOnlyWhenEveryRecordingStartedIt(t *testing.T) {
+	child := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:9000", "startedByTests": "true"}}}
+	plain := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:9000"}}}
+	var r recordedPorts
+	r.add([]*models.Mock{child})
+	if !r.child(9000) {
+		t.Fatal("a port only test-started dependencies were called on is theirs")
+	}
+	r.add([]*models.Mock{plain})
+	if r.child(9000) {
+		t.Fatal("a port another recording called as an outside service must be served from mocks when it is down")
+	}
+}

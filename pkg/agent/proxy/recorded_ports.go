@@ -14,6 +14,7 @@ type recordedPorts struct {
 	mu      sync.RWMutex
 	ports   map[uint32]struct{}
 	kids    map[uint32]struct{}
+	plain   map[uint32]struct{}
 	unknown bool
 }
 
@@ -43,6 +44,11 @@ func (r *recordedPorts) add(sets ...[]*models.Mock) {
 					r.kids = map[uint32]struct{}{}
 				}
 				r.kids[port] = struct{}{}
+			} else {
+				if r.plain == nil {
+					r.plain = map[uint32]struct{}{}
+				}
+				r.plain[port] = struct{}{}
 			}
 		}
 	}
@@ -61,6 +67,7 @@ func (r *recordedPorts) has(port uint32) bool {
 func (r *recordedPorts) child(port uint32) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, ok := r.kids[port]
-	return ok
+	_, kid := r.kids[port]
+	_, plain := r.plain[port]
+	return kid && !plain
 }
