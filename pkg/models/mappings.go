@@ -18,6 +18,7 @@ type MockEntry struct {
 	Timestamp        int64  `json:"timestamp,omitempty" yaml:"timestamp,omitempty" bson:"timestamp,omitempty"`
 	ReqTimestampMock string `json:"reqTimestampMock,omitempty" yaml:"reqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock string `json:"resTimestampMock,omitempty" yaml:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+	Start            string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
 }
 
 // FormatMockTimestamp stores mock timings as stable RFC3339 strings so
@@ -71,6 +72,18 @@ type Mapping struct {
 	// startup mock is actually recorded; every older reader ignores the key.
 	Startup []MockEntry `json:"startup,omitempty" yaml:"startup,omitempty" bson:"startup,omitempty"`
 	Suites  []SuiteSpan `json:"suites,omitempty" yaml:"suites,omitempty" bson:"suites,omitempty"`
+	Boots   []BootSpec  `json:"boots,omitempty" yaml:"boots,omitempty" bson:"boots,omitempty"`
+	Runner  []MockEntry `json:"runner,omitempty" yaml:"runner,omitempty" bson:"runner,omitempty"`
+}
+
+type BootSpec struct {
+	Dir     string      `json:"dir" yaml:"dir" bson:"dir"`
+	Key     string      `json:"key" yaml:"key" bson:"key"`
+	Program string      `json:"program" yaml:"program" bson:"program"`
+	Place   string      `json:"place" yaml:"place" bson:"place"`
+	N       int         `json:"n" yaml:"n" bson:"n"`
+	Ready   bool        `json:"ready" yaml:"ready" bson:"ready"`
+	Mocks   []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
 }
 
 // StartupMockNames returns the names of the test-set-scoped startup mocks. Callers

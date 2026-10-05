@@ -2,11 +2,10 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/appstart"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -167,8 +166,8 @@ func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error)
 	defer a.scopeMu.Unlock()
 	out := make([]models.ScopeWindow, len(a.scopeWindows))
 	copy(out, a.scopeWindows)
-	for _, s := range appstart.List() {
-		out = append(out, models.ScopeWindow{Name: fmt.Sprintf("app:%d", s.Port), Start: s.At, End: s.At, PID: s.PID, App: true, Port: s.Port})
+	for _, s := range starts.Default.List() {
+		out = append(out, models.ScopeWindow{Name: s.Key, Start: s.First, End: s.First, Ready: s.Ready, PID: s.Root, Dir: s.Dir, App: true, Port: s.Port, Program: s.Program, Place: s.Place, N: s.N, Ref: s.Ref, Worker: s.Worker})
 	}
 	return out, nil
 }

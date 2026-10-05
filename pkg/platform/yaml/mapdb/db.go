@@ -277,6 +277,35 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 }
 
 // UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
+func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	mapping.Boots = boots
+	mapping.Startup = nil
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
 func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error {
 	if len(byTest) == 0 && len(startup) == 0 && len(suites) == 0 {
 		return nil
@@ -445,6 +474,11 @@ func (db *MappingDb) decodeMapping(ctx context.Context, testSetID string) (*mode
 		return nil, "", false, err
 	}
 	return mapping, filepath.Join(mappingPath, fileName+"."+detected.FileExtension()), true, nil
+}
+
+func (db *MappingDb) GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error) {
+	m, _, _, err := db.decodeMapping(ctx, testSetID)
+	return m, err
 }
 
 // GetCases lists the test cases each flow recorded, keyed by flow.

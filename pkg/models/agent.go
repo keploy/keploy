@@ -136,11 +136,17 @@ type ScopeWindow struct {
 	// record attributes a captured mock to this window if the mock's own source
 	// PID resolves (up the /proc tree) to this worker — exact even when windows
 	// from parallel workers overlap in time.
-	PID   uint32 `json:"pid,omitempty"`
-	Dir   string `json:"dir,omitempty"`
-	Suite bool   `json:"suite,omitempty"`
-	App   bool   `json:"app,omitempty"`
-	Port  uint16 `json:"port,omitempty"`
+	PID     uint32    `json:"pid,omitempty"`
+	Dir     string    `json:"dir,omitempty"`
+	Suite   bool      `json:"suite,omitempty"`
+	App     bool      `json:"app,omitempty"`
+	Port    uint16    `json:"port,omitempty"`
+	Program string    `json:"program,omitempty"`
+	Place   string    `json:"place,omitempty"`
+	N       int       `json:"n,omitempty"`
+	Ready   time.Time `json:"ready,omitzero"`
+	Ref     string    `json:"ref,omitempty"`
+	Worker  uint32    `json:"worker,omitempty"`
 }
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
@@ -148,6 +154,19 @@ type ScopeWindow struct {
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
+	Root     string              `json:"root,omitempty"`
+	Sets     map[string]SetTable `json:"sets,omitempty"`
+}
+
+type SetTable struct {
+	Boots  map[string][]string `json:"boots,omitempty"`
+	Tests  map[string][]Owned  `json:"tests,omitempty"`
+	Runner []string            `json:"runner,omitempty"`
+}
+
+type Owned struct {
+	Name  string `json:"name"`
+	Start string `json:"start,omitempty"`
 }
 
 // ErrMockStatsUnsupported reports that an agent cannot answer /agent/mock/stats

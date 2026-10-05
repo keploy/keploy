@@ -3,10 +3,13 @@ package proxy
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -60,11 +63,16 @@ type scopedMockDb struct {
 	integrations.MockMemDb
 	allow    map[string]struct{} // mock names this worker's current test may see
 	universe map[string]struct{} // union of ALL tests' mapped names (nil ⇒ no filtering)
+	pid      uint32
+	live     bool
 }
 
 // keep returns the mocks visible to this worker: those in its allowlist plus any
 // that belong to no test (absent from the universe of mapped names).
 func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, error) {
+	if s.live && err == nil {
+		return byStart(s.pid, mocks), nil
+	}
 	if err != nil || s.allow == nil || s.universe == nil {
 		return mocks, err
 	}
@@ -237,6 +245,9 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	if kpid == 0 || mgr == nil {
 		return mgr
 	}
+	if starts.Default.Active() {
+		return &scopedMockDb{MockMemDb: mgr, pid: kpid, live: true}
+	}
 	p.workerScopeMu.RLock()
 	if len(p.workerScope) == 0 {
 		p.workerScopeMu.RUnlock()
@@ -288,4 +299,34 @@ func ppidFromStat(pid uint32) (uint32, bool) {
 		return 0, false
 	}
 	return uint32(ppid), true
+}
+
+func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
+	rank, universe, ok := starts.Default.View(pid, time.Now())
+	if !ok {
+		return mocks
+	}
+	type ranked struct {
+		m *models.Mock
+		r int
+	}
+	kept := make([]ranked, 0, len(mocks))
+	for _, m := range mocks {
+		if m == nil {
+			continue
+		}
+		if r, ok := rank[m.Name]; ok {
+			kept = append(kept, ranked{m, r})
+			continue
+		}
+		if _, known := universe[m.Name]; !known {
+			kept = append(kept, ranked{m, 9})
+		}
+	}
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].r < kept[j].r })
+	out := make([]*models.Mock, len(kept))
+	for i, k := range kept {
+		out[i] = k.m
+	}
+	return out
 }

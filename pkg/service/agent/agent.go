@@ -19,6 +19,7 @@ import (
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -487,6 +488,7 @@ const (
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, outgoingMockChanCap)
 
+	starts.Default.Reset()
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
 		return nil, err
@@ -526,6 +528,7 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	// standalone) never drains one replay's captured-on-miss mocks into a later,
 	// unrelated set. Harmless when --on-miss is not "record" (buffer stays empty).
 	httpparser.ResetCaptured()
+	starts.Default.Reset()
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {

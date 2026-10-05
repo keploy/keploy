@@ -117,6 +117,8 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
+	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	StartRef  string `json:"-" yaml:"-" bson:"-"`
 	// Noise holds exact-match regex patterns for obfuscated values.
 	// During mock matching, any stored value matching a pattern in this
 	// list is skipped (treated as noise). Written by the enterprise

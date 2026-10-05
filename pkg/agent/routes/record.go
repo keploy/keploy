@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/render"
 	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -560,6 +561,7 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			starts.Default.Stamp(m)
 			if err := enc.Encode(m); err != nil {
 				// enc.Encode(m) folds two distinct failure modes into
 				// one error: (a) per-mock serialization errors (an

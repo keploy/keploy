@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go.keploy.io/server/v3/config"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -563,6 +564,9 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) {
 	if m.mappingDB == nil {
 		return
 	}
+	if m.pushSetTable(ctx, name) {
+		return
+	}
 	pusher, ok := m.instrumentation.(ScopePusher)
 	if !ok {
 		return
@@ -584,6 +588,89 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) {
 		return
 	}
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.String("mock-set", name))
+}
+
+func (m *mockService) pushSetTable(ctx context.Context, name string) bool {
+	reader, ok := m.mappingDB.(MappingReader)
+	if !ok {
+		return false
+	}
+	pusher, ok := m.instrumentation.(SetPusher)
+	if !ok {
+		return false
+	}
+	mapping, err := reader.GetMapping(ctx, name)
+	if err != nil || mapping == nil || len(mapping.Boots) == 0 {
+		return false
+	}
+	root := gitTop()
+	sets := setTable(mapping, root)
+	if err := pusher.PushSetTable(ctx, root, sets); err != nil {
+		m.logger.Warn("could not install the app start table; app starts are not kept apart in this run", zap.Error(err))
+		return false
+	}
+	m.logger.Info("app starts kept apart", zap.Int("sets", len(sets)), zap.String("mock-set", name))
+	return true
+}
+
+func setTable(mapping *models.Mapping, root string) map[string]models.SetTable {
+	sets := map[string]models.SetTable{}
+	get := func(dir string) models.SetTable {
+		set := setName(dir, root)
+		st, ok := sets[set]
+		if !ok {
+			st = models.SetTable{Boots: map[string][]string{}, Tests: map[string][]models.Owned{}}
+		}
+		return st
+	}
+	for _, b := range mapping.Boots {
+		st := get(b.Dir)
+		names := make([]string, 0, len(b.Mocks))
+		for _, e := range b.Mocks {
+			names = append(names, e.Name)
+		}
+		if b.Key == "" {
+			st.Runner = append(st.Runner, names...)
+		} else {
+			st.Boots[b.Key] = names
+		}
+		sets[setName(b.Dir, root)] = st
+	}
+	for _, tc := range mapping.TestCases {
+		st := get(tc.Dir)
+		owned := make([]models.Owned, 0, len(tc.Mocks))
+		for _, e := range tc.Mocks {
+			owned = append(owned, models.Owned{Name: e.Name, Start: e.Start})
+		}
+		st.Tests[tc.ID] = owned
+		sets[setName(tc.Dir, root)] = st
+	}
+	return sets
+}
+
+func setName(dir, root string) string {
+	if dir == "" || !filepath.IsAbs(dir) {
+		return filepath.ToSlash(dir)
+	}
+	if root != "" {
+		if rel, err := filepath.Rel(root, dir); err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.ToSlash(dir)
+}
+
+func gitTop() string {
+	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		if top := strings.TrimSpace(string(out)); top != "" {
+			if real, err := filepath.EvalSymlinks(top); err == nil {
+				return real
+			}
+			return top
+		}
+	}
+	wd, _ := os.Getwd()
+	return wd
 }
 
 // ReplayOutcome is what a replay produced, for a wrapping build that meters or

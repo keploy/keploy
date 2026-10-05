@@ -187,7 +187,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			}
 			mockCount++
 			kind := mk.Spec.Metadata["type"]
-			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection"})
+			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection", start: mk.Start, ref: mk.StartRef})
 		}
 	}()
 
@@ -293,7 +293,13 @@ func (m *mockService) Record(ctx context.Context) error {
 	if m.mappingDB != nil {
 		if len(windows) > 0 {
 			byTest := correlateScopes(windows, recorded)
-			byCase := correlateCases(windows, recorded, capture.list(), stepWindows(windows))
+			owned := recorded
+			var plan bootPlan
+			if len(starts) > 0 {
+				plan = classify(windows, starts, suites, recorded)
+				byTest, owned = plan.tests, plan.perTest
+			}
+			byCase := correlateCases(windows, owned, capture.list(), stepWindows(windows))
 			for _, w := range windows {
 				if _, ok := byTest[w.Name]; !ok {
 					byTest[w.Name] = nil
@@ -306,16 +312,20 @@ func (m *mockService) Record(ctx context.Context) error {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
 				}
 			}
-			restarts := startsByTest(windows, starts)
 			for _, w := range windows {
-				if w.Dir == "" && restarts[w.Name] == 0 {
+				if w.Dir == "" {
 					continue
 				}
 				tc := byCase[w.Name]
-				tc.Dir, tc.Starts = w.Dir, restarts[w.Name]
+				tc.Dir = w.Dir
 				byCase[w.Name] = tc
 			}
-			m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded), suites)
+			if len(starts) > 0 {
+				m.upsertCases(persistCtx, name, byCase, nil, suites)
+				m.upsertBoots(persistCtx, name, plan.boots)
+			} else {
+				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded), suites)
+			}
 		}
 	}
 
@@ -445,6 +455,17 @@ func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[s
 	m.logger.Info("wrote per-flow test cases", zap.Int("flows", len(byCase)), zap.String("mock-set", name))
 }
 
+func (m *mockService) upsertBoots(ctx context.Context, name string, boots []models.BootSpec) {
+	mapper, ok := m.mappingDB.(BootMapper)
+	if !ok {
+		m.logger.Warn("the mapping store cannot record app starts", zap.String("mock-set", name))
+		return
+	}
+	if err := mapper.UpsertBoots(ctx, name, boots); err != nil {
+		m.logger.Warn("failed to write the app starts", zap.Error(err))
+	}
+}
+
 // deleteMappings drops the set's old per-test mappings so a re-record cannot leave tests pointing at renamed mocks.
 func (m *mockService) deleteMappings(ctx context.Context, name string) {
 	if m.mappingDB == nil {
@@ -463,11 +484,13 @@ func (m *mockService) deleteMappings(ctx context.Context, name string) {
 // capturedMock is one recorded mock's name + request timestamp + source worker
 // PID, used to correlate mocks into per-test scope windows.
 type capturedMock struct {
-	name string
-	ts   time.Time
-	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
-	end  time.Time
-	boot bool
+	name  string
+	ts    time.Time
+	pid   uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	end   time.Time
+	boot  bool
+	start string
+	ref   string
 }
 
 // correlateScopes buckets each recorded mock into the per-test scope window its

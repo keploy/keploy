@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/render"
-	"go.keploy.io/server/v3/pkg/agent/appstart"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -84,6 +84,7 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 	if s, ok := a.svc.(scopeNoter); ok {
 		s.NoteScope(req.Name, req.Pid, req.Dir, req.Suite)
 	}
+	starts.Default.Begin(uint32(req.Pid), req.Name, req.Dir, req.Suite, markTime(req.At))
 	if err := beginScope(r.Context(), a.svc, req); err != nil {
 		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -100,6 +101,7 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-end request: %v", err), http.StatusBadRequest)
 		return
 	}
+	starts.Default.End(uint32(req.Pid), req.Name, req.Suite, markTime(req.At))
 	if err := endScope(r.Context(), a.svc, req); err != nil {
 		a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -134,7 +136,10 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-table request: %v", err), http.StatusBadRequest)
 		return
 	}
-	if s, ok := a.svc.(scopeTableSetter); ok {
+	if req.Sets != nil {
+		starts.Default.SetTable(req.Root, req.Sets)
+	}
+	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
 		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -223,11 +228,18 @@ func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid app-start request: port must be the port the app listens on", http.StatusBadRequest)
 		return
 	}
-	at := req.At
-	if at.IsZero() {
-		at = time.Now()
+	if req.Pid <= 0 {
+		http.Error(w, "invalid app-start request: pid must be the app's pid", http.StatusBadRequest)
+		return
 	}
-	appstart.NoteAt(at, uint32(req.Pid), uint16(req.Port))
+	starts.Default.Ready(uint32(req.Pid), uint16(req.Port), markTime(req.At))
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
+}
+
+func markTime(at time.Time) time.Time {
+	if at.IsZero() {
+		return time.Now()
+	}
+	return at
 }

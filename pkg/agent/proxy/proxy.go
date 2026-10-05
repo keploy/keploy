@@ -35,6 +35,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
@@ -2241,6 +2242,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// copy so the mock-serve and record-capture paths can attribute the call to
 	// the test worker that made it (per-PID scoping). 0 when unavailable.
 	outgoingOpts.SrcPid = destInfo.KernelPid
+	starts.Default.Note(fmt.Sprint(clientConnID), outgoingOpts.SrcPid, time.Now())
 
 	mgr := syncMock.Get()
 	mgr.SetOutputChannel(rule.MC)

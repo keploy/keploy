@@ -110,6 +110,14 @@ type ScopePusher interface {
 	PushScopeTable(ctx context.Context, table map[string][]string) error
 }
 
+type SetPusher interface {
+	PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) error
+}
+
+type MappingReader interface {
+	GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error)
+}
+
 // MockDB reads and writes a named mock set on disk. It is exactly the surface
 // the yaml mockdb already implements, so OSS wires the file store directly and
 // enterprise wraps it with registry upload/download.
@@ -134,6 +142,10 @@ type MappingDB interface {
 // CaseMapper is an optional MappingDB extension: Record writes which test cases each flow produced through it.
 type CaseMapper interface {
 	UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error
+}
+
+type BootMapper interface {
+	UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error
 }
 
 // IncomingReader is an optional Instrumentation extension: the agent's stream of the app's captured incoming requests.

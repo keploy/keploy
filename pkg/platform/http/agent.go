@@ -2567,6 +2567,31 @@ func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow
 // PushScopeTable hands the agent the replay-time per-test name→mock-names table
 // (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
 // served pool per test. A missing endpoint (older agent) is a no-op.
+func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) error {
+	body, err := json.Marshal(models.ScopeTableReq{Root: root, Sets: sets})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the app start table: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push the app start table: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("app start table returned status %d: %s", res.StatusCode, string(b))
+	}
+	return nil
+}
+
 func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string) error {
 	url := fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI)
 	body, err := json.Marshal(models.ScopeTableReq{Mappings: table})
