@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -137,7 +138,7 @@ func TestRecordV2_PostTLS_AnAnswerInFlightIsReportedWhenTheFirstResponseCannotBe
 				t.Fatalf("%d spans left out, %d counted; want %d each", spans, counted, c.leftOut)
 			}
 			var unanswered []observer.LoggedEntry
-			for _, e := range logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("was not recorded as a mock").All() {
+			for _, e := range logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(supervisor.LeftOutWarnMsg).All() {
 				if r, _ := e.ContextMap()["reason"].(string); strings.HasPrefix(r, "server bytes that answer no captured request") {
 					unanswered = append(unanswered, e)
 				}
@@ -219,7 +220,7 @@ func TestRecordV2_PostTLS_AnAnswerInFlightIsReportedWhenThePoolQuits(t *testing.
 				t.Fatalf("%d spans left out, %d counted; want %d each", spans, counted, c.leftOut)
 			}
 			unanswered := 0
-			for _, e := range logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("was not recorded as a mock").All() {
+			for _, e := range logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(supervisor.LeftOutWarnMsg).All() {
 				if r, _ := e.ContextMap()["reason"].(string); strings.HasPrefix(r, "server bytes that answer no captured request") {
 					unanswered++
 				}

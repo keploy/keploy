@@ -108,7 +108,7 @@ func (r leftOutRun) nothingReported(t *testing.T) {
 
 // warned are the left-out WARNs a run logged.
 func (r leftOutRun) warned() []observer.LoggedEntry {
-	return r.logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("was not recorded as a mock").All()
+	return r.logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(supervisor.LeftOutWarnMsg).All()
 }
 
 // A parser that returns on an exchange it cannot record reports it before it

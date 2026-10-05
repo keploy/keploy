@@ -111,7 +111,7 @@ func (c *exchangeConn) unansweredLines() int {
 	said := 0
 	for _, e := range c.logs.All() {
 		if r, ok := e.ContextMap()["reason"].(string); ok && strings.HasPrefix(r, leftOutUnansweredCause+":") &&
-			(e.Message == leftOutWarnMsg || e.Message == leftOutDebugMsg) {
+			(e.Message == LeftOutWarnMsg || e.Message == LeftOutDebugMsg) {
 			said++
 		}
 	}

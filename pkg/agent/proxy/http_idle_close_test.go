@@ -132,7 +132,7 @@ func TestRecordViaSupervisor_AnUpstreamIdleCloseLeavesNothingOut(t *testing.T) {
 	if over, n := mgr.WasMockOrphanedInWindow(started, time.Now()); over {
 		t.Errorf("%d orphan spans over the connection, want none: every test case in flight there would be left out", n)
 	}
-	if w := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("was not recorded as a mock").All(); len(w) != 0 {
+	if w := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(supervisor.LeftOutWarnMsg).All(); len(w) != 0 {
 		t.Errorf("%d left-out WARNs, want none: %v", len(w), w[0].ContextMap())
 	}
 }

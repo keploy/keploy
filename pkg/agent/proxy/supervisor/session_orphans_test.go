@@ -94,7 +94,7 @@ func TestAMockLeftOutForTheIncompleteFlagIsReported(t *testing.T) {
 	}
 	warns := func() []observer.LoggedEntry { return logs.FilterLevelExact(zapcore.WarnLevel).All() }
 	heldBack := func() int {
-		return logs.FilterLevelExact(zapcore.DebugLevel).FilterMessage(leftOutDebugMsg).Len()
+		return logs.FilterLevelExact(zapcore.DebugLevel).FilterMessage(LeftOutDebugMsg).Len()
 	}
 
 	s.MarkMockIncomplete("channel_full")
@@ -345,7 +345,7 @@ func TestAParserDroppingAFlaggedMockReportsItOnce(t *testing.T) {
 	if n := mgr.MocksLeftOut(); n != 1 {
 		t.Fatalf("the manager counts %d mocks left out, want the one dropped", n)
 	}
-	reported := logs.FilterMessage(leftOutWarnMsg).Len() + logs.FilterMessage(leftOutDebugMsg).Len()
+	reported := logs.FilterMessage(LeftOutWarnMsg).Len() + logs.FilterMessage(LeftOutDebugMsg).Len()
 	if reported != 1 {
 		t.Fatalf("the mock dropped is logged %d times, want once", reported)
 	}
@@ -419,7 +419,7 @@ func TestAParserLeavingOutSeveralExchangesForOneMarkReportsEach(t *testing.T) {
 	if w["reason"] != "memory_pressure" || w["connID"] != "h2-conn" || w["kind"] != string(models.HTTP2) {
 		t.Fatalf("the WARN says %v, want the reason taken, the connection and the kind", w)
 	}
-	if n := logs.FilterLevelExact(zapcore.DebugLevel).FilterMessage(leftOutDebugMsg).Len(); n != 1 {
+	if n := logs.FilterLevelExact(zapcore.DebugLevel).FilterMessage(LeftOutDebugMsg).Len(); n != 1 {
 		t.Fatalf("logged %d held-back DEBUG lines, want the second exchange's", n)
 	}
 	if cleared != 2 {
@@ -724,7 +724,7 @@ func TestAMockLeftOutIsSpannedOverItsOwnTimesOnly(t *testing.T) {
 			t.Fatalf("%s: spanned over %v, want [%v, %v]", tc.name, spans.got, tc.span[0], tc.span[1])
 		}
 		lines := logs.Filter(func(e observer.LoggedEntry) bool {
-			return e.Message == leftOutWarnMsg || e.Message == leftOutDebugMsg
+			return e.Message == LeftOutWarnMsg || e.Message == LeftOutDebugMsg
 		}).All()
 		if len(lines) != 1 {
 			t.Fatalf("%s: %d left-out lines, want one", tc.name, len(lines))
@@ -740,7 +740,7 @@ func TestAMockLeftOutIsSpannedOverItsOwnTimesOnly(t *testing.T) {
 	leftOutWarns = NewWarnLimiters(leftOutWarnEvery)
 	logs.TakeAll()
 	_ = s.EmitMock(&models.Mock{Name: "untimed"})
-	w := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(leftOutWarnMsg).All()
+	w := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(LeftOutWarnMsg).All()
 	if len(w) != 1 {
 		t.Fatalf("%d left-out WARNs, want 1", len(w))
 	}
@@ -785,7 +785,7 @@ func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
 	}
 	warned := func(t *testing.T, r *run) map[string]any {
 		t.Helper()
-		w := r.logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(leftOutWarnMsg).All()
+		w := r.logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(LeftOutWarnMsg).All()
 		if len(w) != 1 {
 			t.Fatalf("%d left-out WARNs, want one", len(w))
 		}
@@ -1162,5 +1162,59 @@ func TestTheLeftOutWarnPromisesOnlyWhatHolds(t *testing.T) {
 	}
 	if w[0].ContextMap()["next_step"] != leftOutNextStep(leftOutPerConnCap, true) {
 		t.Errorf("the WARN's next_step is %v, want per_conn_cap's", w[0].ContextMap()["next_step"])
+	}
+}
+
+// An HTTP/2 stream reset before it completed is left out by its parser for a
+// cause of its own (LeftOutResetByClient, LeftOutResetByServer), of class
+// reset, whose next_step says that the call did not complete, that the
+// capture lost nothing, and that a client's CANCEL is usually its deadline. It
+// used to fall into class other, whose next_step points at --debug, and the
+// WARN said the capture was incomplete: every client deadline in a recording
+// read as a capture loss.
+func TestAResetStreamIsLeftOutWithItsOwnNextStep(t *testing.T) {
+	for _, tc := range []struct{ reason, class string }{
+		{LeftOutResetByClient + ": CANCEL, before its response ended (a client's CANCEL is usually its deadline)", leftOutReset},
+		{LeftOutResetByClient + ": NO_ERROR, before its request ended", leftOutReset},
+		{LeftOutResetByServer + ": INTERNAL_ERROR, before its response ended", leftOutReset},
+		{"http2 stream reset: CANCEL", leftOutOther},
+	} {
+		if got := leftOutClass(leftOutCause(tc.reason)); got != tc.class {
+			t.Errorf("reason %q is of class %q, want %q", tc.reason, got, tc.class)
+		}
+	}
+	next := leftOutNextStep(leftOutReset, true)
+	for _, want := range []string{"traffic is unaffected", "reset (RST_STREAM) before it completed", "the capture lost nothing",
+		"which half of it had not ended", "A client's CANCEL is usually its deadline: raise it and re-record"} {
+		if !strings.Contains(next, want) {
+			t.Errorf("the reset's next_step %q does not say %q", next, want)
+		}
+	}
+	if strings.Contains(next, "--debug") || strings.Contains(next, "--memory-limit") || strings.Contains(next, "maxMemoryPerConnection") {
+		t.Errorf("the reset's next_step %q gives a capture loss's knob", next)
+	}
+
+	prev := leftOutWarns
+	leftOutWarns = NewWarnLimiters(leftOutWarnEvery)
+	t.Cleanup(func() { leftOutWarns = prev })
+	core, logs := observer.New(zapcore.WarnLevel)
+	s := &Session{Mgr: syncMock.New(nil), Orphans: &syncMock.Spans{}, Logger: zap.New(core)}
+	at := time.Now().Add(-time.Minute)
+	m := &models.Mock{Name: "reset", Kind: models.HTTP2}
+	m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(time.Millisecond)
+	reason := LeftOutResetByClient + ": CANCEL, before its response ended (a client's CANCEL is usually its deadline)"
+	s.ReportLeftOut(m, reason)
+	w := logs.All()
+	if len(w) != 1 || w[0].Message != LeftOutWarnMsg {
+		t.Fatalf("logged %v, want one WARN %q", w, LeftOutWarnMsg)
+	}
+	if strings.Contains(w[0].Message, "incomplete") || strings.Contains(w[0].Message, "decoded") {
+		t.Errorf("the WARN %q says why the exchange was not recorded, which its reason field says", w[0].Message)
+	}
+	if got := w[0].ContextMap()["reason"]; got != reason {
+		t.Errorf("the WARN's reason is %v, want %q", got, reason)
+	}
+	if got := w[0].ContextMap()["next_step"]; got != next {
+		t.Errorf("the WARN's next_step is %v, want the reset's", got)
 	}
 }

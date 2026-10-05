@@ -376,10 +376,13 @@ type SyncMockManager struct {
 	totalAdded      atomic.Int64
 
 	// leftOut counts the mocks a session routed here left out
-	// because a parser could not record them: their capture was incomplete,
-	// or they could not be decoded or served (NoteMockLeftOut), for the
-	// recording's summary: their warnings are rate-limited, so this is the
-	// one place each is counted.
+	// because a parser could not record them (NoteMockLeftOut): their capture
+	// was incomplete, they could not be decoded or served, their call did not
+	// complete (an HTTP/2 stream reset), or they are the answer to a request
+	// sent before the capture of their connection began
+	// (supervisor.Session.NextRequest). It is for the recording's summary:
+	// their warnings are rate-limited, so this is the one place each is
+	// counted.
 	leftOut atomic.Int64
 
 	// outChanClosedDrops counts mocks that were already counted in

@@ -675,23 +675,29 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					// on included, each reported with Session.ReportLeftOut
 					// (Session.ReportStoppedOn for the one it stopped on):
 					// for the incomplete-mock flag (a chunk the relay
-					// dropped, a short write, a decode error), or for a
-					// reason of the parser's own. A MySQL command that does
-					// not decode, that the replayer cannot serve, or whose
-					// response cannot be framed is left out alone, and the
-					// connection's recording goes on. An HTTP/1 request or
-					// response that does not decode stops the parser, and
-					// so does a MySQL command in which the framing of the
-					// client's stream is lost, or whose response cannot be
-					// framed with no way to take the connection up again
-					// after it (a client that pipelines its commands, say).
-					// Their WARN is rate-limited, so this is where each is
-					// counted: the ones reported while this session was
-					// open, as tcs_left_out_in_flight counts its test cases
-					// left out in flight, so a later session's summary does
-					// not count them again. What a connection carried after
-					// its recording stopped is in the orphan spans above,
-					// not here: it was never parsed into mocks to count.
+					// dropped, a short write, a decode error), for a reason
+					// of the parser's own, or for the server bytes that
+					// start a connection the capture joined mid-way, the
+					// answer to a request it does not have
+					// (Session.NextRequest). A parser's own reasons: a
+					// MySQL command that does not decode, that the replayer
+					// cannot serve, or whose response cannot be framed is
+					// left out alone, and the connection's recording goes
+					// on; an HTTP/1 request or response that does not
+					// decode stops the parser, and so does a MySQL command
+					// in which the framing of the client's stream is lost,
+					// or whose response cannot be framed with no way to
+					// take the connection up again after it (a client that
+					// pipelines its commands, say); an HTTP/2 stream reset
+					// before it completed is left out, which the capture
+					// did not lose: its call did not complete. Their WARN
+					// is rate-limited, so this is where each is counted:
+					// the ones reported while this session was open, as
+					// tcs_left_out_in_flight counts its test cases left out
+					// in flight, so a later session's summary does not
+					// count them again. What a connection carried after its
+					// recording stopped is in the orphan spans above, not
+					// here: it was never parsed into mocks to count.
 					zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()-mocksLeftOutBefore),
 					zap.Int64("mocks_added_successfully", finalAdded),
 					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),

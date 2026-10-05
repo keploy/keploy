@@ -897,13 +897,13 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 	class := leftOutClass(cause)
 	ok, held, _ := leftOutWarns.AllowOr(cause, class)
 	if !ok {
-		s.Logger.Debug(leftOutDebugMsg, fields...)
+		s.Logger.Debug(LeftOutDebugMsg, fields...)
 		return
 	}
 	if held > 0 {
 		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
 	}
-	s.Logger.Warn(leftOutWarnMsg, append(fields, zap.String("next_step", leftOutNextStep(class, spanned)))...)
+	s.Logger.Warn(LeftOutWarnMsg, append(fields, zap.String("next_step", leftOutNextStep(class, spanned)))...)
 }
 
 // ReportStoppedOn reports the exchange a parser stops on, as it returns
@@ -1037,11 +1037,25 @@ func (s *Session) RecordingStopping() bool {
 }
 
 // ReportLeftOut's log lines: at WARN, and at Debug for one the limit holds
-// back. Their reason field says why the exchange was not recorded: the
-// flag's, or the parser's own.
+// back. They say only that the exchange was not recorded. Their reason field
+// says why: the flag's (a lost chunk, a short write), or the parser's own (a
+// capture cut short, a message that does not decode, an HTTP/2 stream reset
+// before it completed), and only some of those are a capture that was
+// incomplete. They are exported for a parser's tests, which find the lines a
+// mock left out logs by them.
 const (
-	leftOutWarnMsg  = "a captured exchange was not recorded as a mock: its capture was incomplete or could not be decoded"
-	leftOutDebugMsg = "left out a mock: its capture was incomplete or could not be decoded"
+	LeftOutWarnMsg  = "a captured exchange was not recorded as a mock"
+	LeftOutDebugMsg = "left out a mock"
+)
+
+// The causes (leftOutCause) an HTTP/2 parser leaves a stream out for when it
+// was reset (RST_STREAM) before it completed: its reason is one of them, then
+// a colon, the reset's code and which half of the call had not ended. Neither
+// is a capture loss: the call itself did not complete, so there is no whole
+// exchange to record. Both are of class leftOutReset.
+const (
+	LeftOutResetByClient = "http2 stream reset by the client"
+	LeftOutResetByServer = "http2 stream reset by the server"
 )
 
 // maxLeftOutCause is the longest cause leftOutCause keeps of a reason.
@@ -1072,9 +1086,10 @@ func leftOutCause(reason string) string {
 // The classes of cause a mock is left out for, each with its own next_step
 // (leftOutNextStep). The first three are the relay's drop reasons
 // (relay.DropMemoryPressure, relay.DropPerConnCap, relay.DropDesynced), which
-// it hands MarkMockIncomplete verbatim; the fourth is NextRequest's. A class
-// also keys the WARN limit for a cause past the first maxOpenKinds
-// (WarnLimiters.AllowOr).
+// it hands MarkMockIncomplete verbatim; the fourth is NextRequest's.
+// leftOutReset is an HTTP/2 stream's reset (LeftOutResetByClient,
+// LeftOutResetByServer). A class also keys the WARN limit for a cause past the
+// first maxOpenKinds (WarnLimiters.AllowOr).
 const (
 	leftOutMemoryPressure = "memory_pressure"
 	leftOutPerConnCap     = "per_conn_cap"
@@ -1092,15 +1107,18 @@ const (
 	// the answer to a request the capture does not have. Nothing about the
 	// recording's settings caused it.
 	leftOutUnansweredCause = "server bytes that answer no captured request"
+	leftOutReset           = "reset"
 	leftOutOther           = "other"
 )
 
-// leftOutClass is the class of a cause (leftOutCause) the incomplete-mock
-// flag was set for: the knob that fits it.
+// leftOutClass is the class of a cause (leftOutCause) a mock was left out
+// for: the knob that fits it.
 func leftOutClass(cause string) string {
 	switch cause {
 	case leftOutMemoryPressure, leftOutPerConnCap, leftOutDesynced, leftOutUnansweredCause:
 		return cause
+	case LeftOutResetByClient, LeftOutResetByServer:
+		return leftOutReset
 	}
 	return leftOutOther
 }
@@ -1145,6 +1163,11 @@ func leftOutNextStep(class string, spanned bool) string {
 		return next + "The request these bytes answer was in flight when the capture of this already open connection " +
 			"began (the recording started, a TLS hook attached, or the agent restarted, while it was sent), so it was never " +
 			"captured: there is no setting to change, and the connection's later exchanges are recorded each with its own answer"
+	case leftOutReset:
+		return next + "reason=http2 stream reset: the call was reset (RST_STREAM) before it completed, so there is no " +
+			"whole exchange to record, and a replay cannot reproduce the reset; the capture lost nothing. The reason " +
+			"says who reset the call, with the code, and which half of it had not ended. A client's CANCEL is usually " +
+			"its deadline: raise it and re-record. A server's reset is a call it failed or abandoned: its logs say why"
 	}
 	return next + "Re-run with --debug to see each mock left out and why it could not be recorded"
 }
