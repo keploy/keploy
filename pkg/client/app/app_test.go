@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/utils"
@@ -576,5 +577,44 @@ func TestKeployAgentComposeServiceConstant(t *testing.T) {
 	if keployAgentComposeService != "keploy-agent" {
 		t.Fatalf("keployAgentComposeService = %q, want \"keploy-agent\" (must match the injected compose service key in pkg/platform/docker/docker.go)",
 			keployAgentComposeService)
+	}
+}
+
+// keploy's flags go right after the run subcommand. Splicing them after the
+// second word put them in front of `run` for `sudo docker run` and `docker
+// container run`, both of which resolve to the docker-run kind, and docker
+// refused the command ("unknown flag: --pid").
+func TestModifyDockerRunPutsItsFlagsAfterTheRunSubcommand(t *testing.T) {
+	for _, tc := range []struct{ cmd, before, after string }{
+		{"docker run --rm --name app img", "docker run", "--rm --name app img"},
+		{"sudo docker run --rm --name app img", "sudo docker run", "--rm --name app img"},
+		{"docker container run --name app img", "docker container run", "--name app img"},
+		{"sudo -E /usr/bin/podman run  -e 'A=b c' img", "sudo -E /usr/bin/podman run", "-e 'A=b c' img"},
+		{"podman container run -d img", "podman container run", "-d img"},
+	} {
+		a := &App{logger: zap.NewNop(), cmd: tc.cmd, kind: utils.DockerRun, keployContainer: "keploy-v3-test"}
+		if err := a.modifyDockerRun(context.Background()); err != nil {
+			t.Fatalf("%q: %v", tc.cmd, err)
+		}
+		if !strings.HasPrefix(a.cmd, tc.before+" --pid=container:keploy-v3-test --network=container:keploy-v3-test ") {
+			t.Errorf("%q: keploy's flags are not right after %q: %s", tc.cmd, tc.before, a.cmd)
+		}
+		if !strings.HasSuffix(a.cmd, " "+tc.after) {
+			t.Errorf("%q: the user's own arguments did not survive verbatim after keploy's: %s", tc.cmd, a.cmd)
+		}
+	}
+}
+
+// A container `start` resumes was created without keploy's namespaces, and
+// none can be added to it: say so, instead of handing docker run-only flags
+// it rejects.
+func TestModifyDockerRunRefusesAStart(t *testing.T) {
+	a := &App{logger: zap.NewNop(), cmd: "docker start -a app", kind: utils.DockerStart, keployContainer: "keploy-v3-test"}
+	err := a.modifyDockerRun(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "`docker run`") {
+		t.Fatalf("want a refusal pointing at `docker run`, got %v (command now %q)", err, a.cmd)
+	}
+	if a.cmd != "docker start -a app" {
+		t.Fatalf("the command was changed: %q", a.cmd)
 	}
 }

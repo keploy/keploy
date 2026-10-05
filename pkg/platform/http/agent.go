@@ -38,6 +38,7 @@ import (
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -1635,8 +1636,9 @@ func (a *AgentClient) logAgentContainerDiagnostics(container string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	logs, _ := exec.CommandContext(ctx, "docker", "logs", "--tail", "200", container).CombinedOutput()
-	state, _ := exec.CommandContext(ctx, "docker", "inspect", "-f",
+	cli := engine.Active().CLI
+	logs, _ := exec.CommandContext(ctx, cli, "logs", "--tail", "200", container).CombinedOutput()
+	state, _ := exec.CommandContext(ctx, cli, "inspect", "-f",
 		"status={{.State.Status}} exitCode={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} error={{.State.Error}}",
 		container).CombinedOutput()
 	a.logger.Warn("keploy-agent did not become ready; captured agent container diagnostics",
@@ -2263,12 +2265,13 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		containerName := opts.KeployContainer
 
 		// Try stopping the container without sudo first (works if user is in docker group)
-		stopCmd := exec.Command("docker", "stop", containerName)
+		cli := engine.Active().CLI
+		stopCmd := exec.Command(cli, "stop", containerName)
 		if output, err := stopCmd.CombinedOutput(); err != nil {
 			// If that fails on Linux, try with sudo -n (non-interactive, won't prompt for password)
 			if runtime.GOOS == "linux" {
 				logger.Debug("docker stop without sudo failed, trying with sudo -n", zap.Error(err))
-				stopCmd = exec.Command("sudo", "-n", "docker", "stop", containerName)
+				stopCmd = exec.Command("sudo", "-n", cli, "stop", containerName)
 				if output, err := stopCmd.CombinedOutput(); err != nil {
 					logger.Debug("Could not stop the docker container. It may have already stopped.",
 						zap.String("container", containerName),

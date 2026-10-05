@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/agent"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -126,6 +127,11 @@ func (a *App) Setup(ctx context.Context) error {
 			return err
 		}
 	case utils.DockerCompose:
+		// Before anything else: compose starts the agent, and a sudo that
+		// cannot hand it the token would start it unauthenticated.
+		if err := a.checkAgentTokenHandoff(ctx); err != nil {
+			return err
+		}
 		extraArgs := agent.StartupAgentHook.GetArgs(ctx)
 		err := a.SetupCompose(extraArgs)
 		if err != nil {
@@ -198,16 +204,21 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
 	tlsFlags += fmt.Sprintf("-e JAVA_TOOL_OPTIONS='%s' ", javaOpts)
 
-	// Inject the pidMode flag after 'docker run' in the command
-	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
-	if len(parts) < 3 {
-		return fmt.Errorf("invalid command structure: %s", a.cmd)
+	at := utils.RunSubcommandEnd(a.cmd)
+	if at < 0 {
+		if a.kind == utils.DockerStart {
+			// A container that already exists cannot be given these: its
+			// PID and network namespaces were settled when it was created.
+			return engine.StartUnsupported(engine.Detect(a.cmd))
+		}
+		return fmt.Errorf("invalid command structure: no `run` subcommand to add keploy's flags to: %s", a.cmd)
 	}
 
+	// The flags go right after the engine's run subcommand, wherever it is:
+	// in `sudo docker run` and `docker container run` that is past the second
+	// word, and docker takes nothing in front of `run` but its own flags.
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
-
-	// Modify the command to insert the pidMode and environment variables
-	a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], injection, parts[2])
+	a.cmd = fmt.Sprintf("%s %s %s", a.cmd[:at], injection, strings.TrimLeft(a.cmd[at:], " "))
 	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", a.cmd))
 	return nil
 }
@@ -685,10 +696,10 @@ func (a *App) ComposeDown() {
 	// through `docker compose -f -` with the generated document on stdin.
 	case len(a.composeContent) > 0:
 		a.logger.Debug("Running docker compose down using in-memory compose content")
-		args := []string{"compose", "-f", "-"}
+		args := []string{"-f", "-"}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "down", "--timeout", "1")
-		downCmd = exec.CommandContext(downCtx, "docker", args...)
+		downCmd = composeCommand(downCtx, args...)
 		downCmd.Stdin = bytes.NewReader(a.composeContent)
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
@@ -697,10 +708,10 @@ func (a *App) ComposeDown() {
 		// the teardown targets the SAME project the `up` created (a user whose
 		// compose command sets an explicit project would otherwise have `down`
 		// resolve a different, cwd-derived project and leave this stack running).
-		args := []string{"compose", "-f", a.composeFile}
+		args := []string{"-f", a.composeFile}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "down", "--timeout", "1")
-		downCmd = exec.CommandContext(downCtx, "docker", args...)
+		downCmd = composeCommand(downCtx, args...)
 	default:
 		return
 	}
@@ -1125,18 +1136,18 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 	// Reached only where the library is not linked (darwin): the generated
 	// document goes to `docker compose -f -` on stdin, exactly as before.
 	case len(a.composeContent) > 0:
-		args = []string{"compose", "-f", "-"}
+		args = []string{"-f", "-"}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "ps", "-aq", keployAgentComposeService)
 	case a.composeFile != "":
-		args = []string{"compose", "-f", a.composeFile}
+		args = []string{"-f", a.composeFile}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "ps", "-aq", keployAgentComposeService)
 	default:
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := composeCommand(ctx, args...)
 	if len(a.composeContent) > 0 {
 		cmd.Stdin = bytes.NewReader(a.composeContent)
 	}
@@ -1276,11 +1287,11 @@ func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
 	switch {
 	// Reached only where the library is not linked (darwin).
 	case len(a.composeContent) > 0:
-		args = []string{"compose", "-f", "-"}
+		args = []string{"-f", "-"}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "ps", "-a", "--format", "json")
 	case a.composeFile != "":
-		args = []string{"compose", "-f", a.composeFile}
+		args = []string{"-f", a.composeFile}
 		// Carry any -p/--project-name/--project-directory from the run command so
 		// the probe resolves the SAME project the `up` created. Without this, a user
 		// whose compose command sets an explicit project would have the probe query
@@ -1292,7 +1303,7 @@ func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := composeCommand(ctx, args...)
 	if len(a.composeContent) > 0 {
 		cmd.Stdin = bytes.NewReader(a.composeContent)
 	}
@@ -1591,10 +1602,11 @@ func extractProjectFlags(cmd string) []string {
 //
 // Under docker compose that command is what starts the agent: the generated
 // keploy-agent service names the control-plane token without a value, and
-// compose fills it in from the environment given here. A leading sudo would
-// reset that environment first, so it is told to keep the one variable
-// (keepAgentTokenThroughSudo). Every other kind starts its agent some other
-// way, and the application under test is handed nothing.
+// compose fills it in from the environment given here. A leading sudo or doas
+// would reset that environment first, so a root keploy drops it and any other
+// keploy tells sudo to keep the one variable (agentTokenCommand). Every other
+// kind starts its agent some other way, and the application under test is
+// handed nothing.
 //
 // One place for both, whichever way the compose command was put together —
 // rewritten around a generated file, piped in memory, or a wrapper keploy
@@ -1610,7 +1622,8 @@ func (a *App) withAgentToken(cmd string) (string, []string) {
 		return cmd, nil
 	}
 	token.RecordLaunch(a.opts.AgentURI)
-	return keepAgentTokenThroughSudo(cmd), docker.AgentTokenEnv()
+	cmd, _ = agentTokenCommand(cmd, effectiveUID() == 0)
+	return cmd, docker.AgentTokenEnv()
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
@@ -1995,4 +2008,12 @@ func exitCodeFromErr(err error) int {
 		return statusErr.StatusCode
 	}
 	return -1
+}
+
+// composeCommand is a compose subcommand (args: what follows `docker compose`)
+// run through the active engine's compose command, for the teardown and probes
+// that run where the compose library is not linked.
+func composeCommand(ctx context.Context, args ...string) *exec.Cmd {
+	compose := engine.Active().Compose
+	return exec.CommandContext(ctx, compose[0], append(append([]string{}, compose[1:]...), args...)...)
 }
