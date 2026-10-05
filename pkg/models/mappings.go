@@ -166,10 +166,14 @@ func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
 func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
-	if err := node.Decode(&persisted); err == nil && (nodeHasField(node, "mock_entries") || nodeHasField(node, "dir") || nodeHasField(node, "starts") || (nodeHasField(node, "cases") && !nodeHasField(node, "mocks"))) {
+	perr := node.Decode(&persisted)
+	if perr == nil && (nodeHasField(node, "mock_entries") || ((nodeHasField(node, "dir") || nodeHasField(node, "starts") || nodeHasField(node, "cases")) && !nodeHasField(node, "mocks"))) {
 		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
-		tc.CaseMocks, tc.CaseSteps, tc.Dir, tc.Starts = persisted.CaseMocks, persisted.CaseSteps, persisted.Dir, persisted.Starts
+		tc.extras(persisted)
 		return nil
+	}
+	if perr != nil {
+		persisted = persistedTestFormat{}
 	}
 
 	type legacyTestFormat struct {
@@ -180,12 +184,14 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	var legacy legacyTestFormat
 	if err := node.Decode(&legacy); err == nil {
 		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, legacy.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
 	var structured structuredTestFormat
 	if err := node.Decode(&structured); err == nil {
 		tc.applyDecodedMocks(structured.ID, structured.Mocks, "", structured.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
@@ -203,10 +209,14 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 // string format while supporting the structured formats used by newer builds.
 func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	var persisted persistedTestFormat
-	if err := json.Unmarshal(data, &persisted); err == nil && (jsonContainsField(data, "mock_entries") || jsonContainsField(data, "dir") || jsonContainsField(data, "starts") || (jsonContainsField(data, "cases") && !jsonContainsField(data, "mocks"))) {
+	perr := json.Unmarshal(data, &persisted)
+	if perr == nil && (jsonContainsField(data, "mock_entries") || ((jsonContainsField(data, "dir") || jsonContainsField(data, "starts") || jsonContainsField(data, "cases")) && !jsonContainsField(data, "mocks"))) {
 		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
-		tc.CaseMocks, tc.CaseSteps, tc.Dir, tc.Starts = persisted.CaseMocks, persisted.CaseSteps, persisted.Dir, persisted.Starts
+		tc.extras(persisted)
 		return nil
+	}
+	if perr != nil {
+		persisted = persistedTestFormat{}
 	}
 
 	type legacyTestFormat struct {
@@ -217,12 +227,14 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	var legacy legacyTestFormat
 	if err := json.Unmarshal(data, &legacy); err == nil {
 		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, legacy.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
 	var structured structuredTestFormat
 	if err := json.Unmarshal(data, &structured); err == nil {
 		tc.applyDecodedMocks(structured.ID, structured.Mocks, "", structured.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
@@ -254,6 +266,10 @@ func (tc MappedTestCase) persistedFormat() persistedTestFormat {
 		Dir:         tc.Dir,
 		Starts:      tc.Starts,
 	}
+}
+
+func (tc *MappedTestCase) extras(p persistedTestFormat) {
+	tc.CaseMocks, tc.CaseSteps, tc.Dir, tc.Starts = p.CaseMocks, p.CaseSteps, p.Dir, p.Starts
 }
 
 func (tc *MappedTestCase) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string, cases []string) {

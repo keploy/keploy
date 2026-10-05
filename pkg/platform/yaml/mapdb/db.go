@@ -276,7 +276,6 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	return nil
 }
 
-// UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
 func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
@@ -306,6 +305,7 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }
 
+// UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
 func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error {
 	if len(byTest) == 0 && len(startup) == 0 && len(suites) == 0 {
 		return nil

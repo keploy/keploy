@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/v3/config"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
@@ -29,6 +29,7 @@ import (
 // failure of keploy's own -- one that stopped the run, or left --strict unable
 // to verify it -- which a failing test command never is.
 func (m *mockService) Replay(ctx context.Context) (err error) {
+	m.ids = nil
 	name := m.setName()
 	requests := m.requests()
 	started := time.Now()
@@ -655,7 +656,7 @@ func setName(dir, root string) string {
 		return filepath.ToSlash(dir)
 	}
 	if root != "" {
-		if rel, err := filepath.Rel(root, dir); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, err := filepath.Rel(root, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return filepath.ToSlash(rel)
 		}
 	}
@@ -663,10 +664,12 @@ func setName(dir, root string) string {
 }
 
 func gitTop() string {
-	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output(); err == nil {
 		if top := strings.TrimSpace(string(out)); top != "" {
-			if real, err := filepath.EvalSymlinks(top); err == nil {
-				return real
+			if resolved, err := filepath.EvalSymlinks(top); err == nil {
+				return resolved
 			}
 			return top
 		}

@@ -122,6 +122,14 @@ func requestKey(method, rawURL string) string {
 	return strings.ToUpper(method) + " " + normalisePath(rawURL)
 }
 
+func exactKey(method, rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return strings.ToUpper(method) + " " + rawURL
+	}
+	return strings.ToUpper(method) + " " + u.Path + "?" + u.Query().Encode()
+}
+
 func flowAt[V any](windows []models.ScopeWindow, at time.Time, known map[string]V) (string, bool) {
 	best, top := -1, -1
 	for i, w := range windows {
@@ -146,6 +154,9 @@ func flowAt[V any](windows []models.ScopeWindow, at time.Time, known map[string]
 
 // pairCases matches the requests the runner made this run with the cases each flow recorded, in order within the flow.
 func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestCase, actual []*models.TestCase, compare func(*models.TestCase, *models.HTTPResp) (bool, *models.Result)) []CaseOutcome {
+	if len(windows) == 0 {
+		return nil
+	}
 	byFlow := make(map[string][]*models.TestCase)
 	for _, a := range actual {
 		if a.Kind == models.GRPC_EXPORT {
@@ -165,25 +176,30 @@ func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestC
 		seen := byFlow[flow]
 		sort.SliceStable(seen, func(i, j int) bool { return caseTime(seen[i]).Before(caseTime(seen[j])) })
 		used := make([]bool, len(seen))
-		for _, rc := range recorded[flow] {
-			key := requestKey(string(rc.HTTPReq.Method), rc.HTTPReq.URL)
-			o := CaseOutcome{Flow: flow, Case: rc, Skipped: rc.Kind == models.GRPC_EXPORT}
-			if o.Skipped {
-				out = append(out, o)
-				continue
-			}
-			for i, a := range seen {
-				if used[i] || requestKey(string(a.HTTPReq.Method), a.HTTPReq.URL) != key {
+		cases := recorded[flow]
+		outs := make([]CaseOutcome, len(cases))
+		for i, rc := range cases {
+			outs[i] = CaseOutcome{Flow: flow, Case: rc, Skipped: rc.Kind == models.GRPC_EXPORT}
+		}
+		for _, key := range []func(method, rawURL string) string{exactKey, requestKey} {
+			for i, rc := range cases {
+				if outs[i].Skipped || outs[i].Actual != nil {
 					continue
 				}
-				used[i] = true
-				resp := a.HTTPResp
-				o.Actual = &resp
-				o.Passed, o.Result = compare(rc, &resp)
-				break
+				want := key(string(rc.HTTPReq.Method), rc.HTTPReq.URL)
+				for j, a := range seen {
+					if used[j] || key(string(a.HTTPReq.Method), a.HTTPReq.URL) != want {
+						continue
+					}
+					used[j] = true
+					resp := a.HTTPResp
+					outs[i].Actual = &resp
+					outs[i].Passed, outs[i].Result = compare(rc, &resp)
+					break
+				}
 			}
-			out = append(out, o)
 		}
+		out = append(out, outs...)
 	}
 	return out
 }

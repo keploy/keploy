@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -144,10 +147,45 @@ func TestRecordPublishesOnlyWhenTheTestsPassed(t *testing.T) {
 			if utils.ErrCode != tc.exitCode {
 				t.Fatalf("exit code = %d, want %d", utils.ErrCode, tc.exitCode)
 			}
-			warned := logs.FilterMessage("tests failed; the recording was kept locally and not published").Len() == 1
+			warned := logs.FilterMessage("tests failed; the recording was not kept or published, and the previous recording is left as it was").Len() == 1
 			if warned != tc.warned {
 				t.Fatalf("warned = %v, want %v", warned, tc.warned)
 			}
 		})
+	}
+}
+
+func TestSaveSetPutsThePreviousRecordingBackUnlessKept(t *testing.T) {
+	dir := t.TempDir()
+	m := &mockService{logger: zap.NewNop(), config: &config.Config{Path: dir}}
+	set := filepath.Join(dir, "e2e")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(set, "old"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore, existed := m.saveSet("e2e")
+	if !existed {
+		t.Fatal("the set was there")
+	}
+	_ = os.Remove(filepath.Join(set, "old"))
+	_ = os.WriteFile(filepath.Join(set, "new"), nil, 0o644)
+	restore(false)
+	if _, err := os.Stat(filepath.Join(set, "old")); err != nil {
+		t.Fatal("the previous recording must be back")
+	}
+	if _, err := os.Stat(filepath.Join(set, "new")); err == nil {
+		t.Fatal("the dropped recording must be gone")
+	}
+
+	restore, existed = m.saveSet("fresh")
+	if existed {
+		t.Fatal("the set was not there")
+	}
+	_ = os.MkdirAll(filepath.Join(dir, "fresh"), 0o755)
+	restore(false)
+	if _, err := os.Stat(filepath.Join(dir, "fresh")); err == nil {
+		t.Fatal("a dropped first recording leaves nothing behind")
 	}
 }

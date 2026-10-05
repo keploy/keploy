@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/v3/config"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
@@ -282,6 +282,12 @@ func (m *mockService) Record(ctx context.Context) error {
 	if m.mappingDB != nil {
 		windows = m.agentWindows(persistCtx)
 	}
+	if len(windows) > 0 {
+		root := gitTop()
+		for i := range windows {
+			windows[i].Dir = setName(windows[i].Dir, root)
+		}
+	}
 	starts := appStarts(windows)
 	windows, suites := splitSuites(windows)
 	if err := repeatedScope(windows, existed); err != nil {
@@ -289,7 +295,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Error(err.Error())
 		return err
 	}
-	keep = true
+	keep = runnerPassed(appErr)
 	if m.mappingDB != nil {
 		if len(windows) > 0 {
 			byTest := correlateScopes(windows, recorded)
@@ -335,7 +341,7 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
 	if !runnerPassed(appErr) {
-		m.logger.Warn("tests failed; the recording was kept locally and not published", zap.String("mock-set", name))
+		m.logger.Warn("tests failed; the recording was not kept or published, and the previous recording is left as it was", zap.String("mock-set", name))
 	} else if err := m.store.Push(persistCtx, name); err != nil {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
@@ -386,13 +392,14 @@ func (m *mockService) saveSet(name string) (func(keep bool), bool) {
 	set := filepath.Join(m.config.Path, name)
 	saved := filepath.Join(m.config.Path, "."+name+".previous")
 	_ = os.RemoveAll(saved)
-	err := os.CopyFS(saved, os.DirFS(set))
+	_, err := os.Stat(set)
 	absent := errors.Is(err, fs.ErrNotExist)
-	if err != nil {
+	if !absent {
+		err = os.CopyFS(saved, os.DirFS(set))
+	}
+	if !absent && err != nil {
 		_ = os.RemoveAll(saved)
-		if !absent {
-			m.logger.Warn("could not keep a copy of the set before re-recording it; a refused recording cannot be undone", zap.String("mock-set", name), zap.Error(err))
-		}
+		m.logger.Warn("could not keep a copy of the set before re-recording it; a refused recording cannot be undone", zap.String("mock-set", name), zap.Error(err))
 	}
 	return func(keep bool) {
 		switch {

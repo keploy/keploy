@@ -255,3 +255,17 @@ func TestPairCasesFindsSubtestRequestsUnderTheTopLevelFlow(t *testing.T) {
 	require.Len(t, mocks[0].Consumed, 1)
 	require.Len(t, mocks[0].Missed, 1)
 }
+
+func TestPairCasesPrefersTheSameQueryWhenACallIsNotMade(t *testing.T) {
+	recorded := map[string][]*models.TestCase{
+		"pkg.TestA": {httpCase("open", "GET", "/items?status=open", 200, `open`, runnerT0), httpCase("closed", "GET", "/items?status=closed", 200, `closed`, runnerT0)},
+	}
+	actual := []*models.TestCase{httpCase("", "GET", "/items?status=closed", 200, `closed`, runnerT0.Add(10*time.Millisecond))}
+	compare := func(tc *models.TestCase, resp *models.HTTPResp) (bool, *models.Result) {
+		return tc.HTTPResp.Body == resp.Body, nil
+	}
+	out := pairCases(replayWindows, recorded, actual, compare)
+	require.Len(t, out, 2)
+	require.Nil(t, out[0].Actual, "the call that was not made is reported as not made")
+	require.True(t, out[1].Passed, "the call that was made is compared with its own recording")
+}

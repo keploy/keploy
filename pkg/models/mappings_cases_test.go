@@ -153,3 +153,19 @@ func TestMappedTestCaseKeepsMocksBesideCases(t *testing.T) {
 		})
 	}
 }
+
+func TestMappedTestCaseKeepsMocksWrittenBesideAFolder(t *testing.T) {
+	var fromJSON MappedTestCase
+	if err := json.Unmarshal([]byte(`{"id":"T","mocks":[{"name":"mock-1"}],"dir":"pkg/x","starts":2}`), &fromJSON); err != nil {
+		t.Fatal(err)
+	}
+	var fromYAML MappedTestCase
+	if err := yaml.Unmarshal([]byte("id: T\nmocks:\n  - name: mock-1\ndir: pkg/x\nstarts: 2\n"), &fromYAML); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []MappedTestCase{fromJSON, fromYAML} {
+		if len(tc.Mocks) != 1 || tc.Mocks[0].Name != "mock-1" || tc.Dir != "pkg/x" || tc.Starts != 2 {
+			t.Fatalf("mocks, folder and starts must all be read: %+v", tc)
+		}
+	}
+}

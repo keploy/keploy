@@ -133,9 +133,9 @@ func FlakyHeaderNoise() map[string][]string {
 // a correctness assertion in Stripe-style APIs; authorization appears in
 // token-refresh responses. Suppressing those would delete real coverage.
 //
-// This set is therefore only the identifiers and timing values that are, by
-// construction, different on every response: the HTTP date, request/correlation
-// ids, and distributed-trace ids.
+// This set is therefore only the identifiers, timing values and rate-limit
+// counters that are, by construction, different on every response: the HTTP
+// date, request/correlation ids, distributed-trace ids and rate-limit counters.
 var volatileResponseHeaders = map[string]struct{}{
 	"date":                   {},
 	"x-request-id":           {},

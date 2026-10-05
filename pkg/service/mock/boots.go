@@ -59,12 +59,12 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 }
 
 func testAt(tests []models.ScopeWindow, worker uint32, at time.Time) string {
-	var mine, any []models.ScopeWindow
+	var mine, all []models.ScopeWindow
 	for _, w := range tests {
 		if at.Before(w.Start) || at.After(w.End) {
 			continue
 		}
-		any = append(any, w)
+		all = append(all, w)
 		if worker != 0 && w.PID == worker {
 			mine = append(mine, w)
 		}
@@ -72,13 +72,13 @@ func testAt(tests []models.ScopeWindow, worker uint32, at time.Time) string {
 	pick := mine
 	if len(pick) == 0 {
 		pid := uint32(0)
-		for i, w := range any {
+		for i, w := range all {
 			if i > 0 && w.PID != pid {
 				return ""
 			}
 			pid = w.PID
 		}
-		pick = any
+		pick = all
 	}
 	if len(pick) == 0 {
 		return ""
