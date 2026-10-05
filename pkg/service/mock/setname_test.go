@@ -35,7 +35,9 @@ func TestRanSetsListsEachSetThatBeganOnce(t *testing.T) {
 		{Name: "a", Dir: "e2e"},
 		{Name: "b", Dir: "e2e"},
 		{Name: "c", Dir: "pay", Suite: true},
+		{Name: "e", Dir: "pay"},
 		{Name: "app", Dir: "other", App: true},
+		{Name: "s", Dir: "only-suite", Suite: true},
 		{Name: "d"},
 	})
 	if len(got) != 2 || got[0] != "e2e" || got[1] != "pay" {

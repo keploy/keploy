@@ -4343,8 +4343,9 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		return false, nil
 	}
 	if ip.IsUnspecified() {
-		ip = net.IPv4(127, 0, 0, 1)
-		if ip6 := net.ParseIP(host); ip6.To4() == nil {
+		if ip.To4() != nil {
+			ip = net.IPv4(127, 0, 0, 1)
+		} else {
 			ip = net.IPv6loopback
 		}
 	}

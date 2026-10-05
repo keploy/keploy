@@ -656,7 +656,7 @@ func ranSets(windows []models.ScopeWindow) []string {
 	seen := map[string]bool{}
 	var sets []string
 	for _, w := range windows {
-		if w.Dir == "" || w.App {
+		if w.Dir == "" || w.App || w.Suite {
 			continue
 		}
 		if s := setName(w.Dir, root); !seen[s] {
