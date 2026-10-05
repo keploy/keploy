@@ -4289,29 +4289,16 @@ func (p *Proxy) SetLiveHandler(h LiveHandler) {
 	starts.Default.OnMark(p.closeDependencyConns)
 }
 
-var localIPs = sync.OnceValue(func() []net.IP {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil
-	}
-	var ips []net.IP
-	for _, a := range addrs {
-		if n, ok := a.(*net.IPNet); ok {
-			ips = append(ips, n.IP)
-		}
-	}
-	return ips
-})
-
 func ownIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	if ip.IsLoopback() {
+	if ip.IsLoopback() || ip.IsUnspecified() {
 		return true
 	}
-	for _, l := range localIPs() {
-		if l.Equal(ip) {
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
 			return true
 		}
 	}

@@ -655,6 +655,9 @@ func setName(dir, root string) string {
 	if dir == "" || !filepath.IsAbs(dir) {
 		return filepath.ToSlash(dir)
 	}
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = r
+	}
 	if root != "" {
 		if rel, err := filepath.Rel(root, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return filepath.ToSlash(rel)

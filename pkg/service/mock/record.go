@@ -296,7 +296,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		return err
 	}
 	keep = runnerPassed(appErr)
-	if m.mappingDB != nil {
+	if keep && m.mappingDB != nil {
 		if len(windows) > 0 {
 			byTest := correlateScopes(windows, recorded)
 			owned := recorded
@@ -335,8 +335,10 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 	}
 
-	if err := m.hooks.AfterRecordingComplete(persistCtx, &rec.RecordingCompleteContext{TestSetID: name, Path: m.config.Path}); err != nil {
-		m.logger.Warn("AfterRecordingComplete hook failed", zap.Error(err), zap.String("mock-set", name))
+	if keep {
+		if err := m.hooks.AfterRecordingComplete(persistCtx, &rec.RecordingCompleteContext{TestSetID: name, Path: m.config.Path}); err != nil {
+			m.logger.Warn("AfterRecordingComplete hook failed", zap.Error(err), zap.String("mock-set", name))
+		}
 	}
 
 	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
