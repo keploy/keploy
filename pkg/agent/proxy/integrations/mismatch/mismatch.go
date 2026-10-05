@@ -253,10 +253,13 @@ func RenderFieldDiffs(diffs []models.MockFieldDiff) string {
 // so the hints below name that command; every other run keeps the old text.
 var mockMode atomic.Bool
 
-// SetMockMode is called once by the agent at setup with its --mock-mode flag.
+// SetMockMode is called by the agent at setup with its --mock-mode flag.
 func SetMockMode(on bool) { mockMode.Store(on) }
 
-func recordCommand() string {
+// RecordCommand is the command that records this run again. A protocol that
+// writes its own hint with WithNextSteps names the command through it, so a
+// mock run never points at `keploy record`.
+func RecordCommand() string {
 	if mockMode.Load() {
 		return "keploy mock record"
 	}
@@ -277,7 +280,10 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 	}
 	switch {
 	case r.MatchPhase == models.MatchPhaseNoMocks:
-		return "No recorded mocks were available to match against for this protocol in the selected test set. Re-record the test set with '" + recordCommand() + "'."
+		if mockMode.Load() {
+			return "No recorded mocks were available to match against for this protocol in the selected mock set. Re-record the mock set with '" + RecordCommand() + "'."
+		}
+		return "No recorded mocks were available to match against for this protocol in the selected test set. Re-record the test set with '" + RecordCommand() + "'."
 	case r.DestinationScope == models.DestinationScopeNotInComparedSet:
 		// Ahead of the value-drift branch on purpose: when nothing in the
 		// compared set targets this upstream, the closest mock belongs to a
@@ -306,6 +312,14 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		return lead
 	case onlyValueDrift:
 		paths := make([]string, 0, len(r.FieldDiffs))
+		for _, d := range r.FieldDiffs {
+			paths = append(paths, d.Path)
+		}
+		if mockMode.Load() {
+			// `keploy mock replay` sends the agent no noise config, so
+			// test.globalNoise would not change the next run's match.
+			return fmt.Sprintf("Only values drifted (%s). If the change is expected, re-record the mock set with '%s', or capture the new calls with 'keploy mock replay --on-miss record'.", strings.Join(paths, ", "), RecordCommand())
+		}
 		// Body diffs are reported "body."-prefixed for readability, but HTTP
 		// request matching reads the request-body noise bucket with
 		// root-relative keys — so strip the prefix in the copy-paste hint to
@@ -313,19 +327,18 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		// request matcher never consults.
 		bodyKeys := make([]string, 0, len(r.FieldDiffs))
 		for _, d := range r.FieldDiffs {
-			paths = append(paths, d.Path)
 			if k := strings.TrimPrefix(d.Path, "body."); k != d.Path {
 				bodyKeys = append(bodyKeys, k)
 			}
 		}
 		if len(bodyKeys) > 0 {
-			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.requestbody with root-relative keys (e.g. requestbody: {%s: []}); otherwise re-record with '%s'.", strings.Join(paths, ", "), strings.Join(bodyKeys, ": [], "), recordCommand())
+			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.requestbody with root-relative keys (e.g. requestbody: {%s: []}); otherwise re-record with '%s'.", strings.Join(paths, ", "), strings.Join(bodyKeys, ": [], "), RecordCommand())
 		}
-		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise); otherwise re-record with '%s'.", strings.Join(paths, ", "), recordCommand())
+		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise); otherwise re-record with '%s'.", strings.Join(paths, ", "), RecordCommand())
 	default:
 		if mockMode.Load() {
 			// --update-test-mapping is a `keploy test` flag; a mock run has no such option.
-			return "Request structure changed since recording. Re-record the test with 'keploy mock record'."
+			return "Request structure changed since recording. Re-record the mock set with '" + RecordCommand() + "'."
 		}
 		return "Request structure changed since recording. Re-record the test set with 'keploy record', or refresh mappings with --update-test-mapping if mocks were edited."
 	}

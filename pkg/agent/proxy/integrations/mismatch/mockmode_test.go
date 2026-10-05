@@ -35,12 +35,42 @@ func TestHintsNameKeployMockRecordInMockMode(t *testing.T) {
 		if strings.Contains(r.NextSteps, "--update-test-mapping") {
 			t.Errorf("%s: --update-test-mapping is a keploy test flag, not a keploy mock one: %q", name, r.NextSteps)
 		}
+		// keploy mock replay sends the agent no noise config, so noise advice cannot fix the miss.
+		if strings.Contains(r.NextSteps, "globalNoise") {
+			t.Errorf("%s: a mock run has no test.globalNoise to add to: %q", name, r.NextSteps)
+		}
 	}
 }
 
-// Everything that is not a mock run keeps the exact hint it had.
+// The exact mock-mode text, so a change to it is a deliberate one.
+func TestHintTextInMockMode(t *testing.T) {
+	SetMockMode(true)
+	t.Cleanup(func() { SetMockMode(false) })
+	want := map[string]string{
+		"no mocks":             "No recorded mocks were available to match against for this protocol in the selected mock set. Re-record the mock set with 'keploy mock record'.",
+		"body values drifted":  "Only values drifted (body.qty). If the change is expected, re-record the mock set with 'keploy mock record', or capture the new calls with 'keploy mock replay --on-miss record'.",
+		"other values drifted": "Only values drifted (path). If the change is expected, re-record the mock set with 'keploy mock record', or capture the new calls with 'keploy mock replay --on-miss record'.",
+		"structure changed":    "Request structure changed since recording. Re-record the mock set with 'keploy mock record'.",
+	}
+	for name, r := range rerecordReports() {
+		if r.NextSteps != want[name] {
+			t.Errorf("%s: mock-mode hint:\n got  %q\n want %q", name, r.NextSteps, want[name])
+		}
+	}
+	if got := RecordCommand(); got != "keploy mock record" {
+		t.Errorf("RecordCommand in mock mode = %q", got)
+	}
+}
+
+// Everything that is not a mock run keeps the exact hint it had, including
+// after mock mode was on, so a flag left over from one setup cannot leak into
+// a later one.
 func TestHintsAreUnchangedOutsideMockMode(t *testing.T) {
+	SetMockMode(true)
 	SetMockMode(false)
+	if got := RecordCommand(); got != "keploy record" {
+		t.Errorf("RecordCommand outside mock mode = %q", got)
+	}
 	want := map[string]string{
 		"no mocks":             "No recorded mocks were available to match against for this protocol in the selected test set. Re-record the test set with 'keploy record'.",
 		"body values drifted":  "Only values drifted (body.qty). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.requestbody with root-relative keys (e.g. requestbody: {qty: []}); otherwise re-record with 'keploy record'.",
@@ -51,16 +81,5 @@ func TestHintsAreUnchangedOutsideMockMode(t *testing.T) {
 		if r.NextSteps != want[name] {
 			t.Errorf("%s: hint changed outside mock mode:\n got  %q\n want %q", name, r.NextSteps, want[name])
 		}
-	}
-}
-
-// Turning mock mode off again restores the old hints, so a flag left over from
-// one setup cannot leak into a later one.
-func TestSetMockModeCanBeTurnedOff(t *testing.T) {
-	SetMockMode(true)
-	SetMockMode(false)
-	r := NewReport(ProtocolGeneric, "x").WithPhase(models.MatchPhaseNoMocks, 0).Build()
-	if !strings.Contains(r.NextSteps, "'keploy record'") || strings.Contains(r.NextSteps, "mock record") {
-		t.Errorf("mock mode off should give the keploy record hint, got %q", r.NextSteps)
 	}
 }
