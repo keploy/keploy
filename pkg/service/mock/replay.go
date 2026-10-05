@@ -173,6 +173,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		MongoPassword:             m.config.Test.MongoPassword,
 		SQLDelay:                  time.Duration(m.config.Test.Delay) * time.Second,
 		Mocking:                   true,
+		SwapIDs:                   true,
 		OnMiss:                    policy,
 		MysqlPorts:                m.config.MysqlPorts,
 		DisableMysqlAutoDetect:    m.config.DisableMysqlAutoDetect,
