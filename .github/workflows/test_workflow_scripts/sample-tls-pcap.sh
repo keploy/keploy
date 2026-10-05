@@ -395,6 +395,33 @@ for _ in $(seq 1 30); do
 done
 endsec
 
+section "Assert keploy's per-run MITM CA did not persist in the OS trust store"
+# keploy now generates a fresh MITM CA per run, installs it into the system
+# store under a unique keploy-mitm-<id>.crt name for the duration of the run,
+# and removes it on shutdown. After the run, no such anchor may remain in any
+# store dir — otherwise trust (to a CA whose key is already gone) would leak
+# across runs. The fixture CA this script installed itself (keploy-ci-db-ca.crt)
+# is unrelated and must survive.
+leftover="$(sudo find \
+  /usr/local/share/ca-certificates/ \
+  /etc/pki/ca-trust/source/anchors/ \
+  /etc/ca-certificates/trust-source/anchors/ \
+  /etc/pki/trust/anchors/ \
+  /usr/local/share/certs/ \
+  /etc/ssl/certs/ \
+  -maxdepth 1 -name 'keploy-mitm-*.crt' 2>/dev/null || true)"
+if [[ -n "$leftover" ]]; then
+  echo "::error::keploy left a per-run MITM CA anchor behind after the run:"
+  echo "$leftover"
+  false
+fi
+if ! sudo test -f /usr/local/share/ca-certificates/keploy-ci-db-ca.crt; then
+  echo "::error::the test's own CA fixture was wrongly removed by keploy's cleanup"
+  false
+fi
+echo "no keploy-mitm-* anchor remained; the fixture CA survived"
+endsec
+
 # ----- assertions on the captured artifacts -----
 
 if [[ "$MODE_NAME" == verify-upstream* ]]; then
