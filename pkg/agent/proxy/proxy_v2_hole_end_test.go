@@ -105,6 +105,9 @@ type holeEndHarness struct {
 	writeApp  func(t *testing.T, b string)
 	writeDest func(t *testing.T, b string)
 	destSeen  func() string
+	appSeen   func() string
+	// returned is closed once recordViaSupervisor has returned.
+	returned <-chan struct{}
 }
 
 func newHoleEndHarness(t *testing.T, parser integrations.Integrations, perConnCap int64) *holeEndHarness {
@@ -137,7 +140,13 @@ func newHoleEndHarness(t *testing.T, parser integrations.Integrations, perConnCa
 		destBuf = append(destBuf, b...)
 		destMu.Unlock()
 	})
-	go drain(clientApp, nil)
+	var appMu sync.Mutex
+	var appBuf []byte
+	go drain(clientApp, func(b []byte) {
+		appMu.Lock()
+		appBuf = append(appBuf, b...)
+		appMu.Unlock()
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -159,24 +168,28 @@ func newHoleEndHarness(t *testing.T, parser integrations.Integrations, perConnCa
 		_ = srcConn.Close()
 		_ = dstConn.Close()
 	})
+	// A write the relay no longer reads fails rather than hanging the test.
+	write := func(t *testing.T, c net.Conn, who, b string) {
+		t.Helper()
+		_ = c.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if _, err := c.Write([]byte(b)); err != nil {
+			t.Fatalf("%s write %q: %v", who, b, err)
+		}
+	}
 	return &holeEndHarness{
-		writeApp: func(t *testing.T, b string) {
-			t.Helper()
-			if _, err := clientApp.Write([]byte(b)); err != nil {
-				t.Fatalf("app write %q: %v", b, err)
-			}
-		},
-		writeDest: func(t *testing.T, b string) {
-			t.Helper()
-			if _, err := destSvc.Write([]byte(b)); err != nil {
-				t.Fatalf("destination write %q: %v", b, err)
-			}
-		},
+		writeApp:  func(t *testing.T, b string) { t.Helper(); write(t, clientApp, "app", b) },
+		writeDest: func(t *testing.T, b string) { t.Helper(); write(t, destSvc, "destination", b) },
 		destSeen: func() string {
 			destMu.Lock()
 			defer destMu.Unlock()
 			return string(destBuf)
 		},
+		appSeen: func() string {
+			appMu.Lock()
+			defer appMu.Unlock()
+			return string(appBuf)
+		},
+		returned: done,
 	}
 }
 
@@ -268,7 +281,7 @@ func TestRecordViaSupervisorEndsADirectionAtItsHoleForAParserThatAsks(t *testing
 		close(probe.gate)
 
 		if probe.waitEnded(fakeconn.FromClient, 750*time.Millisecond) {
-			t.Fatal("the client direction ended at its hole for a parser that did not ask: one that returns at its first EOF ends the relay, and the application's connection")
+			t.Fatal("the client direction ended at its hole for a parser that did not ask: it would take the end for the connection's, and record what the hole cut as though the connection had closed there")
 		}
 		if got := probe.delivered(fakeconn.FromClient); len(got) != 1 || got[0] != "ab" {
 			t.Fatalf("the client direction delivered %q, want the chunk teed before the hole, alone", got)
@@ -339,5 +352,119 @@ func TestApplyEndAtHole(t *testing.T) {
 	applyEndAtHole(&cfg, nil, askEndAtHole{can: true})
 	if cfg.EndAtHole != nil {
 		t.Fatal("EndAtHole was set with no session to say it on")
+	}
+}
+
+// returningEndAtHoleProbe asks for its directions to end at their holes, and
+// reads each to its own end, like holeEndProbe; then it returns, as a parser
+// that has read all of its connection does (keploy/integrations' HTTP/2
+// recorder returns once both directions have ended).
+type returningEndAtHoleProbe struct{ *holeEndProbe }
+
+func (returningEndAtHoleProbe) CanEndAtHole() bool { return true }
+
+func (p returningEndAtHoleProbe) RecordOutgoing(_ context.Context, s *integrations.RecordSession) error {
+	<-p.gate
+	sess := s.V2
+	var wg sync.WaitGroup
+	for d, fc := range [2]*fakeconn.FakeConn{sess.ClientStream, sess.DestStream} {
+		wg.Add(1)
+		go func(d int, fc *fakeconn.FakeConn) {
+			defer wg.Done()
+			for {
+				if _, err := fc.ReadChunk(); err != nil {
+					p.mu.Lock()
+					p.endErr[d] = err
+					p.mu.Unlock()
+					close(p.endedC[d])
+					return
+				}
+			}
+		}(d, fc)
+	}
+	wg.Wait()
+	return nil
+}
+
+// A parser's return never ends the relay: the application's connection
+// outlives every way a parser stops. Here a hole in each direction (the
+// client's chunk and the server's are each too large for the cap) ends both
+// streams of a parser that asked for it, while the connection goes on. The
+// parser reads both to their end and returns, with no error. The relay goes
+// on forwarding the application's bytes and the destination's, and
+// recordViaSupervisor returns only once the peers have closed.
+//
+// Before, the dispatcher cancelled the relay when the parser returned, and
+// its caller then closed the application's socket and the destination's: a
+// write the application made next never reached the destination.
+func TestRecordViaSupervisorKeepsTheConnectionWhenItsParserReturns(t *testing.T) {
+	t.Parallel()
+	probe := newHoleEndProbe()
+	h := newHoleEndHarness(t, returningEndAtHoleProbe{probe}, 8)
+	h.writeApp(t, "ab")
+	h.writeDest(t, "srv1")
+	h.writeApp(t, "0123456789")
+	h.writeDest(t, "a server chunk past the cap")
+	waitForCondition(t, 2*time.Second, func() bool { return h.destSeen() == "ab0123456789" })
+	waitForCondition(t, 2*time.Second, func() bool { return h.appSeen() == "srv1a server chunk past the cap" })
+	// The forwarder tees a chunk after it writes it: give the last pushes time
+	// to land.
+	time.Sleep(50 * time.Millisecond)
+	close(probe.gate)
+
+	for _, d := range []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest} {
+		if !probe.waitEnded(d, 3*time.Second) {
+			t.Fatalf("the %v direction did not end at its hole", d)
+		}
+	}
+	select {
+	case <-h.returned:
+		t.Fatal("recordViaSupervisor returned when its parser did, with both peers open: it ended the relay, and its caller closes the application's connection")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	h.writeApp(t, "after")
+	h.writeDest(t, "answer")
+	waitForCondition(t, 2*time.Second, func() bool { return h.destSeen() == "ab0123456789after" })
+	waitForCondition(t, 2*time.Second, func() bool { return h.appSeen() == "srv1a server chunk past the capanswer" })
+}
+
+// holdingReturnProbe asks the relay to hold the client's writes, reads the
+// client's first chunk, and returns with the hold still armed.
+type holdingReturnProbe struct {
+	stubParser
+	returned chan struct{}
+}
+
+func (holdingReturnProbe) IsV2() bool                 { return true }
+func (holdingReturnProbe) WantsClientWriteHold() bool { return true }
+
+func (p holdingReturnProbe) RecordOutgoing(_ context.Context, s *integrations.RecordSession) error {
+	defer close(p.returned)
+	_, err := s.V2.ClientStream.ReadChunk()
+	return err
+}
+
+// A parser that returns with the client's writes held does not take the
+// application's connection with it either: the hold is released when it
+// returns, so what it held reaches the destination, and so does what the
+// application writes next.
+func TestRecordViaSupervisorReleasesTheClientHoldWhenItsParserReturns(t *testing.T) {
+	t.Parallel()
+	probe := holdingReturnProbe{returned: make(chan struct{})}
+	h := newHoleEndHarness(t, probe, 0)
+	h.writeApp(t, "held")
+	select {
+	case <-probe.returned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the parser never read the client's chunk")
+	}
+	waitForCondition(t, 2*time.Second, func() bool { return h.destSeen() == "held" })
+	h.writeApp(t, "after")
+	waitForCondition(t, 2*time.Second, func() bool { return h.destSeen() == "heldafter" })
+	select {
+	case <-h.returned:
+		t.Fatal("recordViaSupervisor returned when its parser did, with both peers open")
+	default:
 	}
 }

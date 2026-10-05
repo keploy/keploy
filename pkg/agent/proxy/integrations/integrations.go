@@ -189,11 +189,13 @@ type GapResyncCapable interface {
 // emitted next, which is one from before the hole. The other direction is fed
 // as before, until the connection ends.
 //
-// It asserts that the parser does not stop recording at the first direction
-// to end: when a V2 parser returns, the dispatcher ends the relay, and with it
-// the application's connection. A parser that returns at its first io.EOF
-// must not claim it. Mid-connection, only a parser that claims it sees one
-// direction end while the other goes on.
+// It asserts that the parser reads each direction to its own end, and tells a
+// hole's end from the connection's (supervisor.Session.EndedAtHole): one that
+// does not would record what the hole cut as though the connection had closed
+// there. Mid-connection, only a parser that claims it sees one direction end
+// while the other goes on. Whenever the parser returns, at the end of both
+// directions or before, the relay goes on forwarding the application's bytes
+// until a peer closes: a parser's return never ends it.
 //
 // keploy/integrations' HTTP/2 recorder implements it, and asserts so at
 // compile time, so renaming the interface or its method breaks that build

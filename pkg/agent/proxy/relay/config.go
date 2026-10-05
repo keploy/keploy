@@ -453,11 +453,11 @@ type Config struct {
 	//
 	// Nil (the default) keeps a desynced direction's FakeConn open, fed
 	// nothing, until the connection ends. Only a parser that reads each
-	// direction to its own end may have it set
-	// ([integrations.EndAtHoleCapable]): when a V2 parser returns, the
-	// dispatcher ends the relay, and the application's connection with it,
-	// so one that returns at its first io.EOF would cut the connection at a
-	// capture hole. The forward path is untouched either way.
+	// direction to its own end, and tells a hole's end from the
+	// connection's, may have it set ([integrations.EndAtHoleCapable]): one
+	// that does not would record what the hole cut as though the connection
+	// had closed there. The forward path is untouched either way, and so is
+	// the relay when the parser returns: a parser's return never ends it.
 	EndAtHole func(dir fakeconn.Direction, reason string)
 }
 

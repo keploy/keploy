@@ -370,7 +370,12 @@ func (p *Proxy) recordViaSupervisor(
 		return parser.RecordOutgoing(parserCtx, recSess)
 	}, svSess)
 
-	if result.FallthroughToPassthrough {
+	// What the caller gets back: nothing for a retired parser, whose stop is
+	// logged here and whose connection is forwarded whole; the error of a
+	// parser that returned with one, unless the network closed under it.
+	var err error
+	switch {
+	case result.FallthroughToPassthrough:
 		// A parser retired as the recording stops (RecordingStopping), however
 		// it ends: aborted in a read once the supervisor's grace is over
 		// (canceled), or dead of a panic as the recording stops (panicked).
@@ -466,46 +471,49 @@ func (p *Proxy) recordViaSupervisor(
 		// when the connection ends, so the close survives a panic here rather
 		// than only the happy path. A span that never closes would suppress
 		// every test case for the REST OF THE SESSION.
-		<-relayDone
-		return nil
+	case result.Err != nil && isNetworkClosedErr(result.Err):
+		logger.Debug("V2 parser exited with network-closed error", zap.Error(result.Err))
+	case result.Err != nil:
+		err = result.Err
+	default:
+		logger.Debug("V2 parser recorded outgoing message successfully",
+			zap.String("parser", string(parserType)),
+			zap.String("status", result.Status.String()),
+		)
 	}
 
-	// Non-fallthrough path: parser returned normally or with an error.
+	// The teardown, the same whether the parser returned on its own or was
+	// retired. A parser's return never ends the relay (invariant I1): the
+	// relay forwards the application's bytes until a peer closes, or the
+	// outer context is cancelled, whatever the parser does. A parser can
+	// return while the connection goes on: one that reads each direction to
+	// its own end returns once a capture hole in each has ended both
+	// (relay.Config.EndAtHole). Cancelling the relay here would have the
+	// caller close the application's socket and the destination's: the
+	// application would lose its connection at the holes.
 	//
-	// The parser has EXITED, so nothing will ever read these streams again.
-	// Say so, rather than leaving the relay to infer it: closing the
-	// FakeConns fires their Done() channels, which is what releases a tee
-	// drain still holding chunks for a full out channel. Without this the
-	// drain has no way to distinguish "parser is slow" from "parser is gone"
-	// and has to wait out ConsumerStallGrace — on a path where the answer is
-	// already known for certain. This is the same guarantee tokio gets for
-	// free when a Receiver is dropped; Go has no goroutine-death event, so
-	// the owner of the goroutine has to publish it.
+	// Pause the tees first: every later chunk then drops on the pause fast
+	// path, and PauseTees also ends a client write hold the parser can no
+	// longer release. Then close the FakeConns: the parser has EXITED, so
+	// nothing will ever read these streams again, and closing them fires
+	// their Done() channels, which is what releases a tee drain still holding
+	// chunks for a full out channel. Without this the drain has no way to
+	// distinguish "parser is slow" from "parser is gone" and has to wait out
+	// ConsumerStallGrace — on a path where the answer is already known for
+	// certain. Go has no goroutine-death event, so the owner of the goroutine
+	// has to publish it. A retired parser's SessionOnAbort has done both
+	// already, to unblock its reads; both are idempotent.
 	//
 	// Ordering matters: this must precede <-relayDone, which is where the
 	// relay waits for the drains.
+	r.PauseTees()
 	_ = r.ClientStream().Close()
 	_ = r.DestStream().Close()
 
-	// Cancel the relay and drain.
-	relayCancel()
-	relayErr := <-relayDone
-	if relayErr != nil && !errors.Is(relayErr, context.Canceled) {
+	if relayErr := <-relayDone; relayErr != nil && !errors.Is(relayErr, context.Canceled) {
 		logger.Debug("relay exited with error", zap.Error(relayErr))
 	}
-
-	if result.Err != nil {
-		if isNetworkClosedErr(result.Err) {
-			logger.Debug("V2 parser exited with network-closed error", zap.Error(result.Err))
-			return nil
-		}
-		return result.Err
-	}
-	logger.Debug("V2 parser recorded outgoing message successfully",
-		zap.String("parser", string(parserType)),
-		zap.String("status", result.Status.String()),
-	)
-	return nil
+	return err
 }
 
 // newProxyTLSUpgradeFn adapts keploy's existing TLS helpers into the
@@ -825,8 +833,9 @@ func applyEndAtHole(cfg *relay.Config, sess *supervisor.Session, parser integrat
 
 // parserCanEndAtHole reports whether parser asks for a direction that lost a
 // chunk to be ended at the hole (integrations.EndAtHoleCapable). Absent the
-// capability the answer is false: a parser that returns at its first io.EOF
-// would end the relay, and the application's connection, at a capture hole.
+// capability the answer is false: a parser that has not said it tells a
+// hole's end from the connection's would record what the hole cut as though
+// the connection had closed there.
 func parserCanEndAtHole(parser integrations.Integrations) bool {
 	ep, ok := parser.(integrations.EndAtHoleCapable)
 	return ok && ep.CanEndAtHole()
