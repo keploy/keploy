@@ -478,16 +478,6 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 		for _, n := range st.Runner {
 			put(n, 4)
 		}
-		for name, owned := range st.Tests {
-			if name == test {
-				continue
-			}
-			for _, o := range owned {
-				if o.Start == s.Bound {
-					put(o.Name, 5)
-				}
-			}
-		}
 		return rank, r.universe, true
 	}
 	for _, o := range st.Tests[test] {

@@ -176,8 +176,8 @@ func TestReplayBindsEachStartToItsOwnBootAndHidesTheOthers(t *testing.T) {
 		t.Fatal("the universe must list every recorded name so unlisted ones are hidden")
 	}
 	rank, _, _ = r.View(101, at(170))
-	if rank["pen-old"] != 1 || rank["boot-inr"] != 2 || rank["book"] != 5 {
-		t.Fatalf("old shop during the test = %v", rank)
+	if rank["pen-old"] != 1 || rank["boot-inr"] != 2 || hasAny(rank, "book") {
+		t.Fatalf("old shop during the test sees only this test's mocks and its own boot: %v", rank)
 	}
 }
 
