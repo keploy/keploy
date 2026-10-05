@@ -23,6 +23,14 @@ const ticks = 100
 
 func boot() time.Time {
 	bootOnce.Do(func() {
+		if b, err := os.ReadFile("/proc/uptime"); err == nil {
+			if f := strings.Fields(string(b)); len(f) > 0 {
+				if up, err := strconv.ParseFloat(f[0], 64); err == nil {
+					bootTime = time.Now().Add(-time.Duration(up * float64(time.Second)))
+					return
+				}
+			}
+		}
 		f, err := os.Open("/proc/stat")
 		if err != nil {
 			return

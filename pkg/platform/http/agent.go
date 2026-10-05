@@ -2564,9 +2564,6 @@ func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow
 	return windows, nil
 }
 
-// PushScopeTable hands the agent the replay-time per-test name→mock-names table
-// (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
-// served pool per test. A missing endpoint (older agent) is a no-op.
 func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) error {
 	body, err := json.Marshal(models.ScopeTableReq{Root: root, Sets: sets})
 	if err != nil {
@@ -2592,6 +2589,9 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 	return nil
 }
 
+// PushScopeTable hands the agent the replay-time per-test name→mock-names table
+// (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
+// served pool per test. A missing endpoint (older agent) is a no-op.
 func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string) error {
 	url := fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI)
 	body, err := json.Marshal(models.ScopeTableReq{Mappings: table})

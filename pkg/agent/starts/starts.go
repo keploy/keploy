@@ -188,9 +188,9 @@ func (r *Registry) Child(conn string) {
 	r.child[conn] = true
 }
 
-func (r *Registry) Ready(pid uint32, port uint16, at time.Time) {
+func (r *Registry) Ready(pid uint32, port uint16, at time.Time) bool {
 	if pid == 0 {
-		return
+		return false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -199,17 +199,18 @@ func (r *Registry) Ready(pid uint32, port uint16, at time.Time) {
 		s = r.startOf(pid, at)
 	}
 	if s == nil {
-		return
+		return false
 	}
 	s.Ready = at
 	s.Port = port
 	s.App = true
 	r.firstMark()
+	return true
 }
 
-func (r *Registry) Mark(pid uint32, at time.Time) {
+func (r *Registry) Mark(pid uint32, at time.Time) bool {
 	if pid == 0 {
-		return
+		return false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -218,10 +219,11 @@ func (r *Registry) Mark(pid uint32, at time.Time) {
 		s = r.startOf(pid, at)
 	}
 	if s == nil {
-		return
+		return false
 	}
 	s.App = true
 	r.firstMark()
+	return true
 }
 
 func (r *Registry) OnMark(f func()) {
@@ -450,7 +452,7 @@ func (r *Registry) setOf(dir string) string {
 		return ""
 	}
 	if r.root != "" {
-		if rel, err := filepath.Rel(r.root, dir); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, err := filepath.Rel(r.root, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			rel = filepath.ToSlash(rel)
 			if _, ok := r.sets[rel]; ok {
 				return rel
@@ -487,10 +489,8 @@ func (r *Registry) bind(s *Start) {
 }
 
 func (r *Registry) currentTest(w *worker) string {
-	if w != nil {
-		for i := len(w.frames) - 1; i >= 1; i-- {
-			return w.frames[i].place
-		}
+	if w != nil && len(w.frames) > 1 {
+		return w.frames[len(w.frames)-1].place
 	}
 	open := ""
 	count := 0

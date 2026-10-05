@@ -2244,7 +2244,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// copy so the mock-serve and record-capture paths can attribute the call to
 	// the test worker that made it (per-PID scoping). 0 when unavailable.
 	outgoingOpts.SrcPid = destInfo.KernelPid
-	starts.Default.Note(fmt.Sprint(clientConnID), outgoingOpts.SrcPid, time.Now())
+	if p.mockMode {
+		starts.Default.Note(fmt.Sprint(clientConnID), outgoingOpts.SrcPid, time.Now())
+	}
 
 	mgr := syncMock.Get()
 	mgr.SetOutputChannel(rule.MC)
@@ -2260,7 +2262,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
-	starts.Default.Dest(fmt.Sprint(clientConnID), dstAddr)
+	if p.mockMode {
+		starts.Default.Dest(fmt.Sprint(clientConnID), dstAddr)
+	}
 
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
@@ -3601,6 +3605,7 @@ func (p *Proxy) loadUpstreamTLSTrustAnchors() {
 }
 
 func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	recorded.reset()
 	// Reconcile the two mock-noise spellings on receipt. This is the process
 	// boundary: opts arrives over the agent API from a client that may predate
 	// the schema-noise -> mock-noise rename and therefore sets only the
@@ -3645,6 +3650,7 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 }
 
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+	recorded.reset()
 	// Reconcile the two mock-noise spellings on receipt. This is the process
 	// boundary: opts arrives over the agent API from a client that may predate
 	// the schema-noise -> mock-noise rename and therefore sets only the
@@ -4283,6 +4289,35 @@ func (p *Proxy) SetLiveHandler(h LiveHandler) {
 	starts.Default.OnMark(p.closeDependencyConns)
 }
 
+var localIPs = sync.OnceValue(func() []net.IP {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var ips []net.IP
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			ips = append(ips, n.IP)
+		}
+	}
+	return ips
+})
+
+func ownIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	for _, l := range localIPs() {
+		if l.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Proxy) trackTree(conn net.Conn, owner int) func() {
 	p.treeMu.Lock()
 	if p.tree == nil {
@@ -4317,6 +4352,9 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		return false, nil
 	}
 	ip := net.ParseIP(host)
+	if !ownIP(ip) {
+		return false, nil
+	}
 	owner, listening := listenerOwner(ip, dest.Port)
 	if !listening && ip != nil && ip.IsLoopback() && (!recorded.has(dest.Port) || recorded.child(dest.Port)) {
 		p.logger.Debug("nothing listens at the local destination yet; closing the call as the connect would have been refused", zap.String("destination", dstAddr))

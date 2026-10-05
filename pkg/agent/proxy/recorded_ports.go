@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"net"
+	"net/url"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -32,6 +34,9 @@ func (r *recordedPorts) add(sets ...[]*models.Mock) {
 			}
 			port, ok := portFromAddr(addr)
 			if !ok {
+				port, ok = defaultPort(m, addr)
+			}
+			if !ok {
 				r.unknown = true
 				continue
 			}
@@ -52,6 +57,25 @@ func (r *recordedPorts) add(sets ...[]*models.Mock) {
 			}
 		}
 	}
+}
+
+func (r *recordedPorts) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ports, r.kids, r.plain, r.unknown = nil, nil, nil, false
+}
+
+func defaultPort(m *models.Mock, addr string) (uint32, bool) {
+	if m.Kind != models.HTTP || m.Spec.HTTPReq == nil || addr == "" {
+		return 0, false
+	}
+	if _, _, err := net.SplitHostPort(addr); err == nil {
+		return 0, false
+	}
+	if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil && u.Scheme == "https" {
+		return 443, true
+	}
+	return 80, true
 }
 
 func (r *recordedPorts) has(port uint32) bool {

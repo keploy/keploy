@@ -42,8 +42,11 @@ func TestListenerOwnerOnMacUsesReportedListens(t *testing.T) {
 		t.Fatal(err)
 	}
 	listeners.Note(uint32(cmd.Process.Pid), uint16(ln2.Addr().(*net.TCPAddr).Port))
-	if pid, listening := listenerOwner(ip, uint32(ln2.Addr().(*net.TCPAddr).Port)); pid != 0 || listening {
-		t.Fatalf("a port whose reported owner exited is not that owner's, got %d %v", pid, listening)
+	if pid, listening := listenerOwner(ip, uint32(ln2.Addr().(*net.TCPAddr).Port)); pid != 0 || !listening {
+		t.Fatalf("a live port whose reported owner exited is someone else's, got %d %v", pid, listening)
+	}
+	if _, ok := listeners.Owner(uint16(ln2.Addr().(*net.TCPAddr).Port)); ok {
+		t.Fatal("the owner that exited must be forgotten")
 	}
 	if !descends(os.Getpid(), os.Getppid()) || descends(os.Getppid(), os.Getpid()) {
 		t.Fatal("descends must follow parents only")

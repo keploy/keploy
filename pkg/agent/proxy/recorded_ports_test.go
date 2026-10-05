@@ -44,3 +44,23 @@ func TestADeadPortIsAChildOnlyWhenEveryRecordingStartedIt(t *testing.T) {
 		t.Fatal("a port another recording called as an outside service must be served from mocks when it is down")
 	}
 }
+
+func TestAnHTTPHostWithoutAPortUsesTheSchemePort(t *testing.T) {
+	var r recordedPorts
+	r.add([]*models.Mock{
+		{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{URL: "https://api.example.com/x", Header: map[string]string{"Host": "api.example.com"}}}},
+		{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{URL: "http://plain.example.com/x", Header: map[string]string{"Host": "plain.example.com"}}}},
+	})
+	if !r.has(443) || !r.has(80) || r.has(41234) {
+		t.Fatal("a host without a port is called on its scheme's port, and no other")
+	}
+}
+
+func TestRecordedPortsStartEmptyAfterReset(t *testing.T) {
+	var r recordedPorts
+	r.add([]*models.Mock{{Kind: models.GENERIC}})
+	r.reset()
+	if r.has(41234) {
+		t.Fatal("a new session must not keep the previous session's ports")
+	}
+}

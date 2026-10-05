@@ -44,6 +44,7 @@ type IngressProxyManager struct {
 	hooks    agent.Hooks
 	tcChan   chan *models.TestCase
 	mockMode bool
+	requests bool
 	// incomingOpts is read by ingress capture goroutines on every
 	// captured request (CaptureHook call sites in http.go) and written
 	// by IngressProxyManager.Start on every recorder (re)connect. Pre-
@@ -88,6 +89,7 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
 		mockMode:    cfg.Agent.MockMode,
+		requests:    cfg.Agent.RecordRequests,
 		synchronous: cfg.Agent.Synchronous,
 		mapping:     !cfg.DisableMapping,
 		sampling:    false,
@@ -418,7 +420,7 @@ func dialIngressTarget(ctx context.Context, addr string, timeout time.Duration) 
 		}
 	}
 	for {
-		conn, err := net.DialTimeout(network, addr, timeout)
+		conn, err := net.DialTimeout(network, addr, max(time.Until(deadline), time.Millisecond))
 		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || !time.Now().Before(deadline) {
 			return conn, err
 		}
@@ -503,5 +505,15 @@ func (r *replayConn) Read(p []byte) (int, error) {
 }
 
 func (pm *IngressProxyManager) ServeLive(ctx context.Context, conn net.Conn, upstream string, port uint16) {
+	if !pm.requests {
+		up, err := dialIngressTarget(ctx, upstream, ingressTargetListenTimeout)
+		if err != nil {
+			pm.logger.Debug("the app is not reachable", zap.String("upstream", upstream), zap.Error(err))
+			return
+		}
+		defer up.Close()
+		util.RelayRawPassthrough(conn, up)
+		return
+	}
 	pm.handleConnection(ctx, conn, upstream, pm.logger, pm.tcChan, make(chan struct{}, 1), port)
 }
