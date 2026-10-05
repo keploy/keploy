@@ -689,8 +689,9 @@ func FindDockerCmd(cmd string) CmdType {
 	if cmd == "" {
 		return Empty
 	}
-	// Convert command to lowercase for case-insensitive comparison
-	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
+	// Lowercased, and with its words joined by one space: `docker  run` and
+	// `docker<TAB>run` are `docker run` to the shell, and so to keploy.
+	cmdLower := strings.Join(strings.Fields(strings.ToLower(cmd)), " ")
 
 	// Define patterns for Docker and Docker Compose
 	dockerRunPatterns := []string{"docker run", "sudo docker run", "docker container run", "sudo docker container run",
@@ -719,6 +720,46 @@ func FindDockerCmd(cmd string) CmdType {
 		}
 	}
 	return Native
+}
+
+// RunSubcommandEnd is the offset in cmd just past the run subcommand of a
+// docker or podman (by base name), taken as `run` or `container run` right
+// after the engine word, where the flags for the container it starts go; -1
+// when there is none. A docker-named word without that after it (the value of
+// sudo's -u, a directory) is passed over.
+func RunSubcommandEnd(cmd string) int {
+	type word struct {
+		text string
+		end  int
+	}
+	var words []word
+	isSpace := func(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
+	for i := 0; i < len(cmd); {
+		for i < len(cmd) && isSpace(cmd[i]) {
+			i++
+		}
+		from := i
+		for i < len(cmd) && !isSpace(cmd[i]) {
+			i++
+		}
+		if i > from {
+			words = append(words, word{cmd[from:i], i})
+		}
+	}
+	for i, w := range words {
+		base := strings.ToLower(w.text[strings.LastIndexAny(w.text, `/\`)+1:])
+		if base = strings.TrimSuffix(base, ".exe"); base != "docker" && base != "podman" {
+			continue
+		}
+		next := i + 1
+		if next < len(words) && strings.EqualFold(words[next].text, "container") {
+			next++
+		}
+		if next < len(words) && strings.EqualFold(words[next].text, "run") {
+			return words[next].end
+		}
+	}
+	return -1
 }
 
 type CmdType string

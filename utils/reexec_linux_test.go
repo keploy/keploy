@@ -150,3 +150,26 @@ func TestShouldReexecWithSudo_NotForAnEngineThisBuildCannotDrive(t *testing.T) {
 		t.Error("ShouldReexecWithSudo() = false for a docker run, want true")
 	}
 }
+
+// docker-start is refused before anything starts (it cannot work), so it must
+// not ask for a sudo password first, detected or given.
+func TestShouldReexecWithSudo_NotForDockerStart(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root; ShouldReexecWithSudo short-circuits")
+	}
+	orig := os.Args
+	defer func() { os.Args = orig }()
+	for _, args := range [][]string{
+		{"keploy", "record", "-c", "docker start -a app"},
+		{"keploy", "record", "--cmd-type", "docker-start", "-c", "docker start -a app"},
+	} {
+		os.Args = args
+		if ShouldReexecWithSudo() {
+			t.Errorf("ShouldReexecWithSudo() = true for %v: a refused command would ask for sudo first", args)
+		}
+	}
+	os.Args = []string{"keploy", "record", "-c", "docker run --name app img"}
+	if !ShouldReexecWithSudo() {
+		t.Error("ShouldReexecWithSudo() = false for docker run")
+	}
+}

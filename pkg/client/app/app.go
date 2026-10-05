@@ -204,16 +204,21 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
 	tlsFlags += fmt.Sprintf("-e JAVA_TOOL_OPTIONS='%s' ", javaOpts)
 
-	// Inject the pidMode flag after 'docker run' in the command
-	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
-	if len(parts) < 3 {
-		return fmt.Errorf("invalid command structure: %s", a.cmd)
+	at := utils.RunSubcommandEnd(a.cmd)
+	if at < 0 {
+		if a.kind == utils.DockerStart {
+			// A container that already exists cannot be given these: its
+			// PID and network namespaces were settled when it was created.
+			return engine.StartUnsupported(engine.Detect(a.cmd))
+		}
+		return fmt.Errorf("invalid command structure: no `run` subcommand to add keploy's flags to: %s", a.cmd)
 	}
 
+	// The flags go right after the engine's run subcommand, wherever it is:
+	// in `sudo docker run` and `docker container run` that is past the second
+	// word, and docker takes nothing in front of `run` but its own flags.
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
-
-	// Modify the command to insert the pidMode and environment variables
-	a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], injection, parts[2])
+	a.cmd = fmt.Sprintf("%s %s %s", a.cmd[:at], injection, strings.TrimLeft(a.cmd[at:], " "))
 	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", a.cmd))
 	return nil
 }

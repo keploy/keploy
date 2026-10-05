@@ -106,7 +106,7 @@ func ShouldReexecWithSudo() bool {
 	if explicit := ExtractCmdTypeFromArgs(os.Args); explicit != "" {
 		switch kind := CmdType(explicit); kind {
 		case Native, DockerRun, DockerStart, DockerCompose, FromContainer:
-			return IsDockerCmd(kind)
+			return needsRoot(kind)
 		}
 		// Anything else is rejected later by ValidateFlags with a proper
 		// message; fall through to sniffing rather than guessing here.
@@ -117,8 +117,14 @@ func ShouldReexecWithSudo() bool {
 	}
 
 	// Check if it's a Docker command
-	cmdType := FindDockerCmd(cmd)
-	return IsDockerCmd(cmdType)
+	return needsRoot(FindDockerCmd(cmd))
+}
+
+// needsRoot reports whether a command of this kind re-executes keploy under
+// sudo: the container kinds, except docker-start, which ValidateFlags refuses
+// (it cannot work) and which must not ask for a password first.
+func needsRoot(kind CmdType) bool {
+	return IsDockerCmd(kind) && kind != DockerStart
 }
 
 // isCloudReplayCmd checks if the args represent the "keploy cloud replay" subcommand.

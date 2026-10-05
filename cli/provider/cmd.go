@@ -778,12 +778,12 @@ func mentionsDockerBinary(command string) bool {
 		}
 		// A bare "docker" token is not enough: `npm run docker` runs a script
 		// called docker. Require a subcommand that actually launches
-		// something, which is what the docker-run/docker-start modes rewrite,
-		// and require it next: modifyDockerRun splices its flags in after
-		// the second word, so `docker --log-level=debug run` would get them
-		// in front of `run`. Podman's CLI takes the same subcommands and
-		// flags; whether this build can drive it is refuseUnsupportedEngine's
-		// to say.
+		// something, which is what the docker-run mode rewrites,
+		// and require it next: modifyDockerRun finds the run subcommand only
+		// right after the engine word (or `container`), and would find none
+		// in `docker --log-level=debug run`. Podman's CLI takes the same
+		// subcommands and flags; whether this build can drive it is
+		// refuseEngineCommand's to say.
 		if (base == "docker" || base == "podman") && i+1 < len(fields) {
 			switch fields[i+1] {
 			case "run", "start", "compose", "container":
@@ -794,37 +794,77 @@ func mentionsDockerBinary(command string) bool {
 	return false
 }
 
-// refuseUnsupportedEngine refuses a command that runs on a container engine
-// this build cannot drive. Callers pass the command that will actually run (a
-// base path or --from-container sets it aside, and then nothing is refused),
-// and call it before anything that could need root or write the keploy
-// folder, so the refusal never follows a sudo prompt.
+// refuseEngineCommand refuses a command that starts its application in a
+// container keploy cannot capture:
 //
-// Whatever kind the command resolved to: one the kind detection does not
-// spell out (sudo -E podman run, /usr/bin/podman run) resolves to native,
-// where keploy would run the engine as a host process and capture nothing
-// from the container it starts. Only an explicit --cmd-type native, the user
-// insisting on exactly that, is let through.
-func refuseUnsupportedEngine(cmd *cobra.Command, command string) error {
+//   - one on a container engine this build cannot drive (engine.Unsupported);
+//   - one keploy would run as a host process: an engine invocation, as the
+//     command's application (engine.Invocation: a command that only starts
+//     dependencies in containers runs its application on the host, and is
+//     fine), that the kind detection does not spell out (sudo -E docker run,
+//     /usr/bin/podman run, the engine's own flags before the subcommand, a
+//     build before it, a subcommand keploy does not drive such as podman kube
+//     play). That resolves to native, keploy runs the engine CLI as the
+//     application, and the container it starts is out of sight: the run used
+//     to end with nothing recorded, and no word why.
+//
+// Callers pass the command that will actually run (a base path or
+// --from-container sets it aside, and then nothing is refused), and call it
+// before anything that could need root or write the keploy folder, so the
+// refusal never follows a sudo prompt.
+//
+// --cmd-type native as given, the user insisting the command runs on the
+// host, lets both through. Any other explicit kind lets the second through:
+// the user says it starts a container, and the docker path takes it as
+// written.
+func refuseEngineCommand(cmd *cobra.Command, command string) error {
 	if command == "" {
 		return nil
 	}
 	// The flag as given, not the type it resolved to: `--cmd-type=` resolves
 	// by detection, which is native for exactly the spellings this catches.
+	explicit := ""
 	if cmd.Flags().Changed("cmd-type") {
-		if v, err := cmd.Flags().GetString("cmd-type"); err == nil &&
-			utils.CmdType(strings.ToLower(strings.TrimSpace(v))) == utils.Native {
-			return nil
+		if v, err := cmd.Flags().GetString("cmd-type"); err == nil {
+			explicit = strings.ToLower(strings.TrimSpace(v))
 		}
 	}
-	name, ok := engine.Invocation(command)
-	if !ok || engine.Supported(name) {
+	if utils.CmdType(explicit) == utils.Native {
 		return nil
 	}
-	// Retrying cannot help: the command, or the keploy running it, has to
-	// change.
+	// Retrying cannot help either way: the command, or the keploy running
+	// it, has to change.
+	kind := utils.CmdType(explicit)
+	switch kind {
+	case "":
+		kind = utils.FindDockerCmd(command)
+	case utils.DockerRun, utils.DockerStart, utils.DockerCompose, utils.FromContainer:
+	default:
+		return nil // not a kind: resolveCommandType says so, which is the mistake to fix
+	}
+	if utils.IsDockerCmd(kind) {
+		// A container kind runs on the engine the command drives, detached
+		// or not.
+		if name := engine.Detect(command); !engine.Supported(name) {
+			utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+			return engine.Unsupported(name)
+		}
+		return nil
+	}
+	name, ok := engine.Invocation(command)
+	if !ok {
+		return nil
+	}
+	if !engine.Supported(name) {
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return engine.Unsupported(name)
+	}
 	utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
-	return engine.Unsupported(name)
+	return fmt.Errorf("keploy captures a container's traffic only from a command that starts with "+
+		"`%[1]s run`, `%[1]s compose` or `%[1]s-compose`, and this one would run as a host process, "+
+		"where keploy captures nothing from the container it starts. Write the command that starts the "+
+		"application that way: nothing in front of it (no sudo, path or wrapper) and no %[1]s option "+
+		"before the subcommand. Or pass --cmd-type native if the application itself runs on the host", name)
 }
 
 // resolveCommandType decides the CommandType for a record/test run.
@@ -848,6 +888,19 @@ func refuseUnsupportedEngine(cmd *cobra.Command, command string) error {
 // in config is warned about rather than silently ignored, so the trap that
 // made this flag inert for so long is at least visible.
 func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configured string) (string, error) {
+	kind, err := resolveCommandKind(logger, cmd, command, configured)
+	if err == nil && utils.CmdType(kind) == utils.DockerStart {
+		// Detected or given: it cannot work, so it is refused before
+		// anything starts (and without a sudo prompt: ShouldReexecWithSudo
+		// leaves it alone).
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return "", engine.StartUnsupported(engine.Detect(command))
+	}
+	return kind, err
+}
+
+// resolveCommandKind is resolveCommandType before the docker-start refusal.
+func resolveCommandKind(logger *zap.Logger, cmd *cobra.Command, command, configured string) (string, error) {
 	if cmd.Flags().Changed("cmd-type") {
 		// Normalised the same way FindDockerCmd normalises what it matches
 		// against, so `--cmd-type Docker-Compose` is not a fatal typo.
@@ -1449,7 +1502,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if c.cfg.Test.BasePath != "" {
 			runs = ""
 		}
-		if err := refuseUnsupportedEngine(cmd, runs); err != nil {
+		if err := refuseEngineCommand(cmd, runs); err != nil {
 			return err
 		}
 
@@ -2417,7 +2470,7 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 	if cmd.Flags().Changed("from-container") && !cmd.Flags().Changed("command") {
 		runs = ""
 	}
-	if err := refuseUnsupportedEngine(cmd, runs); err != nil {
+	if err := refuseEngineCommand(cmd, runs); err != nil {
 		return err
 	}
 
