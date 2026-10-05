@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
@@ -489,6 +490,7 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	m := make(chan *models.Mock, outgoingMockChanCap)
 
 	starts.Default.Reset()
+	ids.Default.Reset()
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
 		return nil, err
@@ -529,6 +531,7 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	// unrelated set. Harmless when --on-miss is not "record" (buffer stays empty).
 	httpparser.ResetCaptured()
 	starts.Default.Reset()
+	ids.Default.Reset()
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {

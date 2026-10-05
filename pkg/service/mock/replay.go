@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/utils"
@@ -731,6 +732,13 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		defer cancel()
 		consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
 		misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
+		if reader, ok := m.instrumentation.(idPairReader); ok {
+			if pairs, err := reader.GetIDPairs(outcomeCtx); err == nil {
+				m.ids = ids.New(pairs)
+			} else {
+				m.logger.Debug("failed to read the ids this run made", zap.Error(err))
+			}
+		}
 	}
 	if consumedErr == nil && m.config.Mock.EmitMockEvents {
 		// Flush the tail. The poll loop stops when the runner exits, so
@@ -828,6 +836,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 // servedMockPoller is an optional extension of Instrumentation, asserted rather
 // than added to the interface so existing implementations (and test fakes) keep
 // compiling without it — the same discipline ConsumedStateReader uses.
+type idPairReader interface {
+	GetIDPairs(ctx context.Context) (map[string]string, error)
+}
+
 type servedMockPoller interface {
 	GetServedMocks(ctx context.Context) (map[string]models.MockState, error)
 }

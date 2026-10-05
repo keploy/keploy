@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/render"
+	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -163,4 +164,9 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 	a.logger.Debug("Time taken to update mock params duration :", zap.Duration("duration", time.Since(start)))
 
 	respondAgent(w, r, http.StatusOK, nil)
+}
+
+func (a *Agent) HandleIDs(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ids.Default.Pairs())
 }

@@ -231,6 +231,7 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 
 // compareCase checks the app's answer against the recorded one, forgiving the case's own noise and volatile headers.
 func (m *mockService) compareCase(tc *models.TestCase, actual *models.HTTPResp) (bool, *models.Result) {
+	tc = m.withRunIDs(tc)
 	return httpMatcher.Match(tc, actual, m.config.Test.GlobalNoise.Global, m.config.Test.IgnoreOrdering, m.config.Test.CompareAll, m.logger, false, httpMatcher.WithAutoHeaderNoise(true))
 }
 
@@ -276,4 +277,19 @@ func (m *mockService) expectedMocks(ctx context.Context, name string) map[string
 		return nil
 	}
 	return byFlow
+}
+
+func (m *mockService) withRunIDs(tc *models.TestCase) *models.TestCase {
+	if m.ids == nil || m.ids.Empty() || tc == nil {
+		return tc
+	}
+	out := *tc
+	out.HTTPResp.Body = m.ids.Rewrite(tc.HTTPResp.Body)
+	if len(tc.HTTPResp.Header) > 0 {
+		out.HTTPResp.Header = make(map[string]string, len(tc.HTTPResp.Header))
+		for k, v := range tc.HTTPResp.Header {
+			out.HTTPResp.Header[k] = m.ids.Rewrite(v)
+		}
+	}
+	return &out
 }

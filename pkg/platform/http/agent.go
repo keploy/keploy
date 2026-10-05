@@ -3332,3 +3332,24 @@ func (a *AgentClient) restoreShortfall(ctx context.Context, name string) (proble
 
 	return problems, true, nil
 }
+
+func (a *AgentClient) GetIDPairs(ctx context.Context) (map[string]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/ids", nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get id pairs", res, rawBody)
+	}
+	var pairs map[string]string
+	if err := json.NewDecoder(res.Body).Decode(&pairs); err != nil {
+		return nil, err
+	}
+	return pairs, nil
+}

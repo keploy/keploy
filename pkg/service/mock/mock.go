@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
@@ -18,6 +19,7 @@ import (
 
 // mockService implements Service for the `keploy mock record|replay` flow.
 type mockService struct {
+	ids *ids.Map
 	// servedAnnounced remembers which mocks have already been reported as
 	// served, so the poll loop and the end-of-run flush cannot announce the
 	// same mock twice. Guarded because the two run on different goroutines.
