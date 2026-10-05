@@ -978,13 +978,14 @@ func TestResolveTestStatus(t *testing.T) {
 // value could never be tested for it.
 func TestResolveTestOutcome(t *testing.T) {
 	tests := []struct {
-		name               string
-		responseMatched    bool
-		mockSetMismatch    bool
-		schemaNoiseStrict  bool
-		assertDependencies bool
-		strictFailure      bool
-		want               testOutcome
+		name                string
+		responseMatched     bool
+		mockSetMismatch     bool
+		schemaNoiseStrict   bool
+		assertDependencies  bool
+		strictFailure       bool
+		strictRequestReject bool
+		want                testOutcome
 	}{
 		{
 			name:            "a clean pass",
@@ -1084,6 +1085,26 @@ func TestResolveTestOutcome(t *testing.T) {
 			},
 		},
 		{
+			// The app tolerated the rejected call and answered with the
+			// recorded response, and no per-test mapping covered the call: the
+			// changed request alone fails the test.
+			name:            "strict request reject fails a matching response with no mapping divergence",
+			responseMatched: true, schemaNoiseStrict: true, strictRequestReject: true,
+			want: testOutcome{
+				Status: models.TestStatusFailed, FailsTestSet: true,
+				Log: mismatchLogStrictRequestReject,
+			},
+		},
+		{
+			// Never demoted to OBSOLETE: the recording is not what changed.
+			name:            "strict request reject keeps a failing response FAILED, not OBSOLETE, and records the divergence",
+			mockSetMismatch: true, schemaNoiseStrict: true, strictRequestReject: true,
+			want: testOutcome{
+				Status: models.TestStatusFailed, FailsTestSet: true,
+				RecordMismatch: true, Log: mismatchLogStrictRequestReject,
+			},
+		},
+		{
 			name:            "both vetoes are named",
 			mockSetMismatch: true, assertDependencies: true, strictFailure: true,
 			want: testOutcome{
@@ -1096,7 +1117,7 @@ func TestResolveTestOutcome(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveTestOutcome(tt.responseMatched, tt.mockSetMismatch, tt.schemaNoiseStrict, tt.assertDependencies, tt.strictFailure)
+			got := resolveTestOutcome(tt.responseMatched, tt.mockSetMismatch, tt.schemaNoiseStrict, tt.assertDependencies, tt.strictFailure, tt.strictRequestReject)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -1109,7 +1130,7 @@ func TestResolveTestOutcome(t *testing.T) {
 func TestResolveTestOutcome_DefaultsAreBackwardCompatible(t *testing.T) {
 	for _, responseMatched := range []bool{false, true} {
 		for _, mismatch := range []bool{false, true} {
-			got := resolveTestOutcome(responseMatched, mismatch, false, false, false)
+			got := resolveTestOutcome(responseMatched, mismatch, false, false, false, false)
 			want, wantFails := resolveTestStatus(responseMatched, mismatch, false, false, false)
 			assert.Equal(t, want, got.Status,
 				"responseMatched=%v mismatch=%v", responseMatched, mismatch)
@@ -2021,5 +2042,46 @@ func TestNoEligibleDepsAndCheckedAreTheSameQuestion(t *testing.T) {
 				t.Fatalf("a NOT-CHECKED verdict carries data: consumed=%d rows=%v", dep.Consumed, dep.Rows)
 			}
 		})
+	}
+}
+
+func TestDriftedCallsListsOnlyDriftedNonDNSMocks(t *testing.T) {
+	drift := []models.MockFieldDiff{{Path: "body.amount", Expected: "100", Actual: "250"}}
+	consumed := []models.MockState{
+		{Name: "charge", Kind: models.HTTP, RequestDrift: drift},
+		{Name: "users", Kind: models.HTTP},
+		{Name: "dns", Kind: models.DNS, RequestDrift: drift},
+		{Name: "q", Kind: models.MySQL, RequestDrift: drift},
+	}
+	got := driftedCalls(consumed, func(name string) (string, string) {
+		if name == "charge" {
+			return "HTTP", "POST /charge"
+		}
+		return "", ""
+	})
+	if len(got) != 2 {
+		t.Fatalf("want charge and q; got %+v", got)
+	}
+	if got[0].MockName != "charge" || got[0].Protocol != "HTTP" || got[0].Summary != "POST /charge" || len(got[0].FieldDiffs) != 1 {
+		t.Fatalf("charge entry wrong: %+v", got[0])
+	}
+	if got[1].MockName != "q" || got[1].Protocol != string(models.MySQL) {
+		t.Fatalf("an unknown protocol falls back to the mock kind: %+v", got[1])
+	}
+	if driftedCalls(nil, nil) != nil {
+		t.Fatal("no consumed mocks, no drifted calls")
+	}
+}
+
+func TestHasStrictRequestReject(t *testing.T) {
+	strict := models.UnmatchedCall{Protocol: "HTTP", MatchPhase: models.MatchPhaseStrict}
+	if !hasStrictRequestReject([]models.UnmatchedCall{{Protocol: "HTTP", MatchPhase: models.MatchPhaseBody}, strict}) {
+		t.Fatal("a strict-rejected HTTP call counts")
+	}
+	if hasStrictRequestReject([]models.UnmatchedCall{{Protocol: "HTTP", MatchPhase: models.MatchPhaseBody}}) {
+		t.Fatal("a call that matched nothing for another reason is not a strict reject")
+	}
+	if hasStrictRequestReject([]models.UnmatchedCall{{Protocol: "DNS", MatchPhase: models.MatchPhaseStrict}}) {
+		t.Fatal("DNS still gets an answer; it does not fail the test")
 	}
 }

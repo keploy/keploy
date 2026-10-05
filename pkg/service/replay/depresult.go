@@ -563,6 +563,10 @@ const (
 	// demotions by scraping it externally loses those hits — call it out in
 	// the release notes.
 	mismatchLogVetoedFailure
+	// mismatchLogStrictRequestReject: strict request matching refused an
+	// outgoing call its recorded mock because the request changed outside
+	// known noise, so the test fails whatever the response did.
+	mismatchLogStrictRequestReject
 )
 
 // testOutcome is the complete per-test decision for a diverged (or clean)
@@ -598,9 +602,23 @@ type testOutcome struct {
 //
 // Nothing here is reachable unless mockSetMismatch is true, which is itself
 // gated on depAssertionValid at the call site.
-func resolveTestOutcome(responseMatched, mockSetMismatch, schemaNoiseStrict, assertDependencies, strictFailure bool) testOutcome {
+func resolveTestOutcome(responseMatched, mockSetMismatch, schemaNoiseStrict, assertDependencies, strictFailure, strictRequestReject bool) testOutcome {
 	depAssertFail := dependencyAssertionRejects(mockSetMismatch, assertDependencies)
 	out := testOutcome{DepAssertFail: depAssertFail}
+
+	// Strict request matching refused one of this test's outgoing calls its
+	// recorded mock: the app sent a changed request. That is a failure on its
+	// own — the response may still match (the app tolerated the error, or did
+	// not depend on the answer), and the mapping-based check below covers only
+	// per-test-tier mocks — and never a demotion to OBSOLETE, since the
+	// recording is not what is wrong. The mismatch is still recorded when the
+	// mock set diverged too.
+	if strictRequestReject {
+		out.Status, out.FailsTestSet = models.TestStatusFailed, true
+		out.Log = mismatchLogStrictRequestReject
+		out.RecordMismatch = mockSetMismatch
+		return out
+	}
 
 	if !mockSetMismatch {
 		out.Status, out.FailsTestSet = resolveTestStatus(responseMatched, false, false, false, strictFailure)

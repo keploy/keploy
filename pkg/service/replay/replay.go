@@ -2650,7 +2650,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//     --format json — only the verdict differs.
 			//   - StrictFailure: the pre-existing veto of the OBSOLETE
 			//     demotion for a response-failing test.
-			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.NoiseStrict(), r.config.Test.AssertDependencies, r.config.Test.StrictFailure)
+			// Under strict request matching a drifted call is rejected, not
+			// served — but an app that tolerates the error can still answer
+			// with the recorded response, and the per-test mapping check that
+			// would catch it applies only to per-test-tier mocks. So the verdict
+			// reads this test's unmatched calls directly: drained HERE, once, and
+			// attached to the result from the same drain below.
+			var testMockErrs testMockErrors
+			strictRequestReject := false
+			if r.config.Test.NoiseStrict() {
+				testMockErrs = testMockErrors{fetched: true, calls: r.fetchMockErrors(runTestSetCtx, testSetID, testCase.Name)}
+				strictRequestReject = hasStrictRequestReject(testMockErrs.calls)
+			}
+			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.NoiseStrict(), r.config.Test.AssertDependencies, r.config.Test.StrictFailure, strictRequestReject)
 			switch outcome.Log {
 			case mismatchLogSchemaNoiseReject:
 				r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
@@ -2683,6 +2695,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("testset", testSetID),
 					zap.Strings("expectedMocks", filteredExpectedNames),
 					zap.Strings("actualMocks", filteredMockNames))
+			case mismatchLogStrictRequestReject:
+				r.logger.Error("strict request matching: an outgoing call's request changed and its recorded mock was rejected; failing testcase",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID))
 			case mismatchLogNone:
 			}
 			if outcome.RecordMismatch {
@@ -2854,6 +2870,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							}
 						}
 					}
+					// DriftedCalls, for EVERY test: calls answered from a recorded
+					// mock although their request changed outside known noise. A
+					// served mock hides the change from the response check, so a
+					// passing test is exactly where it must show. Same per-test
+					// consumption gate as MatchedCalls.
+					if perTestConsumedKnown {
+						testCaseResult.FailureInfo.DriftedCalls = driftedCalls(perTestConsumed, func(name string) (string, string) {
+							info := mockLookup[name]
+							return info.protocol, info.summary
+						})
+					}
 					// UnmatchedCalls is finalized for EVERY test, not just
 					// failed/obsolete ones: (1) a miss during an otherwise-passing
 					// test must still surface; (2) the per-test capture window
@@ -2864,7 +2891,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// transports — native and k8s alike reach the agent over HTTP,
 					// so the agent's error channel is consumed only inside the
 					// agent's own drain goroutine, never by the replayer.
-					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+					r.attachTestMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult, &testMockErrs)
 					// Build the {expected, actual} mock set for THIS test case.
 					// See buildExpectedMockInfos / buildActualMockInfos at the
 					// bottom of this file for DNS-filter + perTestConsumed-known
@@ -2974,7 +3001,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// miss during this test attaches here instead of leaking into a
 					// later test (or vanishing) when we bail out on this internal error.
 					failedResult := r.CreateFailedTestResult(testCase, testSetID, started, "internal error: test case result is nil")
-					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult)
+					r.attachTestMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult, &testMockErrs)
 					if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 						utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil test case result")
 					}
@@ -2987,7 +3014,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// (false, nil)). Same as above: finalize the window + persist a
 				// failed result so the miss surfaces and can't carry forward.
 				failedResult := r.CreateFailedTestResult(testCase, testSetID, started, "internal error: comparison returned no result")
-				r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult)
+				r.attachTestMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult, &testMockErrs)
 				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 					utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil comparison result")
 				}
@@ -3365,6 +3392,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.String("testCaseID", tc.Name),
 				zap.Strings("mockNames", mockNames))
 
+			// Strict request matching, as on the non-streaming path: an outgoing
+			// call refused its recorded mock because its request changed fails
+			// the test even when the streamed response matched. Drained here —
+			// after the stream body was consumed, so in-stream calls count — and
+			// attached from the same drain below.
+			var streamMockErrs testMockErrors
+			strictRequestRejected := false
+			if r.config.Test.NoiseStrict() {
+				streamMockErrs = testMockErrors{fetched: true, calls: r.fetchMockErrors(runTestSetCtx, testSetID, tc.Name)}
+				if hasStrictRequestReject(streamMockErrs.calls) {
+					strictRequestRejected = true
+					r.logger.Error("strict request matching: an outgoing call's request changed and its recorded mock was rejected; failing streaming testcase",
+						zap.String("testcase", tc.Name),
+						zap.String("testset", testSetID))
+					testPass = false
+				}
+			}
+
 			if mockSetMismatch {
 				if testPass {
 					r.logger.Debug("mock mapping mismatch ignored because streaming testcase passed",
@@ -3372,6 +3417,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.String("testset", testSetID),
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
+				} else if strictRequestRejected {
+					r.logger.Error("mock mapping mismatch detected for streaming testcase; it is FAILED (strict request matching rejected a changed dependency request), not obsolete",
+						zap.String("testcase", tc.Name),
+						zap.String("testset", testSetID),
+						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("actualMocks", mockNames))
+					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
 				} else {
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking as obsolete",
 						zap.String("testcase", tc.Name),
@@ -3398,7 +3450,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !r.config.Test.StrictFailure {
+			} else if mockSetMismatch && !r.config.Test.StrictFailure && !strictRequestRejected {
 				testStatus = models.TestStatusObsolete
 				obsolete++
 			} else {
@@ -3446,7 +3498,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// Finalize the capture window now - AFTER CompareHTTPStream and the
 				// post-stream consumed-mock drain above, so in-stream mock misses
 				// are included - and attach them to this result.
-				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+				r.attachTestMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult, &streamMockErrs)
+				// Calls served from a recorded mock although their request
+				// changed, as on the non-streaming path. The consumed set is
+				// known here only when instrumented.
+				if r.instrument {
+					testCaseResult.FailureInfo.DriftedCalls = driftedCalls(consumedMocks, func(name string) (string, string) {
+						info := mockLookup[name]
+						return info.protocol, info.summary
+					})
+				}
 
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -5714,6 +5775,78 @@ func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
 // simulation-error / invalid-response returns — so the window is finalized for
 // THIS test and a miss is never carried forward to the next test or lost.
 func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName string, result *models.TestResult) {
+	r.recordMockErrors(testSetID, testCaseName, result, r.fetchMockErrors(ctx, testSetID, testCaseName))
+}
+
+// driftedCalls lists the consumed mocks served for a request that drifted from
+// the recorded one (MockState.RequestDrift), DNS excluded. lookup gives a
+// mock's protocol and one-line summary; the mock's kind stands in for an
+// unknown protocol.
+func driftedCalls(consumed []models.MockState, lookup func(name string) (protocol, summary string)) []models.DriftedCall {
+	var out []models.DriftedCall
+	for _, m := range consumed {
+		if m.Kind == models.DNS || len(m.RequestDrift) == 0 {
+			continue
+		}
+		protocol, summary := lookup(m.Name)
+		if protocol == "" {
+			protocol = string(m.Kind)
+		}
+		out = append(out, models.DriftedCall{
+			MockName:   m.Name,
+			Protocol:   protocol,
+			Summary:    summary,
+			FieldDiffs: m.RequestDrift,
+		})
+	}
+	return out
+}
+
+// testMockErrors holds one test's unmatched calls once drained, so the verdict
+// that needs them (strict request matching) and the attach that persists them
+// read the same drain — the agent's per-test window can be drained only once.
+type testMockErrors struct {
+	fetched bool
+	calls   []models.UnmatchedCall
+}
+
+// attachTestMockErrors attaches the test's unmatched calls from pre when the
+// verdict already drained them, and drains them now otherwise.
+func (r *Replayer) attachTestMockErrors(ctx context.Context, testSetID, testCaseName string, result *models.TestResult, pre *testMockErrors) {
+	if pre == nil || !pre.fetched {
+		r.attachMockErrors(ctx, testSetID, testCaseName, result)
+		return
+	}
+	r.recordMockErrors(testSetID, testCaseName, result, pre.calls)
+}
+
+// hasStrictRequestReject reports whether a non-DNS outgoing call of the test
+// was refused its recorded mock by strict request matching: the request
+// changed outside known noise (models.MatchPhaseStrict). An unanswered DNS
+// lookup still gets an answer, so it does not count.
+func hasStrictRequestReject(calls []models.UnmatchedCall) bool {
+	for _, c := range calls {
+		if c.MatchPhase == models.MatchPhaseStrict && !strings.EqualFold(c.Protocol, string(models.DNS)) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordMockErrors attaches drained unmatched calls to the result and the
+// run's mismatch summary.
+func (r *Replayer) recordMockErrors(testSetID, testCaseName string, result *models.TestResult, mockErrors []models.UnmatchedCall) {
+	for _, me := range mockErrors {
+		if result != nil {
+			result.FailureInfo.UnmatchedCalls = append(result.FailureInfo.UnmatchedCalls, me)
+		}
+		r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCaseName, me)
+	}
+}
+
+// fetchMockErrors drains the test's unmatched calls from the agent; nil when
+// the fetch fails (logged).
+func (r *Replayer) fetchMockErrors(ctx context.Context, testSetID, testCaseName string) []models.UnmatchedCall {
 	mockErrors, err := r.instrumentation.GetMockErrors(ctx)
 	if err != nil {
 		// Don't swallow silently. This test's misses can't be attached, but the
@@ -5725,14 +5858,9 @@ func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName
 			zap.String("testSetID", testSetID),
 			zap.String("testCaseID", testCaseName),
 			zap.Error(err))
-		return
+		return nil
 	}
-	for _, me := range mockErrors {
-		if result != nil {
-			result.FailureInfo.UnmatchedCalls = append(result.FailureInfo.UnmatchedCalls, me)
-		}
-		r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCaseName, me)
-	}
+	return mockErrors
 }
 
 // The third return is the test-set's startup mock names — boot traffic that
