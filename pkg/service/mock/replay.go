@@ -651,16 +651,35 @@ func setTable(mapping *models.Mapping, root string) map[string]models.SetTable {
 	return sets
 }
 
+func ranSets(windows []models.ScopeWindow) []string {
+	root := gitTop()
+	seen := map[string]bool{}
+	var sets []string
+	for _, w := range windows {
+		if w.Dir == "" || w.App {
+			continue
+		}
+		if s := setName(w.Dir, root); !seen[s] {
+			seen[s] = true
+			sets = append(sets, s)
+		}
+	}
+	return sets
+}
+
 func setName(dir, root string) string {
 	if dir == "" || !filepath.IsAbs(dir) {
 		return filepath.ToSlash(dir)
 	}
-	if r, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = r
-	}
 	if root != "" {
-		if rel, err := filepath.Rel(root, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return filepath.ToSlash(rel)
+		dirs := []string{dir}
+		if r, err := filepath.EvalSymlinks(dir); err == nil && r != dir {
+			dirs = append(dirs, r)
+		}
+		for _, d := range dirs {
+			if rel, err := filepath.Rel(root, d); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return filepath.ToSlash(rel)
+			}
 		}
 	}
 	return filepath.ToSlash(dir)
@@ -693,6 +712,7 @@ type ReplayOutcome struct {
 	// Mocks is what each test used and missed, next to what it recorded.
 	Mocks  []FlowMocks
 	Starts map[string]int
+	Sets   []string
 }
 
 // replayOutcomeReporter is installed by a wrapping build (enterprise) from
@@ -828,6 +848,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				Cases:    pairCases(detail.windows, detail.recorded, detail.actual, m.compareCase),
 				Mocks:    attributeMocks(detail.windows, detail.expected, consumed, misses),
 				Starts:   startsByTest(detail.windows, detail.starts),
+				Sets:     ranSets(detail.windows),
 			})
 		}
 	}

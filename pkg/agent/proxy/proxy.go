@@ -4342,6 +4342,12 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	if !ownIP(ip) {
 		return false, nil
 	}
+	if ip.IsUnspecified() {
+		ip = net.IPv4(127, 0, 0, 1)
+		if ip6 := net.ParseIP(host); ip6.To4() == nil {
+			ip = net.IPv6loopback
+		}
+	}
 	owner, listening := listenerOwner(ip, dest.Port)
 	if !listening && ip != nil && ip.IsLoopback() && (!recorded.has(dest.Port) || recorded.child(dest.Port)) {
 		p.logger.Debug("nothing listens at the local destination yet; closing the call as the connect would have been refused", zap.String("destination", dstAddr))
