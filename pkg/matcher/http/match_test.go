@@ -1,11 +1,13 @@
 package http
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
 	"errors"
 
+	"github.com/k0kubun/pp/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
@@ -152,6 +154,60 @@ func TestMatch_RedirectToAssertionMatch_567(t *testing.T) {
 	require.NotNil(t, result)
 	assert.True(t, result.StatusCode.Normal)
 	assert.True(t, result.BodyResult[0].Normal)
+}
+
+// TestMatch_AssertionsDecideBanner ensures a test case decided by its
+// assertions prints the banner for the verdict Match returns, not for the
+// response comparison.
+func TestMatch_AssertionsDecideBanner(t *testing.T) {
+	tests := []struct {
+		name           string
+		assertedStatus int
+		actualBody     string
+		wantPass       bool
+		wantBanner     string
+		wrongBanner    string
+	}{
+		{name: "failing assertion, matching response", assertedStatus: 500, actualBody: `{"a":1}`, wantPass: false, wantBanner: "Testrun failed", wrongBanner: "Testrun passed"},
+		{name: "passing assertion, drifted response", assertedStatus: 200, actualBody: `{"a":2}`, wantPass: true, wantBanner: "Testrun passed", wrongBanner: "Testrun failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := &models.TestCase{
+				Name:       "assert-tc",
+				HTTPResp:   models.HTTPResp{StatusCode: 200, Body: `{"a":1}`},
+				Assertions: map[models.AssertionType]interface{}{models.StatusCode: tt.assertedStatus},
+			}
+			actualResponse := &models.HTTPResp{StatusCode: 200, Body: tt.actualBody}
+
+			var pass bool
+			out := captureMatchOutput(t, func() {
+				pass, _ = Match(tc, actualResponse, map[string]map[string][]string{}, false, false, zap.NewNop(), true)
+			})
+
+			require.Equal(t, tt.wantPass, pass)
+			require.Contains(t, out, tt.wantBanner)
+			require.NotContains(t, out, tt.wrongBanner)
+		})
+	}
+}
+
+// captureMatchOutput returns what Match prints through ppNew234 while fn runs.
+func captureMatchOutput(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := ppNew234
+	ppNew234 = func() *pp.PrettyPrinter {
+		p := pp.New()
+		p.SetColoringEnabled(false)
+		p.SetOutput(&buf)
+		return p
+	}
+	t.Cleanup(func() { ppNew234 = orig })
+
+	fn()
+	return buf.String()
 }
 
 // TestMatch_InvalidJSONBody_321 ensures that when the actual response body is not valid JSON,
