@@ -74,6 +74,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 
 	r.Route(agentRoutePrefix, func(r chi.Router) {
 		r.Get("/health", a.Health)
+		r.Get("/ca", a.CACert)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)
 		r.Post("/mappings", a.HandleMappings)
@@ -241,6 +242,26 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
+}
+
+// CACert serves this run's MITM CA public certificate (PEM) to the native
+// client, which points the app's trust env vars at it. The MITM CA is generated
+// per run and its private key never leaves the agent; only the public
+// certificate is returned here. The route is token-guarded (it is NOT in
+// isAuthExempt), so only the keploy client that holds the session token can read
+// it. A 503 before SetupCA has established the CA lets the client distinguish
+// "not ready yet" from a transport failure.
+func (a *Agent) CACert(w http.ResponseWriter, _ *http.Request) {
+	certPEM := pTls.ActiveCACertPEM()
+	if len(certPEM) == 0 {
+		http.Error(w, "CA not ready", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(certPEM); err != nil {
+		a.logger.Debug("failed to write CA certificate response", zap.Error(err))
+	}
 }
 
 // HandlePcapStream is a long-lived chunked response that emits a

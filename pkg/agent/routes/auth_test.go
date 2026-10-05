@@ -138,6 +138,7 @@ func TestIsAuthExempt(t *testing.T) {
 	for _, path := range []string{
 		"/agent/stop", "/agent/storemocks", "/agent/pcap/keylog",
 		"/agent/pcap/traffic", "/agent/scope/begin", "/agent/mock/served",
+		"/agent/ca",
 	} {
 		require.False(t, isAuthExempt(path), "%s must not be exempt", path)
 	}

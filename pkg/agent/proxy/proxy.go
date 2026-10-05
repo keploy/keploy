@@ -2000,6 +2000,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 		p.nsSwitchMutex.Unlock()
+		// Remove this run's MITM CA from the OS trust store so trust does not
+		// persist after the run (no-op in docker/k8s mode and for a persisted
+		// per-user CA).
+		pTls.TeardownNativeCA(p.logger)
 		p.logger.Debug("proxy (skipListener) stopped")
 		return nil
 	}
@@ -2107,6 +2111,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 		p.nsSwitchMutex.Unlock()
+		// Remove this run's MITM CA from the OS trust store so trust does not
+		// persist after the run (no-op in docker/k8s mode and for a persisted
+		// per-user CA).
+		pTls.TeardownNativeCA(p.logger)
 	}()
 
 	for {

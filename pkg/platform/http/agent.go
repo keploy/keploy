@@ -1876,6 +1876,37 @@ func relaxPerfEventParanoid() error {
 	return err
 }
 
+// fetchAgentCA retrieves the running agent's MITM CA public certificate over the
+// token-authenticated control-plane API. a.client already carries the bearer
+// token, so this inherits the same guard as every other control-plane call. The
+// returned bytes are a PEM certificate — public material, never the private key.
+func (a *AgentClient) fetchAgentCA(ctx context.Context) ([]byte, error) {
+	url := fmt.Sprintf("%s/ca", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build CA request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request the agent CA: %w", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+		return nil, fmt.Errorf("agent returned %d fetching the CA: %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	// Cap the read: a CA PEM is a few KB; a megabyte ceiling is generous and
+	// bounds a misbehaving endpoint.
+	certPEM, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the agent CA: %w", err)
+	}
+	if len(certPEM) == 0 {
+		return nil, fmt.Errorf("agent returned an empty CA certificate")
+	}
+	return certPEM, nil
+}
+
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
@@ -2024,12 +2055,27 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 	}()
 
-	// TODO : Proxy or TLS should not be importes in the agent
-	// This is done because to set env variable for TLS
-	err = ptls.SetupCaCertEnv(a.logger)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to set TLS environment")
-		return err
+	// Native mode only: the application runs as a child of this client and
+	// inherits its environment, so the client points the language-runtime trust
+	// env vars at the agent's CA. The CA is generated per run and lives in the
+	// agent process, so the client fetches its PUBLIC certificate over the
+	// token-authenticated control-plane API rather than carrying an embedded copy
+	// of a shared CA. In docker-run, compose and k8s the shared /tmp/keploy-tls
+	// volume delivers trust to the app container instead, and this call would only
+	// leak an unused host temp file — so it is skipped there.
+	if !isDockerCmd && opts.CommandType != string(utils.DockerCompose) {
+		certPEM, caErr := a.fetchAgentCA(ctx)
+		if caErr != nil {
+			utils.LogError(a.logger, caErr, "failed to fetch the agent's CA certificate; the app would not trust keploy's MITM leaves",
+				zap.String("next_step", "ensure the agent started cleanly (check the agent log for a SetupCA error) and retry"))
+			return caErr
+		}
+		// TODO : Proxy or TLS should not be imported in the agent
+		// This is done because to set env variable for TLS
+		if err = ptls.SetupCaCertEnv(a.logger, certPEM); err != nil {
+			utils.LogError(a.logger, err, "failed to set TLS environment")
+			return err
+		}
 	}
 
 	exportMockScopeEnv(a.logger, opts, agentPort)
