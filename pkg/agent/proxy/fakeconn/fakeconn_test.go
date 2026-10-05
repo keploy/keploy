@@ -212,6 +212,45 @@ func TestReadAfterCloseDrainsBuffered(t *testing.T) {
 	}
 }
 
+// A reader that found nothing and is about to wait, when a chunk is delivered
+// and Close follows, still gets the chunk: the relay's teardown delivers what
+// its tee holds and then closes the stream, and a parser a moment behind lost
+// the connection's last request or response to it. Here the chunk and the
+// Close arrive between Waiting and the wait (beforeWait) in every round, so the
+// reader waits with both ready every time; it used to take the Close about
+// half the time, and lose the chunk.
+func TestReadChunkAboutToWaitWhenAChunkAndCloseArriveGetsTheChunk(t *testing.T) {
+	// Not parallel: it sets the package's beforeWait. The hook acts only for
+	// this test's FakeConn, and runs on the goroutine that reads it.
+	t.Cleanup(func() { beforeWait.Store(nil) })
+	const rounds = 2000
+	lost := 0
+	for i := 0; i < rounds; i++ {
+		ch := make(chan Chunk, 1)
+		f := New(ch, nil, nil)
+		arrived := false
+		hook := func(waiting *FakeConn) {
+			if waiting != f || arrived {
+				return
+			}
+			arrived = true
+			ch <- Chunk{Dir: FromDest, Bytes: []byte("last response")}
+			close(ch)
+			_ = f.Close()
+		}
+		beforeWait.Store(&hook)
+		if _, err := f.ReadChunk(); err != nil {
+			lost++
+		}
+		if !arrived {
+			t.Fatal("the reader did not wait: the chunk and the Close did not arrive as it was about to")
+		}
+	}
+	if lost != 0 {
+		t.Fatalf("a chunk delivered before Close was lost in %d of %d rounds", lost, rounds)
+	}
+}
+
 func TestReadDeadlineExceeded(t *testing.T) {
 	t.Parallel()
 	ch := make(chan Chunk)

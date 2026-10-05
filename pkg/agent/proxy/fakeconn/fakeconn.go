@@ -374,6 +374,13 @@ func (f *FakeConn) readChunkLocked() (Chunk, error) {
 	return f.recvChunk()
 }
 
+// beforeWait, when set, runs on a reader's goroutine as it is about to wait:
+// after Waiting reports it waiting, before the wait. It is for tests, which put
+// what arrives in that window there every time instead of by chance; nil
+// outside them. It is the package's, not a FakeConn field: a FakeConn is 288
+// bytes, a size class, and one more field would put each in the 320 byte one.
+var beforeWait atomic.Pointer[func(*FakeConn)]
+
 // recvChunk blocks for the next Chunk on f.ch, ignoring anything
 // residual in buf. Split out of readChunkLocked because
 // [FakeConn.applyDiscard] must pull the pipeline forward WITHOUT
@@ -395,6 +402,20 @@ func (f *FakeConn) recvChunk() (Chunk, error) {
 		return c, nil
 	}
 	for {
+		// Closed: what ch already holds is still the reader's (see Read),
+		// however the reader learns of the Close, here or while it waits: a
+		// reader that found ch empty can be delivered a chunk and closed
+		// before it waits, and then waits with both ready.
+		if f.closed.Load() {
+			select {
+			case c, ok := <-f.ch:
+				if ok {
+					return took(c, ok)
+				}
+			default:
+			}
+			return Chunk{}, ErrClosed
+		}
 		dlCh, changedCh := f.currentDeadlineChans()
 		select {
 		case c, ok := <-f.ch:
@@ -405,13 +426,16 @@ func (f *FakeConn) recvChunk() (Chunk, error) {
 		// blocks for more (Waiting).
 		f.waits.Add(1)
 		f.waiting.Store(true)
+		if h := beforeWait.Load(); h != nil {
+			(*h)(f)
+		}
 		select {
 		case c, ok := <-f.ch:
 			f.waiting.Store(false)
 			return took(c, ok)
 		case <-f.closeCh:
+			// Closed: loop to take what ch already holds.
 			f.waiting.Store(false)
-			return Chunk{}, ErrClosed
 		case <-dlCh:
 			f.waiting.Store(false)
 			return Chunk{}, ErrDeadlineExceeded
