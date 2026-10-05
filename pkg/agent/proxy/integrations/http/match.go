@@ -169,7 +169,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if ok {
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
-			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil)
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil, nil)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -211,7 +211,8 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			if len(bodyMatched) == 1 {
 				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
 				detected, _ := noiseEngine.Detect(bodyMatched[0], input.body, userBodyNoise)
-				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, detected)
+				drift := servedRequestDrift(noiseEngine, bodyMatched[0], input.body, userBodyNoise)
+				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, detected, drift)
 				if err != nil {
 					return false, nil, nil, err
 				}
@@ -231,7 +232,8 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if isMatched {
 			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
 			detected, _ := noiseEngine.Detect(bestMatch, input.body, userBodyNoise)
-			served, claimed, err := h.claim(ctx, bestMatch, mockDb, detected)
+			drift := servedRequestDrift(noiseEngine, bestMatch, input.body, userBodyNoise)
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, detected, drift)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -1192,12 +1194,12 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 // leaves the mock unconsumed rather than reported as served. It returns the
 // mock to serve, m or a copy of it with the response loaded, and claimed=false
 // when another connection took m first.
-func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) (served *models.Mock, claimed bool, err error) {
+func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, drift []models.MockFieldDiff) (served *models.Mock, claimed bool, err error) {
 	served, err = withResponse(m)
 	if err != nil {
 		return nil, false, err
 	}
-	if !h.updateMock(ctx, m, mockDb, detectedNoise) {
+	if !h.updateMock(ctx, m, mockDb, detectedNoise, drift) {
 		return nil, false, nil
 	}
 	return served, true, nil
@@ -1217,8 +1219,11 @@ func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.Mo
 // match.go:723-725). We build a fresh copy, mutate the copy, and pass
 // (old=matchedMock, new=&updatedMock) to the mock DB — which already
 // takes treesMu internally to swap the pointer atomically.
-func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
+func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, drift []models.MockFieldDiff) bool {
 	updatedMock := *matchedMock
+	// The drift belongs to THIS serve, so it rides on the copy (and the
+	// delete-key copy below), never on the pooled mock.
+	updatedMock.ServedRequestDrift = drift
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 
@@ -1255,6 +1260,7 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 	// matchedMock has no noise, and updatedMock's mutated TestModeInfo wouldn't
 	// match the tree node).
 	deleteMock := *matchedMock
+	deleteMock.ServedRequestDrift = drift
 	if len(detectedNoise) > 0 {
 		deleteMock.Spec.ReqBodyNoise = mergeReqBodyNoise(deleteMock.Spec.ReqBodyNoise, detectedNoise)
 	}
@@ -1262,6 +1268,27 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 		return true
 	}
 	return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
+}
+
+// servedRequestDrift is the request-body drift of a call about to be answered
+// from mock m although the bodies differ (mocknoise.Engine.ServedDrift: fields
+// outside known noise, recorded vs live values, nil while detection learns),
+// with secret-shaped and obfuscated values redacted like a mismatch report's.
+func servedRequestDrift(eng *schemanoise.Engine, m *models.Mock, liveBody []byte, userBodyNoise map[string][]string) []models.MockFieldDiff {
+	if m == nil || m.Spec.HTTPReq == nil || len(liveBody) == 0 {
+		return nil
+	}
+	// A multipart body carries a boundary chosen per request, so its bytes
+	// differ on every replay and it cannot be compared field by field:
+	// reporting it would flag every multipart call as changed.
+	for k, v := range m.Spec.HTTPReq.Header {
+		if strings.EqualFold(k, "Content-Type") && strings.HasPrefix(strings.ToLower(strings.TrimSpace(v)), "multipart/") {
+			return nil
+		}
+	}
+	diffs := eng.ServedDrift(m, liveBody, userBodyNoise)
+	redactFieldDiffs(diffs, m.Noise)
+	return diffs
 }
 
 // filterStrictNoiseMatches enforces strict request-body matching on the

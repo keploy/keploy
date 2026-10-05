@@ -766,6 +766,12 @@ jobs:
     # `latest` (currently demonstrates the bug, continue-on-error).
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/http-stale-pool-race-linux.yml
+  run_request_drift_linux:
+    # A changed request to a dependency: reported on a lenient replay
+    # (failure_info.drifted_calls) and failing a strict one even when the
+    # response matches. `build` must pass; `latest` predates the fix.
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/request-drift-linux.yml
   run_outbound_fin_stall_linux:
     # Regression guard for issue #4173 (relay forwarder join stall on
     # upstream FIN during outbound capture). urllib3 client + fake
@@ -1345,6 +1351,7 @@ jobs:
       - run_mock_fromcontainer_linux
       - run_http_stale_pool_race_linux
       - run_outbound_fin_stall_linux
+      - run_request_drift_linux
       - run_upstream_refusal_linux
       - run_upstream_refusal_linux_extended
       - run_startup_mock_capture_linux
@@ -1375,6 +1382,7 @@ jobs:
             "${{ needs.run_mock_fromcontainer_linux.result }}" \
             "${{ needs.run_http_stale_pool_race_linux.result }}" \
             "${{ needs.run_outbound_fin_stall_linux.result }}" \
+            "${{ needs.run_request_drift_linux.result }}" \
             "${{ needs.run_upstream_refusal_linux.result }}" \
             "${{ needs.run_upstream_refusal_linux_extended.result }}" \
             "${{ needs.run_startup_mock_capture_linux.result }}" \

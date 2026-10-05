@@ -117,6 +117,11 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
+	// ServedRequestDrift is the request-body drift of the call this mock was
+	// just served for (fields outside known noise, recorded vs live values),
+	// carried transiently from the matcher to the mock manager, which reports
+	// it on the consumed MockState. Runtime-only, never serialized.
+	ServedRequestDrift []MockFieldDiff `json:"-" yaml:"-" bson:"-"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -930,6 +935,10 @@ type MockState struct {
 	// store it on the kind-agnostic MockSpec.ReqBodyNoise field. fieldpath
 	// ("body.user.id") -> regex list; empty list means "ignore the whole field".
 	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
+	// RequestDrift is the request-body drift of the call(s) this mock was
+	// served for since the last drain (models.DriftedCall), deduplicated by
+	// path. Empty when the request matched exactly or drifted only on noise.
+	RequestDrift []MockFieldDiff `json:"requestDrift,omitempty"`
 	// CarryOver marks a mock consumed outside the running test's window through
 	// a path that exists for exactly that (see RegisterCarryOver): taken from
 	// the carry-over tier, or a registered kind's per-test mock consumed out of

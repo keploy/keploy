@@ -35,6 +35,7 @@ package mocknoise
 import (
 	"encoding/json"
 	"maps"
+	"sort"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -155,6 +156,68 @@ func (e *Engine) Detect(m *models.Mock, liveBody []byte, userNoise map[string][]
 		return nil, false
 	}
 	return e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), e.adapter.RecordedValueIsNoise(m))
+}
+
+// servedDriftMaxValueLen caps each recorded/live value a served-drift diff
+// carries, as the protocols' miss reports cap theirs.
+const servedDriftMaxValueLen = 96
+
+// ServedDrift reports, with recorded (Expected) and live (Actual) values, the
+// fields of a live request body that differ from mock m's recorded body
+// outside known noise, for a mock about to be served although they differ.
+// It is what a replay reports as a models.DriftedCall: a served mock hides the
+// change from the response check, so this is where the change shows.
+//
+// Nil when detection is on — the auto-replay that learns noise is learning
+// such drift, not reporting it — when the mock has no recorded body, or when
+// nothing outside known noise drifted. Bodies the adapter cannot compare field
+// by field that still differ are reported as one changed "body" field. The
+// fields are exactly the ones Detect/StrictReject would name (the adapter's
+// Diff against the same known-noise set); the values come from a JSON walk of
+// the two bodies, and a drifted field the walk cannot name is reported
+// without values rather than dropped. Callers redact as their protocol needs.
+func (e *Engine) ServedDrift(m *models.Mock, liveBody []byte, userNoise map[string][]string) []models.MockFieldDiff {
+	if e == nil || e.detection {
+		return nil
+	}
+	recorded, ok := e.adapter.RecordedBody(m)
+	if !ok || string(recorded) == string(liveBody) {
+		return nil
+	}
+	known := e.KnownNoise(m, userNoise)
+	drift, comparable := e.adapter.Diff(m, recorded, liveBody, known, e.adapter.RecordedValueIsNoise(m))
+	if !comparable {
+		return []models.MockFieldDiff{{Path: "body", Kind: models.DiffKindValueChanged}}
+	}
+	if len(drift) == 0 {
+		return nil
+	}
+	var out []models.MockFieldDiff
+	named := make(map[string]struct{}, len(drift))
+	for _, d := range matcher.JSONFieldDiffs(string(recorded), string(liveBody), known, "body.", servedDriftMaxValueLen) {
+		if _, drifted := drift[d.Path]; drifted {
+			// The JSON walk folds every element of an array into one "[]"
+			// path, so its values are one element's, not necessarily the one
+			// that changed: report the field without them rather than a
+			// misleading pair.
+			if strings.Contains(d.Path, "[]") {
+				d.Expected, d.Actual = "", ""
+			}
+			out = append(out, d)
+			named[d.Path] = struct{}{}
+		}
+	}
+	var rest []string
+	for p := range drift {
+		if _, ok := named[p]; !ok {
+			rest = append(rest, p)
+		}
+	}
+	sort.Strings(rest)
+	for _, p := range rest {
+		out = append(out, models.MockFieldDiff{Path: p, Kind: models.DiffKindValueChanged})
+	}
+	return out
 }
 
 // Learn merges newly-detected drift into the mock's stored noise (monotonic —

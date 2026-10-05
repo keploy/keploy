@@ -336,3 +336,55 @@ func TestEngineStrictReject(t *testing.T) {
 		t.Fatalf("rejection drift must name body.tier_type; got %v", drift)
 	}
 }
+
+// ServedDrift is what a replay reports for a mock served although the request
+// changed: the drifted fields outside known noise, with recorded and live
+// values. While detection learns noise it reports nothing.
+func TestEngineServedDrift(t *testing.T) {
+	mock := &models.Mock{}
+	adapter := func() *fakeAdapter {
+		return &fakeAdapter{
+			body:    []byte(`{"amount":100,"currency":"USD","ts":1}`),
+			hasBody: true,
+			stored:  map[string][]string{"body.ts": {}},
+		}
+	}
+
+	got := New(adapter(), false, false).ServedDrift(mock, []byte(`{"amount":250,"currency":"USD","ts":2}`), nil)
+	if len(got) != 1 || got[0].Path != "body.amount" || got[0].Expected != "100" || got[0].Actual != "250" {
+		t.Fatalf("want one drift body.amount 100 -> 250 (ts is learned noise); got %+v", got)
+	}
+
+	if got := New(adapter(), true, false).ServedDrift(mock, []byte(`{"amount":250,"currency":"USD","ts":2}`), nil); got != nil {
+		t.Fatalf("with detection on the drift is being learned, not reported; got %+v", got)
+	}
+	if got := New(adapter(), false, false).ServedDrift(mock, []byte(`{"amount":100,"currency":"USD","ts":9}`), nil); got != nil {
+		t.Fatalf("a noise-only change is not a drift; got %+v", got)
+	}
+	if got := New(adapter(), false, false).ServedDrift(mock, []byte(`{"amount":100,"currency":"USD","ts":1}`), nil); got != nil {
+		t.Fatalf("an identical body is not a drift; got %+v", got)
+	}
+	user := map[string][]string{"currency": {}}
+	if got := New(adapter(), false, false).ServedDrift(mock, []byte(`{"amount":100,"currency":"EUR","ts":1}`), user); got != nil {
+		t.Fatalf("a field in the user's body noise is not a drift; got %+v", got)
+	}
+
+	bin := &fakeAdapter{body: []byte("bin-v1"), hasBody: true}
+	got = New(bin, false, false).ServedDrift(mock, []byte("bin-v2"), nil)
+	if len(got) != 1 || got[0].Path != "body" {
+		t.Fatalf("a differing body that cannot be compared field by field is one changed body; got %+v", got)
+	}
+	arr := &fakeAdapter{body: []byte(`{"items":[{"x":1},{"x":2}]}`), hasBody: true}
+	got = New(arr, false, false).ServedDrift(mock, []byte(`{"items":[{"x":1},{"x":7}]}`), nil)
+	if len(got) == 0 {
+		t.Fatal("a changed array element must still be reported")
+	}
+	for _, d := range got {
+		if strings.Contains(d.Path, "[]") && (d.Expected != "" || d.Actual != "") {
+			t.Fatalf("an array element's values are not reported (the walk folds elements together); got %+v", d)
+		}
+	}
+	if got := New(&fakeAdapter{}, false, false).ServedDrift(mock, []byte(`{"a":1}`), nil); got != nil {
+		t.Fatalf("a mock with no recorded body reports nothing; got %+v", got)
+	}
+}
