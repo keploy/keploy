@@ -16,9 +16,18 @@ func TestAppStartAcceptsAPortAndThePid(t *testing.T) {
 	}
 }
 
-func TestAppStartRefusesAMissingPortOrPid(t *testing.T) {
+func TestAppStartAcceptsThePidAloneRightAfterTheAppIsStarted(t *testing.T) {
 	a := &Agent{}
-	for _, body := range []string{`{}`, `{"port": 0, "pid": 1}`, `{"port": 70000, "pid": 1}`, `not json`, `{"port": 8080}`} {
+	rec := httptest.NewRecorder()
+	a.HandleAppStart(rec, httptest.NewRequest(http.MethodPost, "/agent/app/start", strings.NewReader(`{"pid": 41}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAppStartRefusesABadPortOrAMissingPid(t *testing.T) {
+	a := &Agent{}
+	for _, body := range []string{`{}`, `{"port": -1, "pid": 1}`, `{"port": 70000, "pid": 1}`, `not json`, `{"port": 8080}`} {
 		rec := httptest.NewRecorder()
 		a.HandleAppStart(rec, httptest.NewRequest(http.MethodPost, "/agent/app/start", strings.NewReader(body)))
 		if rec.Code != http.StatusBadRequest {

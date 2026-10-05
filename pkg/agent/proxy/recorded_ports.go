@@ -8,11 +8,12 @@ import (
 
 var recorded recordedPorts
 
-func RecordedPort(port uint32) bool { return recorded.has(port) }
+func RecordedPort(port uint32) bool { return recorded.has(port) && !recorded.child(port) }
 
 type recordedPorts struct {
 	mu      sync.RWMutex
 	ports   map[uint32]struct{}
+	kids    map[uint32]struct{}
 	unknown bool
 }
 
@@ -37,6 +38,12 @@ func (r *recordedPorts) add(sets ...[]*models.Mock) {
 				r.ports = map[uint32]struct{}{}
 			}
 			r.ports[port] = struct{}{}
+			if m.Spec.Metadata["startedByTests"] == "true" {
+				if r.kids == nil {
+					r.kids = map[uint32]struct{}{}
+				}
+				r.kids[port] = struct{}{}
+			}
 		}
 	}
 }
@@ -48,5 +55,12 @@ func (r *recordedPorts) has(port uint32) bool {
 		return true
 	}
 	_, ok := r.ports[port]
+	return ok
+}
+
+func (r *recordedPorts) child(port uint32) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.kids[port]
 	return ok
 }

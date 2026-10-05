@@ -3,14 +3,23 @@
 package proxy
 
 import (
+	"errors"
 	"net"
+	"strconv"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/listeners"
 	"golang.org/x/sys/unix"
 )
 
-func listenerOwner(_ net.IP, port uint32) (int, bool) {
+func listenerOwner(ip net.IP, port uint32) (int, bool) {
 	pid, ok := listeners.Owner(uint16(port))
+	if ip != nil && ip.IsLoopback() && refused(ip, port) {
+		if ok {
+			listeners.Forget(uint16(port))
+		}
+		return 0, false
+	}
 	if !ok {
 		return 0, true
 	}
@@ -32,4 +41,13 @@ func descends(pid, ancestor int) bool {
 		pid = int(kp.Eproc.Ppid)
 	}
 	return pid == ancestor
+}
+
+func refused(ip net.IP, port uint32) bool {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip.String(), strconv.Itoa(int(port))), 200*time.Millisecond)
+	if err != nil {
+		return errors.Is(err, unix.ECONNREFUSED)
+	}
+	_ = conn.Close()
+	return false
 }

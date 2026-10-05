@@ -32,6 +32,7 @@ type Start struct {
 	Ready   time.Time
 	Port    uint16
 	Bound   string
+	App     bool
 }
 
 type frame struct {
@@ -62,9 +63,11 @@ type Registry struct {
 	byPID    map[uint32]*Start
 	conns    map[string]uint32
 	dests    map[string]string
+	child    map[string]bool
 	root     string
 	sets     map[string]models.SetTable
 	universe map[string]struct{}
+	marked   bool
 }
 
 func New(p Proc, slack time.Duration) *Registry {
@@ -81,9 +84,11 @@ func (r *Registry) Reset() {
 	r.byPID = nil
 	r.conns = nil
 	r.dests = nil
+	r.child = nil
 	r.root = ""
 	r.sets = nil
 	r.universe = nil
+	r.marked = false
 }
 
 func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time) {
@@ -170,6 +175,18 @@ func (r *Registry) Dest(conn, addr string) {
 	r.dests[conn] = addr
 }
 
+func (r *Registry) Child(conn string) {
+	if conn == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.child == nil {
+		r.child = map[string]bool{}
+	}
+	r.child[conn] = true
+}
+
 func (r *Registry) Ready(pid uint32, port uint16, at time.Time) {
 	if pid == 0 {
 		return
@@ -185,6 +202,38 @@ func (r *Registry) Ready(pid uint32, port uint16, at time.Time) {
 	}
 	s.Ready = at
 	s.Port = port
+	s.App = true
+	r.marked = true
+}
+
+func (r *Registry) Mark(pid uint32, at time.Time) {
+	if pid == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.rootStart(pid)
+	if s == nil {
+		s = r.startOf(pid, at)
+	}
+	if s == nil {
+		return
+	}
+	s.App = true
+	r.marked = true
+}
+
+func (r *Registry) Dependency(pid uint32) bool {
+	if pid == 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.marked {
+		return false
+	}
+	s := r.rootStart(pid)
+	return s == nil || !s.App
 }
 
 func (r *Registry) Stamp(m *models.Mock) {
@@ -202,6 +251,12 @@ func (r *Registry) Stamp(m *models.Mock) {
 			m.Spec.Metadata = map[string]string{}
 		}
 		m.Spec.Metadata["destAddr"] = addr
+	}
+	if r.child[id] {
+		if m.Spec.Metadata == nil {
+			m.Spec.Metadata = map[string]string{}
+		}
+		m.Spec.Metadata["startedByTests"] = "true"
 	}
 	pid := m.SourcePID
 	if pid == 0 {

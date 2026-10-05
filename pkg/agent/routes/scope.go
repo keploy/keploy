@@ -224,15 +224,19 @@ func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid app-start request: %v", err), http.StatusBadRequest)
 		return
 	}
-	if req.Port <= 0 || req.Port > 65535 {
-		http.Error(w, "invalid app-start request: port must be the port the app listens on", http.StatusBadRequest)
+	if req.Port < 0 || req.Port > 65535 {
+		http.Error(w, "invalid app-start request: port must be the port the app listens on, or left out right after the app is started", http.StatusBadRequest)
 		return
 	}
 	if req.Pid <= 0 {
 		http.Error(w, "invalid app-start request: pid must be the app's pid", http.StatusBadRequest)
 		return
 	}
-	starts.Default.Ready(uint32(req.Pid), uint16(req.Port), markTime(req.At))
+	if req.Port == 0 {
+		starts.Default.Mark(uint32(req.Pid), markTime(req.At))
+	} else {
+		starts.Default.Ready(uint32(req.Pid), uint16(req.Port), markTime(req.At))
+	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
 }

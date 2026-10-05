@@ -19,3 +19,9 @@ func Owner(port uint16) (uint32, bool) {
 	pid, ok := owners[port]
 	return pid, ok
 }
+
+func Forget(port uint16) {
+	mu.Lock()
+	delete(owners, port)
+	mu.Unlock()
+}

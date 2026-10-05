@@ -256,3 +256,27 @@ func TestStampWritesTheDestinationOfTheCall(t *testing.T) {
 		t.Fatalf("a recorder's own destAddr must stay, got %q", got)
 	}
 }
+
+func TestUnmarkedProcessesInTheTreeAreDependenciesOnceAnAppIsMarked(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	f.spawn(100, 1, at(0), "orders.test")
+	r.Begin(100, "/r/e2e/orders", "/r/e2e/orders", true, at(10))
+	f.spawn(101, 100, at(20), "pricing")
+	f.spawn(102, 100, at(30), "shop")
+	f.spawn(103, 102, at(35), "shop-worker")
+	if r.Dependency(101) {
+		t.Fatal("before any app is marked, nothing is a dependency")
+	}
+	r.Mark(102, at(31))
+	if !r.Dependency(101) {
+		t.Fatal("an unmarked process the tests started is a dependency")
+	}
+	if r.Dependency(102) || r.Dependency(103) {
+		t.Fatal("the marked app and its children are the app")
+	}
+	r.Reset()
+	if r.Dependency(101) {
+		t.Fatal("a new run starts unmarked")
+	}
+}

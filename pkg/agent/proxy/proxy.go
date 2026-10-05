@@ -2319,7 +2319,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
-	if served, err := p.serveTreeListener(parserCtx, srcConn, destInfo, dstAddr); served {
+	if served, err := p.serveTreeListener(parserCtx, srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID)); served {
 		return err
 	}
 
@@ -4278,7 +4278,7 @@ type LiveHandler func(ctx context.Context, conn net.Conn, upstream string, port 
 
 func (p *Proxy) SetLiveHandler(h LiveHandler) { p.live = h }
 
-func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string) (bool, error) {
+func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, conn string) (bool, error) {
 	if !p.mockMode || p.IsDocker || p.appPID == 0 {
 		return false, nil
 	}
@@ -4288,11 +4288,17 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	}
 	ip := net.ParseIP(host)
 	owner, listening := listenerOwner(ip, dest.Port)
-	if !listening && ip != nil && ip.IsLoopback() && !recorded.has(dest.Port) {
+	if !listening && ip != nil && ip.IsLoopback() && (!recorded.has(dest.Port) || recorded.child(dest.Port)) {
 		p.logger.Debug("nothing listens at the local destination and the recording never called it; closing the call instead of mocking it", zap.String("destination", dstAddr))
 		return true, nil
 	}
 	if owner == 0 || !descends(owner, int(p.appPID)) {
+		p.logger.Debug("the destination is not a process the test command started", zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Bool("listening", listening))
+		return false, nil
+	}
+	if starts.Default.Dependency(uint32(owner)) {
+		p.logger.Debug("the destination is a dependency the tests started; recording and serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
+		starts.Default.Child(conn)
 		return false, nil
 	}
 	caller := int(dest.KernelPid)
