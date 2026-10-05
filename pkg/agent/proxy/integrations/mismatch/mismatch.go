@@ -317,8 +317,14 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		}
 		if mockMode.Load() {
 			// `keploy mock replay` sends the agent no noise config, so
-			// test.globalNoise would not change the next run's match.
-			return fmt.Sprintf("Only values drifted (%s). If the change is expected, re-record the mock set with '%s', or capture the new calls with 'keploy mock replay --on-miss record'.", strings.Join(paths, ", "), RecordCommand())
+			// test.globalNoise would not change the next run's match. Only
+			// the HTTP parser acts on --on-miss, and only when it can reach
+			// the real dependency.
+			hint := fmt.Sprintf("Only values drifted (%s). If the change is expected, re-record the mock set with '%s'", strings.Join(paths, ", "), RecordCommand())
+			if r.Protocol == ProtocolHTTP {
+				hint += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
+			}
+			return hint + "."
 		}
 		// Body diffs are reported "body."-prefixed for readability, but HTTP
 		// request matching reads the request-body noise bucket with

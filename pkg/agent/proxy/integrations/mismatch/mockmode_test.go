@@ -48,8 +48,8 @@ func TestHintTextInMockMode(t *testing.T) {
 	t.Cleanup(func() { SetMockMode(false) })
 	want := map[string]string{
 		"no mocks":             "No recorded mocks were available to match against for this protocol in the selected mock set. Re-record the mock set with 'keploy mock record'.",
-		"body values drifted":  "Only values drifted (body.qty). If the change is expected, re-record the mock set with 'keploy mock record', or capture the new calls with 'keploy mock replay --on-miss record'.",
-		"other values drifted": "Only values drifted (path). If the change is expected, re-record the mock set with 'keploy mock record', or capture the new calls with 'keploy mock replay --on-miss record'.",
+		"body values drifted":  "Only values drifted (body.qty). If the change is expected, re-record the mock set with 'keploy mock record', or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'.",
+		"other values drifted": "Only values drifted (path). If the change is expected, re-record the mock set with 'keploy mock record', or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'.",
 		"structure changed":    "Request structure changed since recording. Re-record the mock set with 'keploy mock record'.",
 	}
 	for name, r := range rerecordReports() {
@@ -59,6 +59,12 @@ func TestHintTextInMockMode(t *testing.T) {
 	}
 	if got := RecordCommand(); got != "keploy mock record" {
 		t.Errorf("RecordCommand in mock mode = %q", got)
+	}
+	// --on-miss is acted on by the HTTP parser alone; other protocols are told only to re-record.
+	other := NewReport(ProtocolGeneric, "opaque exchange").
+		WithClosest("mock-1", []models.MockFieldDiff{{Path: "payload", Kind: models.DiffKindValueChanged, Expected: "a", Actual: "b"}}).Build()
+	if want := "Only values drifted (payload). If the change is expected, re-record the mock set with 'keploy mock record'."; other.NextSteps != want {
+		t.Errorf("non-HTTP drift hint in mock mode:\n got  %q\n want %q", other.NextSteps, want)
 	}
 }
 
