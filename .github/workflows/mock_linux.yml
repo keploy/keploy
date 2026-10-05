@@ -59,6 +59,16 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-linux.sh"
 
+      # `keploy mock record` must never destroy an existing recording when a
+      # re-record fails, is interrupted, or captures nothing. Records a baseline,
+      # re-records with an empty and a failing command (bytes must be unchanged),
+      # then re-records a different workload (fully replaced). (gaps W1/W14.)
+      - name: Run mock-mode non-destructive-record e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-nondestructive-linux.sh"
+
       - name: Run mock-mode parallel-scope e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}

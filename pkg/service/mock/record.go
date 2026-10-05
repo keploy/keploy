@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -111,10 +112,24 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
-	// 3. Overwrite the named set in place: drop the previous mocks so the
-	//    re-record is a clean rewrite, not an append.
-	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
-		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
+	// 3. Capture into a staging set and promote it over the named set only once
+	//    the run has produced mocks and finished cleanly. This replaces the old
+	//    delete-first, which dropped the existing recording before capture even
+	//    armed — so any failure, interrupt or zero-capture run left the user with
+	//    nothing (gaps W1/W14; design §P0b "no delete-first"). See
+	//    MockDB.PromoteStagedSet / DiscardStagedSet.
+	staging := stagingSetID(name)
+	// Clear any staging set a previously-crashed record left behind. This MUST
+	// succeed before we capture: appending into a dirty staging base would
+	// persist duplicate/stale mocks (yaml appends; a leftover gob would even be
+	// promoted and, being preferred on read, shadow the fresh recording) and then
+	// promote that polluted set over the real one. The real set is untouched
+	// here, so aborting now is safe and leaves it intact.
+	if err := m.mockDB.DiscardStagedSet(persistCtx, staging); err != nil {
+		stopReason = "failed to clear a leftover staging set before recording"
+		utils.LogError(m.logger, err, stopReason, zap.String("staging", staging),
+			zap.String("next_step", "remove the leftover staging directory under your keploy mocks folder (its name ends in "+yaml.MockStagingSuffix+") and retry"))
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 	m.mockDB.ResetCounterID()
 
@@ -160,14 +175,14 @@ func (m *mockService) Record(ctx context.Context) error {
 	// only by persist, which runs on the one consumer goroutine.
 	insertedDoc := rec.NewInsertedMockDoc(persistCtx, m.hooks)
 	persist := func(mk *models.Mock) {
-		mctx := &rec.MockContext{Mock: mk, TestSetID: name}
+		mctx := &rec.MockContext{Mock: mk, TestSetID: staging}
 		if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
 			m.logger.Debug("BeforeMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 		}
 		if mctx.Skip {
 			return
 		}
-		encoded, encodedFormat, err := insertedDoc.Insert(m.mockDB, mk, name)
+		encoded, encodedFormat, err := insertedDoc.Insert(m.mockDB, mk, staging)
 		if err != nil {
 			if errors.Is(err, models.ErrMockEncode) {
 				m.logger.Warn("dropping one unencodable mock and continuing", zap.String("kind", mk.GetKind()), zap.Error(err))
@@ -177,7 +192,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			return
 		}
 		if err := m.hooks.AfterMockInsert(ctx, &rec.MockContext{
-			Mock: mk, TestSetID: name, Encoded: encoded, EncodedFormat: encodedFormat,
+			Mock: mk, TestSetID: staging, Encoded: encoded, EncodedFormat: encodedFormat,
 		}); err != nil {
 			m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 		}
@@ -272,7 +287,10 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 
 	if parent.Err() != nil { // user Ctrl+C
-		m.logger.Info("recording stopped", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			m.logger.Debug("failed to discard staging set after interrupt", zap.String("staging", staging), zap.Error(derr))
+		}
+		m.logger.Info("recording stopped; the existing mock set was left unchanged", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return nil
 	}
 	// Not the user: the agent died under the test command. What was captured
@@ -286,12 +304,41 @@ func (m *mockService) Record(ctx context.Context) error {
 		cause = context.Cause(ctx)
 	}
 	if cause != nil {
+		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			m.logger.Debug("failed to discard staging set after an incomplete recording", zap.String("staging", staging), zap.Error(derr))
+		}
 		stopReason = "the recording did not finish"
 		utils.LogError(m.logger, cause, stopReason, zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return fmt.Errorf("%s: %w", stopReason, cause)
 	}
 
-	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
+	// 9. Nothing captured: leave the existing set untouched and publish nothing.
+	//    (A v3-path stopgap for H2 — PR-C makes this exit non-zero as
+	//    `nothing_verified`.)
+	if mockCount == 0 {
+		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			m.logger.Debug("failed to discard an empty staging set", zap.String("staging", staging), zap.Error(derr))
+		}
+		m.logger.Warn("no outgoing calls were captured; the existing mock set (if any) was left unchanged; the runner made no mockable dependency calls, or its traffic was not intercepted",
+			zap.String("mock-set", name),
+			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
+		m.propagateExit(appErr, "record")
+		return nil
+	}
+
+	// 10. Promote the staged capture over the named set (atomic). Only now is the
+	//     previous recording replaced — a complete new one exists to replace it.
+	if err := m.mockDB.PromoteStagedSet(persistCtx, staging, name); err != nil {
+		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			m.logger.Debug("failed to discard staging set after a failed promote", zap.String("staging", staging), zap.Error(derr))
+		}
+		stopReason = "failed to promote the recorded mocks over the existing set"
+		utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name))
+		return fmt.Errorf("%s: %w", stopReason, err)
+	}
+
+	// 11. Correlate per-test scope windows into mappings.yaml (best-effort), now
+	//     that the promoted set is the one on disk.
 	if m.mappingDB != nil {
 		if reader, ok := m.instrumentation.(ScopeReader); ok {
 			scopeCtx, cancelScope := context.WithTimeout(persistCtx, agentEpilogueTimeout)
@@ -312,18 +359,15 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 	}
 
-	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
+	// 12. Publish the set to the store (registry upload in enterprise; no-op on
+	//     files) — only after a complete, non-empty, promoted recording.
 	if err := m.store.Push(persistCtx, name); err != nil {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
 
 	m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
-	if mockCount == 0 {
-		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
-			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
-	}
 
-	// 11. Propagate the runner's exit code so a CI 're-record on merge' job
+	// 13. Propagate the runner's exit code so a CI 're-record on merge' job
 	//     fails when the tests fail.
 	m.propagateExit(appErr, "record")
 	return nil
@@ -336,6 +380,14 @@ type capturedMock struct {
 	ts   time.Time
 	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
 }
+
+// stagingSetID returns the staging set name record captures into while recording
+// name, before promoting it over name on a complete, non-empty run. The suffix
+// (yaml.MockStagingSuffix) is reserved and skipped by test-set enumeration, so a
+// leftover staging dir from a hard kill is never listed as a phantom test-set.
+// Appended to an already-single-segment set name it adds no path separator, so a
+// promote or discard can never escape to touch a real set.
+func stagingSetID(name string) string { return name + yaml.MockStagingSuffix }
 
 // correlateScopes buckets each recorded mock into the per-test scope window its
 // request timestamp falls within, producing the mappings.yaml structure. A mock

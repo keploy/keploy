@@ -116,6 +116,17 @@ type ScopePusher interface {
 type MockDB interface {
 	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
 	DeleteMocksForSet(ctx context.Context, testSetID string) error
+	// PromoteStagedSet replaces targetID's mock files with the ones recorded into
+	// stagingID (an atomic rename for the common same-format case), then removes
+	// the staging set. Record captures into a staging set and promotes it only on
+	// a complete, non-empty run, so a failed, interrupted or zero-capture record
+	// never destroys an existing recording (gaps W1/W14; design §P0b "no
+	// delete-first").
+	PromoteStagedSet(ctx context.Context, stagingID, targetID string) error
+	// DiscardStagedSet removes a staging set left by a record that did not
+	// complete, leaving the target it was never promoted over intact. Also used
+	// before capture to clear a staging directory a crashed run left behind.
+	DiscardStagedSet(ctx context.Context, stagingID string) error
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	ResetCounterID()
