@@ -6,6 +6,10 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
+var recorded recordedPorts
+
+func RecordedPort(port uint32) bool { return recorded.has(port) }
+
 type recordedPorts struct {
 	mu      sync.RWMutex
 	ports   map[uint32]struct{}

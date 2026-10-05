@@ -266,3 +266,16 @@ func TestStartIngressReleasesPortWhenAcceptLoopExits(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+func TestDialIngressTargetReachesAnIPv6App(t *testing.T) {
+	ln, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback: %v", err)
+	}
+	defer ln.Close()
+	conn, err := dialIngressTarget(context.Background(), ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("dialIngressTarget(%s): %v", ln.Addr(), err)
+	}
+	_ = conn.Close()
+}

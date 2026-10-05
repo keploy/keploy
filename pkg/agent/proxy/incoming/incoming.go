@@ -411,8 +411,14 @@ func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duratio
 
 func dialIngressTarget(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
 	deadline := time.Now().Add(timeout)
+	network := "tcp4"
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+			network = "tcp6"
+		}
+	}
 	for {
-		conn, err := net.DialTimeout("tcp4", addr, timeout)
+		conn, err := net.DialTimeout(network, addr, timeout)
 		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || !time.Now().Before(deadline) {
 			return conn, err
 		}
