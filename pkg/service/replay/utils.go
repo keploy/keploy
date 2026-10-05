@@ -250,7 +250,7 @@ func composeFileFromCommand(cmd string) (string, bool) {
 	fields := strings.Fields(cmd)
 	isCompose := false
 	for i, f := range fields {
-		if f == "compose" || strings.HasPrefix(f, "docker-compose") {
+		if f == "compose" || strings.HasPrefix(f, "docker-compose") || strings.HasPrefix(f, "podman-compose") {
 			isCompose = true
 		}
 		if (f == "-f" || f == "--file") && i+1 < len(fields) {

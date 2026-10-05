@@ -118,3 +118,35 @@ func TestShouldReexecWithSudo_HonoursExplicitCmdType(t *testing.T) {
 		})
 	}
 }
+
+// A Podman command in a build that cannot drive Podman is refused by
+// ValidateFlags. Re-executing under sudo first would ask for a password only
+// to refuse the command after it, so it must not happen, whether the kind was
+// sniffed or given with --cmd-type. (A build that registers Podman re-executes
+// as it does for Docker; that is tested where Podman is registered.)
+func TestShouldReexecWithSudo_NotForAnEngineThisBuildCannotDrive(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root; ShouldReexecWithSudo short-circuits before the engine check")
+	}
+	orig := os.Args
+	defer func() { os.Args = orig }()
+
+	for _, args := range [][]string{
+		{"keploy", "record", "-c", "podman run --name app img"},
+		{"keploy", "test", "-c", "sudo podman start -a app"},
+		{"keploy", "record", "-c", "podman compose up"},
+		{"keploy", "record", "--cmd-type", "docker-run", "-c", "podman run --name app img"},
+		{"keploy", "record", "--cmd-type", "docker-run", "-c", "sudo -E podman run --name app img"},
+	} {
+		os.Args = args
+		if ShouldReexecWithSudo() {
+			t.Errorf("ShouldReexecWithSudo() = true for %v, want false: Podman is not supported in this build", args)
+		}
+	}
+
+	// Docker still re-executes.
+	os.Args = []string{"keploy", "record", "-c", "docker run --name app img"}
+	if !ShouldReexecWithSudo() {
+		t.Error("ShouldReexecWithSudo() = false for a docker run, want true")
+	}
+}

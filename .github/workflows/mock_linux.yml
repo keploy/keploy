@@ -78,6 +78,16 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-agent-cannot-start-linux.sh"
 
+      # A command that runs in Podman is refused at once by this build, with
+      # exit code 4 and where to get a keploy that records it, and never after
+      # a sudo prompt; before, it ran as a native process and recorded
+      # nothing. Every spelling of a podman invocation, record, test and mock.
+      - name: Run podman-refusal e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/podman-refusal-linux.sh"
+
       # `keploy report` against keploy.yml files, overrides and reports that
       # keploy must refuse -- fast, naming the file and why, never blocking or
       # running out of memory -- and ones it must still read. The script lists

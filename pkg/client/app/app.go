@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/agent"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -690,10 +691,10 @@ func (a *App) ComposeDown() {
 	// through `docker compose -f -` with the generated document on stdin.
 	case len(a.composeContent) > 0:
 		a.logger.Debug("Running docker compose down using in-memory compose content")
-		args := []string{"compose", "-f", "-"}
+		args := []string{"-f", "-"}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "down", "--timeout", "1")
-		downCmd = exec.CommandContext(downCtx, "docker", args...)
+		downCmd = composeCommand(downCtx, args...)
 		downCmd.Stdin = bytes.NewReader(a.composeContent)
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
@@ -702,10 +703,10 @@ func (a *App) ComposeDown() {
 		// the teardown targets the SAME project the `up` created (a user whose
 		// compose command sets an explicit project would otherwise have `down`
 		// resolve a different, cwd-derived project and leave this stack running).
-		args := []string{"compose", "-f", a.composeFile}
+		args := []string{"-f", a.composeFile}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "down", "--timeout", "1")
-		downCmd = exec.CommandContext(downCtx, "docker", args...)
+		downCmd = composeCommand(downCtx, args...)
 	default:
 		return
 	}
@@ -1130,18 +1131,18 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 	// Reached only where the library is not linked (darwin): the generated
 	// document goes to `docker compose -f -` on stdin, exactly as before.
 	case len(a.composeContent) > 0:
-		args = []string{"compose", "-f", "-"}
+		args = []string{"-f", "-"}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "ps", "-aq", keployAgentComposeService)
 	case a.composeFile != "":
-		args = []string{"compose", "-f", a.composeFile}
+		args = []string{"-f", a.composeFile}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "ps", "-aq", keployAgentComposeService)
 	default:
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := composeCommand(ctx, args...)
 	if len(a.composeContent) > 0 {
 		cmd.Stdin = bytes.NewReader(a.composeContent)
 	}
@@ -1281,11 +1282,11 @@ func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
 	switch {
 	// Reached only where the library is not linked (darwin).
 	case len(a.composeContent) > 0:
-		args = []string{"compose", "-f", "-"}
+		args = []string{"-f", "-"}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "ps", "-a", "--format", "json")
 	case a.composeFile != "":
-		args = []string{"compose", "-f", a.composeFile}
+		args = []string{"-f", a.composeFile}
 		// Carry any -p/--project-name/--project-directory from the run command so
 		// the probe resolves the SAME project the `up` created. Without this, a user
 		// whose compose command sets an explicit project would have the probe query
@@ -1297,7 +1298,7 @@ func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := composeCommand(ctx, args...)
 	if len(a.composeContent) > 0 {
 		cmd.Stdin = bytes.NewReader(a.composeContent)
 	}
@@ -2002,4 +2003,12 @@ func exitCodeFromErr(err error) int {
 		return statusErr.StatusCode
 	}
 	return -1
+}
+
+// composeCommand is a compose subcommand (args: what follows `docker compose`)
+// run through the active engine's compose command, for the teardown and probes
+// that run where the compose library is not linked.
+func composeCommand(ctx context.Context, args ...string) *exec.Cmd {
+	compose := engine.Active().Compose
+	return exec.CommandContext(ctx, compose[0], append(append([]string{}, compose[1:]...), args...)...)
 }

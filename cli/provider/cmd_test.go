@@ -325,6 +325,68 @@ func TestResolveCommandType_NativeAcceptsAnyCommand(t *testing.T) {
 	}
 }
 
+// Before Podman was recognised, `podman run …` resolved to native: keploy ran
+// it as a host process, the app ran in a container keploy never looked at, and
+// the recording came back empty with no word about why. A build that cannot
+// drive Podman (this one registers no Podman engine) must refuse it instead,
+// and say where to get one that can, whatever kind the command resolved to:
+// the spellings kind detection does not know resolve to native, which is
+// exactly where the recording comes back empty.
+func TestRefuseUnsupportedEngine(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, explicit string
+	}{
+		{"run", "podman run --rm --name app -p 8080:8080 img", ""},
+		{"start", "sudo podman start -a app", ""},
+		{"compose", "podman compose up", ""},
+		{"podman-compose", "podman-compose -f c.yml up", ""},
+		{"sudo -E, which resolves to native", "sudo -E podman run --name app img", ""},
+		{"full path, which resolves to native", "/usr/bin/podman run --name app img", ""},
+		{"engine flags before the subcommand", "podman --remote run --name app img", ""},
+		{"a wrapper with arguments", "sudo -u alice podman compose up", ""},
+		{"a connection flag with its value", "podman -c machine run --name app img", ""},
+		{"a log level with its value", "podman --log-level debug run --name app img", ""},
+		{"kube play", "podman kube play app.yaml", ""},
+		{"pod start", "podman pod start app", ""},
+		{"explicit docker-run", "podman run --name app img", "docker-run"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := refuseUnsupportedEngine(cmdWithCmdTypeFlag(tc.explicit, tc.explicit != ""), tc.command)
+			if err == nil {
+				t.Fatalf("%q: want refused, got no error", tc.command)
+			}
+			if !strings.Contains(err.Error(), "Podman") || !strings.Contains(err.Error(), "https://keploy.io/install.sh") {
+				t.Fatalf("%q: the refusal must name Podman and where to get a keploy that supports it, got %q", tc.command, err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name, command, explicit string
+	}{
+		// The command is set aside (a base path, --from-container).
+		{"no command", "", ""},
+		// The user insists: run it as a host process.
+		{"explicit native", "podman run --name app img", "native"},
+		{"explicit native, any case", "podman run --name app img", " Native "},
+		{"docker", "docker run --name app img", ""},
+		{"a wrapper", "make up", "docker-compose"},
+		{"a script named podman", "npm run podman", ""},
+	} {
+		t.Run("allowed: "+tc.name, func(t *testing.T) {
+			if err := refuseUnsupportedEngine(cmdWithCmdTypeFlag(tc.explicit, tc.explicit != ""), tc.command); err != nil {
+				t.Fatalf("%q: want allowed, got %v", tc.command, err)
+			}
+		})
+	}
+
+	// `--cmd-type=` resolves by detection, which is native for exactly the
+	// spellings refused above: only native as given is let through.
+	if err := refuseUnsupportedEngine(cmdWithCmdTypeFlag("", true), "sudo -E podman run --name app img"); err == nil {
+		t.Fatal("an explicitly empty --cmd-type let a podman command through")
+	}
+}
+
 // Substring matching let "./run-docker.sh" past the docker-run guard — a
 // wrapper by any reading, and the naming convention a docker wrapper script
 // actually uses. Past the guard it fails much worse: ParseDockerCmd finds no
@@ -335,6 +397,12 @@ func TestMentionsDockerBinary(t *testing.T) {
 		"sudo -E docker run --name app img",
 		"/usr/bin/docker compose up",
 		"env FOO=bar docker-compose up",
+		// Podman's CLI takes the same subcommands and flags; whether this
+		// build can drive it is resolveCommandType's to say.
+		"podman run --name app img",
+		"sudo podman start -a app",
+		"podman compose up",
+		"podman-compose up",
 	}
 	for _, cmd := range yes {
 		if !mentionsDockerBinary(cmd) {
@@ -346,8 +414,14 @@ func TestMentionsDockerBinary(t *testing.T) {
 		"./run-docker.sh",
 		"make docker-up",
 		"npm run docker",
-		"podman run --name app img",
+		"npm run podman",
 		"make up",
+		// Not rewritable: modifyDockerRun splices its flags in after the
+		// second word, in front of `run` here.
+		"docker --log-level=debug run --name app img",
+		"docker -D run --name app img",
+		"npm run docker -- start",
+		"podman --remote run --name app img",
 	}
 	for _, cmd := range no {
 		if mentionsDockerBinary(cmd) {

@@ -107,7 +107,8 @@ func findComposeFile(cmd string) []string {
 // through the COMPOSE_FILE environment variable instead.
 func isRewritableComposeCommand(appCmd string) bool {
 	lower := strings.ToLower(appCmd)
-	return strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose")
+	return strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose") ||
+		strings.Contains(lower, "podman compose") || strings.Contains(lower, "podman-compose")
 }
 
 // composeLaunchPlan decides how keploy hands its generated compose file to

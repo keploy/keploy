@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -771,13 +772,19 @@ func mentionsDockerBinary(command string) bool {
 			base = base[j+1:] // /usr/bin/docker -> docker
 		}
 		// The v1 binary takes any subcommand, so the name alone is enough.
-		if base == "docker-compose" {
+		// podman-compose is the same shape.
+		if base == "docker-compose" || base == "podman-compose" {
 			return true
 		}
 		// A bare "docker" token is not enough: `npm run docker` runs a script
 		// called docker. Require a subcommand that actually launches
-		// something, which is what the docker-run/docker-start modes rewrite.
-		if base == "docker" && i+1 < len(fields) {
+		// something, which is what the docker-run/docker-start modes rewrite,
+		// and require it next: modifyDockerRun splices its flags in after
+		// the second word, so `docker --log-level=debug run` would get them
+		// in front of `run`. Podman's CLI takes the same subcommands and
+		// flags; whether this build can drive it is refuseUnsupportedEngine's
+		// to say.
+		if (base == "docker" || base == "podman") && i+1 < len(fields) {
 			switch fields[i+1] {
 			case "run", "start", "compose", "container":
 				return true
@@ -785,6 +792,39 @@ func mentionsDockerBinary(command string) bool {
 		}
 	}
 	return false
+}
+
+// refuseUnsupportedEngine refuses a command that runs on a container engine
+// this build cannot drive. Callers pass the command that will actually run (a
+// base path or --from-container sets it aside, and then nothing is refused),
+// and call it before anything that could need root or write the keploy
+// folder, so the refusal never follows a sudo prompt.
+//
+// Whatever kind the command resolved to: one the kind detection does not
+// spell out (sudo -E podman run, /usr/bin/podman run) resolves to native,
+// where keploy would run the engine as a host process and capture nothing
+// from the container it starts. Only an explicit --cmd-type native, the user
+// insisting on exactly that, is let through.
+func refuseUnsupportedEngine(cmd *cobra.Command, command string) error {
+	if command == "" {
+		return nil
+	}
+	// The flag as given, not the type it resolved to: `--cmd-type=` resolves
+	// by detection, which is native for exactly the spellings this catches.
+	if cmd.Flags().Changed("cmd-type") {
+		if v, err := cmd.Flags().GetString("cmd-type"); err == nil &&
+			utils.CmdType(strings.ToLower(strings.TrimSpace(v))) == utils.Native {
+			return nil
+		}
+	}
+	name, ok := engine.Invocation(command)
+	if !ok || engine.Supported(name) {
+		return nil
+	}
+	// Retrying cannot help: the command, or the keploy running it, has to
+	// change.
+	utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+	return engine.Unsupported(name)
 }
 
 // resolveCommandType decides the CommandType for a record/test run.
@@ -1399,6 +1439,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			return nil
+		}
+
+		// Before the command type: refusing an engine does not depend on it,
+		// and the --cmd-type checks would otherwise answer a podman command
+		// with a docker message. A base path sets the command aside below:
+		// nothing runs it.
+		runs := c.cfg.Command
+		if c.cfg.Test.BasePath != "" {
+			runs = ""
+		}
+		if err := refuseUnsupportedEngine(cmd, runs); err != nil {
+			return err
 		}
 
 		// set the command type
@@ -2359,6 +2411,16 @@ func (c *CmdConfigurator) readMockCoverageFlags(cmd *cobra.Command) error {
 // subcommands. It mirrors the record/test path (command type, platform gate,
 // keploy folder resolution + permissions) but reads the mock-specific flags.
 func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Command) error {
+	// Before the command type, as in validateFlags. --from-container without
+	// -c sets a configured command aside below: nothing runs it.
+	runs := c.cfg.Command
+	if cmd.Flags().Changed("from-container") && !cmd.Flags().Changed("command") {
+		runs = ""
+	}
+	if err := refuseUnsupportedEngine(cmd, runs); err != nil {
+		return err
+	}
+
 	// Resolve the command type (native vs docker-*).
 	commandType, err := resolveCommandType(c.logger, cmd, c.cfg.Command, c.cfg.CommandType)
 	if err != nil {

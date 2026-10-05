@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.uber.org/zap"
 )
 
@@ -92,6 +93,16 @@ func ShouldReexecWithSudo() bool {
 		return true
 	}
 
+	// Extract the command from arguments
+	cmd := ExtractCommandFromArgs(os.Args)
+
+	// A container engine this build cannot drive is refused by ValidateFlags
+	// with a message saying so. Asking for a sudo password first, only to be
+	// refused after it, would be the worse experience.
+	if cmd != "" && !engine.Supported(engine.Detect(cmd)) {
+		return false
+	}
+
 	if explicit := ExtractCmdTypeFromArgs(os.Args); explicit != "" {
 		switch kind := CmdType(explicit); kind {
 		case Native, DockerRun, DockerStart, DockerCompose, FromContainer:
@@ -101,8 +112,6 @@ func ShouldReexecWithSudo() bool {
 		// message; fall through to sniffing rather than guessing here.
 	}
 
-	// Extract the command from arguments
-	cmd := ExtractCommandFromArgs(os.Args)
 	if cmd == "" {
 		return false
 	}
