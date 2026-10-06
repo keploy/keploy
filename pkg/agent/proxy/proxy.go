@@ -4400,6 +4400,18 @@ func ownIP(ip net.IP) bool {
 	return false
 }
 
+// pidToUint32 narrows a PID to the uint32 the dependency tracker keys on,
+// guarding the architecture-dependent int->uint32 conversion (CWE-681): the
+// PID flows from a strconv.Atoi of /proc and is always a small non-negative
+// value, so an out-of-range int (never expected for a real PID) collapses to
+// 0 — which Dependency reads as "no such process", the safe default.
+func pidToUint32(pid int) uint32 {
+	if pid < 0 || pid > math.MaxUint32 {
+		return 0
+	}
+	return uint32(pid)
+}
+
 func (p *Proxy) trackTree(conn net.Conn, owner int) func() {
 	p.treeMu.Lock()
 	if p.tree == nil {
@@ -4418,7 +4430,7 @@ func (p *Proxy) closeDependencyConns() {
 	p.treeMu.Lock()
 	defer p.treeMu.Unlock()
 	for conn, owner := range p.tree {
-		if starts.Default.Dependency(uint32(owner)) {
+		if starts.Default.Dependency(pidToUint32(owner)) {
 			p.logger.Debug("closing a connection opened before the app was marked to a process that turned out to be a dependency", zap.Int("owner", owner))
 			_ = conn.Close()
 		}
@@ -4453,7 +4465,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		p.logger.Debug("the destination is not a process the test command started", zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Bool("listening", listening))
 		return false, nil
 	}
-	if starts.Default.Dependency(uint32(owner)) {
+	if starts.Default.Dependency(pidToUint32(owner)) {
 		p.logger.Debug("the destination is a dependency the tests started; recording and serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
 		starts.Default.Child(conn)
 		return false, nil
