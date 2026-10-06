@@ -67,6 +67,9 @@ func NewApp(logger *zap.Logger, cmd string, client docker.Client, opts models.Se
 }
 
 type App struct {
+	// onAgentRestart, when set, sets keploy's agent up again after the
+	// compose retry's `up` started it again; see SetOnAgentRestart.
+	onAgentRestart  func(ctx context.Context) error
 	logger          *zap.Logger
 	docker          docker.Client
 	cmd             string
@@ -175,6 +178,14 @@ func (a *App) SetupDocker() error {
 		return err
 	}
 	return nil
+}
+
+// SetOnAgentRestart sets what sets keploy's agent up again when the compose
+// retry's `up` started it again: compose starts an agent it stopped, and
+// recreates one under a recreate flag, with none of what the run set up on the
+// one before. The agent client puts that setup back.
+func (a *App) SetOnAgentRestart(f func(ctx context.Context) error) {
+	a.onAgentRestart = f
 }
 
 // ModifyDockerRun modifies the existing Docker command to attach the init container's PID namespace
@@ -974,7 +985,7 @@ const (
 	// health-wait under CI contention, so compose aborts with "dependency failed
 	// to start: container <dep> exited (N)" before the app service is ever started.
 	// Work-slow-not-fail: a flaky dependency container should slow the recording
-	// (a bounded, backed-off retry from a clean stack), not abort it. Strictly
+	// (a bounded, backed-off retry with that dependency afresh), not abort it. Strictly
 	// gated by isTransientComposeDependencyFailure so a genuine app failure is
 	// NEVER retried — see that predicate. Small N: a dependency that fails to come
 	// up on every attempt is a real environment problem the run must still surface.
@@ -1400,7 +1411,11 @@ func parseComposeServiceStates(out string) []composeServiceState {
 //  2. the APP service (appService) is in state "created" — i.e. compose never
 //     started it because a depended-on container failed its health gate, AND
 //  3. some OTHER service (not the app, not the injected keploy-agent) is in state
-//     "exited" with a NON-ZERO exit code — the dependency that actually crashed.
+//     "exited" with a NON-ZERO exit code — the dependency that actually crashed,
+//     AND
+//  4. the injected keploy-agent did not crash: stopped by compose (exit 0, or
+//     143/137 from its TERM and KILL) is fine, and the retry sets it up again
+//     if compose starts it again; exited otherwise, the agent is the failure.
 //
 // Why it cannot misclassify a genuine app failure: an app that fails to start on
 // its OWN (its container runs and exits non-zero, a bad image, a crash on boot)
@@ -1417,6 +1432,7 @@ func isTransientComposeDependencyFailure(runErr error, errType utils.ErrType, ap
 	}
 	appCreated := false
 	depCrashed := false
+	agentCrashed := false
 	for _, s := range states {
 		switch {
 		case s.Service == appService:
@@ -1429,15 +1445,69 @@ func isTransientComposeDependencyFailure(runErr error, errType utils.ErrType, ap
 			}
 		case s.Service == keployAgentComposeService:
 			// The injected agent is keploy's own service; never count it as the
-			// user's crashed dependency.
-			continue
+			// user's crashed dependency. Stopped by compose (0, or 143/137 from
+			// its TERM and KILL), it is set up again after the retry; crashed,
+			// it is the failure, and retrying would only delay its error.
+			if s.State == "exited" && s.ExitCode != 0 && s.ExitCode != 143 && s.ExitCode != 137 {
+				agentCrashed = true
+			}
 		default:
-			if s.State == "exited" && s.ExitCode != 0 {
+			if isCrashedDependency(appService, s) {
 				depCrashed = true
 			}
 		}
 	}
-	return appCreated && depCrashed
+	return appCreated && depCrashed && !agentCrashed
+}
+
+// isCrashedDependency reports whether a `docker compose ps` row is a service
+// the app depends on that crashed: neither the app nor keploy's agent, and
+// exited non-zero.
+func isCrashedDependency(appService string, s composeServiceState) bool {
+	return s.Service != appService && s.Service != keployAgentComposeService &&
+		s.State == "exited" && s.ExitCode != 0
+}
+
+// removeCrashedDependencies removes the containers of the dependencies that
+// crashed, so that the retry's `up` creates them afresh, as the teardown it
+// replaced did: a dependency that crashed over state it left in its own
+// filesystem would crash the same way again in the same container. The app's
+// container, keploy's agent, and `compose run` containers (the user's) stay.
+//
+// It waits for the removals, so that `up` does not meet a container still
+// being removed, up to preRunRemoveBudget in all. It runs on the app-runner
+// goroutine, which record and replay drain under DrainErrGroup's budget, so it
+// stops as soon as the run is cancelled: there is no retry to clean up for.
+func (a *App) removeCrashedDependencies(ctx context.Context, states []composeServiceState) {
+	ctx, cancel := context.WithTimeout(ctx, preRunRemoveBudget)
+	defer cancel()
+	var ids []string
+	for _, s := range states {
+		if ctx.Err() != nil {
+			return
+		}
+		if s.ID == "" || isComposeOneOff(s.Labels) || !isCrashedDependency(a.composeService, s) {
+			continue
+		}
+		if err := a.docker.ContainerRemove(ctx, s.ID, container.RemoveOptions{Force: true}); err != nil {
+			a.logger.Debug("failed to remove a crashed dependency's container before the retry; compose starts it again as it is",
+				zap.String("service", s.Service), zap.String("container", s.ID), zap.Error(err))
+			continue
+		}
+		ids = append(ids, s.ID)
+	}
+	for _, id := range ids {
+		for {
+			if _, err := a.docker.ContainerInspect(ctx, id); err != nil {
+				break // gone, or ctx is done
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
 }
 
 // shouldRetryComposeUp is the SINGLE decision the compose-up retry loop turns
@@ -1871,8 +1941,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// ever started, and `up` COMMONLY exits non-zero — which keploy would otherwise
 	// turn into "user application terminated unexpectedly hence stopping keploy",
 	// aborting the recording over a transient infra hiccup. Work-slow-not-fail:
-	// bring the partial stack down to a clean slate and retry the bring-up, a
-	// bounded number of times with a linear backoff.
+	// retry the bring-up in place, a bounded number of times with a linear
+	// backoff (see the loop for why in place, and how keploy's agent is kept).
 	//
 	// The non-zero exit on a dependency abort is the COMMON case, not guaranteed:
 	// empirically ~1 in 20 `up --abort-on-container-exit --exit-code-from app` runs
@@ -1892,20 +1962,30 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// satisfy the gate — it fails fast with its real error. A dependency that
 	// crashes on EVERY attempt is bounded by composeDepFailureRetries and then
 	// surfaced; the retry can only DELAY a persistent failure, never hide it.
+	var states []composeServiceState
 	for attempt := 1; shouldRetryComposeUp(a.kind, attempt, composeDepFailureRetries, ctx.Err(),
 		cmdErr.Err, cmdErr.Type, a.composeService,
-		func() []composeServiceState { return a.composeServiceStatesWithin(composePsStateBudget) }); attempt++ {
-		a.logger.Info("a dependency container failed to start transiently during docker compose up (it crashed before the app could start); bringing the stack down and retrying the bring-up",
+		func() []composeServiceState {
+			states = a.composeServiceStatesWithin(composePsStateBudget)
+			return states
+		}); attempt++ {
+		a.logger.Info("a dependency container failed to start transiently during docker compose up (it crashed before the app could start); retrying the bring-up",
 			zap.String("appService", a.composeService),
 			zap.Int("attempt", attempt),
 			zap.Int("maxAttempts", composeDepFailureRetries))
 
-		// Clean slate: tear the partial stack (and the injected agent) down so the
-		// retry's `up` re-creates every service fresh — no dangling containers or
-		// half-started dependency, no stale keploy-agent to trip a compose Recreate.
-		a.ComposeDown()
-
-		// Linear backoff, but abort immediately if the run is being cancelled.
+		// Retry in place, with no teardown: a second `up` starts the crashed
+		// dependency afresh (removeCrashedDependencies), and the app once it
+		// is healthy. The run has already
+		// set keploy's agent up (its mocks, the readiness its healthcheck gates
+		// the app on), and that lives in the agent's process. When the abort
+		// left the agent running, `up` reuses it; when compose stopped it (every
+		// service attached, so the crash was an attached container's exit), or
+		// recreates it (a recreate flag), the agent `up` starts has none of it,
+		// and retryComposeUp has the agent client set it up again. Bringing
+		// the stack down here recreated the agent and nothing set it up: its
+		// healthcheck never passed, the app behind it never started, and the run
+		// waited out every test's timeout instead of recovering.
 		backoff := time.Duration(attempt) * composeDepFailureBaseBackoff
 		select {
 		case <-ctx.Done():
@@ -1914,27 +1994,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 		case <-time.After(backoff):
 		}
 
-		// Re-run the same pre-up guards run() does before the first up so the retry
-		// starts from a clean, conflict-free project (no leftover agent/app name).
-		// Each guard can wait up to preRunRemoveBudget (90s) under a saturated
-		// daemon, and this whole loop runs on the app-runner goroutine that
-		// record/replay drains under DrainErrGroup's 30s budget. So short-circuit on
-		// ctx cancellation BEFORE and BETWEEN the guards: once the run is being torn
-		// down there is nothing to clean up for a retry, and burning up to ~180s of
-		// guard budget on the drain path would resurrect the very "goroutine
-		// ignoring context cancellation" timeout these guards otherwise prevent.
+		a.removeCrashedDependencies(ctx, states)
 		if ctx.Err() != nil {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
-		a.removeStaleComposeAgentWithin(preRunRemoveBudget)
-		if ctx.Err() != nil {
-			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
-		}
-		if a.keployContainer != "" {
-			a.ensureContainerNameFreeWithin(a.keployContainer, preRunRemoveBudget)
-		}
-
-		cmdErr = executeApp(runCmd, runEnv)
+		cmdErr = a.retryComposeUp(ctx, func() utils.CmdError { return executeApp(runCmd, runEnv) })
 	}
 
 	if cmdErr.Err != nil {

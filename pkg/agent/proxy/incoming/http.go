@@ -724,7 +724,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 
-		// Response modifications for sync/sampling modes.
+		// Response modifications for sync/sampling modes. appResp is the
+		// response as the app sent it, which is what is recorded.
+		appResp := resp
 		if forceCloseMode {
 			if resp.ContentLength == -1 || isChunked(resp.TransferEncoding) {
 				// Release the sync/sampling lock early on streaming
@@ -736,8 +738,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				streamingExchange = true
 			}
 
-			resp.Close = true
-			resp.Header.Set("Connection", "close")
+			appResp = closeAfter(resp)
 		}
 		respTimestamp := time.Now()
 
@@ -851,7 +852,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		reqBytesTotal := reqCapture.Total()
 		respBytesTotal := respCapture.Total()
 		capturedReq := req
-		capturedResp := resp
+		capturedResp := appResp
 		capturedReqTS := reqTimestamp
 		capturedRespTS := respTimestamp
 
@@ -1499,10 +1500,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// hint and still hands back a keep-alive response. The loop
 		// exits at the req.Close || resp.Close check at the bottom of
 		// this iteration, which triggers the deferred releaseLock in
-		// the caller and frees the sampling slot.
+		// the caller and frees the sampling slot. appResp is the response
+		// as the app sent it, which is what is recorded.
+		appResp := resp
 		if forceCloseActive {
-			resp.Close = true
-			resp.Header.Set("Connection", "close")
+			appResp = closeAfter(resp)
 		}
 
 		if err := resp.Write(clientConn); err != nil {
@@ -1555,7 +1557,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				respBodyBytes = respCapture.Bytes()
 			}
 			capturedReq := req
-			capturedResp := resp
+			capturedResp := appResp
 			capturedReqTS := reqTimestamp
 			capturedRespTS := respTimestamp
 			actualPort := appPort
