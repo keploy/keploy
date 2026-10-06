@@ -337,11 +337,24 @@ func pathMatchesModuloDynamicSegments(mockPath, reqPath string) bool {
 		if ms[i] == rs[i] {
 			continue
 		}
-		if looksDynamicSegment(ms[i]) && looksDynamicSegment(rs[i]) {
+		// Relax a differing segment only when BOTH sides are the SAME dynamic
+		// type-class — so /users/123 matches /users/456 (digits) but NOT
+		// /users/<uuid>: a segment that changed TYPE is a different resource, not
+		// the same id drifting. Was "both look dynamic (any shape)", which let a
+		// numeric id match a uuid/hash and collapse distinct calls onto one mock.
+		//
+		// The class is derived from each value's characters, so it is a proxy for
+		// "same id type", not a guarantee: a short (~16-char) hex-alphabet id that
+		// is coincidentally all-decimal on one side can class differently (digits
+		// vs hex) and false-reject. That is the loud, safe direction (a replay
+		// "mock missed" you can see), traded against the silent false-accept — the
+		// wrong mock served — that the old any-shape relax allowed. Longer
+		// hashes/uuids/nanoids are not realistically affected.
+		if c := urlSegmentTypeClass(ms[i]); c != "" && c == urlSegmentTypeClass(rs[i]) {
 			differed = true
 			continue
 		}
-		return false // a non-id segment differs -> genuinely different path
+		return false // a non-id segment, or a type change, -> genuinely different path
 	}
 	return differed
 }
@@ -412,11 +425,26 @@ var (
 // ("v1alpha1", "oauth2"), or word-like slugs — all ambiguous with static path
 // components and left to explicit url-noise config (test.globalNoise.url).
 func looksDynamicSegment(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	if reSegAllDigits.MatchString(s) || reSegUUID.MatchString(s) || reSegLongHex.MatchString(s) {
-		return true
+	return urlSegmentTypeClass(s) != ""
+}
+
+// urlSegmentTypeClass classifies a dynamic-looking URL path segment into a stable
+// type-class, or "" when the segment is not dynamic-looking. The classes mirror
+// looksDynamicSegment's recognized shapes so a LEARNED-dynamic segment can be
+// matched on TYPE (its value ignored, its class required to match) instead of the
+// value being re-guessed per request. Returning "" for every non-dynamic shape
+// keeps looksDynamicSegment byte-for-byte equivalent. See looksDynamicSegment for
+// why each shape is (or isn't) treated as dynamic.
+func urlSegmentTypeClass(s string) string {
+	switch {
+	case s == "":
+		return ""
+	case reSegAllDigits.MatchString(s):
+		return "digits"
+	case reSegUUID.MatchString(s):
+		return "uuid"
+	case reSegLongHex.MatchString(s):
+		return "hex"
 	}
 	if len(s) >= 16 {
 		hasDigit, hasAlpha := false, false
@@ -428,9 +456,11 @@ func looksDynamicSegment(s string) bool {
 				hasAlpha = true
 			}
 		}
-		return hasDigit && hasAlpha
+		if hasDigit && hasAlpha {
+			return "token"
+		}
 	}
-	return false
+	return ""
 }
 
 // relaxed header key matcher (presence-only)
