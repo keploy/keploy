@@ -21,6 +21,19 @@ $ErrorActionPreference = 'Stop'
 $savedTestsFlag = $env:KEPLOY_WINDOWS_SCRIPT_TESTS
 $env:KEPLOY_WINDOWS_SCRIPT_TESTS = '1'
 
+# How long a background run (a runspace, or a real child powershell.exe started
+# by Start-Ensure) is given to reach an expected point before a case calls it
+# stuck. Every such wait here is a HANG safety net, not a tight bound: each case
+# is "driven by events, not by timing" and breaks the instant its event lands,
+# so this budget is only ever spent when something has genuinely wedged. The old
+# fixed 120s (and a 60s cross-run barrier) was too tight for that role on the
+# shared self-hosted Windows runner: under CPU contention from concurrent jobs a
+# child powershell.exe can be starved past it before emitting its first line,
+# which failed a correct run spuriously (e.g. "did not say it was waiting within
+# 120s"). A generous budget keeps genuine-hang detection while absorbing that
+# scheduling jitter; normal runs never approach it.
+$script:BgWaitSeconds = 300
+
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $reaper = Join-Path $here 'reap-keploy-containers.ps1'
 $cleanup = Join-Path $here 'cleanup-windows.ps1'
@@ -887,7 +900,7 @@ try {
     $bg = Start-Background $takeLock @{ LockDir = $lockDir; RunId = 12; RunAttempt = 1; PollSeconds = 1 }
     $problems = @()
     try {
-        $deadline = [DateTime]::UtcNow.AddSeconds(120)
+        $deadline = [DateTime]::UtcNow.AddSeconds($script:BgWaitSeconds)
         $held = @(); $said = ''
         while ($true) {
             $held = @(Get-ChildItem -LiteralPath $lockDir -Filter 'docker-job-12-1-*.lock')
@@ -906,7 +919,7 @@ try {
             $problems += "did not say it was waiting for the prune"
         } else {
             Remove-Item -LiteralPath $m -Force
-            if (-not (Wait-Background $bg 120)) { $problems += "still waiting 120s after the prune marker was taken down" }
+            if (-not (Wait-Background $bg $script:BgWaitSeconds)) { $problems += "still waiting $($script:BgWaitSeconds)s after the prune marker was taken down" }
             else {
                 $said = Read-Background $bg
                 $after = @(Get-ChildItem -LiteralPath $lockDir -Filter 'docker-job-12-1-*.lock')
@@ -931,13 +944,13 @@ try {
     $bg = Start-Background $takeLock @{ LockDir = $lockDir; RunId = 13; RunAttempt = 1; PollSeconds = 60 }
     $problems = @()
     try {
-        $deadline = [DateTime]::UtcNow.AddSeconds(120)
+        $deadline = [DateTime]::UtcNow.AddSeconds($script:BgWaitSeconds)
         $said = ''
         while ($true) {
             $said = Read-Background $bg
             if ($said -match 'is in progress') { $problems += "waits for it"; break }
             if (Test-BackgroundDone $bg) { break }
-            if ([DateTime]::UtcNow -ge $deadline) { $problems += "neither finished nor said it was waiting within 120s"; break }
+            if ([DateTime]::UtcNow -ge $deadline) { $problems += "neither finished nor said it was waiting within $($script:BgWaitSeconds)s"; break }
             Start-Sleep -Milliseconds 200
         }
         if (-not $problems.Count) {
@@ -1500,12 +1513,12 @@ function Get-ChildItem {
         $bg = Start-Ensure $lockDir $evFile -prelude $countPrelude
         $problems = @(); $said = ''
         try {
-            $deadline = [DateTime]::UtcNow.AddSeconds(120)
+            $deadline = [DateTime]::UtcNow.AddSeconds($script:BgWaitSeconds)
             while ($true) {
                 $said = Read-Background $bg
                 if ($said -match 'waiting for it to finish, then checking Docker again') { break }
                 if ((Test-BackgroundDone $bg) -or (Get-Events $evFile).Count) { $problems += "did not wait for the other runner's $($v.What)"; break }
-                if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not say it was waiting within 120s"; break }
+                if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not say it was waiting within $($script:BgWaitSeconds)s"; break }
                 Start-Sleep -Milliseconds 200
             }
             if (-not $problems.Count) {
@@ -1515,7 +1528,7 @@ function Get-ChildItem {
                     if ((Get-Calls $callsFile).Count -gt $calls0) { $problems += "asked docker while the other runner's marker was down"; break }
                     if ((Get-Events $listedFile).Count -ge $listed0 + 3) { break }
                     if ((Test-BackgroundDone $bg) -or (Get-Events $evFile).Count) { $problems += "stopped waiting while the other runner's marker was down"; break }
-                    if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not look for the marker 3 times within 120s"; break }
+                    if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not look for the marker 3 times within $($script:BgWaitSeconds)s"; break }
                     Start-Sleep -Milliseconds 100
                 }
             }
@@ -1524,7 +1537,7 @@ function Get-ChildItem {
                 # marker comes down.
                 & $v.End $lockDir
                 Remove-Item -LiteralPath (Join-Path $lockDir 'docker-prune-other.inprogress') -Force
-                if (-not (Wait-Background $bg 120)) { $problems += "still going 120s after the other runner's $($v.What) finished" }
+                if (-not (Wait-Background $bg $script:BgWaitSeconds)) { $problems += "still going $($script:BgWaitSeconds)s after the other runner's $($v.What) finished" }
                 $said = Read-Background $bg
                 if ((Get-BackgroundExit $bg) -ne 0) { $problems += "exit $(Get-BackgroundExit $bg), want 0" }
                 if ($said -notmatch $v.Says) { $problems += "missing '$($v.Says)'" }
@@ -1573,12 +1586,12 @@ function Get-ChildItem {
         $bg = Start-Ensure $lockDir $evFile -getRunStatus "Microsoft.PowerShell.Management\Set-Content -LiteralPath '$other' -Value 'a Docker Desktop restart by keploy/keploy run 2 win-runner-3'; 'completed'"
         $problems = @(); $said = ''; $wentAt = $null
         try {
-            $deadline = [DateTime]::UtcNow.AddSeconds(120)
+            $deadline = [DateTime]::UtcNow.AddSeconds($script:BgWaitSeconds)
             while ($true) {
                 $said = Read-Background $bg
                 if ($said -match 'waiting for its marker to go') { break }
                 if ((Test-BackgroundDone $bg) -or (Get-Events $evFile).Count) { $problems += "did not wait for the other runner's restart"; break }
-                if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not say it was waiting within 120s"; break }
+                if ([DateTime]::UtcNow -ge $deadline) { $problems += "did not say it was waiting within $($script:BgWaitSeconds)s"; break }
                 Start-Sleep -Milliseconds 200
             }
             if (-not $problems.Count) {
@@ -1589,7 +1602,7 @@ function Get-ChildItem {
                 if ($v.Started) { Write-OtherStart $lockDir -Up:$v.Up -FailInfo $v.FailInfo }
                 $wentAt = [DateTime]::UtcNow
                 Remove-Item -LiteralPath $other -Force
-                if (-not (Wait-Background $bg 120)) { $problems += "still going 120s after the other runner's restart ended" }
+                if (-not (Wait-Background $bg $script:BgWaitSeconds)) { $problems += "still going $($script:BgWaitSeconds)s after the other runner's restart ended" }
                 $said = Read-Background $bg
                 if ((Get-BackgroundExit $bg) -ne 0) { $problems += "exit $(Get-BackgroundExit $bg), want 0" }
                 foreach ($p in $v.Says) { if ($said -notmatch $p) { $problems += "missing '$p'" } }
@@ -1630,7 +1643,7 @@ function Get-ChildItem {
         $bg = Start-Ensure $lockDir $evFile -getRunStatus $runStatus -extra 'MaxWaitMinutes = 0' -running $running
         $problems = @(); $said = ''
         try {
-            if (-not (Wait-Background $bg 120)) { $problems += "still waiting 120s later" }
+            if (-not (Wait-Background $bg $script:BgWaitSeconds)) { $problems += "still waiting $($script:BgWaitSeconds)s later" }
             $said = Read-Background $bg
             if ((Get-BackgroundExit $bg) -ne 1) { $problems += "exit $(Get-BackgroundExit $bg), want 1" }
             if ($said -notmatch "::error::Docker does not answer, and 0 min after this step started, .*\(docker-prune-$($v.Other)\.inprogress\)") { $problems += "missing the deadline error naming the other marker" }
@@ -1660,7 +1673,11 @@ function Get-ChildItem {
 $env:FAKE_DOCKER_CALLS = Join-Path '@@BARRIER@@' 'calls-@@ID@@'
 $global:listed = $false; $global:marked = $false; $global:raced = $false
 function Wait-Barrier([string]$what, [scriptblock]$ready) {
-    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    # The same hang net as the parent's $script:BgWaitSeconds, substituted in
+    # below (@@BGWAIT@@) since this runs in a child where that var does not
+    # exist. Two child runs must both be scheduled to meet here, so this is the
+    # most starvation-prone wait of all under shared-runner contention.
+    $deadline = [DateTime]::UtcNow.AddSeconds(@@BGWAIT@@)
     while (-not (& $ready)) {
         if ([DateTime]::UtcNow -ge $deadline) { Write-Host "BARRIER TIMEOUT: $what"; return }
         Start-Sleep -Milliseconds 20
@@ -1693,7 +1710,7 @@ function Set-Content {
         Wait-Barrier 'both markers down' { @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath '@@BARRIER@@' -Filter 'marked-*').Count -ge 2 }
     }
 }
-'@ -replace '@@BARRIER@@', $barrierDir -replace '@@ID@@', $id
+'@ -replace '@@BARRIER@@', $barrierDir -replace '@@ID@@', $id -replace '@@BGWAIT@@', $script:BgWaitSeconds
     }
     foreach ($race in @(
             @{ What = 'restart'; DesktopDown = $false; Want = 'stop+marker,start+marker' },
@@ -1707,7 +1724,7 @@ function Set-Content {
             })
         $problems = @(); $said = ''
         try {
-            foreach ($bg in $bgs) { if (-not (Wait-Background $bg 180)) { $problems += "a run was still going after 180s" } }
+            foreach ($bg in $bgs) { if (-not (Wait-Background $bg $script:BgWaitSeconds)) { $problems += "a run was still going after $($script:BgWaitSeconds)s" } }
             $logs = @($bgs | ForEach-Object { Read-Background $_ })
             $said = $logs -join "`n----`n"
             foreach ($bg in $bgs) { if ((Get-BackgroundExit $bg) -ne 0) { $problems += "a run exited $(Get-BackgroundExit $bg), want 0" } }
