@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -130,175 +131,206 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Make the HTTP request
-	res, err := a.client.Do(req)
+	// Registered before it connects; it outlives a restarted agent (see
+	// agentSession).
+	stream := a.session().openStream()
+	conn := stream.connect(ctx)
+	res, err := a.client.Do(req.WithContext(conn.ctx))
 	if err != nil {
+		stream.close()
 		return nil, fmt.Errorf("failed to get incoming: %s", err.Error())
 	}
 	if err := agentStreamStatus("get incoming", res); err != nil {
+		stream.close()
 		return nil, err
 	}
+	res.Body = conn.body(res.Body)
 
 	// Create a channel to stream TestCase data
 	tcChan := make(chan *models.TestCase)
 
-	// Determine stream type
+	// The first response's framing is checked here, where it can still fail
+	// the call; see readIncoming for the rest.
+	if mediaType, params, err := mime.ParseMediaType(res.Header.Get("Content-Type")); err == nil &&
+		strings.HasPrefix(mediaType, "multipart/") && strings.TrimSpace(params["boundary"]) == "" {
+		stream.close()
+		if res.Body != nil {
+			res.Body.Close()
+		}
+		return nil, fmt.Errorf("missing multipart boundary in content-type: %s", res.Header.Get("Content-Type"))
+	}
+
+	go func() {
+		defer func() {
+			close(tcChan)
+			stream.close()
+		}()
+		for {
+			done := a.readIncoming(ctx, res, tcChan)
+			if res.Body != nil {
+				if err := res.Body.Close(); err != nil {
+					utils.LogError(a.logger, err, "failed to close response body for incoming request")
+				}
+			}
+			if done {
+				return
+			}
+			var ok bool
+			if res, ok = a.resumeStream(ctx, stream, "get incoming", http.MethodPost, "/incoming", requestJSON); !ok {
+				return
+			}
+		}
+	}()
+
+	a.logger.Debug("Successfully connected to incoming test cases stream.")
+	return tcChan, nil
+}
+
+// readIncoming hands the test cases of one incoming stream to tcChan until the
+// stream ends, in the stream's framing (multipart, or a legacy JSON stream).
+// It reports whether the stream must not go on: ctx is done, or the response
+// cannot be read at all.
+func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcChan chan<- *models.TestCase) (done bool) {
 	contentType := res.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to parse content type", zap.String("content-type", contentType))
 	}
-
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := strings.TrimSpace(params["boundary"])
 		if boundary == "" {
-			if res.Body != nil {
-				res.Body.Close()
-			}
-			return nil, fmt.Errorf("missing multipart boundary in content-type: %s", contentType)
+			utils.LogError(a.logger, nil, "missing multipart boundary in content-type", zap.String("content-type", contentType))
+			return true
 		}
-		go func() {
-			defer func() {
-				close(tcChan)
-				if res.Body != nil {
-					res.Body.Close()
-				}
-			}()
+		return a.readIncomingParts(ctx, res, boundary, tcChan)
+	}
+	return a.readIncomingJSON(ctx, res, tcChan)
+}
 
-			mr := multipart.NewReader(res.Body, boundary)
-			var pendingTestCase *models.TestCase
+// readIncomingParts reads a multipart incoming stream; see readIncoming.
+func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase) (done bool) {
+	mr := multipart.NewReader(res.Body, boundary)
+	var pendingTestCase *models.TestCase
 
-			for {
-				part, err := mr.NextPart()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					if ctx.Err() != nil ||
-						strings.Contains(err.Error(), "closed network connection") ||
-						errors.Is(err, io.ErrUnexpectedEOF) ||
-						strings.Contains(err.Error(), "unexpected EOF") {
-						a.logger.Debug("multipart stream ended", zap.Error(err))
-						break
-					}
-					utils.LogError(a.logger, err, "error reading stream part")
-					break
-				}
-
-				if part.FormName() == "metadata" {
-					var tc models.TestCase
-					if err := json.NewDecoder(part).Decode(&tc); err != nil {
-						utils.LogError(a.logger, err, "failed to decode metadata json")
-						continue
-					}
-					if tc.HasBinaryFile {
-						pendingTestCase = &tc
-					} else {
-						select {
-						case <-ctx.Done():
-							return
-						case tcChan <- &tc:
-							pendingTestCase = nil
-						}
-					}
-				} else if part.FormName() == "file" {
-					if pendingTestCase == nil {
-						utils.LogError(a.logger, nil, "Received file part without preceding metadata, skipping...")
-						continue
-					}
-					fileName := part.FileName()
-					sanitizedFileName := filepath.Base(fileName)
-					if sanitizedFileName == "." || sanitizedFileName == string(filepath.Separator) || sanitizedFileName == "" {
-						sanitizedFileName = "testcase_blob"
-					}
-					a.logger.Debug("Received binary file part", zap.String("file_name", fileName), zap.String("sanitized_name", sanitizedFileName))
-
-					savePath := filepath.Join(os.TempDir(), fmt.Sprintf("keploy_%d_%s", time.Now().UnixNano(), sanitizedFileName))
-					outFile, err := os.Create(savePath)
-					if err != nil {
-						utils.LogError(a.logger, err, "failed to create temp file for stream")
-						continue
-					}
-
-					_, err = io.Copy(outFile, part)
-					outFile.Close()
-					if err != nil {
-						utils.LogError(a.logger, err, "failed to write file stream to disk")
-						continue
-					}
-					a.logger.Debug("Successfully wrote binary file to temp storage", zap.String("path", savePath))
-					// Link matching file path logic
-					updated := false
-					for i := range pendingTestCase.HTTPReq.Form {
-						form := &pendingTestCase.HTTPReq.Form[i]
-						for j, fname := range form.FileNames {
-							if (fname == fileName || fname == sanitizedFileName || filepath.Base(fname) == sanitizedFileName) && j < len(form.Paths) {
-								form.Paths[j] = savePath
-								updated = true
-							}
-						}
-					}
-					if !updated {
-						for i := range pendingTestCase.HTTPReq.Form {
-							form := &pendingTestCase.HTTPReq.Form[i]
-							if len(form.Paths) > 0 {
-								form.Paths[0] = savePath
-								break
-							}
-						}
-					}
-
-				} else if part.FormName() == "delimiter" {
-					if pendingTestCase == nil {
-						continue
-					}
-					select {
-					case <-ctx.Done():
-						return
-					case tcChan <- pendingTestCase:
-						pendingTestCase = nil
-					}
-				}
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if ctx.Err() != nil ||
+				strings.Contains(err.Error(), "closed network connection") ||
+				errors.Is(err, io.ErrUnexpectedEOF) ||
+				strings.Contains(err.Error(), "unexpected EOF") {
+				a.logger.Debug("multipart stream ended", zap.Error(err))
+				break
 			}
-		}()
-	} else {
-		// Legacy JSON stream
-		go func() {
-			defer func() {
-				close(tcChan)
+			utils.LogError(a.logger, err, "error reading stream part")
+			break
+		}
 
-				err := res.Body.Close()
-				if err != nil {
-					utils.LogError(a.logger, err, "failed to close response body for incoming request")
-				}
-			}()
-
-			decoder := json.NewDecoder(res.Body)
-
-			for {
-				var testCase models.TestCase
-				if err := decoder.Decode(&testCase); err != nil {
-					if utils.IsShutdownError(err) {
-						// End of the stream or connection closed during shutdown
-						break
-					}
-					utils.LogError(a.logger, err, "failed to decode test case from stream")
-					break
-				}
-
+		if part.FormName() == "metadata" {
+			var tc models.TestCase
+			if err := json.NewDecoder(part).Decode(&tc); err != nil {
+				utils.LogError(a.logger, err, "failed to decode metadata json")
+				continue
+			}
+			if tc.HasBinaryFile {
+				pendingTestCase = &tc
+			} else {
 				select {
 				case <-ctx.Done():
-					// If the context is done, exit the loop
-					return
-				case tcChan <- &testCase:
-					// Send the decoded test case to the channel
+					return true
+				case tcChan <- &tc:
+					pendingTestCase = nil
 				}
 			}
-		}()
-	}
+		} else if part.FormName() == "file" {
+			if pendingTestCase == nil {
+				utils.LogError(a.logger, nil, "Received file part without preceding metadata, skipping...")
+				continue
+			}
+			fileName := part.FileName()
+			sanitizedFileName := filepath.Base(fileName)
+			if sanitizedFileName == "." || sanitizedFileName == string(filepath.Separator) || sanitizedFileName == "" {
+				sanitizedFileName = "testcase_blob"
+			}
+			a.logger.Debug("Received binary file part", zap.String("file_name", fileName), zap.String("sanitized_name", sanitizedFileName))
 
-	a.logger.Debug("Successfully connected to incoming test cases stream.")
-	return tcChan, nil
+			savePath := filepath.Join(os.TempDir(), fmt.Sprintf("keploy_%d_%s", time.Now().UnixNano(), sanitizedFileName))
+			outFile, err := os.Create(savePath)
+			if err != nil {
+				utils.LogError(a.logger, err, "failed to create temp file for stream")
+				continue
+			}
+
+			_, err = io.Copy(outFile, part)
+			outFile.Close()
+			if err != nil {
+				utils.LogError(a.logger, err, "failed to write file stream to disk")
+				continue
+			}
+			a.logger.Debug("Successfully wrote binary file to temp storage", zap.String("path", savePath))
+			// Link matching file path logic
+			updated := false
+			for i := range pendingTestCase.HTTPReq.Form {
+				form := &pendingTestCase.HTTPReq.Form[i]
+				for j, fname := range form.FileNames {
+					if (fname == fileName || fname == sanitizedFileName || filepath.Base(fname) == sanitizedFileName) && j < len(form.Paths) {
+						form.Paths[j] = savePath
+						updated = true
+					}
+				}
+			}
+			if !updated {
+				for i := range pendingTestCase.HTTPReq.Form {
+					form := &pendingTestCase.HTTPReq.Form[i]
+					if len(form.Paths) > 0 {
+						form.Paths[0] = savePath
+						break
+					}
+				}
+			}
+
+		} else if part.FormName() == "delimiter" {
+			if pendingTestCase == nil {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return true
+			case tcChan <- pendingTestCase:
+				pendingTestCase = nil
+			}
+		}
+	}
+	return false
+}
+
+// readIncomingJSON reads a legacy JSON incoming stream; see readIncoming.
+func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, tcChan chan<- *models.TestCase) (done bool) {
+	decoder := json.NewDecoder(res.Body)
+
+	for {
+		var testCase models.TestCase
+		if err := decoder.Decode(&testCase); err != nil {
+			if utils.IsShutdownError(err) {
+				// End of the stream or connection closed during shutdown
+				break
+			}
+			utils.LogError(a.logger, err, "failed to decode test case from stream")
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			// If the context is done, exit the loop
+			return true
+		case tcChan <- &testCase:
+			// Send the decoded test case to the channel
+		}
+	}
+	return false
 }
 
 // mockHandoffBuffer sizes the decoder -> consumer hand-off. Deep enough that a
@@ -352,14 +384,20 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Make the HTTP request
-	res, err := a.client.Do(req)
+	// Registered before it connects; it outlives a restarted agent (see
+	// agentSession).
+	stream := a.session().openStream()
+	conn := stream.connect(ctx)
+	res, err := a.client.Do(req.WithContext(conn.ctx))
 	if err != nil {
+		stream.close()
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 	if err := agentStreamStatus("get outgoing", res); err != nil {
+		stream.close()
 		return nil, err
 	}
+	res.Body = conn.body(res.Body)
 
 	// Buffered. An unbuffered channel parks the decoder for as long as the
 	// consumer spends inside InsertMock - and the first insert does mkdir +
@@ -370,64 +408,79 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
+		stream.close()
+		_ = res.Body.Close()
 		return nil, fmt.Errorf("failed to get errorgroup from the context")
 	}
 
 	grp.Go(func() error {
 		defer func() {
 			close(mockChan)
-
-			err := res.Body.Close()
-			if err != nil {
+			stream.close()
+		}()
+		for {
+			dropped := a.readMocks(res, mockChan)
+			if err := res.Body.Close(); err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getoutgoing")
 			}
-		}()
-
-		decoder := gob.NewDecoder(res.Body)
-
-		for {
-			var mock models.Mock
-			if err := decoder.Decode(&mock); err != nil {
-				if utils.IsShutdownError(err) {
-					// End of the stream or connection closed during shutdown
-					break
-				}
-				utils.LogError(a.logger, err, "failed to decode mock from stream")
-				break
+			if dropped {
+				return nil
 			}
-
-			// Offer the mock rather than racing the context for it.
-			//
-			// This used to be `select { case <-ctx.Done(): return nil; case
-			// mockChan <- &mock }`, which threw away a mock already decoded
-			// into our own address space the moment the capture context was
-			// cancelled - silently, with agent-side accounting still reporting
-			// success. Cancellation is the wrong thing to consult here: the
-			// consumer persists on an uncancellable context, so it can always
-			// accept, and the only reason it might not have yet is that it is
-			// busy writing the previous mock.
-			//
-			// So always try to deliver, bounded so a genuinely dead consumer
-			// cannot hang the stream. Anything still dropped is data loss and
-			// is logged as an error, because the alternative - a mock set
-			// indistinguishable from one where the call never happened - is
-			// what made this class of bug take an investigation to find.
-			select {
-			case mockChan <- &mock:
-				// Send the decoded mock to the channel
-			case <-time.After(mockHandoffGrace):
-				utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
-					zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
-					zap.Duration("waited", mockHandoffGrace))
+			var ok bool
+			if res, ok = a.resumeStream(ctx, stream, "get outgoing", http.MethodPost, "/outgoing", requestJSON); !ok {
 				return nil
 			}
 		}
-		return nil
 	})
 
 	a.logger.Debug("Successfully connected to outgoing mocks stream.")
 
 	return mockChan, nil
+}
+
+// readMocks hands the mocks of one outgoing stream to mockChan until the
+// stream ends. It reports whether it dropped one because the consumer stopped
+// taking them, after which the stream must not go on.
+func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock) (dropped bool) {
+	decoder := gob.NewDecoder(res.Body)
+	for {
+		var mock models.Mock
+		if err := decoder.Decode(&mock); err != nil {
+			if utils.IsShutdownError(err) {
+				// End of the stream or connection closed during shutdown
+				break
+			}
+			utils.LogError(a.logger, err, "failed to decode mock from stream")
+			break
+		}
+
+		// Offer the mock rather than racing the context for it.
+		//
+		// This used to be `select { case <-ctx.Done(): return nil; case
+		// mockChan <- &mock }`, which threw away a mock already decoded
+		// into our own address space the moment the capture context was
+		// cancelled - silently, with agent-side accounting still reporting
+		// success. Cancellation is the wrong thing to consult here: the
+		// consumer persists on an uncancellable context, so it can always
+		// accept, and the only reason it might not have yet is that it is
+		// busy writing the previous mock.
+		//
+		// So always try to deliver, bounded so a genuinely dead consumer
+		// cannot hang the stream. Anything still dropped is data loss and
+		// is logged as an error, because the alternative - a mock set
+		// indistinguishable from one where the call never happened - is
+		// what made this class of bug take an investigation to find.
+		select {
+		case mockChan <- &mock:
+			// Send the decoded mock to the channel
+		case <-time.After(mockHandoffGrace):
+			utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
+				zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
+				zap.Duration("waited", mockHandoffGrace))
+			return true
+		}
+	}
+	return false
 }
 
 func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptions) (<-chan models.TestMockMapping, error) {
@@ -441,9 +494,13 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Make the HTTP request
-	res, err := a.client.Do(req)
+	// Registered before it connects; it outlives a restarted agent (see
+	// agentSession).
+	stream := a.session().openStream()
+	conn := stream.connect(ctx)
+	res, err := a.client.Do(req.WithContext(conn.ctx))
 	if err != nil {
+		stream.close()
 		return nil, fmt.Errorf("failed to get mappings response: %s", err.Error())
 	}
 	// An agent predating test-mock mapping (keploy #3715, Feb 2026) has no
@@ -462,6 +519,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 	// an edge case. /incoming and /outgoing need no such guard — both routes
 	// predate #3016 and every agent that can serve a session has them.
 	if res.StatusCode == http.StatusNotFound {
+		stream.close()
 		if closeErr := res.Body.Close(); closeErr != nil {
 			utils.LogError(a.logger, closeErr, "failed to close response body for getmappings")
 		}
@@ -473,50 +531,71 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 		return noMappings, nil
 	}
 	if err := agentStreamStatus("get mappings", res); err != nil {
+		stream.close()
 		return nil, err
 	}
+	res.Body = conn.body(res.Body)
 
 	mappingChan := make(chan models.TestMockMapping)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
+		stream.close()
+		_ = res.Body.Close()
 		return nil, fmt.Errorf("failed to get errorgroup from the context")
 	}
 
 	grp.Go(func() error {
 		defer func() {
 			close(mappingChan)
+			stream.close()
+		}()
+		for {
+			done := a.readMappings(ctx, res, mappingChan)
 			if err := res.Body.Close(); err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getmappings")
 			}
-		}()
-
-		decoder := json.NewDecoder(res.Body)
-
-		for {
-			var mapping models.TestMockMapping
-			if err := decoder.Decode(&mapping); err != nil {
-				if utils.IsShutdownError(err) {
-					break
-				}
-				utils.LogError(a.logger, err, "failed to decode mapping from stream")
-				break
-			}
-
-			select {
-			case <-ctx.Done():
+			if done {
 				return nil
-			case mappingChan <- mapping:
+			}
+			var ok bool
+			if res, ok = a.resumeStream(ctx, stream, "get mappings", http.MethodPost, "/mappings", nil); !ok {
+				return nil
 			}
 		}
-		return nil
 	})
 
 	a.logger.Debug("Successfully connected to mappings stream.")
 	return mappingChan, nil
 }
 
-func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
+// readMappings hands the mappings of one mappings stream to mappingChan until
+// the stream ends. It reports whether ctx is done, after which the stream must
+// not go on.
+func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mappingChan chan<- models.TestMockMapping) (done bool) {
+	decoder := json.NewDecoder(res.Body)
+	for {
+		var mapping models.TestMockMapping
+		if err := decoder.Decode(&mapping); err != nil {
+			if !utils.IsShutdownError(err) {
+				utils.LogError(a.logger, err, "failed to decode mapping from stream")
+			}
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return true
+		case mappingChan <- mapping:
+		}
+	}
+}
+
+func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			a.session().record(stepMockOutgoing, func(c context.Context) error { return a.MockOutgoing(c, opts) })
+		}
+	}()
 
 	// See GetOutgoing: mirror both spellings before the marshal so a pre-rename
 	// agent still sees the toggle.
@@ -754,7 +833,15 @@ func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error
 
 }
 
-func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error {
+func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) (retErr error) {
+	defer func() {
+		// Made again on a restarted agent, it is no first run: what a
+		// first run cleans up was cleaned up (see replay's repair, which
+		// re-registers the same way).
+		if retErr == nil && a.session().recording() {
+			a.session().record(stepTestSetHook, func(c context.Context) error { return a.BeforeTestSetCompose(c, testRunID, testSetID, false) })
+		}
+	}()
 
 	requestBody := models.BeforeTestSetCompose{
 		TestRunID: testRunID,
@@ -842,7 +929,12 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 // to reject the stream is old enough to have handled single-shot before — and
 // predates the large-corpus recordings streaming exists for — so the fallback
 // is safe; a genuine bad-request 400 simply fails again on the retry.
-func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) (retErr error) {
+	defer func() {
+		if retErr == nil {
+			a.session().record(stepStoreMocks, func(c context.Context) error { return a.StoreMocks(c, filtered, unFiltered) })
+		}
+	}()
 	a.consumedPerTest.Store(false)
 	// A dedicated cancelable context for the stream request: cancelling it tears
 	// down the transport's read of the io.Pipe body, which unblocks the encoder
@@ -1004,7 +1096,13 @@ func decodeStoreMocksResp(res *http.Response) error {
 	return nil
 }
 
-func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			recorded := copyMockParams(params)
+			a.session().record(stepMockParams, func(c context.Context) error { return a.UpdateMockParams(c, recorded) })
+		}
+	}()
 	// Only a successful answer that says so sets it again below; a call that
 	// fails at any point leaves the client believing nothing.
 	a.consumedPerTest.Store(false)
@@ -1134,8 +1232,9 @@ func (a *AgentClient) GetServedMocks(ctx context.Context) (map[string]models.Moc
 // (GET /mock/stats): the number of mocks stored on this agent process, plus
 // the running consumed/missed totals. The replay setup calls it after the
 // docker-compose bring-up to verify the agent still holds what the session
-// stored before any test fires: a replacement agent (the bring-up retry
-// recreates the stack, agent included) reports a loaded count of zero.
+// stored before any test fires: a replacement agent (one compose started again
+// in the bring-up retry, had it not been set up again) reports a loaded count
+// of zero.
 func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error) {
 	url := fmt.Sprintf("%s/mock/stats", a.conf.Agent.AgentURI)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -1187,6 +1286,9 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 		utils.LogError(a.logger, err, "failed to get app while running")
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	}
+	// Once this run of the application is over, no stream waits for its
+	// agent to come back, and what was recorded for it is let go.
+	defer a.session().end()
 
 	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
 	appErrCh := make(chan models.AppError, 1)
@@ -2048,6 +2150,10 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// Continue with app setup and registration as per normal flow
 	usrApp := app.NewApp(a.logger, cmd, a.dockerClient, opts)
 	a.apps.Store(uint64(0), usrApp) // key = 0, since there's only one client per agent
+	// Under compose the agent is the user's project's to start again: the
+	// session puts back what the run set up on it (see agentSession).
+	a.session().configure(utils.CmdType(opts.CommandType) == utils.DockerCompose)
+	usrApp.SetOnAgentRestart(a.setUpRestartedAgent)
 
 	// Set up cleanup on failure
 	defer func() {
@@ -2511,7 +2617,12 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 	return nil
 }
 
-func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
+func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retErr error) {
+	defer func() {
+		if retErr == nil {
+			a.session().record(stepAgentReady, func(c context.Context) error { return a.MakeAgentReadyForDockerCompose(c) })
+		}
+	}()
 	// Aligned with the agent's own healthcheck budget; see pkg.AgentReadyTimeout.
 	ctx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
 	defer cancel()
@@ -2571,10 +2682,10 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return a.streamPcapArtifact(gctx, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644)
+		return a.streamPcapArtifact(gctx, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644, false)
 	})
 	g.Go(func() error {
-		return a.streamPcapArtifact(gctx, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644)
+		return a.streamPcapArtifact(gctx, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644, true)
 	})
 	return g.Wait()
 }
@@ -2585,19 +2696,58 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 // stays a no-op for non-capture sessions. Other non-200s surface as
 // errors. Context cancellation returns nil so callers don't see
 // spurious errors at recording stop.
-func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile string, mode os.FileMode) error {
+func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile string, mode os.FileMode, appendable bool) error {
 	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, urlPath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("build pcap stream request: %w", err)
 	}
-	resp, err := a.client.Do(req)
+	// Registered before it connects; it outlives a restarted agent (see
+	// agentSession), going on in a file of its own (a capture), or in the
+	// same file (appendable, as the key log is).
+	stream := a.session().openStream()
+	defer stream.close()
+	conn := stream.connect(ctx)
+	resp, err := a.client.Do(req.WithContext(conn.ctx))
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil
 		}
 		return fmt.Errorf("dial %s: %w", url, err)
 	}
+	resp.Body = conn.body(resp.Body)
+	for n := 1; ; n++ {
+		path, flags := dstFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC
+		if n > 1 && appendable {
+			flags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+		} else if n > 1 {
+			ext := filepath.Ext(dstFile)
+			path = fmt.Sprintf("%s.%d%s", strings.TrimSuffix(dstFile, ext), n, ext)
+		}
+		copyErr, err := a.copyPcapStream(resp, url, path, flags, mode)
+		if errors.Is(err, errNoPcapStream) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var ok bool
+		if resp, ok = a.resumeStream(ctx, stream, "pcap stream "+urlPath, http.MethodGet, urlPath, nil); !ok {
+			if copyErr != nil && !errors.Is(copyErr, context.Canceled) {
+				return copyErr
+			}
+			return nil
+		}
+	}
+}
+
+// errNoPcapStream is an agent with no pcap stream to serve: capture is off.
+var errNoPcapStream = errors.New("the agent serves no pcap stream")
+
+// copyPcapStream writes one pcap stream response to path. It returns how the
+// copy ended, and an error when there was nothing to copy into a file
+// (errNoPcapStream when capture is off).
+func (a *AgentClient) copyPcapStream(resp *http.Response, url, path string, flags int, mode os.FileMode) (copyErr, err error) {
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil && !errors.Is(cerr, context.Canceled) {
 			a.logger.Debug("failed to close pcap stream body", zap.String("url", url), zap.Error(cerr))
@@ -2608,37 +2758,34 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 	case http.StatusNotFound, http.StatusServiceUnavailable:
 		a.logger.Debug("agent reports no pcap stream available; capture likely off",
 			zap.String("url", url))
-		return nil
+		return nil, errNoPcapStream
 	case http.StatusOK:
 		// fall through to the long copy below
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("stream %s: status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("stream %s: status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	out, err := os.OpenFile(dstFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	out, err := os.OpenFile(path, flags, mode)
 	if err != nil {
-		return fmt.Errorf("create %s: %w", dstFile, err)
+		return nil, fmt.Errorf("create %s: %w", path, err)
 	}
 	defer func() {
 		if cerr := out.Close(); cerr != nil {
 			a.logger.Warn("failed to close pcap dst file",
-				zap.String("path", dstFile), zap.Error(cerr))
+				zap.String("path", path), zap.Error(cerr))
 		}
 	}()
 
 	a.logger.Debug("pcap stream connected",
-		zap.String("url", url), zap.String("path", dstFile))
+		zap.String("url", url), zap.String("path", path))
 	written, copyErr := io.Copy(out, resp.Body)
 	a.logger.Debug("pcap stream ended",
 		zap.String("url", url),
-		zap.String("path", dstFile),
+		zap.String("path", path),
 		zap.Int64("bytes", written),
 		zap.Error(copyErr))
-	if copyErr != nil && !errors.Is(copyErr, context.Canceled) {
-		return copyErr
-	}
-	return nil
+	return copyErr, nil
 }
 
 // GetScopeWindows fetches the per-test scope windows the wrapped runner reported
@@ -2676,7 +2823,13 @@ func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow
 // PushScopeTable hands the agent the replay-time per-test name→mock-names table
 // (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
 // served pool per test. A missing endpoint (older agent) is a no-op.
-func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string) error {
+func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			recorded := maps.Clone(table)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushScopeTable(c, recorded) })
+		}
+	}()
 	url := fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI)
 	body, err := json.Marshal(models.ScopeTableReq{Mappings: table})
 	if err != nil {

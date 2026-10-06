@@ -332,6 +332,36 @@ func TestIsTransientComposeDependencyFailure(t *testing.T) {
 			},
 			false,
 		},
+		// Whatever state compose left keploy's agent in, the run is recoverable:
+		// a running agent is reused by the retry's `up`, and one compose stopped
+		// (or never started) is set up again by the agent client's session.
+		{
+			"app created + dep exited nonzero + agent running -> transient",
+			runtimeErr, utils.Runtime, "app",
+			append(depFailStates("app"), composeServiceState{Service: keployAgentComposeService, State: "running"}),
+			true,
+		},
+		{
+			"app created + dep exited nonzero + agent stopped by compose -> transient",
+			runtimeErr, utils.Runtime, "app",
+			append(depFailStates("app"), composeServiceState{Service: keployAgentComposeService, State: "exited", ExitCode: 0}),
+			true,
+		},
+		{
+			"app created + dep exited nonzero + agent killed by compose (143) -> transient",
+			runtimeErr, utils.Runtime, "app",
+			append(depFailStates("app"), composeServiceState{Service: keployAgentComposeService, State: "exited", ExitCode: 143}),
+			true,
+		},
+		// The agent crashed: it is the failure, and every dependency compose
+		// stopped after it exits non-zero too. Retrying would only delay the
+		// agent's error.
+		{
+			"agent crashed -> NOT transient",
+			runtimeErr, utils.Runtime, "app",
+			append(depFailStates("app"), composeServiceState{Service: keployAgentComposeService, State: "exited", ExitCode: 1}),
+			false,
+		},
 		// Only the injected keploy-agent exited non-zero: it is keploy's own
 		// service, never the user's crashed dependency, so it must not count.
 		{

@@ -1730,15 +1730,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
-		// The compose bring-up retry (pkg/client/app) answers a transient
-		// dependency crash by tearing the whole stack down, the injected
-		// keploy-agent included, and re-issuing `up`; the replacement agent boots
-		// empty. Everything this session stored on the agent lived in the process
-		// that just went away, and the setup above already ran, so without a check
-		// the tests would fire against an agent holding nothing and the run would
-		// report zero executed tests (keploy#4614). Re-register with the
-		// replacement, or fail this test set loudly rather than proceeding
-		// mockless.
+		// The compose bring-up retry (pkg/client/app) can leave keploy's agent
+		// replaced: compose starts again an agent it stopped, or recreates one
+		// under a recreate flag, and the replacement boots empty. The CLI sets
+		// it up again as this one was (pkg/platform/http/session.go); should that
+		// not have taken, everything this session stored on the agent lived in
+		// the process that went away, and the tests would fire against an agent
+		// holding nothing and report zero executed tests (keploy#4614).
+		// Re-register with the replacement, or fail this test set loudly rather
+		// than proceeding mockless.
 		if err := r.ensureAgentHoldsStoredMocks(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
 			totalConsumedMocks, useMappingBased, testCases); err != nil {
 			return models.TestSetStatusFailed, err
@@ -4333,7 +4333,7 @@ func (r *Replayer) probeMockStats(ctx context.Context) (models.MockStats, error)
 // fire against. The loaded count is only ever written by StoreMocks on the
 // agent process, so any non-zero value means that process received our store;
 // zero while a non-empty corpus was stored is the replacement-agent signature
-// (the bring-up retry boots a new agent, and nothing re-stores onto it).
+// (an agent the bring-up retry started that was not set up again).
 func agentHoldsStoredCorpus(stored, loaded int) bool {
 	return stored == 0 || loaded > 0
 }
@@ -4344,13 +4344,17 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // replacement agent when it does not.
 //
 // Why this exists: the compose bring-up retry (pkg/client/app,
-// shouldRetryComposeUp) answers a transient dependency crash by tearing the
-// whole stack down, the injected keploy-agent included, and re-issuing `up`;
-// the replacement agent boots empty. All of the session's replay state - the
-// stored corpus, the proxy's mock manager, the mock filter params - lived in
-// the agent that just went away, and the straight-line setup above has
-// already run, so nothing re-registers it: the tests fire against an agent
-// holding nothing and the run reports zero executed tests (keploy#4614).
+// shouldRetryComposeUp) answers a transient dependency crash by running `up`
+// again, and compose can replace the injected keploy-agent there: it starts
+// again an agent it stopped (every service attached), or recreates one (a
+// recreate flag), and the replacement boots empty. The CLI's agent session
+// sets the replacement up again once it answers (pkg/platform/http/
+// session.go); this is the check that it took, and the repair when it did not.
+// All of the session's replay state - the stored corpus, the proxy's mock
+// manager, the mock filter params - lived in the agent that went away, and
+// the straight-line setup above has already run: unrepaired, the tests fire
+// against an agent holding nothing and the run reports zero executed tests
+// (keploy#4614).
 //
 // The probe is the agent's non-draining /mock/stats loaded count rather than
 // GetConsumedMocks: that one drains, and polling it here would steal entries
