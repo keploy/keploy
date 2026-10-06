@@ -182,24 +182,25 @@ func (p *Proxy) recordViaSupervisor(
 	// "parser retired" one below, and the one a parser that reports its own
 	// stop logs in its place (supervisor.ErrReported: the MySQL recorder's for
 	// lost framing). The spans read it in one place, openSpan, as each opens:
-	// at the stop (OnStop), or on the connection's traffic after a span closed
-	// for idleness (UnrecordedConn.Note). Read at the stop alone, it let a
-	// span open after the recording had stopped: a span opened at a stop while
-	// the recording ran closes once the connection idles, as it does while the
-	// relay is blocked writing an answer to an app slow to read it, and the
-	// write the relay finished after the recording stopped opened another.
-	// The retirement WARN was decided apart, by a status of canceled, and a
-	// parser that panicked as the recording stopped had it logged with no span
-	// opened; the hole's was logged whatever the recording did, and so was the
-	// MySQL recorder's. A span at the stop opens as the stop is stamped, and
-	// each WARN reads the rule after it. A recording that has stopped does not
-	// resume, so no WARN goes out for a stop that opened no span. A span
-	// opened while the recording ran goes without its WARN if the recording
-	// stops before the WARN is due: a parser whose return wins the
-	// supervisor's select over the stop has its stop stamped as it returns,
-	// before the stop, and is seen retired once the recording has stopped.
-	// Its span is a loss before the stop, and the session's summary counts the
-	// test cases it leaves out.
+	// at the stop (OnStop), from the connection's next bytes after its parser
+	// returns (StopFromNextBytes, below), or on the connection's traffic after
+	// a span closed for idleness (UnrecordedConn.Note). Read where a stop is
+	// armed instead, it would let a span open after the recording had
+	// stopped, from a write the relay finishes once an app slow to read an
+	// answer reads it: the write would reopen a span closed for idleness after
+	// a stop while the recording ran, or open the first after a parser's
+	// return while it ran. The retirement WARN was decided apart, by a status
+	// of canceled, and a parser that panicked as the recording stopped had it
+	// logged with no span opened; the hole's was logged whatever the recording
+	// did, and so was the MySQL recorder's. A span at the stop opens as the
+	// stop is stamped, and each WARN reads the rule after it. A recording that
+	// has stopped does not resume, so no WARN goes out for a stop that opened
+	// no span. A span opened while the recording ran goes without its WARN if
+	// the recording stops before the WARN is due: a parser whose return wins
+	// the supervisor's select over the stop has its stop stamped as it
+	// returns, before the stop, and is seen retired once the recording has
+	// stopped. Its span is a loss before the stop, and the session's summary
+	// counts the test cases it leaves out.
 	openSpan := func(start time.Time) func() {
 		if svSess.RecordingStopping() {
 			return func() {}
@@ -481,6 +482,23 @@ func (p *Proxy) recordViaSupervisor(
 			zap.String("status", result.Status.String()),
 		)
 	}
+
+	// Whatever the connection carries from here is not recorded: its parser
+	// is gone, and the relay keeps forwarding. A parser that stopped on an
+	// exchange, died or was retired stopped the connection as its stop was
+	// stamped (OnStop, above), no later than the retirement: what it had
+	// captured and not recorded is lost, the exchange it was in, which only
+	// the parser can report (ReportStoppedOn), and those queued behind it. A
+	// parser that returned on its own recorded what it read, so the
+	// connection is left out from the next bytes it carries, if any (a parser
+	// that returns at its connection's end leaves no span). The first stop
+	// counts, so this is a no-op after a stamped one, a capture hole's
+	// included (OnCaptureDesync). Whether those next bytes cost the recording
+	// anything is decided as their span opens (openSpan), not here: they can
+	// come after the recording stopped, whether the parser returned before
+	// the stop or as it, from a write the relay finishes once an app slow to
+	// read an answer reads it, and they open no span then.
+	unrecorded.StopFromNextBytes()
 
 	// The teardown, the same whether the parser returned on its own or was
 	// retired. A parser's return never ends the relay (invariant I1): the

@@ -411,7 +411,18 @@ func (u *UnrecordedConn) Stop(at time.Time) bool {
 	return true
 }
 
-// Stopped reports whether Stop has been called.
+// StopFromNextBytes says the connection is no longer recorded, with nothing it
+// carried so far lost: its parser returned, having recorded what it read. No
+// span opens now; the next bytes the connection carries (Note) open one, from
+// where they were, and it follows the traffic from then on as after Stop. A
+// connection that carries nothing more, the usual end of a parser that
+// returned at its connection's end, leaves no span. Only the first Stop or
+// StopFromNextBytes counts; it reports whether this was it.
+func (u *UnrecordedConn) StopFromNextBytes() bool {
+	return u != nil && !u.ended.Load() && u.stopped.CompareAndSwap(false, true)
+}
+
+// Stopped reports whether Stop (or StopFromNextBytes) has been called.
 func (u *UnrecordedConn) Stopped() bool { return u != nil && u.stopped.Load() }
 
 // End says the connection has ended: an open span is closed now, and none opens
