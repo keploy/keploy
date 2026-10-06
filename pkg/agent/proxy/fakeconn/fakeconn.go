@@ -18,6 +18,16 @@ var ErrFakeConnNoWrite = errors.New("fakeconn: Write is not permitted; parsers m
 // ErrClosed is returned by Read/ReadChunk after Close.
 var ErrClosed = errors.New("fakeconn: closed")
 
+// ErrSkipMidChunk is returned by [FakeConn.SkipThrough] when the chunk the
+// reader is partway through was captured after the point to skip through: the
+// stream cannot be cut there at a chunk boundary.
+var ErrSkipMidChunk = errors.New("fakeconn: the chunk being read was captured after the point to skip through")
+
+// ErrUnplaced is returned by [FakeConn.SkipThrough] for a chunk whose capture
+// time (ReadAt) does not place it before or after the point to skip through:
+// it has none, or it is the point itself.
+var ErrUnplaced = errors.New("fakeconn: a chunk's capture time does not place it before or after the point to skip through")
+
 // deadlineError implements net.Error with Timeout()=true and
 // Temporary()=true so callers that inspect via net.Error can treat
 // Read deadline hits like real socket deadline hits.
@@ -57,6 +67,10 @@ type FakeConn struct {
 	bufReadAt    time.Time // source ReadAt of bytes currently in buf
 	bufWrittenAt time.Time // source WrittenAt of bytes currently in buf
 	bufDir       Direction // source direction of bytes currently in buf
+	// bufUnread: buf holds a whole chunk SkipThrough left unread. None of
+	// its bytes were handed over yet, so its capture time is not yet the
+	// stream's LastReadTime (takeBufLocked).
+	bufUnread bool
 	// pos is the absolute offset, in bytes of this stream, of the next
 	// byte the parser will be handed. Equivalently: how many bytes have
 	// already left this FakeConn, counting both bytes delivered to the
@@ -188,6 +202,7 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 
 	f.mu.Lock()
 	if f.buf.Len() > 0 {
+		f.takeBufLocked()
 		n, err := f.buf.Read(p)
 		f.pos += int64(n)
 		f.consumed.Store(f.pos)
@@ -287,6 +302,7 @@ func (f *FakeConn) ReadChunk() (Chunk, error) {
 func (f *FakeConn) drainBufferedLocked() (Chunk, bool) {
 	f.mu.Lock()
 	if f.buf.Len() > 0 {
+		f.bufUnread = false // the timestamps below are stored from bufReadAt
 		out := make([]byte, f.buf.Len())
 		_, _ = f.buf.Read(out)
 		c := Chunk{
@@ -331,6 +347,7 @@ func (f *FakeConn) readChunkLocked() (Chunk, error) {
 	// mixes Read and ReadChunk on the same FakeConn.
 	f.mu.Lock()
 	if f.buf.Len() > 0 {
+		f.bufUnread = false // the timestamps below are stored from bufReadAt
 		out := make([]byte, f.buf.Len())
 		_, _ = f.buf.Read(out)
 		c := Chunk{
@@ -402,6 +419,125 @@ func (f *FakeConn) recvChunk() (Chunk, error) {
 			// deadline changed; loop and re-fetch.
 			f.waiting.Store(false)
 		}
+	}
+}
+
+// AtChunkBoundary reports whether the next byte read starts a chunk: nothing
+// is left of the chunk the reader was partway through. A parser taking up a
+// stream again after one it could not frame starts only where a message was
+// sent on its own.
+func (f *FakeConn) AtChunkBoundary() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.buf.Len() == 0
+}
+
+// takeBufLocked marks the chunk in buf as being read: a whole chunk SkipThrough
+// left unread becomes the one LastReadTime names, as a chunk taken off the
+// channel does. Caller holds mu.
+func (f *FakeConn) takeBufLocked() {
+	if !f.bufUnread {
+		return
+	}
+	f.bufUnread = false
+	if !f.bufReadAt.IsZero() {
+		f.lastReadNano.Store(f.bufReadAt.UnixNano())
+	}
+	if !f.bufWrittenAt.IsZero() {
+		f.lastWrittenNano.Store(f.bufWrittenAt.UnixNano())
+	}
+}
+
+// SkipThrough discards the bytes of this stream captured before t, and leaves
+// the reader at the start of the first chunk captured after it.
+//
+// A parser that could not frame a response re-aligns with it. In a
+// request/response protocol whose client sends a command only once it has
+// read the whole answer to the one before (MySQL's, unpipelined), every byte
+// of that answer was captured before the next command was, and every byte of
+// the next answer after it. With t the capture time of the next command, what
+// SkipThrough discards is the rest of the answer the parser could not frame,
+// and the next Read starts the next answer: a capture never joins two reads
+// into one chunk, so an answer the server sent only after the command starts a
+// chunk of its own.
+//
+// What is left of the chunk the reader is partway through goes with it when
+// that chunk was captured before t. When the reader has read from a chunk
+// captured after t (partway through it, or the whole of it) the stream cannot
+// be cut at t, and SkipThrough returns [ErrSkipMidChunk] having discarded
+// nothing. A chunk with no capture time, or captured at t itself, cannot be
+// told to be before or after it (a clock too coarse to order the command and
+// its answer): SkipThrough returns [ErrUnplaced] before it. Otherwise it
+// blocks for chunks until one captured after t arrives, and leaves it unread,
+// LastReadTime still naming the last chunk read; or until the stream ends,
+// with the error a Read gets there. It returns how many bytes it discarded,
+// and the capture time of the last chunk it discarded from (zero when none).
+//
+// Like DiscardBefore, it must not be called while another read is in
+// progress: it is the reader's own call.
+func (f *FakeConn) SkipThrough(t time.Time) (n int64, last time.Time, err error) {
+	if err := f.applyDiscard(); err != nil {
+		return 0, time.Time{}, err
+	}
+	f.mu.Lock()
+	if left := f.buf.Len(); left > 0 {
+		switch {
+		case f.bufUnread && f.bufReadAt.After(t):
+			// A whole chunk captured after t, left unread by a skip before
+			// this one: the reader is already where t puts it.
+			f.mu.Unlock()
+			return 0, time.Time{}, nil
+		case f.bufReadAt.IsZero() || f.bufReadAt.Equal(t):
+			f.mu.Unlock()
+			return 0, time.Time{}, ErrUnplaced
+		case f.bufReadAt.After(t):
+			f.mu.Unlock()
+			return 0, time.Time{}, ErrSkipMidChunk
+		}
+		f.buf.Reset()
+		f.pos += int64(left)
+		f.consumed.Store(f.pos)
+		n, last = int64(left), f.bufReadAt
+		f.bufReadAt, f.bufWrittenAt, f.bufDir, f.bufUnread = time.Time{}, time.Time{}, 0, false
+	} else if read := f.lastReadNano.Load(); read != 0 && !time.Unix(0, read).Before(t) {
+		// The last chunk read, all of it, was captured at t or after it.
+		f.mu.Unlock()
+		if time.Unix(0, read).Equal(t) {
+			return 0, time.Time{}, ErrUnplaced
+		}
+		return 0, time.Time{}, ErrSkipMidChunk
+	}
+	f.mu.Unlock()
+	for {
+		var c Chunk
+		read, written := f.lastReadNano.Load(), f.lastWrittenNano.Load()
+		if f.closed.Load() {
+			var ok bool
+			if c, ok = f.drainBufferedLocked(); !ok {
+				return n, last, ErrClosed
+			}
+		} else if c, err = f.recvChunk(); err != nil {
+			return n, last, err
+		}
+		if !c.ReadAt.Before(t) || c.ReadAt.IsZero() {
+			// Left unread: the next Read starts with it, and LastReadTime
+			// names it once it does.
+			f.lastReadNano.Store(read)
+			f.lastWrittenNano.Store(written)
+			f.mu.Lock()
+			f.buf.Write(c.Bytes)
+			f.bufReadAt, f.bufWrittenAt, f.bufDir, f.bufUnread = c.ReadAt, c.WrittenAt, c.Dir, true
+			f.mu.Unlock()
+			if !c.ReadAt.After(t) {
+				return n, last, ErrUnplaced
+			}
+			return n, last, nil
+		}
+		f.mu.Lock()
+		f.pos += int64(len(c.Bytes))
+		f.consumed.Store(f.pos)
+		f.mu.Unlock()
+		n, last = n+int64(len(c.Bytes)), c.ReadAt
 	}
 }
 
@@ -500,6 +636,7 @@ func (f *FakeConn) applyDiscard() error {
 			return nil
 		}
 		if have := int64(f.buf.Len()); have > 0 {
+			f.takeBufLocked()
 			n := have
 			if n > need {
 				n = need
