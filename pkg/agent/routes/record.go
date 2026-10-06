@@ -240,6 +240,9 @@ func (a *Agent) Stop(w http.ResponseWriter, _ *http.Request) {
 
 func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	// Tells the client that /storemocks takes a zstd-compressed stream
+	// (RFC 7694). An agent without this header gets the stream uncompressed.
+	w.Header().Set("Accept-Encoding", models.MockStreamEncodingZstd)
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
 }

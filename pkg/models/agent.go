@@ -172,6 +172,17 @@ type StoreMocksReq struct {
 
 const StoreMocksStreamContentType = "application/x-gob-stream"
 
+// MockStreamEncodingZstd is the Content-Encoding of a zstd-compressed /storemocks
+// stream. An agent that can decode it says so with "Accept-Encoding: zstd" on its
+// /health response (RFC 7694), and the client compresses only for such an agent:
+// an older one would read the compressed bytes as gob and fail the upload.
+const MockStreamEncodingZstd = "zstd"
+
+// MockStreamZstdWindow is the zstd window both ends of a /storemocks stream use.
+// The client encodes with it and the agent refuses a stream that needs more, so
+// a stream cannot make the agent allocate more than this for its window.
+const MockStreamZstdWindow = 8 << 20
+
 // MockStreamHeader is the first gob value on a /storemocks body; the counts
 // pre-size the agent's slices and split the following mocks into filtered then
 // unfiltered.

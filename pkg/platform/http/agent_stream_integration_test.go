@@ -9,13 +9,19 @@ package http_test
 // agent_fallback_test.go).
 
 import (
+	"bytes"
 	"context"
 	"encoding/gob"
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/routes"
 	"go.keploy.io/server/v3/pkg/models"
@@ -34,6 +40,7 @@ type stubSvc struct {
 	streamCalls int
 	filtered    int
 	unfiltered  int
+	names       []string
 }
 
 func (s *stubSvc) StoreMocks(_ context.Context, f, u []*models.Mock) error {
@@ -53,6 +60,9 @@ func (s *stubSvc) StoreMocksStream(_ context.Context, h models.MockStreamHeader,
 		if err := dec.Decode(&m); err != nil {
 			return err
 		}
+		s.mu.Lock()
+		s.names = append(s.names, m.Name)
+		s.mu.Unlock()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -97,4 +107,120 @@ func TestStoreMocks_StreamsToAgent(t *testing.T) {
 	if svc.filtered != len(f) || svc.unfiltered != len(u) {
 		t.Fatalf("counts mismatch: got f=%d u=%d want f=%d u=%d", svc.filtered, svc.unfiltered, len(f), len(u))
 	}
+}
+
+// compressibleCorpus is n HTTP mocks whose bodies repeat the way recorded API
+// responses do, so a compressed stream comes out much smaller than the raw one.
+func compressibleCorpus(n int) []*models.Mock {
+	mocks := make([]*models.Mock, n)
+	for i := range mocks {
+		mocks[i] = &models.Mock{
+			Name: fmt.Sprintf("mock-%d", i),
+			Kind: models.HTTP,
+			Spec: models.MockSpec{HTTPResp: &models.HTTPResp{
+				StatusCode: 200,
+				Body:       strings.Repeat(fmt.Sprintf(`{"id":%d,"name":"item","tags":["a","b"]}`, i), 32),
+			}},
+		}
+	}
+	return mocks
+}
+
+func mockNamesOf(mocks []*models.Mock) []string {
+	names := make([]string, len(mocks))
+	for i, m := range mocks {
+		names[i] = m.Name
+	}
+	return names
+}
+
+// gobStreamSize is how many bytes the uncompressed stream of mocks takes.
+func gobStreamSize(t *testing.T, mocks []*models.Mock) int {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	require.NoError(t, enc.Encode(models.MockStreamHeader{FilteredCount: len(mocks)}))
+	for _, m := range mocks {
+		require.NoError(t, enc.Encode(m))
+	}
+	return buf.Len()
+}
+
+// storeMocksTap records the Content-Encoding and size of what reached
+// /storemocks before passing it on.
+type storeMocksTap struct {
+	mu       sync.Mutex
+	encoding string
+	bytes    int
+}
+
+func (tap *storeMocksTap) read(r *http.Request) {
+	if !strings.HasSuffix(r.URL.Path, "/storemocks") {
+		return
+	}
+	body, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	tap.mu.Lock()
+	defer tap.mu.Unlock()
+	tap.encoding, tap.bytes = r.Header.Get("Content-Encoding"), len(body)
+}
+
+// The agent's /health says it takes zstd, so the stream goes compressed, and
+// the agent still decodes every mock in order.
+func TestStoreMocks_CompressesForAnAgentThatAcceptsZstd(t *testing.T) {
+	svc := &stubSvc{}
+	r := chi.NewRouter()
+	routes.DefaultRoutes{}.New(r, svc, zap.NewNop())
+	tap := &storeMocksTap{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		tap.read(req)
+		r.ServeHTTP(w, req)
+	}))
+	defer srv.Close()
+
+	mocks := compressibleCorpus(500)
+	require.NoError(t, newClient(t, srv.URL+"/agent").StoreMocks(context.Background(), mocks, nil))
+
+	tap.mu.Lock()
+	defer tap.mu.Unlock()
+	require.Equal(t, models.MockStreamEncodingZstd, tap.encoding)
+	raw := gobStreamSize(t, mocks)
+	require.Less(t, tap.bytes*5, raw, "sent %d bytes for a %d-byte stream", tap.bytes, raw)
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	require.Equal(t, 1, svc.streamCalls)
+	require.Equal(t, mockNamesOf(mocks), svc.names)
+}
+
+// An agent from before compression: its /health has no Accept-Encoding, and its
+// /storemocks reads the body as gob whatever the headers say. The client must
+// send it the stream uncompressed, or the agent fails on the zstd bytes.
+func TestStoreMocks_SendsUncompressedToAnAgentThatDoesNotAcceptZstd(t *testing.T) {
+	svc := &stubSvc{}
+	r := chi.NewRouter()
+	routes.DefaultRoutes{}.New(r, svc, zap.NewNop())
+	tap := &storeMocksTap{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/agent/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		tap.read(req)
+		req.Header.Del("Content-Encoding")
+		r.ServeHTTP(w, req)
+	}))
+	defer srv.Close()
+
+	mocks := compressibleCorpus(50)
+	require.NoError(t, newClient(t, srv.URL+"/agent").StoreMocks(context.Background(), mocks, nil))
+
+	tap.mu.Lock()
+	defer tap.mu.Unlock()
+	require.Empty(t, tap.encoding)
+	require.Equal(t, gobStreamSize(t, mocks), tap.bytes)
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	require.Equal(t, mockNamesOf(mocks), svc.names)
 }
