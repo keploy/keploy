@@ -337,11 +337,24 @@ func pathMatchesModuloDynamicSegments(mockPath, reqPath string) bool {
 		if ms[i] == rs[i] {
 			continue
 		}
-		if looksDynamicSegment(ms[i]) && looksDynamicSegment(rs[i]) {
+		// Relax a differing segment only when BOTH sides are the SAME dynamic
+		// type-class — so /users/123 matches /users/456 (digits) but NOT
+		// /users/<uuid>: a segment that changed TYPE is a different resource, not
+		// the same id drifting. Was "both look dynamic (any shape)", which let a
+		// numeric id match a uuid/hash and collapse distinct calls onto one mock.
+		//
+		// The class is derived from each value's characters, so it is a proxy for
+		// "same id type", not a guarantee: a short (~16-char) hex-alphabet id that
+		// is coincidentally all-decimal on one side can class differently (digits
+		// vs hex) and false-reject. That is the loud, safe direction (a replay
+		// "mock missed" you can see), traded against the silent false-accept — the
+		// wrong mock served — that the old any-shape relax allowed. Longer
+		// hashes/uuids/nanoids are not realistically affected.
+		if c := urlSegmentTypeClass(ms[i]); c != "" && c == urlSegmentTypeClass(rs[i]) {
 			differed = true
 			continue
 		}
-		return false // a non-id segment differs -> genuinely different path
+		return false // a non-id segment, or a type change, -> genuinely different path
 	}
 	return differed
 }
@@ -412,11 +425,26 @@ var (
 // ("v1alpha1", "oauth2"), or word-like slugs — all ambiguous with static path
 // components and left to explicit url-noise config (test.globalNoise.url).
 func looksDynamicSegment(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	if reSegAllDigits.MatchString(s) || reSegUUID.MatchString(s) || reSegLongHex.MatchString(s) {
-		return true
+	return urlSegmentTypeClass(s) != ""
+}
+
+// urlSegmentTypeClass classifies a dynamic-looking URL path segment into a stable
+// type-class, or "" when the segment is not dynamic-looking. The classes mirror
+// looksDynamicSegment's recognized shapes so a LEARNED-dynamic segment can be
+// matched on TYPE (its value ignored, its class required to match) instead of the
+// value being re-guessed per request. Returning "" for every non-dynamic shape
+// keeps looksDynamicSegment byte-for-byte equivalent. See looksDynamicSegment for
+// why each shape is (or isn't) treated as dynamic.
+func urlSegmentTypeClass(s string) string {
+	switch {
+	case s == "":
+		return ""
+	case reSegAllDigits.MatchString(s):
+		return "digits"
+	case reSegUUID.MatchString(s):
+		return "uuid"
+	case reSegLongHex.MatchString(s):
+		return "hex"
 	}
 	if len(s) >= 16 {
 		hasDigit, hasAlpha := false, false
@@ -428,9 +456,11 @@ func looksDynamicSegment(s string) bool {
 				hasAlpha = true
 			}
 		}
-		return hasDigit && hasAlpha
+		if hasDigit && hasAlpha {
+			return "token"
+		}
 	}
-	return false
+	return ""
 }
 
 // relaxed header key matcher (presence-only)
@@ -469,22 +499,39 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	return true
 }
 
-// looksDynamicQueryValue reports whether a query-param VALUE looks like a
-// machine-generated token that legitimately varies between record and replay.
-// It reuses looksDynamicSegment (uuid / long hex / >=16-char alphanumeric mix)
-// but is deliberately STRICTER about bare integers: in a path, position gives a
-// number its meaning (/users/55 is unmistakably an id), whereas a bare small
-// integer in a query is overwhelmingly a page / limit / offset / count, and
-// collapsing ?page=2 onto ?page=3 would re-open the very "wrong recorded
-// response" bug this gate exists to close. So only a LONG digit run (epoch
-// seconds/millis, snowflake ids and the like) counts as dynamic.
+// queryValueTypeClass classifies a query-param VALUE into the dynamic
+// type-class it belongs to ("digits" / "uuid" / "hex" / "token"), or "" when it
+// is not machine-generated enough to treat as dynamic. It mirrors the path
+// classifier urlSegmentTypeClass but is deliberately STRICTER about bare
+// integers: in a path, position gives a number its meaning (/users/55 is
+// unmistakably an id), whereas a bare small integer in a query is overwhelmingly
+// a page / limit / offset / count, and collapsing ?page=2 onto ?page=3 would
+// re-open the very "wrong recorded response" bug this gate exists to close. So a
+// digit run counts as dynamic ("digits") only when it is LONG (epoch
+// seconds/millis, snowflake ids and the like); a short one is static ("").
+//
+// The class is what makes the auto-dynamic query relaxation TYPE-AWARE: a
+// differing value is tolerated only when both sides share the same class, so a
+// rotating ?id=<uuid> no longer collapses onto a numeric ?id=<10-digit> (a
+// different value space, hence a different resource).
 const minDynamicQueryDigits = 10
 
-func looksDynamicQueryValue(s string) bool {
+func queryValueTypeClass(s string) string {
 	if reSegAllDigits.MatchString(s) {
-		return len(s) >= minDynamicQueryDigits
+		if len(s) >= minDynamicQueryDigits {
+			return "digits"
+		}
+		return "" // short bare integer: page / limit / offset — never dynamic
 	}
-	return looksDynamicSegment(s)
+	return urlSegmentTypeClass(s)
+}
+
+// looksDynamicQueryValue reports whether a query-param VALUE looks like a
+// machine-generated token that legitimately varies between record and replay.
+// It is the boolean view of queryValueTypeClass and stays byte-for-byte
+// equivalent to "class != \"\"".
+func looksDynamicQueryValue(s string) bool {
+	return queryValueTypeClass(s) != ""
 }
 
 // maskAndSort applies url noise to every member and sorts the result, so two
@@ -538,8 +585,9 @@ func maskAndSort(vals []string, noiseRes []*regexp.Regexp) []string {
 // needs no config in the path (/items/<uuid>) would hard-fail in the query
 // (?id=<uuid>), which is the same non-deterministic-id 502 that pass 2 exists to
 // prevent. A differing member is tolerated only when it looks machine-generated
-// on BOTH sides (see looksDynamicQueryValue), so deterministic and
-// genuinely-distinct queries are never relaxed. Disable via
+// AND shares the same dynamic type-class on BOTH sides (see
+// queryValueTypeClass), so deterministic queries, genuinely-distinct values, and
+// cross-type drift (a uuid vs a number) are never relaxed. Disable via
 // OutgoingOptions.DisableAutoURLDynamic.
 func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Values, urlNoise []string, autoDynamic bool) bool {
 	shouldIgnore := func(key string) bool {
@@ -612,15 +660,27 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 				continue
 			}
 			// Fallback only (pass 2): tolerate a member that looks
-			// machine-generated on BOTH sides. Sorting can misalign two
-			// multi-value sets that each carry a dynamic member, so this is a
-			// best-effort relaxation for repeated params; the single-value case
-			// (len 1, the one that matters) is exact.
-			if autoDynamic && looksDynamicQueryValue(rv[i]) && looksDynamicQueryValue(av[i]) {
+			// machine-generated on BOTH sides AND shares the SAME dynamic
+			// type-class — so a rotating ?id=<uuid> matches another uuid but NOT a
+			// numeric ?id=<10-digit>: a value that changed TYPE is a different
+			// resource, not the same id drifting (mirrors MatchURLPath's
+			// type-aware path relax). Was "both look dynamic (any shape)", which
+			// let a uuid collapse onto a long int / hash and serve the wrong
+			// recorded response. Sorting can misalign two multi-value sets that
+			// each carry a dynamic member, so this is a best-effort relaxation for
+			// repeated params; the single-value case (len 1, the one that matters)
+			// is exact.
+			//
+			// Same proxy-not-guarantee trade-off as the path classifier: a
+			// ~16-char hex id coincidentally all-decimal on one side can class
+			// differently and false-reject (~1/900, negligible for longer ids) —
+			// the loud, safe direction versus the silent wrong-mock this replaces.
+			if c := queryValueTypeClass(rv[i]); autoDynamic && c != "" && c == queryValueTypeClass(av[i]) {
 				h.Logger.Debug("http query: value treated as auto-detected dynamic",
 					zap.String("param", key),
 					zap.String("mock value", rv[i]),
-					zap.String("request value", av[i]))
+					zap.String("request value", av[i]),
+					zap.String("type class", c))
 				continue
 			}
 			return false
