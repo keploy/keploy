@@ -127,6 +127,11 @@ type noiseEntry struct {
 	keyLower string
 	key      string           // as configured; orders entries whose keyLower is the same
 	regexps  []*regexp.Regexp // empty => ignore subtree
+	// typeStrict marks a LEARNED-dynamic entry: its VALUE is ignored but its TYPE
+	// must still match (vs an ordinary entry, which ignores value and type). The
+	// flag rides on the entry so it is resolved by the SAME most-specific-first
+	// ordering as everything else — a more-specific user/regex entry still wins.
+	typeStrict bool
 }
 type noiseIndex struct {
 	entries []noiseEntry
@@ -169,12 +174,42 @@ func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
 }
 
 func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool) {
+	regs, isNoisy, _ = ni.matchKind(keyLower)
+	return regs, isNoisy
+}
+
+// matchKind is match() plus the winning entry's typeStrict flag. The first
+// (most-specific-first) entry whose keyLower is a substring of keyLower wins, so a
+// learned type-strict entry never overrides a more-specific user/regex entry — it
+// only applies when it is itself the most specific match. collectJSON uses this;
+// every other caller uses match() and ignores the flag.
+func (ni noiseIndex) matchKind(keyLower string) (regs []*regexp.Regexp, isNoisy, typeStrict bool) {
 	for _, e := range ni.entries {
 		if strings.Contains(keyLower, e.keyLower) {
-			return e.regexps, true
+			return e.regexps, true, e.typeStrict
 		}
 	}
-	return nil, false
+	return nil, false, false
+}
+
+// markTypeStrict flags the entries whose key is in typeStrict as learned-dynamic
+// (value ignored, type enforced). The entry must already exist — in practice the
+// learned path is also in the known-noise set the index was built from, so
+// non-JSON parsers (which don't consult the flag) still fully exclude it. Marking
+// after the build does not change ordering, so most-specific-first still holds.
+func (ni *noiseIndex) markTypeStrict(typeStrict map[string]struct{}) {
+	if len(typeStrict) == 0 {
+		return
+	}
+	ts := make(map[string]struct{}, len(typeStrict))
+	for k := range typeStrict {
+		ts[strings.ToLower(k)] = struct{}{}
+	}
+	for i := range ni.entries {
+		if _, ok := ts[ni.entries[i].keyLower]; ok {
+			ni.entries[i].typeStrict = true
+		}
+	}
 }
 
 // CloneNoiseMap returns a copy of a noise map, so that merging a test case's
