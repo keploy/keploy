@@ -3,14 +3,12 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -452,7 +450,12 @@ func dialIngressTarget(ctx context.Context, addr string, timeout time.Duration) 
 	}
 	for {
 		conn, err := net.DialTimeout(network, addr, max(time.Until(deadline), time.Millisecond))
-		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || !time.Now().Before(deadline) {
+		// Retry only while the target refuses the connection (app not listening
+		// yet), bounded by the deadline. isConnRefused is platform-aware: on
+		// Windows a refused connect surfaces as WSAECONNREFUSED, not the POSIX
+		// ECONNREFUSED, so a bare errors.Is(err, syscall.ECONNREFUSED) never
+		// matched there and the dial gave up immediately instead of waiting.
+		if err == nil || !isConnRefused(err) || !time.Now().Before(deadline) {
 			return conn, err
 		}
 		select {
