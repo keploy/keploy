@@ -140,3 +140,31 @@ func TestHookAnswersDNSWithWhereTheHooksReachTheProxy(t *testing.T) {
 		})
 	}
 }
+
+// captureProxy can begin a test's capture window; continuingProxy can also
+// continue one.
+type captureProxy struct {
+	coreAgent.Proxy // nil: any other call panics loudly
+	opened          *[]string
+}
+
+func (p captureProxy) BeginTestErrorCapture() { *p.opened = append(*p.opened, "begin") }
+
+type continuingProxy struct{ captureProxy }
+
+func (p continuingProxy) ContinueTestErrorCapture() { *p.opened = append(*p.opened, "continue") }
+
+// ContinueTestErrorCapture continues the proxy's capture, and opens the window
+// as Begin does on a proxy that predates continue.
+func TestContinueTestErrorCaptureFallsBackToBegin(t *testing.T) {
+	var opened []string
+	a := &Agent{logger: zap.NewNop(), Proxy: continuingProxy{captureProxy{opened: &opened}}}
+	if err := a.ContinueTestErrorCapture(context.Background()); err != nil || len(opened) != 1 || opened[0] != "continue" {
+		t.Fatalf("continuing proxy: err %v, opened %v; want [continue]", err, opened)
+	}
+	opened = nil
+	a = &Agent{logger: zap.NewNop(), Proxy: captureProxy{opened: &opened}}
+	if err := a.ContinueTestErrorCapture(context.Background()); err != nil || len(opened) != 1 || opened[0] != "begin" {
+		t.Fatalf("older proxy: err %v, opened %v; want [begin]", err, opened)
+	}
+}
