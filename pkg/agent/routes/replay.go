@@ -6,10 +6,13 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/render"
+	"github.com/klauspost/compress/zstd"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -110,8 +113,31 @@ func (a *Agent) BeginTestErrorCapture(w http.ResponseWriter, r *http.Request) {
 	render.JSON(w, r, map[string]string{"status": "ok"})
 }
 
+// storeMocksBody is a /storemocks body with its Content-Encoding undone: the
+// body itself when there is none, a streaming zstd reader for "zstd". Any other
+// encoding is an error, since reading it as gob would only fail later and less
+// clearly. Close releases the zstd reader; it does not close the request body.
+func storeMocksBody(r *http.Request) (io.ReadCloser, error) {
+	switch enc := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))); enc {
+	case "", "identity":
+		return io.NopCloser(r.Body), nil
+	case models.MockStreamEncodingZstd:
+		zr, err := zstd.NewReader(r.Body,
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderMaxWindow(models.MockStreamZstdWindow))
+		if err != nil {
+			return nil, fmt.Errorf("storemocks: start the zstd decoder: %w", err)
+		}
+		return zr.IOReadCloser(), nil
+	default:
+		return nil, fmt.Errorf("storemocks: unsupported Content-Encoding %q; this agent accepts %q or none", enc, models.MockStreamEncodingZstd)
+	}
+}
+
 // StoreMocks receives the mock corpus as a stream: a gob MockStreamHeader
 // followed by one gob Mock per frame, decoded mock-by-mock by StoreMocksStream.
+// The stream may be zstd-compressed (Content-Encoding: zstd), which the client
+// does only after this agent's /health has advertised it.
 func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-gob")
 
@@ -130,7 +156,15 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	dec := gob.NewDecoder(r.Body)
+	body, err := storeMocksBody(r)
+	if err != nil {
+		w.Header().Set("Accept-Encoding", models.MockStreamEncodingZstd)
+		writeErr(http.StatusUnsupportedMediaType, err)
+		return
+	}
+	defer body.Close()
+
+	dec := gob.NewDecoder(body)
 	var header models.MockStreamHeader
 	if err := dec.Decode(&header); err != nil {
 		writeErr(http.StatusBadRequest, fmt.Errorf("storemocks: decode stream header: %w", err))

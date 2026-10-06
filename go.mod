@@ -35,6 +35,7 @@ require (
 	github.com/k0kubun/pp/v3 v3.2.0
 	github.com/keploy/jsonDiff v1.0.8
 	github.com/keploy/shlex v1.0.0
+	github.com/klauspost/compress v1.18.0
 	github.com/miekg/dns v1.1.57
 	github.com/olekukonko/tablewriter v1.1.0
 	github.com/opencontainers/image-spec v1.1.1
@@ -174,7 +175,6 @@ require (
 	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
