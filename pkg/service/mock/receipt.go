@@ -48,11 +48,12 @@ const receiptTempPrefix = ".last-replay-"
 
 // Why a replay failed, when it did.
 const (
-	FailedBySetup       = "setup"        // keploy could not start the run; the tests never ran
-	FailedByRunner      = "runner"       // the test command itself failed
-	FailedByStrict      = "strict"       // --strict: a call was missed, or the miss list was unreadable
-	FailedByMinCoverage = "min-coverage" // --min-coverage: the run covered too little, or wrote no report
-	FailedByKeploy      = "keploy"       // keploy itself did not complete the run
+	FailedBySetup           = "setup"            // keploy could not start the run; the tests never ran
+	FailedByRunner          = "runner"           // the test command itself failed
+	FailedByStrict          = "strict"           // --strict: a call was missed, or the miss list was unreadable
+	FailedByMinCoverage     = "min-coverage"     // --min-coverage: the run covered too little, or wrote no report
+	FailedByKeploy          = "keploy"           // keploy itself did not complete the run
+	FailedByNothingVerified = "nothing-verified" // the run served none of the recorded calls, so it verified nothing
 )
 
 // Receipt is what one `keploy mock replay` proved.
