@@ -92,6 +92,36 @@ func TestDetectJSONDrift(t *testing.T) {
 	}
 }
 
+// TestEngineDetectLearnsValueOnly pins B1c: the auto-noising learn pass
+// (Engine.Detect) learns a field whose VALUE drifts (same type) but NOT one
+// whose TYPE changed. A type change is the real drift the type-enforcement
+// (StrictReject marking learned paths typeStrict) exists to catch, so learning
+// it would defeat the purpose. Non-vacuous: before B1c (valueChangesOnly=false
+// in Detect) the type-changing field was learned too, so this fails on the old
+// code.
+func TestEngineDetectLearnsValueOnly(t *testing.T) {
+	a := &fakeAdapter{body: []byte(`{"orderId":"EKL-1","updatedAt":1,"status":"OK","note":null,"tmp":"x"}`), hasBody: true}
+	// updatedAt: 1 -> 2        (value drift, same number type)      => learned.
+	// status:    "OK" -> 500   (string -> number, a TYPE change)    => NOT learned.
+	// note:      null -> "hi"  (null -> string, a TYPE change)      => NOT learned.
+	// tmp:       "x" -> absent (field removed)                      => NOT learned.
+	drift, comparable := New(a, true, false).Detect(&models.Mock{}, []byte(`{"orderId":"EKL-1","updatedAt":2,"status":500,"note":"hi"}`), nil)
+	if !comparable {
+		t.Fatalf("JSON bodies must be comparable")
+	}
+	if _, ok := drift["body.updatedAt"]; !ok {
+		t.Fatalf("a value-drifting field (same type) must be learned; got %v", drift)
+	}
+	for _, p := range []string{"body.status", "body.note", "body.tmp"} {
+		if _, ok := drift[p]; ok {
+			t.Fatalf("%s is a TYPE change (incl null<->value) or a removal -- it must NOT be learned; got %v", p, drift)
+		}
+	}
+	if len(drift) != 1 {
+		t.Fatalf("exactly one learned path (body.updatedAt) expected; got %v", drift)
+	}
+}
+
 // lineDiffer is a reference NON-JSON Diff: it proves a parser with a binary /
 // structured (non-JSON) payload can plug into the same Engine by supplying its
 // own Diff. It treats the body as newline-separated "key=value" records and
