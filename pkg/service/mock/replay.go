@@ -272,7 +272,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
 	}
 
-	if parent.Err() != nil { // user Ctrl+C
+	if parent.Err() != nil { // user Ctrl+C / a signal interrupted the replay
+		// A replay stopped by a signal before it finished did not verify the
+		// suite, so it must not exit 0 (a pass). Exit 128+N for the signal that
+		// stopped it (SIGINT→130, SIGHUP→129, SIGTERM→143); a non-signal cancel
+		// leaves the code alone (InterruptExitCode returns 0, SetExitCodeOnce is
+		// a no-op). Record is unaffected -- a stopped recording is a finish, and
+		// it returns 0 from its own path, not here.
+		if code := utils.InterruptExitCode(); code != 0 {
+			utils.SetExitCodeOnce(code)
+		}
 		return nil
 	}
 	// Either way the cause is returned as keploy's own failure (see

@@ -67,10 +67,33 @@ func RegisterPreCancelHook(fn func()) {
 // had been cut short over a recording that had just succeeded.
 var interrupted atomic.Bool
 
+// interruptSignal is the number of the signal NewCtx's handler stopped this run
+// on (syscall.SIGHUP=1, SIGINT=2, SIGTERM=15), or 0 when no signal did. It lets
+// a replay exit 128+N on a signal kill, so a run cut short before it finished
+// verifying is not read as a pass.
+var interruptSignal atomic.Int32
+
 // Interrupted reports whether NewCtx's handler stopped this run on a signal:
 // SIGINT, SIGTERM, or SIGHUP where NewCtx listens for it (see notifyHangups
 // and DieOnHangup).
 func Interrupted() bool { return interrupted.Load() }
+
+// InterruptSignalNumber returns the number of the signal NewCtx's handler
+// stopped this run on, or 0 when no signal did.
+func InterruptSignalNumber() int { return int(interruptSignal.Load()) }
+
+// InterruptExitCode is the 128+N process exit code for the signal that stopped
+// this run (SIGHUP→129, SIGINT→130, SIGTERM→143), or 0 when no signal did. A
+// replay uses it so a run killed before it finished verifying exits non-zero,
+// the shell's own convention for "terminated by signal N", rather than 0 — which
+// a CI pipeline reads as a pass.
+func InterruptExitCode() int {
+	n := int(interruptSignal.Load())
+	if n <= 0 {
+		return 0
+	}
+	return 128 + n
+}
 
 // MarkInterrupted records that a signal ended this run. The signal handler
 // below calls it; a build that installs its own handler, and a test that
@@ -79,7 +102,7 @@ func Interrupted() bool { return interrupted.Load() }
 func MarkInterrupted() { interrupted.Store(true) }
 
 // ClearInterrupted is for tests, which share one process across cases.
-func ClearInterrupted() { interrupted.Store(false) }
+func ClearInterrupted() { interrupted.Store(false); interruptSignal.Store(0) }
 
 // interruptedAgain is closed when a second interrupt (SIGINT or SIGTERM)
 // arrives after the one that stopped the run: the user asking a stop that is
@@ -130,6 +153,9 @@ func NewCtx() context.Context {
 		case sig = <-hangups:
 		}
 		MarkInterrupted()
+		if ss, ok := sig.(syscall.Signal); ok {
+			interruptSignal.Store(int32(ss))
+		}
 		fmt.Printf("Signal received: %s, canceling context...\n", sig)
 
 		// Where NewCtx listens for SIGHUP (not under nohup: see
