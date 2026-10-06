@@ -5,6 +5,7 @@ import (
 	"time"
 
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -48,11 +49,12 @@ type scopeKey struct {
 // that worker so PARALLEL workers each get their own served view without
 // stomping each other (Design A); pid == 0 falls back to the single global
 // scope (sequential single-worker runs, and the suite-level default).
-func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
+func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.Time) error {
 	if name == "" {
 		return nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
+		a.openWindow(name, pid, at)
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
 		a.scopeMu.Unlock()
@@ -78,29 +80,49 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
 		})
 	}
 
-	// Record mode: mark the window start (agent clock), keyed by worker PID so
-	// overlapping windows from parallel workers stay distinguishable. We do NOT
-	// touch the syncMock ingress-correlation machinery here — that is driven by
-	// incoming requests, which mock mode has none of.
+	a.openWindow(name, pid, at)
+	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
+	return nil
+}
+
+// openWindow remembers when a test said it started, in either mode, so a client can read the windows later.
+func (a *Agent) openWindow(name string, pid int, at time.Time) {
 	a.scopeMu.Lock()
 	if a.workerOpen == nil {
 		a.workerOpen = make(map[scopeKey]time.Time)
 	}
-	a.workerOpen[scopeKey{pid: uint32(pid), name: name}] = time.Now()
+	a.workerOpen[scopeKey{pid: uint32(pid), name: name}] = boundaryTime(at)
 	a.scopeMu.Unlock()
-	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
-	return nil
+}
+
+// closeWindow turns a started test into a window once it says it ended.
+func (a *Agent) closeWindow(name string, pid int, at time.Time) {
+	a.scopeMu.Lock()
+	k := scopeKey{pid: uint32(pid), name: name}
+	start, ok := a.workerOpen[k]
+	if ok {
+		delete(a.workerOpen, k)
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: a.scopeMeta[k].dir, Suite: a.scopeMeta[k].suite})
+		delete(a.scopeMeta, k)
+	}
+	a.scopeMu.Unlock()
+}
+
+// BeginScope is BeginScopeAt stamped with the agent's clock.
+func (a *Agent) BeginScope(ctx context.Context, name string, pid int) error {
+	return a.BeginScopeAt(ctx, name, pid, time.Time{})
 }
 
 // EndScope closes a per-test scope. In record mode it records the [begin, now]
 // window (tagged with the worker PID) for later correlation. In test mode it
 // restores this worker's whole-pool view so a call made between tests still
 // matches.
-func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
+func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Time) error {
 	if name == "" {
 		return nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
+		a.closeWindow(name, pid, at)
 		a.scopeMu.Lock()
 		_, scoped := a.scopeTable[name]
 		a.scopeMu.Unlock()
@@ -119,16 +141,22 @@ func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 		})
 	}
 
-	a.scopeMu.Lock()
-	k := scopeKey{pid: uint32(pid), name: name}
-	start, ok := a.workerOpen[k]
-	if ok {
-		delete(a.workerOpen, k)
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: time.Now(), PID: uint32(pid)})
-	}
-	a.scopeMu.Unlock()
+	a.closeWindow(name, pid, at)
 	a.logger.Debug("scope end (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
+}
+
+// EndScope is EndScopeAt stamped with the agent's clock.
+func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
+	return a.EndScopeAt(ctx, name, pid, time.Time{})
+}
+
+// boundaryTime is the runner's time when it gave one, else now.
+func boundaryTime(at time.Time) time.Time {
+	if at.IsZero() {
+		return time.Now()
+	}
+	return at
 }
 
 // GetScopeWindows returns the per-test windows collected this record session,
@@ -138,6 +166,9 @@ func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error)
 	defer a.scopeMu.Unlock()
 	out := make([]models.ScopeWindow, len(a.scopeWindows))
 	copy(out, a.scopeWindows)
+	for _, s := range starts.Default.List() {
+		out = append(out, models.ScopeWindow{Name: s.Key, Start: s.First, End: s.First, Ready: s.Ready, PID: s.Root, Dir: s.Dir, App: true, Port: s.Port, Program: s.Program, Place: s.Place, N: s.N, Ref: s.Ref, Worker: s.Worker})
+	}
 	return out, nil
 }
 
@@ -179,4 +210,21 @@ func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 	loaded := a.loadedMocks
 	a.scopeMu.Unlock()
 	return models.MockStats{Loaded: loaded}, nil
+}
+
+type scopeMeta struct {
+	dir   string
+	suite bool
+}
+
+func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {
+	if name == "" || (dir == "" && !suite) {
+		return
+	}
+	a.scopeMu.Lock()
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	a.scopeMeta[scopeKey{pid: uint32(pid), name: name}] = scopeMeta{dir: dir, suite: suite}
+	a.scopeMu.Unlock()
 }

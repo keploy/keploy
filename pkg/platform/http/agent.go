@@ -1572,6 +1572,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if opts.MockMode {
 		args = append(args, "--mock-mode")
 	}
+	if opts.RecordRequests {
+		args = append(args, "--record-requests")
+	}
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
 	// pattern (and for the same reason) as --disable-mapping above: the
 	// orchestrator has already applied flag > yaml > default, and the native
@@ -2965,6 +2968,31 @@ func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow
 	return windows, nil
 }
 
+func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) error {
+	body, err := json.Marshal(models.ScopeTableReq{Root: root, Sets: sets})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the app start table: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push the app start table: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("app start table returned status %d: %s", res.StatusCode, string(b))
+	}
+	return nil
+}
+
 // PushScopeTable hands the agent the replay-time per-test name→mock-names table
 // (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
 // served pool per test. A missing endpoint (older agent) is a no-op.
@@ -3713,4 +3741,25 @@ func (a *AgentClient) restoreShortfall(ctx context.Context, name string) (proble
 	}
 
 	return problems, true, nil
+}
+
+func (a *AgentClient) GetIDPairs(ctx context.Context) (map[string]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/ids", nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get id pairs", res, rawBody)
+	}
+	var pairs map[string]string
+	if err := json.NewDecoder(res.Body).Decode(&pairs); err != nil {
+		return nil, err
+	}
+	return pairs, nil
 }

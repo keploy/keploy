@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -97,6 +98,9 @@ func MockRecord(ctx context.Context, logger *zap.Logger, serviceFactory ServiceF
 				// A user interrupt is not a failure.
 				if ctx.Err() == context.Canceled {
 					return nil
+				}
+				if errors.Is(err, mockSvc.ErrRecordRefused) {
+					return err
 				}
 				utils.LogError(logger, err, "failed to record mocks")
 				// Record() returns nil after a merely-failing test command (it calls

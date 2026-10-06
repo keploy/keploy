@@ -107,6 +107,7 @@ type OutgoingOptions struct {
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay time.Duration // This is the same as Application delay.
 	Mocking  bool          // used to enable/disable mocking
+	SwapIDs  bool
 	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
 	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
 	// default), "passthrough" (dial the real upstream, don't persist), or
@@ -344,7 +345,9 @@ type SetupOptions struct {
 	// because the wrapped process is a test runner, not a server whose
 	// incoming traffic becomes test cases. Only outgoing calls are captured
 	// (record) or served (replay). Forwarded to the agent via --mock-mode.
-	MockMode          bool
+	MockMode bool
+	// RecordRequests keeps the ingress hooks on in mock mode so the app's incoming requests become test cases; forwarded as --record-requests.
+	RecordRequests    bool
 	GlobalPassthrough bool
 	// DisableHandshakeHold turns off holding each redirected connection's
 	// handshake until its destination answers (pkg/agent/proxy/synhold), so

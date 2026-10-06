@@ -58,6 +58,11 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	// binary TLS shims, time-freeze, secret obfuscation — applies to
 	// `keploy mock` unchanged. OSS uses the file-backed store.
 	mockSvc := mock.New(logger, commonServices.Instrumentation, commonServices.YamlMockDb, commonServices.YamlMappingDb, mock.FileStore{}, nil, cfg)
+	if cfg.Mock.RecordRequests {
+		if s, ok := mockSvc.(mock.TestDBSetter); ok {
+			s.SetTestDB(commonServices.YamlTestDB)
+		}
+	}
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	diffSvc := diff.New(logger, commonServices.YamlReportDb, commonServices.YamlTestDB)

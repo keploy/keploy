@@ -60,6 +60,7 @@ type NetworkTrafficDoc struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
+	Start        string              `json:"start,omitempty" yaml:"start,omitempty"`
 }
 
 // DocNoise is the unified on-disk representation of a mock's noise, written under

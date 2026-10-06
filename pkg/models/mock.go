@@ -117,6 +117,8 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
+	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	StartRef  string `json:"-" yaml:"-" bson:"-"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The

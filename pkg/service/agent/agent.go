@@ -14,11 +14,13 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -137,8 +139,9 @@ type Agent struct {
 	scopeMu      sync.Mutex
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
-	scopeTable   map[string][]string    // replay: test name -> mock names (from mappings.yaml)
-	loadedMocks  int                    // replay: count of mocks stored, for /agent/mock/stats
+	scopeMeta    map[scopeKey]scopeMeta
+	scopeTable   map[string][]string // replay: test name -> mock names (from mappings.yaml)
+	loadedMocks  int                 // replay: count of mocks stored, for /agent/mock/stats
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -483,9 +486,28 @@ const (
 	outgoingMockChanCap           = int(outgoingMockBufferBytes / nominalMockSizeBytes)
 )
 
+// resetScopeState clears the per-session scope bookkeeping — open scopes, the
+// closed per-test windows, and their metadata — at the start of a record or
+// replay session. A reused, long-lived agent process (compose, standalone)
+// serves many sessions back to back; without this, one session's windows would
+// bleed into the next and corrupt the mappings.yaml a later record builds from
+// GetScopeWindows. It does NOT touch scopeTable/loadedMocks: the CLI installs
+// those for a replay session via SetScopeTable before serving begins. The maps
+// are lazily re-created by openWindow/NoteScope, so nil is the correct zero.
+func (a *Agent) resetScopeState() {
+	a.scopeMu.Lock()
+	a.workerOpen = nil
+	a.scopeWindows = nil
+	a.scopeMeta = nil
+	a.scopeMu.Unlock()
+}
+
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, outgoingMockChanCap)
 
+	starts.Default.Reset()
+	ids.Default.Reset()
+	a.resetScopeState()
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
 		return nil, err
@@ -525,6 +547,9 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	// standalone) never drains one replay's captured-on-miss mocks into a later,
 	// unrelated set. Harmless when --on-miss is not "record" (buffer stays empty).
 	httpparser.ResetCaptured()
+	starts.Default.Reset()
+	ids.Default.Reset()
+	a.resetScopeState()
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {

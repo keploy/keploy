@@ -52,11 +52,11 @@ var effectiveUID = os.Geteuid
 // setenv { KEPLOY_AGENT_TOKEN }); refusing it would refuse the doas setups
 // that work. If it drops the token, the self-check's ERROR says so and how to
 // keep it (pkg.verifyControlPlaneGuarded).
-func agentTokenCommand(appCmd string, root bool) (cmd string, viaSudo bool) {
+func agentTokenCommand(appCmd string, root bool, names ...string) (cmd string, viaSudo bool) {
 	body := strings.TrimLeft(appCmd, " \t")
 	indent := appCmd[:len(appCmd)-len(body)]
 	wrapper, args := cutWord(body)
-	if (wrapper != "sudo" && wrapper != "doas") || args == "" {
+	if (wrapper != "sudo" && wrapper != "doas") || args == "" || len(names) == 0 {
 		return appCmd, false
 	}
 	if root {
@@ -67,7 +67,7 @@ func agentTokenCommand(appCmd string, root bool) (cmd string, viaSudo bool) {
 	if wrapper != "sudo" {
 		return appCmd, false
 	}
-	return indent + "sudo --preserve-env=" + token.Env + " " + args, true
+	return indent + "sudo --preserve-env=" + strings.Join(names, ",") + " " + args, true
 }
 
 // rootNoOps are the options that leave a leading sudo or doas, run by root,
@@ -123,7 +123,7 @@ func cutWord(s string) (word, rest string) {
 // before any agent exists (see agentTokenCommand).
 func (a *App) checkAgentTokenHandoff(ctx context.Context) error {
 	root := effectiveUID() == 0
-	if _, viaSudo := agentTokenCommand(a.cmd, root); !viaSudo {
+	if _, viaSudo := agentTokenCommand(a.cmd, root, token.Env); !viaSudo {
 		return nil
 	}
 	return docker.CheckSudoKeepsAgentToken(ctx, root)

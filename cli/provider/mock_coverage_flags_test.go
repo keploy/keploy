@@ -122,3 +122,37 @@ func TestMockSetNameIsOneDirectory(t *testing.T) {
 }
 
 func ptr(f float64) *float64 { return &f }
+
+func TestMockSetNameRespectsKeployYml(t *testing.T) {
+	for _, tc := range []struct {
+		name, fromYml, flag, want string
+	}{
+		{name: "default", want: "default"},
+		{name: "keploy.yml names the set", fromYml: "orders", want: "orders"},
+		{name: "an explicit --name wins", fromYml: "orders", flag: "payments", want: "payments"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Mock.Name = "default"
+			c := NewCmdConfigurator(zap.NewNop(), cfg)
+			cmd := &cobra.Command{Use: "replay"}
+			if err := c.addMockFlags(cmd); err != nil {
+				t.Fatal(err)
+			}
+			if tc.fromYml != "" {
+				cfg.Mock.Name = tc.fromYml
+			}
+			if tc.flag != "" {
+				if err := cmd.Flags().Set("name", tc.flag); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := c.readMockSetName(cmd); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Mock.Name != tc.want {
+				t.Fatalf("set name = %q, want %q", cfg.Mock.Name, tc.want)
+			}
+		})
+	}
+}

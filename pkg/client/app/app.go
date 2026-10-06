@@ -215,6 +215,13 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
 	tlsFlags += fmt.Sprintf("-e JAVA_TOOL_OPTIONS='%s' ", javaOpts)
 
+	if a.opts.MockMode && a.opts.AgentPort != 0 {
+		// The app shares the agent's network namespace, so a test can mark its own start and end here.
+		tlsFlags += fmt.Sprintf("-e KEPLOY_MOCK_AGENT=http://localhost:%d ", a.opts.AgentPort)
+		if token.Session() != "" {
+			tlsFlags += "-e " + token.MockAgentTokenEnv + " "
+		}
+	}
 	at := utils.RunSubcommandEnd(a.cmd)
 	if at < 0 {
 		if a.kind == utils.DockerStart {
@@ -1688,11 +1695,19 @@ func extractProjectFlags(cmd string) []string {
 // address, which the client's check that its agent enforces the token has to
 // see as the new agent it is.
 func (a *App) withAgentToken(cmd string) (string, []string) {
+	var mock []string
+	if a.opts.MockMode && token.Session() != "" {
+		mock = []string{token.MockAgentTokenEnv}
+	}
 	if a.kind != utils.DockerCompose {
+		if a.kind == utils.DockerRun {
+			cmd, _ = agentTokenCommand(cmd, effectiveUID() == 0, mock...)
+			return cmd, nil
+		}
 		return cmd, nil
 	}
 	token.RecordLaunch(a.opts.AgentURI)
-	cmd, _ = agentTokenCommand(cmd, effectiveUID() == 0)
+	cmd, _ = agentTokenCommand(cmd, effectiveUID() == 0, append([]string{token.Env}, mock...)...)
 	return cmd, docker.AgentTokenEnv()
 }
 

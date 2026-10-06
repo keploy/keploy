@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/render"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -23,6 +25,39 @@ type scopeBeginner interface {
 type scopeEnder interface {
 	EndScope(ctx context.Context, name string, pid int) error
 }
+type scopeBeginnerAt interface {
+	BeginScopeAt(ctx context.Context, name string, pid int, at time.Time) error
+}
+type scopeEnderAt interface {
+	EndScopeAt(ctx context.Context, name string, pid int, at time.Time) error
+}
+
+// beginScope hands the runner's time to a service that takes it and falls back to the old call.
+func beginScope(ctx context.Context, svc any, req models.ScopeReq) error {
+	if s, ok := svc.(scopeBeginnerAt); ok {
+		return s.BeginScopeAt(ctx, req.Name, req.Pid, req.At)
+	}
+	if s, ok := svc.(scopeBeginner); ok {
+		return s.BeginScope(ctx, req.Name, req.Pid)
+	}
+	return nil
+}
+
+// endScope is beginScope for the end of a scope.
+func endScope(ctx context.Context, svc any, req models.ScopeReq) error {
+	if s, ok := svc.(scopeEnderAt); ok {
+		return s.EndScopeAt(ctx, req.Name, req.Pid, req.At)
+	}
+	if s, ok := svc.(scopeEnder); ok {
+		return s.EndScope(ctx, req.Name, req.Pid)
+	}
+	return nil
+}
+
+type scopeNoter interface {
+	NoteScope(name string, pid int, dir string, suite bool)
+}
+
 type scopeWindowReader interface {
 	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
 }
@@ -46,12 +81,14 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-begin request: %v", err), http.StatusBadRequest)
 		return
 	}
-	if s, ok := a.svc.(scopeBeginner); ok {
-		if err := s.BeginScope(r.Context(), req.Name, req.Pid); err != nil {
-			a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if s, ok := a.svc.(scopeNoter); ok {
+		s.NoteScope(req.Name, req.Pid, req.Dir, req.Suite)
+	}
+	starts.Default.Begin(uint32(req.Pid), req.Name, req.Dir, req.Suite, markTime(req.At))
+	if err := beginScope(r.Context(), a.svc, req); err != nil {
+		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
@@ -64,12 +101,11 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-end request: %v", err), http.StatusBadRequest)
 		return
 	}
-	if s, ok := a.svc.(scopeEnder); ok {
-		if err := s.EndScope(r.Context(), req.Name, req.Pid); err != nil {
-			a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	starts.Default.End(uint32(req.Pid), req.Name, req.Suite, markTime(req.At))
+	if err := endScope(r.Context(), a.svc, req); err != nil {
+		a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
@@ -100,7 +136,10 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-table request: %v", err), http.StatusBadRequest)
 		return
 	}
-	if s, ok := a.svc.(scopeTableSetter); ok {
+	if req.Sets != nil {
+		starts.Default.SetTable(req.Root, req.Sets)
+	}
+	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
 		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -177,4 +216,38 @@ func (a *Agent) HandleServedMocks(w http.ResponseWriter, r *http.Request) {
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, served)
+}
+
+func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {
+	var req models.AppStartReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid app-start request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if req.Port < 0 || req.Port > 65535 {
+		http.Error(w, "invalid app-start request: port must be the port the app listens on, or left out right after the app is started", http.StatusBadRequest)
+		return
+	}
+	if req.Pid <= 0 {
+		http.Error(w, "invalid app-start request: pid must be the app's pid", http.StatusBadRequest)
+		return
+	}
+	var placed bool
+	if req.Port == 0 {
+		placed = starts.Default.Mark(uint32(req.Pid), markTime(req.At))
+	} else {
+		placed = starts.Default.Ready(uint32(req.Pid), uint16(req.Port), markTime(req.At))
+	}
+	if !placed {
+		a.logger.Warn("the app could not be placed under a test process; mark the suite or test before starting the app, and start the app as a child process, or its calls are treated as a dependency's", zap.Int("pid", req.Pid))
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]string{"status": "ok"})
+}
+
+func markTime(at time.Time) time.Time {
+	if at.IsZero() {
+		return time.Now()
+	}
+	return at
 }

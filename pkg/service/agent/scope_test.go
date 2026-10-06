@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -52,4 +53,34 @@ func TestRecordScopesParallelWorkers(t *testing.T) {
 		pids[w.PID] = true
 	}
 	require.True(t, pids[100] && pids[200], "each worker's window carries its own PID")
+}
+
+// A runner that reports its own clock gets a window stamped with it, not with the agent's read time.
+func TestRecordScopesUseTheRunnerTimeWhenGiven(t *testing.T) {
+	a := newRecordAgent()
+	ctx := context.Background()
+	start := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	end := start.Add(7 * time.Millisecond)
+	require.NoError(t, a.BeginScopeAt(ctx, "t", 0, start))
+	require.NoError(t, a.EndScopeAt(ctx, "t", 0, end))
+
+	ws, _ := a.GetScopeWindows(ctx)
+	require.Len(t, ws, 1)
+	require.True(t, ws[0].Start.Equal(start), "start %v", ws[0].Start)
+	require.True(t, ws[0].End.Equal(end), "end %v", ws[0].End)
+}
+
+// A fixture that posts no time still gets a window, stamped when the agent saw each call.
+func TestRecordScopesFallBackToTheAgentClock(t *testing.T) {
+	a := newRecordAgent()
+	ctx := context.Background()
+	before := time.Now()
+	require.NoError(t, a.BeginScope(ctx, "t", 0))
+	require.NoError(t, a.EndScope(ctx, "t", 0))
+
+	ws, _ := a.GetScopeWindows(ctx)
+	require.Len(t, ws, 1)
+	require.False(t, ws[0].Start.Before(before))
+	require.False(t, ws[0].End.Before(ws[0].Start))
+	require.True(t, ws[0].End.Before(time.Now().Add(time.Second)))
 }

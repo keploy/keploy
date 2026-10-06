@@ -13,6 +13,7 @@ package proxy
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -152,5 +153,24 @@ func TestPersistentConsumed_SurvivesDrainsWithinASet(t *testing.T) {
 
 	if p := mm.GetPersistentConsumed(); len(p) != 1 || p["mock-1"].Usage != models.Deleted {
 		t.Fatalf("the map must survive drains within a test set; got %#v", p)
+	}
+}
+
+// A mock served twice keeps the time it was first served, so a client attributes it to the test that used it first.
+func TestConsumedMockKeepsItsFirstServedTime(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	if err := mm.flagMockAsUsed(models.MockState{Name: "A", Kind: models.HTTP, Usage: models.Updated}); err != nil {
+		t.Fatal(err)
+	}
+	first := mm.consumedList[0].Timestamp
+	if first == 0 {
+		t.Fatal("a served mock must carry the time it was served")
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := mm.flagMockAsUsed(models.MockState{Name: "A", Kind: models.HTTP, Usage: models.Deleted}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mm.consumedList[0]; got.Timestamp != first || got.Usage != models.Deleted {
+		t.Fatalf("re-flag kept time %d (want %d) and usage %v", got.Timestamp, first, got.Usage)
 	}
 }

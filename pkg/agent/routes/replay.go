@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/render"
 	"github.com/klauspost/compress/zstd"
+	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -214,4 +215,9 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(models.ConsumedScopeHeader, models.ConsumedScopePerTest)
 	}
 	respondAgent(w, r, http.StatusOK, nil)
+}
+
+func (a *Agent) HandleIDs(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ids.Default.Pairs())
 }

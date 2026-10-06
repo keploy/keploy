@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // failsRecord is failsGroup for the stages only a recording has: a dying
@@ -111,6 +112,137 @@ func TestAnInterruptedRecordingIsNotAFailure(t *testing.T) {
 				t.Fatalf("an interrupted recording failed: %v", err)
 			}
 		})
+	}
+}
+
+type countingStore struct{ pushes int }
+
+func (s *countingStore) Pull(context.Context, string) error { return nil }
+
+func (s *countingStore) Push(context.Context, string) error {
+	s.pushes++
+	return nil
+}
+
+func TestRecordPublishesOnlyWhenTheTestsPassed(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		runResult models.AppError
+		pushes    int
+		exitCode  int
+		warned    bool
+	}{
+		{"passed", models.AppError{AppErrorType: models.ErrAppStopped}, 1, 0, false},
+		{"failed", models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 2}, 0, 2, true},
+		{"failed without a code", models.AppError{AppErrorType: models.ErrCommandError}, 0, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, tc.runResult), mocks: []*models.Mock{mockAt("mock-0", runnerT0)}}
+			cfg := instrConfig(base.composeInstr, utils.Native, "go test ./...")
+			cfg.Path = t.TempDir()
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			core, logs := observer.New(zap.WarnLevel)
+			store := &countingStore{}
+			if err := New(zap.New(core), base, stubMockDB{}, nil, store, nil, cfg).Record(context.Background()); err != nil {
+				t.Fatalf("Record returned %v", err)
+			}
+			if store.pushes != tc.pushes {
+				t.Fatalf("pushes = %d, want %d", store.pushes, tc.pushes)
+			}
+			if utils.ErrCode != tc.exitCode {
+				t.Fatalf("exit code = %d, want %d", utils.ErrCode, tc.exitCode)
+			}
+			warned := logs.FilterMessage("tests failed; the recording was not kept or published, and the previous recording is left as it was").Len() == 1
+			if warned != tc.warned {
+				t.Fatalf("warned = %v, want %v", warned, tc.warned)
+			}
+		})
+	}
+}
+
+func TestSaveSetPutsThePreviousRecordingBackUnlessKept(t *testing.T) {
+	dir := t.TempDir()
+	m := &mockService{logger: zap.NewNop(), config: &config.Config{Path: dir}}
+	set := filepath.Join(dir, "e2e")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(set, "old"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore, existed, err := m.saveSet("e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !existed {
+		t.Fatal("the set was there")
+	}
+	_ = os.Remove(filepath.Join(set, "old"))
+	_ = os.WriteFile(filepath.Join(set, "new"), nil, 0o644)
+	restore(false)
+	if _, err := os.Stat(filepath.Join(set, "old")); err != nil {
+		t.Fatal("the previous recording must be back")
+	}
+	if _, err := os.Stat(filepath.Join(set, "new")); err == nil {
+		t.Fatal("the dropped recording must be gone")
+	}
+
+	restore, existed, err = m.saveSet("fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if existed {
+		t.Fatal("the set was not there")
+	}
+	_ = os.MkdirAll(filepath.Join(dir, "fresh"), 0o755)
+	restore(false)
+	if _, err := os.Stat(filepath.Join(dir, "fresh")); err == nil {
+		t.Fatal("a dropped first recording leaves nothing behind")
+	}
+}
+
+// TestSaveSetRefusesWhenTheBackupCannotBeMade pins the data-loss guard: if the
+// pre-record backup cannot be written, saveSet must refuse (non-nil error, no
+// restore) and leave the existing set untouched, so the caller aborts before
+// deleting the set's mappings and cases.
+func TestSaveSetRefusesWhenTheBackupCannotBeMade(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses the directory permission used to force the backup to fail")
+	}
+	dir := t.TempDir()
+	set := filepath.Join(dir, "e2e")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(set, "old"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Make the mocks folder read-only so the .previous backup copy cannot be
+	// created — standing in for a full disk or a permissions problem.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	m := &mockService{logger: zap.NewNop(), config: &config.Config{Path: dir}}
+	restore, existed, err := m.saveSet("e2e")
+	if err == nil {
+		t.Fatal("saveSet must fail when it cannot back the set up")
+	}
+	if !existed {
+		t.Fatal("existed must stay true for a set that is present")
+	}
+	if restore != nil {
+		t.Fatal("a failed backup must not hand back a restore closure")
+	}
+
+	_ = os.Chmod(dir, 0o755)
+	if _, statErr := os.Stat(filepath.Join(set, "old")); statErr != nil {
+		t.Fatal("the live set must be left intact after a refused backup")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".e2e.previous")); !os.IsNotExist(statErr) {
+		t.Fatal("a failed backup must not leave a partial .previous behind")
 	}
 }
 

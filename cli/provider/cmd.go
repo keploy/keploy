@@ -363,6 +363,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// relocation (the wrapped process is a test runner, not a server).
 		cmd.Flags().Bool("mock-mode", c.cfg.Agent.MockMode, "Internal: agent-side mirror of `keploy mock` mode; disables ingress port relocation. Set by the orchestrator, not by users.")
 		_ = cmd.Flags().MarkHidden("mock-mode")
+		cmd.Flags().Bool("record-requests", c.cfg.Agent.RecordRequests, "Internal: keeps the ingress hooks on in mock mode. Set by the orchestrator, not by users.")
+		_ = cmd.Flags().MarkHidden("record-requests")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -665,7 +667,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	viper.SetEnvPrefix("KEPLOY")
 
 	// 3) Nested flag binding (your existing util)
-	if err := utils.BindFlagsToViper(c.logger, cmd, ""); err != nil {
+	if err := utils.BindFlagsToViper(c.logger, cmd, mockViperPrefix(cmd)); err != nil {
 		errMsg := "failed to bind cmd specific flags to viper"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
@@ -758,6 +760,14 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	// 8) Persist the path used
 	c.cfg.ConfigPath = configPath
 	return nil
+}
+
+// mockViperPrefix keeps `keploy mock record` flags out of the record.* config section, whose passThroughPorts holds rules, not ports.
+func mockViperPrefix(cmd *cobra.Command) string {
+	if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		return "mock"
+	}
+	return ""
 }
 
 // mentionsDockerBinary reports whether the command actually invokes docker,
@@ -2014,6 +2024,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.MockMode = mockMode
 
+		recordRequests, err := cmd.Flags().GetBool("record-requests")
+		if err != nil {
+			errMsg := "failed to read the record-requests flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.RecordRequests = recordRequests
+
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on
 		// Changed() — but the gate now records that the flag was PRESENT
 		// (…Set) rather than leaving the agent to guess. The orchestrator
@@ -2389,6 +2407,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	switch cmd.Name() {
 	case "record":
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
+		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
@@ -2397,6 +2416,20 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")
 		cmd.Flags().String("coverage-report", c.cfg.Mock.CoverageReport, "Coverage report the test command writes, when it is not a default location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...)")
 	}
+	return nil
+}
+
+// readMockBool copies a bool flag into dst unless keploy.yml set the key and the flag was left alone.
+func (c *CmdConfigurator) readMockBool(cmd *cobra.Command, flag, key string, dst *bool) error {
+	if !cmd.Flags().Changed(flag) && viper.IsSet(key) {
+		return nil
+	}
+	v, err := cmd.Flags().GetBool(flag)
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the "+flag+" flag")
+		return fmt.Errorf("failed to get the %s flag", flag)
+	}
+	*dst = v
 	return nil
 }
 
@@ -2410,7 +2443,7 @@ func (c *CmdConfigurator) readMockSetName(cmd *cobra.Command) error {
 		utils.LogError(c.logger, err, "failed to get the name flag")
 		return errors.New("failed to get the name flag")
 	}
-	if name != "" {
+	if cmd.Flags().Changed("name") {
 		c.cfg.Mock.Name = name
 	}
 	if c.cfg.Mock.Name == "" {
@@ -2596,6 +2629,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 				return errors.New("failed to get the record-timer flag")
 			}
 			c.cfg.Mock.RecordTimer = d
+		}
+		if err := c.readMockBool(cmd, "record-requests", "mock.recordRequests", &c.cfg.Mock.RecordRequests); err != nil {
+			return err
 		}
 	case "replay":
 		onMiss, err := cmd.Flags().GetString("on-miss")

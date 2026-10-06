@@ -133,26 +133,32 @@ func FlakyHeaderNoise() map[string][]string {
 // a correctness assertion in Stripe-style APIs; authorization appears in
 // token-refresh responses. Suppressing those would delete real coverage.
 //
-// This set is therefore only the identifiers and timing values that are, by
-// construction, different on every response: the HTTP date, request/correlation
-// ids, and distributed-trace ids.
+// This set is therefore only the identifiers, timing values and rate-limit
+// counters that are, by construction, different on every response: the HTTP
+// date, request/correlation ids, distributed-trace ids and rate-limit counters.
 var volatileResponseHeaders = map[string]struct{}{
-	"date":                  {},
-	"x-request-id":          {},
-	"request-id":            {},
-	"x-correlation-id":      {},
-	"x-runtime":             {}, // Rails: per-request wall time
-	"traceparent":           {},
-	"tracestate":            {},
-	"b3":                    {},
-	"x-b3-traceid":          {},
-	"x-b3-spanid":           {},
-	"x-b3-parentspanid":     {},
-	"x-datadog-trace-id":    {},
-	"x-datadog-parent-id":   {},
-	"x-amzn-trace-id":       {},
-	"x-cloud-trace-context": {},
-	"sentry-trace":          {},
+	"date":                   {},
+	"x-request-id":           {},
+	"request-id":             {},
+	"x-correlation-id":       {},
+	"x-runtime":              {}, // Rails: per-request wall time
+	"traceparent":            {},
+	"tracestate":             {},
+	"b3":                     {},
+	"x-b3-traceid":           {},
+	"x-b3-spanid":            {},
+	"x-b3-parentspanid":      {},
+	"x-datadog-trace-id":     {},
+	"x-datadog-parent-id":    {},
+	"x-amzn-trace-id":        {},
+	"x-cloud-trace-context":  {},
+	"sentry-trace":           {},
+	"x-ratelimit-remaining":  {},
+	"x-ratelimit-reset":      {},
+	"x-rate-limit-remaining": {},
+	"x-rate-limit-reset":     {},
+	"ratelimit-remaining":    {},
+	"ratelimit-reset":        {},
 }
 
 // IsVolatileResponseHeader reports whether name is EXACTLY one of the headers

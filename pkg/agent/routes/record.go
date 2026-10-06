@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/render"
 	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -86,6 +87,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
+		r.Get("/ids", a.HandleIDs)
 		r.Post("/test-capture/begin", a.BeginTestErrorCapture)
 		// Per-test scope API for `keploy mock record|replay` — a user's test
 		// runner marks per-test boundaries so mocks are attributed / restricted
@@ -94,6 +96,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/scope/end", a.HandleScopeEnd)
 		r.Get("/scope/windows", a.HandleScopeWindows)
 		r.Post("/scope/table", a.HandleScopeTable)
+		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
@@ -718,6 +721,7 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			starts.Default.Stamp(m)
 			if err := enc.Encode(m); err != nil {
 				// enc.Encode(m) folds two distinct failure modes into
 				// one error: (a) per-mock serialization errors (an

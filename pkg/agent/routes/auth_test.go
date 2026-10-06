@@ -224,6 +224,7 @@ func TestNextStepFor_NamesTheVariableAScopeCallerIsMissing(t *testing.T) {
 	// the only thing that explains why per-test scoping quietly stopped.
 	require.Contains(t, nextStepFor("/agent/scope/begin"), "KEPLOY_MOCK_AGENT_TOKEN")
 	require.Contains(t, nextStepFor("/agent/scope/end"), "Authorization: Bearer")
+	require.Contains(t, nextStepFor("/agent/app/start"), "KEPLOY_MOCK_AGENT_TOKEN")
 	require.NotContains(t, nextStepFor("/agent/stop"), "KEPLOY_MOCK_AGENT_TOKEN",
 		"a rejected /agent/stop is not a test-runner problem; pointing the operator at the scope variable would misdirect them")
 }

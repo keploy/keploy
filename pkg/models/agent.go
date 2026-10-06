@@ -118,6 +118,10 @@ type ScopeReq struct {
 	// (Design A). Optional: 0/omitted falls back to the single global scope
 	// (correct for sequential single-worker runs and suite-level).
 	Pid int `json:"pid,omitempty"`
+	// At is the runner's own clock for this boundary; zero means the agent stamps its read time.
+	At    time.Time `json:"at,omitzero"`
+	Dir   string    `json:"dir,omitempty"`
+	Suite bool      `json:"suite,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -132,7 +136,17 @@ type ScopeWindow struct {
 	// record attributes a captured mock to this window if the mock's own source
 	// PID resolves (up the /proc tree) to this worker — exact even when windows
 	// from parallel workers overlap in time.
-	PID uint32 `json:"pid,omitempty"`
+	PID     uint32    `json:"pid,omitempty"`
+	Dir     string    `json:"dir,omitempty"`
+	Suite   bool      `json:"suite,omitempty"`
+	App     bool      `json:"app,omitempty"`
+	Port    uint16    `json:"port,omitempty"`
+	Program string    `json:"program,omitempty"`
+	Place   string    `json:"place,omitempty"`
+	N       int       `json:"n,omitempty"`
+	Ready   time.Time `json:"ready,omitzero"`
+	Ref     string    `json:"ref,omitempty"`
+	Worker  uint32    `json:"worker,omitempty"`
 }
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
@@ -140,6 +154,19 @@ type ScopeWindow struct {
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
+	Root     string              `json:"root,omitempty"`
+	Sets     map[string]SetTable `json:"sets,omitempty"`
+}
+
+type SetTable struct {
+	Boots  map[string][]string `json:"boots,omitempty"`
+	Tests  map[string][]Owned  `json:"tests,omitempty"`
+	Runner []string            `json:"runner,omitempty"`
+}
+
+type Owned struct {
+	Name  string `json:"name"`
+	Start string `json:"start,omitempty"`
 }
 
 // ErrMockStatsUnsupported reports that an agent cannot answer /agent/mock/stats
@@ -281,4 +308,16 @@ type AfterTestRunReq struct {
 	TestRunID  string       `json:"testRunID"`
 	TestSetIDs []string     `json:"testSetIDs"`
 	Coverage   TestCoverage `json:"coverage"`
+}
+
+type AppStart struct {
+	At   time.Time `json:"at"`
+	PID  uint32    `json:"pid"`
+	Port uint16    `json:"port"`
+}
+
+type AppStartReq struct {
+	Port int       `json:"port"`
+	Pid  int       `json:"pid,omitempty"`
+	At   time.Time `json:"at,omitzero"`
 }
