@@ -4543,8 +4543,25 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		starts.Default.Child(conn)
 		return false, nil
 	}
+	// A port the recording called as a (non-child) outside dependency stays on
+	// the mock path even when something in the run's tree now listens there:
+	// those recorded responses are the dependency's, and serving the live
+	// listener would skip the mock the test set is built on. A genuine
+	// self-call is unaffected — an app's own ingress port is never a recorded
+	// dependency destination.
+	if ip.IsLoopback() && RecordedPort(dest.Port) {
+		p.logger.Debug("the destination is a port the recording called as an outside dependency; serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
+		return false, nil
+	}
 	caller := int(dest.KernelPid)
 	defer p.trackTree(srcConn, owner)()
+	// A self-call: the destination is a listener owned by the run's own process
+	// tree, so it is passed through to the real handler instead of served from a
+	// mock. Surfaced so a verdict can show a self-call reached the real handler
+	// (and a broken one fails the run) rather than passing on a stale mock.
+	p.logger.Info("self-call passed through to the run's own listener; the real handler answers it, not a mock",
+		zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+		zap.String("reason", models.ReasonLoopbackOutsideRun))
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
 		return true, nil
