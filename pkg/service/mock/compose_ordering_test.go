@@ -256,6 +256,8 @@ type stubMockDB struct {
 
 func (stubMockDB) InsertMock(context.Context, *models.Mock, string) error { return nil }
 func (stubMockDB) DeleteMocksForSet(context.Context, string) error        { return nil }
+func (stubMockDB) PromoteStagedSet(context.Context, string, string) error { return nil }
+func (stubMockDB) DiscardStagedSet(context.Context, string) error         { return nil }
 func (stubMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
 	return nil, nil
 }

@@ -92,8 +92,10 @@ func (r *recordingMockDB) InsertMock(_ context.Context, m *models.Mock, _ string
 	r.names = append(r.names, m.Name)
 	return nil
 }
-func (r *recordingMockDB) DeleteMocksForSet(context.Context, string) error { return nil }
-func (r *recordingMockDB) ResetCounterID()                                 {}
+func (r *recordingMockDB) DeleteMocksForSet(context.Context, string) error        { return nil }
+func (r *recordingMockDB) PromoteStagedSet(context.Context, string, string) error { return nil }
+func (r *recordingMockDB) DiscardStagedSet(context.Context, string) error         { return nil }
+func (r *recordingMockDB) ResetCounterID()                                        {}
 func (r *recordingMockDB) inserted() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
