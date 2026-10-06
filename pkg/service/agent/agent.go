@@ -691,6 +691,17 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 	return nil
 }
 
+// ContinueTestErrorCapture opens the next test's capture window, carrying in
+// the misses made since the previous test's window closed (the proxy's
+// ContinueTestErrorCapture). A proxy without it opens a window as Begin does.
+func (a *Agent) ContinueTestErrorCapture(ctx context.Context) error {
+	if c, ok := a.Proxy.(interface{ ContinueTestErrorCapture() }); ok {
+		c.ContinueTestErrorCapture()
+		return nil
+	}
+	return a.BeginTestErrorCapture(ctx)
+}
+
 // collectAsyncMocks returns the async subset (Mock.IsAsync, i.e. Spec.Async != nil).
 func collectAsyncMocks(mocks []*models.Mock) []*models.Mock {
 	var out []*models.Mock

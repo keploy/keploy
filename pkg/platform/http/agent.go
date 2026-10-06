@@ -32,6 +32,7 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/errdefs"
+	"github.com/klauspost/compress/zstd"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -942,7 +943,9 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	// whole stream — so the fallback path can't leak that goroutine.
 	streamCtx, cancelStream := context.WithCancel(ctx)
 
-	res, err := a.storeMocksStream(streamCtx, filtered, unFiltered)
+	encoding := a.storeMocksEncoding(ctx)
+	start := time.Now()
+	res, sent, err := a.storeMocksStream(streamCtx, filtered, unFiltered, encoding)
 	if err != nil {
 		cancelStream()
 		return err
@@ -958,21 +961,138 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 
 	defer cancelStream()
 	defer res.Body.Close()
-	return decodeStoreMocksResp(res)
+	if err := decodeStoreMocksResp(res); err != nil {
+		return err
+	}
+	a.logger.Info("stored the mocks on the agent",
+		zap.Int("mocks", len(filtered)+len(unFiltered)),
+		zap.Int64("bytes", sent.raw.Load()),
+		zap.Int64("sentBytes", sent.wire.Load()),
+		zap.String("encoding", encodingName(encoding)),
+		zap.Duration("took", time.Since(start)))
+	return nil
+}
+
+// storeMocksEncodingProbeTimeout bounds the /health request that asks the agent
+// whether its /storemocks takes a compressed stream. Running out of it is not an
+// error: the mocks then go uncompressed, as to an agent that cannot decompress.
+// It is long because the agent can be a port-forward away over a slow link,
+// where a new connection alone costs several round trips.
+const storeMocksEncodingProbeTimeout = 30 * time.Second
+
+// storeMocksEncoding returns the Content-Encoding to send the mock stream with:
+// zstd when the agent's /health advertises it (Accept-Encoding, RFC 7694), and
+// "" (uncompressed) otherwise, including when the agent cannot be asked. An
+// agent that predates compression has no such header, so it keeps getting the
+// stream it can read.
+func (a *AgentClient) storeMocksEncoding(ctx context.Context) string {
+	ctx, cancel := context.WithTimeout(ctx, storeMocksEncodingProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.Agent.AgentURI), nil)
+	if err != nil {
+		return ""
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		a.logger.Debug("could not ask the agent whether it takes compressed mocks; sending them uncompressed", zap.Error(err))
+		return ""
+	}
+	defer res.Body.Close()
+	_, _ = io.Copy(io.Discard, res.Body)
+	if res.StatusCode == http.StatusOK && acceptsEncoding(res.Header.Values("Accept-Encoding"), models.MockStreamEncodingZstd) {
+		return models.MockStreamEncodingZstd
+	}
+	return ""
+}
+
+// acceptsEncoding reports whether Accept-Encoding header values list coding,
+// ignoring case, spaces and parameters. A coding listed with q=0 is refused
+// (RFC 9110, section 12.5.3).
+func acceptsEncoding(values []string, coding string) bool {
+	for _, v := range values {
+		for _, item := range strings.Split(v, ",") {
+			name, params, _ := strings.Cut(item, ";")
+			if !strings.EqualFold(strings.TrimSpace(name), coding) {
+				continue
+			}
+			for _, p := range strings.Split(params, ";") {
+				k, val, ok := strings.Cut(strings.TrimSpace(p), "=")
+				if ok && strings.EqualFold(k, "q") {
+					if q, err := strconv.ParseFloat(strings.TrimSpace(val), 64); err == nil && q == 0 {
+						return false
+					}
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func encodingName(encoding string) string {
+	if encoding == "" {
+		return "identity"
+	}
+	return encoding
+}
+
+// mockStreamBytes counts a /storemocks stream before compression (raw) and as
+// sent (wire). The encoder goroutine writes them while the caller may read them,
+// hence atomics.
+type mockStreamBytes struct {
+	raw  atomic.Int64
+	wire atomic.Int64
+}
+
+// countingWriter adds what it writes to n.
+type countingWriter struct {
+	w io.Writer
+	n *atomic.Int64
+}
+
+func (c countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n.Add(int64(n))
+	return n, err
 }
 
 // storeMocksStream POSTs the corpus as a gob stream (MockStreamHeader + one
-// frame per mock) and returns the raw response so the caller can decide whether
-// to fall back on a 400.
-func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) (*http.Response, error) {
+// frame per mock), zstd-compressed when encoding says so, and returns the raw
+// response so the caller can decide whether to fall back on a 400.
+func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock, encoding string) (*http.Response, *mockStreamBytes, error) {
 	pr, pw := io.Pipe()
+	sent := &mockStreamBytes{}
 	go func() {
-		enc := gob.NewEncoder(pw)
+		var out io.Writer = countingWriter{w: pw, n: &sent.wire}
+		var zw *zstd.Encoder
+		if encoding == models.MockStreamEncodingZstd {
+			var err error
+			// One encoder goroutine: the link, not the CPU, bounds a remote
+			// upload, and a local one is fast either way.
+			zw, err = zstd.NewWriter(out,
+				zstd.WithEncoderLevel(zstd.SpeedDefault),
+				zstd.WithWindowSize(models.MockStreamZstdWindow),
+				zstd.WithEncoderConcurrency(1))
+			if err != nil {
+				_ = pw.CloseWithError(fmt.Errorf("start the zstd encoder: %w", err))
+				return
+			}
+			out = zw
+		}
+		// The pipe is closed first, so the encoder's Close writes nothing that
+		// could block and only releases its resources.
+		fail := func(err error) {
+			_ = pw.CloseWithError(err)
+			if zw != nil {
+				_ = zw.Close()
+			}
+		}
+		enc := gob.NewEncoder(countingWriter{w: out, n: &sent.raw})
 		if err := enc.Encode(models.MockStreamHeader{
 			FilteredCount:   len(filtered),
 			UnfilteredCount: len(unFiltered),
 		}); err != nil {
-			_ = pw.CloseWithError(err)
+			fail(err)
 			return
 		}
 		i := 0
@@ -991,12 +1111,19 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 			return nil
 		}
 		if err := encodeAll(filtered); err != nil {
-			_ = pw.CloseWithError(err)
+			fail(err)
 			return
 		}
 		if err := encodeAll(unFiltered); err != nil {
-			_ = pw.CloseWithError(err)
+			fail(err)
 			return
+		}
+		if zw != nil {
+			// Flushes the last block and ends the zstd frame.
+			if err := zw.Close(); err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
 		}
 		_ = pw.Close()
 	}()
@@ -1011,16 +1138,19 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 		// reached.)
 		_ = pw.CloseWithError(err)
 		utils.LogError(a.logger, err, "failed to create request for storemocks")
-		return nil, fmt.Errorf("create request for storemocks: %s", err.Error())
+		return nil, nil, fmt.Errorf("create request for storemocks: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", models.StoreMocksStreamContentType)
 	req.Header.Set("Accept", "application/x-gob")
+	if encoding != "" {
+		req.Header.Set("Content-Encoding", encoding)
+	}
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("send request for storemocks: %s", err.Error())
+		return nil, nil, fmt.Errorf("send request for storemocks: %s", err.Error())
 	}
-	return res, nil
+	return res, sent, nil
 }
 
 // storeMocksLegacy POSTs the corpus in the pre-streaming single-shot framing:
@@ -2511,7 +2641,22 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 // endpoint (older agent) returns 404 and is treated as a no-op, preserving the
 // legacy global-queue behaviour.
 func (a *AgentClient) BeginTestErrorCapture(ctx context.Context) error {
+	return a.openTestErrorCapture(ctx, false)
+}
+
+// ContinueTestErrorCapture is BeginTestErrorCapture for a test after its set's
+// first: the window carries in the misses made since the previous test's
+// window closed. An agent that predates it ignores ?carry and opens the window
+// as Begin does.
+func (a *AgentClient) ContinueTestErrorCapture(ctx context.Context) error {
+	return a.openTestErrorCapture(ctx, true)
+}
+
+func (a *AgentClient) openTestErrorCapture(ctx context.Context, carry bool) error {
 	url := fmt.Sprintf("%s/test-capture/begin", a.conf.Agent.AgentURI)
+	if carry {
+		url += "?carry=1"
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %s", err.Error())

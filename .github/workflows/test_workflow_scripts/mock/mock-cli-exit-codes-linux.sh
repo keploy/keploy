@@ -4,8 +4,9 @@
 # Before the fix, a cobra group with no RunE (mock, ca, contract, ...) printed
 # help and returned 0 for an unknown verb, so `keploy mock bogus` was a false
 # success a CI job calling a mistyped verb would pass on. An unknown verb is a
-# usage error -> EX_USAGE (64); a group with no verb still shows help (0); a
-# valid subcommand resolves normally. (design §P0b: unknown mock verbs exit 64.)
+# usage error -> exit 8 (utils.ExitUsageError), and so is a flag that cannot
+# be parsed or the wrong number of arguments; a group with no verb still shows
+# help (0); a valid subcommand resolves normally. (design §P0b.)
 #
 # Pure CLI behaviour: no sudo, no eBPF, no dependencies.
 set -uo pipefail
@@ -26,12 +27,18 @@ check() {
   fi
 }
 
-# Unknown verb on a command group is a usage error (64), never a false 0.
-check 64 mock bogusverb
-check 64 ca bogusverb
-check 64 contract bogusverb
+# Unknown verb on a command group is a usage error (8), never a false 0.
+check 8 mock bogusverb
+check 8 ca bogusverb
+check 8 contract bogusverb
 # Unknown top-level command is also a usage error.
-check 64 totallybogus
+check 8 totallybogus
+# So is a flag that cannot be parsed: unknown, mistyped value, missing value.
+check 8 mock record --bogusflag
+check 8 test --bogusflag
+check 8 test --delay notanumber
+# And so is the wrong number of arguments.
+check 8 diff a b c
 # A group with no verb shows help and succeeds.
 check 0 mock
 # A known subcommand is routed to (its --help exits 0). NOTE: --help short-circuits

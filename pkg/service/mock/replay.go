@@ -361,6 +361,31 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			zap.String("next_step", "a dependency contract drifted; re-record the set (keploy mock record) or add the new calls with --on-miss record"))
 	}
 
+	// A replay that served NONE of the recorded calls verified nothing: the test
+	// command never exercised the recording, so a green exit would be a false
+	// pass (gap H2). This is the failure --strict cannot catch -- --strict is
+	// about recorded calls that were MISSED, and a run that makes no matching
+	// call at all misses nothing -- so it is enforced on its own, regardless of
+	// --strict. It applies to the VERIFICATION policy only (--on-miss fail, the
+	// default): --on-miss passthrough deliberately lets calls reach the real
+	// service and never claims isolation, so a run that happened to match none
+	// of the recording is that user's accepted outcome, not a false pass; and
+	// --on-miss record consumes nothing while it extends the set. Also guarded
+	// so it fires only when there WERE mocks to verify (loaded > 0; an empty set
+	// is already warned loudly above, not failed here), the agent actually
+	// reported the count (consumed is 0, not -1 "unknown"), and nothing else has
+	// already failed the run (a crashed runner keeps its own, more useful
+	// reason). Like a reported miss, it is the suite's contract, not keploy's own
+	// failure, so it sets the exit code but is not returned as a keployFailure.
+	if policy == models.MissFail && loaded > 0 && counts.consumed == 0 && utils.ErrCode == 0 {
+		utils.ErrCode = 1
+		failedBy = FailedByNothingVerified
+		m.logger.Error("replay verified nothing: the test command served none of the recorded calls",
+			zap.String("mock-set", name),
+			zap.Int("loaded", loaded),
+			zap.String("next_step", "check the test command actually makes the recorded dependency calls, and that the recording is not stale -- re-record it with keploy mock record if it is"))
+	}
+
 	// 12. What the run proved -- decided once, so the log line below and the
 	//     receipt cannot disagree -- then how much of the code it exercised,
 	//     from the runner's own report, and the --min-coverage floor.

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -16,6 +17,115 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+// loadedMockDB serves n recorded mocks so a replay has something to verify.
+// stubMockDB loads zero, which is exactly the empty-set case the "nothing
+// verified" check must leave alone, so it cannot exercise loaded>0.
+type loadedMockDB struct {
+	stubMockDB
+	n int
+}
+
+func (d loadedMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	out := make([]*models.Mock, d.n)
+	for i := range out {
+		out[i] = &models.Mock{Name: fmt.Sprintf("mock-%d", i)}
+	}
+	return out, nil
+}
+
+// A replay that served none of its recorded calls verified nothing, and must
+// fail rather than report a false pass (gap H2) -- independently of --strict,
+// which only catches recorded calls that were MISSED. The guard leaves the
+// empty set (nothing to verify, already warned) and --on-miss record (which
+// consumes nothing while extending the set) exiting 0.
+func TestReplayFailsWhenNothingWasVerified(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		loaded   int
+		consumed []models.MockState
+		onMiss   models.MissPolicy
+		strict   bool
+		wantExit int
+		wantLog  string
+	}{
+		{
+			name:     "under --on-miss fail, mocks loaded but none served fails",
+			loaded:   2,
+			consumed: nil,
+			onMiss:   models.MissFail,
+			wantExit: 1,
+			wantLog:  "verified nothing",
+		},
+		{
+			name:     "it also fails under --strict: known-empty misses do not shadow it",
+			loaded:   2,
+			consumed: nil,
+			onMiss:   models.MissFail,
+			strict:   true,
+			wantExit: 1,
+			wantLog:  "verified nothing",
+		},
+		{
+			name:     "serving a recorded call is a real pass",
+			loaded:   2,
+			consumed: []models.MockState{{Name: "mock-0"}},
+			onMiss:   models.MissFail,
+			wantExit: 0,
+		},
+		{
+			name:     "an empty set is only warned, not failed by this check",
+			loaded:   0,
+			consumed: nil,
+			onMiss:   models.MissFail,
+			wantExit: 0,
+		},
+		{
+			name:     "--on-miss passthrough opted into real calls: consuming nothing is its accepted outcome",
+			loaded:   2,
+			consumed: nil,
+			onMiss:   models.MissPassthrough,
+			wantExit: 0,
+		},
+		{
+			name:     "--on-miss record consuming nothing is fine: it is extending the set",
+			loaded:   2,
+			consumed: nil,
+			onMiss:   models.MissRecord,
+			wantExit: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.DebugLevel)
+			instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+			instr.consumedMocks = tc.consumed
+
+			cfg := instrConfig(instr, utils.Native, "pytest -q")
+			cfg.Mock.Strict = tc.strict
+			cfg.Mock.OnMiss = string(tc.onMiss)
+
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+
+			err := New(zap.New(core), instr, loadedMockDB{n: tc.loaded}, nil, nil, nil, cfg).Replay(context.Background())
+			if err != nil {
+				t.Fatalf("Replay returned an unexpected error: %v", err)
+			}
+			if utils.ErrCode != tc.wantExit {
+				t.Errorf("exit code %d, want %d", utils.ErrCode, tc.wantExit)
+			}
+			if tc.wantLog != "" {
+				var printed []string
+				for _, e := range logs.All() {
+					printed = append(printed, e.Message)
+				}
+				if joined := strings.Join(printed, "\n"); !strings.Contains(joined, tc.wantLog) {
+					t.Errorf("no log mentioning %q; got:\n%s", tc.wantLog, joined)
+				}
+			}
+		})
+	}
+}
 
 // The replay outcome is read from the agent AFTER the runner exits. Under
 // docker compose the runner exiting is what stops the whole project, agent

@@ -161,12 +161,13 @@ type Proxy struct {
 	errDrainOnce   sync.Once
 	// pendingMockErrors retains mock-not-found errors that arrive while no test
 	// capture window is active (activeTestErrors is nil) — e.g. between tests,
-	// or when the replayer/agent predates the BeginTestErrorCapture wiring. The
-	// replayer normally opens a window per test (so misses route to
-	// activeTestErrors), but this remains the fallback so a miss is never
-	// silently dropped before GetMockErrors reads it. Only mock-not-found errors
-	// are retained (background noise — OTel, health checks — is still
-	// discarded), and the buffer is bounded so it can't grow unboundedly.
+	// or when the replayer/agent predates the BeginTestErrorCapture wiring.
+	// ContinueTestErrorCapture carries them into the next test's window;
+	// BeginTestErrorCapture (a set's first test) discards and logs them;
+	// GetMockErrors returns them where no window is opened at all. Only
+	// mock-not-found errors are retained (background noise — OTel, health
+	// checks — is still discarded), and the buffer is bounded so it can't grow
+	// unboundedly.
 	pendingMockErrors testErrorAccumulator
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
@@ -3978,6 +3979,10 @@ func (p *Proxy) GetPersistentConsumed() map[string]models.MockState {
 type testErrorAccumulator struct {
 	mu   sync.Mutex
 	errs []error
+	// read is set, under Proxy.captureMu, when GetMockErrors has read a window
+	// it could not close (the degenerate path): what is filed into it after
+	// that was made after its test's misses were taken, between two tests.
+	read bool
 }
 
 func (a *testErrorAccumulator) add(err error) {
@@ -4089,22 +4094,89 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // BeginTestErrorCapture starts collecting mock-not-found errors for the current
 // test case into a fresh per-test accumulator, so the replayer's GetMockErrors
 // returns only THIS test's misses instead of draining a shared global queue.
-// Stale stragglers retained before any window (startup / between-test
-// background traffic) are discarded so they don't attach to this test.
-// GetMockErrors retrieves and the next BeginTestErrorCapture resets the window.
-func (p *Proxy) BeginTestErrorCapture() {
+// The replayer opens it for the first test of a test set. Misses retained
+// before it, with no window open (the app's startup, or a previous set's last
+// test's traffic), are not this test's: they are discarded so they don't
+// attach to it, and logged, so none is lost without a word.
+// GetMockErrors retrieves and the next Begin/ContinueTestErrorCapture resets
+// the window.
+func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false) }
+
+// ContinueTestErrorCapture opens the next test's window, as
+// BeginTestErrorCapture does, but carries into it the misses made since the
+// previous test's window closed. The replayer opens it for every test after a
+// set's first. A miss made with no test running, between two tests, is the
+// next test's: the test the replay is running when the miss can first be
+// reported, as a miss that lands in a later test's window is that test's.
+// Discarding it would drop a real miss silently: a SEND the app publishes in
+// reaction to something the replay did between two tests is reported against
+// no test at all.
+func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(true) }
+
+func (p *Proxy) openTestErrorCapture(carry bool) {
+	acc := &testErrorAccumulator{}
 	p.captureMu.Lock()
-	p.pendingMockErrors.drain()
-	// Discard anything left in a prior window that was never closed — e.g. a
-	// GetMockErrors whose HTTP round-trip failed, so the replayer couldn't
-	// finalize it. Carrying those misses into THIS window would misattribute the
-	// previous test's failures to the current test; they belong to a test we can
-	// no longer report for, so drop them (same reasoning as the pre-window
-	// stragglers drained above).
-	if old := p.activeTestErrors.Swap(&testErrorAccumulator{}); old != nil {
-		old.drain()
+	// Misses made with no test's window open — or into a window its test's
+	// GetMockErrors already read (the degenerate path) — were made between
+	// tests. A window never read at all belongs to a test that can no longer
+	// report for it (its GetMockErrors failed, or it never ran): carrying its
+	// misses into THIS window would claim them as this test's, so they are
+	// dropped.
+	var unread []error
+	var between []error
+	if old := p.activeTestErrors.Swap(acc); old != nil {
+		if old.read {
+			between = old.drain()
+		} else {
+			unread = old.drain()
+		}
+	}
+	between = append(between, p.pendingMockErrors.drain()...)
+	if carry {
+		for _, err := range between {
+			acc.addBounded(err, maxPendingMockErrors)
+		}
 	}
 	p.captureMu.Unlock()
+	if !carry {
+		p.logDroppedMisses("mock mismatches made while no test's capture window was open are not attributed to a test", between)
+	}
+	p.logDroppedMisses("mock mismatches of a test whose capture window was never read are dropped", unread)
+}
+
+// logDroppedMisses says which misses are dropped: at Warn, except DNS misses
+// alone (an offline runner's upstream DNS, at the app's startup), which the
+// end-of-run summary leaves out of a green run too, at Debug.
+func (p *Proxy) logDroppedMisses(msg string, errs []error) {
+	if len(errs) == 0 {
+		return
+	}
+	level := zap.DebugLevel
+	for _, err := range errs {
+		var pe models.ParserError
+		if !errors.As(err, &pe) || pe.MismatchReport == nil || pe.MismatchReport.Protocol != "DNS" {
+			level = zap.WarnLevel
+			break
+		}
+	}
+	p.logger.Log(level, msg, zap.Int("count", len(errs)), zap.Strings("calls", missSummaries(errs)))
+}
+
+// missSummaries names, for a log line, the calls of up to the first 10 misses.
+func missSummaries(errs []error) []string {
+	out := make([]string, 0, min(len(errs), 10))
+	for _, err := range errs {
+		if len(out) == 10 {
+			break
+		}
+		var pe models.ParserError
+		if errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.ActualSummary != "" {
+			out = append(out, pe.MismatchReport.ActualSummary)
+			continue
+		}
+		out = append(out, err.Error())
+	}
+	return out
 }
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
@@ -4194,12 +4266,13 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 		// Rendezvous could not complete (errChannel full or the drain stalled
 		// past the deadline). Take what the window holds now but DON'T close it,
 		// so a miss the goroutine is still routing isn't dropped from THIS fetch.
-		// Any straggler the drain files afterward is discarded by the next
-		// BeginTestErrorCapture (which resets a never-closed window) - preferring
-		// correct per-test attribution over keeping a possibly cross-test miss.
-		// Degenerate path.
+		// Marked read: what the drain files into it afterwards was made after
+		// this test's misses were taken, and the next window carries it as a
+		// miss made between tests (ContinueTestErrorCapture), or a set's
+		// first discards it. Degenerate path.
 		if acc := p.activeTestErrors.Load(); acc != nil {
 			rawErrs = append(rawErrs, acc.drain()...)
+			acc.read = true
 		}
 	}
 	p.captureMu.Unlock()
