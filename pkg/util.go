@@ -2936,7 +2936,43 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 	return err
 }
 
+// agentHealthFirstWait is how long the first agent health check waits for its
+// answer. An agent on the same host answers in well under a millisecond, and one
+// that is not up yet refuses the connection at once, so this keeps the local case
+// as quick as it always was.
+//
+// agentHealthMaxWait bounds the wait a run of slow answers can grow to (see
+// nextAgentHealthWait); the caller's context still bounds the whole wait.
+const (
+	agentHealthFirstWait = 500 * time.Millisecond
+	agentHealthMaxWait   = 30 * time.Second
+)
+
+// nextAgentHealthWait is how long the next agent health check waits: twice the
+// last wait when that check ran out of time, up to agentHealthMaxWait, and the
+// same wait otherwise. Only a check that timed out says the answer needs longer
+// to arrive than it was given; one refused at once (nothing listening yet) or
+// answered says nothing about the path, so it leaves the wait alone.
+//
+// A fixed wait cannot fit every path to the agent. Reached through a Kubernetes
+// port-forward, each new connection costs two stream set-ups before the request
+// is sent, so a check takes about three round trips: 735ms over a 245ms link.
+// A fixed 500ms cut every check off and the agent was never found ready.
+func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
+	if !timedOut {
+		return wait
+	}
+	if wait >= agentHealthMaxWait/2 {
+		return agentHealthMaxWait
+	}
+	return 2 * wait
+}
+
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals.
+//
+// Each check waits agentHealthFirstWait for its answer to begin with, and twice
+// as long after a check that ran out of time (nextAgentHealthWait), so an agent
+// behind a slow path is found ready instead of every check being cut off.
 //
 // When an agent first becomes healthy it also kicks off verifyControlPlaneGuarded
 // for it, off this goroutine and after the readiness signal, so the check never
@@ -2949,9 +2985,9 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 	defer ticker.Stop()
 	defer close(agentReadyCh)
 
-	client := &http.Client{
-		Timeout: 500 * time.Millisecond, // short timeout for health checks
-	}
+	// No client-wide timeout: each check waits as long as `wait` (below).
+	client := &http.Client{}
+	wait := agentHealthFirstWait
 	agentStarted := false
 
 	for {
@@ -2959,7 +2995,15 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			isHealthy := isAgentHealthy(ctx, logger, client, agentURI)
+			checkCtx, cancel := context.WithTimeout(ctx, wait)
+			isHealthy := isAgentHealthy(checkCtx, logger, client, agentURI)
+			timedOut := !isHealthy && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+			cancel()
+			if next := nextAgentHealthWait(wait, timedOut); next != wait {
+				logger.Debug("agent health check ran out of time; the next one waits longer",
+					zap.String("agentURI", agentURI), zap.Duration("waited", wait), zap.Duration("next_wait", next))
+				wait = next
+			}
 
 			if isHealthy && !agentStarted {
 				// Agent became healthy
