@@ -158,10 +158,17 @@ func (e *Engine) Detect(m *models.Mock, liveBody []byte, userNoise map[string][]
 	if !ok {
 		return nil, false
 	}
-	// Learn pass: typeStrict nil and valueChangesOnly false keeps learning
-	// exactly as before (type/removed drift still learned); narrowing learning to
-	// value-only is a later step.
-	return e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), nil, false, e.adapter.RecordedValueIsNoise(m))
+	// Learn pass (JSON bodies): narrow learning to VALUE drift only
+	// (valueChangesOnly=true). Auto-noising tolerates fields whose VALUE varies
+	// between record and replay (ids, tokens, timestamps) while StrictReject
+	// still enforces their TYPE -- it marks each learned path typeStrict, except
+	// one the user also configured as noise, which stays full-ignore. A field
+	// whose TYPE changed (incl. null<->value) or was removed is not "a value
+	// that varies"; learning it would mask the type/shape drift type-enforcement
+	// exists to catch, so it is left strict. typeStrict is nil here (this is the
+	// learn pass, not the enforce pass). Non-JSON form bodies ignore this flag
+	// (value-only/type-strict is a JSON-body feature for now).
+	return e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), nil, true, e.adapter.RecordedValueIsNoise(m))
 }
 
 // Learn merges newly-detected drift into the mock's stored noise (monotonic —
