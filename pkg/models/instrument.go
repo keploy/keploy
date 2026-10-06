@@ -92,6 +92,13 @@ type IngressEvent struct {
 	_           uint16 // Padding
 }
 
+// AppListenAddrs is the agent's answer to where the app's sockets listen on one
+// of its ports (GET /agent/app/listen-addrs): each address as net/netip prints
+// it, "0.0.0.0" and "::" for a wildcard. Empty when nothing listens there yet.
+type AppListenAddrs struct {
+	Addrs []string `json:"addrs"`
+}
+
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
@@ -340,8 +347,13 @@ type SetupOptions struct {
 	// (record) or served (replay). Forwarded to the agent via --mock-mode.
 	MockMode bool
 	// RecordRequests keeps the ingress hooks on in mock mode so the app's incoming requests become test cases; forwarded as --record-requests.
-	RecordRequests            bool
-	GlobalPassthrough         bool
+	RecordRequests    bool
+	GlobalPassthrough bool
+	// DisableHandshakeHold turns off holding each redirected connection's
+	// handshake until its destination answers (pkg/agent/proxy/synhold), so
+	// the proxy accepts every connection at once as it used to. Forwarded to
+	// the agent via --disable-handshake-hold.
+	DisableHandshakeHold      bool
 	CapturePackets            bool
 	OpportunisticTLSIntercept bool
 	// ChannelBindingShim mirrors config.Record.ChannelBindingShim. Forwarded

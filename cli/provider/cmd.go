@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -257,6 +258,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable test-mock mapping production during record")
 		}
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Bool("disable-handshake-hold", false, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers (a refused or unreachable dependency then reads as EOF, not a connect error)")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
@@ -339,6 +341,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Bool("disable-handshake-hold", c.cfg.Agent.DisableHandshakeHold, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers")
 		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
 		// Agent-side mirrors of the record command's upstream-TLS flags.
@@ -533,6 +536,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"fromContainer":             "from-container",
 		"networkName":               "network-name",
 		"passThroughPorts":          "pass-through-ports",
+		"disableHandshakeHold":      "disable-handshake-hold",
 		"memoryLimit":               "memory-limit",
 		"maxMemoryPerConnection":    "max-memory-per-conn",
 		"queueSize":                 "queue-size",
@@ -778,13 +782,19 @@ func mentionsDockerBinary(command string) bool {
 			base = base[j+1:] // /usr/bin/docker -> docker
 		}
 		// The v1 binary takes any subcommand, so the name alone is enough.
-		if base == "docker-compose" {
+		// podman-compose is the same shape.
+		if base == "docker-compose" || base == "podman-compose" {
 			return true
 		}
 		// A bare "docker" token is not enough: `npm run docker` runs a script
 		// called docker. Require a subcommand that actually launches
-		// something, which is what the docker-run/docker-start modes rewrite.
-		if base == "docker" && i+1 < len(fields) {
+		// something, which is what the docker-run mode rewrites,
+		// and require it next: modifyDockerRun finds the run subcommand only
+		// right after the engine word (or `container`), and would find none
+		// in `docker --log-level=debug run`. Podman's CLI takes the same
+		// subcommands and flags; whether this build can drive it is
+		// refuseEngineCommand's to say.
+		if (base == "docker" || base == "podman") && i+1 < len(fields) {
 			switch fields[i+1] {
 			case "run", "start", "compose", "container":
 				return true
@@ -792,6 +802,79 @@ func mentionsDockerBinary(command string) bool {
 		}
 	}
 	return false
+}
+
+// refuseEngineCommand refuses a command that starts its application in a
+// container keploy cannot capture:
+//
+//   - one on a container engine this build cannot drive (engine.Unsupported);
+//   - one keploy would run as a host process: an engine invocation, as the
+//     command's application (engine.Invocation: a command that only starts
+//     dependencies in containers runs its application on the host, and is
+//     fine), that the kind detection does not spell out (sudo -E docker run,
+//     /usr/bin/podman run, the engine's own flags before the subcommand, a
+//     build before it, a subcommand keploy does not drive such as podman kube
+//     play). That resolves to native, keploy runs the engine CLI as the
+//     application, and the container it starts is out of sight: the run used
+//     to end with nothing recorded, and no word why.
+//
+// Callers pass the command that will actually run (a base path or
+// --from-container sets it aside, and then nothing is refused), and call it
+// before anything that could need root or write the keploy folder, so the
+// refusal never follows a sudo prompt.
+//
+// --cmd-type native as given, the user insisting the command runs on the
+// host, lets both through. Any other explicit kind lets the second through:
+// the user says it starts a container, and the docker path takes it as
+// written.
+func refuseEngineCommand(cmd *cobra.Command, command string) error {
+	if command == "" {
+		return nil
+	}
+	// The flag as given, not the type it resolved to: `--cmd-type=` resolves
+	// by detection, which is native for exactly the spellings this catches.
+	explicit := ""
+	if cmd.Flags().Changed("cmd-type") {
+		if v, err := cmd.Flags().GetString("cmd-type"); err == nil {
+			explicit = strings.ToLower(strings.TrimSpace(v))
+		}
+	}
+	if utils.CmdType(explicit) == utils.Native {
+		return nil
+	}
+	// Retrying cannot help either way: the command, or the keploy running
+	// it, has to change.
+	kind := utils.CmdType(explicit)
+	switch kind {
+	case "":
+		kind = utils.FindDockerCmd(command)
+	case utils.DockerRun, utils.DockerStart, utils.DockerCompose, utils.FromContainer:
+	default:
+		return nil // not a kind: resolveCommandType says so, which is the mistake to fix
+	}
+	if utils.IsDockerCmd(kind) {
+		// A container kind runs on the engine the command drives, detached
+		// or not.
+		if name := engine.Detect(command); !engine.Supported(name) {
+			utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+			return engine.Unsupported(name)
+		}
+		return nil
+	}
+	name, ok := engine.Invocation(command)
+	if !ok {
+		return nil
+	}
+	if !engine.Supported(name) {
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return engine.Unsupported(name)
+	}
+	utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+	return fmt.Errorf("keploy captures a container's traffic only from a command that starts with "+
+		"`%[1]s run`, `%[1]s compose` or `%[1]s-compose`, and this one would run as a host process, "+
+		"where keploy captures nothing from the container it starts. Write the command that starts the "+
+		"application that way: nothing in front of it (no sudo, path or wrapper) and no %[1]s option "+
+		"before the subcommand. Or pass --cmd-type native if the application itself runs on the host", name)
 }
 
 // resolveCommandType decides the CommandType for a record/test run.
@@ -815,6 +898,19 @@ func mentionsDockerBinary(command string) bool {
 // in config is warned about rather than silently ignored, so the trap that
 // made this flag inert for so long is at least visible.
 func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configured string) (string, error) {
+	kind, err := resolveCommandKind(logger, cmd, command, configured)
+	if err == nil && utils.CmdType(kind) == utils.DockerStart {
+		// Detected or given: it cannot work, so it is refused before
+		// anything starts (and without a sudo prompt: ShouldReexecWithSudo
+		// leaves it alone).
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return "", engine.StartUnsupported(engine.Detect(command))
+	}
+	return kind, err
+}
+
+// resolveCommandKind is resolveCommandType before the docker-start refusal.
+func resolveCommandKind(logger *zap.Logger, cmd *cobra.Command, command, configured string) (string, error) {
 	if cmd.Flags().Changed("cmd-type") {
 		// Normalised the same way FindDockerCmd normalises what it matches
 		// against, so `--cmd-type Docker-Compose` is not a fatal typo.
@@ -1408,6 +1504,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 
+		// Before the command type: refusing an engine does not depend on it,
+		// and the --cmd-type checks would otherwise answer a podman command
+		// with a docker message. A base path sets the command aside below:
+		// nothing runs it.
+		runs := c.cfg.Command
+		if c.cfg.Test.BasePath != "" {
+			runs = ""
+		}
+		if err := refuseEngineCommand(cmd, runs); err != nil {
+			return err
+		}
+
 		// set the command type
 		commandType, err := resolveCommandType(c.logger, cmd, c.cfg.Command, c.cfg.CommandType)
 		if err != nil {
@@ -1768,6 +1876,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
+		// The flag, when given, wins over keploy.yml's record.disableHandshakeHold.
+		if cmd.Flags().Changed("disable-handshake-hold") {
+			disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
+			if err != nil {
+				errMsg := "failed to read the disable-handshake-hold flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Record.DisableHandshakeHold = disableHandshakeHold
+		}
+
 		if cmd.Name() == "record" {
 			opportunisticTLSIntercept, err := cmd.Flags().GetBool("opportunistic-tls-intercept")
 			if err != nil {
@@ -1864,6 +1983,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.GlobalPassthrough = globalPassthrough
+
+		disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
+		if err != nil {
+			errMsg := "failed to read the disable-handshake-hold flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.DisableHandshakeHold = disableHandshakeHold
 
 		capturePackets, err := cmd.Flags().GetBool("capture-packets")
 		if err != nil {
@@ -2275,6 +2402,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server")
 	cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Destination ports to leave untouched (never mocked)")
 	cmd.Flags().Bool("local", c.cfg.Mock.Local, "Use the local file-backed mock store even when a cloud registry is configured")
+	cmd.Flags().Bool("disable-handshake-hold", false, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers")
 
 	switch cmd.Name() {
 	case "record":
@@ -2369,6 +2497,16 @@ func (c *CmdConfigurator) readMockCoverageFlags(cmd *cobra.Command) error {
 // subcommands. It mirrors the record/test path (command type, platform gate,
 // keploy folder resolution + permissions) but reads the mock-specific flags.
 func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Command) error {
+	// Before the command type, as in validateFlags. --from-container without
+	// -c sets a configured command aside below: nothing runs it.
+	runs := c.cfg.Command
+	if cmd.Flags().Changed("from-container") && !cmd.Flags().Changed("command") {
+		runs = ""
+	}
+	if err := refuseEngineCommand(cmd, runs); err != nil {
+		return err
+	}
+
 	// Resolve the command type (native vs docker-*).
 	commandType, err := resolveCommandType(c.logger, cmd, c.cfg.Command, c.cfg.CommandType)
 	if err != nil {
@@ -2471,6 +2609,16 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return errors.New("failed to get the local flag")
 	}
 	c.cfg.Mock.Local = local
+
+	// The flag, when given, wins over keploy.yml's record.disableHandshakeHold.
+	if cmd.Flags().Changed("disable-handshake-hold") {
+		disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to read the disable-handshake-hold flag")
+			return errors.New("failed to read the disable-handshake-hold flag")
+		}
+		c.cfg.Record.DisableHandshakeHold = disableHandshakeHold
+	}
 
 	switch cmd.Name() {
 	case "record":

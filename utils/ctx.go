@@ -81,6 +81,35 @@ func MarkInterrupted() { interrupted.Store(true) }
 // ClearInterrupted is for tests, which share one process across cases.
 func ClearInterrupted() { interrupted.Store(false) }
 
+// interruptedAgain is closed when a second interrupt (SIGINT or SIGTERM)
+// arrives after the one that stopped the run: the user asking a stop that is
+// still finishing its work (a recording draining what the agent captured) to
+// give that up. InterruptedAgain returns it.
+type interruptLatch struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+var interruptedAgain atomic.Pointer[interruptLatch]
+
+func init() { ResetInterruptedAgain() }
+
+// InterruptedAgain is closed once a second interrupt has arrived. Work a stop
+// waits on for as long as it makes progress (a recording's drain) selects on
+// it, so the user can always end it.
+func InterruptedAgain() <-chan struct{} { return interruptedAgain.Load().ch }
+
+// MarkInterruptedAgain is what a second interrupt does; for tests.
+func MarkInterruptedAgain() {
+	l := interruptedAgain.Load()
+	l.once.Do(func() { close(l.ch) })
+}
+
+// ResetInterruptedAgain is for tests, which share one process across cases.
+func ResetInterruptedAgain() {
+	interruptedAgain.Store(&interruptLatch{ch: make(chan struct{})})
+}
+
 func NewCtx() context.Context {
 	// Create a context that can be canceled
 	ctx, cancel := context.WithCancel(context.Background())
@@ -182,6 +211,16 @@ func NewCtx() context.Context {
 		}
 
 		cancel()
+
+		// The stop can take a while: a recording drains what the agent
+		// captured before it, for as long as that keeps coming. A second
+		// interrupt gives that up (InterruptedAgain); without this, SIGINT
+		// stayed registered and unread, so Ctrl+C did nothing and only
+		// SIGKILL, which skips all cleanup, could end the process.
+		for sig2 := range sigs {
+			fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
+			MarkInterruptedAgain()
+		}
 	}()
 
 	return ctx

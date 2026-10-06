@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -906,6 +907,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.GlobalPassthrough {
 		command = append(command, "--global-passthrough")
 	}
+	if opts.DisableHandshakeHold {
+		command = append(command, "--disable-handshake-hold")
+	}
 	if opts.CapturePackets {
 		command = append(command, "--capture-packets")
 	}
@@ -992,17 +996,26 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		},
 	}
 
+	// The engine's own options first: on an SELinux host the agent cannot
+	// load eBPF without label=disable, whatever else it needs.
+	var securityOpts []*yaml.Node
+	for _, opt := range engine.Active().AgentSecurityOpts {
+		securityOpts = append(securityOpts, &yaml.Node{Kind: yaml.ScalarNode, Value: opt})
+	}
+	securityOptComment := "Required by keploy-agent to load eBPF under the container engine's security policy."
 	if needsCgroupV2Mount {
 		// Docker's default seccomp profile already permits mount(2) once
 		// CAP_SYS_ADMIN is granted (the mount rule includes CAP_SYS_ADMIN), so
 		// seccomp need not be relaxed. Its default AppArmor profile, however,
 		// denies mount outright, so AppArmor must be unconfined for the agent to
 		// mount a cgroup2 hierarchy on a legacy cgroup v1 host.
+		securityOpts = append(securityOpts, &yaml.Node{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"})
+		securityOptComment += "\nAlso required to mount a cgroup2 hierarchy for eBPF hooks on a legacy cgroup v1 host."
+	}
+	if len(securityOpts) > 0 {
 		serviceNode.Content = append(serviceNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "security_opt", HeadComment: "Required to mount a cgroup2 hierarchy for eBPF hooks on a legacy cgroup v1 host."},
-			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
-			}},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "security_opt", HeadComment: securityOptComment},
+			&yaml.Node{Kind: yaml.SequenceNode, Content: securityOpts},
 		)
 	}
 

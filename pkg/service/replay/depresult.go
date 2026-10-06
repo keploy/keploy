@@ -11,12 +11,13 @@ import (
 )
 
 // mockDisplayInfo carries the human-facing identity of a loaded mock, built
-// once per test set from the mock registry and keyed by mock name. Hoisted out
-// of RunTestSet (where it used to be a function-local `mockInfo`) so the
-// DepResult writer below can be unit-tested without a full replay.
+// once per test set from the mock registry's per-test and session mocks and
+// keyed by mock name. Hoisted out of RunTestSet (where it used to be a
+// function-local `mockInfo`) so the DepResult writer below can be unit-tested
+// without a full replay.
 //
-// Every field is best-effort: r.mockDB may be nil and GetUnFilteredMocks
-// errors are swallowed at the build site, so a lookup miss is normal and
+// Every field is best-effort: r.mockDB may be nil and the lookup's reads
+// swallow their errors at the build site, so a lookup miss is normal and
 // consumers must degrade rather than assume a hit.
 type mockDisplayInfo struct {
 	summary  string

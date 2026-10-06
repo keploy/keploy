@@ -342,7 +342,7 @@ func TestRecordPassesCasesAndMocksThroughTheHooks(t *testing.T) {
 	svc.(TestDBSetter).SetTestDB(&memTestDB{})
 	require.NoError(t, svc.Record(context.Background()))
 
-	require.ElementsMatch(t, []string{"before-case set test-1", "after-case set test-1", "before-mock set mock-0", "after-mock set mock-0"}, hooks.calls)
+	require.ElementsMatch(t, []string{"before-case set test-1", "after-case set test-1", "before-mock set.keploy-staging mock-0", "after-mock set.keploy-staging mock-0"}, hooks.calls)
 	require.Less(t, slices.Index(hooks.calls, "before-case set test-1"), slices.Index(hooks.calls, "after-case set test-1"))
 	require.Equal(t, []rec.RecordingCompleteContext{{TestSetID: "set", Path: cfg.Path}}, hooks.complete)
 	_, err := os.Stat(filepath.Join(dir, "set", "mappings.yaml"))

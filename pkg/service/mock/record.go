@@ -14,15 +14,17 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
-// mockDrainGrace bounds how long Record waits for the agent to hand over the
-// last few mocks after the wrapped runner has exited.
-const mockDrainGrace = 5 * time.Second
+// mockDrainStall bounds how long Record waits, after capture has stopped, for a
+// consumer that has stopped making progress (it used to wait 5 s in all): one
+// still persisting mocks is waited for however long it takes.
+const mockDrainStall = 5 * time.Second
 
 // mockDrainQuiet is how long the outgoing stream must stay silent before the
 // drain concludes the agent has handed over everything.
@@ -31,8 +33,8 @@ const mockDrainGrace = 5 * time.Second
 // dependency response, emits the mock, and it travels agent -> gob stream ->
 // CLI, while the CLI independently observes the wrapped runner exit. Measured
 // on a failing reproduction that gap ran to a median of 6.5ms and a maximum of
-// 22.8ms. 500ms is an order of magnitude of headroom on that, is paid once per
-// recording, and is bounded by mockDrainGrace above.
+// 22.8ms. 500ms is an order of magnitude of headroom on that, and is paid once
+// per recording.
 const mockDrainQuiet = 500 * time.Millisecond
 
 // Record runs the wrapped test command and captures every outgoing dependency
@@ -85,6 +87,8 @@ func (m *mockService) Record(ctx context.Context) error {
 		ConfigPath:       m.config.ConfigPath,
 		PassThroughPorts: config.GetByPassPorts(m.config),
 		RecordRequests:   requests,
+
+		DisableHandshakeHold: m.config.Record.DisableHandshakeHold,
 	}); err != nil {
 		if parent.Err() != nil {
 			return nil
@@ -116,14 +120,33 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
-	// 3. Overwrite the named set in place: drop the previous mocks so the
-	//    re-record is a clean rewrite, not an append.
 	restore, existed := m.saveSet(name)
 	keep := false
 	defer func() { restore(keep) }()
-	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
-		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
+	// 3. Capture into a staging set and promote it over the named set only once
+	//    the run has produced mocks and finished cleanly. This replaces the old
+	//    delete-first, which dropped the existing recording before capture even
+	//    armed — so any failure, interrupt or zero-capture run left the user with
+	//    nothing (gaps W1/W14; design §P0b "no delete-first"). See
+	//    MockDB.PromoteStagedSet / DiscardStagedSet.
+	staging := stagingSetID(name)
+	// Clear any staging set a previously-crashed record left behind. This MUST
+	// succeed before we capture: appending into a dirty staging base would
+	// persist duplicate/stale mocks (yaml appends; a leftover gob would even be
+	// promoted and, being preferred on read, shadow the fresh recording) and then
+	// promote that polluted set over the real one. The real set is untouched
+	// here, so aborting now is safe and leaves it intact.
+	if err := m.mockDB.DiscardStagedSet(persistCtx, staging); err != nil {
+		stopReason = "failed to clear a leftover staging set before recording"
+		utils.LogError(m.logger, err, stopReason, zap.String("staging", staging),
+			zap.String("next_step", "remove the leftover staging directory under your keploy mocks folder (its name ends in "+yaml.MockStagingSuffix+") and retry"))
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
+	defer func() {
+		if !keep {
+			_ = m.mockDB.DiscardStagedSet(persistCtx, staging)
+		}
+	}()
 	m.mockDB.ResetCounterID()
 	m.deleteMappings(persistCtx, name)
 	if requests {
@@ -157,42 +180,73 @@ func (m *mockService) Record(ctx context.Context) error {
 	// scope-window correlation after the run can build mappings.yaml.
 	var recorded []capturedMock
 	mockCount := 0
-	// Bumped for every mock that arrives, whether or not it ends up persisted,
-	// and read by the drain below while the consumer is still running - hence
-	// atomic. mockCount stays a plain int: it is only read after consumerDone.
-	var mocksSeen atomic.Int64
+	// mocksSeen is bumped for every mock that arrives, whether or not it ends
+	// up persisted. heldSeen counts only those requested before the drain
+	// began (drainFrom; 0 until it does): what the agent held when the runner
+	// exited, which the drain waits for, as opposed to calls something left
+	// running keeps making. heldDone counts those the consumer has finished
+	// with, and heldBusy is set while it works on one: a consumer persisting
+	// is draining, however long one write takes (a 12 MB mock, a disk stall),
+	// and the drain's quiet bound does not run meanwhile. All are read while
+	// the consumer is still running - hence atomic. mockCount stays a plain
+	// int: it is only read after consumerDone.
+	var mocksSeen, heldSeen, heldDone, drainFrom atomic.Int64
+	var heldBusy atomic.Bool
 	consumerDone := make(chan struct{})
+	// The document the MockDB writes for each mock, for AfterMockInsert. Used
+	// only by persist, which runs on the one consumer goroutine.
+	insertedDoc := rec.NewInsertedMockDoc(persistCtx, m.hooks)
+	persist := func(mk *models.Mock) {
+		mctx := &rec.MockContext{Mock: mk, TestSetID: staging}
+		if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
+			m.logger.Debug("BeforeMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
+		}
+		if mctx.Skip {
+			return
+		}
+		encoded, encodedFormat, err := insertedDoc.Insert(m.mockDB, mk, staging)
+		if err != nil {
+			if errors.Is(err, models.ErrMockEncode) {
+				m.logger.Warn("dropping one unencodable mock and continuing", zap.String("kind", mk.GetKind()), zap.Error(err))
+				return
+			}
+			utils.LogError(m.logger, err, "failed to persist mock", zap.String("mock", mk.Name))
+			return
+		}
+		if err := m.hooks.AfterMockInsert(ctx, &rec.MockContext{
+			Mock: mk, TestSetID: staging, Encoded: encoded, EncodedFormat: encodedFormat,
+		}); err != nil {
+			m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
+		}
+		mockCount++
+		kind := mk.Spec.Metadata["type"]
+		recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection", start: mk.Start, ref: mk.StartRef})
+	}
 	go func() {
 		defer utils.Recover(m.logger)
 		defer close(consumerDone)
 		for mk := range outgoing {
 			mocksSeen.Add(1)
-			mctx := &rec.MockContext{Mock: mk, TestSetID: name}
-			if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
-				m.logger.Debug("BeforeMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
+			// An undated mock cannot be told apart, and is taken as held:
+			// dropping it would be the loss the drain exists to prevent.
+			// Mocks the agent's parsers emit are dated.
+			held := false
+			if from := drainFrom.Load(); from == 0 || mk.Spec.ReqTimestampMock.IsZero() || mk.Spec.ReqTimestampMock.UnixNano() <= from {
+				held = true
+				heldBusy.Store(true)
+				heldSeen.Add(1)
 			}
-			if mctx.Skip {
-				continue
+			persist(mk)
+			if held {
+				heldDone.Add(1)
+				heldBusy.Store(false)
 			}
-			if err := m.mockDB.InsertMock(persistCtx, mk, name); err != nil {
-				if errors.Is(err, models.ErrMockEncode) {
-					m.logger.Warn("dropping one unencodable mock and continuing", zap.String("kind", mk.GetKind()), zap.Error(err))
-					continue
-				}
-				utils.LogError(m.logger, err, "failed to persist mock", zap.String("mock", mk.Name))
-				continue
-			}
-			if err := m.hooks.AfterMockInsert(ctx, &rec.MockContext{Mock: mk, TestSetID: name}); err != nil {
-				m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
-			}
-			mockCount++
-			kind := mk.Spec.Metadata["type"]
-			recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection", start: mk.Start, ref: mk.StartRef})
 		}
 	}()
 
 	// 4b. With --record-requests, also store the app's incoming requests as test cases.
-	capture := m.captureCases(captureCtx, persistCtx, name, &mocksSeen, requests)
+	var casesSeen atomic.Int64
+	capture := m.captureCases(captureCtx, persistCtx, name, &casesSeen, requests)
 
 	// 5. Release the compose app now that the capture is armed and draining.
 	//    This is the post-arm half of step 2 — see releaseComposeApp.
@@ -247,18 +301,33 @@ func (m *mockService) Record(ctx context.Context) error {
 	// rather than a fixed sleep: a sleep long enough to be safe would be paid
 	// in full by every recording, and one short enough not to hurt would still
 	// be a race. This returns as soon as the agent stops sending.
-	m.drainTrailingMocks(ctx, consumerDone, &mocksSeen)
+	drainStart := time.Now()
+	drainFrom.Store(drainStart.UnixNano())
+	m.drainTrailingMocks(consumerDone, drainStart, func() (uint64, bool) {
+		return uint64(heldSeen.Load() + heldDone.Load() + casesSeen.Load()), heldBusy.Load()
+	})
 	stopCapture()
-	select {
-	case <-consumerDone:
-	case <-time.After(mockDrainGrace):
-		m.logger.Debug("timed out waiting for the mock consumer to finish after teardown")
+	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
+		m.logger.Warn("the mock consumer made no progress after capture stopped; not waiting for it any longer",
+			zap.Int64("mocks_seen", mocksSeen.Load()),
+			zap.Duration("stalledFor", mockDrainStall))
 	}
-	capture.wait(mockDrainGrace)
+	capture.wait(mockDrainStall)
 
-	if parent.Err() != nil { // user Ctrl+C
+	if parent.Err() != nil { // user stopped the recording (Ctrl+C, or a session stop)
+		if mockCount == 0 && len(capture.list()) == 0 {
+			if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+				m.logger.Debug("failed to discard an empty staging set after interrupt", zap.String("staging", staging), zap.Error(derr))
+			}
+			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged", zap.String("mock-set", name))
+			return nil
+		}
 		keep = true
-		m.logger.Info("recording stopped", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+		if err := m.saveMocks(persistCtx, staging, name, mockCount); err != nil {
+			utils.LogError(m.logger, err, "recording stopped, but saving the captured mocks failed", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+			return nil
+		}
+		m.logger.Info("recording stopped; captured mocks saved", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return nil
 	}
 	// Not the user: the agent died under the test command. What was captured
@@ -272,6 +341,9 @@ func (m *mockService) Record(ctx context.Context) error {
 		cause = context.Cause(ctx)
 	}
 	if cause != nil {
+		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			m.logger.Debug("failed to discard staging set after an incomplete recording", zap.String("staging", staging), zap.Error(derr))
+		}
 		stopReason = "the recording did not finish"
 		utils.LogError(m.logger, cause, stopReason, zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return fmt.Errorf("%s: %w", stopReason, cause)
@@ -296,6 +368,22 @@ func (m *mockService) Record(ctx context.Context) error {
 		return err
 	}
 	keep = runnerPassed(appErr)
+	if keep && mockCount == 0 && len(capture.list()) == 0 {
+		keep = false
+		m.logger.Warn("no outgoing calls were captured; the existing mock set (if any) was left unchanged; the runner made no mockable dependency calls, or its traffic was not intercepted",
+			zap.String("mock-set", name),
+			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
+		m.propagateExit(appErr, "record")
+		return nil
+	}
+	if keep {
+		if err := m.saveMocks(persistCtx, staging, name, mockCount); err != nil {
+			keep = false
+			stopReason = "failed to promote the recorded mocks over the existing set"
+			utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name))
+			return fmt.Errorf("%s: %w", stopReason, err)
+		}
+	}
 	if keep && m.mappingDB != nil {
 		if len(windows) > 0 {
 			byTest := correlateScopes(windows, recorded)
@@ -357,10 +445,20 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
 	}
 
-	// 11. Propagate the runner's exit code so a CI 're-record on merge' job
+	// 13. Propagate the runner's exit code so a CI 're-record on merge' job
 	//     fails when the tests fail.
 	m.propagateExit(appErr, "record")
 	return nil
+}
+
+func (m *mockService) saveMocks(ctx context.Context, staging, name string, n int) error {
+	if n > 0 {
+		return m.mockDB.PromoteStagedSet(ctx, staging, name)
+	}
+	if err := m.mockDB.DiscardStagedSet(ctx, staging); err != nil {
+		m.logger.Debug("failed to discard an empty staging set", zap.String("staging", staging), zap.Error(err))
+	}
+	return m.mockDB.DeleteMocksForSet(ctx, name)
 }
 
 func runnerPassed(appErr models.AppError) bool {
@@ -501,6 +599,14 @@ type capturedMock struct {
 	start string
 	ref   string
 }
+
+// stagingSetID returns the staging set name record captures into while recording
+// name, before promoting it over name on a complete, non-empty run. The suffix
+// (yaml.MockStagingSuffix) is reserved and skipped by test-set enumeration, so a
+// leftover staging dir from a hard kill is never listed as a phantom test-set.
+// Appended to an already-single-segment set name it adds no path separator, so a
+// promote or discard can never escape to touch a real set.
+func stagingSetID(name string) string { return name + yaml.MockStagingSuffix }
 
 // correlateScopes buckets each recorded mock into the per-test scope window its
 // request timestamp falls within, producing the mappings.yaml structure. A mock
@@ -649,35 +755,64 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 }
 
 // drainTrailingMocks blocks until the agent has evidently finished handing over
-// mocks: no new arrival for mockDrainQuiet, or the stream ended by itself, or
-// mockDrainGrace elapsed, or the user interrupted. It must be called BEFORE the
-// capture context is cancelled - see the call site.
-func (m *mockService) drainTrailingMocks(ctx context.Context, consumerDone <-chan struct{}, mocksSeen *atomic.Int64) {
-	deadline := time.After(mockDrainGrace)
+// mocks: no new arrival of one requested before the drain began
+// (mocksSeen counts those) for mockDrainQuiet, or the stream ended by itself.
+// It is bounded by progress, not by a deadline: an agent still handing over a
+// backlog is waited for however long that takes, and so is one the user
+// interrupted (Ctrl+C stops the recording, not the handing over of what was
+// already captured). Calls something left running keeps making do not hold
+// it. It must be called BEFORE the capture context is cancelled - see the
+// call site.
+func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, held func() (progress uint64, busy bool)) {
 	quiet := time.NewTimer(mockDrainQuiet)
 	defer quiet.Stop()
 
-	last := mocksSeen.Load()
+	last, _ := held()
 	for {
 		select {
 		case <-consumerDone:
 			// The agent closed the stream on its own; nothing left to wait for.
 			return
-		case <-ctx.Done():
-			// Ctrl+C. Stop waiting and let the caller report what it has.
-			return
-		case <-deadline:
-			m.logger.Debug("timed out draining trailing mocks after runner exit",
-				zap.Int64("mocks_seen", mocksSeen.Load()))
+		case <-utils.InterruptedAgain():
+			m.logger.Warn("stopped saving the mocks the agent captured before the run ended, at a second interrupt",
+				zap.String("next_step", "mocks the agent still held were not saved"))
 			return
 		case <-quiet.C:
-			if now := mocksSeen.Load(); now != last {
-				// Still arriving - reset and keep waiting.
+			// Quiet means the stream brought nothing held while the consumer
+			// was free to take it: a consumer still persisting one is not
+			// quiet, however long the write takes.
+			if now, busy := held(); now != last || busy {
 				last = now
+				quiet.Reset(mockDrainQuiet)
+				continue
+			}
+			// Quiet is not proof: an agent whose capture can tell says whether
+			// it may still hand over a mock from before the runner exited.
+			if m.agentPendingBefore(from) {
 				quiet.Reset(mockDrainQuiet)
 				continue
 			}
 			return
 		}
 	}
+}
+
+// pendingReader is an agent client that can ask the agent whether it may still
+// hand over something captured before a time (AgentClient.PendingBefore).
+type pendingReader interface {
+	PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error)
+}
+
+// agentPendingBefore reports whether the agent says it may still hand over a
+// mock captured before `before`. False when it cannot tell.
+func (m *mockService) agentPendingBefore(before time.Time) bool {
+	pr, ok := m.instrumentation.(pendingReader)
+	if !ok {
+		return false
+	}
+	pending, known, err := pr.PendingBefore(context.Background(), before)
+	if err != nil {
+		m.logger.Debug("could not ask the agent what it has yet to hand over; going by the stream's quiet", zap.Error(err))
+	}
+	return known && pending
 }

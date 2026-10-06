@@ -482,3 +482,134 @@ func TestCoerceToString(t *testing.T) {
 		})
 	}
 }
+
+// Every column type a server sends in a binary row decodes, and encodes back
+// to the same bytes. MEDIUMINT (INT24) is a 4-byte integer, and BIT, ENUM,
+// SET, GEOMETRY and VECTOR are length-encoded strings. They had no case, so a
+// row carrying one did not decode ("unsupported column type"), and the
+// recorder skipped the row: the COM_STMT_EXECUTE result set was recorded
+// without it. BIT, GEOMETRY and VECTOR bytes are kept as a string, as a
+// BLOB's are.
+func TestBinaryRow_EveryServerColumnTypeRoundTrips(t *testing.T) {
+	ctx, logger := context.Background(), zap.NewNop()
+	le32 := func(v int32) []byte {
+		u := uint32(v)
+		return []byte{byte(u), byte(u >> 8), byte(u >> 16), byte(u >> 24)}
+	}
+	lenenc := func(s string) []byte { return append([]byte{byte(len(s))}, s...) }
+	for _, c := range []struct {
+		name  string
+		col   *mysql.ColumnDefinition41
+		wire  []byte
+		value interface{}
+	}{
+		{"MEDIUMINT", &mysql.ColumnDefinition41{Name: "m", Type: byte(mysql.FieldTypeInt24)}, le32(-8388608), int32(-8388608)},
+		{"MEDIUMINT UNSIGNED", &mysql.ColumnDefinition41{Name: "m", Type: byte(mysql.FieldTypeInt24), Flags: mysql.UNSIGNED_FLAG}, le32(16777215), uint32(16777215)},
+		{"BIT(1)", &mysql.ColumnDefinition41{Name: "b", Type: byte(mysql.FieldTypeBit)}, lenenc("\x01"), "\x01"},
+		{"BIT(16)", &mysql.ColumnDefinition41{Name: "b", Type: byte(mysql.FieldTypeBit)}, lenenc("\x80\x00"), "\x80\x00"},
+		{"ENUM", &mysql.ColumnDefinition41{Name: "e", Type: byte(mysql.FieldTypeEnum)}, lenenc("active"), "active"},
+		{"SET", &mysql.ColumnDefinition41{Name: "s", Type: byte(mysql.FieldTypeSet)}, lenenc("a,c"), "a,c"},
+		{"VECTOR", &mysql.ColumnDefinition41{Name: "v", Type: byte(mysql.FieldTypeVector)}, lenenc("\x00\x00\x80\x3f"), "\x00\x00\x80\x3f"},
+		{"GEOMETRY", &mysql.ColumnDefinition41{Name: "g", Type: byte(mysql.FieldTypeGeometry)}, lenenc("\x00\x00\x00\x00\x01\x01\x00\x00\x00"), "\x00\x00\x00\x00\x01\x01\x00\x00\x00"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// OK byte, a 1-byte null bitmap (one column + 2 reserved bits), the value.
+			payload := append([]byte{0x00, 0x00}, c.wire...)
+			pkt := append([]byte{byte(len(payload)), 0, 0, 7}, payload...)
+			cols := []*mysql.ColumnDefinition41{c.col}
+			row, n, err := DecodeBinaryRow(ctx, logger, pkt, cols)
+			if err != nil {
+				t.Fatalf("DecodeBinaryRow: %v", err)
+			}
+			if n != len(pkt) || len(row.Values) != 1 || row.Values[0].Value != c.value {
+				t.Fatalf("decoded (%d of %d bytes) %#v, want %#v", n, len(pkt), row.Values, c.value)
+			}
+			out, err := EncodeBinaryRow(ctx, logger, row, cols)
+			if err != nil {
+				t.Fatalf("EncodeBinaryRow: %v", err)
+			}
+			if string(out) != string(pkt) {
+				t.Fatalf("encoded % x, want % x", out, pkt)
+			}
+		})
+	}
+}
+
+// TestDecodeBinaryRow_TruncatedPacket guards the bounds-check fix in
+// DecodeBinaryRow. Before the fix, a packet shorter than the header + OK
+// byte, or too short for the computed null-bitmap length, sliced past the
+// end of data and panicked the connection handler instead of returning a
+// decode error - exactly the "malformed or unexpected network data" panic
+// described for the MySQL parser boundary.
+func TestDecodeBinaryRow_TruncatedPacket(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+	columns := []*mysql.ColumnDefinition41{{Type: byte(mysql.FieldTypeLong), Name: "id"}}
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty packet", data: []byte{}},
+		{name: "shorter than header+OK byte", data: []byte{0x01, 0x02}},
+		{name: "header+OK byte only, no null bitmap", data: []byte{0x01, 0x00, 0x00, 0x01, 0x00}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("DecodeBinaryRow panicked on %q: %v", tt.name, r)
+				}
+			}()
+			_, _, err := DecodeBinaryRow(ctx, logger, tt.data, columns)
+			if err == nil {
+				t.Fatalf("expected a decode error for %q, got nil", tt.name)
+			}
+		})
+	}
+}
+
+// TestDecodeBinaryRow_TruncatedAfterNullBitmap covers the case flagged in
+// review: a packet that ends immediately after the null bitmap, for a column
+// the bitmap marks as non-NULL. ParseBinaryDate/DateTime/Time treat an empty
+// slice as "nothing to parse yet" and return (nil, 0, nil), so without an
+// explicit bounds check the truncated row was silently accepted instead of
+// rejected.
+func TestDecodeBinaryRow_TruncatedAfterNullBitmap(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+	columns := []*mysql.ColumnDefinition41{{Type: byte(mysql.FieldTypeDate), Name: "date_of_birth"}}
+
+	// header(4) + OK byte(0x00) + 1-byte null bitmap (0x00 => column not NULL),
+	// with nothing after it for the DATE value itself.
+	data := []byte{0x01, 0x00, 0x00, 0x01, 0x00, 0x00}
+
+	_, _, err := DecodeBinaryRow(ctx, logger, data, columns)
+	if err == nil {
+		t.Fatal("expected a decode error for a packet truncated right after the null bitmap, got nil")
+	}
+}
+
+// TestDecodeBinaryRow_TruncatedLengthEncodedString covers the suppressed
+// review comment on the FieldTypeTiny case: a length-encoded-string column
+// (VarString, String, BLOB, JSON, NewDecimal, ...) ending in a lone
+// 0xfc/0xfd/0xfe extended-length marker with its follow-up bytes missing.
+// This routes through the same utils.ReadLengthEncodedString call as
+// DecodeTextRow, so it must be rejected rather than silently accepted with
+// the offset left unchanged.
+func TestDecodeBinaryRow_TruncatedLengthEncodedString(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+	columns := []*mysql.ColumnDefinition41{{Type: byte(mysql.FieldTypeVarString), Name: "name"}}
+
+	// header(4) + OK byte(0x00) + 1-byte null bitmap (0x00 => column not
+	// NULL), followed by a lone 0xfc extended-length marker with no
+	// follow-up bytes for the VarString value itself.
+	data := []byte{0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0xfc}
+
+	_, _, err := DecodeBinaryRow(ctx, logger, data, columns)
+	if err == nil {
+		t.Fatal("expected a decode error for a VarString column with a truncated extended-length prefix, got nil")
+	}
+}

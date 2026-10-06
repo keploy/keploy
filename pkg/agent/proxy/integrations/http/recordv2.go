@@ -3,6 +3,7 @@ package http
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
@@ -138,10 +140,22 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		resTs := firstRespChunk.WrittenAt
 
 		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, requestMethod(finalReq))
+		// The stream ended before readResponseV2 found the response's end.
+		// Where keploy relays the connection it has read all the server sent,
+		// so that is the server's doing. An observe-only capture carries only
+		// what the client read, so when its stream ended with the connection
+		// (EndedWithConnection) it is the client that stopped reading and
+		// closed: the response is recorded as the client read it
+		// (FinalHTTP.RespReadInPart).
+		streamEnded := false
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// Legacy encodeHTTP treats EOF after some bytes as
 				// end-of-response. Respect that shape: emit what we have.
+				// Only a stream that ran out (io.EOF) ended where its capture
+				// did: ErrClosed is its reader being closed, possibly with
+				// chunks still on their way.
+				streamEnded = errors.Is(err, io.EOF)
 				if !gotLastWritten.IsZero() {
 					resTs = gotLastWritten
 				}
@@ -163,6 +177,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			Resp:             finalResp,
 			ReqTimestampMock: reqTs,
 			ResTimestampMock: resTs,
+			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
 		}, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
 			sess.MarkMockIncomplete("http decode error: " + err.Error())
@@ -469,6 +484,95 @@ func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
 	return ok && lane.IsPoll()
 }
 
+// parseFinalResponse parses the response m records: the final one, past any
+// interim 1xx responses in front of it (net/http does not skip them), which are
+// read off the same reader one after another, so their line endings do not
+// matter. One net/http will not read that way (an interim with a malformed
+// header line) is framed by its blank lines instead (finalResponse), as it was
+// before the interims were read. A response its client read only in part
+// (m.RespReadInPart) that does not parse whole is parsed as the client had it
+// (responseAsRead, from where the final response begins), and cut reports so.
+// What parses as it stands is never read that way: a bare-LF header section,
+// which responseAsRead cannot frame, still parses whole.
+//
+// An interim response is never recorded as the answer: one whose final
+// response never arrived (the stream ended after it, in its head, or in the
+// final one's status line) is an error wrapping io.ErrUnexpectedEOF, as a
+// response cut short is.
+func parseFinalResponse(m *FinalHTTP, req *http.Request) (resp *http.Response, cut bool, err error) {
+	rd := bytes.NewReader(m.Resp)
+	br := bufio.NewReader(rd)
+	interim, final := 0, 0 // final: where the response after the interims begins
+	for {
+		resp, err = http.ReadResponse(br, req)
+		if err != nil || !isInterimStatus(resp.StatusCode) {
+			break
+		}
+		interim = resp.StatusCode // no body: the next response follows it
+		final = len(m.Resp) - rd.Len() - br.Buffered()
+	}
+	if err == nil {
+		return resp, false, nil
+	}
+	if framed, ferr := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResponse(m.Resp))), req); ferr == nil && !isInterimStatus(framed.StatusCode) {
+		return framed, false, nil
+	}
+	if m.RespReadInPart {
+		asRead, rerr := http.ReadResponse(bufio.NewReader(bytes.NewReader(responseAsRead(m.Resp[final:]))), req)
+		if rerr == nil && !isInterimStatus(asRead.StatusCode) {
+			return asRead, true, nil
+		}
+	}
+	if interim != 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+		return nil, false, fmt.Errorf("parse response: the final response after a %d never arrived whole: %w",
+			interim, io.ErrUnexpectedEOF)
+	}
+	return nil, false, fmt.Errorf("parse response: %w", err)
+}
+
+// isInterimStatus reports whether code is an interim response (RFC 9110
+// §15.2), which a final response follows. Not 101: after it the connection
+// carries another protocol.
+func isInterimStatus(code int) bool {
+	return code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
+}
+
+// decompressReadInPart is pkg.Decompress for a body its client read only in
+// part: what decodes before the cut, which is as much as the client could
+// decode. A body cut before any of it decodes (in the gzip header, or none of
+// it read) decodes to nothing. The cut is expected here, so it is not logged as
+// a failure. An encoding it does not decode is kept as it is, as Decompress
+// keeps it.
+func decompressReadInPart(encoding string, data []byte, limit int64) ([]byte, error) {
+	var r io.Reader
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(data))
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return []byte{}, nil // cut in its header
+		}
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		r = zr
+	case "br":
+		r = brotli.NewReader(bytes.NewReader(data))
+	case "", "identity":
+		return data, nil
+	default:
+		return data, nil
+	}
+	out, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if int64(len(out)) > limit {
+		return nil, fmt.Errorf("%w of %d bytes (possible decompression bomb)", pkg.ErrDecompressedTooLarge, limit)
+	}
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, err
+	}
+	return out, nil
+}
+
 // buildHTTPMock constructs a *models.Mock with the same shape the legacy
 // parseFinalHTTP produces. Returns (nil, nil) when the request is a
 // pass-through (IsPassThrough true) so the caller skips emission.
@@ -509,20 +613,36 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 	}
 
-	// The final response: net/http does not skip interim 1xx responses.
-	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResponse(m.Resp))), req)
+	respParsed, cut, err := parseFinalResponse(m, req)
 	if err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
+		return nil, err
 	}
 
 	var respBody []byte
 	if respParsed.Body != nil {
 		respBody, err = io.ReadAll(respParsed.Body)
+		// A body its client read in part is recorded as far as it read it:
+		// ReadAll returns what it read before the cut. Replay serves it with
+		// its own length (the Content-Length set below).
 		if err != nil {
-			return nil, fmt.Errorf("read response body: %w", err)
+			if !m.RespReadInPart || !errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, fmt.Errorf("read response body: %w", err)
+			}
+			cut = true
 		}
-		if respParsed.Header.Get("Content-Encoding") != "" {
-			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody, pkg.MaxDecompressedSize)
+		if enc := respParsed.Header.Get("Content-Encoding"); enc != "" {
+			// Read in part, a body with no length of its own (close-delimited)
+			// cannot be known to be whole either: it decodes as far as it goes.
+			// A whole one decodes the same either way.
+			//
+			// Not a response with no body by rule (to a HEAD, a 204, a 304):
+			// its encoding describes a body it does not carry, and it is
+			// recorded, or not, as a whole one is.
+			if (cut || m.RespReadInPart) && !responseHasNoBody(req.Method, respParsed.StatusCode) {
+				respBody, err = decompressReadInPart(enc, respBody, pkg.MaxDecompressedSize)
+			} else {
+				respBody, err = pkg.Decompress(h.Logger, enc, respBody, pkg.MaxDecompressedSize)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("decompress response body: %w", err)
 			}
@@ -593,6 +713,10 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 				StatusCode: respParsed.StatusCode,
 				Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 				Body:       string(respBody),
+
+				// Replay serves this response: keep what it takes to serve a
+				// repeated header (Set-Cookie) on its own lines.
+				HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 			},
 			Created:          time.Now().Unix(),
 			ReqTimestampMock: m.ReqTimestampMock,

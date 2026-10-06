@@ -139,6 +139,7 @@ committed fixtures.
 | `keploy report`              | `pkg/service/report`             | Summarize a previous test run                                                    |
 | `keploy export` / `import`   | `cli/export.go`, `cli/import.go` | Move test-sets between repos                                                     |
 | `keploy update`              | `cli/update.go`                  | Self-update the binary                                                           |
+| `keploy ca clean`            | `cli/ca.go`                      | Remove the retired static MITM CA (matched by fingerprint) from this host's trust store |
 | `keploy agent`               | `cli/agent.go`                   | Internal — used by the Docker image entrypoint                                   |
 
 Note: `keploy gen` (`pkg/service/utgen`, LLM unit-test generation) has its CLI

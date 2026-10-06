@@ -12,7 +12,7 @@ import (
 )
 
 func mockAt(name string, at time.Time) *models.Mock {
-	return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at}}
+	return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at, HTTPReq: &models.HTTPReq{}, HTTPResp: &models.HTTPResp{}}}
 }
 
 // A re-record starts from an empty mapping: the old tests would otherwise

@@ -1257,7 +1257,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		passPortsUint32[i] = uint32(port)
 	}
 
-	setupOpts := models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose}
+	setupOpts := models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, DisableHandshakeHold: r.config.Record.DisableHandshakeHold, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose}
 	// Retry only a stalled agent bring-up (pkg.ErrAgentNotReady) with a fresh
 	// agent; a healthy agent is set up once and the test set runs against it.
 	err := pkg.RetryAgentSetup(ctx, r.logger, func(c context.Context, attempt int) error {
@@ -1426,6 +1426,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var ignored int
 	var totalConsumedMocks = map[string]models.MockState{}
 	var passingTotalConsumedMocks = map[string]models.MockState{}
+	// perTestRegion names the per-test mocks this set hands the agent, the
+	// only ones an agent that says so reads consumed entries for (see
+	// consumedForAgent). nil until StoreMocks: then everything is sent.
+	var perTestRegion map[string]struct{}
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -1473,6 +1477,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// (the same reason DNS mocks are excluded). MockEntry carries no tier, so
 	// we derive it from the loaded mocks (which do, via TestModeInfo.Lifetime).
 	reusableMockNames := make(map[string]bool)
+	// mockLookup maps a mock's name to its summary, protocol and target, for
+	// the report: the per-test and session mocks as recorded. Built as the
+	// mocks are loaded (loadTestSetMocks), or below, before the tests run,
+	// when they are not loaded here.
+	var mockLookup map[string]mockDisplayInfo
 	addKinds := func(mocks []*models.Mock) {
 		for _, m := range mocks {
 			mockKindByName[m.Name] = m.Kind
@@ -1641,10 +1650,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+		filteredMocks, unfilteredMocks, lookup, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		mockLookup = lookup
 
 		addKinds(filteredMocks)
 		addKinds(unfilteredMocks)
@@ -1678,13 +1688,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
+		perTestRegion = pkg.PerTestRegion(filteredMocks)
 
 		if !isMappingEnabled {
 			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShapeOf(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -1715,19 +1726,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// runs every test-set, matching the historical lifecycle.
 		if serveTest && !r.isFirstTestSet {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(r.config.Test, testCases, testSetID, r.logger)) {
+		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(runTestSetCtx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation))) {
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
-		// The compose bring-up retry (pkg/client/app) answers a transient
-		// dependency crash by tearing the whole stack down, the injected
-		// keploy-agent included, and re-issuing `up`; the replacement agent boots
-		// empty. Everything this session stored on the agent lived in the process
-		// that just went away, and the setup above already ran, so without a check
-		// the tests would fire against an agent holding nothing and the run would
-		// report zero executed tests (keploy#4614). Re-register with the
-		// replacement, or fail this test set loudly rather than proceeding
-		// mockless.
+		// The compose bring-up retry (pkg/client/app) can leave keploy's agent
+		// replaced: compose starts again an agent it stopped, or recreates one
+		// under a recreate flag, and the replacement boots empty. The CLI sets
+		// it up again as this one was (pkg/platform/http/session.go); should that
+		// not have taken, everything this session stored on the agent lived in
+		// the process that went away, and the tests would fire against an agent
+		// holding nothing and report zero executed tests (keploy#4614).
+		// Re-register with the replacement, or fail this test set loudly rather
+		// than proceeding mockless.
 		if err := r.ensureAgentHoldsStoredMocks(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
 			totalConsumedMocks, useMappingBased, testCases); err != nil {
 			return models.TestSetStatusFailed, err
@@ -1778,10 +1789,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+		filteredMocks, unfilteredMocks, lookup, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		mockLookup = lookup
 		addKinds(filteredMocks)
 		addKinds(unfilteredMocks)
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
@@ -1806,6 +1818,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
+		perTestRegion = pkg.PerTestRegion(filteredMocks)
 		if r.firstRun {
 			err = r.hookImpl.BeforeTestRun(ctx, testRunID)
 			if err != nil {
@@ -1855,7 +1868,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShapeOf(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -1914,7 +1927,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// one-shot spawn actually fired.
 			if serveTest && !r.isFirstTestSet {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(r.config.Test, testCases, testSetID, r.logger)) {
+			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(runTestSetCtx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation))) {
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
 
@@ -2081,15 +2094,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	for k, v := range totalConsumedMocks {
 		allConsumedAcrossCycles[k] = v
 	}
-	// Build a lookup of mock name -> summary, protocol and target from the mock
-	// registry (once per test set). `target` is added for the DepResult writer:
-	// neither models.MockEntry (the mapping side) nor models.MockState (the
-	// consumed side) carries a destination, so the only place a human-meaningful
-	// target exists is the loaded *models.Mock. Can legitimately stay empty —
-	// r.mockDB may be nil and GetUnFilteredMocks errors are swallowed here — so
-	// every consumer must degrade gracefully rather than assume a hit.
-	mockLookup := map[string]mockDisplayInfo{}
-
 	// Test-set-scoped dependency-assertion bookkeeping.
 	//
 	// depMissingTests collects the tests that lost a recorded outgoing call so
@@ -2107,16 +2111,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// per test.
 	depMissingTests := map[string]models.TestStatus{}
 	depAssertionInertWarned := false
-	if r.mockDB != nil {
-		if allMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now(), nil, nil); err == nil {
-			for _, mock := range allMocks {
-				mockLookup[mock.Name] = mockDisplayInfo{
-					summary:  models.MockSummaryFromSpec(mock),
-					protocol: string(mock.Kind),
-					target:   mockTargetFromSpec(mock),
-				}
-			}
-		}
+	// The lookup of mock name -> summary, protocol and target from the mock
+	// registry (once per test set). `target` is added for the DepResult writer:
+	// neither models.MockEntry (the mapping side) nor models.MockState (the
+	// consumed side) carries a destination, so the only place a human-meaningful
+	// target exists is the loaded *models.Mock. Can legitimately stay empty —
+	// r.mockDB may be nil and the lookup's reads swallow their errors — so
+	// every consumer must degrade gracefully rather than assume a hit.
+	if mockLookup == nil {
+		// Not built with the mocks above: they were not loaded here.
+		mockLookup = r.readMockLookup(runTestSetCtx, testSetID)
 	}
 
 	// Separate replay into regular and streaming buckets. Regular tests can use the
@@ -2159,6 +2163,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	testsToRun := activeTestCases
+	// Mocks the agent reports consumed outside their own window (a late server
+	// push, a carry-over publish) are kept and mapped by their own window, not
+	// by the running test; see carryOverAttribution.
+	carryAttr := newCarryOverAttribution(testCases)
 	// stoppedEarly records that a cycle exited before every test it intended to
 	// run had produced a verdict. The counters cannot express this on their own:
 	// `success` is ASSIGNED per cycle while `failure`/`obsolete` accumulate, and
@@ -2291,15 +2299,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			var testPass bool
 			var loopErr error
 
-			var reqTime, respTime time.Time
-			switch testCase.Kind {
-			case models.HTTP:
-				reqTime = testCase.HTTPReq.Timestamp
-				respTime = testCase.HTTPResp.Timestamp
-			case models.GRPC_EXPORT:
-				reqTime = testCase.GrpcReq.Timestamp
-				respTime = testCase.GrpcResp.Timestamp
-			}
+			reqTime, respTime := testWindowOf(testCase)
 
 			// Per-test names PLUS the test-set's startup names. On this path the
 			// agent calls disk.LoadByNames(MockMapping) and loads nothing else,
@@ -2308,7 +2308,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// startup section exists to close. The timestamp path needs no
 			// equivalent: it reloads them via disk.LoadBefore(firstWindowStart).
 			expectedNames := models.MergeStartupMockNames(expectedTestMockMappings[testCase.Name], startupMockNames)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased, time.Time{})
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{})
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 					testSetStatus = resolvedStatus
@@ -2608,7 +2608,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			tcReqTime, tcRespTime := recordReqResTimestamps(testCase)
-			upsertActualTestMockMapping(actualTestMockMappings, testCase.Name, consumedMocks, tcReqTime, tcRespTime)
+			carryAttr.mapConsumed(actualTestMockMappings, testCase.Name, tcReqTime, tcRespTime, consumedMocks)
 
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Debug("consumed mocks for test case",
@@ -2711,6 +2711,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			default:
 				currentFailures++
 			}
+			carryAttr.keepWhateverTheVerdict(passingTotalConsumedMocks, testCase.Name, consumedMocks)
 			if outcome.FailsTestSet {
 				testSetStatus = models.TestSetStatusFailed
 			}
@@ -2740,6 +2741,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							Binary:     testCase.HTTPReq.Binary,
 							Form:       testCase.HTTPReq.Form,
 							Timestamp:  testCase.HTTPReq.Timestamp,
+
+							HeaderLineLengths: testCase.HTTPReq.HeaderLineLengths,
 						},
 						Res:          *httpResp,
 						TestCasePath: filepath.Join(r.config.Path, testSetID),
@@ -3110,7 +3113,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// to expected would have that unexpected consumption tolerated — a
 			// test that should go OBSOLETE would pass instead.
 			streamExpected := models.MergeStartupMockNames(expectedTestMockMappings[tc.Name], startupMockNames)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased, time.Time{})
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{})
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
@@ -3354,7 +3357,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			tcReqTimeStream, tcRespTimeStream := recordReqResTimestamps(tc)
-			upsertActualTestMockMapping(actualTestMockMappings, tc.Name, consumedMocks, tcReqTimeStream, tcRespTimeStream)
+			carryAttr.mapConsumed(actualTestMockMappings, tc.Name, tcReqTimeStream, tcRespTimeStream, consumedMocks)
 
 			// Log consumed mocks for streaming test
 			r.logger.Debug("consumed mocks for streaming test case",
@@ -3403,6 +3406,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 			}
+			carryAttr.keepWhateverTheVerdict(passingTotalConsumedMocks, tc.Name, consumedMocks)
 
 			if testResult != nil {
 				testCaseResult := &models.TestResult{
@@ -3423,6 +3427,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						Binary:     tc.HTTPReq.Binary,
 						Form:       tc.HTTPReq.Form,
 						Timestamp:  tc.HTTPReq.Timestamp,
+
+						HeaderLineLengths: tc.HTTPReq.HeaderLineLengths,
 					},
 					Res:          *httpResp,
 					TestCasePath: filepath.Join(r.config.Path, testSetID),
@@ -4010,6 +4016,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 }
 
 func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, err error) {
+	if reader, ok := r.mockDB.(pkg.TestSetMocksReader); ok {
+		set, err := r.getTestSetMocks(ctx, reader, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
+		return set.Filtered, set.Unfiltered, err
+	}
 	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get filtered mocks")
@@ -4023,11 +4033,125 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-// SendMockFilterParamsToAgent sends filtering parameters to agent instead of sending filtered mocks
-// firstRecordedTestStart is the request time of the EARLIEST RECORDED test in
-// the set, and is only meaningful on the initial staging call. It lets the agent
-// seed the startup-init cutoff from the set's recorded shape instead of from
-// whichever test fires first; pass the zero time on per-test calls.
+// getTestSetMocks reads both of the test set's pools, and its session pool
+// before the mapping prune, in one pass over its mock file.
+func (r *Replayer) getTestSetMocks(ctx context.Context, reader pkg.TestSetMocksReader, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error) {
+	set, err := reader.GetTestSetMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
+	if err != nil {
+		// The pass that failed is the one the per-test pool was read in.
+		utils.LogError(r.logger, err, "failed to get filtered mocks")
+		return models.TestSetMocks{}, err
+	}
+	return set, nil
+}
+
+// loadTestSetMocks is GetMocks over the run's whole window, plus the report's
+// mock lookup: the test set's per-test and session mocks as recorded.
+// RunTestSet used to read the set's mock file once per pool and once more for
+// the lookup, three full decodes before the first test. A store that reads
+// every pool in one pass (pkg.TestSetMocksReader) gives the lookup from that
+// read: the per-test candidates and the session pool before the mapping prune
+// and the window filter. A store that reads one pool per call gives the
+// per-test half from the pool it loaded, which the prune never takes a mock a
+// running test expects from, and the session half from the session pool it
+// loaded when the prune had nothing to drop, else from a read of its own.
+//
+// The lookup is built here, before AfterGetMocks may change the mocks in place
+// (a mutator decrypts them, for one), so it describes them as they are on disk.
+func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, err error) {
+	reader, ok := r.mockDB.(pkg.TestSetMocksReader)
+	if !ok {
+		filtered, unfiltered, err = r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		allSession := unfiltered
+		if len(mocksThatHaveMappings) > 0 {
+			allSession, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
+			if err != nil {
+				r.logger.Debug("failed to read the session mocks for the report's mock lookup; the report will not describe them",
+					zap.String("testSetID", testSetID), zap.Error(err))
+				allSession = nil
+			}
+		}
+		return filtered, unfiltered, newMockLookup(filtered, allSession), nil
+	}
+	set, err := r.getTestSetMocks(ctx, reader, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), nil
+}
+
+// readMockLookup reads the report's mock lookup for a test set whose mocks
+// RunTestSet does not load: its per-test and session mocks, in one read when
+// the store can, else in one read per pool. A read that fails leaves its pool
+// out of the lookup.
+func (r *Replayer) readMockLookup(ctx context.Context, testSetID string) map[string]mockDisplayInfo {
+	if r.mockDB == nil {
+		return map[string]mockDisplayInfo{}
+	}
+	logFailed := func(pool string, err error) {
+		r.logger.Debug("failed to read the "+pool+" mocks for the report's mock lookup; the report will not describe them",
+			zap.String("testSetID", testSetID), zap.Error(err))
+	}
+	if reader, ok := r.mockDB.(pkg.TestSetMocksReader); ok {
+		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
+		if err != nil {
+			logFailed("per-test and session", err)
+			return map[string]mockDisplayInfo{}
+		}
+		return newMockLookup(set.AllPerTest, set.AllSession)
+	}
+	// No window: the per-test reader then filters nothing out, so the lookup
+	// gets every per-test mock as recorded, as AllPerTest gives it above.
+	perTest, err := r.mockDB.GetFilteredMocks(ctx, testSetID, time.Time{}, time.Time{}, nil, nil)
+	if err != nil {
+		logFailed("per-test", err)
+		perTest = nil
+	}
+	session, err := r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
+	if err != nil {
+		logFailed("session", err)
+		session = nil
+	}
+	return newMockLookup(perTest, session)
+}
+
+// newMockLookup builds the report's mock lookup from a test set's per-test and
+// session mocks. A name in both, which the gob store's PostgresV2 mocks are,
+// keeps the session mock's entry, as the lookup did when it held only those.
+func newMockLookup(perTest, session []*models.Mock) map[string]mockDisplayInfo {
+	lookup := make(map[string]mockDisplayInfo, len(perTest)+len(session))
+	addMockDisplayInfo(lookup, perTest)
+	addMockDisplayInfo(lookup, session)
+	return lookup
+}
+
+// addMockDisplayInfo adds each mock's display info to the lookup, keyed by
+// name; a later mock of the same name replaces an earlier one.
+func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock) {
+	for _, mock := range mocks {
+		lookup[mock.Name] = mockDisplayInfo{
+			summary:  models.MockSummaryFromSpec(mock),
+			protocol: string(mock.Kind),
+			target:   mockTargetFromSpec(mock),
+		}
+	}
+}
+
+// consumedForAgent is the consumed history to send with filter params: only the
+// per-test region's entries once the agent has said it reads no others
+// (pkg.ConsumedScopeReader), the whole of it until then. Agents from v3.0.0-beta1
+// through v3.3.22 also applied the history to the session pool, so only that
+// answer, never this client's own view of the agent, may narrow it.
+func (r *Replayer) consumedForAgent(total map[string]models.MockState, region map[string]struct{}) map[string]models.MockState {
+	if s, ok := r.instrumentation.(pkg.ConsumedScopeReader); ok && s.AgentReadsConsumedPerTestOnly() {
+		return pkg.ConsumedForAgent(total, region)
+	}
+	return total
+}
+
 // firstRecordedTestStart returns the request time of the earliest RECORDED test
 // in the set. testDB returns cases sorted by request timestamp, so it is the
 // first one's; a case with no request time contributes nothing rather than
@@ -4044,7 +4168,62 @@ func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
 	return time.Time{}
 }
 
-func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, firstRecordedTestStart time.Time) error {
+// recordedSetShape is what the staging call tells the agent about the set's
+// recording as a whole. Per-test calls send the zero value.
+//
+//   - firstTestStart is the request time of the EARLIEST RECORDED test; the
+//     agent seeds the startup-init cutoff from it instead of from whichever
+//     test fires first.
+//   - windows is the window of EVERY recorded test, selected or not; the agent
+//     releases traffic the test windows do not pace by themselves (server push)
+//     at the recorded window it belongs to.
+type recordedSetShape struct {
+	firstTestStart time.Time
+	windows        []models.TestWindow
+}
+
+func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
+	return recordedSetShape{
+		firstTestStart: firstRecordedTestStart(testCases),
+		windows:        recordedTestWindows(testCases),
+	}
+}
+
+// recordedTestWindows returns the window each recorded test opens on the agent
+// when it runs — the same [req, res] pair the per-test SendMockFilterParamsToAgent
+// call sends (HTTP and gRPC; other kinds open none) — for every test case of the
+// set, including those this run does not select. A case with no request time
+// opens no window and is left out.
+func recordedTestWindows(testCases []*models.TestCase) []models.TestWindow {
+	out := make([]models.TestWindow, 0, len(testCases))
+	for _, tc := range testCases {
+		start, end := testWindowOf(tc)
+		if start.IsZero() {
+			continue
+		}
+		out = append(out, models.TestWindow{TestCase: tc.Name, Start: start, End: end})
+	}
+	return out
+}
+
+// testWindowOf is the [req, res] window the per-test agent call opens for tc.
+func testWindowOf(tc *models.TestCase) (time.Time, time.Time) {
+	if tc == nil {
+		return time.Time{}, time.Time{}
+	}
+	switch tc.Kind {
+	case models.HTTP:
+		return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+	case models.GRPC_EXPORT:
+		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+	}
+	return time.Time{}, time.Time{}
+}
+
+// SendMockFilterParamsToAgent sends filtering parameters to agent instead of
+// sending filtered mocks. shape is only meaningful on the set's staging call
+// (see recordedSetShape); pass the zero value on per-test calls.
+func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, shape recordedSetShape) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -4092,7 +4271,8 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	params := models.MockFilterParams{
 		AfterTime:              afterTime,
 		BeforeTime:             beforeTime,
-		FirstRecordedTestStart: firstRecordedTestStart,
+		FirstRecordedTestStart: shape.firstTestStart,
+		RecordedWindows:        shape.windows,
 		MockMapping:            expectedMockMapping,
 		UseMappingBased:        useMappingBased,
 		AgentOwnsConsumed:      agentOwnsConsumed,
@@ -4153,7 +4333,7 @@ func (r *Replayer) probeMockStats(ctx context.Context) (models.MockStats, error)
 // fire against. The loaded count is only ever written by StoreMocks on the
 // agent process, so any non-zero value means that process received our store;
 // zero while a non-empty corpus was stored is the replacement-agent signature
-// (the bring-up retry boots a new agent, and nothing re-stores onto it).
+// (an agent the bring-up retry started that was not set up again).
 func agentHoldsStoredCorpus(stored, loaded int) bool {
 	return stored == 0 || loaded > 0
 }
@@ -4164,13 +4344,17 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // replacement agent when it does not.
 //
 // Why this exists: the compose bring-up retry (pkg/client/app,
-// shouldRetryComposeUp) answers a transient dependency crash by tearing the
-// whole stack down, the injected keploy-agent included, and re-issuing `up`;
-// the replacement agent boots empty. All of the session's replay state - the
-// stored corpus, the proxy's mock manager, the mock filter params - lived in
-// the agent that just went away, and the straight-line setup above has
-// already run, so nothing re-registers it: the tests fire against an agent
-// holding nothing and the run reports zero executed tests (keploy#4614).
+// shouldRetryComposeUp) answers a transient dependency crash by running `up`
+// again, and compose can replace the injected keploy-agent there: it starts
+// again an agent it stopped (every service attached), or recreates one (a
+// recreate flag), and the replacement boots empty. The CLI's agent session
+// sets the replacement up again once it answers (pkg/platform/http/
+// session.go); this is the check that it took, and the repair when it did not.
+// All of the session's replay state - the stored corpus, the proxy's mock
+// manager, the mock filter params - lived in the agent that went away, and
+// the straight-line setup above has already run: unrepaired, the tests fire
+// against an agent holding nothing and the run reports zero executed tests
+// (keploy#4614).
 //
 // The probe is the agent's non-draining /mock/stats loaded count rather than
 // GetConsumedMocks: that one drains, and polling it here would steal entries
@@ -4250,7 +4434,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	if err := r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
-	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, firstRecordedTestStart(testCases)); err != nil {
+	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, recordedSetShapeOf(testCases)); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at the filter params: %w", testSetID, err)
 	}
 	// Same soft-fail as the setup call site: a readiness-file write that fails
@@ -5078,6 +5262,8 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Binary:     testCase.HTTPReq.Binary,
 			Form:       testCase.HTTPReq.Form,
 			Timestamp:  testCase.HTTPReq.Timestamp,
+
+			HeaderLineLengths: testCase.HTTPReq.HeaderLineLengths,
 		}
 		testCaseResult.Res = *actualResponse
 
@@ -5379,6 +5565,12 @@ const resetResendReadyTimeout = 5 * time.Second
 // successful re-send's consumption is still accounted by the subsequent per-test
 // GetConsumedMocks in RunTestSet (loopErr becomes nil, so that block runs).
 func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase, testSetID string, origErr error) (interface{}, bool, []models.MockState) {
+	// A reset at an address the app can never be reached at (a published port
+	// it listens behind only on 127.0.0.1 in its container) comes back on every
+	// re-send, and waiting for it to serve first would wait out each gate.
+	if pkg.IsUnreachableAppPort(origErr) {
+		return nil, false, nil
+	}
 	for attempt := 1; attempt <= maxResetResends; attempt++ {
 		if ctx.Err() != nil {
 			return nil, false, nil

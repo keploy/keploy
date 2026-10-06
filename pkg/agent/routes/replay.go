@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -163,6 +164,13 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 
 	a.logger.Debug("Time taken to update mock params duration :", zap.Duration("duration", time.Since(start)))
 
+	// A header, not a body field: a client that predates it never looks at
+	// headers, so its handling of this response cannot change.
+	if s, ok := a.svc.(interface {
+		ReadsConsumedForPerTestOnly(agent.Service) bool
+	}); ok && s.ReadsConsumedForPerTestOnly(a.svc) {
+		w.Header().Set(models.ConsumedScopeHeader, models.ConsumedScopePerTest)
+	}
 	respondAgent(w, r, http.StatusOK, nil)
 }
 

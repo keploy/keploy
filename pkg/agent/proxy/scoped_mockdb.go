@@ -3,6 +3,7 @@ package proxy
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -78,18 +79,27 @@ func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, er
 	}
 	out := mocks[:0:0]
 	for _, m := range mocks {
-		if m == nil {
-			continue
-		}
-		if _, mine := s.allow[m.Name]; mine {
+		if s.visible(m) {
 			out = append(out, m)
-			continue
-		}
-		if _, mapped := s.universe[m.Name]; !mapped {
-			out = append(out, m) // shared / unmapped mock — visible to everyone
 		}
 	}
 	return out, nil
+}
+
+// visible is keep's verdict on one mock. Without a filter every non-nil mock
+// is visible.
+func (s *scopedMockDb) visible(m *models.Mock) bool {
+	if m == nil {
+		return false
+	}
+	if s.allow == nil || s.universe == nil {
+		return true
+	}
+	if _, mine := s.allow[m.Name]; mine {
+		return true
+	}
+	_, mapped := s.universe[m.Name]
+	return !mapped // shared / unmapped mock — visible to everyone
 }
 
 func (s *scopedMockDb) GetFilteredMocks() ([]*models.Mock, error) {
@@ -106,6 +116,48 @@ func (s *scopedMockDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 
 func (s *scopedMockDb) GetSessionMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetSessionMocks())
+}
+
+// GetSessionMocksInWindow forwards the window index of the wrapped store through
+// the same name filter as GetSessionMocks; both filters are per mock, so their
+// order does not matter. A store without the index is walked.
+func (s *scopedMockDb) GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.SessionWindowReader); ok {
+		return s.keep(r.GetSessionMocksInWindow(start, end))
+	}
+	all, err := s.GetSessionMocks()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*models.Mock, 0, len(all))
+	for _, mk := range all {
+		if mk != nil && recordedIn(mk, start, end) {
+			out = append(out, mk)
+		}
+	}
+	return out, nil
+}
+
+// RangeSessionMocksWithKey forwards the key index of the wrapped store through
+// the same name filter as GetSessionMocks. A store without the index is
+// walked, which costs each lookup a whole GetSessionMocks snapshot; the agent
+// always wraps the mock manager, which has it.
+func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	if r, ok := s.MockMemDb.(integrations.SessionKeyReader); ok {
+		return r.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
+			return !s.visible(mk) || fn(mk)
+		})
+	}
+	all, err := s.GetSessionMocks()
+	if err != nil {
+		return err
+	}
+	for _, mk := range all {
+		if mk != nil && slices.Contains(ix.Keys(mk), key) && !fn(mk) {
+			break
+		}
+	}
+	return nil
 }
 
 func (s *scopedMockDb) GetUnFilteredMocks() ([]*models.Mock, error) {
@@ -141,6 +193,46 @@ func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
 		RevisionByKind(models.Kind) uint64
 	}); ok {
 		return r.RevisionByKind(kind)
+	}
+	return 0
+}
+
+// RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
+// pass straight through.
+func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
+	if r, ok := s.MockMemDb.(integrations.RecordedWindowsReader); ok {
+		return r.RecordedWindows()
+	}
+	return nil
+}
+
+// WindowChanged of a manager without the signal returns nil, a channel that
+// never fires — the same "no signal" a consumer sees when the assertion fails.
+func (s *scopedMockDb) WindowChanged() <-chan struct{} {
+	if p, ok := s.MockMemDb.(integrations.WindowPacer); ok {
+		return p.WindowChanged()
+	}
+	return nil
+}
+
+// The carry-over tier is a read tier like the others, so it goes through keep().
+func (s *scopedMockDb) GetCarryOverMocks() ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {
+		return s.keep(r.GetCarryOverMocks())
+	}
+	return nil, nil
+}
+
+func (s *scopedMockDb) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {
+		return s.keep(r.GetCarryOverMocksByKind(kind))
+	}
+	return nil, nil
+}
+
+func (s *scopedMockDb) StagingEpoch() uint64 {
+	if p, ok := s.MockMemDb.(integrations.WindowPacer); ok {
+		return p.StagingEpoch()
 	}
 	return 0
 }

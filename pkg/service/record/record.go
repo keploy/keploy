@@ -27,13 +27,6 @@ import (
 )
 
 const (
-	// mappingDrainGrace hard-caps how long recording shutdown waits for the agent
-	// to flush the test<->mock mappings it has already resolved. Bounded so a
-	// wedged agent cannot hang exit, and kept under the 30s DrainErrGroup budget
-	// that Start's teardown gives the group this drain runs in — overshooting that
-	// would trade a lost tail for a teardown timeout, which is no better.
-	mappingDrainGrace = 15 * time.Second
-
 	// mappingFlushBatch is how many mappings accumulate before mappings.yaml is
 	// rewritten. Each rewrite re-encodes the whole file, so writing per mapping is
 	// quadratic (368 tests: 164us for the first, 19.45ms for the last, ~2.7s of
@@ -46,6 +39,10 @@ const (
 	// recording still persists mappings as it goes instead of holding them all in
 	// memory until the stream closes.
 	mappingFlushInterval = 2 * time.Second
+
+	// closedStreamGrace is how long a frame stream that has been ended may take
+	// to hand over what its reader had already decoded (forwardUntilDrained).
+	closedStreamGrace = 250 * time.Millisecond
 
 	// mappingIdleGrace ends the shutdown drain once the mapping stream falls idle.
 	// The agent holds the stream open for the whole session, so idleness — not EOF
@@ -69,6 +66,231 @@ func stopTimer(t *time.Timer) {
 		default:
 		}
 	}
+}
+
+// drainOpts says how forwardUntilDrained treats one stream's frames.
+type drainOpts[T any] struct {
+	// capturedAt is when a frame was captured (zero: it does not say).
+	capturedAt func(T) time.Time
+	// dropped logs a frame taken off the stream that no consumer will take.
+	dropped func(T)
+	// closeStream ends the stream, once the drain is over.
+	closeStream func()
+	// afterStop, when set, is told of a frame captured after the stop,
+	// undated ones included, which is then not forwarded. It is set when the
+	// app keeps serving through the drain (docker compose): what it serves
+	// then is not part of the recording. Without it such frames are forwarded
+	// (a native app is already stopped: nothing after the stop is new).
+	afterStop func(T)
+	// keepUndated keeps undated frames even when afterStop is set.
+	keepUndated bool
+	// handing, when set, is called with each frame about to be handed to the
+	// consumer, and returns what to run once it has been. It reads what it
+	// needs from the frame there: a handed frame is the consumer's, which may
+	// change it (InsertTestCase names an unnamed test case in place).
+	handing func(T) (handed func())
+	// kind names the frames in logs ("test cases", "mocks").
+	kind string
+}
+
+// beforeHand runs o.handing for a frame about to be handed over, and returns
+// what to run once it has been.
+func (o drainOpts[T]) beforeHand(item T) (handed func()) {
+	if o.handing == nil {
+		return func() {}
+	}
+	return o.handing(item)
+}
+
+// forwardUntilDrained forwards a frame stream from the agent to its consumer,
+// and on through the stop until the stream has held back nothing captured
+// before it.
+//
+// The agent's parsers run behind the traffic, so at the stop a busy recording
+// still has frames queued there: at 110 req/s the CLI that stopped reading at
+// the stop and gave the stream one 30 s wait lost the mocks of 1,655 of 3,300
+// tests. So a stop does not end the forwarding. The drain ends when the stream
+// closes, when nothing will consume it (abandoned), or once, for
+// mappingIdleGrace, it has delivered nothing captured before the stop: the
+// agent holds its streams open for the whole session, so quiet is the only
+// sign that what it held is through. Frames captured after the stop, and
+// undated ones, say nothing about that backlog and do not extend it; see
+// drainOpts.afterStop for whether they are forwarded. There is no bound on the
+// total: a sink still draining is never cut off.
+//
+// A frame taken off the stream is always handed over, unless no consumer will
+// ever come (abandoned), when dropped logs it. When the drain ends, closeStream
+// ends the stream, and what its reader has already queued is still handed
+// over before this returns; a frame the reader holds at that moment can be
+// lost, but by then nothing captured before the stop is left to come.
+//
+// Stop and frame times are compared across the CLI and the agent, which run on
+// one host (natively, or in a local container) and so share its clock.
+func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan T, out chan<- T,
+	abandoned <-chan struct{}, o drainOpts[T]) {
+	var stoppedAt time.Time
+	quiet := r.frameQuietGrace()
+	idle := time.NewTimer(quiet)
+	defer idle.Stop()
+	stopTimer(idle)
+	// quietUntil is when the stream will have been quiet for the whole bound,
+	// once the stop has come. Only time spent waiting on the stream counts:
+	// the bound is paused while a frame is handed to a consumer that is still
+	// persisting the last one (the channels hold one frame), or one slow
+	// write (a 12 MB mock, a disk stall) ended the drain with the agent still
+	// holding frames, and the stream's ready frame then lost a random race
+	// against the timer that fired meanwhile.
+	var quietUntil time.Time
+	// sinceStop counts the frames handed on since the stop. giveUp ends the
+	// drain at a second interrupt, and says what it got.
+	var sinceStop int
+	giveUp := func() {
+		o.closeStream()
+		r.logger.Warn("stopped saving what the agent captured before the stop, at a second interrupt",
+			zap.String("frames", o.kind), zap.Int("savedSinceTheStop", sinceStop),
+			zap.String("next_step", "what the agent still held was not saved: test cases it had captured may be missing, or saved without their mocks"))
+	}
+	// keep reports whether a frame taken off the stream goes on to the
+	// consumer, and whether it is progress: a frame from before the stop.
+	keep := func(item T) (forward, progress bool) {
+		if stoppedAt.IsZero() {
+			return true, false
+		}
+		switch at := o.capturedAt(item); {
+		case at.IsZero():
+			// Undated: no sign of a backlog, or undated traffic after the stop
+			// would hold the drain open.
+			if o.afterStop == nil || o.keepUndated {
+				return true, false
+			}
+		case !at.After(stoppedAt):
+			return true, true
+		case o.afterStop == nil:
+			return true, false
+		}
+		o.afterStop(item)
+		return false, false
+	}
+	hand := func(item T, progress bool) bool {
+		draining := !stoppedAt.IsZero()
+		var left time.Duration
+		if draining {
+			left = max(time.Until(quietUntil), 0)
+		}
+		var again <-chan struct{}
+		if draining {
+			again = utils.InterruptedAgain()
+		}
+		onHanded := o.beforeHand(item)
+		handed := false
+		select {
+		case out <- item:
+			r.frameProgress.Add(1)
+			if draining {
+				sinceStop++
+			}
+			onHanded()
+			handed = true
+		case <-abandoned:
+			o.dropped(item)
+		case <-again:
+			giveUp()
+			return false
+		}
+		if draining {
+			if progress {
+				quietUntil = time.Now().Add(quiet)
+			} else {
+				// Not progress, but not quiet either: the bound resumes
+				// where it was paused.
+				quietUntil = time.Now().Add(left)
+			}
+			// Re-armed, and drained of a fire that came meanwhile, so the
+			// next select never weighs a stale fire against a ready frame.
+			resetTimer(idle, time.Until(quietUntil))
+		}
+		return handed
+	}
+	for {
+		var shutdownC, againC <-chan struct{}
+		var idleC <-chan time.Time
+		if stoppedAt.IsZero() {
+			shutdownC = ctx.Done()
+		} else {
+			idleC = idle.C
+			againC = utils.InterruptedAgain()
+		}
+		select {
+		case <-againC:
+			giveUp()
+			return
+		case <-shutdownC:
+			stoppedAt = time.Now()
+			quietUntil = stoppedAt.Add(quiet)
+			resetTimer(idle, quiet)
+			continue
+		case <-idleC:
+			// Quiet is not proof: an agent whose capture can tell says whether
+			// it may still hand over something from before the stop (a parser
+			// behind the traffic can be quiet for longer than any grace).
+			if r.agentPendingBefore(stoppedAt) {
+				quietUntil = time.Now().Add(quiet)
+				resetTimer(idle, quiet)
+				continue
+			}
+			// What the agent held at the stop is through. End the stream, and
+			// hand over what its reader had already queued.
+			o.closeStream()
+			for {
+				// The reader closes the stream once its request ends; one that
+				// does not is taken as done once it has nothing buffered.
+				var item T
+				var ok bool
+				resetTimer(idle, closedStreamGrace)
+				select {
+				case item, ok = <-stream:
+				case <-idle.C:
+				}
+				if !ok {
+					return
+				}
+				stopTimer(idle)
+				if forward, _ := keep(item); forward {
+					onHanded := o.beforeHand(item)
+					select {
+					case out <- item:
+						r.frameProgress.Add(1)
+						onHanded()
+					case <-abandoned:
+						o.dropped(item)
+						return
+					}
+				}
+			}
+		case <-abandoned:
+			// No consumer is coming; what is still queued on the stream has
+			// nowhere to go (see the MAPPINGS forwarder's note).
+			return
+		case item, ok := <-stream:
+			if !ok {
+				return
+			}
+			if forward, progress := keep(item); forward && !hand(item, progress) {
+				return
+			}
+		}
+	}
+}
+
+// testCaseCapturedAt is when a test case was complete, from the wire times the
+// agent stamped: its response, else its request. A gRPC test case carries
+// neither (its Created is when the agent built it, not when it ran) and is
+// undated.
+func testCaseCapturedAt(tc *models.TestCase) time.Time {
+	if !tc.HTTPResp.Timestamp.IsZero() {
+		return tc.HTTPResp.Timestamp
+	}
+	return tc.HTTPReq.Timestamp
 }
 
 // resetTimer re-arms t for d, safely draining any pending fire first.
@@ -175,6 +397,7 @@ func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappin
 	}()
 
 	for mapping := range mappings {
+		r.frameProgress.Add(1)
 		realMockEntries, lostMock, uncorrelated := r.resolveMappingEntries(mapping, correlationMap, asyncMockIDs, droppedMockIDs)
 
 		// Persisted anyway (see resolveMappingEntries), so record that this test
@@ -256,6 +479,77 @@ type Recorder struct {
 	// store interfaces. Register with RegisterCleanup.
 	cleanupMu sync.Mutex
 	cleanups  []func() error
+
+	// frameProgress counts test cases, mocks and mappings handed on from the
+	// agent's streams and persisted. The stop's drains wait while it moves
+	// (utils.DrainErrGroupProgress).
+	frameProgress atomic.Uint64
+
+	// frameQuiet is how long a frame stream must go without delivering
+	// anything captured before the stop for its drain to end
+	// (forwardUntilDrained); zero means mappingIdleGrace. A field so tests
+	// that are not about the drain need not wait it out.
+	frameQuiet time.Duration
+}
+
+// pendingReader is an agent client that can ask the agent whether it may still
+// hand over something captured before a time (AgentClient.PendingBefore).
+type pendingReader interface {
+	PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error)
+}
+
+// agentPendingBefore reports whether the agent says it may still hand over a
+// test case or a mock captured before `before`. False when it cannot tell.
+func (r *Recorder) agentPendingBefore(before time.Time) bool {
+	pr, ok := r.instrumentation.(pendingReader)
+	if !ok {
+		return false
+	}
+	pending, known, err := pr.PendingBefore(context.Background(), before)
+	if err != nil {
+		r.logger.Debug("could not ask the agent what it has yet to hand over; going by the streams' quiet", zap.Error(err))
+	}
+	return known && pending
+}
+
+// drainProgressEvery is how often a stop that is still saving what the agent
+// captured says so.
+const drainProgressEvery = 5 * time.Second
+
+// reportDrainProgress says, every `every` while the stop's drain is saving
+// frames, how many it has saved, and that a second interrupt ends it. The
+// drain has no fixed bound (forwardUntilDrained), so a user waiting on it must
+// be able to see that it is moving, and to end it. It returns the stop.
+func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
+	done := make(chan struct{})
+	start := r.frameProgress.Load()
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		last := start
+		for {
+			select {
+			case <-done:
+				return
+			case <-utils.InterruptedAgain():
+				return
+			case <-t.C:
+			}
+			if now := r.frameProgress.Load(); now != last {
+				last = now
+				r.logger.Info("Still saving what Keploy captured before the stop; press Ctrl+C again to stop now, and lose the rest",
+					zap.Uint64("savedSinceTheStop", now-start))
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+func (r *Recorder) frameQuietGrace() time.Duration {
+	if r.frameQuiet > 0 {
+		return r.frameQuiet
+	}
+	return mappingIdleGrace
 }
 
 // RegisterCleanup appends a shutdown callback that Recorder.Start's
@@ -675,6 +969,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	 * immediately because no join was requested.
 	 */
 	uiJoinObserved := newUIJoinPorts()
+	unreachablePorts := newUnreachablePortWarner(r.logger, r.instrumentation, r.config)
 
 	runAppErrGrp, _ := errgroup.WithContext(ctx)
 	runAppCtx := context.WithoutCancel(ctx)
@@ -799,14 +1094,34 @@ func (r *Recorder) Start(ctx context.Context) error {
 		// Bounded drains: a goroutine wedged under contention that ignores its
 		// cancel() must not hang teardown forever (which would swallow SIGINT and
 		// keep the process alive until an external SIGKILL). See utils.DrainErrGroup.
+		//
+		// The frame streams drain through the stop until what the agent held at
+		// it is through (forwardUntilDrained): wait for them while they make
+		// progress, however long that takes, and give up only on a stall.
+		drainFrames := func() {
+			reqCtxCancel()
+			defer r.reportDrainProgress(drainProgressEvery)()
+			if err, _ := utils.DrainErrGroupProgress(r.logger, "record-req", reqErrGrp, 30*time.Second, r.frameProgress.Load); err != nil {
+				utils.LogError(r.logger, err, "failed to stop request processing")
+			}
+		}
+		// Under docker compose the agent is a service of the app's own stack
+		// (keploy injects it), so taking the stack down takes the agent, and
+		// everything it has not handed over yet, with it: at 110 req/s for 30 s
+		// that was the mocks of 1,655 of 3,300 tests. So the agent is drained
+		// first. The app keeps running meanwhile, but what it serves after the
+		// stop is not recorded (forwardUntilDrained).
+		composeAgent := r.config.CommandType == string(utils.DockerCompose)
+		if composeAgent {
+			r.logger.Info("Waiting for the keploy agent to hand over what it captured before the stop...")
+			drainFrames()
+		}
 		runAppCtxCancel()
 		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
-
-		reqCtxCancel()
-		if err := utils.DrainErrGroup(r.logger, "record-req", reqErrGrp, 30*time.Second); err != nil {
-			utils.LogError(r.logger, err, "failed to stop request processing")
+		if !composeAgent {
+			drainFrames()
 		}
 
 		setupCtxCancel()
@@ -818,7 +1133,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		// only if this drain actually joined every persist goroutine; on the
 		// timeout path a mock/test-case writer may still be in flight (see below).
 		recordDrainedCleanly := true
-		if err, timedOut := utils.DrainErrGroupStatus(r.logger, "record", errGrp, 30*time.Second); err != nil {
+		if err, timedOut := utils.DrainErrGroupProgress(r.logger, "record", errGrp, 30*time.Second, r.frameProgress.Load); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		} else if timedOut {
 			recordDrainedCleanly = false
@@ -1205,7 +1520,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	setupOpts := models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, ChannelBindingShim: r.config.Record.ChannelBindingShim, UpstreamTLSVerify: r.config.Record.UpstreamTLS.Verify, UpstreamTLSCACert: r.config.Record.UpstreamTLS.CACert, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize, RecordBufferConsumerStallGrace: r.config.Record.RecordBuffer.ConsumerStallGrace, RecordBufferHalfCloseGrace: r.config.Record.RecordBuffer.HalfCloseGrace}
+	setupOpts := models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, DisableHandshakeHold: r.config.Record.DisableHandshakeHold, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, ChannelBindingShim: r.config.Record.ChannelBindingShim, UpstreamTLSVerify: r.config.Record.UpstreamTLS.Verify, UpstreamTLSCACert: r.config.Record.UpstreamTLS.CACert, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize, RecordBufferConsumerStallGrace: r.config.Record.RecordBuffer.ConsumerStallGrace, RecordBufferHalfCloseGrace: r.config.Record.RecordBuffer.HalfCloseGrace}
 	// Retry only a stalled agent bring-up (pkg.ErrAgentNotReady) with a fresh agent.
 	err = pkg.RetryAgentSetup(setupCtx, r.logger, func(c context.Context, attempt int) error {
 		o := setupOpts
@@ -1384,6 +1699,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
+			r.frameProgress.Add(1)
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
@@ -1433,6 +1749,8 @@ func (r *Recorder) Start(ctx context.Context) error {
 			 */
 			uiJoinObserved.observe(testCase.AppPort)
 			err := r.testDB.InsertTestCase(persistCtx, testCase, newTestSetID, true)
+			// After the insert, which is what names an auto-named test case.
+			unreachablePorts.check(ctx, testCase)
 			if err != nil {
 				if ctx.Err() != nil {
 					// Once shutdown has begun nothing reads insertTestErrChan:
@@ -1483,7 +1801,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 	})
 
 	errGrp.Go(func() error {
+		// The document the MockDB writes for each mock, for AfterMockInsert.
+		insertedDoc := NewInsertedMockDoc(persistCtx, r.hooks)
 		for mock := range frames.Outgoing {
+			r.frameProgress.Add(1)
 			// Deferred-orphan revoke: a reserved-Kind control frame, NOT a mock.
 			// Divert it into the revoke set (applied at finalize) BEFORE any
 			// domain-extraction / hook / InsertMock / correlation work — it
@@ -1538,7 +1859,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 			if mock.IsAsync() {
 				asyncMockIDs.Store(tempID, struct{}{})
 			}
-			err := r.mockDB.InsertMock(persistCtx, mock, newTestSetID)
+			encoded, encodedFormat, err := insertedDoc.Insert(r.mockDB, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() != nil {
 					// See the sibling note on the test-case insert: insertMockErrChan
@@ -1629,6 +1950,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 			} else {
 				if hookErr := r.hooks.AfterMockInsert(ctx, &MockContext{
 					Mock: mock, TestSetID: newTestSetID,
+					Encoded: encoded, EncodedFormat: encodedFormat,
 				}); hookErr != nil {
 					r.logger.Error("AfterMockInsert hook failed; mock was inserted successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
 						zap.Error(hookErr),
@@ -1776,9 +2098,33 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		return FrameChan{}, fmt.Errorf("failed to get error group from context")
 	}
 
+	// Both frame streams stay open through the stop until what the agent held
+	// at it is through (forwardUntilDrained), so they are opened on contexts
+	// that only their forwarders end. framesDrained closes when both have
+	// ended: the mapping drain waits for it (see MAPPINGS).
+	framesDrained := make(chan struct{})
+	// Under docker compose the app runs on while the agent drains (Start's
+	// stop): what it serves after the stop is not recorded. postStopTests
+	// names the test cases left out for it, and recordedTests those handed to
+	// the consumer, so that the mappings of the rest are left out too. Both
+	// are kept only under compose: recordedTests holds a name (tens of bytes)
+	// per recorded test case for the whole recording, the size of the test
+	// set's own index.
+	appRunsOn := r.config.CommandType == string(utils.DockerCompose)
+	var postStopTests, recordedTests sync.Map
+	var framesLeft atomic.Int32
+	framesLeft.Store(2)
+	frameDrained := func() {
+		if framesLeft.Add(-1) == 0 {
+			close(framesDrained)
+		}
+	}
+
 	// INCOMING
-	incomingStream, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
+	tcCtx, tcCancel := context.WithCancel(context.WithoutCancel(ctx))
+	incomingStream, err := r.instrumentation.GetIncoming(tcCtx, incomingOpts)
 	if err != nil {
+		tcCancel()
 		if ctx.Err() != nil || utils.IsShutdownError(err) {
 			r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
 			/*
@@ -1816,63 +2162,38 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 	g.Go(func() error {
 		defer close(incomingChan)
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case tc, ok := <-incomingStream:
-				if !ok {
-					return nil
-				}
-				// This test case has ALREADY been taken from the agent — the
-				// agent considers it delivered and will not re-send it. Returning
-				// here on a cancelled ctx therefore drops it silently, with no
-				// log and no counter, while its mocks and its mapping are still
-				// persisted: the set ships with orphaned mocks and a mappings.yaml
-				// entry for a test that does not exist. Since SIGINT lands while
-				// the agent is still handing over the tail, that is exactly the
-				// window the tail is in.
-				//
-				// Hand it over anyway and then stop, mirroring the outgoing
-				// forwarder below. The consumer writes on persistCtx (detached
-				// from ctx) precisely so a shutdown-time hand-off still reaches
-				// disk.
-				//
-				// UNLESS NOBODY IS COMING. Without the `abandoned` arm this
-				// send parked forever whenever Start returned before spawning
-				// a consumer; the buffer slot does not save it, because an
-				// ordinary send may already be sitting in it.
-				select {
-				case <-ctx.Done():
-					select {
-					case incomingChan <- tc:
-					case <-abandoned:
-						r.logger.Warn("dropped an in-flight test case on shutdown: recording stopped before any consumer started, so there is nothing left to persist it",
-							zap.String("testCaseName", tc.Name),
-							zap.String("next_step", "this test case was captured but not written; re-record the test set if you need it"))
-					}
-					return ctx.Err()
-				case incomingChan <- tc:
-				case <-abandoned:
-					// Abandoned while ctx is still live: Start returned before
-					// spawning a consumer and reqCtx has not been cancelled yet.
-					// Without this arm the send parks until that cancellation
-					// arrives -- for mappings, a further 15s of mappingDrainGrace
-					// on top.
-					//
-					// NOT COVERED on the OUTER select, and that is a
-					// MEASURED survivor: deleting this arm here leaves the
-					// package green, because the inner ctx.Done arm still
-					// catches it eventually. On this select the arm is a
-					// latency guard, not a correctness one. The INNER
-					// hand-over arms below ARE pinned.
-					r.logger.Warn("dropped a test case: recording stopped before any consumer started, so there is nothing left to persist it",
-						zap.String("testCaseName", tc.Name),
-						zap.String("next_step", "this test case was captured but not written; re-record the test set if you need it"))
-					return nil
-				}
+		defer frameDrained()
+		defer tcCancel()
+		opts := drainOpts[*models.TestCase]{
+			capturedAt: testCaseCapturedAt,
+			dropped: func(tc *models.TestCase) {
+				r.logger.Warn("dropped a test case: recording stopped before any consumer started, so there is nothing left to persist it",
+					zap.String("testCaseName", tc.Name),
+					zap.String("next_step", "this test case was captured but not written; re-record the test set if you need it"))
+			},
+			closeStream: tcCancel,
+			kind:        "test cases",
+		}
+		if appRunsOn {
+			// A test case the app served after the stop is not part of the
+			// recording: its mocks may come after the drain has ended, and
+			// saved without them it would fail replay. An undated one (gRPC)
+			// cannot be told from one, and is left out too. Neither is its
+			// mapping (MAPPINGS).
+			opts.afterStop = func(tc *models.TestCase) {
+				postStopTests.Store(tc.Name, struct{}{})
+				r.logger.Debug("not recording a test case served after the stop", zap.String("testCaseName", tc.Name))
+			}
+			// Keyed by the name the test case is handed over with: the
+			// agent's, which its mappings carry. Read before the hand-off,
+			// since the consumer's insert names an unnamed test case in place.
+			opts.handing = func(tc *models.TestCase) func() {
+				name := tc.Name
+				return func() { recordedTests.Store(name, struct{}{}) }
 			}
 		}
+		forwardUntilDrained(ctx, r, incomingStream, incomingChan, abandoned, opts)
+		return nil
 	})
 
 	/*
@@ -1944,6 +2265,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	if err != nil {
 
 		cancel()
+		frameDrained() // the mapping forwarder is not started on these returns
 		if ctx.Err() != nil || utils.IsShutdownError(err) {
 			r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
 			// Close outgoingChan to prevent callers from hanging.
@@ -1965,46 +2287,28 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	}
 	g.Go(func() error {
 		defer close(outgoingChan)
+		defer frameDrained()
 		defer cancel()
-
-		// Also cancel mockCtx when parent ctx is done
-		// This is done inside the goroutine to avoid goroutine leaks
-		go func() {
-			<-ctx.Done()
-			cancel()
-		}()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case m, ok := <-outgoingStream:
-				if !ok {
-					return nil
-				}
-				select {
-				case <-ctx.Done():
-					// See the incoming forwarder: the `abandoned` arm is what
-					// keeps this from parking forever with no consumer.
-					select {
-					case outgoingChan <- m:
-					case <-abandoned:
-						r.logger.Warn("dropped an in-flight mock on shutdown: recording stopped before any consumer started, so there is nothing left to persist it",
-							zap.String("mockName", m.Name),
-							zap.String("next_step", "this mock was captured but not written; re-record the test set if you need it"))
-					}
-					return ctx.Err()
-				case outgoingChan <- m:
-				case <-abandoned:
-					// See the incoming forwarder -- including its note that
-					// this OUTER arm is a measured, uncovered latency guard.
-					r.logger.Warn("dropped a mock: recording stopped before any consumer started, so there is nothing left to persist it",
-						zap.String("mockName", m.Name),
-						zap.String("next_step", "this mock was captured but not written; re-record the test set if you need it"))
-					return nil
-				}
-			}
+		opts := drainOpts[*models.Mock]{
+			capturedAt: func(m *models.Mock) time.Time { return m.Spec.ReqTimestampMock },
+			dropped: func(m *models.Mock) {
+				r.logger.Warn("dropped a mock: recording stopped before any consumer started, so there is nothing left to persist it",
+					zap.String("mockName", m.Name),
+					zap.String("next_step", "this mock was captured but not written; re-record the test set if you need it"))
+			},
+			closeStream: cancel,
+			kind:        "mocks",
 		}
+		if appRunsOn {
+			// Traffic the app serves after the stop is not recorded: a mock
+			// requested after it belongs to a test case that is not (a recorded
+			// one ended before the stop, and so did its mocks). An undated
+			// mock is kept: at worst it is a mock no test case uses.
+			opts.afterStop = func(*models.Mock) {}
+			opts.keepUndated = true
+		}
+		forwardUntilDrained(ctx, r, outgoingStream, outgoingChan, abandoned, opts)
+		return nil
 	})
 
 	// MAPPINGS
@@ -2023,37 +2327,68 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		//
 		// It is tempting to assume the tail has already been flushed by now because
 		// teardown stops the app first. That is only true for the NATIVE path: under
-		// docker-compose keploy never runs the app at all (see the CommandType check
-		// above), runAppErrGrp is empty, its drain returns instantly, and reqCtxCancel
-		// therefore fires within milliseconds of SIGINT — with the agent's queue still
-		// full. Docker-compose is what most e2e lanes and many users run, and it is
-		// where this bug was measured: 27 of 342 tests lost, all tails.
+		// docker-compose the agent runs in the app's stack, so teardown drains the
+		// frame streams BEFORE it takes the stack down (see Start's stop defer), and
+		// reqCtxCancel therefore fires within milliseconds of SIGINT — with the
+		// agent's queue still full. Docker-compose is what most e2e lanes and many
+		// users run, and it is where this bug was measured: 27 of 342 tests lost, all
+		// tails.
 		//
-		// So on shutdown keep the stream open and keep draining. Stop as soon as the
-		// tail is through — the agent closing the stream, or the stream falling idle —
-		// and hard-cap the total wait so a wedged agent cannot hang exit.
+		// So on shutdown keep the stream open and keep draining, for as long as
+		// mappings keep coming: the stream ends when the agent closes it, or once
+		// it has delivered nothing for mappingIdleGrace. Time spent handing a
+		// mapping to a consumer that is still persisting is not quiet: a sink
+		// still draining is never cut off.
+		//
+		// The tail is the mappings of the tests whose mocks were queued at the
+		// stop, and the agent emits a test's mapping only once its mocks are in.
+		// So the quiet bound does not start until the test-case and mock drains
+		// have ended (framesDrained): those last as long as the agent keeps
+		// delivering what it held at the stop, and a quiet mapping stream
+		// meanwhile means the agent is still busy with mocks, not that the tail
+		// is through.
 		mapCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
 
+		// lastMapping is when the stream last delivered a mapping, or a
+		// hand-over to the consumer ended (UnixNano); handing is set while one
+		// is under way.
+		var lastMapping atomic.Int64
+		var handing atomic.Bool
 		drained := make(chan struct{})
 		defer close(drained)
 		go func() {
+			// The bound for a stream that is not being read below: an older
+			// agent, which establishes its mapping stream only with the first
+			// mapping, leaves GetMappings blocked in its request.
+			// The loop below applies the same bound to a stream it reads.
 			select {
 			case <-drained:
 				return // finished before shutdown — nothing to wait for
 			case <-ctx.Done():
 			}
 			select {
-			case <-drained: // tail fully drained
-			case <-time.After(mappingDrainGrace):
-				// Hitting the cap means the agent never finished flushing, so the
-				// tail is truncated here — the same damage this drain prevents.
-				// Say so: silence is what made the original bug so hard to find.
-				r.logger.Warn("timed out draining test-mock mappings on shutdown",
-					zap.Duration("waited", mappingDrainGrace),
-					zap.String("next_step", "mappings.yaml may be missing the last recorded tests and replay can report no_mocks for them; re-record the test set and report this if it recurs"))
+			case <-drained:
+				return
+			case <-framesDrained:
 			}
-			cancel()
+			lastMapping.CompareAndSwap(0, time.Now().UnixNano())
+			quiet := time.NewTimer(mappingIdleGrace)
+			defer quiet.Stop()
+			for {
+				select {
+				case <-drained:
+					return
+				case <-quiet.C:
+				}
+				idle := time.Since(time.Unix(0, max(lastMapping.Load(), 0)))
+				if !handing.Load() && idle >= mappingIdleGrace {
+					r.logger.Debug("mapping stream quiet after the stop; ending its drain", zap.Duration("quiet", idle))
+					cancel()
+					return
+				}
+				quiet.Reset(max(mappingIdleGrace-idle, mappingIdleGrace/10))
+			}
 		}()
 
 		// Call the new AgentClient method
@@ -2065,30 +2400,53 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			return fmt.Errorf("failed to get mappings: %w", err)
 		}
 
-		// idle is armed only once shutdown has begun. While recording is live, gaps
-		// between mappings are normal and must never end the stream; once shutdown
-		// starts, a gap long enough means the agent has nothing left to flush (it
-		// holds the stream open for the whole session, so it will not close it).
+		// idle is armed only once shutdown has begun and the test-case and mock
+		// drains have ended. While recording is live, gaps between mappings are
+		// normal and must never end the stream; once the tail's mocks are in, a gap
+		// long enough means the agent has nothing left to flush (it holds the
+		// stream open for the whole session, so it will not close it).
 		idle := time.NewTimer(mappingIdleGrace)
 		defer idle.Stop()
 		stopTimer(idle)
 
+		// lastSeen is when the stream last delivered, or shutdown began: the
+		// idle bound runs from it, so a stream that went quiet while the frame
+		// drains were still ending is not waited on again for a whole grace.
+		framesDone := false
+		var lastSeen time.Time
 		for {
-			// While recording is live, wake on ctx.Done(); once draining, wait on the
-			// idle timer instead. Arming both would let an already-closed ctx.Done()
-			// spin the loop.
+			// While recording is live, wake on ctx.Done(); once shutdown began,
+			// on the frame drains ending; once they have, on the idle timer.
+			// Arming an already-closed channel would spin the loop.
 			var idleC <-chan time.Time
-			var shutdownC <-chan struct{}
-			if ctx.Err() != nil {
-				resetTimer(idle, mappingIdleGrace)
-				idleC = idle.C
-			} else {
+			var shutdownC, framesC <-chan struct{}
+			if ctx.Err() != nil && lastSeen.IsZero() {
+				lastSeen = time.Now() // shutdown began before this loop saw it
+			}
+			switch {
+			case ctx.Err() == nil:
 				shutdownC = ctx.Done()
+			case !framesDone:
+				framesC = framesDrained
+			default:
+				rest := mappingIdleGrace - time.Since(lastSeen)
+				if rest <= 0 {
+					return nil // quiet for the whole grace already: the tail is through
+				}
+				resetTimer(idle, rest)
+				idleC = idle.C
 			}
 
 			select {
 			case <-shutdownC:
-				// Shutdown began: re-loop to arm the idle timer and start draining.
+				// Shutdown began: re-loop to wait for the frame drains.
+				continue
+			case <-framesC:
+				// The mocks queued at the stop are in: re-loop to arm the idle
+				// timer, for a whole grace from here, since the agent emits a
+				// test's mapping only after its mocks.
+				framesDone = true
+				lastSeen = time.Now()
 				continue
 			case <-abandoned:
 				/*
@@ -2122,6 +2480,27 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				if !ok {
 					return nil
 				}
+				if appRunsOn && ctx.Err() != nil {
+					// A mapping of a test case served after the stop is not
+					// recorded. Once the test-case drain is over, every test
+					// case recorded has been handed on, so a mapping of any
+					// other one is left out.
+					_, after := postStopTests.Load(m.TestName)
+					_, recorded := recordedTests.Load(m.TestName)
+					if after || (framesDone && !recorded) {
+						continue
+					}
+				}
+				lastSeen = time.Now()
+				lastMapping.Store(lastSeen.UnixNano())
+				handing.Store(true)
+				handed := func() {
+					// The hand-over is not quiet: a consumer still persisting
+					// holds it, and the quiet bound runs from its end.
+					lastSeen = time.Now()
+					lastMapping.Store(lastSeen.UnixNano())
+					handing.Store(false)
+				}
 				select {
 				case <-mapCtx.Done():
 					// Hand off the mapping we already took off the stream before
@@ -2142,13 +2521,13 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					 *
 					 * Reaching it needs mapCtx cancelled while `abandoned`
 					 * is still open, with an item in hand. mapCtx is
-					 * cancelled mappingDrainGrace (15s) AFTER ctx is done,
-					 * and Abandon fires the moment Start returns -- which
-					 * on the no-consumer path is immediately, at its gate.
-					 * So the outer arm below wins by about fifteen
-					 * seconds every time, and the wedge table cannot drive
-					 * this one without sleeping out that grace period for
-					 * a state the current ordering cannot produce.
+					 * cancelled only once the stream has been quiet for
+					 * mappingIdleGrace after the frame drains ended, and not
+					 * during a hand-over, while Abandon fires the moment
+					 * Start returns -- which on the no-consumer path is
+					 * immediately, at its gate. So the outer arm below wins
+					 * every time, and the wedge table cannot drive this one
+					 * without a state the current ordering cannot produce.
 					 *
 					 * Kept because "the ordering makes it unreachable" is
 					 * a property of two other functions, not of this one,
@@ -2163,14 +2542,15 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 							zap.String("testName", m.TestName),
 							zap.String("next_step", "mappings.yaml may be missing this test; re-record the test set if you need it"))
 					}
+					handed()
 					return ctx.Err()
 				case mappingChan <- m:
+					handed()
 				case <-abandoned:
 					// See the incoming forwarder. This one matters most: mapCtx
-					// is not cancelled until mappingDrainGrace (15s) after ctx
-					// is done, so without this arm an abandoned mapping
-					// forwarder holds the errgroup for that whole window before
-					// it even reaches the hand-over.
+					// is not cancelled while mappings keep coming, so without
+					// this arm an abandoned mapping forwarder holds the
+					// errgroup for as long as the agent sends.
 					r.logger.Warn("dropped a test-mock mapping: recording stopped before any consumer started",
 						zap.String("testName", m.TestName),
 						zap.String("next_step", "mappings.yaml may be missing this test; re-record the test set if you need it"))

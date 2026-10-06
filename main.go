@@ -326,7 +326,7 @@ func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink)
 // printEnterpriseUpgradeBanner emits a high-visibility nudge to install
 // Keploy from keploy.io — free with an account — which adds the broader
 // protocol/dependency set, native macOS and Windows recording, and the AI
-// features that this open-source build doesn't ship. User-facing text names
+// features that this open-source build doesn't ship, and Podman. User-facing text names
 // no editions: the product is just "keploy".
 //
 // Lives in the OSS binary's main.go (not in cli/root.go) so the
@@ -399,6 +399,7 @@ func printEnterpriseUpgradeBanner() {
 	fmt.Fprintln(os.Stderr, "  This is Keploy's open-source build. Keploy from keploy.io (free with an account) adds:")
 	fmt.Fprintln(os.Stderr, "    • PostgreSQL, MongoDB, gRPC, HTTP/2, Kafka — on top of this build's HTTP + MySQL")
 	fmt.Fprintln(os.Stderr, "    • Recording apps running natively on macOS and Windows")
+	fmt.Fprintln(os.Stderr, "    • Recording and testing apps that run in Podman")
 	fmt.Fprintln(os.Stderr, "    • AI-powered test generation, sandbox replay, MCP for AI agents")
 	fmt.Fprintln(os.Stderr, "      (Claude Code, Cursor, Copilot, Gemini, …)")
 	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+"curl --silent -O -L https://keploy.io/install.sh && source install.sh"+reset)
@@ -441,9 +442,17 @@ func exitCodeForCmdErr(err error, w io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
+	unknownCmd := strings.HasPrefix(err.Error(), "unknown command")
+	if unknownCmd || strings.HasPrefix(err.Error(), "unknown shorthand") {
 		fmt.Fprintln(w, "Error: ", err.Error())
 		fmt.Fprintln(w, "Run 'keploy --help' for usage.")
 	}
-	return 1
+	if unknownCmd {
+		// A mistyped or unknown command/verb is a usage error, not a Keploy
+		// failure — the command never ran. EX_USAGE (64) lets CI tell that apart
+		// from a real failure (1). Covers unknown `mock` verbs, which previously
+		// printed help and exited 0 (design §P0b).
+		return utils.ExitUsageError
+	}
+	return utils.ExitKeployError
 }

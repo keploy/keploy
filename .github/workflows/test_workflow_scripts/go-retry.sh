@@ -36,8 +36,9 @@
 # direct from 3 — the schedule of the inline download_go_modules this replaces.
 #
 # Set GO_RETRY_DIRECT_FROM to a number past max attempts to never go direct.
-# check-deprecated-deps.sh needs that: `go list -m -u all` asks about every
-# module in the graph, and direct would git ls-remote hundreds of upstreams.
+# check-deprecated-deps.sh needs that: `go list -m -u` resolves the newest
+# release of every direct dependency, and under direct one renamed, deleted
+# or retagged upstream fails PERMANENTLY where the proxy would still serve it.
 #
 # Usage:  source .../go-retry.sh
 #         go_retry build -o app .
@@ -104,7 +105,7 @@ go_retry() {
   fifo_f="${err_f}.fifo"
   # Streams stay SEPARATE. Merging them would corrupt any caller that captures
   # the command's output — check-deprecated-deps.sh does
-  # `output=$(go_retry list -m -u all)`, and go writes "go: downloading …"
+  # `output=$(go_retry list -m -u $direct_deps)`, and go writes "go: downloading …"
   # progress to stderr, which would land in the parsed value. Every message
   # this function emits itself goes to stderr for the same reason.
 
@@ -155,9 +156,9 @@ go_retry() {
     wait "$tee_pid" 2>/dev/null || true
     rm -f "$fifo_f"
     # stdout reaches the caller ONLY on success. A failed attempt's partial
-    # stdout would otherwise land in `output=$(go_retry …)` — `go list -m -u all`
+    # stdout would otherwise land in `output=$(go_retry …)` — `go list -m -u`
     # streams module lines as it resolves, so a mid-way failure would inject
-    # hundreds of them into the captured value, two or three times over.
+    # dozens of them into the captured value, two or three times over.
     if [ "$rc" -eq 0 ]; then
       cat "$out_f"
     else

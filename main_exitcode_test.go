@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"go.keploy.io/server/v3/utils"
 )
 
 // TestExitCodeForCmdErr pins the CLI's exit-code contract: any error out of
@@ -12,6 +14,9 @@ import (
 // centralised, only "unknown command"/"unknown shorthand" did, so every
 // flag-parsing error left utils.ErrCode at 0 and `keploy test --typo`
 // reported success to the shell and to CI while printing a red error.
+// An unknown command/verb is further distinguished as a usage error
+// (EX_USAGE, 64) so CI can tell a mistyped invocation from a real failure
+// (1) — this is what stops `keploy mock bogus` exiting 0 (design §P0b).
 func TestExitCodeForCmdErr(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -25,9 +30,15 @@ func TestExitCodeForCmdErr(t *testing.T) {
 			wantCode: 0,
 		},
 		{
-			name:     "unknown command still exits non-zero and hints",
+			name:     "unknown top-level command is a usage error (64) and hints",
 			err:      errors.New(`unknown command "recrd" for "keploy"`),
-			wantCode: 1,
+			wantCode: utils.ExitUsageError,
+			wantHint: true,
+		},
+		{
+			name:     "unknown mock verb is a usage error (64) and hints",
+			err:      errors.New(`unknown command "bogus" for "keploy mock"`),
+			wantCode: utils.ExitUsageError,
 			wantHint: true,
 		},
 		{

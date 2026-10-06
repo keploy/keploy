@@ -820,3 +820,35 @@ func TestReadSessionIndicesF(t *testing.T) {
 		t.Errorf("YAML indices count = %d, want 2, got %v", len(yamlIndices), yamlIndices)
 	}
 }
+
+// TestReadSessionIndices_SkipMockStagingDir verifies a leftover mock-record
+// staging directory — what a hard kill between capture and promote leaves behind
+// — is not listed as a phantom test-set by either directory enumerator
+// (non-destructive-record follow-up; gaps W1/W14).
+func TestReadSessionIndices_SkipMockStagingDir(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	tempDir := t.TempDir()
+
+	for _, d := range []string{"test-set-0", "orders" + MockStagingSuffix} {
+		if err := os.MkdirAll(filepath.Join(tempDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		list func() ([]string, error)
+	}{
+		{"ReadSessionIndicesF", func() ([]string, error) { return ReadSessionIndicesF(ctx, tempDir, logger, ModeDir, FormatYAML) }},
+		{"ReadSessionIndicesAny", func() ([]string, error) { return ReadSessionIndicesAny(ctx, tempDir, logger, ModeDir) }},
+	} {
+		got, err := tc.list()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(got) != 1 || got[0] != "test-set-0" {
+			t.Errorf("%s listed %v; want only [test-set-0] (the staging dir must be skipped)", tc.name, got)
+		}
+	}
+}

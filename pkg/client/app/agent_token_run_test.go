@@ -33,6 +33,9 @@ func TestRun_OnlyTheComposeCommandStartsAnAgentWithTheToken(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the stand-ins are shell scripts; windows runs the app command through cmd.exe")
 	}
+	// Not root: a root keploy runs compose without its sudo (see
+	// TestRun_AsRootComposeDoesNotGoThroughItsSudo).
+	setEffectiveUID(t, 1000)
 	bin := t.TempDir()
 	calls := filepath.Join(bin, "calls.log")
 	// Each stand-in logs one line: its name, the token it was given, its argv.

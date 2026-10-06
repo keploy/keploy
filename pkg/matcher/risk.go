@@ -118,12 +118,22 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 // matched by it is excluded from the diff so re-runs don't re-report it.
 // Returns nil if either side isn't valid JSON. Paths are root-relative (no
 // "body." prefix) — callers add the prefix to match the testcase convention.
+// `typeStrict` names learned-dynamic paths: their VALUE is ignored but their
+// TYPE must still match, so a value change on them is tolerated while a type
+// change (or removal) is reported. A path is resolved under the same
+// most-specific-first ordering as `known`, so a more-specific `known` entry wins
+// over a less-specific type-strict one.
 // excludeRecordedValue, when non-nil, is consulted with the recorded
 // (expected) scalar value of each changed path — returning true drops that
 // path. This lets the proxy exclude fields the enterprise obfuscator already
 // redacted (recorded value matches a Mock.Noise regex) so secret fields are
-// not re-flagged as schema noise.
-func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, excludeRecordedValue func(string) bool) []string {
+// not re-flagged as schema noise. (Note: for a type-strict path the recorded
+// value is not captured, so excludeRecordedValue cannot apply to it.)
+// valueChangesOnly, when true, returns only fields whose VALUE drifted (same
+// type) — not type changes or removed fields. The auto-noising LEARN pass uses
+// it so a field that changed type (or vanished) is a real difference, never
+// learned as ignorable noise; enforcement passes false to see every drift.
+func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, excludeRecordedValue func(string) bool) []string {
 	if !json.Valid([]byte(expJSON)) || !json.Valid([]byte(actJSON)) {
 		return nil
 	}
@@ -137,6 +147,11 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, e
 	}
 
 	idx := buildNoiseIndex(known, nil)
+	// typeStrict paths are LEARNED-dynamic: their VALUE is ignored but their TYPE
+	// must match. Marked on the index so they resolve under the same
+	// most-specific-first ordering as user/regex noise — a more-specific user entry
+	// still wins and keeps its own semantics. Empty => behaviour is unchanged.
+	idx.markTypeStrict(typeStrict)
 
 	expMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
 	actMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
@@ -156,8 +171,12 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, e
 		return true
 	}
 
+	groups := [][]string{valueChanges, typeChanges, removed}
+	if valueChangesOnly {
+		groups = [][]string{valueChanges}
+	}
 	out := make([]string, 0, len(valueChanges)+len(typeChanges)+len(removed))
-	for _, group := range [][]string{valueChanges, typeChanges, removed} {
+	for _, group := range groups {
 		for _, p := range group {
 			if keep(p) {
 				out = append(out, p)
@@ -260,7 +279,15 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 
 func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 	keyLower := strings.ToLower(path)
-	if regs, noisy := ni.match(keyLower); noisy {
+	// matchKind resolves the winning (most-specific-first) entry. A type-strict
+	// entry records the field's TYPE but not its VALUE — so a type change is
+	// reported while a value change is tolerated — but ONLY when it is itself the
+	// most specific match; a more-specific user/regex entry still wins and keeps
+	// its full-ignore / value-regex semantics. (The learned path is also carried in
+	// the known-noise set, so non-JSON parsers, which don't consult the flag, keep
+	// fully excluding it.)
+	regs, noisy, typeStrict := ni.matchKind(keyLower)
+	if noisy && !typeStrict {
 		// An entry with no patterns ignores the whole subtree. A pattern-guarded
 		// entry ignores only the values it describes, so it must be evaluated
 		// against this value — otherwise a field the matcher just reported as a
@@ -299,16 +326,24 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 		}
 	case string:
 		out.types[path] = "string"
-		out.values[path] = t
+		if !typeStrict {
+			out.values[path] = t
+		}
 	case float64:
 		out.types[path] = "number"
-		out.values[path] = fmt.Sprintf("%v", t)
+		if !typeStrict {
+			out.values[path] = fmt.Sprintf("%v", t)
+		}
 	case bool:
 		out.types[path] = "boolean"
-		out.values[path] = strconv.FormatBool(t)
+		if !typeStrict {
+			out.values[path] = strconv.FormatBool(t)
+		}
 	case nil:
 		out.types[path] = "null"
-		out.values[path] = "null"
+		if !typeStrict {
+			out.values[path] = "null"
+		}
 	default:
 		// other JSON forms won't appear here
 	}

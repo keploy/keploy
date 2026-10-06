@@ -56,3 +56,36 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-compose-linux.sh"
+
+  # A dependency that crashes once after keploy's agent is set up: keploy's
+  # compose retry must reuse that agent, or set up again the one compose starts
+  # again, or the recording (and the replay) is lost. A job of its own: its
+  # four record and replay runs take minutes, and the lane above has its own
+  # budget.
+  compose_dep_retry_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: compose dependency retry (docker_compose)
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run compose dependency-retry e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-dep-retry-linux.sh"

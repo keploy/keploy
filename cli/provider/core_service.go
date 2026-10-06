@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/platform/http"
 	"go.keploy.io/server/v3/pkg/platform/storage"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
@@ -153,6 +154,11 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 	var err error
 
 	if utils.IsDockerCmd(utils.CmdType(c.CommandType)) {
+		// Before the client: preparing an engine can be what gives it an
+		// Engine API endpoint to talk to.
+		if err := engine.Prepare(ctx, logger, engine.Detect(c.Command)); err != nil {
+			return nil, err
+		}
 		client, err = docker.New(logger, c)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create docker client")

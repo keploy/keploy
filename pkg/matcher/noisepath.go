@@ -159,9 +159,11 @@ func BodyNoiseFromJSONDiff(expJSON, actJSON string, known map[string][]string, i
 	for k, v := range known {
 		if strings.Contains(k, ".") {
 			dotted[k] = v
-			continue
 		}
-		w.knownGlobalRegs[strings.ToLower(k)] = compilePatterns(v, nil)
+	}
+	// Keys that differ only in case resolve as the matcher resolves them.
+	for lk, k := range globalNoiseKeys(known) {
+		w.knownGlobalRegs[lk] = compilePatterns(known[k], nil)
 		w.hasKnownGlobal = true
 	}
 	w.knownPath = buildNoiseIndex(dotted, nil)

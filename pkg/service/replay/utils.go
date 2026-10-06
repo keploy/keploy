@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"sync"
@@ -249,7 +250,7 @@ func composeFileFromCommand(cmd string) (string, bool) {
 	fields := strings.Fields(cmd)
 	isCompose := false
 	for i, f := range fields {
-		if f == "compose" || strings.HasPrefix(f, "docker-compose") {
+		if f == "compose" || strings.HasPrefix(f, "docker-compose") || strings.HasPrefix(f, "podman-compose") {
 			isCompose = true
 		}
 		if (f == "-f" || f == "--file") && i+1 < len(fields) {
@@ -459,6 +460,17 @@ func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
 // answering, and holding replay back for application-level health would turn a
 // readiness gate into a liveness policy.
 func waitForHTTPServingPath(ctx context.Context, scheme, host, port, path string) error {
+	return waitForHTTPServingPathOr(ctx, scheme, host, port, path, nil)
+}
+
+// errProbeTargetUnreachable is waitForHTTPServingPathOr giving up on its target
+// because giveUp said the host cannot reach it.
+var errProbeTargetUnreachable = errors.New("the host cannot reach the probed address")
+
+// waitForHTTPServingPathOr is waitForHTTPServingPath that also stops, with
+// errProbeTargetUnreachable, when giveUp (if set) returns true after a failed
+// probe.
+func waitForHTTPServingPathOr(ctx context.Context, scheme, host, port, path string, giveUp func() bool) error {
 	if path == "" {
 		path = keployReadinessProbePath
 	}
@@ -514,6 +526,9 @@ func waitForHTTPServingPath(ctx context.Context, scheme, host, port, path string
 	ticker := time.NewTicker(resetProbeInterval)
 	defer ticker.Stop()
 	for {
+		if giveUp != nil && giveUp() {
+			return errProbeTargetUnreachable
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -584,15 +599,35 @@ func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Confi
 	hctx, cancel := context.WithTimeout(ctx, remaining)
 	defer cancel()
 
-	// Scheme comes from the resolved target; healthScheme is an explicit override
-	// for the rare case an operator needs to force it.
-	scheme := probe.scheme
-	if forced := strings.TrimSpace(cfg.Test.HealthScheme); forced != "" && !strings.EqualFold(forced, scheme) {
-		if strings.EqualFold(forced, "http") || strings.EqualFold(forced, "https") {
-			scheme = strings.ToLower(forced)
+	for {
+		// Scheme comes from the resolved target; healthScheme is an explicit
+		// override for the rare case an operator needs to force it.
+		scheme := probe.scheme
+		if forced := strings.TrimSpace(cfg.Test.HealthScheme); forced != "" && !strings.EqualFold(forced, scheme) {
+			if strings.EqualFold(forced, "http") || strings.EqualFold(forced, "https") {
+				scheme = strings.ToLower(forced)
+			}
+		}
+		err := waitForHTTPServingPathOr(hctx, scheme, probe.host, probe.port, cfg.Test.HealthPath, probe.lostReach(hctx))
+		if !errors.Is(err, errProbeTargetUnreachable) {
+			return reportHTTPGate(ctx, logger, label, cfg, ceiling, probe, err)
+		}
+		// Chosen before the app listened, and it turns out to listen where the
+		// host cannot reach it (only on 127.0.0.1 behind a published port):
+		// it would never answer, so probe the set's next test instead.
+		logger.Debug("readiness gate: the host cannot reach the probed test's address; probing the next test",
+			zap.String("gate", label), zap.String("probeHost", probe.host), zap.String("probePort", probe.port))
+		if probe = probe.src.nextTarget(hctx); !probe.ok {
+			logger.Debug("readiness gate: no HTTP test the host can reach; the TCP-accept stage stands", zap.String("gate", label))
+			return ctx.Err() == nil
 		}
 	}
-	if err := waitForHTTPServingPath(hctx, scheme, probe.host, probe.port, cfg.Test.HealthPath); err != nil {
+}
+
+// reportHTTPGate logs the outcome of gateOnAppAddress's HTTP stage against
+// probe and returns what the gate returns.
+func reportHTTPGate(ctx context.Context, logger *zap.Logger, label string, cfg *config.Config, ceiling time.Duration, probe httpProbeTarget, err error) bool {
+	if err != nil {
 		if ctx.Err() != nil {
 			return false
 		}
@@ -629,6 +664,10 @@ func healthProbePathForLog(configured string) string {
 type httpProbeTarget struct {
 	scheme, host, port string
 	ok                 bool
+	// src, when set, is where the target came from: the gate asks it again
+	// while probing, and takes the set's next target from it when the host
+	// turns out unable to reach this one.
+	src *probeTargetSource
 }
 
 // resolveTestSetProbeTarget returns the address the readiness gate should complete
@@ -650,19 +689,113 @@ type httpProbeTarget struct {
 // gated on the IPv6 path, not a mismatched 127.0.0.1. It is the same resolver the
 // reset re-send gate already uses.
 //
+// A test whose address reach says the host can never reach (in Docker mode, a
+// port the run command does not publish) is not evidence of anything: probing it
+// spends the whole ceiling on every set. It is skipped for the next test, and
+// each address is asked about once here. Whether the app listens where a
+// published port reaches it is often unknown this early (the app is still
+// starting), so the gate asks again while it probes; see lostReach.
+//
 // Returns ok=false when no test case resolves (empty set, non-HTTP set, or an
-// unresolvable target); the caller then keeps the TCP-accept stage only, which is
-// exactly the pre-existing behaviour.
-func resolveTestSetProbeTarget(testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger) httpProbeTarget {
-	for _, tc := range testCases {
+// unresolvable or unreachable target); the caller then keeps the TCP-accept stage
+// only, which is exactly the pre-existing behaviour.
+func resolveTestSetProbeTarget(ctx context.Context, testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger, reach pkg.AppPortReachability) httpProbeTarget {
+	src := &probeTargetSource{
+		testCfg: testCfg, testCases: testCases, testSetID: testSetID, logger: logger,
+		reach: reach, seen: map[string]bool{},
+	}
+	return src.nextTarget(ctx)
+}
+
+// probeTargetSource walks a test set's HTTP tests, in order, for readiness-gate
+// probe targets: each distinct address once, skipping those reach says the
+// host cannot reach.
+type probeTargetSource struct {
+	testCfg   config.Test
+	testCases []*models.TestCase
+	testSetID string
+	logger    *zap.Logger
+	reach     pkg.AppPortReachability
+	next      int             // the next test case to look at
+	seen      map[string]bool // addresses already returned or skipped
+}
+
+// nextTarget is the next address the set's tests dial that the host may reach,
+// or ok=false when there is none left.
+func (s *probeTargetSource) nextTarget(ctx context.Context) httpProbeTarget {
+	for s.next < len(s.testCases) {
+		tc := s.testCases[s.next]
+		s.next++
 		if tc == nil || tc.Kind != models.HTTP {
 			continue
 		}
-		if scheme, host, port, ok := resolveProbeTarget(testCfg, tc, testSetID, logger); ok {
-			return httpProbeTarget{scheme: scheme, host: host, port: port, ok: true}
+		scheme, host, port, ok := resolveProbeTarget(s.testCfg, tc, s.testSetID, s.logger)
+		if !ok {
+			continue
 		}
+		addr := net.JoinHostPort(host, port)
+		if s.seen[addr] {
+			continue
+		}
+		s.seen[addr] = true
+		if s.reach != nil && probeTargetUnreachable(ctx, s.reach, host, port) {
+			s.logger.Debug("readiness gate: not probing a test the host cannot reach",
+				zap.String("testcase", tc.Name), zap.String("address", addr))
+			continue
+		}
+		return httpProbeTarget{scheme: scheme, host: host, port: port, ok: true, src: s}
 	}
 	return httpProbeTarget{}
+}
+
+// The gate re-asks whether the host can reach its probe target first after
+// probeReachRecheckFirst of failed probes, then at doubling intervals up to
+// probeReachRecheckMax: a slow start costs a handful of questions, not one per
+// probe. Vars only so tests can shorten them.
+var (
+	probeReachRecheckFirst = time.Second
+	probeReachRecheckMax   = 16 * time.Second
+)
+
+// lostReach is the check the gate runs after each failed probe of t: whether
+// the host has turned out unable to reach it. It was chosen when the app may
+// not have been listening yet; once it is, reach can see that it listens only
+// where no published port leads (127.0.0.1 in its container), and a probe
+// there would fail until the ceiling. nil when there is nothing to ask.
+func (t httpProbeTarget) lostReach(ctx context.Context) func() bool {
+	if t.src == nil || t.src.reach == nil {
+		return nil
+	}
+	interval := probeReachRecheckFirst
+	due := time.Now().Add(interval)
+	return func() bool {
+		if time.Now().Before(due) {
+			return false
+		}
+		if interval < probeReachRecheckMax {
+			interval = min(2*interval, probeReachRecheckMax)
+		}
+		due = time.Now().Add(interval)
+		return probeTargetUnreachable(ctx, t.src.reach, t.host, t.port)
+	}
+}
+
+// probeTargetUnreachable asks reach about host:port. reach bounds its own wait.
+func probeTargetUnreachable(ctx context.Context, reach pkg.AppPortReachability, host, port string) bool {
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return false
+	}
+	return reach.UnreachableAppPort(ctx, host, uint16(n)) != ""
+}
+
+// appPortReachabilityOf is the instrumentation's AppPortReachability when it
+// has one (Docker mode), else nil.
+func appPortReachabilityOf(instrumentation Instrumentation) pkg.AppPortReachability {
+	if reach, ok := instrumentation.(pkg.AppPortReachability); ok {
+		return reach
+	}
+	return nil
 }
 
 func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget) bool {

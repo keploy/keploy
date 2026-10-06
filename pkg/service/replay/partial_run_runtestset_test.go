@@ -54,18 +54,23 @@ func (f *prTestDB) DeleteTestSet(context.Context, string) error                 
 type prMockDB struct {
 	mu          sync.Mutex
 	updateCalls int
+	// kept is the keep-set of the last prune.
+	kept map[string]models.MockState
+	// filtered is the set's per-test mocks; none by default.
+	filtered []*models.Mock
 }
 
-func (*prMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
-	return nil, nil
+func (m *prMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	return m.filtered, nil
 }
 func (*prMockDB) GetUnFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
 	return nil, nil
 }
-func (m *prMockDB) UpdateMocks(context.Context, string, map[string]models.MockState, time.Time, time.Time) error {
+func (m *prMockDB) UpdateMocks(_ context.Context, _ string, keep map[string]models.MockState, _ time.Time, _ time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.updateCalls++
+	m.kept = keep
 	return nil
 }
 func (m *prMockDB) pruneCalls() int {
@@ -83,12 +88,15 @@ type prMappingDB struct {
 	inserts     int
 	exists      bool
 	existsCalls int
+	// last is the mapping of the last Insert.
+	last *models.Mapping
 }
 
-func (m *prMappingDB) Insert(context.Context, *models.Mapping) error {
+func (m *prMappingDB) Insert(_ context.Context, mapping *models.Mapping) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.inserts++
+	m.last = mapping
 	return nil
 }
 func (*prMappingDB) Get(context.Context, string) (map[string][]models.MockEntry, bool, error) {
@@ -200,6 +208,22 @@ type prInstr struct {
 	// lastParams is the filter-params payload of the most recent send, so a
 	// test can assert what the agent was actually told.
 	lastParams models.MockFilterParams
+	// allParams is every send, in order.
+	allParams []models.MockFilterParams
+	// perTestScope makes the stand-in agent answer each send the way an agent
+	// that reads the consumed history only for its per-test mocks does
+	// (models.ConsumedScopeHeader); scopeSaid is what the client has taken from
+	// the last answer, cleared by a store as the real client clears it.
+	perTestScope bool
+	scopeSaid    bool
+	// storedFiltered and storedUnfiltered are the pools of the last store.
+	storedFiltered, storedUnfiltered []*models.Mock
+}
+
+func (f *prInstr) AgentReadsConsumedPerTestOnly() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.scopeSaid
 }
 
 func (f *prInstr) Setup(context.Context, string, models.SetupOptions) error     { return nil }
@@ -235,12 +259,20 @@ func (f *prInstr) BeforeTestSetCompose(context.Context, string, string, bool) er
 func (f *prInstr) AfterTestRun(context.Context, string, []string, models.TestCoverage) error {
 	return nil
 }
-func (f *prInstr) StoreMocks(context.Context, []*models.Mock, []*models.Mock) error { return nil }
+func (f *prInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scopeSaid = false
+	f.storedFiltered, f.storedUnfiltered = filtered, unfiltered
+	return nil
+}
 func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastParams = params
+	f.allParams = append(f.allParams, params)
 	f.updateCalls++
+	f.scopeSaid = f.perTestScope
 	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates {
 		close(f.appStopped) // the application exits mid-set
 		// Wait for the replayer to ACTUALLY observe the exit rather than
@@ -278,8 +310,13 @@ type prHooks struct {
 	wrongType bool
 	simErr    map[string]error
 	streamErr map[string]error
-	// consumed is what every GetConsumedMocks call returns.
-	consumed []models.MockState
+	// consumed is what every GetConsumedMocks call returns, unless consumedFor
+	// is set, which is then asked on every call.
+	consumed    []models.MockState
+	consumedFor func() []models.MockState
+	// wrongBody answers the named tests with a body that does not match, so
+	// they fail on the response comparison.
+	wrongBody map[string]bool
 	// consumedFailsOnStop fails GetConsumedMocks once the run's context is
 	// cancelled, as the real agent call does after the app exits.
 	consumedFailsOnStop bool
@@ -306,11 +343,17 @@ func (h prHooks) SimulateRequest(_ context.Context, tc *models.TestCase, _ strin
 		return &resp, nil
 	}
 	resp := tc.HTTPResp
+	if h.wrongBody[tc.Name] {
+		resp.Body = `{"ok":false}`
+	}
 	return &resp, nil
 }
 func (h prHooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	if h.consumedFailsOnStop && ctx.Err() != nil {
 		return nil, ctx.Err()
+	}
+	if h.consumedFor != nil {
+		return h.consumedFor(), nil
 	}
 	return h.consumed, nil
 }
@@ -1227,7 +1270,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	// Baseline: with a trustworthy agent history the flag is honoured and the
 	// CLI's map is NOT sent. Without this the assertion below proves nothing.
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, time.Time{}); err != nil {
+		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if !h.instr.lastParams.AgentOwnsConsumed {
@@ -1239,7 +1282,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	r.rewindConsumedForRetryCycle(map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
 
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, time.Time{}); err != nil {
+		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if h.instr.lastParams.AgentOwnsConsumed {

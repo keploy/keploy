@@ -174,12 +174,22 @@ type Session struct {
 	// parsers). nil ⇒ the package-global manager (single-session default).
 	Mgr *syncMock.SyncMockManager
 
+	// Orphans, when set, receives the spans this connection could not record
+	// (RecordOrphanWindow, OpenOrphanWindow) instead of Mgr. A caller whose
+	// test cases are checked against spans kept elsewhere sets it: a DaemonSet
+	// agent keeps them per pod, since its test cases can only ride their own
+	// pod's connections. nil ⇒ Mgr, as before.
+	Orphans OrphanSpans
+
 	// --- Internal bookkeeping ---
 
-	mockIncomplete   atomic.Bool
-	hookMu           sync.Mutex
-	lastReqMu        sync.Mutex
-	lastReqTimestamp time.Time // most recent ReqTimestampMock emitted on this session
+	// endedWithConnection, per fakeconn.Direction: that stream ended because
+	// its connection did (MarkEndedWithConnection).
+	endedWithConnection [2]atomic.Bool
+	mockIncomplete      atomic.Bool
+	hookMu              sync.Mutex
+	lastReqMu           sync.Mutex
+	lastReqTimestamp    time.Time // most recent ReqTimestampMock emitted on this session
 }
 
 // AddPostRecordHook adds h to the front of the session's post-record chain
@@ -229,6 +239,36 @@ func (s *Session) MarkMockIncomplete(reason string) {
 	}
 }
 
+// MarkEndedWithConnection says dir's stream ended because its connection did,
+// with every byte the capture was handed for it: not at a hole, and not because
+// the capture stopped (the recording ended) while the connection carried on.
+// The caller calls it before it ends the stream (closes its chunk channel), so
+// a parser that reaches the end of the stream sees it. It is tied to the end of
+// the stream, the one place a parser that runs behind its capture can be sure
+// of (unlike MarkMockIncomplete, which voids whichever mock is emitted next).
+//
+// It lets a parser of an observe-only capture (OutgoingOptions.SkipTLSMITM: a
+// DaemonSet's), which carries the bytes the client read and nothing else,
+// record a message its stream ends in the middle of as the client had it: the
+// client read that much and closed the connection. Without it the end is not
+// known to be the client's (the rest may have been lost, or never captured),
+// and such a message is not recorded. Nil-safe.
+func (s *Session) MarkEndedWithConnection(dir fakeconn.Direction) {
+	if s == nil || int(dir) >= len(s.endedWithConnection) {
+		return
+	}
+	s.endedWithConnection[dir].Store(true)
+}
+
+// EndedWithConnection reports whether dir's stream ended because its
+// connection did (MarkEndedWithConnection). Nil-safe.
+func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {
+	if s == nil || int(dir) >= len(s.endedWithConnection) {
+		return false
+	}
+	return s.endedWithConnection[dir].Load()
+}
+
 // MarkMockComplete clears the incomplete-mock flag. Parsers call it
 // when they have finished a mock cycle (typically right after EmitMock
 // or when sending directive.FinalizeMock). Idempotent.
@@ -273,11 +313,22 @@ func (s *Session) RecordOrphanWindow(start, end time.Time) {
 	if s == nil {
 		return
 	}
+	if s.Orphans != nil {
+		s.Orphans.Record(start, end)
+		return
+	}
 	mgr := s.Mgr
 	if mgr == nil {
 		mgr = syncMock.Get()
 	}
 	mgr.RecordOrphanWindow(start, end)
+}
+
+// OrphanSpans is where a Session's unrecordable spans go instead of its manager
+// (Session.Orphans). *syncMock.Spans is one.
+type OrphanSpans interface {
+	Record(start, end time.Time)
+	Open(start time.Time) func()
 }
 
 // OpenOrphanWindow is the open-ended twin of RecordOrphanWindow, for a hole
@@ -291,6 +342,9 @@ func (s *Session) RecordOrphanWindow(start, end time.Time) {
 func (s *Session) OpenOrphanWindow(start time.Time) func() {
 	if s == nil {
 		return func() {}
+	}
+	if s.Orphans != nil {
+		return s.Orphans.Open(start)
 	}
 	mgr := s.Mgr
 	if mgr == nil {

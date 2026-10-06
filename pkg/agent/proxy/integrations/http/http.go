@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -51,6 +52,11 @@ type HTTP struct {
 	// ptRecorder de-duplicates recordOne telemetry-passthrough captures to one
 	// representative exchange per endpoint (see passthrough_egress.go).
 	ptRecorder *ptRecorder
+	// ptLoadWarned holds the names of the recorded pass-through mocks whose
+	// response could not be loaded, each warned about once for the agent's
+	// life. Mock names repeat across test sets (mock-0, mock-1, ...), so a
+	// later set's mock of a name already warned about is not warned again.
+	ptLoadWarned sync.Map
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
@@ -65,6 +71,20 @@ type FinalHTTP struct {
 	Resp             []byte
 	ReqTimestampMock time.Time
 	ResTimestampMock time.Time
+	// RespReadInPart: Resp may be only the part of the response its client
+	// read. An observe-only capture (a DaemonSet's, OutgoingOptions.SkipTLSMITM)
+	// carries the bytes the client read and nothing else, so a client that
+	// closes the connection before the end of the response (it wanted the
+	// status line, or the headers, or the start of the body) leaves the
+	// response cut short where it stopped. buildHTTPMock then records the
+	// response as the client had it (responseAsRead). Set only when the
+	// response's stream ended with its connection
+	// (supervisor.Session.EndedWithConnection): a stream that ended at a
+	// capture hole, or because the recording stopped, lost the rest of the
+	// response rather than leaving it unread. What the capture cannot tell
+	// apart is a server that closed the connection partway through its
+	// response: the client read all there was, and it is recorded as that.
+	RespReadInPart bool
 }
 
 // MatchType determines if the outgoing network call is HTTP by checking for
@@ -220,9 +240,9 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		}
 	}
 
-	// converts the response message buffer to http response (the final one:
-	// net/http does not skip interim 1xx responses)
-	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResponse(mock.Resp))), req)
+	// converts the response message buffer to http response: the final one,
+	// never an interim 1xx (parseFinalResponse, as the V2 recorder parses it)
+	respParsed, _, err := parseFinalResponse(mock, req)
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(req)))
 		return err
@@ -316,6 +336,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 				StatusCode: respParsed.StatusCode,
 				Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 				Body:       string(respBody),
+
+				// Replay serves this response: keep what it takes to serve a
+				// repeated header (Set-Cookie) on its own lines.
+				HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 			},
 			Created: time.Now().Unix(),
 
