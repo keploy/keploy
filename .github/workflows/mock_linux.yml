@@ -69,7 +69,7 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-nondestructive-linux.sh"
 
-      # An unknown verb on a command group (mock/ca/contract) must exit 64, not
+      # An unknown verb on a command group (mock/ca/contract) must exit 8, not
       # print help and exit 0 — a false success a CI job calling a mistyped verb
       # would pass on. Pure CLI behaviour; no deps.
       - name: Run mock CLI exit-codes e2e

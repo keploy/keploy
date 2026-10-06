@@ -75,8 +75,10 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	}
 
 	// Every binary (OSS and enterprise — enterprise builds its root through this
-	// same Root) gets unknown-subcommand hardening in one place.
+	// same Root) gets unknown-subcommand hardening, and its command-line errors
+	// tagged as usage errors, in one place.
 	HardenUnknownSubcommands(rootCmd)
+	TagUsageErrors(rootCmd)
 
 	return rootCmd
 }
@@ -90,15 +92,39 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 // already errors on an unknown top-level command; only descendant groups need
 // this.) A hardened group still shows help and exits 0 when given no verb; a
 // valid subcommand still resolves to its own command, so this RunE never runs for
-// it. The "unknown command" error maps to EX_USAGE (64) in main's
+// it. The "unknown command" error maps to utils.ExitUsageError (8) in main's
 // exitCodeForCmdErr. Exported so a downstream build can harden commands it adds
-// after Root returns. (Design §P0b: unknown mock verbs exit 64.)
+// after Root returns. (Design §P0b: an unknown mock verb is a usage error.)
 func HardenUnknownSubcommands(root *cobra.Command) {
 	for _, c := range root.Commands() {
 		if len(c.Commands()) > 0 && c.Run == nil && c.RunE == nil {
 			rejectUnknownSubcommand(c)
 		}
 		HardenUnknownSubcommands(c)
+	}
+}
+
+// TagUsageErrors tags, as usage errors (utils.UsageError), the errors cobra
+// raises while parsing the command line, at the one place each is raised: a
+// command's flag-error func (an unknown flag or shorthand, a flag missing its
+// value, a value of the wrong type) and its argument validator (the wrong
+// number of arguments). Nothing else is tagged, so an error a command returns
+// while running stays its own, even one of pflag's types (keploy reading a
+// flag it never defined is keploy's bug, not the user's). A command's existing
+// flag-error func still runs, and still prints; its error is only tagged.
+// Exported so a downstream build can tag commands it adds after Root returns.
+func TagUsageErrors(root *cobra.Command) {
+	flagErr := root.FlagErrorFunc()
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return utils.UsageError(flagErr(cmd, err))
+	})
+	if args := root.Args; args != nil {
+		root.Args = func(cmd *cobra.Command, a []string) error {
+			return utils.UsageError(args(cmd, a))
+		}
+	}
+	for _, c := range root.Commands() {
+		TagUsageErrors(c)
 	}
 }
 

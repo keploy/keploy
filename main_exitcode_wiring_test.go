@@ -62,8 +62,13 @@ func TestCLIExitCodes(t *testing.T) {
 		{name: "subcommand help", args: []string{"test", "--help"}, want: 0},
 		{name: "version flag", args: []string{"--version"}, want: 0},
 		{name: "unknown command", args: []string{"bogus-cmd"}, want: utils.ExitUsageError},
-		{name: "unknown flag", args: []string{"test", "--nope"}, want: 1},
-		{name: "invalid flag value", args: []string{"test", "--delay", "abc"}, want: 1},
+		// A flag pflag cannot parse is a usage error too: the command never ran.
+		{name: "unknown flag", args: []string{"test", "--nope"}, want: utils.ExitUsageError},
+		{name: "unknown shorthand", args: []string{"test", "-Z"}, want: utils.ExitUsageError},
+		{name: "invalid flag value", args: []string{"test", "--delay", "abc"}, want: utils.ExitUsageError},
+		{name: "flag missing its value", args: []string{"test", "--delay"}, want: utils.ExitUsageError},
+		{name: "unknown mock flag", args: []string{"mock", "record", "--nope"}, want: utils.ExitUsageError},
+		{name: "too many arguments", args: []string{"diff", "a", "b", "c"}, want: utils.ExitUsageError},
 	}
 
 	for _, tt := range tests {
