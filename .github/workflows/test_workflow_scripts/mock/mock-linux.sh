@@ -149,6 +149,27 @@ grep -q "did not prove the tests run with the dependencies off" passthrough.log 
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --on-miss fail --disable-tele >/dev/null 2>&1
 grep -qx 'isolated: true' keploy/e2e/last-replay.yaml || { echo "FAIL: a proven replay did not restore the verdict"; FAIL=1; }
 
+echo "== 2d. a replay that serves NONE of the recorded calls verified nothing =="
+# A passing runner that exercises none of the recording is the H2 false pass:
+# nothing was served from the mocks, so a green exit would vouch for a run that
+# proved nothing. test_noop makes no dependency call, so loaded=3 / consumed=0.
+cat > test_noop.py <<PY
+def test_noop(): assert True
+PY
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_noop.py" --name e2e --disable-tele 2>&1 | tee nothing.log
+RC=${PIPESTATUS[0]}
+echo "nothing-served replay exit=$RC"
+[ "$RC" -ne 0 ] || { echo "FAIL: a replay that served no recorded call must exit non-zero (nothing verified)"; FAIL=1; }
+check_receipt_exit "$RC"
+grep -qx 'failedBy: nothing-verified' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not say the run verified nothing"; FAIL=1; }
+grep -qx 'consumed: 0' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not record zero consumed"; FAIL=1; }
+grep -q "verified nothing" nothing.log || { echo "FAIL: keploy did not say the run verified nothing"; FAIL=1; }
+# A genuine proof (passed, no miss) must still exit 0: 'nothing verified' must
+# not fire when a recorded call WAS served, or it would fail every real pass.
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --on-miss fail --disable-tele >/dev/null 2>&1
+RC=$?
+[ "$RC" -eq 0 ] || { echo "FAIL: a replay that served the recorded calls must still pass, got $RC"; FAIL=1; }
+
 echo "== 3. exit-code propagation: a failing runner must fail keploy =="
 cat > test_fail.py <<PY
 def test_boom(): assert False
