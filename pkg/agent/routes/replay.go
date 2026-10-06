@@ -85,17 +85,26 @@ func (a *Agent) GetMockErrors(w http.ResponseWriter, r *http.Request) {
 }
 
 // BeginTestErrorCapture opens a per-test mock-error capture window in the proxy
-// so the next GetMockErrors returns only this test's misses. Implemented via a
-// capability type-assertion so the agent.Service interface stays unchanged.
+// so the next GetMockErrors returns only this test's misses. With ?carry=1 it
+// carries in the misses made since the previous test's window closed (the
+// proxy's ContinueTestErrorCapture): the replayer asks for that for every test
+// after a set's first. Implemented via capability type-assertions so the
+// agent.Service interface stays unchanged.
 func (a *Agent) BeginTestErrorCapture(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if b, ok := a.svc.(interface {
+	var err error
+	if c, ok := a.svc.(interface {
+		ContinueTestErrorCapture(context.Context) error
+	}); ok && r.URL.Query().Get("carry") == "1" {
+		err = c.ContinueTestErrorCapture(r.Context())
+	} else if b, ok := a.svc.(interface {
 		BeginTestErrorCapture(context.Context) error
 	}); ok {
-		if err := b.BeginTestErrorCapture(r.Context()); err != nil {
-			respondAgent(w, r, http.StatusInternalServerError, err)
-			return
-		}
+		err = b.BeginTestErrorCapture(r.Context())
+	}
+	if err != nil {
+		respondAgent(w, r, http.StatusInternalServerError, err)
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})

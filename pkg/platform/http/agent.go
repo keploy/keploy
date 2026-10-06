@@ -2508,7 +2508,22 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 // endpoint (older agent) returns 404 and is treated as a no-op, preserving the
 // legacy global-queue behaviour.
 func (a *AgentClient) BeginTestErrorCapture(ctx context.Context) error {
+	return a.openTestErrorCapture(ctx, false)
+}
+
+// ContinueTestErrorCapture is BeginTestErrorCapture for a test after its set's
+// first: the window carries in the misses made since the previous test's
+// window closed. An agent that predates it ignores ?carry and opens the window
+// as Begin does.
+func (a *AgentClient) ContinueTestErrorCapture(ctx context.Context) error {
+	return a.openTestErrorCapture(ctx, true)
+}
+
+func (a *AgentClient) openTestErrorCapture(ctx context.Context, carry bool) error {
 	url := fmt.Sprintf("%s/test-capture/begin", a.conf.Agent.AgentURI)
+	if carry {
+		url += "?carry=1"
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %s", err.Error())
