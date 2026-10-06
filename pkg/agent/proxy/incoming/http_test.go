@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -867,4 +868,126 @@ type capturedExchange struct {
 	method, url, reqBody string
 	status               int
 	respBody             string
+}
+
+// oneShotUpstream answers each connection with one response, then closes it.
+func oneShotUpstream(t *testing.T, response string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
+					return
+				}
+				_, _ = io.WriteString(c, response)
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// Sync and sampled recording close the client's connection after each
+// exchange, to free their slot, and say so in the response they forward. The
+// recording keeps the response as the app sent it: the app's answer at replay
+// does not say so either, and a test recorded with it failed every replay.
+func TestHandleHttp1Connection_ForcedCloseIsNotRecorded(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+	for _, tc := range []struct {
+		mode, app, response string
+		recorded            []string // the Connection header recorded, as the app sent it
+	}{
+		{"sync", "HTTP/1.0", "HTTP/1.0 200 OK\r\nServer: BaseHTTP/0.6\r\nContent-Length: 2\r\n\r\nok", nil},
+		{"sampled", "HTTP/1.0", "HTTP/1.0 200 OK\r\nServer: BaseHTTP/0.6\r\nContent-Length: 2\r\n\r\nok", nil},
+		{"sync", "HTTP/1.1 keep-alive", "HTTP/1.1 200 OK\r\nServer: BaseHTTP/0.6\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok", []string{"keep-alive"}},
+		{"sampled", "HTTP/1.1 keep-alive", "HTTP/1.1 200 OK\r\nServer: BaseHTTP/0.6\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok", []string{"keep-alive"}},
+	} {
+		mode := tc.mode
+		t.Run(mode+", "+tc.app, func(t *testing.T) {
+			upstream := oneShotUpstream(t, tc.response)
+			recorded := make(chan http.Header, 1)
+			stubCaptureHook(t, func(_ context.Context, _ *zap.Logger, _ chan *models.TestCase,
+				_ *http.Request, resp *http.Response, _, _ time.Time,
+				_ models.IncomingOptions, _ bool, _ bool, _ uint16) {
+				recorded <- resp.Header.Clone()
+			})
+			pm := &IngressProxyManager{
+				logger:      zap.NewNop(),
+				tcChan:      make(chan *models.TestCase, 4),
+				synchronous: mode == "sync",
+				sampling:    mode == "sampled",
+				samplingSem: make(chan struct{}, 1),
+			}
+
+			ln, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			accepted := make(chan net.Conn, 1)
+			go func() {
+				if c, err := ln.Accept(); err == nil {
+					accepted <- c
+				}
+			}()
+			clientConn, err := net.Dial("tcp4", ln.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = clientConn.Close() })
+			serverConn := <-accepted
+			t.Cleanup(func() { _ = serverConn.Close() })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				pm.handleHttp1Connection(ctx, serverConn, upstream, pm.logger, pm.tcChan, make(chan struct{}, 1), 8080)
+			}()
+
+			if _, err := io.WriteString(clientConn, "GET / HTTP/1.1\r\nHost: app\r\n\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			// The bytes on the wire: Go's parser drops an HTTP/1.1
+			// response's Connection: close from its header.
+			var wire bytes.Buffer
+			forwarded, err := http.ReadResponse(bufio.NewReader(io.TeeReader(clientConn, &wire)), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.ReadAll(forwarded.Body)
+			_ = forwarded.Body.Close()
+			head, _, _ := strings.Cut(wire.String(), "\r\n\r\n")
+			if !strings.Contains(head+"\r\n", "\r\nConnection: close\r\n") {
+				t.Fatalf("forwarded %q, want Connection: close: the client's connection is closed after the exchange", head)
+			}
+
+			select {
+			case header := <-recorded:
+				if got := header["Connection"]; !slices.Equal(got, tc.recorded) {
+					t.Fatalf("recorded Connection %q, want %q as the app sent it; recorded header %v", got, tc.recorded, header)
+				}
+				if got := header.Get("Server"); got != "BaseHTTP/0.6" {
+					t.Fatalf("recorded Server %q, want the app's", got)
+				}
+			case <-ctx.Done():
+				t.Fatal("the exchange was not recorded")
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("handleHttp1Connection did not return")
+			}
+		})
+	}
 }
