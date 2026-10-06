@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
@@ -427,9 +429,21 @@ func finalExitCode(err error, current int, w io.Writer) int {
 	return exitCodeForCmdErr(err, w)
 }
 
+// isFlagError reports whether err is one of pflag's command-line parse errors.
+// Asked only of a usage error, to decide whether it has been printed already:
+// whether it IS a usage error is utils.IsUsageError's call, made from the tag.
+func isFlagError(err error) bool {
+	var notExist *pflag.NotExistError
+	var valueRequired *pflag.ValueRequiredError
+	var invalidValue *pflag.InvalidValueError
+	var invalidSyntax *pflag.InvalidSyntaxError
+	return errors.As(err, &notExist) || errors.As(err, &valueRequired) ||
+		errors.As(err, &invalidValue) || errors.As(err, &invalidSyntax)
+}
+
 // exitCodeForCmdErr maps an error returned by the root command onto the
-// process exit code, writing the unknown-command hint to w when that is what
-// went wrong.
+// process exit code, writing the error (unless it was printed where it was
+// raised) and the --help hint to w for a usage error.
 //
 // Any non-nil error means the command did not run successfully, so the
 // process must not report success. This used to convert only "unknown
@@ -442,16 +456,20 @@ func exitCodeForCmdErr(err error, w io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	unknownCmd := strings.HasPrefix(err.Error(), "unknown command")
-	if unknownCmd || strings.HasPrefix(err.Error(), "unknown shorthand") {
-		fmt.Fprintln(w, "Error: ", err.Error())
+	if utils.IsUsageError(err) {
+		// A mistyped or unknown command/verb, a flag that could not be parsed,
+		// or the wrong number of arguments is a usage error, not a Keploy
+		// failure — the command never ran. ExitUsageError (8) lets CI tell
+		// that apart from a real failure (1). Covers unknown `mock` verbs,
+		// which previously printed help and exited 0 (design §P0b).
+		//
+		// A flag error was printed where it was raised, by the command's
+		// flag-error func; nothing has printed anything else yet (every
+		// command silences cobra's own printing), so say it here.
+		if !isFlagError(err) {
+			fmt.Fprintln(w, "Error: ", err.Error())
+		}
 		fmt.Fprintln(w, "Run 'keploy --help' for usage.")
-	}
-	if unknownCmd {
-		// A mistyped or unknown command/verb is a usage error, not a Keploy
-		// failure — the command never ran. EX_USAGE (64) lets CI tell that apart
-		// from a real failure (1). Covers unknown `mock` verbs, which previously
-		// printed help and exited 0 (design §P0b).
 		return utils.ExitUsageError
 	}
 	return utils.ExitKeployError
