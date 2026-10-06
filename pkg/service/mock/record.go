@@ -120,7 +120,15 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
-	restore, existed := m.saveSet(name)
+	restore, existed, err := m.saveSet(name)
+	if err != nil {
+		// No restorable copy of the set — refuse before deleting its mappings
+		// or cases below, so a failed backup can never destroy the recording.
+		stopReason = "could not back up the existing mock set before re-recording it"
+		utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name),
+			zap.String("next_step", "free up disk space or fix permissions on your keploy mocks folder, then retry — your existing recording was left untouched"))
+		return fmt.Errorf("%s: %w", stopReason, err)
+	}
 	keep := false
 	defer func() { restore(keep) }()
 	// 3. Capture into a staging set and promote it over the named set only once
@@ -485,38 +493,46 @@ func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
 	return windows
 }
 
-func (m *mockService) saveSet(name string) (func(keep bool), bool) {
+// saveSet backs the named set up to a sibling .<name>.previous directory so a
+// refused or interrupted re-record can be undone, and returns a restore(keep)
+// closure plus whether the set existed. The backup is a HARD precondition: when
+// it cannot be made, saveSet returns an error and makes NO change, because the
+// caller is about to delete the live set's mappings and test cases — doing that
+// without a restorable copy is unrecoverable data loss. The caller must abort
+// on a non-nil error before any destructive step.
+func (m *mockService) saveSet(name string) (func(keep bool), bool, error) {
 	if m.config.Path == "" {
-		return func(bool) {}, true
+		return func(bool) {}, true, nil
 	}
 	set := filepath.Join(m.config.Path, name)
 	saved := filepath.Join(m.config.Path, "."+name+".previous")
 	_ = os.RemoveAll(saved)
-	_, err := os.Stat(set)
-	absent := errors.Is(err, fs.ErrNotExist)
-	if !absent {
-		err = os.CopyFS(saved, os.DirFS(set))
+	if _, err := os.Stat(set); errors.Is(err, fs.ErrNotExist) {
+		// Nothing to lose: a fresh set. On a refused run, drop whatever the
+		// aborted recording left behind.
+		return func(keep bool) {
+			if !keep {
+				_ = os.RemoveAll(set)
+			}
+		}, false, nil
 	}
-	if !absent && err != nil {
+	if err := os.CopyFS(saved, os.DirFS(set)); err != nil {
 		_ = os.RemoveAll(saved)
-		m.logger.Warn("could not keep a copy of the set before re-recording it; a refused recording cannot be undone", zap.String("mock-set", name), zap.Error(err))
+		return nil, true, fmt.Errorf("back up mock set %q before re-recording: %w", name, err)
 	}
 	return func(keep bool) {
-		switch {
-		case keep:
+		if keep {
 			_ = os.RemoveAll(saved)
-		case absent:
-			_ = os.RemoveAll(set)
-		case err == nil:
-			if rmErr := os.RemoveAll(set); rmErr != nil {
-				m.logger.Warn("could not put the previous recording back", zap.String("mock-set", name), zap.Error(rmErr))
-				return
-			}
-			if mvErr := os.Rename(saved, set); mvErr != nil {
-				m.logger.Warn("could not put the previous recording back; it is kept at "+saved, zap.String("mock-set", name), zap.Error(mvErr))
-			}
+			return
 		}
-	}, !absent
+		if rmErr := os.RemoveAll(set); rmErr != nil {
+			m.logger.Warn("could not put the previous recording back", zap.String("mock-set", name), zap.Error(rmErr))
+			return
+		}
+		if mvErr := os.Rename(saved, set); mvErr != nil {
+			m.logger.Warn("could not put the previous recording back; it is kept at "+saved, zap.String("mock-set", name), zap.Error(mvErr))
+		}
+	}, true, nil
 }
 
 // caseNames lists the test cases the set holds before a re-record.
