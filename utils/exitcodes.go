@@ -13,6 +13,10 @@ import "errors"
 //	1        a generic Keploy-side failure
 //	3,4,6    a SPECIFIC Keploy-side failure, listed below (5 is the enterprise
 //	         build's: a command that needs a session it cannot use)
+//	64       a USAGE error — a mistyped or unknown command/verb. Not a Keploy
+//	         failure and not the runner: the command never ran. Returned straight
+//	         from main's exitCodeForCmdErr (it does not flow through ErrCode /
+//	         SetExitCodeOnce), so it is the one code here not tied to an ErrCode.
 //
 // The specific codes exist so a caller can react correctly instead of pattern
 // matching log text or guessing from a bare 1. The VS Code extension, for
@@ -20,9 +24,9 @@ import "errors"
 // unelevated on Linux — which meant a plainly failing `pytest` (exit 1, the most
 // common non-zero code there is) told the user they had a permissions problem.
 //
-// These are only ever set for a Keploy-side failure, so nothing that succeeded
-// starts failing. Deliberately kept clear of the shell's reserved range (126,
-// 127) and of 128+N signal codes.
+// Apart from 64 (a usage error, above), these are only ever set for a Keploy-side
+// failure, so nothing that succeeded starts failing. Deliberately kept clear of
+// the shell's reserved range (126, 127) and of 128+N signal codes.
 const (
 	// ExitKeployError is the generic Keploy-side failure.
 	ExitKeployError = 1
@@ -50,6 +54,15 @@ const (
 	// enterprise build uses 5 for a command that needs a session it cannot
 	// use.
 	ExitEnvironmentUnsupported = 6
+
+	// ExitUsageError (EX_USAGE, 64) means the command line itself was wrong — a
+	// mistyped or unknown command/verb (e.g. `keploy mock bogus`). It is NOT a
+	// Keploy-side failure and NOT the wrapped runner failing: the command never
+	// ran. A CI job can tell "the invocation was wrong" apart from "Keploy ran
+	// and failed" (1) by this code, instead of a mistyped verb silently exiting 0
+	// (design §P0b: unknown mock verbs exit 64). Clear of the shell's reserved
+	// range (126,127) and the 128+N signal codes.
+	ExitUsageError = 64
 )
 
 // The errors the exit codes above are derived from. A failure is tagged with
