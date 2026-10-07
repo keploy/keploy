@@ -218,6 +218,12 @@ type prInstr struct {
 	scopeSaid    bool
 	// storedFiltered and storedUnfiltered are the pools of the last store.
 	storedFiltered, storedUnfiltered []*models.Mock
+	// release, when set, holds the stand-in application after the run's
+	// context is cancelled until it is closed: an application still stopping,
+	// for as long as the test says. stopped, when set, is closed as Run
+	// returns.
+	release chan struct{}
+	stopped chan struct{}
 }
 
 func (f *prInstr) AgentReadsConsumedPerTestOnly() bool {
@@ -235,8 +241,14 @@ func (f *prInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) 
 // report the app as having exited, and the set lands on APP_HALTED no matter
 // what the tests did — which would mask the very status this file asserts on.
 func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	if f.stopped != nil {
+		defer close(f.stopped)
+	}
 	select {
 	case <-ctx.Done():
+		if f.release != nil {
+			<-f.release
+		}
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1}
 	case <-f.appStopped:
 		errType := models.ErrAppStopped

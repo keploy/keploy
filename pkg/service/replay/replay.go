@@ -1296,6 +1296,11 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 	return r.testDB.GetTestCases(ctx, testID)
 }
 
+// testSetDrainTimeout bounds the drain of a test set's goroutines (the
+// application and its watcher) once the set is over. A var, not a const, so a
+// test can shrink it rather than wait it out.
+var testSetDrainTimeout = 30 * time.Second
+
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, serveTest bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
@@ -1306,6 +1311,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	startTime := time.Now()
 	pruneBefore := startTime.UTC()
 
+	// exitLoopChan is never closed. The test loops below are its only readers,
+	// and they have finished by the time the deferred drain runs; its writers
+	// are the app watchers in runTestSetErrGrp, and a drain that times out
+	// leaves the group running. Closing it after the drain ordered nothing for
+	// the readers, and raced a watcher's send: the race detector caught the
+	// close and the send unordered once the drain had given up, and a watcher
+	// that sent after the close would have panicked.
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
 		// Notify the agent before cancelling the app context so proxy logs shutdown errors as debug.
@@ -1318,10 +1330,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		runTestSetCtxCancel()
 		// Bounded drain so a wedged per-test-set goroutine can't hang teardown/SIGINT.
-		if err := utils.DrainErrGroup(r.logger, "replay-testset", runTestSetErrGrp, 30*time.Second); err != nil {
+		if err := utils.DrainErrGroup(r.logger, "replay-testset", runTestSetErrGrp, testSetDrainTimeout); err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
-		close(exitLoopChan)
 	}()
 
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
