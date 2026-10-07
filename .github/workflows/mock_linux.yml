@@ -7,7 +7,9 @@ name: Mock Mode Regression (Linux)
 # mappings are written via the scope API, and (c) a failing runner propagates a
 # non-zero exit code. Runs the PR `build` binary for both record and replay.
 # Another replays two concurrent workers under different named scopes and
-# asserts each is served only its own scope's mocks. Another replays with the
+# asserts each is served only its own scope's mocks. Another replays a stateful
+# dependency (one request recorded several times) and asserts record order,
+# per worker and per scope. Another replays with the
 # network off (loopback only), as on a laptop with its Wi-Fi off, and records a
 # dependency on loopback the same way. Another runs the same binary where its
 # agent cannot start, and asserts the run fails at once with the code that
@@ -84,6 +86,16 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-parallel-linux.sh"
+
+      # A stateful dependency (the same request recorded several times) must
+      # replay in record order then saturate — unscoped, per concurrent scoped
+      # worker, and from the start again for a re-run of a test.
+      - name: Run mock-mode stateful-dependency e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-stateful-linux.sh"
 
       - name: Run mock-mode offline e2e
         env:

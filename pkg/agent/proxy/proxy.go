@@ -186,6 +186,10 @@ type Proxy struct {
 	// (backward compatible with suite-level and single-worker sequential scope).
 	workerScopeMu sync.RWMutex
 	workerScope   map[uint32]map[string]struct{}
+	// workerScopeGen counts each worker's scope registrations, so every new
+	// scope (the worker's next test) gets fresh stateful cursors. Guarded by
+	// workerScopeMu.
+	workerScopeGen map[uint32]uint64
 	// mappedUniverse is the union of every test's mapped mock names; lets a
 	// scoped worker distinguish "another test's mock" from an unmapped shared
 	// recording. Guarded by workerScopeMu.
