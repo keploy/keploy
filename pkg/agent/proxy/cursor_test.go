@@ -15,7 +15,7 @@ func TestMockCursorPeekAdvanceSaturateReset(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	const key, n = "GET /counter\x00h", 3
 
-	// Peek is idempotent (no advance); advance moves the cursor on.
+	// Peek is idempotent (no advance); advance (from the served index) moves on.
 	for want := 0; want <= 2; want++ {
 		if got := mm.MockCursorIndex(key, n); got != want {
 			t.Fatalf("peek #%d = %d, want %d", want, got, want)
@@ -23,7 +23,7 @@ func TestMockCursorPeekAdvanceSaturateReset(t *testing.T) {
 		if got := mm.MockCursorIndex(key, n); got != want {
 			t.Fatalf("peek is not idempotent: second read = %d, want %d", got, want)
 		}
-		mm.AdvanceMockCursor(key, n)
+		mm.AdvanceMockCursor(key, want, n)
 	}
 	// Past the end: saturate on the last index, and the stored cursor stays
 	// bounded (does not grow) across repeated over-reads.
@@ -31,7 +31,15 @@ func TestMockCursorPeekAdvanceSaturateReset(t *testing.T) {
 		if got := mm.MockCursorIndex(key, n); got != n-1 {
 			t.Fatalf("saturate read %d = %d, want %d", i, got, n-1)
 		}
-		mm.AdvanceMockCursor(key, n)
+		mm.AdvanceMockCursor(key, n-1, n)
+	}
+
+	// Monotonic + idempotent: advancing from an OLDER served index must not
+	// rewind the cursor (concurrent identical requests that both served index 0
+	// settle at 1, never skipping to 2).
+	mm.AdvanceMockCursor(key, 0, n)
+	if got := mm.MockCursorIndex(key, n); got != n-1 {
+		t.Fatalf("stale advance rewound the cursor: peek = %d, want %d", got, n-1)
 	}
 
 	// Reset (per-test-set boundary) sends the sequence back to the start.
@@ -44,7 +52,7 @@ func TestMockCursorPeekAdvanceSaturateReset(t *testing.T) {
 	if got := mm.MockCursorIndex("solo", 1); got != 0 {
 		t.Fatalf("n=1 peek = %d, want 0", got)
 	}
-	mm.AdvanceMockCursor("solo", 1)
+	mm.AdvanceMockCursor("solo", 0, 1)
 	if got := mm.MockCursorIndex("solo", 1); got != 0 {
 		t.Fatalf("n=1 after advance = %d, want 0 (single recording never advances)", got)
 	}

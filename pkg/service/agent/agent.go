@@ -1176,6 +1176,13 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// rather than carrying a cursor across sets, while the per-test-case calls
 	// (empty shape) leave them alone so a sequence spans the whole set. Optional
 	// capability: a proxy without stateful cursors is a no-op.
+	//
+	// This reuses the same shape-non-empty staging heuristic as the startup
+	// cutoff / recorded-window seeders above. A degenerate test-set whose cases
+	// all carry a zero request timestamp produces an empty shape, so none of
+	// these fire — the pre-existing limitation of that heuristic. Replacing it
+	// with an explicit MockFilterParams.Staging flag (for all three) is a
+	// tracked follow-up; real recordings always carry timestamps.
 	if !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
 		if resetter, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
 			resetter.ResetStatefulCursors()

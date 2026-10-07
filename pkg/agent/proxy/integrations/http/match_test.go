@@ -31,7 +31,7 @@ type mockMemDb struct {
 	updateUnFilteredReturn  bool
 	deletedFiltered         *models.Mock
 	deleteFilteredReturn    bool
-	cursors                 map[string]int // backs NextMockIndex for cursor tests
+	cursors                 map[string]int // backs MockCursorIndex/AdvanceMockCursor for cursor tests
 }
 
 // MockCursorIndex / AdvanceMockCursor give the double the optional
@@ -48,18 +48,21 @@ func (m *mockMemDb) MockCursorIndex(key string, n int) int {
 	return cur
 }
 
-func (m *mockMemDb) AdvanceMockCursor(key string, n int) {
+func (m *mockMemDb) AdvanceMockCursor(key string, servedIdx, n int) {
 	if n <= 1 {
 		return
 	}
 	if m.cursors == nil {
 		m.cursors = make(map[string]int)
 	}
-	cur := m.cursors[key]
-	if cur > n-1 {
-		cur = n - 1
+	next := servedIdx + 1
+	if cur := m.cursors[key]; cur > next {
+		next = cur
 	}
-	m.cursors[key] = cur + 1
+	if next > n {
+		next = n
+	}
+	m.cursors[key] = next
 }
 
 func (m *mockMemDb) GetUnFilteredMocks() ([]*models.Mock, error) { return m.mocks, m.err }

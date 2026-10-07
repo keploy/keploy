@@ -1529,10 +1529,15 @@ func (m *MockManager) MockCursorIndex(key string, n int) int {
 	return clampCursor(m.cursors[key], n)
 }
 
-// AdvanceMockCursor moves the cursor for key one past the position just served,
-// clamped so it saturates at n (never grows unbounded on a hot repeated
-// request). Call it only after the chosen response was actually served.
-func (m *MockManager) AdvanceMockCursor(key string, n int) {
+// AdvanceMockCursor moves the cursor for key one past servedIdx — the index the
+// caller actually served — taking the MAX with the current cursor so it is
+// monotonic and idempotent. Advancing from the served index (not current+1)
+// means two concurrent identical requests that both peeked the same index and
+// both served it settle the cursor to servedIdx+1 rather than jumping two,
+// which would skip a recorded response. Stored value tops out at n (reads clamp
+// to n-1), so a hot repeated request never grows it unbounded. Call it only
+// after the chosen response was actually served.
+func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
 	if n <= 1 {
 		return
 	}
@@ -1541,7 +1546,14 @@ func (m *MockManager) AdvanceMockCursor(key string, n int) {
 	if m.cursors == nil {
 		m.cursors = make(map[string]int)
 	}
-	m.cursors[key] = clampCursor(m.cursors[key], n) + 1
+	next := servedIdx + 1
+	if cur := m.cursors[key]; cur > next {
+		next = cur
+	}
+	if next > n {
+		next = n
+	}
+	m.cursors[key] = next
 }
 
 // clampCursor bounds a stored cursor to the last valid index [0, n-1].

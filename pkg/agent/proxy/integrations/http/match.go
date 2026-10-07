@@ -265,7 +265,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 // recording as before.
 type mockCursor interface {
 	MockCursorIndex(key string, n int) int
-	AdvanceMockCursor(key string, n int)
+	AdvanceMockCursor(key string, servedIdx, n int)
 }
 
 // cursorPick advances a stateful dependency through its recorded responses. When
@@ -338,7 +338,7 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 		return bestMatch, nil
 	}
 	n := len(group)
-	return group[idx], func() { cs.AdvanceMockCursor(key, n) }
+	return group[idx], func() { cs.AdvanceMockCursor(key, idx, n) }
 }
 
 // cursorKey builds a stable per-request key so repeated identical requests share
