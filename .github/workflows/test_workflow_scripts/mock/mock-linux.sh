@@ -236,5 +236,42 @@ RC=${PIPESTATUS[0]}
 [ "$RC" -ne 0 ] || { echo "FAIL: --min-coverage with no coverage report must fail"; FAIL=1; }
 grep -q "no coverage report to check" cov-none.log || { echo "FAIL: the missing report was not explained"; FAIL=1; }
 
+echo "== 5. a suite that calls its own in-process server: said once, then counted =="
+# test_self.py's test makes 5 requests, each to a server it starts in-process
+# on a new port, as supertest's request(app) does: self-calls, which keploy
+# passes through to that real handler. The run's first is logged at INFO, the
+# rest at Debug, and their count when the run ends; one INFO line per
+# connection would flood the log.
+cat > test_self.py <<'PY'
+import http.server, json, socketserver, threading, urllib.request
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"path": self.path}).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+def own_server(path):
+    # TCPServer, not HTTPServer: no name lookup while keploy answers DNS.
+    # The timeout and the daemon thread let a self-call keploy does not pass
+    # through fail the test instead of hanging the run.
+    s = socketserver.TCPServer(("127.0.0.1", 0), H)
+    s.timeout = 5
+    t = threading.Thread(target=s.handle_request, daemon=True); t.start()
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{s.server_address[1]}{path}", timeout=5) as r:
+            return json.load(r)
+    finally:
+        t.join(6); s.server_close()
+def test_self_calls():
+    for i in range(5):
+        assert own_server(f"/self/{i}")["path"] == f"/self/{i}"
+PY
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_self.py" --name e2e --disable-tele 2>&1 | tee self.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] && grep -q "4 passed" self.log || { echo "FAIL: the suite with self-calls should pass (exit 0, 4 passed), got $RC"; FAIL=1; }
+SAID=$(grep -c "INFO.*self-call passed through to the run's own listener" self.log)
+[ "$SAID" -eq 1 ] || { echo "FAIL: 5 self-calls were said at INFO $SAID times, want once"; FAIL=1; }
+grep -qE "self-calls passed through to the run's own listeners.*\"calls\": 5" self.log ||
+  { echo "FAIL: the run's 5 self-calls were not counted when it ended"; FAIL=1; }
+
 if [ "$FAIL" -eq 0 ]; then echo "MOCK E2E: PASSED"; else echo "MOCK E2E: FAILED"; fi
 exit "$FAIL"

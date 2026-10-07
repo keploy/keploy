@@ -292,11 +292,11 @@ const (
 	RejectionLowRiskNoNoise RejectionReason = "LOW_RISK_NO_NOISE" // minor diffs that can't be auto-suppressed as noise
 )
 
-// ReasonLoopbackOutsideRun is recorded when keploy passes a call through to a
-// listener owned by the run's own process tree (a self-call) instead of serving
-// it from a mock — so a verdict can show that a self-call reached the real
-// handler, not a recording, and a broken self-handler fails the run rather than
-// passing on a stale mock.
+// ReasonLoopbackOutsideRun is the reason the agent logs when keploy passes a
+// call through to a listener owned by the run's own process tree (a self-call)
+// instead of serving it from a mock — so the log shows that a self-call reached
+// the real handler, not a recording; a broken self-handler fails the run rather
+// than passing on a stale mock.
 const ReasonLoopbackOutsideRun = "loopback_outside_run"
 
 // NoiseFailureReason explains why automatic noise extraction failed for a LOW_RISK_NO_NOISE test case.
