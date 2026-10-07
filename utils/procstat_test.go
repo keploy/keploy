@@ -1,8 +1,11 @@
 package utils
 
 import (
+	"os"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // statTail is a stat line's fields after pgrp, as Linux 6.12 writes them for a
@@ -56,5 +59,41 @@ func TestParseProcStatAllocatesNothing(t *testing.T) {
 	line := []byte("604 (node (app) )x() S 603 600" + statTail)
 	if allocs := testing.AllocsPerRun(100, func() { _, _ = ParseProcStat(line) }); allocs != 0 {
 		t.Fatalf("ParseProcStat allocates %v times per line; want 0", allocs)
+	}
+}
+
+// ReadProcStat reads this process as the kernel reports it on Linux, and
+// reports nothing where there is no /proc.
+func TestReadProcStatReadsThisProcess(t *testing.T) {
+	stat, ok := ReadProcStat(os.Getpid())
+	if runtime.GOOS != "linux" {
+		if ok {
+			t.Fatalf("ReadProcStat on %s = %+v; want nothing, there is no /proc", runtime.GOOS, stat)
+		}
+		return
+	}
+	if !ok {
+		t.Fatal("ReadProcStat could not read this process")
+	}
+	// The state is the main thread's, often asleep while another reads; it is
+	// some state of a live process. (Z is pinned by the zombie test's isZombie.)
+	if stat.PPID != os.Getppid() || !strings.ContainsRune("RSD", rune(stat.State)) {
+		t.Fatalf("ReadProcStat(self) = %+v; want parent %d, and running or asleep", stat, os.Getppid())
+	}
+	if _, ok := ReadProcStat(1 << 30); ok {
+		t.Fatal("ReadProcStat read a pid no process has")
+	}
+	// The start time is in clock ticks after boot: this process started
+	// after the system did, and less than the system's uptime ago.
+	uptime, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, err := time.ParseDuration(strings.Fields(string(uptime))[0] + "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat.StartTime == 0 || time.Duration(stat.StartTime)*time.Second/100 > up {
+		t.Fatalf("this process started %d ticks after boot; the system has been up %s", stat.StartTime, up)
 	}
 }

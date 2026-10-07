@@ -21,13 +21,11 @@ import (
 // reap it.
 func isZombie(t *testing.T, pid int) bool {
 	t.Helper()
-	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		t.Fatalf("read process %d: %v", pid, err)
+	stat, ok := ReadProcStat(pid)
+	if !ok {
+		t.Fatalf("read process %d's stat", pid)
 	}
-	// "pid (comm) state ...": comm may itself hold spaces and parentheses.
-	fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
-	return len(fields) > 0 && fields[0] == "Z"
+	return stat.State == 'Z'
 }
 
 // countingFS counts the stat files opened through it.

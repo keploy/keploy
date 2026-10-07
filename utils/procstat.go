@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
 	"strconv"
 )
 
@@ -36,6 +37,16 @@ const procStatFields = 20
 // and in practice it is a few hundred bytes (the longest on a 6.12 host was
 // 363). 4096 bytes holds any of them.
 const statBufSize = 4096
+
+// ReadProcStat reads and parses /proc/<pid>/stat. It is false when the line
+// cannot be read (the process has exited, or there is no /proc) or parsed.
+func ReadProcStat(pid int) (ProcStat, bool) {
+	line, err := readStat(os.DirFS("/proc"), strconv.Itoa(pid), make([]byte, statBufSize))
+	if err != nil {
+		return ProcStat{}, false
+	}
+	return ParseProcStat(line)
+}
 
 // readStat reads <pid>/stat from proc, a /proc, into buf and returns what it
 // read.
