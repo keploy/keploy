@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -94,8 +95,28 @@ func TestMatch_CorrelationDisabledServesStale(t *testing.T) {
 	}
 }
 
+// TestMatch_DetectThenHonor: a mock with only raw bodies (no correlation
+// annotation) is run through the replay-ingest detector (MaterializeCorrelations),
+// then honored — tying the detector to the matcher end-to-end.
+func TestMatch_DetectThenHonor(t *testing.T) {
+	h := newHTTP()
+	m := correlationMock(recUUID, false) // no Correlations annotation
+	mocknoise.MaterializeCorrelations(m) // the replay-ingest step populates it
+	db := &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}
+	live := jsonReq("POST", "/pay", `{"amount":10,"idempotencyKey":"`+newUUID+`"}`)
+
+	ok, stub, _, err := h.match(context.Background(), live, db, nil, nil, nil, true, false, false, true, true)
+	if err != nil || !ok || stub == nil {
+		t.Fatalf("detect+honor should match: ok=%v stub=%v err=%v", ok, stub, err)
+	}
+	if !strings.Contains(stub.Spec.HTTPResp.Body, newUUID) || strings.Contains(stub.Spec.HTTPResp.Body, recUUID) {
+		t.Fatalf("detect+honor must render the live uuid; got %q", stub.Spec.HTTPResp.Body)
+	}
+}
+
 // TestMatch_NoCorrelationMetadataServesStale: an identical mock WITHOUT the
-// correlation annotation does not render — the annotation is what drives it.
+// correlation annotation AND without materialization does not render — the
+// annotation is what drives it.
 func TestMatch_NoCorrelationMetadataServesStale(t *testing.T) {
 	h := newHTTP()
 	db := &mockMemDb{mocks: []*models.Mock{correlationMock(recUUID, false)}, updateUnFilteredReturn: true}

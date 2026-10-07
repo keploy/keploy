@@ -139,3 +139,20 @@ func hasMixedEntropy(s string) bool {
 	}
 	return hasAlpha && hasDigit
 }
+
+// MaterializeCorrelations computes and stores request→response echo
+// correlations on a mock at replay-ingest — once, before the mock enters the
+// concurrent runtime pool — so the honor-on-replay matcher has them without a
+// per-match recompute or a shared-pointer mutation race. No-op when the mock
+// already carries correlations (a learn pass or disk already set them) or has
+// none to find. Detection is static (reads only the recording), so this is the
+// natural place to run it. Unconditional by design: it only populates an
+// in-memory field; the replay gate controls whether honor acts on it.
+func MaterializeCorrelations(m *models.Mock) {
+	if m == nil || len(m.Spec.Correlations) > 0 {
+		return
+	}
+	if c := CorrelationsFromMock(m); len(c) > 0 {
+		m.Spec.Correlations = c
+	}
+}

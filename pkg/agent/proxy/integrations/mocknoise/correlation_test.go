@@ -63,3 +63,29 @@ func TestCorrelationsFromMock(t *testing.T) {
 		})
 	}
 }
+
+// TestMaterializeCorrelations pins the replay-ingest helper: it populates an
+// echo mock's Correlations, leaves a no-echo mock empty, and never clobbers a
+// mock that already carries correlations.
+func TestMaterializeCorrelations(t *testing.T) {
+	const id = "550e8400-e29b-41d4-a716-446655440000"
+
+	echo := mockWithBodies(`{"idempotencyKey":"`+id+`"}`, `{"ok":true,"idempotencyKey":"`+id+`"}`)
+	MaterializeCorrelations(echo)
+	if len(echo.Spec.Correlations) != 1 || echo.Spec.Correlations[0].RequestPath != "body.idempotencyKey" {
+		t.Fatalf("materialize should populate the echo correlation, got %+v", echo.Spec.Correlations)
+	}
+
+	none := mockWithBodies(`{"amount":10}`, `{"ok":true}`)
+	MaterializeCorrelations(none)
+	if len(none.Spec.Correlations) != 0 {
+		t.Fatalf("no echo must stay empty, got %+v", none.Spec.Correlations)
+	}
+
+	pre := mockWithBodies(`{"idempotencyKey":"`+id+`"}`, `{"idempotencyKey":"`+id+`"}`)
+	pre.Spec.Correlations = []models.FieldCorrelation{{RequestPath: "pre", RecordedValue: "x"}}
+	MaterializeCorrelations(pre)
+	if len(pre.Spec.Correlations) != 1 || pre.Spec.Correlations[0].RequestPath != "pre" {
+		t.Fatalf("already-populated must be left unchanged, got %+v", pre.Spec.Correlations)
+	}
+}
