@@ -99,3 +99,68 @@ func TestUnregisteredKindsDeriveAsBefore(t *testing.T) {
 		}
 	}
 }
+
+// TestDeriveConsumeMode pins the ConsumeMode classification DeriveLifetime
+// assigns alongside Lifetime. Data-plane mocks promoted to session by the
+// kind-fallback (rules #4 untagged, #5 lax non-canonical tag) must get
+// ConsumeCursorSaturate so repeated identical requests advance through the
+// recorded responses (closing the 1,1,1 stateful false pass), while true
+// session/config/connection mocks, and the order-nondeterministic DNS kind,
+// must stay ConsumeReuse.
+func TestDeriveConsumeMode(t *testing.T) {
+	t.Cleanup(sessionReusableHooks.reset)
+	sessionReusableHooks.reset()
+	RegisterSessionReusable(brokerKind, isHandshake)
+
+	mk := func(kind Kind, tag string) *Mock {
+		md := map[string]string{}
+		if tag != "" {
+			md["type"] = tag
+		}
+		if tag == "connection" {
+			md["connID"] = "c1"
+		}
+		return &Mock{Kind: kind, Spec: MockSpec{Metadata: md}}
+	}
+
+	// Rule #5 (lax promotion of a non-canonical tag) only fires when the lax
+	// kind-fallback is enabled, which is the default; honour whatever this
+	// process was started with so the test is deterministic under either.
+	laxCursor := ConsumeCursorSaturate
+	if laxKindFallbackDisabled() {
+		laxCursor = ConsumeReuse
+	}
+
+	for _, tc := range []struct {
+		name string
+		mock *Mock
+		want ConsumeMode
+	}{
+		// Rule #4 — untagged data-plane kinds → cursor (fires regardless of lax).
+		{"untagged HTTP", mk(HTTP, ""), ConsumeCursorSaturate},
+		{"untagged HTTP2", mk(HTTP2, ""), ConsumeCursorSaturate},
+		{"untagged Generic", mk(GENERIC, ""), ConsumeCursorSaturate},
+		{"untagged Postgres", mk(Postgres, ""), ConsumeCursorSaturate},
+		{"untagged PostgresV2", mk(PostgresV2, ""), ConsumeCursorSaturate},
+		// Rule #5 — lax non-canonical tag on a data-plane kind.
+		{"mocks-tagged HTTP follows lax mode", mk(HTTP, "mocks"), laxCursor},
+		{"HTTP_CLIENT-tagged Generic follows lax mode", mk(GENERIC, "HTTP_CLIENT"), laxCursor},
+		// DNS is excluded from cursoring (non-deterministic resolution order).
+		{"untagged DNS stays reuse", mk(DNS, ""), ConsumeReuse},
+		{"mocks-tagged DNS stays reuse", mk(DNS, "mocks"), ConsumeReuse},
+		// True session mocks keep reuse: config (#2), connection (#3), and the
+		// registered session-reusable hook (#1a).
+		{"config-tagged HTTP stays reuse", mk(HTTP, "config"), ConsumeReuse},
+		{"connection-tagged HTTP stays reuse", mk(HTTP, "connection"), ConsumeReuse},
+		{"registered-reusable broker stays reuse", brokerMock("mocks", "PRODUCER"), ConsumeReuse},
+		// A kind outside the implicit-session list is per-test and reuse.
+		{"unlisted kind stays reuse", mk(Kind("UnlistedKind"), "mocks"), ConsumeReuse},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.mock.DeriveLifetime()
+			if got := tc.mock.TestModeInfo.Consume; got != tc.want {
+				t.Fatalf("Consume = %v, want %v (Lifetime=%v)", got, tc.want, tc.mock.TestModeInfo.Lifetime)
+			}
+		})
+	}
+}

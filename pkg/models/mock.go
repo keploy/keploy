@@ -227,6 +227,15 @@ type TestModeInfo struct {
 	// Runtime-only, untagged; re-derived fresh on each reload.
 	LifetimeDerived bool `json:"-" bson:"-"`
 
+	// Consume classifies how the matcher consumes this mock across repeated
+	// identical requests — ConsumeReuse (serve the same response every time;
+	// the default for session/config/connection mocks) or ConsumeCursorSaturate
+	// (serve successive recorded responses in record order, then saturate on
+	// the last; for stateful data-plane mocks). Derived at ingest by
+	// DeriveLifetime alongside Lifetime; runtime-only, untagged, re-derived on
+	// each load for the same reason Lifetime is.
+	Consume ConsumeMode `json:"-" bson:"-"`
+
 	// IsStartup marks startup-window traffic: a mock captured either before
 	// the first inbound request (classic app-bootstrap, e.g. an AWS Secret
 	// Manager fetch at process boot) OR while fewer than
