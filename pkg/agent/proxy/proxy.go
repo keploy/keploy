@@ -271,6 +271,15 @@ type Proxy struct {
 	tree       map[net.Conn]int
 	caJavaHome string
 
+	// selfCalls counts the self-calls passed through, and selfCallOwners the
+	// processes of the run that served them: the run's first is logged at
+	// INFO, the rest at Debug, and their total when the run ends
+	// (logSelfCalls, from SetGracefulShutdown). selfCallsLogged is the total
+	// last logged, so a repeated shutdown call does not say it again.
+	selfCalls       atomic.Int64
+	selfCallOwners  sync.Map // owner pid -> struct{}
+	selfCallsLogged atomic.Int64
+
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
@@ -1448,6 +1457,7 @@ func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	if p.asyncEngine != nil {
 		p.asyncEngine.LogReport(p.logger)
 	}
+	p.logSelfCalls()
 	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
 	// Flush any in-flight packet capture so the test-set's pcap is
 	// finalised before the agent is allowed to exit.
@@ -4523,6 +4533,34 @@ func (p *Proxy) trackTree(conn net.Conn, owner int) func() {
 	}
 }
 
+// logSelfCalls logs how many self-calls the run passed through, and how many
+// of its processes served them, when there was more than the one already
+// logged at INFO, and only when the count has moved since it last did:
+// SetGracefulShutdown, which calls it, may be called more than once.
+func (p *Proxy) logSelfCalls() {
+	n := p.selfCalls.Load()
+	if n < 2 {
+		return
+	}
+	for {
+		last := p.selfCallsLogged.Load()
+		if n <= last {
+			return
+		}
+		if p.selfCallsLogged.CompareAndSwap(last, n) {
+			break
+		}
+	}
+	processes := 0
+	p.selfCallOwners.Range(func(_, _ any) bool {
+		processes++
+		return true
+	})
+	p.logger.Info("self-calls passed through to the run's own listeners; the real handler answered them, not a mock",
+		zap.Int64("calls", n), zap.Int("processes", processes),
+		zap.String("reason", models.ReasonLoopbackOutsideRun))
+}
+
 func (p *Proxy) closeDependencyConns() {
 	p.treeMu.Lock()
 	defer p.treeMu.Unlock()
@@ -4581,11 +4619,23 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	defer p.trackTree(srcConn, owner)()
 	// A self-call: the destination is a listener owned by the run's own process
 	// tree, so it is passed through to the real handler instead of served from a
-	// mock. Surfaced so a verdict can show a self-call reached the real handler
-	// (and a broken one fails the run) rather than passing on a stale mock.
-	p.logger.Info("self-call passed through to the run's own listener; the real handler answers it, not a mock",
-		zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
-		zap.String("reason", models.ReasonLoopbackOutsideRun))
+	// mock, and a broken self-handler fails the run rather than passing on a
+	// stale mock. The run's first self-call is logged at INFO and the rest at
+	// Debug; logSelfCalls logs the total when the run ends. A runner that calls
+	// its own in-process server (supertest's request(app) starts one per
+	// request) makes a self-call per connection, so a line each at INFO would
+	// flood the log.
+	p.selfCallOwners.LoadOrStore(owner, struct{}{})
+	if p.selfCalls.Add(1) == 1 {
+		p.logger.Info("self-call passed through to the run's own listener; the real handler answers it, not a mock",
+			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+			zap.String("reason", models.ReasonLoopbackOutsideRun),
+			zap.String("note", "further self-calls are logged at debug, and counted at the end of a run that finishes"))
+	} else {
+		p.logger.Debug("self-call passed through to the run's own listener; the real handler answers it, not a mock",
+			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+			zap.String("reason", models.ReasonLoopbackOutsideRun))
+	}
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
 		return true, nil
