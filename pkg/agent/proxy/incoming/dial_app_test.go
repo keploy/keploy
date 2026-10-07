@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -147,6 +148,37 @@ func TestDialApp_ReportsTheOriginalAddressWhenNothingIsListening(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), addr) {
 		t.Errorf("error should name the requested address %q, got %v", addr, err)
+	}
+}
+
+// An application that is not listening yet — a restarted process, the next
+// test binary — must be waited for, not reset: the forwarder owns the port for
+// the whole session, so a client can arrive before the app binds.
+func TestDialApp_WaitsForAnAppThatIsNotListeningYet(t *testing.T) {
+	pm := newDialTestPM()
+	ln, addr := listenOn(t, "127.0.0.1")
+	_ = ln.Close()
+
+	listening := make(chan net.Listener, 1)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		l, err := net.Listen("tcp4", addr)
+		if err != nil {
+			listening <- nil
+			return
+		}
+		listening <- l
+	}()
+
+	conn, err := pm.dialApp(context.Background(), addr, zap.NewNop())
+	if err != nil {
+		t.Fatalf("dialApp gave up on an app that started listening shortly after: %v", err)
+	}
+	_ = conn.Close()
+	if l := <-listening; l == nil {
+		t.Fatal("app listener could not rebind the port")
+	} else {
+		_ = l.Close()
 	}
 }
 
