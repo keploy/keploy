@@ -4322,6 +4322,7 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 				// them as unmatched calls would misdirect the user, so they
 				// stay out of the report (they are already logged).
 				errs = append(errs, models.UnmatchedCall{
+					At:            parserErr.At,
 					Protocol:      "unknown",
 					ActualSummary: parserErr.Err.Error(),
 					NextSteps:     "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details.",
@@ -4347,6 +4348,7 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	proxyErr := models.ParserError{
 		ParserErrorType: models.ErrMockNotFound,
 		Err:             err,
+		At:              time.Now(),
 	}
 	// Extract diff report from the error chain if available.
 	// Use errors.As to traverse wrapped errors.
@@ -4356,6 +4358,15 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	var reporter mismatchReporter
 	if errors.As(err, &reporter) && reporter != nil {
 		proxyErr.MismatchReport = reporter.MismatchReport()
+	}
+	// Every miss says when it happened: `keploy mock` files it under the test
+	// it was made in by that time, and drops one without it. A parser that
+	// built its report without one gets the time the miss reached here (a
+	// copy: the report is the parser's).
+	if r := proxyErr.MismatchReport; r != nil && r.At.IsZero() {
+		stamped := *r
+		stamped.At = proxyErr.At
+		proxyErr.MismatchReport = &stamped
 	}
 	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing
 	// miss funnels through here, so this one line covers HTTP, generic, MySQL,
