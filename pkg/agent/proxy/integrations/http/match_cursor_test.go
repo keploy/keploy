@@ -41,7 +41,7 @@ func TestMatch_StatefulCursorSaturate(t *testing.T) {
 	// Three recordings, read five times: advance 1,2,3 then saturate on 3.
 	want := []string{"resp-1", "resp-2", "resp-3", "resp-3", "resp-3"}
 	for i, w := range want {
-		ok, stub, _, err := h.match(ctx, putGet("/counter"), db, nil, nil, nil, true, false, false, true)
+		ok, stub, _, err := h.match(ctx, putGet("/counter"), db, nil, nil, nil, true, false, false, true, true)
 		if err != nil || !ok || stub == nil {
 			t.Fatalf("call %d: ok=%v stub=%v err=%v", i+1, ok, stub, err)
 		}
@@ -72,7 +72,7 @@ func TestMatch_StatefulCursorDisabledIsLegacy(t *testing.T) {
 	var first string
 	for i := 0; i < 4; i++ {
 		// statefulMocks = false (last arg): cursor is bypassed.
-		ok, stub, _, err := h.match(ctx, putGet("/counter"), db, nil, nil, nil, true, false, false, false)
+		ok, stub, _, err := h.match(ctx, putGet("/counter"), db, nil, nil, nil, true, false, false, false, true)
 		if err != nil || !ok || stub == nil {
 			t.Fatalf("call %d: ok=%v stub=%v err=%v", i+1, ok, stub, err)
 		}
@@ -100,7 +100,7 @@ func TestMatch_StatefulCursorSingleRecordingSaturates(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		ok, stub, _, err := h.match(ctx, putGet("/counter"), db, nil, nil, nil, true, false, false, true)
+		ok, stub, _, err := h.match(ctx, putGet("/counter"), db, nil, nil, nil, true, false, false, true, true)
 		if err != nil || !ok || stub == nil {
 			t.Fatalf("read %d: a single recording must keep being served (no miss): ok=%v stub=%v err=%v", i+1, ok, stub, err)
 		}

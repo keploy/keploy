@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -777,11 +778,13 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	for _, m := range storage.filtered {
 		if m != nil {
 			m.DeriveLifetime()
+			mocknoise.MaterializeCorrelations(m)
 		}
 	}
 	for _, m := range storage.unfiltered {
 		if m != nil {
 			m.DeriveLifetime()
+			mocknoise.MaterializeCorrelations(m)
 		}
 	}
 
@@ -892,6 +895,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		}
 		mock := &m
 		mock.DeriveLifetime()
+		mocknoise.MaterializeCorrelations(mock)
 		if wantAsync && mock.IsAsync() {
 			asyncMocks = append(asyncMocks, mock)
 		}
