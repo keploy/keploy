@@ -40,12 +40,15 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 			out.perTest = append(out.perTest, mk)
 			continue
 		}
-		if test := testAt(tests, mk.pid, mk.ts); test != "" {
+		if test := testAt(tests, mk.pid, mk.ts); test != "" && (!mk.boot || len(starts) > 0) {
 			out.tests[test] = append(out.tests[test], entry)
 			out.perTest = append(out.perTest, mk)
 			continue
 		}
 		dir := suiteAt(suites, mk.ts)
+		if dir == "" {
+			dir = dirAt(tests, mk.ts)
+		}
 		j, ok := runner[dir]
 		if !ok {
 			j = len(boots)
@@ -85,6 +88,28 @@ func testAt(tests []models.ScopeWindow, worker uint32, at time.Time) string {
 	}
 	sort.SliceStable(pick, func(i, j int) bool { return pick[i].Start.After(pick[j].Start) })
 	return pick[0].Name
+}
+
+func dirAt(tests []models.ScopeWindow, at time.Time) string {
+	next, last := -1, -1
+	for i, w := range tests {
+		if w.Dir == "" {
+			continue
+		}
+		if !w.Start.Before(at) && (next == -1 || w.Start.Before(tests[next].Start)) {
+			next = i
+		}
+		if last == -1 || w.Start.After(tests[last].Start) {
+			last = i
+		}
+	}
+	if next == -1 {
+		next = last
+	}
+	if next == -1 {
+		return ""
+	}
+	return tests[next].Dir
 }
 
 func suiteAt(suites []models.SuiteSpan, at time.Time) string {

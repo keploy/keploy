@@ -119,9 +119,10 @@ type ScopeReq struct {
 	// (correct for sequential single-worker runs and suite-level).
 	Pid int `json:"pid,omitempty"`
 	// At is the runner's own clock for this boundary; zero means the agent stamps its read time.
-	At    time.Time `json:"at,omitzero"`
-	Dir   string    `json:"dir,omitempty"`
-	Suite bool      `json:"suite,omitempty"`
+	At     time.Time `json:"at,omitzero"`
+	Dir    string    `json:"dir,omitempty"`
+	Suite  bool      `json:"suite,omitempty"`
+	Status string    `json:"status,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -147,6 +148,7 @@ type ScopeWindow struct {
 	Ready   time.Time `json:"ready,omitzero"`
 	Ref     string    `json:"ref,omitempty"`
 	Worker  uint32    `json:"worker,omitempty"`
+	Status  string    `json:"status,omitempty"`
 }
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands

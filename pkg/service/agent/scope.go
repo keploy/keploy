@@ -102,8 +102,9 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) {
 	start, ok := a.workerOpen[k]
 	if ok {
 		delete(a.workerOpen, k)
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: a.scopeMeta[k].dir, Suite: a.scopeMeta[k].suite})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: a.scopeMeta[k].dir, Suite: a.scopeMeta[k].suite, Status: a.scopeStatus[k]})
 		delete(a.scopeMeta, k)
+		delete(a.scopeStatus, k)
 	}
 	a.scopeMu.Unlock()
 }
@@ -215,6 +216,18 @@ func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 type scopeMeta struct {
 	dir   string
 	suite bool
+}
+
+func (a *Agent) NoteStatus(name string, pid int, status string) {
+	if name == "" || status == "" {
+		return
+	}
+	a.scopeMu.Lock()
+	if a.scopeStatus == nil {
+		a.scopeStatus = make(map[scopeKey]string)
+	}
+	a.scopeStatus[scopeKey{pid: uint32(pid), name: name}] = status
+	a.scopeMu.Unlock()
 }
 
 func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {

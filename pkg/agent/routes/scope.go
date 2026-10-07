@@ -58,6 +58,10 @@ type scopeNoter interface {
 	NoteScope(name string, pid int, dir string, suite bool)
 }
 
+type statusNoter interface {
+	NoteStatus(name string, pid int, status string)
+}
+
 type scopeWindowReader interface {
 	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
 }
@@ -102,6 +106,9 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	starts.Default.End(uint32(req.Pid), req.Name, req.Suite, markTime(req.At))
+	if s, ok := a.svc.(statusNoter); ok {
+		s.NoteStatus(req.Name, req.Pid, req.Status)
+	}
 	if err := endScope(r.Context(), a.svc, req); err != nil {
 		a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)

@@ -7,6 +7,8 @@ import (
 	"os"
 )
 
+var RunnerOut io.Writer
+
 type JSONWriter struct {
 	enabled bool
 	out     io.Writer

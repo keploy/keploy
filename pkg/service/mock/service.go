@@ -193,3 +193,7 @@ type Store interface {
 	// no-op.
 	Push(ctx context.Context, name string) error
 }
+
+type ScopedStore interface {
+	NeedsScopes() bool
+}

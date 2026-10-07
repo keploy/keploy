@@ -2171,7 +2171,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 					if isShutdownError(err) || isNetworkClosedErr(err) {
 						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
 					} else {
-						if refusedLocally(err) {
+						if errors.As(err, new(reportedMiss)) {
+							p.logger.Debug("failed to handle the client connection: no mock matched its call", zap.Error(err))
+						} else if refusedLocally(err) {
 							p.logger.Debug("failed to handle the client connection: nothing is listening at the local destination yet", zap.Error(err))
 						} else {
 							utils.LogError(p.logger, err, "failed to handle the client connection")
@@ -3307,10 +3309,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			testCtx := models.WithMockMismatchReporter(parserCtx, p.sendMockNotFoundError)
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-				utils.LogError(logger, err, "failed to mock the outgoing message")
+				logger.Debug("failed to mock the outgoing message", zap.Error(err))
 				// Send specific error type to error channel for external monitoring
 				p.sendMockNotFoundError(err)
-				return err
+				return reportedMiss{err}
 			}
 		}
 	}
@@ -3414,16 +3416,16 @@ func (p *Proxy) mockGenericOutgoing(
 		// mode-gated), so report rather than relay — which is what the MySQL
 		// replay site does too.
 		err := errors.New("no generic parser is registered to mock this connection")
-		utils.LogError(logger, err, "failed to mock the outgoing message")
+		logger.Debug("failed to mock the outgoing message", zap.Error(err))
 		p.sendMockNotFoundError(err)
-		return err
+		return reportedMiss{err}
 	}
 	err := genericParser.MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-		utils.LogError(logger, err, "failed to mock the outgoing message")
+		logger.Debug("failed to mock the outgoing message", zap.Error(err))
 		// Send specific error type to error channel for external monitoring
 		p.sendMockNotFoundError(err)
-		return err
+		return reportedMiss{err}
 	}
 	return nil
 }
@@ -4343,6 +4345,12 @@ func (p *Proxy) SendError(err error) {
 
 // sendMockNotFoundError builds a ParserError from a mock-miss error,
 // extracting the MismatchReport if the error carries one.
+type reportedMiss struct{ err error }
+
+func (r reportedMiss) Error() string { return r.err.Error() }
+
+func (r reportedMiss) Unwrap() error { return r.err }
+
 func (p *Proxy) sendMockNotFoundError(err error) {
 	proxyErr := models.ParserError{
 		ParserErrorType: models.ErrMockNotFound,
@@ -4391,9 +4399,9 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 		if r.DestinationScope != models.DestinationScopeUnknown {
 			fields = append(fields, zap.String("destination_scope", r.DestinationScope))
 		}
-		p.logger.Warn("mock mismatch: no matching mock for outgoing call", fields...)
+		p.logger.Debug("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {
-		p.logger.Warn("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
+		p.logger.Debug("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
 	}
 	p.SendError(proxyErr)
 }

@@ -1,9 +1,11 @@
 package mock
 
 import (
+	"bytes"
 	"context"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -46,6 +48,7 @@ type replayDetail struct {
 	expected map[string][]models.MockEntry
 	recorded map[string][]*models.TestCase
 	actual   []*models.TestCase
+	failed   []string
 }
 
 // actualCapture keeps the app's incoming requests during a replay, in memory only.
@@ -308,4 +311,90 @@ func (m *mockService) withRunIDs(tc *models.TestCase) *models.TestCase {
 		}
 	}
 	return &out
+}
+
+func (m *mockService) reportMisses(misses []models.UnmatchedCall, byFlow []FlowMocks) {
+	type key struct{ test, protocol, call, dest string }
+	var order []key
+	n := map[key]int{}
+	add := func(test string, miss models.UnmatchedCall) {
+		k := key{test, miss.Protocol, miss.ActualSummary, miss.Destination}
+		if n[k] == 0 {
+			order = append(order, k)
+		}
+		n[k]++
+	}
+	placed := map[string]int{}
+	for _, f := range byFlow {
+		for _, miss := range f.Missed {
+			add(f.Flow, miss)
+			placed[miss.Protocol+" "+miss.ActualSummary+" "+miss.Destination]++
+		}
+	}
+	for _, miss := range misses {
+		k := miss.Protocol + " " + miss.ActualSummary + " " + miss.Destination
+		if placed[k] > 0 {
+			placed[k]--
+			continue
+		}
+		add("", miss)
+	}
+	for _, k := range order {
+		test := k.test
+		if test == "" {
+			test = "(outside any test)"
+		}
+		fields := []zap.Field{zap.String("test", test), zap.String("protocol", k.protocol), zap.String("call", k.call), zap.String("destination", k.dest)}
+		if n[k] > 1 {
+			fields = append(fields, zap.Int("times", n[k]))
+		}
+		m.logger.Warn("no recorded mock matched a call", append(fields, zap.String("next_step", "record this call with --on-miss record, or re-record the set"))...)
+	}
+}
+
+func ranTests(windows []models.ScopeWindow) []RanTest {
+	root := gitTop()
+	var out []RanTest
+	for _, w := range windows {
+		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
+			continue
+		}
+		out = append(out, RanTest{Name: w.Name, Set: setName(w.Dir, root), Status: w.Status})
+	}
+	return out
+}
+
+type failScan struct {
+	mu     sync.Mutex
+	rest   []byte
+	failed []string
+}
+
+func (f *failScan) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rest = append(f.rest, p...)
+	for {
+		i := bytes.IndexByte(f.rest, '\n')
+		if i < 0 {
+			break
+		}
+		line := string(f.rest[:i])
+		f.rest = f.rest[i+1:]
+		if !strings.HasPrefix(line, "--- FAIL: ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 || strings.Contains(fields[2], "/") || slices.Contains(f.failed, fields[2]) {
+			continue
+		}
+		f.failed = append(f.failed, fields[2])
+	}
+	return len(p), nil
+}
+
+func (f *failScan) list() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.failed...)
 }

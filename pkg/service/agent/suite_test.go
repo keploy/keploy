@@ -37,3 +37,27 @@ func TestASuiteMarkComesBackAsASuiteWindow(t *testing.T) {
 		}
 	}
 }
+
+func TestAnEndMarkKeepsTheTestsStatus(t *testing.T) {
+	a := &Agent{logger: zap.NewNop()}
+	ctx := context.Background()
+	for _, name := range []string{"orders.TestSkip", "orders.TestOld"} {
+		if err := a.BeginScope(ctx, name, 42); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.NoteStatus("orders.TestSkip", 42, "skipped")
+	for _, name := range []string{"orders.TestSkip", "orders.TestOld"} {
+		if err := a.EndScope(ctx, name, 42); err != nil {
+			t.Fatal(err)
+		}
+	}
+	windows, _ := a.GetScopeWindows(ctx)
+	got := map[string]string{}
+	for _, w := range windows {
+		got[w.Name] = w.Status
+	}
+	if got["orders.TestSkip"] != "skipped" || got["orders.TestOld"] != "" {
+		t.Fatalf("statuses %+v", got)
+	}
+}

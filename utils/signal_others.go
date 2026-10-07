@@ -103,6 +103,9 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 	}
 	// Set the output of the command to stdout/stderr
 	cmd.Stdout = os.Stdout
+	if RunnerOut != nil {
+		cmd.Stdout = io.MultiWriter(os.Stdout, RunnerOut)
+	}
 	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))

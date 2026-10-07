@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestRequestKeyBlanksIdsInThePath(t *testing.T) {
@@ -268,4 +269,28 @@ func TestPairCasesPrefersTheSameQueryWhenACallIsNotMade(t *testing.T) {
 	require.Len(t, out, 2)
 	require.Nil(t, out[0].Actual, "the call that was not made is reported as not made")
 	require.True(t, out[1].Passed, "the call that was made is compared with its own recording")
+}
+
+func TestFailScanKeepsTheTopLevelTestsTheRunnerFailed(t *testing.T) {
+	f := &failScan{}
+	for _, chunk := range []string{"=== RUN   TestA\n--- FAIL: Te", "stA (0.00s)\n    --- FAIL: TestA/sub (0.00s)\n--- PASS: TestB (0.00s)\n", "--- FAIL: TestC (1.20s)\n--- FAIL: TestA (0.00s)\nFAIL\n"} {
+		_, _ = f.Write([]byte(chunk))
+	}
+	require.Equal(t, []string{"TestA", "TestC"}, f.list())
+}
+
+func TestReportMissesNamesTheTestOnce(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	m := &mockService{logger: zap.New(core)}
+	at := runnerT0.Add(5 * time.Millisecond)
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /price/lamp", Destination: "127.0.0.1:9000", At: at}
+	outside := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /tick", Destination: "127.0.0.1:9000", At: runnerT0.Add(time.Hour)}
+	misses := []models.UnmatchedCall{miss, miss, outside}
+	m.reportMisses(misses, attributeMocks(sequentialMarks(), nil, nil, misses))
+	require.Equal(t, 2, logs.Len())
+	first := logs.All()[0].ContextMap()
+	require.Equal(t, "orders/e2e.TestA", first["test"])
+	require.Equal(t, "GET /price/lamp", first["call"])
+	require.EqualValues(t, 2, first["times"])
+	require.Equal(t, "(outside any test)", logs.All()[1].ContextMap()["test"])
 }

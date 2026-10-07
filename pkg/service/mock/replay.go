@@ -267,11 +267,14 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//    only once the app is fully down (its errgroup Wait is deferred), and
 	//    the sender is the goroutine running exactly that Run.
 	var appErr models.AppError
+	scan := &failScan{}
+	utils.RunnerOut = scan
 	if composeAppExit != nil {
 		appErr = <-composeAppExit
 	} else {
 		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
 	}
+	utils.RunnerOut = nil
 
 	if parent.Err() != nil { // user Ctrl+C / a signal interrupted the replay
 		// A replay stopped by a signal before it finished did not verify the
@@ -314,13 +317,14 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	// 10. Summarise what was served and missed.
-	all := m.agentWindows(ctx)
+	all, _ := m.agentWindows(ctx)
 	detail := replayDetail{
 		windows:  testWindows(all),
 		starts:   appStarts(all),
 		expected: m.expectedMocks(ctx, name),
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),
+		failed:   scan.list(),
 	}
 	counts := m.reportOutcome(ctx, loaded, detail)
 	missed, missesKnown := counts.missed, counts.missed >= 0
@@ -776,6 +780,14 @@ type ReplayOutcome struct {
 	Mocks  []FlowMocks
 	Starts map[string]int
 	Sets   []string
+	Tests  []RanTest
+	Failed []string
+}
+
+type RanTest struct {
+	Name   string
+	Set    string
+	Status string
 }
 
 // replayOutcomeReporter is installed by a wrapping build (enterprise) from
@@ -883,13 +895,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			append(summary, zap.String("next_step", next))...)
 	}
 
-	for _, miss := range misses {
-		m.logger.Warn("no recorded mock matched an outgoing call",
-			zap.String("protocol", miss.Protocol),
-			zap.String("call", miss.ActualSummary),
-			zap.String("destination", miss.Destination),
-			zap.String("next_step", "record this call with --on-miss record, or re-record the set"))
-	}
+	byFlow := attributeMocks(detail.windows, detail.expected, consumed, misses)
+	m.reportMisses(misses, byFlow)
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what
 	// the user actually needs to see first. Never for --local — that is the free
@@ -909,9 +916,11 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				Consumed: len(consumed),
 				Missed:   len(misses),
 				Cases:    pairCases(detail.windows, detail.recorded, detail.actual, m.compareCase),
-				Mocks:    attributeMocks(detail.windows, detail.expected, consumed, misses),
+				Mocks:    byFlow,
 				Starts:   startsByTest(detail.windows, detail.starts),
 				Sets:     ranSets(detail.windows),
+				Tests:    ranTests(detail.windows),
+				Failed:   detail.failed,
 			})
 		}
 	}
