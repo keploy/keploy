@@ -184,6 +184,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		DisableMysqlEndpointDrift: m.config.DisableMysqlEndpointDrift,
 		PassThroughPorts:          m.config.Record.PassThroughPorts,
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
+		DisableStatefulMocks:      m.config.Test.DisableStatefulMocks,
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the

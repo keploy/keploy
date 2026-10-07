@@ -142,13 +142,13 @@ func TestMatch_ExactPreferredOverAutoDynamic(t *testing.T) {
 
 	// Deterministic request for an EXACT recorded id -> exact mock wins (pass 1),
 	// the numeric sibling is never considered.
-	ok, stub, _, err := h.match(ctx, putGet("/users/55"), db, nil, nil, nil, true, false, false)
+	ok, stub, _, err := h.match(ctx, putGet("/users/55"), db, nil, nil, nil, true, false, false, true)
 	if err != nil || !ok || stub == nil || stub.Name != "mock-55" {
 		t.Fatalf("exact should win: ok=%v stub=%v err=%v", ok, stub, err)
 	}
 
 	// Non-deterministic id with no exact mock -> auto-match falls back (pass 2).
-	ok2, stub2, _, err2 := h.match(ctx, putGet("/users/99"), db, nil, nil, nil, true, false, false)
+	ok2, stub2, _, err2 := h.match(ctx, putGet("/users/99"), db, nil, nil, nil, true, false, false, true)
 	if err2 != nil || !ok2 || stub2 == nil {
 		t.Fatalf("auto-dynamic fallback should match: ok=%v stub=%v err=%v", ok2, stub2, err2)
 	}

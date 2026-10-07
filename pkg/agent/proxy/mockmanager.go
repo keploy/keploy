@@ -98,6 +98,13 @@ type MockManager struct {
 	// testcase. Read only when MockFilterParams.AgentOwnsConsumed is set.
 	consumedPersistent map[string]models.MockState
 
+	// cursorMu guards cursors: the per-request-key cursor used to serve
+	// successive recorded responses for a stateful data-plane dependency
+	// (ConsumeCursorSaturate). Session-scoped — reset whenever the mock set is
+	// replaced (per test-set) so cursors don't bleed across test-sets.
+	cursorMu sync.Mutex
+	cursors  map[string]int
+
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
 	statelessUnfiltered map[models.Kind]map[string][]*models.Mock
@@ -1498,6 +1505,77 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 		out = append(out, mk)
 	}
 	return out, nil
+}
+
+// MockCursorIndex returns the record-ordered position to serve for the request
+// identified by key, given n recorded responses for it, WITHOUT advancing. It
+// returns min(cursor, n-1), so once a request has been replayed more times than
+// it was recorded it saturates on the LAST recorded response instead of missing
+// — which keeps fixture re-reads (the same row read many times, recorded once)
+// working while a genuine stateful sequence (1,2,3) is served in order. The
+// caller advances via AdvanceMockCursor only once the response is actually
+// served (a successful claim), so a failed/retried match does not skip a
+// recorded response. Session-scoped: the cursor map is cleared per test-set
+// (ResetStatefulCursors). Satisfies the matcher's optional cursor interface;
+// parsers that do not type-assert it are unaffected.
+func (m *MockManager) MockCursorIndex(key string, n int) int {
+	if n <= 1 {
+		// Zero or one recorded response: always the first (only) one — identical
+		// to the legacy reuse behaviour, no cursor state needed.
+		return 0
+	}
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	return clampCursor(m.cursors[key], n)
+}
+
+// AdvanceMockCursor moves the cursor for key one past servedIdx — the index the
+// caller actually served — taking the MAX with the current cursor so it is
+// monotonic and idempotent. Advancing from the served index (not current+1)
+// means two concurrent identical requests that both peeked the same index and
+// both served it settle the cursor to servedIdx+1 rather than jumping two,
+// which would skip a recorded response. Stored value tops out at n (reads clamp
+// to n-1), so a hot repeated request never grows it unbounded. Call it only
+// after the chosen response was actually served.
+func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
+	if n <= 1 {
+		return
+	}
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if m.cursors == nil {
+		m.cursors = make(map[string]int)
+	}
+	next := servedIdx + 1
+	if cur := m.cursors[key]; cur > next {
+		next = cur
+	}
+	if next > n {
+		next = n
+	}
+	m.cursors[key] = next
+}
+
+// clampCursor bounds a stored cursor to the last valid index [0, n-1].
+func clampCursor(cur, n int) int {
+	if cur > n-1 {
+		return n - 1
+	}
+	if cur < 0 {
+		return 0
+	}
+	return cur
+}
+
+// ResetStatefulCursors drops every per-request stateful cursor so the next
+// stateful sequence starts from its first recorded response. The agent calls it
+// once per test-set (on the staging call) via the StatefulCursorResetter
+// capability, so a sequence spans a whole test-set but does not carry across
+// sets. Safe to call when no cursors exist.
+func (m *MockManager) ResetStatefulCursors() {
+	m.cursorMu.Lock()
+	m.cursors = nil
+	m.cursorMu.Unlock()
 }
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set
