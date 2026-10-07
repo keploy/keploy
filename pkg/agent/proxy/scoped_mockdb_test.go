@@ -151,6 +151,16 @@ func TestScopedMockDb_DoesNotEraseTheManagersCapabilities(t *testing.T) {
 		t.Error("the by-kind readers are erased by the wrap: kind-aware parsers take their " +
 			"legacy branch, which cannot read the startup tier")
 	}
+	c, ok := scoped.(integrations.MockCursor)
+	if !ok {
+		t.Fatal("the stateful cursor is erased by the wrap: a scoped worker replays every " +
+			"repeated request as its first recording")
+	}
+	// The wrap must reach the manager's cursor, not a private copy.
+	c.AdvanceMockCursor("k", 0, 3)
+	if got := mgr.MockCursorIndex("k", 3); got != 1 {
+		t.Fatalf("cursor advanced through the wrap must be visible on the manager: got %d, want 1", got)
+	}
 }
 
 // The startup tier is filtered like every other read tier. It sounds shared,

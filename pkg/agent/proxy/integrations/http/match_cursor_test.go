@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +109,47 @@ func TestMatch_StatefulCursorSingleRecordingSaturates(t *testing.T) {
 		if stub.Name != "only" {
 			t.Fatalf("read %d served %q, want %q", i+1, stub.Name, "only")
 		}
+	}
+}
+
+// TestMatch_StatefulCursorKeyIsTheRequest pins what a cursor is keyed by: the
+// request, not the set of recordings a call happens to schema-match. Header
+// matching only checks that a recording's header keys are present, so the
+// first two calls (no Authorization) match only the two recordings made
+// without it, and the next two match all four. A key derived from that
+// per-call set restarts the sequence (served 1,2,1,2); keyed by the request,
+// the sequence carries on through it (1,2,3,4).
+func TestMatch_StatefulCursorKeyIsTheRequest(t *testing.T) {
+	h := newHTTP()
+	ctx := context.Background()
+	base := time.Unix(1_700_000_000, 0)
+	authed := func(m *models.Mock) *models.Mock {
+		m.Spec.HTTPReq.Header = map[string]string{"Authorization": "Bearer t"}
+		return m
+	}
+	db := &mockMemDb{
+		mocks: []*models.Mock{
+			cursorMock("r1", base),
+			cursorMock("r2", base.Add(time.Second)),
+			authed(cursorMock("r3", base.Add(2*time.Second))),
+			authed(cursorMock("r4", base.Add(3*time.Second))),
+		},
+		updateUnFilteredReturn: true,
+	}
+	withAuth := func() *req {
+		r := putGet("/counter")
+		r.header = http.Header{"Authorization": []string{"Bearer t"}}
+		return r
+	}
+	var got []string
+	for _, in := range []*req{putGet("/counter"), putGet("/counter"), withAuth(), withAuth()} {
+		ok, stub, _, err := h.match(ctx, in, db, nil, nil, nil, true, false, false, true)
+		if err != nil || !ok || stub == nil {
+			t.Fatalf("ok=%v stub=%v err=%v", ok, stub, err)
+		}
+		got = append(got, stub.Name)
+	}
+	if g, want := strings.Join(got, ","), "r1,r2,r3,r4"; g != want {
+		t.Fatalf("served %s, want %s", g, want)
 	}
 }

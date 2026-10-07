@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -66,6 +67,11 @@ type scopedMockDb struct {
 	universe map[string]struct{} // union of ALL tests' mapped names (nil ⇒ no filtering)
 	pid      uint32
 	live     bool
+	view     string // allow mode: the scope the allowlist was resolved for; keys stateful cursors
+	// lastScope is the live-mode scope the latest cursor peek resolved; the
+	// commit after it reuses it. A view serves one connection, whose requests
+	// are sequential.
+	lastScope string
 }
 
 // keep returns the mocks visible to this worker: those in its allowlist plus any
@@ -197,6 +203,47 @@ func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
 	return 0
 }
 
+// A scoped call's stateful cursors are its scope's own: two workers reading
+// the same request never advance each other, and a worker's next test (or a
+// re-run of one) starts its sequences from the first recording instead of
+// where the previous test left off. Dropping these on the wrap silently turned
+// stateful replay off for every scoped worker: repeated requests replayed
+// their first recording forever.
+//
+// The scope is the one this view's visibility uses. In live mode visibility
+// is resolved on every read (byStart), so the scope is too — per peek, and
+// the commit that follows it on this connection reuses it, so a test boundary
+// landing between the two cannot advance another scope's cursor. In allow
+// mode the allowlist was resolved when the connection was opened, and so was
+// its scope (view).
+func (s *scopedMockDb) MockCursorIndex(key string, n int) int {
+	c, ok := s.MockMemDb.(integrations.MockCursor)
+	if !ok {
+		return -1
+	}
+	if s.live {
+		s.lastScope = starts.Default.Scope(s.pid)
+	}
+	return c.MockCursorIndex(s.cursorKey(key), n)
+}
+
+func (s *scopedMockDb) AdvanceMockCursor(key string, servedIdx, n int) {
+	if c, ok := s.MockMemDb.(integrations.MockCursor); ok {
+		c.AdvanceMockCursor(s.cursorKey(key), servedIdx, n)
+	}
+}
+
+func (s *scopedMockDb) cursorKey(key string) string {
+	scope := s.view
+	if s.live {
+		scope = s.lastScope
+	}
+	if scope == "" {
+		return key
+	}
+	return scope + "\x00" + key
+}
+
 // RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
 // pass straight through.
 func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
@@ -291,6 +338,12 @@ func (p *Proxy) SetWorkerScope(pid uint32, names []string) {
 	// Replace (never mutate) the inner map so a reference captured by scopedFor
 	// under RLock stays an immutable snapshot.
 	p.workerScope[pid] = set
+	// Each registration is a new scope (the worker's next test, or a re-run of
+	// the same one), so its stateful cursors start over.
+	if p.workerScopeGen == nil {
+		p.workerScopeGen = make(map[uint32]uint64)
+	}
+	p.workerScopeGen[pid]++
 	p.workerScopeMu.Unlock()
 }
 
@@ -348,10 +401,12 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	// Walk up the process tree to the nearest registered worker. Bounded so a
 	// reparent race or an unexpected /proc shape can never spin.
 	var allow map[string]struct{}
+	var gen uint64
 	pid := kpid
 	for i := 0; i < 32 && pid > 1; i++ {
 		if set, ok := p.workerScope[pid]; ok {
 			allow = set
+			gen = p.workerScopeGen[pid]
 			break
 		}
 		ppid, ok := ppidFromStat(pid)
@@ -366,7 +421,7 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	if allow == nil {
 		return mgr
 	}
-	return &scopedMockDb{MockMemDb: mgr, allow: allow, universe: universe}
+	return &scopedMockDb{MockMemDb: mgr, allow: allow, universe: universe, view: fmt.Sprintf("w%d.%d", pid, gen)}
 }
 
 // ppidFromStat reads the parent PID of pid from /proc/<pid>/stat. The comm field
@@ -422,3 +477,9 @@ func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
 	}
 	return out
 }
+
+// Every MockMemDb the proxy hands a parser must keep the stateful cursor.
+var (
+	_ integrations.MockCursor = (*MockManager)(nil)
+	_ integrations.MockCursor = (*scopedMockDb)(nil)
+)

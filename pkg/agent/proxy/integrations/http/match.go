@@ -274,18 +274,6 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 	}
 }
 
-// mockCursor is the optional capability a mock store exposes to serve stateful
-// dependencies. MockCursorIndex returns the record-ordered position to serve for
-// a request key given n recorded responses WITHOUT advancing; AdvanceMockCursor
-// advances the per-key cursor (saturating at n-1) and is called only once the
-// response is actually served, so a failed/retried match does not skip a
-// recording. MockManager implements it; stores that don't are served the first
-// recording as before.
-type mockCursor interface {
-	MockCursorIndex(key string, n int) int
-	AdvanceMockCursor(key string, servedIdx, n int)
-}
-
 // cursorPick advances a stateful dependency through its recorded responses. When
 // stateful mocks are enabled and bestMatch is a cursor-consumption mock
 // (ConsumeCursorSaturate), it gathers every schema-matched mock carrying the
@@ -312,7 +300,7 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 	if bestMatch.Spec.HTTPReq == nil {
 		return bestMatch, nil
 	}
-	cs, ok := mockDb.(mockCursor)
+	cs, ok := mockDb.(integrations.MockCursor)
 	if !ok {
 		return bestMatch, nil
 	}

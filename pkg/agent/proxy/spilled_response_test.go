@@ -93,7 +93,7 @@ func stageSpilled(t *testing.T, at time.Time, mocks ...*models.Mock) (*DiskMocks
 // serveOne sends rawReq through the HTTP integration's replay path and returns
 // the response the application reads, or nil and the integration's error when
 // none arrives.
-func serveOne(t *testing.T, h integrations.Integrations, mm *MockManager, rawReq string) (*http.Response, []byte, error) {
+func serveOne(t *testing.T, h integrations.Integrations, mm integrations.MockMemDb, rawReq string) (*http.Response, []byte, error) {
 	t.Helper()
 	app, agent := net.Pipe()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -124,11 +124,14 @@ func serveOne(t *testing.T, h integrations.Integrations, mm *MockManager, rawReq
 	if err != nil {
 		return nil, nil, finish()
 	}
-	body := make([]byte, resp.ContentLength)
+	var body []byte
 	if resp.ContentLength < 0 {
 		body, _ = io.ReadAll(resp.Body)
-	} else if _, err := io.ReadFull(resp.Body, body); err != nil {
-		t.Fatalf("reading the served body: %v", err)
+	} else {
+		body = make([]byte, resp.ContentLength)
+		if _, err := io.ReadFull(resp.Body, body); err != nil {
+			t.Fatalf("reading the served body: %v", err)
+		}
 	}
 	return resp, body, nil
 }
