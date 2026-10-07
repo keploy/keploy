@@ -5,6 +5,7 @@ set -Eeuo pipefail
 set -o errtrace
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
@@ -21,24 +22,6 @@ die() {
   exit "$rc"
 }
 trap die ERR
-
-wait_for_mongo() {
-  section "Wait for Mongo readiness"
-  for i in {1..90}; do
-    if docker exec mongoDb mongosh --quiet --eval "db.adminCommand('ping').ok" >/dev/null 2>&1; then
-      echo "Mongo responds to ping."
-      endsec; return 0
-    fi
-    if (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1; then
-      echo "Mongo TCP port open."
-      endsec; return 0
-    fi
-    sleep 1
-  done
-  echo "::error::Mongo did not become ready in time"
-  endsec
-  return 1
-}
 
 wait_for_http() {
   local url="$1" tries="${2:-60}"
@@ -84,9 +67,9 @@ send_request() {
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 section "Start Mongo"
-docker_pull_retry mongo
-docker run --name mongoDb --rm -p 27017:27017 -d mongo
-wait_for_mongo
+# start_mongo prints MongoDB's state and logs when it fails; die would print
+# the logs again.
+start_mongo || { endsec; exit 1; }
 endsec
 
 section "Prepare app"
