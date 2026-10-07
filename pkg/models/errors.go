@@ -217,6 +217,7 @@ type ParserError struct {
 	ParserErrorType ParserErrorType
 	Err             error
 	MismatchReport  *MockMismatchReport // nil when no diff is available
+	At              time.Time           // when the miss reached the proxy; a miss with no report has only this to say when it happened
 }
 
 type ParserErrorType string

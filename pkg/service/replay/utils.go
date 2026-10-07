@@ -1493,6 +1493,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 		ActualMocks:   []string{},
 		FailureReason: models.ErrMockNotFound,
 		MismatchReport: &models.MockMismatchReport{
+			At:            call.At,
 			Protocol:      call.Protocol,
 			ActualSummary: call.ActualSummary,
 			Destination:   call.Destination,
