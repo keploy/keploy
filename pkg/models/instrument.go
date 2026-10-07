@@ -128,6 +128,13 @@ type OutgoingOptions struct {
 	// ConsumeCursorSaturate (DeriveLifetime rules #4/#5); at one recorded
 	// response it is a no-op.
 	DisableStatefulMocks bool
+	// DisableMockCorrelation turns OFF request→response echo correlation: when
+	// the app sends an app-minted random value (UUID / nonce / idempotency key)
+	// that the dependency reflects back, replay captures the live request value
+	// and renders it into the served response instead of replaying the stale
+	// recorded one. Default (false) = ON. Set true to fall back to serving the
+	// recorded value. Only affects mocks carrying Spec.Correlations.
+	DisableMockCorrelation bool
 	// MockNoiseDetection / MockNoiseStrict are the canonical spelling.
 	//
 	// MockNoiseDetection: detect request-body field drift vs the recorded mock
