@@ -73,6 +73,7 @@ const (
 	stepStoreMocks   = "store-mocks"
 	stepMockParams   = "update-mock-params"
 	stepScopeTable   = "scope-table"
+	stepScopeGate    = "scope-gate"
 	stepAgentReady   = "agent-ready"
 )
 

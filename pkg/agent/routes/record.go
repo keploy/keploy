@@ -96,6 +96,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/scope/end", a.HandleScopeEnd)
 		r.Get("/scope/windows", a.HandleScopeWindows)
 		r.Post("/scope/table", a.HandleScopeTable)
+		r.Post("/replay/gate", a.HandleScopeGate)
 		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)

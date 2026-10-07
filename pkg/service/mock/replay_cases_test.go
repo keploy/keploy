@@ -2,6 +2,8 @@ package mock
 
 import (
 	"context"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"testing"
 	"time"
 
@@ -268,4 +270,139 @@ func TestPairCasesPrefersTheSameQueryWhenACallIsNotMade(t *testing.T) {
 	require.Len(t, out, 2)
 	require.Nil(t, out[0].Actual, "the call that was not made is reported as not made")
 	require.True(t, out[1].Passed, "the call that was made is compared with its own recording")
+}
+
+// Each test carries the verdict of its latest run — "" when that run reported
+// none, never an earlier run's — and a test that recorded no mocks, or that
+// the replay gated out, still gets its line.
+func TestAttributeMocksCarriesEachTestsLatestVerdict(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{
+		{Name: "pkg.TestA", Start: at(0), End: at(100), Outcome: models.ScopeOutcomeFailed},
+		{Name: "pkg.TestA", Start: at(400), End: at(500), Outcome: models.ScopeOutcomePassed},
+		{Name: "pkg.TestB", Start: at(200), End: at(300), Outcome: models.ScopeOutcomePassed},
+		{Name: "pkg.TestB", Start: at(600), End: at(650)}, // a re-run that reported nothing
+		{Name: "pkg.TestPure", Start: at(700), End: at(800), Outcome: models.ScopeOutcomePassed},
+		{Name: "pkg.TestGated", Start: at(900), End: at(900), Outcome: models.ScopeOutcomeGated},
+	}
+	expected := map[string][]models.MockEntry{"pkg.TestA": {{Name: "mock-0"}}, "pkg.TestB": {{Name: "mock-1"}}, "pkg.TestGated": {{Name: "mock-2"}}}
+	got := map[string]string{}
+	for _, f := range attributeMocks(windows, expected, nil, nil) {
+		got[f.Flow] = f.Outcome
+	}
+	require.Equal(t, map[string]string{
+		"pkg.TestA":     models.ScopeOutcomePassed,
+		"pkg.TestB":     "",
+		"pkg.TestPure":  models.ScopeOutcomePassed,
+		"pkg.TestGated": models.ScopeOutcomeGated,
+	}, got)
+}
+
+func TestTestReceiptsMarkAnUnreportedCount(t *testing.T) {
+	flows := []FlowMocks{{
+		Flow:     "pkg.TestA",
+		Outcome:  models.ScopeOutcomePassed,
+		Consumed: []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}},
+		Missed:   []models.UnmatchedCall{{Protocol: "HTTP"}},
+	}}
+	require.Equal(t, []TestReceipt{{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: 2, Missed: 1}}, testReceipts(flows, true, true))
+	require.Equal(t, []TestReceipt{{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: -1, Missed: 1}}, testReceipts(flows, false, true))
+	require.Nil(t, testReceipts(nil, true, true))
+}
+
+// gatePusher records the gate a replay pushes.
+type gatePusher struct {
+	Instrumentation
+	pushed bool
+	run    []string
+	reason string
+	err    error
+}
+
+func (g *gatePusher) PushScopeGate(_ context.Context, run []string, reason string) error {
+	g.pushed, g.run, g.reason = true, run, reason
+	return g.err
+}
+
+// A replay always tells the agent which tests to run — with no gate source,
+// every test (a nil list), so a long-lived agent never keeps an earlier gate.
+// The source learns which recording the replay serves.
+func TestPushScopeGate(t *testing.T) {
+	g := &gatePusher{}
+	m := &mockService{logger: zap.NewNop(), instrumentation: g, config: &config.Config{}}
+	require.Equal(t, requestedGate{}, m.pushScopeGate(context.Background(), "set", "d1"))
+	require.True(t, g.pushed)
+	require.Nil(t, g.run)
+
+	var asked ScopeGateRequest
+	RegisterScopeGateSource(func(_ context.Context, req ScopeGateRequest) ([]string, string) {
+		asked = req
+		return []string{req.Set + "/proven"}, "not yet proven"
+	})
+	t.Cleanup(func() { RegisterScopeGateSource(nil) })
+	require.Equal(t, requestedGate{run: []string{"set/proven"}, reason: "not yet proven"}, m.pushScopeGate(context.Background(), "set", "d1"))
+	require.Equal(t, ScopeGateRequest{Set: "set", MocksDigest: "d1"}, asked)
+	require.Equal(t, []string{"set/proven"}, g.run)
+
+	// The user's --run-only wins over the installed policy.
+	m.config = &config.Config{}
+	m.config.Mock.RunOnly = []string{"TestMine"}
+	require.Equal(t, requestedGate{run: []string{"TestMine"}, reason: "not in --run-only"}, m.pushScopeGate(context.Background(), "set", "d1"))
+	require.Equal(t, []string{"TestMine"}, g.run)
+
+	// A gate the agent could not install was not asked for.
+	g.err = models.ErrScopeGateUnsupported
+	require.Equal(t, requestedGate{}, m.pushScopeGate(context.Background(), "set", "d1"))
+}
+
+// A gate that held says nothing; one that no harness could honour — no scope
+// reported, or a test outside the list ran, verdict or not — is called out, so
+// a run of the full suite is never mistaken for the subset asked for.
+func TestGateReport(t *testing.T) {
+	g := requestedGate{run: []string{"TestA"}, reason: "r"}
+	w := func(name, outcome string) models.ScopeWindow { return models.ScopeWindow{Name: name, Outcome: outcome} }
+	note, ungated := gateReport(requestedGate{}, []models.ScopeWindow{w("TestB", models.ScopeOutcomePassed)})
+	require.Empty(t, note, "no gate asked for")
+	require.Zero(t, ungated)
+
+	note, _ = gateReport(g, []models.ScopeWindow{
+		w("TestA", models.ScopeOutcomePassed),
+		w("TestA/case", ""),
+		w("TestB", models.ScopeOutcomeGated),
+	})
+	require.Empty(t, note, "the gate held")
+
+	note, ungated = gateReport(g, nil)
+	require.Contains(t, note, "no test reported")
+	require.Zero(t, ungated)
+
+	// A harness that scopes but sends no verdicts, and cannot skip.
+	note, ungated = gateReport(g, []models.ScopeWindow{w("TestA", ""), w("TestB", ""), w("TestC", ""), w("TestC", "")})
+	require.Contains(t, note, "2 test(s) outside the run list ran")
+	require.Equal(t, 2, ungated)
+}
+
+// A --run-only name lets a recorded test run when it is the test or a parent
+// of its subtests; anything else matches nothing.
+func TestGateNamesAny(t *testing.T) {
+	recorded := map[string][]models.MockEntry{"TestA": nil, "TestB/case_1": nil}
+	require.True(t, gateNamesAny("TestA", recorded))
+	require.True(t, gateNamesAny("TestB", recorded))
+	require.False(t, gateNamesAny("TestAX", recorded))
+	require.False(t, gateNamesAny("TestB/case_2", recorded))
+}
+
+// An agent that cannot gate is fine when there is nothing to gate, and said
+// out loud when there is: the run is not the one the gate asked for.
+func TestPushScopeGateToAnAgentThatCannot(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	g := &gatePusher{err: models.ErrScopeGateUnsupported}
+	m := &mockService{logger: zap.New(core), instrumentation: g, config: &config.Config{}}
+	m.pushScopeGate(context.Background(), "set", "")
+	require.Zero(t, logs.Len(), "no gate asked for: nothing to say")
+
+	RegisterScopeGateSource(func(context.Context, ScopeGateRequest) ([]string, string) { return []string{"t"}, "r" })
+	t.Cleanup(func() { RegisterScopeGateSource(nil) })
+	m.pushScopeGate(context.Background(), "set", "")
+	require.Equal(t, 1, logs.FilterMessageSnippet("every test runs this replay").Len())
 }

@@ -57,6 +57,15 @@ func endScope(ctx context.Context, svc any, req models.ScopeReq) error {
 type scopeNoter interface {
 	NoteScope(name string, pid int, dir string, suite bool)
 }
+type scopeOutcomeNoter interface {
+	NoteScopeOutcome(name string, pid int, outcome string)
+}
+type scopeGate interface {
+	SetScopeGate(ctx context.Context, run []string, reason string) error
+	ScopeRun(name string) (bool, string)
+	NoteScopeGated(name string, pid int, at time.Time)
+	NoteUngatable(name string)
+}
 
 type scopeWindowReader interface {
 	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
@@ -81,6 +90,23 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-begin request: %v", err), http.StatusBadRequest)
 		return
 	}
+	// A test the replay gated out is told to skip before anything else: it
+	// opens no window and narrows no pool, so skipping it leaves the replay
+	// exactly as if it had never been begun — except for the record that it
+	// was gated.
+	if g, ok := a.svc.(scopeGate); ok && !req.Suite {
+		if run, reason := g.ScopeRun(req.Name); !run {
+			if req.CanSkip {
+				g.NoteScopeGated(req.Name, req.Pid, markTime(req.At))
+				render.Status(r, http.StatusOK)
+				render.JSON(w, r, models.ScopeBeginResp{Status: "ok", Action: models.ScopeActionSkip, Reason: reason})
+				return
+			}
+			// A harness that cannot skip runs the test anyway: begin it as
+			// usual, so it is served its own mocks and its verdict counts.
+			g.NoteUngatable(req.Name)
+		}
+	}
 	if s, ok := a.svc.(scopeNoter); ok {
 		s.NoteScope(req.Name, req.Pid, req.Dir, req.Suite)
 	}
@@ -91,7 +117,7 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	render.Status(r, http.StatusOK)
-	render.JSON(w, r, map[string]string{"status": "ok"})
+	render.JSON(w, r, models.ScopeBeginResp{Status: "ok"})
 }
 
 // HandleScopeEnd marks the end of a named per-test scope.
@@ -102,6 +128,11 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	starts.Default.End(uint32(req.Pid), req.Name, req.Suite, markTime(req.At))
+	if s, ok := a.svc.(scopeOutcomeNoter); ok {
+		if outcome := models.NormalizeScopeOutcome(req.Outcome); outcome != "" {
+			s.NoteScopeOutcome(req.Name, req.Pid, outcome)
+		}
+	}
 	if err := endScope(r.Context(), a.svc, req); err != nil {
 		a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -144,6 +175,30 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]string{"status": "ok"})
+}
+
+// HandleScopeGate installs the replay's gate: the only tests that should run
+// (models.ScopeGateReq). /agent/scope/begin answers every other test with
+// ScopeActionSkip so its harness skips it. It is mounted outside /agent/scope/,
+// the API a test runner's harness calls: which tests run is the replay CLI's
+// decision, not the harness's.
+func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
+	var req models.ScopeGateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid scope-gate request: %v", err), http.StatusBadRequest)
+		return
+	}
+	g, ok := a.svc.(scopeGate)
+	if !ok {
+		http.Error(w, "this agent cannot gate which tests run", http.StatusNotImplemented)
+		return
+	}
+	if err := g.SetScopeGate(r.Context(), req.Run, req.Reason); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})

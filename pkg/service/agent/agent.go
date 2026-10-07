@@ -142,6 +142,15 @@ type Agent struct {
 	scopeMeta    map[scopeKey]scopeMeta
 	scopeTable   map[string][]string // replay: test name -> mock names (from mappings.yaml)
 	loadedMocks  int                 // replay: count of mocks stored, for /agent/mock/stats
+	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
+	// Cleared by resetScopeState.
+	gateRun    map[string]struct{}
+	gateReason string
+	gateWarned bool // NoteUngatable said so this session
+	// replay: the scopes the gate told a harness to skip, and whether
+	// noteEndOfGated said so this session.
+	gatedScopes    map[scopeKey]struct{}
+	gatedEndWarned bool
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -499,6 +508,10 @@ func (a *Agent) resetScopeState() {
 	a.workerOpen = nil
 	a.scopeWindows = nil
 	a.scopeMeta = nil
+	// A gate belongs to the replay that installed it; the CLI installs this
+	// session's after the reset.
+	a.gateRun, a.gateReason, a.gateWarned = nil, "", false
+	a.gatedScopes, a.gatedEndWarned = nil, false
 	a.scopeMu.Unlock()
 }
 

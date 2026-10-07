@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -883,4 +884,46 @@ func TestTheReceiptsTemporaryFileIsIgnored(t *testing.T) {
 	if after, _ := os.ReadFile(filepath.Join(keployDir, ".gitignore")); string(after) != string(gi) {
 		t.Fatalf("a second pass rewrote keploy/.gitignore:\n%s", after)
 	}
+}
+
+func TestCountTests(t *testing.T) {
+	require.Nil(t, countTests(nil, "x"))
+	got := countTests([]TestReceipt{
+		{Name: "a", Outcome: models.ScopeOutcomePassed},
+		{Name: "b", Outcome: models.ScopeOutcomeFailed},
+		{Name: "c", Outcome: models.ScopeOutcomeSkipped},
+		{Name: "d", Outcome: models.ScopeOutcomeGated},
+		{Name: "e"},
+		{Name: "f", Outcome: "flaky"},
+	}, "not yet proven")
+	require.Equal(t, &TestCounts{Passed: 1, Failed: 1, Skipped: 1, Gated: 1, GateReason: "not yet proven", NoVerdict: 2}, got)
+	require.Empty(t, countTests([]TestReceipt{{Name: "a", Outcome: models.ScopeOutcomePassed}}, "unused").GateReason,
+		"a reason is recorded only when something was gated")
+}
+
+// What each test did lives next to the receipt — not in it, which every status
+// check reads whole and which must stay small — local and git-ignored like it,
+// and gone when a later replay named no tests.
+func TestTestsReceiptRoundTripsAndIsLocal(t *testing.T) {
+	keployDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(keployDir, "set"), 0o755))
+	at := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	want := TestsReceipt{Set: "set", At: at, MocksDigest: "abc", Tests: []TestReceipt{
+		{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: 2},
+		{Name: "pkg.TestB", Outcome: models.ScopeOutcomeGated},
+	}}
+	writeTestsReceipt(zap.NewNop(), keployDir, want)
+	got, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Equal(t, &want, got)
+
+	writeReceipt(zap.NewNop(), keployDir, Receipt{Set: "set"})
+	gi, err := os.ReadFile(filepath.Join(keployDir, ".gitignore"))
+	require.NoError(t, err)
+	require.Contains(t, string(gi), "/*/"+TestsReceiptFile)
+
+	writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set"})
+	got, err = ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Nil(t, got, "a replay that named no tests leaves no stale per-test file behind")
 }
