@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/pkg/stdcopy"
+	mobyclient "github.com/moby/moby/client"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -93,6 +94,12 @@ type App struct {
 	// cached project would then address the previous stack.
 	composeRunnerMu  sync.Mutex
 	composeRunnerVal composeStack
+	// composeAPI is the Engine API client the compose library drives the
+	// stack through (docker.NewComposeAPIClient). Built with the first runner
+	// and kept for the App's life, as the docker client is: the runner is
+	// rebuilt for every test-set, and a client per runner would leave a
+	// connection pool behind each time. Guarded by composeRunnerMu.
+	composeAPI mobyclient.APIClient
 	// newComposeStack overrides how the runner is built. Production leaves it
 	// nil and gets the compose library; tests substitute a fake so the
 	// in-memory path keeps unit coverage without a docker daemon.
@@ -1191,11 +1198,9 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 //
 // Two conditions, and both matter. composeContent is the seam: only a document
 // keploy generated itself is ever driven by the library. ComposeLibrarySupported
-// is false on darwin, where the library cannot be linked at all — keploy's
-// darwin binaries are cross-compiled from Linux with CGO_ENABLED=0 and the
-// compose backend reaches fsevents, which is cgo-only (see
-// pkg/platform/docker/compose_backend_unsupported.go, which also covers every
-// build made WITHOUT -tags composelib). Every site that would use the
+// is false on darwin, which keeps the docker CLI that installed its engine
+// (see pkg/platform/docker/compose_backend_unsupported.go, which also covers
+// every build made WITHOUT -tags composelib). Every site that would use the
 // library asks this first and otherwise keeps the `docker compose -f -`
 // shell-out, which is what keploy did before the library existed and is always
 // available on a laptop.
@@ -1403,7 +1408,9 @@ func parseComposeServiceStates(out string) []composeServiceState {
 // bounded retry can recover — and ONLY that case. It is the gate that keeps the
 // retry from masking a genuine application failure.
 //
-// The signature (verified against docker compose v2): when a service the app
+// The signature (verified against docker compose v2, and against the compose
+// v5.5.1 library in-process: pkg/platform/docker
+// TestLiveUpReturnsWhenADependencyFails): when a service the app
 // `depends_on: condition: service_healthy/completed_successfully` crashes during
 // compose's health-wait, compose prints "dependency failed to start: container
 // <dep> exited (N)" and ABORTS BEFORE EVER STARTING THE APP SERVICE. So the app

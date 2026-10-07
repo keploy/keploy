@@ -115,8 +115,13 @@ jobs:
       # Scoped to the two packages that have tagged tests rather than ./... ,
       # because everything else is identical in both shapes and would just be
       # run twice.
+      #
+      # Under -race: compose writes what it reports from several goroutines
+      # (the app's log streams, its container monitor), so a writer that is
+      # not safe for that is a data race the plain run passes. The live tests
+      # had one in their own buffers until they moved to syncBuffer.
       - name: Running Unit Tests (compose library)
-        run: go test -tags composelib -count=1 ./pkg/client/app/... ./pkg/platform/docker/...
+        run: go test -race -tags composelib -count=1 ./pkg/client/app/... ./pkg/platform/docker/...
 
       # The mock-manager's concurrency guards — the match-count race and the
       # hitMu/treesMu lock order — are only meaningful under -race: without
