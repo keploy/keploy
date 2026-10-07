@@ -95,10 +95,27 @@ for attempt in range(30):
             sys.exit(1)
         time.sleep(1)
 
+# The priced calls are one test, scoped the way a harness scopes it, with its
+# verdict sent at the end: under compose the agent is stopped with the runner,
+# so what the replay knows about the test comes from the account it leaves.
+# A failed scope call is ignored, so a step that takes the agent away runs
+# exactly as it would without one.
+TOKEN = os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
+def scope(path, body):
+    h = {"Content-Type": "application/json"}
+    if TOKEN:
+        h["Authorization"] = "Bearer " + TOKEN
+    try:
+        urllib.request.urlopen(urllib.request.Request(AGENT + path, data=json.dumps(body).encode(), headers=h, method="POST"), timeout=5).read()
+    except Exception as e:
+        print("scope call failed:", type(e).__name__, flush=True)
+
+scope("/agent/scope/begin", {"name": "compose_test"})
 for p in ["/price/aapl", "/price/msft", "/price/goog"]:
     body = get(p)
     assert body["path"] == p, body
     print("ok", p, body, flush=True)
+scope("/agent/scope/end", {"name": "compose_test", "outcome": "passed"})
 # A call the recording does not have, made only when asked. The runner does not
 # depend on its answer: it is there for keploy to report as missed.
 if os.environ.get("UNRECORDED"):
@@ -210,6 +227,8 @@ grep -q 'mock replay summary.*"missed": 0' rep.log || { echo "FAIL: the replay's
 grep -q 'mock replay summary.*"consumed": [1-9]' rep.log || { echo "FAIL: the replay served every answer from the recording, and its outcome says it served none"; FAIL=1; }
 grep -q "incomplete" rep.log && { echo "FAIL: the replay summary is incomplete under compose"; FAIL=1; }
 sudo grep -q '^isolated: true' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not prove the run isolated:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
+# The test's verdict and window reached the CLI from the stopped agent.
+sudo grep -A1 -x '    - name: compose_test' keploy/e2e/last-replay-tests.yaml | grep -qx '      outcome: passed' || { echo "FAIL: the replay does not know the scoped test passed under compose:"; sudo cat keploy/e2e/last-replay-tests.yaml; FAIL=1; }
 cleanup
 
 echo "== 3. --strict passes a compose replay it can now verify =="

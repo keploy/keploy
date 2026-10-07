@@ -2415,6 +2415,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
 		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")
 		cmd.Flags().String("coverage-report", c.cfg.Mock.CoverageReport, "Coverage report the test command writes, when it is not a default location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...)")
+		cmd.Flags().StringArray("run-only", c.cfg.Mock.RunOnly, "Run only this test (repeat the flag for more; the name as the test runner's harness reports it, and a subtest runs with its test); the harness skips the rest")
 	}
 	return nil
 }
@@ -2490,6 +2491,22 @@ func (c *CmdConfigurator) readMockCoverageFlags(cmd *cobra.Command) error {
 		}
 		c.cfg.Mock.CoverageReport = covReport
 	}
+	return nil
+}
+
+// readMockRunOnly resolves --run-only against keploy.yml's mock.runOnly,
+// guarded like the coverage flags so an untouched flag does not erase a
+// committed list.
+func (c *CmdConfigurator) readMockRunOnly(cmd *cobra.Command) error {
+	if !cmd.Flags().Changed("run-only") && viper.IsSet("mock.runOnly") {
+		return nil
+	}
+	runOnly, err := cmd.Flags().GetStringArray("run-only")
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the run-only flag")
+		return errors.New("failed to get the run-only flag")
+	}
+	c.cfg.Mock.RunOnly = runOnly
 	return nil
 }
 
@@ -2679,6 +2696,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		}
 
 		if err := c.readMockCoverageFlags(cmd); err != nil {
+			return err
+		}
+		if err := c.readMockRunOnly(cmd); err != nil {
 			return err
 		}
 	}

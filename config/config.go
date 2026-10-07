@@ -367,6 +367,10 @@ type MockCmd struct {
 	CoverageReport string `json:"coverageReport" yaml:"coverageReport" mapstructure:"coverageReport"`
 	// RecordRequests captures the app's incoming requests as test cases, on by default; needs --pass-through-ports <app port>.
 	RecordRequests bool `json:"recordRequests" yaml:"recordRequests" mapstructure:"recordRequests"`
+	// RunOnly names the only tests a replay runs (a subtest of a named test
+	// runs with it); every other test's harness is told to skip it. Empty runs
+	// every test. It takes precedence over any gate a wrapping build installs.
+	RunOnly []string `json:"runOnly" yaml:"runOnly" mapstructure:"runOnly"`
 }
 
 type Contract struct {

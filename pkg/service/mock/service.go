@@ -110,6 +110,13 @@ type ScopePusher interface {
 	PushScopeTable(ctx context.Context, table map[string][]string) error
 }
 
+// ScopeGatePusher is an optional Instrumentation extension: Replay uses it to
+// tell the agent which tests should run this replay (see ScopeGateSource).
+// run == nil lets every test run.
+type ScopeGatePusher interface {
+	PushScopeGate(ctx context.Context, run []string, reason string) error
+}
+
 type SetPusher interface {
 	PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) error
 }
