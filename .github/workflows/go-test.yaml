@@ -37,6 +37,13 @@ jobs:
       # only fires if that stops being true, and it stays unset elsewhere so a
       # v6-less environment skips rather than fails.
       KEPLOY_TEST_IPV6_REQUIRED: "1"
+      # And for user namespaces, which this lane lets unprivileged users
+      # create (the step before the unit tests). utils' test of the process
+      # tree InterruptProcessTree signals starts a process in a nested pid
+      # namespace under `unshare --user`, the one real check that it never
+      # signals pid 1; without user namespaces it skips, and the package
+      # still reports ok. With this set it fails instead.
+      KEPLOY_TEST_USERNS_REQUIRED: "1"
       KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
       KEPLOY_TEST_MYSQL_USER: root
       KEPLOY_TEST_MYSQL_PASS: rootpass
@@ -103,6 +110,15 @@ jobs:
           # not this). `go list` warms only what these steps load and picks up
           # new test-only deps by itself.
           go_retry list -deps -test ./... > /dev/null
+
+      # ubuntu-24.04 restricts unprivileged user namespaces through AppArmor
+      # by default (kernel.apparmor_restrict_unprivileged_userns=1), so
+      # `unshare --user` fails there (actions/runner-images#10443). Lift that
+      # for this job, which promises user namespaces to the tests
+      # (KEPLOY_TEST_USERNS_REQUIRED above). A runner without the setting
+      # fails this step, and the lane's promise has to be looked at again.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Running Unit Tests
         run: go test ./...
