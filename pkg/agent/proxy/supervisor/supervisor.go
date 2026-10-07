@@ -147,7 +147,15 @@ func New(cfg Config) *Supervisor {
 // to a FakeConn or an Ack is delivered. It resets the watchdog
 // timer. Cheap; a single atomic store.
 func (s *Supervisor) BumpActivity() {
-	s.lastProgressNano.Store(time.Now().UnixNano())
+	s.bumpActivityAt(time.Now())
+}
+
+// bumpActivityAt records progress as of now. Split out from BumpActivity so
+// the watchdog's reset behaviour can be exercised against a synthetic clock
+// (see TestHangResetOnActivity) instead of racing two wall-clock timers under
+// load, which is inherently flaky.
+func (s *Supervisor) bumpActivityAt(now time.Time) {
+	s.lastProgressNano.Store(now.UnixNano())
 }
 
 // MarkPendingWork indicates an in-flight request is awaiting a
@@ -417,6 +425,27 @@ func (s *Supervisor) Close() {
 	<-s.wdDone
 }
 
+// hangExceeded reports whether the no-progress budget has been exceeded as of
+// now, given the current pending/suspended/activity state. It is the single
+// decision the watchdog makes on each tick, factored out so the reset
+// behaviour can be verified deterministically against a synthetic clock (see
+// TestHangResetOnActivity) rather than by racing two wall-clock timers.
+func (s *Supervisor) hangExceeded(now time.Time) bool {
+	if !s.pending.Load() {
+		return false
+	}
+	// A poll-lane connection is expected to make no byte progress for a long
+	// time; do not treat that as a hang.
+	if s.suspended.Load() {
+		return false
+	}
+	last := s.lastProgressNano.Load()
+	if last == 0 {
+		return false
+	}
+	return now.Sub(time.Unix(0, last)) > s.cfg.HangBudget
+}
+
 // watchdogLoop polls the activity clock. Closes hungCh when budget
 // exceeded while pending work is outstanding.
 func (s *Supervisor) watchdogLoop() {
@@ -434,19 +463,7 @@ func (s *Supervisor) watchdogLoop() {
 		case <-s.wdStop:
 			return
 		case <-t.C:
-			if !s.pending.Load() {
-				continue
-			}
-			// A poll-lane connection is expected to make no byte
-			// progress for a long time; do not treat that as a hang.
-			if s.suspended.Load() {
-				continue
-			}
-			last := s.lastProgressNano.Load()
-			if last == 0 {
-				continue
-			}
-			if time.Since(time.Unix(0, last)) > s.cfg.HangBudget {
+			if s.hangExceeded(time.Now()) {
 				s.hungOnce.Do(func() { close(s.hungCh) })
 				return
 			}
