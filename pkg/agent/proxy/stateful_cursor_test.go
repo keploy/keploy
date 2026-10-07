@@ -374,3 +374,40 @@ func TestStartupTierKeyIndexSurvivesAMirroredUpdate(t *testing.T) {
 		t.Fatalf("keyed walk lists %d mocks, first %p; want 3 with the updated copy (%p) first", len(got), got[0], &upd)
 	}
 }
+
+// Allow mode, one keep-alive connection: its cursors follow the worker's scope
+// to the next test, which walks its own recordings from the first.
+func TestStatefulCursor_AllowKeepAliveAcrossTests(t *testing.T) {
+	mgr := newCursorManager(t)
+	base := time.Now().Add(-time.Hour)
+	mgr.SetMocksWithWindow(nil, append(counterPool(base, "a1", "a2"), counterPool(base.Add(time.Minute), "b1", "b2")...), models.BaseTime, time.Now())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1", "a2", "b1", "b2"})
+	w := uint32(os.Getpid())
+	p.SetWorkerScope(w, []string{"a1", "a2"})
+	conn := p.scopedFor(w, mgr)
+	if got, want := readCounter(t, conn, 2), "a1,a2"; got != want {
+		t.Fatalf("t1 served %s, want %s", got, want)
+	}
+	p.ClearWorkerScope(w)
+	p.SetWorkerScope(w, []string{"b1", "b2"})
+	if got, want := readCounter(t, conn, 3), "b1,b2,b2"; got != want {
+		t.Fatalf("t2 on the connection opened in t1 served %s, want %s", got, want)
+	}
+}
+
+// The commit after a peek advances the scope the peek resolved, even when the
+// worker's next test begins between the two.
+func TestStatefulCursor_AllowCommitReusesThePeekedScope(t *testing.T) {
+	mgr := newCursorManager(t)
+	self := uint32(os.Getpid())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1"})
+	conn := workerScopedOn(t, p, mgr, []string{"a1"})
+	idx := conn.MockCursorIndex("k", 3)    // a t1 read peeks
+	p.SetWorkerScope(self, []string{"a1"}) // t2 begins before it commits
+	conn.AdvanceMockCursor("k", idx, 3)
+	if got := conn.MockCursorIndex("k", 3); got != 0 {
+		t.Fatalf("t2's cursor starts at %d: the commit of a t1 read advanced it", got)
+	}
+}

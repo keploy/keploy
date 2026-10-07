@@ -23,12 +23,13 @@ import (
 //
 // A worker self-reports its PID in the scope call (ScopeReq.Pid — e.g. Node
 // process.pid), which registers an allowlist of that test's mock names on the
-// proxy (SetWorkerScope). An outgoing call's origin PID (OutgoingOptions.SrcPid,
-// from the eBPF redirect map) is resolved up the /proc process tree to the
-// nearest registered ancestor; that worker's per-test view is then intersected
-// with its allowlist. Calls from unregistered process trees (and every call
-// when no worker has scoped) fall through to the whole pool — so suite-level and
-// single-worker sequential scoping behave exactly as before.
+// proxy (SetWorkerScope). A connection's origin PID (OutgoingOptions.SrcPid,
+// from the eBPF redirect map) is resolved up the /proc process tree once, when
+// it opens; each read on it is then filtered by the allowlist of the nearest
+// worker on that chain registered at that moment, so the connection follows
+// its worker from test to test. Connections from unregistered process trees
+// (and every connection when no worker has scoped) get the whole pool — so
+// suite-level and single-worker sequential scoping behave exactly as before.
 //
 // Scope of the isolation: this filters VISIBILITY (which per-test mocks a call
 // can see), over the one shared pool. Per-test mocks are per-test-named in
@@ -60,15 +61,63 @@ import (
 // leave every worker seeing the whole set (the isolation would be a no-op).
 type scopedMockDb struct {
 	integrations.MockMemDb
-	allow    map[string]struct{} // mock names this worker's current test may see
-	universe map[string]struct{} // union of ALL tests' mapped names (nil ⇒ no filtering)
-	pid      uint32
-	live     bool
-	view     string // allow mode: the scope the allowlist was resolved for; keys stateful cursors
-	// lastScope is the live-mode scope the latest cursor peek resolved; the
-	// commit after it reuses it. A view serves one connection, whose requests
-	// are sequential.
+	// live: the view is resolved from the starts registry, per read, for pid.
+	pid  uint32
+	live bool
+	// src (allow mode) makes the view follow its worker: every read resolves,
+	// from the proxy's worker scopes as they are now, the nearest registered
+	// worker the connection's process (chain) descends from, and that
+	// worker's current test. A connection outlives a test — a keep-alive
+	// client the worker reuses in its next test — so a view fixed when it
+	// opened would serve the previous test's mocks. A wrap with neither live
+	// nor src (a test seam for the forwarded capabilities) filters nothing.
+	//
+	// One request of a parser may read more than once (its per-test tier, its
+	// session tier, a cursor peek); a test boundary landing between them can
+	// mix two tests' views in that one request, as it would with any
+	// boundary that lands mid-request.
+	src   *Proxy
+	chain []uint32 // the connection's process and its ancestors, nearest first
+	born  uint64   // the proxy's scope sequence when this view was made (see Revision)
+	// lastScope is the scope the latest cursor peek resolved; the commit after
+	// it reuses it. A view serves one connection, whose requests are
+	// sequential.
 	lastScope string
+}
+
+// workerView is what a scoped call may see, resolved for one read.
+type workerView struct {
+	allow    map[string]struct{}
+	universe map[string]struct{}
+	scope    string // the worker's current scope ("" for none); keys stateful cursors
+	// version is the proxy's scope sequence at the latest change to anything
+	// this view is made from: the scope of a worker on its chain, or the
+	// mapped universe. It only grows, and never returns to an earlier value.
+	version uint64
+}
+
+// current resolves this view for one read.
+func (s *scopedMockDb) current() workerView {
+	if s.src == nil {
+		return workerView{}
+	}
+	return s.src.workerViewFor(s.chain)
+}
+
+// visibleIn is whether a view shows m: in its allowlist, or belonging to no
+// test. Without a filter every non-nil mock is visible.
+func visibleIn(v workerView, m *models.Mock) bool {
+	if m == nil {
+		return false
+	}
+	if v.allow == nil || v.universe == nil {
+		return true
+	}
+	if _, mine := v.allow[m.Name]; mine {
+		return true
+	}
+	_, mapped := v.universe[m.Name]
+	return !mapped // shared / unmapped mock — visible to everyone
 }
 
 // keep returns the mocks visible to this worker: those in its allowlist plus any
@@ -77,32 +126,20 @@ func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, er
 	if s.live && err == nil {
 		return byStart(s.pid, mocks), nil
 	}
-	if err != nil || s.allow == nil || s.universe == nil {
+	if err != nil {
 		return mocks, err
+	}
+	v := s.current()
+	if v.allow == nil || v.universe == nil {
+		return mocks, nil
 	}
 	out := mocks[:0:0]
 	for _, m := range mocks {
-		if s.visible(m) {
+		if visibleIn(v, m) {
 			out = append(out, m)
 		}
 	}
 	return out, nil
-}
-
-// visible is keep's verdict on one mock. Without a filter every non-nil mock
-// is visible.
-func (s *scopedMockDb) visible(m *models.Mock) bool {
-	if m == nil {
-		return false
-	}
-	if s.allow == nil || s.universe == nil {
-		return true
-	}
-	if _, mine := s.allow[m.Name]; mine {
-		return true
-	}
-	_, mapped := s.universe[m.Name]
-	return !mapped // shared / unmapped mock — visible to everyone
 }
 
 func (s *scopedMockDb) GetFilteredMocks() ([]*models.Mock, error) {
@@ -147,8 +184,9 @@ func (s *scopedMockDb) GetSessionMocksInWindow(start, end time.Time) ([]*models.
 // always wraps the mock manager, which has it.
 func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
 	if r, ok := s.MockMemDb.(integrations.SessionKeyReader); ok {
+		v := s.current()
 		return r.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
-			return !s.visible(mk) || fn(mk)
+			return !visibleIn(v, mk) || fn(mk)
 		})
 	}
 	all, err := s.GetSessionMocks()
@@ -181,23 +219,45 @@ func (s *scopedMockDb) GetSessionScopedMocks() ([]*models.Mock, error) {
 // pool, so that branch reads nothing.
 //
 // Forward them explicitly. The by-kind readers go through keep() for the same
-// reason the plain ones do; the revision counters carry no mock data and pass
-// straight through.
+// reason the plain ones do.
+//
+// The revision counters tell a parser that caches what it read (an index of
+// the pool) when to read again. A view that follows its worker changes what it
+// shows when the worker begins or ends a test, with no change to the pool, so
+// its revisions add the view's version: the proxy's scope sequence at the
+// latest change to this view (workerView.version). Both only grow, so the sum
+// does; only this connection's parsers re-read, since another worker's test
+// does not change this view's version; and a view that returns to showing
+// what it showed before (between two tests) still reports a new revision.
+//
+// A view starts at the sequence value it took when it was made, above
+// anything an earlier view reported: a parser that keys its cache on the
+// store's address must not take a new view at a recycled address for the old
+// one.
 
 func (s *scopedMockDb) Revision() uint64 {
+	var rev uint64
 	if r, ok := s.MockMemDb.(interface{ Revision() uint64 }); ok {
-		return r.Revision()
+		rev = r.Revision()
 	}
-	return 0
+	return rev + s.viewVersion()
 }
 
 func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
+	var rev uint64
 	if r, ok := s.MockMemDb.(interface {
 		RevisionByKind(models.Kind) uint64
 	}); ok {
-		return r.RevisionByKind(kind)
+		rev = r.RevisionByKind(kind)
 	}
-	return 0
+	return rev + s.viewVersion()
+}
+
+func (s *scopedMockDb) viewVersion() uint64 {
+	if s.src == nil {
+		return 0
+	}
+	return max(s.born, s.current().version)
 }
 
 // A scoped call's stateful cursors are its scope's own: two workers reading
@@ -207,12 +267,10 @@ func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
 // stateful replay off for every scoped worker: repeated requests replayed
 // their first recording forever.
 //
-// The scope is the one this view's visibility uses. In live mode visibility
-// is resolved on every read (byStart), so the scope is too — per peek, and
-// the commit that follows it on this connection reuses it, so a test boundary
-// landing between the two cannot advance another scope's cursor. In allow
-// mode the allowlist was resolved when the connection was opened, and so was
-// its scope (view).
+// The scope is the one this view's visibility uses, resolved on every read as
+// visibility is — per peek, and the commit that follows it on this connection
+// reuses it, so a test boundary landing between the two cannot advance another
+// scope's cursor.
 func (s *scopedMockDb) MockCursorIndex(key string, n int) int {
 	c, ok := s.MockMemDb.(integrations.MockCursor)
 	if !ok {
@@ -220,6 +278,8 @@ func (s *scopedMockDb) MockCursorIndex(key string, n int) int {
 	}
 	if s.live {
 		s.lastScope = starts.Default.Scope(s.pid)
+	} else {
+		s.lastScope = s.current().scope
 	}
 	return c.MockCursorIndex(s.cursorKey(key), n)
 }
@@ -231,14 +291,10 @@ func (s *scopedMockDb) AdvanceMockCursor(key string, servedIdx, n int) {
 }
 
 func (s *scopedMockDb) cursorKey(key string) string {
-	scope := s.view
-	if s.live {
-		scope = s.lastScope
-	}
-	if scope == "" {
+	if s.lastScope == "" {
 		return key
 	}
-	return scope + "\x00" + key
+	return s.lastScope + "\x00" + key
 }
 
 // RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
@@ -330,35 +386,55 @@ func (p *Proxy) SetWorkerScope(pid uint32, names []string) {
 	}
 	p.workerScopeMu.Lock()
 	if p.workerScope == nil {
-		p.workerScope = make(map[uint32]map[string]struct{})
+		p.workerScope = make(map[uint32]workerScopeEntry)
 	}
-	// Replace (never mutate) the inner map so a reference captured by scopedFor
-	// under RLock stays an immutable snapshot.
-	p.workerScope[pid] = set
 	// Each registration is a new scope (the worker's next test, or a re-run of
-	// the same one), so its stateful cursors start over.
-	if p.workerScopeGen == nil {
-		p.workerScopeGen = make(map[uint32]uint64)
-	}
-	p.workerScopeGen[pid]++
+	// the same one), named by its place in the scope sequence, so its
+	// stateful cursors start over. Replace (never mutate) the entry so a set
+	// a read resolved stays an immutable snapshot.
+	at := p.stampWorkerLocked(pid)
+	p.workerScope[pid] = workerScopeEntry{allow: set, scope: fmt.Sprintf("w%d.%d", pid, at)}
 	p.workerScopeMu.Unlock()
+}
+
+// workerScopeEntry is a registered worker's current test: the mock names it
+// may see, and its scope, which keys its stateful cursors.
+type workerScopeEntry struct {
+	allow map[string]struct{}
+	scope string
+}
+
+// stampWorkerLocked records that pid's scope changed now, and returns the
+// scope sequence value of the change. workerScopeMu must be held.
+func (p *Proxy) stampWorkerLocked(pid uint32) uint64 {
+	p.scopeSeq++
+	if p.workerScopeAt == nil {
+		p.workerScopeAt = make(map[uint32]uint64)
+	}
+	p.workerScopeAt[pid] = p.scopeSeq
+	return p.scopeSeq
 }
 
 // ClearWorkerScope drops a worker's scope (called on /agent/scope/end and when a
 // test has no mapping). Idempotent.
 func (p *Proxy) ClearWorkerScope(pid uint32) {
 	p.workerScopeMu.Lock()
-	delete(p.workerScope, pid)
+	if _, ok := p.workerScope[pid]; ok {
+		delete(p.workerScope, pid)
+		p.stampWorkerLocked(pid)
+	}
 	p.workerScopeMu.Unlock()
 }
 
 // ClearAllWorkerScopes wipes every worker scope and the mapped universe. Called
-// at replay-session teardown so a crashed worker that never sent /scope/end
-// cannot leak an entry that later mis-scopes a recycled PID.
+// when a replay session starts, so a worker of the session before that never
+// sent /scope/end cannot leave an entry that mis-scopes a recycled PID.
 func (p *Proxy) ClearAllWorkerScopes() {
 	p.workerScopeMu.Lock()
 	p.workerScope = nil
 	p.mappedUniverse = nil
+	p.scopeSeq++
+	p.universeAt = p.scopeSeq
 	p.workerScopeMu.Unlock()
 }
 
@@ -376,13 +452,23 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 	}
 	p.workerScopeMu.Lock()
 	p.mappedUniverse = set
+	p.scopeSeq++
+	p.universeAt = p.scopeSeq
 	p.workerScopeMu.Unlock()
 }
 
-// scopedFor returns a mock view for an outgoing call from kpid. If some ancestor
-// of kpid is a registered worker with an active scope, the returned view is
-// narrowed to that worker's allowlist; otherwise the bare manager is returned
-// (whole pool). kpid == 0 (non-eBPF platform / lookup miss) ⇒ whole pool.
+// scopedFor returns a mock view for an outgoing call from kpid. A call whose
+// process descends from a registered worker gets a view that follows that
+// worker from test to test, resolved on every read (see scopedMockDb.src);
+// any other call gets the bare manager (whole pool), as does kpid == 0
+// (non-eBPF platform / lookup miss).
+//
+// A connection opened before its process (or an ancestor) registered as a
+// worker — a client a test binary dialled during its setup — keeps the bare
+// manager: it is not wrapped on the chance that it might belong to a worker
+// later, because a wrap is a new store identity, and parsers that key their
+// indexes and stateful cursors on the store (enterprise Redis, Memcached,
+// Couchbase, HBase) would then split one app's state per connection.
 func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.MockMemDb {
 	if kpid == 0 || mgr == nil {
 		return mgr
@@ -391,34 +477,54 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 		return &scopedMockDb{MockMemDb: mgr, pid: kpid, live: true}
 	}
 	p.workerScopeMu.RLock()
-	if len(p.workerScope) == 0 {
-		p.workerScopeMu.RUnlock()
-		return mgr // fast path: nobody scoped — no /proc walk, exact old behavior
+	nobody := len(p.workerScope) == 0
+	p.workerScopeMu.RUnlock()
+	if nobody {
+		return mgr // fast path: no worker scoped — no /proc walk, exact old behavior
 	}
-	// Walk up the process tree to the nearest registered worker. Bounded so a
-	// reparent race or an unexpected /proc shape can never spin.
-	var allow map[string]struct{}
-	var gen uint64
-	pid := kpid
+	chain := ancestorChain(kpid)
+	if p.workerViewFor(chain).allow == nil {
+		return mgr
+	}
+	p.workerScopeMu.Lock()
+	p.scopeSeq++
+	born := p.scopeSeq
+	p.workerScopeMu.Unlock()
+	return &scopedMockDb{MockMemDb: mgr, src: p, chain: chain, born: born}
+}
+
+// ancestorChain is pid and its ancestors, nearest first, read from /proc once
+// per connection, outside any lock. Bounded so a reparent race or an
+// unexpected /proc shape can never spin.
+func ancestorChain(pid uint32) []uint32 {
+	chain := make([]uint32, 0, 8)
 	for i := 0; i < 32 && pid > 1; i++ {
-		if set, ok := p.workerScope[pid]; ok {
-			allow = set
-			gen = p.workerScopeGen[pid]
-			break
-		}
+		chain = append(chain, pid)
 		ppid, ok := ppidFromStat(pid)
 		if !ok {
 			break
 		}
 		pid = ppid
 	}
-	universe := p.mappedUniverse
-	p.workerScopeMu.RUnlock()
+	return chain
+}
 
-	if allow == nil {
-		return mgr
+// workerViewFor is what a call from a process with the given ancestor chain
+// may see now: the allowlist and current scope of the nearest registered
+// worker, or — when it descends from none — the whole pool.
+func (p *Proxy) workerViewFor(chain []uint32) workerView {
+	p.workerScopeMu.RLock()
+	defer p.workerScopeMu.RUnlock()
+	v := workerView{universe: p.mappedUniverse, version: p.universeAt}
+	for _, pid := range chain {
+		// Every worker on the chain counts, not only the nearest: one that
+		// ended its test changed this view as much as one that began.
+		v.version = max(v.version, p.workerScopeAt[pid])
+		if e, ok := p.workerScope[pid]; ok && v.allow == nil {
+			v.allow, v.scope = e.allow, e.scope
+		}
 	}
-	return &scopedMockDb{MockMemDb: mgr, allow: allow, universe: universe, view: fmt.Sprintf("w%d.%d", pid, gen)}
+	return v
 }
 
 // ppidFromStat reads the parent PID of pid from /proc/<pid>/stat
