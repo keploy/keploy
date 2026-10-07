@@ -114,6 +114,70 @@ func TestMatch_DetectThenHonor(t *testing.T) {
 	}
 }
 
+// corrMockUser: a correlated mock whose request has a non-correlated userId and
+// a correlated id echoed in the response.
+func corrMockUser(id, user string) *models.Mock {
+	return &models.Mock{
+		Kind: models.Kind(models.HTTP),
+		Spec: models.MockSpec{
+			HTTPReq:  &models.HTTPReq{Method: models.Method("POST"), URL: "http://api/u", Body: `{"id":"` + id + `","userId":"` + user + `"}`},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Body: `{"id":"` + id + `","user":"` + user + `"}`},
+			Correlations: []models.FieldCorrelation{{
+				RequestPath: "body.id", ResponsePaths: []string{"body.id"}, RecordedValue: id, ValueClass: "uuid",
+			}},
+		},
+	}
+}
+
+// TestCorrelationMatch_ExactPathNotSubstring is the regression for the substring
+// poisoning blocker: a correlated field named "id" must NOT swallow "userId".
+// Two mocks differ only on userId (alice/bob); a bob request must select the bob
+// mock, never alice's.
+func TestCorrelationMatch_ExactPathNotSubstring(t *testing.T) {
+	h := newHTTP()
+	const bobRec = "6ba7b811-9dad-11d1-80b4-00c04fd430c8"
+	alice := corrMockUser(recUUID, "alice")
+	bob := corrMockUser(bobRec, "bob")
+	live := []byte(`{"id":"` + newUUID + `","userId":"bob"}`)
+
+	ok, m, bindings := h.correlationMatch(live, []*models.Mock{alice, bob}, true)
+	if !ok || m != bob {
+		t.Fatalf("a bob request must select the bob mock, not alice (substring-poisoning blocker): ok=%v selected=%p bob=%p", ok, m, bob)
+	}
+	if bindings["body.id"] != newUUID {
+		t.Fatalf("captured id = %q, want %q", bindings["body.id"], newUUID)
+	}
+}
+
+// TestCorrelationMatch_RejectsExtraField is the regression for addition-blindness:
+// a live request with an extra non-correlated field must NOT match a correlated
+// mock that lacks it.
+func TestCorrelationMatch_RejectsExtraField(t *testing.T) {
+	h := newHTTP()
+	m := correlationMock(recUUID, true) // req {"amount":10,"idempotencyKey":<uuid>}
+	liveExtra := []byte(`{"amount":10,"idempotencyKey":"` + newUUID + `","refund":true}`)
+	if ok, _, _ := h.correlationMatch(liveExtra, []*models.Mock{m}, true); ok {
+		t.Fatalf("a live request with an extra field must not match a correlated mock that lacks it")
+	}
+}
+
+// TestCorrelationMatch_RejectsBareScalar: a bare-scalar body (flattens to the ""
+// path) must not be correlated (ignoring "" would exclude the whole body).
+func TestCorrelationMatch_RejectsBareScalar(t *testing.T) {
+	h := newHTTP()
+	m := &models.Mock{
+		Kind: models.Kind(models.HTTP),
+		Spec: models.MockSpec{
+			HTTPReq:      &models.HTTPReq{Method: models.Method("POST"), URL: "http://api/x", Body: `"` + recUUID + `"`},
+			HTTPResp:     &models.HTTPResp{StatusCode: 200, Body: `{"echo":"` + recUUID + `"}`},
+			Correlations: []models.FieldCorrelation{{RequestPath: "body.", RecordedValue: recUUID, ValueClass: "uuid"}},
+		},
+	}
+	if ok, _, _ := h.correlationMatch([]byte(`"`+newUUID+`"`), []*models.Mock{m}, true); ok {
+		t.Fatalf("a bare-scalar correlated body must not match (would exclude the whole body)")
+	}
+}
+
 // TestMatch_NoCorrelationMetadataServesStale: an identical mock WITHOUT the
 // correlation annotation AND without materialization does not render — the
 // annotation is what drives it.

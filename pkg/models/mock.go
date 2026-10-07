@@ -975,11 +975,6 @@ type MockState struct {
 	// window's test, and kept from the prune whatever the running test's
 	// verdict — instead of to the test that happened to be running.
 	CarryOver bool `json:"carryOver,omitempty"`
-
-	// Correlations carries request→response echo correlations detected for this
-	// mock during replay (mirrors ReqBodyNoise); persisted onto
-	// MockSpec.Correlations by the learn pass.
-	Correlations []FieldCorrelation `json:"correlations,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec

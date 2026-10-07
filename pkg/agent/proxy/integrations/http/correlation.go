@@ -1,19 +1,33 @@
 package http
 
 import (
+	"encoding/json"
 	"maps"
 	"strings"
 
-	"github.com/tidwall/gjson"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
 // rootRelPath strips the kind-agnostic "body." prefix from a correlation path,
-// yielding the dotted JSON path that gjson and ChangedJSONFieldPaths use.
+// yielding the dotted JSON path used to compare and capture within the body.
 func rootRelPath(p string) string {
 	return strings.TrimPrefix(p, "body.")
+}
+
+// flattenJSONBody parses a JSON body and returns matcher.Flatten's path→values
+// map (index-free dotted paths); nil for an empty or non-JSON body.
+func flattenJSONBody(body string) map[string][]string {
+	b := strings.TrimSpace(body)
+	if b == "" {
+		return nil
+	}
+	var j interface{}
+	if err := json.Unmarshal([]byte(b), &j); err != nil {
+		return nil
+	}
+	return matcher.Flatten(j)
 }
 
 // correlationMatch selects a mock whose request carries an app-random value the
@@ -29,34 +43,53 @@ func (h *HTTP) correlationMatch(liveBody []byte, schemaMatched []*models.Mock, e
 	if !enabled || !pkg.IsJSON(liveBody) {
 		return false, nil, nil
 	}
+	liveFlat := flattenJSONBody(string(liveBody))
+	if len(liveFlat) == 0 {
+		return false, nil, nil
+	}
 	for _, m := range schemaMatched {
 		if m == nil || len(m.Spec.Correlations) == 0 || m.Spec.HTTPReq == nil {
 			continue
 		}
-		recBody := m.Spec.HTTPReq.Body
-		if !pkg.IsJSON([]byte(recBody)) {
+		recFlat := flattenJSONBody(m.Spec.HTTPReq.Body)
+		if len(recFlat) == 0 {
 			continue
 		}
-		// Ignore the correlated paths when comparing the rest of the body; any
-		// OTHER differing field rejects this candidate.
-		known := make(map[string][]string, len(m.Spec.Correlations))
+		// The correlated paths are matched by EXACT equality (a map-key set), not
+		// substring — a field named "id" must not swallow "userId"/"orderId".
+		// A bare-scalar body flattens to the "" path; refuse to correlate it
+		// (ignoring "" would exclude the whole body).
+		correlated := make(map[string]bool, len(m.Spec.Correlations))
+		bareScalar := false
 		for _, c := range m.Spec.Correlations {
-			known[rootRelPath(c.RequestPath)] = []string{}
+			p := rootRelPath(c.RequestPath)
+			if p == "" {
+				bareScalar = true
+				break
+			}
+			correlated[p] = true
 		}
-		if drift := matcher.ChangedJSONFieldPaths(recBody, string(liveBody), known, nil, false, nil); len(drift) > 0 {
+		if bareScalar {
 			continue
 		}
-		// Capture the live value at each correlated path; all must be present to
-		// bind (a vanished correlated field is not a match).
+		// Every NON-correlated field must match exactly, and the live body must
+		// carry no extra (non-correlated) field the recording lacks — stricter
+		// than the lenient key-schema path, so a correlated mock is never served
+		// on a request that differs anywhere but the echoed value.
+		if !nonCorrelatedFieldsMatch(recFlat, liveFlat, correlated) {
+			continue
+		}
+		// Capture the live scalar value at each correlated path; all must be a
+		// single present value (an absent or array-valued path is not a bind).
 		bindings := make(map[string]string, len(m.Spec.Correlations))
 		complete := true
 		for _, c := range m.Spec.Correlations {
-			res := gjson.GetBytes(liveBody, rootRelPath(c.RequestPath))
-			if !res.Exists() {
+			lv, present := liveFlat[rootRelPath(c.RequestPath)]
+			if !present || len(lv) != 1 {
 				complete = false
 				break
 			}
-			bindings[c.RequestPath] = res.String()
+			bindings[c.RequestPath] = lv[0]
 		}
 		if !complete {
 			continue
@@ -64,6 +97,44 @@ func (h *HTTP) correlationMatch(liveBody []byte, schemaMatched []*models.Mock, e
 		return true, m, bindings
 	}
 	return false, nil, nil
+}
+
+// nonCorrelatedFieldsMatch reports whether recorded and live flattened JSON
+// bodies are identical on every path EXCEPT the exact correlated paths: each
+// recorded non-correlated path must be present in live with equal values, and
+// live must carry no non-correlated path absent from the recording (additions
+// are rejected — ChangedJSONFieldPaths does not report them, which would make a
+// correlated mock match a strictly-larger request).
+func nonCorrelatedFieldsMatch(rec, live map[string][]string, correlated map[string]bool) bool {
+	for path, recVals := range rec {
+		if correlated[path] {
+			continue
+		}
+		if liveVals, ok := live[path]; !ok || !equalStrs(recVals, liveVals) {
+			return false
+		}
+	}
+	for path := range live {
+		if correlated[path] {
+			continue
+		}
+		if _, ok := rec[path]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStrs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // renderCorrelations returns a serve-safe copy of served with each correlated
