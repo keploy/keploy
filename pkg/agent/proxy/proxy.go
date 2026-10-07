@@ -3944,6 +3944,15 @@ func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
 	}
 }
 
+// ResetStatefulCursors drops the mock manager's per-request stateful cursors so
+// each test-set replays its stateful sequences from the first recorded response.
+// Satisfies the agent's optional StatefulCursorResetter extension interface.
+func (p *Proxy) ResetStatefulCursors() {
+	if m := p.getMockManager(); m != nil {
+		m.ResetStatefulCursors()
+	}
+}
+
 // CarryOverLoadRange reports which recorded-time range of carry-over mocks the
 // agent should load beside the window that starts at start. Satisfies the
 // agent's optional CarryOverPlanner extension interface.

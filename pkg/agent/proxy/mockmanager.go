@@ -940,9 +940,6 @@ func (o mockOwner) own(in []*models.Mock) []*models.Mock {
 // the startup tier this call builds, and is stamped with the rest of the
 // staging, before any tier is published.
 func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time) {
-	// A new mock set means new (or re-recorded) stateful sequences — drop the
-	// per-request cursors so each test-set replays its 1,2,3 from the start.
-	m.resetCursors()
 	// Track the earliest window-start we've ever seen on this manager.
 	// Used below to distinguish startup-init mocks (recorded before
 	// any test fired) from stale previous-test mocks. Once set, only
@@ -1510,39 +1507,60 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 	return out, nil
 }
 
-// NextMockIndex returns the record-ordered position to serve for the request
-// identified by key, given n recorded responses for it, then advances the
-// per-key cursor. It returns min(cursor, n-1), so once a request has been
-// replayed more times than it was recorded it saturates on the LAST recorded
-// response instead of missing — which keeps fixture re-reads (the same row read
-// many times, recorded once) working while a genuine stateful sequence
-// (1,2,3) is served in order. Session-scoped: the cursor map is cleared when
-// the mock set is replaced (per test-set). It satisfies the matcher's optional
-// cursor interface; parsers that do not type-assert it are unaffected.
-func (m *MockManager) NextMockIndex(key string, n int) int {
+// MockCursorIndex returns the record-ordered position to serve for the request
+// identified by key, given n recorded responses for it, WITHOUT advancing. It
+// returns min(cursor, n-1), so once a request has been replayed more times than
+// it was recorded it saturates on the LAST recorded response instead of missing
+// — which keeps fixture re-reads (the same row read many times, recorded once)
+// working while a genuine stateful sequence (1,2,3) is served in order. The
+// caller advances via AdvanceMockCursor only once the response is actually
+// served (a successful claim), so a failed/retried match does not skip a
+// recorded response. Session-scoped: the cursor map is cleared per test-set
+// (ResetStatefulCursors). Satisfies the matcher's optional cursor interface;
+// parsers that do not type-assert it are unaffected.
+func (m *MockManager) MockCursorIndex(key string, n int) int {
 	if n <= 1 {
-		// Zero or one recorded response: nothing to advance through; serving the
-		// first (only) response every time is identical to the legacy reuse
-		// behaviour, so there is no need to touch the cursor map.
+		// Zero or one recorded response: always the first (only) one — identical
+		// to the legacy reuse behaviour, no cursor state needed.
 		return 0
+	}
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	return clampCursor(m.cursors[key], n)
+}
+
+// AdvanceMockCursor moves the cursor for key one past the position just served,
+// clamped so it saturates at n (never grows unbounded on a hot repeated
+// request). Call it only after the chosen response was actually served.
+func (m *MockManager) AdvanceMockCursor(key string, n int) {
+	if n <= 1 {
+		return
 	}
 	m.cursorMu.Lock()
 	defer m.cursorMu.Unlock()
 	if m.cursors == nil {
 		m.cursors = make(map[string]int)
 	}
-	idx := m.cursors[key]
-	if idx > n-1 {
-		idx = n - 1
-	}
-	m.cursors[key] = idx + 1
-	return idx
+	m.cursors[key] = clampCursor(m.cursors[key], n) + 1
 }
 
-// resetCursors drops every per-request stateful cursor. Called when the mock set
-// is replaced so a new test-set starts its stateful sequences from the first
-// recorded response.
-func (m *MockManager) resetCursors() {
+// clampCursor bounds a stored cursor to the last valid index [0, n-1].
+func clampCursor(cur, n int) int {
+	if cur > n-1 {
+		return n - 1
+	}
+	if cur < 0 {
+		return 0
+	}
+	return cur
+}
+
+// ResetStatefulCursors drops every per-request stateful cursor so the next
+// stateful sequence starts from its first recorded response. The agent calls it
+// once per test-set (on the staging call) via the StatefulCursorResetter
+// capability, so a sequence spans a whole test-set but does not carry across
+// sets. Safe to call when no cursors exist.
+func (m *MockManager) ResetStatefulCursors() {
 	m.cursorMu.Lock()
 	m.cursors = nil
 	m.cursorMu.Unlock()

@@ -146,6 +146,17 @@ type RecordedWindowsSeeder interface {
 	SeedRecordedWindows(ws []models.TestWindow)
 }
 
+// StatefulCursorResetter is the optional extension implemented by proxies whose
+// mock manager keeps per-request cursors for stateful dependency replay (serving
+// successive recorded responses in record order). The agent calls it once per
+// test-set, on the staging call, so a stateful sequence replays from its first
+// recorded response in each test-set rather than carrying a cursor across sets.
+// Optional in the same style as StartupCutoffSeeder: a proxy that lacks it is a
+// no-op (a proxy without stateful cursors has nothing to reset).
+type StatefulCursorResetter interface {
+	ResetStatefulCursors()
+}
+
 // CarryOverPlanner is the optional extension implemented by proxies with a
 // carry-over tier (models.RegisterCarryOver). For the window that starts at
 // start it names the recorded-time range of registered per-test mocks the agent

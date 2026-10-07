@@ -1170,6 +1170,17 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 			seeder.SeedRecordedWindows(params.RecordedWindows)
 		}
 	}
+	// A staging call (recordedSetShape populated: FirstRecordedTestStart and/or
+	// RecordedWindows) marks a new test-set. Reset the stateful-dependency
+	// cursors so each test-set replays its sequences (1,2,3…) from the start
+	// rather than carrying a cursor across sets, while the per-test-case calls
+	// (empty shape) leave them alone so a sequence spans the whole set. Optional
+	// capability: a proxy without stateful cursors is a no-op.
+	if !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
+		if resetter, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
+			resetter.ResetStatefulCursors()
+		}
+	}
 
 	a.logger.Debug("UpdateMockParams called",
 		zap.Time("afterTime", params.AfterTime),

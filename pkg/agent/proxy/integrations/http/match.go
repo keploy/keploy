@@ -173,7 +173,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			// exact request (a counter, a created-then-read row), serve them in
 			// record order via a per-request cursor instead of always the first,
 			// then saturate on the last. No-op for a single recording.
-			bestMatch = h.cursorPick(bestMatch, schemaMatched, input, mockDb, statefulMocks)
+			bestMatch, commitCursor := h.cursorPick(bestMatch, schemaMatched, mockDb, statefulMocks)
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
 			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil)
@@ -182,6 +182,11 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			}
 			if !claimed {
 				continue
+			}
+			// Advance the cursor only now the response is actually served, so a
+			// failed claim + retry does not skip a recorded response.
+			if commitCursor != nil {
+				commitCursor()
 			}
 			return true, served, nil, nil
 		}
@@ -252,45 +257,68 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 }
 
 // mockCursor is the optional capability a mock store exposes to serve stateful
-// dependencies: NextMockIndex returns the record-ordered position to serve for a
-// request key given n recorded responses, advancing a per-key cursor (and
-// saturating at n-1). MockManager implements it; stores that don't are served
-// the first recording as before.
+// dependencies. MockCursorIndex returns the record-ordered position to serve for
+// a request key given n recorded responses WITHOUT advancing; AdvanceMockCursor
+// advances the per-key cursor (saturating at n-1) and is called only once the
+// response is actually served, so a failed/retried match does not skip a
+// recording. MockManager implements it; stores that don't are served the first
+// recording as before.
 type mockCursor interface {
-	NextMockIndex(key string, n int) int
+	MockCursorIndex(key string, n int) int
+	AdvanceMockCursor(key string, n int)
 }
 
 // cursorPick advances a stateful dependency through its recorded responses. When
 // stateful mocks are enabled and bestMatch is a cursor-consumption mock
 // (ConsumeCursorSaturate), it gathers every schema-matched mock carrying the
-// SAME request body, orders them by record time, and returns the cursor-th one
-// so repeated identical requests get served 1,2,3,… and then saturate on the
-// last. Returns bestMatch unchanged when stateful mocks are off, the store
-// exposes no cursor, or there is only one recorded response for the request
-// (the common case, where cursor == reuse — byte-identical to legacy behaviour).
-func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, input *req, mockDb integrations.MockMemDb, statefulMocks bool) *models.Mock {
+// SAME request (method + URL + body), orders them by record time, and returns
+// the cursor-th one so repeated identical requests get served 1,2,3,… and then
+// saturate on the last. It returns a commit closure the caller must call once
+// the response is actually served (after a successful claim), so a failed/
+// retried match does not skip a recording; commit is nil when no cursoring
+// applies. Returns bestMatch unchanged (commit nil) when stateful mocks are off,
+// the store exposes no cursor, or there is only one recorded response for the
+// request (the common case, where cursor == reuse — byte-identical to legacy).
+//
+// Scope: the group is gathered by BYTE-EXACT request body, which covers stateful
+// dependencies whose repeated requests are identical (a counter, a created-then-
+// read row). A stateful request that carries a noisy/rotating field in its body
+// (so the recordings are NOT byte-equal) is not grouped here and replays as the
+// first recording; that case is handled by request→response correlation (masked
+// grouping), tracked separately — see correlation-auto-replay. This is a known,
+// documented limit, not a silent catch-all.
+func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, mockDb integrations.MockMemDb, statefulMocks bool) (*models.Mock, func()) {
 	if !statefulMocks || bestMatch == nil || bestMatch.TestModeInfo.Consume != models.ConsumeCursorSaturate {
-		return bestMatch
+		return bestMatch, nil
 	}
 	if bestMatch.Spec.HTTPReq == nil {
-		return bestMatch
+		return bestMatch, nil
 	}
 	cs, ok := mockDb.(mockCursor)
 	if !ok {
-		return bestMatch
+		return bestMatch, nil
 	}
+	wantMethod := bestMatch.Spec.HTTPReq.Method
+	wantURL := bestMatch.Spec.HTTPReq.URL
 	wantBody := bestMatch.Spec.HTTPReq.Body
 	group := make([]*models.Mock, 0, 4)
 	for _, m := range schemaMatched {
 		if m == nil || m.Spec.HTTPReq == nil {
 			continue
 		}
-		if m.TestModeInfo.Consume == models.ConsumeCursorSaturate && m.Spec.HTTPReq.Body == wantBody {
+		// Same request = same ConsumeCursorSaturate class, method, URL and body.
+		// Method+URL matter because the auto-dynamic URL pass can schema-match
+		// recordings of DIFFERENT endpoints that share a body; grouping those
+		// would cursor across unrelated resources.
+		if m.TestModeInfo.Consume == models.ConsumeCursorSaturate &&
+			m.Spec.HTTPReq.Method == wantMethod &&
+			m.Spec.HTTPReq.URL == wantURL &&
+			m.Spec.HTTPReq.Body == wantBody {
 			group = append(group, m)
 		}
 	}
 	if len(group) <= 1 {
-		return bestMatch // single recording: nothing to advance through
+		return bestMatch, nil // single recording: nothing to advance through
 	}
 	// Record order: request timestamp is stable across replay; SortOrder is
 	// mutated on every match so it cannot be used here. ID then Name break ties.
@@ -304,24 +332,23 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 		}
 		return group[i].Name < group[j].Name
 	})
-	idx := cs.NextMockIndex(cursorKey(input, wantBody), len(group))
+	key := cursorKey(string(wantMethod), wantURL, wantBody)
+	idx := cs.MockCursorIndex(key, len(group))
 	if idx < 0 || idx >= len(group) {
-		return bestMatch
+		return bestMatch, nil
 	}
-	return group[idx]
+	n := len(group)
+	return group[idx], func() { cs.AdvanceMockCursor(key, n) }
 }
 
 // cursorKey builds a stable per-request key so repeated identical requests share
-// one cursor. Method + URL + a hash of the request body is enough: the schema
-// match has already fixed method/URL/headers, and the body hash distinguishes
-// otherwise-equal paths without holding the whole body in the map key.
-func cursorKey(input *req, body string) string {
+// one cursor. Method + URL + a hash of the request body is enough: the group is
+// gathered by the same method/URL/body, so the key must agree with it.
+func cursorKey(method, url, body string) string {
 	var b strings.Builder
-	b.WriteString(input.method)
+	b.WriteString(method)
 	b.WriteByte(' ')
-	if input.url != nil {
-		b.WriteString(input.url.String())
-	}
+	b.WriteString(url)
 	b.WriteByte('\x00')
 	sum := sha256.Sum256([]byte(body))
 	b.WriteString(hex.EncodeToString(sum[:]))
