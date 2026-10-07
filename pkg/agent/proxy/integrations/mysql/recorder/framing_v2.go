@@ -30,13 +30,23 @@ import (
 // the previous command's response. Every mock after that point is either
 // missing or wrong, and nothing says so.
 //
-// So it stops instead: the error retires the parser, and the supervisor counts
-// what the connection carries from there as not recorded. Fewer mocks, none of
-// them wrong.
+// So it does not carry on from there. When it was a response it lost the
+// framing of, with the command read whole, it leaves that exchange out and
+// re-aligns at the client's next command (realign): every answer a client that
+// waits for each answer before its next command gets starts after that
+// command, so the rest of the response is skipped, and only the test cases of
+// the exchange it could not frame are left out. A pooled connection carries
+// the traffic of every request that borrows it: stopping there left out every
+// test case recorded for as long as the connection carried traffic, almost the
+// whole recording. Otherwise (a client that pipelines its commands, lost
+// framing on the client's stream) it stops: the error retires the parser, and
+// the supervisor counts what the connection carries from there as not
+// recorded. Fewer mocks, none of them wrong.
 //
-// The recorder logs it where it finds it (warnFramingLost), so the error wraps
-// supervisor.ErrReported: whoever runs the parser does not warn of its
-// retirement again for every connection one fault stops.
+// The recorder logs it once it knows which of the two follows (reportFault,
+// warnFramingLost), so the error wraps supervisor.ErrReported: whoever runs
+// the parser does not warn of its retirement again for every connection one
+// fault stops.
 var ErrFramingLost error = reportedError("mysql: the connection's packet framing is lost")
 
 // reportedError is a sentinel error the recorder logs where it happens, which
@@ -49,6 +59,99 @@ func (reportedError) Unwrap() error   { return supervisor.ErrReported }
 // framingLost wraps why framing was lost.
 func framingLost(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrFramingLost, fmt.Sprintf(format, args...))
+}
+
+// responseFault is lost framing found while reading a response, with what was
+// found (msg). It is logged where the command loop decides what follows from
+// it (reportFault): the exchange left out and the recording going on from the
+// next command, or the connection no longer recorded.
+type responseFault struct {
+	msg string
+	err error
+}
+
+func (f *responseFault) Error() string { return f.err.Error() }
+func (f *responseFault) Unwrap() error { return f.err }
+
+// found is the lost framing err a response showed, msg saying what was found.
+func found(msg string, err error) error {
+	return &responseFault{msg: msg, err: err}
+}
+
+// reportFault logs lost framing a response showed (found), at WARN through its
+// limiter, with what follows from it: realigned, the exchange is left out and
+// the connection's recording goes on; otherwise the connection is no longer
+// recorded. Lost framing not found in a response was logged where it was.
+func reportFault(logger *zap.Logger, sess *supervisor.Session, err error, realigned bool) {
+	var f *responseFault
+	if !errors.As(err, &f) {
+		return
+	}
+	if !realigned {
+		warnFramingLost(logger, sess, f.msg+"; the connection is no longer recorded", err)
+		return
+	}
+	warnLimited(logger, sess, f.msg+"; the exchange is left out, and the connection's recording goes on from its next command", err,
+		"user traffic is unaffected. The test cases recorded while this exchange ran are left out of the recording rather than saved without its mock; the connection's later queries are recorded")
+}
+
+// answered reports whether the server answers a command (the command's first
+// byte): all but COM_QUIT, COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA
+// (wire.IsNoResponseCommand).
+func answered(command byte) bool {
+	return command != mysql.COM_QUIT && command != mysql.COM_STMT_CLOSE && command != mysql.COM_STMT_SEND_LONG_DATA
+}
+
+// nextCommandAfterFault reads the client's next command after a response left
+// out (realign), and returns it as the command loop reads one: its packet, the
+// sequence id its answer starts at, and whether it continued over several
+// packets. It passes over the client packets still part of the exchange left
+// out: a command starts a new sequence, at 0, and what a client sends inside
+// an exchange (a LOCAL INFILE upload, an auth switch response) is numbered on
+// from it. An upload of more than 254 packets numbers on past 255 to 0: a
+// packet at 0 right after one at 255 that carried data is more of it. (The
+// upload ends with an empty packet; a command after that starts at 0 again.)
+// Each packet passed over is input consumed: its bytes armed the supervisor's
+// pending work, which a connection that then sits idle must not leave armed
+// (clearPending).
+//
+// A client that waits for each answer before its next command sends that
+// command on its own, so it starts a chunk of the capture. One that does not
+// (in the middle of a chunk) is not where the client's stream can be taken up
+// again: lost framing.
+func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) (cmdBuf []byte, respFirst byte, joined bool, err error) {
+	// prevSeq and prevData: the last packet passed over ended at sequence id
+	// prevSeq, and carried data (one has been passed over: passed).
+	var prevSeq byte
+	prevData, passed := false, false
+	for {
+		atChunk := sess.ClientStream.AtChunkBoundary()
+		var cs commandSeq
+		inExchange := false
+		var lastSeq byte
+		buf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, func(header []byte) error {
+			if !cs.started && !inExchange && (header[3] != 0 || passed && prevSeq == 255 && prevData) {
+				inExchange = true
+			}
+			lastSeq = header[3]
+			if inExchange {
+				return nil
+			}
+			return cs.take(header)
+		})
+		if err != nil {
+			return nil, 0, false, err
+		}
+		if inExchange {
+			prevSeq, prevData, passed = lastSeq, len(buf) > 4, true
+			clearPending(sess)
+			continue
+		}
+		if !atChunk {
+			return nil, 0, false, framingLost("the command after a response left out does not start a chunk of the capture: the client did not send it on its own")
+		}
+		return buf, cs.next, cs.joined, nil
+	}
 }
 
 // packetSeq checks the sequence id of every packet of one exchange.
@@ -83,7 +186,9 @@ func (s *packetSeq) take(buf []byte, part string) error {
 		return framingLost("the %s of the %s response is %d bytes, shorter than a packet header", part, s.what, len(buf))
 	}
 	if got := buf[3]; got != s.next {
-		return framingLost("the %s of the %s response has sequence id %d where %d comes next", part, s.what, got, s.next)
+		// The header's bytes say what the reader was on: a row's bytes, the
+		// payload of an OK, a header read one byte early.
+		return framingLost("the %s of the %s response has sequence id %d where %d comes next (header % x)", part, s.what, got, s.next, buf[:4])
 	}
 	s.next++
 	if continues(buf) {
@@ -273,8 +378,7 @@ func firstResponsePacket(ctx context.Context, logger *zap.Logger, sess *supervis
 	if buf := *carry; buf != nil {
 		*carry = nil
 		if err := seq.take(buf, "first packet"); err != nil {
-			warnFramingLost(logger, sess, "V2: mysql response packet out of sequence; the connection is no longer recorded", err)
-			return nil, err
+			return nil, found("V2: mysql response packet out of sequence", err)
 		}
 		return buf, nil
 	}
@@ -288,7 +392,7 @@ func firstResponsePacket(ctx context.Context, logger *zap.Logger, sess *supervis
 	})
 	if err != nil {
 		if errors.Is(err, ErrFramingLost) {
-			warnFramingLost(logger, sess, "V2: mysql response packet out of sequence; the connection is no longer recorded", err)
+			err = found("V2: mysql response packet out of sequence", err)
 		}
 		return nil, err
 	}
@@ -643,7 +747,8 @@ func (h *heldPrepare) release(decodeCtx *wire.DecodeContext, eof []byte, at time
 
 // leaveOut leaves the PREPARE's exchange out, and records the mocks queued
 // behind it, which do not depend on its framing. why is logged at WARN, but
-// for lost framing, which was logged where it was found.
+// for lost framing, which is logged where what follows from it is decided
+// (reportFault).
 func (h *heldPrepare) leaveOut(logger *zap.Logger, sess *supervisor.Session, why error) {
 	if errors.Is(why, ErrFramingLost) {
 		sess.RecordOrphanWindow(h.reqTs, h.resTs)
@@ -697,7 +802,7 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 	})
 	if err != nil {
 		if errors.Is(err, ErrFramingLost) {
-			warnFramingLost(logger, sess, "V2: mysql response packet out of sequence; the connection is no longer recorded", err)
+			err = found("V2: mysql response packet out of sequence", err)
 			h.leaveOut(logger, sess, err)
 			return nil, err
 		}
@@ -744,7 +849,7 @@ func (h *heldPrepare) end(ctx context.Context, logger *zap.Logger, sess *supervi
 	})
 	switch {
 	case errors.Is(err, ErrFramingLost):
-		warnFramingLost(logger, sess, "V2: mysql response packet out of sequence; the connection is no longer recorded", err)
+		err = found("V2: mysql response packet out of sequence", err)
 		h.leaveOut(logger, sess, err)
 		return err
 	case err != nil:

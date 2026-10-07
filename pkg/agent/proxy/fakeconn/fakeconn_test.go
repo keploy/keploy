@@ -510,3 +510,264 @@ func TestDiscardBeforeZeroLengthReadDoesNotBlock(t *testing.T) {
 		t.Fatal("Read with a zero-length buffer blocked on a pending discard")
 	}
 }
+
+// TestSkipThroughStopsAtTheFirstChunkAfterThePoint: the rest of the chunk
+// being read and every chunk captured no later than the point are discarded;
+// the first chunk captured after it is left whole for the next Read, with its
+// own capture time.
+func TestSkipThroughStopsAtTheFirstChunkAfterThePoint(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 4)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("HEADtail"), ReadAt: time.Unix(1, 0)}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("more"), ReadAt: time.Unix(2, 0)}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("NEXT"), ReadAt: time.Unix(4, 0)}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("LAST"), ReadAt: time.Unix(5, 0)}
+	f := New(ch, nil, nil)
+
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(f, head); err != nil {
+		t.Fatalf("read head: %v", err)
+	}
+	n, last, err := f.SkipThrough(time.Unix(3, 0))
+	if err != nil {
+		t.Fatalf("SkipThrough: %v", err)
+	}
+	if n != 8 || !last.Equal(time.Unix(2, 0)) {
+		t.Fatalf("SkipThrough = (%d, %v), want (8, the second chunk's capture time): the rest of the first chunk and the whole second", n, last)
+	}
+	got := make([]byte, 8)
+	if _, err := io.ReadFull(f, got); err != nil {
+		t.Fatalf("read after the skip: %v", err)
+	}
+	if string(got) != "NEXTLAST" {
+		t.Fatalf("after the skip the reader got %q, want NEXTLAST: the first chunk captured after the point starts the next read", got)
+	}
+	if want := int64(len("HEADtailmoreNEXTLAST")); f.Consumed() != want {
+		t.Fatalf("Consumed = %d, want %d: discarded bytes have left the FakeConn", f.Consumed(), want)
+	}
+}
+
+// TestSkipThroughKeepsTheChunksCaptureTime: the chunk left unread is read with
+// its own capture time, as any chunk is.
+func TestSkipThroughKeepsTheChunksCaptureTime(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 2)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("old"), ReadAt: time.Unix(1, 0)}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("new"), ReadAt: time.Unix(7, 0)}
+	f := New(ch, nil, nil)
+	if _, _, err := f.SkipThrough(time.Unix(3, 0)); err != nil {
+		t.Fatalf("SkipThrough: %v", err)
+	}
+	c, err := f.ReadChunk()
+	if err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	if string(c.Bytes) != "new" || !c.ReadAt.Equal(time.Unix(7, 0)) {
+		t.Fatalf("ReadChunk = %q at %v, want \"new\" at its own capture time", c.Bytes, c.ReadAt)
+	}
+	if !f.LastReadTime().Equal(time.Unix(7, 0)) {
+		t.Fatalf("LastReadTime = %v, want the chunk being read's", f.LastReadTime())
+	}
+}
+
+// TestSkipThroughRefusesToCutAChunkCapturedAfterThePoint: a reader partway
+// through a chunk captured after the point cannot be put at a boundary there;
+// nothing is discarded.
+func TestSkipThroughRefusesToCutAChunkCapturedAfterThePoint(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 1)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("ABCDEF"), ReadAt: time.Unix(5, 0)}
+	f := New(ch, nil, nil)
+	if _, err := io.ReadFull(f, make([]byte, 2)); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if n, _, err := f.SkipThrough(time.Unix(3, 0)); !errors.Is(err, ErrSkipMidChunk) || n != 0 {
+		t.Fatalf("SkipThrough = (%d, %v), want (0, ErrSkipMidChunk)", n, err)
+	}
+	rest := make([]byte, 4)
+	if _, err := io.ReadFull(f, rest); err != nil || string(rest) != "CDEF" {
+		t.Fatalf("read after the refusal = %q, %v: want the chunk's rest, untouched", rest, err)
+	}
+}
+
+// TestSkipThroughRefusesAChunkItCannotPlace: a chunk with no capture time, or
+// captured at the point itself, cannot be told to be before or after it; it
+// is left unread.
+func TestSkipThroughRefusesAChunkItCannotPlace(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name string
+		at   time.Time
+	}{{"no capture time", time.Time{}}, {"captured at the point", time.Unix(3, 0)}} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ch := make(chan Chunk, 2)
+			ch <- Chunk{Dir: FromDest, Bytes: []byte("old"), ReadAt: time.Unix(1, 0)}
+			ch <- Chunk{Dir: FromDest, Bytes: []byte("unplaced"), ReadAt: c.at}
+			f := New(ch, nil, nil)
+			n, _, err := f.SkipThrough(time.Unix(3, 0))
+			if !errors.Is(err, ErrUnplaced) || n != 3 {
+				t.Fatalf("SkipThrough = (%d, %v), want (3, ErrUnplaced)", n, err)
+			}
+			got := make([]byte, 8)
+			if _, err := io.ReadFull(f, got); err != nil || string(got) != "unplaced" {
+				t.Fatalf("read after the refusal = %q, %v: want the chunk, unread", got, err)
+			}
+		})
+	}
+}
+
+// TestSkipThroughWaitsForTheNextChunk: with nothing captured after the point
+// yet, it waits for it, as a Read would.
+func TestSkipThroughWaitsForTheNextChunk(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 1)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("old"), ReadAt: time.Unix(1, 0)}
+	f := New(ch, nil, nil)
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := f.SkipThrough(time.Unix(3, 0))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("SkipThrough returned (%v) before a chunk captured after the point arrived", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("new"), ReadAt: time.Unix(4, 0)}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SkipThrough: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SkipThrough did not return once a chunk captured after the point arrived")
+	}
+}
+
+// TestSkipThroughEndsWithTheStream: a stream that ends before a chunk captured
+// after the point arrives ends the skip with what a Read gets there.
+func TestSkipThroughEndsWithTheStream(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 1)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("old"), ReadAt: time.Unix(1, 0)}
+	close(ch)
+	f := New(ch, nil, nil)
+	if n, last, err := f.SkipThrough(time.Unix(3, 0)); err != io.EOF || n != 3 || !last.Equal(time.Unix(1, 0)) {
+		t.Fatalf("SkipThrough = (%d, %v, %v), want (3, the chunk's capture time, io.EOF)", n, last, err)
+	}
+
+	closed := New(make(chan Chunk), nil, nil)
+	_ = closed.Close()
+	if _, _, err := closed.SkipThrough(time.Unix(3, 0)); !errors.Is(err, ErrClosed) {
+		t.Fatalf("SkipThrough on a closed FakeConn = %v, want ErrClosed", err)
+	}
+}
+
+// TestSkipThroughRefusesAfterReadingAChunkCapturedAfterThePoint: a reader that
+// has read the whole of a chunk captured after the point (a length that ran
+// over into the next answer) is past it; skipping on would start at an answer
+// after the one the point starts. A chunk read whole that was captured at the
+// point itself cannot be placed.
+func TestSkipThroughRefusesAfterReadingAChunkCapturedAfterThePoint(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name string
+		at   time.Time
+		want error
+	}{{"captured after the point", time.Unix(5, 0), ErrSkipMidChunk}, {"captured at the point", time.Unix(3, 0), ErrUnplaced}} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ch := make(chan Chunk, 2)
+			ch <- Chunk{Dir: FromDest, Bytes: []byte("read"), ReadAt: c.at}
+			ch <- Chunk{Dir: FromDest, Bytes: []byte("next"), ReadAt: time.Unix(6, 0)}
+			f := New(ch, nil, nil)
+			if _, err := io.ReadFull(f, make([]byte, 4)); err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if n, _, err := f.SkipThrough(time.Unix(3, 0)); !errors.Is(err, c.want) || n != 0 {
+				t.Fatalf("SkipThrough = (%d, %v), want (0, %v)", n, err, c.want)
+			}
+		})
+	}
+}
+
+// TestSkipThroughLeavesAChunkItLeftUnread: a chunk a skip left unread, captured
+// after a later skip's point too, is where that skip puts the reader as well.
+func TestSkipThroughLeavesAChunkItLeftUnread(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 2)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("old"), ReadAt: time.Unix(1, 0)}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("new"), ReadAt: time.Unix(7, 0)}
+	f := New(ch, nil, nil)
+	if _, _, err := f.SkipThrough(time.Unix(4, 0)); err != nil {
+		t.Fatalf("SkipThrough: %v", err)
+	}
+	if n, _, err := f.SkipThrough(time.Unix(3, 0)); err != nil || n != 0 {
+		t.Fatalf("a second SkipThrough = (%d, %v), want (0, nil): the reader is at the chunk already", n, err)
+	}
+	got := make([]byte, 3)
+	if _, err := io.ReadFull(f, got); err != nil || string(got) != "new" {
+		t.Fatalf("read = %q, %v, want the chunk left unread", got, err)
+	}
+}
+
+// TestSkipThroughLastReadTimeNamesWhatWasRead: the chunk left unread is not
+// the one LastReadTime names until its bytes are read.
+func TestSkipThroughLastReadTimeNamesWhatWasRead(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 2)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("old"), ReadAt: time.Unix(1, 0), WrittenAt: time.Unix(1, 1)}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("new"), ReadAt: time.Unix(7, 0), WrittenAt: time.Unix(7, 1)}
+	f := New(ch, nil, nil)
+	if _, _, err := f.SkipThrough(time.Unix(4, 0)); err != nil {
+		t.Fatalf("SkipThrough: %v", err)
+	}
+	if got := f.LastReadTime(); !got.Equal(time.Unix(1, 0)) {
+		t.Fatalf("LastReadTime after the skip = %v, want the last chunk it discarded (%v), not the one it left unread", got, time.Unix(1, 0))
+	}
+	if _, err := io.ReadFull(f, make([]byte, 1)); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got, w := f.LastReadTime(), f.LastWrittenTime(); !got.Equal(time.Unix(7, 0)) || !w.Equal(time.Unix(7, 1)) {
+		t.Fatalf("LastReadTime/LastWrittenTime once its bytes are read = %v/%v, want the chunk's", got, w)
+	}
+}
+
+// TestSkipThroughOnAClosedConnSkipsWhatArrived: a FakeConn closed with chunks
+// still queued skips through them as an open one does, and leaves the first
+// captured after the point readable.
+func TestSkipThroughOnAClosedConnSkipsWhatArrived(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 2)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("old"), ReadAt: time.Unix(1, 0)}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("new"), ReadAt: time.Unix(7, 0)}
+	f := New(ch, nil, nil)
+	_ = f.Close()
+	if n, _, err := f.SkipThrough(time.Unix(4, 0)); err != nil || n != 3 {
+		t.Fatalf("SkipThrough = (%d, %v), want (3, nil)", n, err)
+	}
+	got := make([]byte, 3)
+	if _, err := io.ReadFull(f, got); err != nil || string(got) != "new" {
+		t.Fatalf("read after the skip = %q, %v, want the chunk captured after the point", got, err)
+	}
+}
+
+// TestSkipThroughHonoursAPendingDiscard: bytes a DiscardBefore watermark
+// swallows are gone before the skip looks at the stream.
+func TestSkipThroughHonoursAPendingDiscard(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 3)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("SWALLOW"), ReadAt: time.Unix(9, 0)}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("old"), ReadAt: time.Unix(10, 0)}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("new"), ReadAt: time.Unix(12, 0)}
+	f := New(ch, nil, nil)
+	f.DiscardBefore(7)
+	if n, _, err := f.SkipThrough(time.Unix(11, 0)); err != nil || n != 3 {
+		t.Fatalf("SkipThrough = (%d, %v), want (3, nil): the 7 bytes below the watermark are not the skip's", n, err)
+	}
+	got := make([]byte, 3)
+	if _, err := io.ReadFull(f, got); err != nil || string(got) != "new" {
+		t.Fatalf("read after the skip = %q, %v", got, err)
+	}
+}

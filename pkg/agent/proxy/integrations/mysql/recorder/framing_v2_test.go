@@ -176,20 +176,37 @@ type recording struct {
 	// windows it left out (Session.RecordOrphanWindow).
 	leftOut *orphanSpans
 	// cleared counts the times RecordV2 told the supervisor its input so far
-	// was consumed (Session.OnPendingCleared).
-	cleared int64
+	// was consumed (Session.OnPendingCleared), and clearedAt how many client
+	// bytes it had consumed at each; clientConsumed is how many it consumed in
+	// all.
+	cleared        int64
+	clearedAt      []int64
+	clientConsumed int64
+	// closedAt is when the streams of a connection left open were closed, at
+	// the deadline (zero when RecordV2 returned before it).
+	closedAt time.Time
 }
 
-// orphanSpans collects the windows a Session leaves out (supervisor.OrphanSpans).
+// orphanSpans collects the windows a Session leaves out (supervisor.OrphanSpans),
+// and when each was left out.
 type orphanSpans struct {
 	mu      sync.Mutex
 	windows [][2]time.Time
+	at      []time.Time
 }
 
 func (o *orphanSpans) Record(start, end time.Time) {
 	o.mu.Lock()
 	o.windows = append(o.windows, [2]time.Time{start, end})
+	o.at = append(o.at, time.Now())
 	o.mu.Unlock()
+}
+
+// recordedAt is when window i was left out.
+func (o *orphanSpans) recordedAt(i int) time.Time {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.at[i]
 }
 
 func (o *orphanSpans) Open(start time.Time) func() {
@@ -214,9 +231,58 @@ func (o *orphanSpans) last() ([2]time.Time, bool) {
 
 // recordConn runs RecordV2 over a connection: its handshake, then client and
 // server (each delivered in the given chunks, the way a capture hands them
-// over). closeAtEnd closes both streams after the last chunk, as a connection
-// that ended does; without it they stay open, as a pooled connection's do.
+// over, stamped as they are pushed). closeAtEnd closes both streams after the
+// last chunk, as a connection that ended does; without it they stay open, as a
+// pooled connection's do.
 func recordConn(t *testing.T, client, server [][]byte, closeAtEnd bool, deadline time.Duration) recording {
+	t.Helper()
+	chunks := func(bufs [][]byte, dir fakeconn.Direction) []fakeconn.Chunk {
+		out := make([]fakeconn.Chunk, len(bufs))
+		for i, b := range bufs {
+			out[i] = fakeconn.Chunk{Dir: dir, Bytes: b}
+		}
+		return out
+	}
+	return recordChunks(t, chunks(client, fakeconn.FromClient), chunks(server, fakeconn.FromDest), closeAtEnd, deadline)
+}
+
+// wireBase is when the chunks onTheWire lays out are captured from: after the
+// handshake recordChunks stamps.
+var wireBase = time.Date(2026, 10, 2, 10, 47, 0, 0, time.UTC)
+
+// onTheWire lays the exchanges out as a capture of a client that waits for
+// each answer before its next command stamps them: each command in a chunk of
+// its own, sent before its answer, then the answer in reads of n bytes, every
+// one of them before the next command (the server sends nothing more until it
+// arrives). An exchange with no command (nil) is more of the answer before it;
+// one with no reply, a command the server does not answer.
+func onTheWire(xs []exchange, n int) (client, server []fakeconn.Chunk) {
+	tick := 0
+	at := func() time.Time {
+		tick++
+		return wireBase.Add(time.Duration(tick) * time.Microsecond)
+	}
+	for _, x := range xs {
+		if len(x.command) > 0 {
+			client = append(client, fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: x.command, ReadAt: at()})
+		}
+		for _, c := range chunked(bytes.Join(x.reply, nil), n) {
+			server = append(server, fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: c, ReadAt: at()})
+		}
+	}
+	return client, server
+}
+
+// recordWire is recordConn over the exchanges as onTheWire lays them out.
+func recordWire(t *testing.T, xs []exchange, n int, closeAtEnd bool, deadline time.Duration) recording {
+	t.Helper()
+	client, server := onTheWire(xs, n)
+	return recordChunks(t, client, server, closeAtEnd, deadline)
+}
+
+// recordChunks is recordConn over chunks: one with no capture time is stamped
+// as it is pushed, client and server alike.
+func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool, deadline time.Duration) recording {
 	t.Helper()
 	core, logs := observer.New(zapcore.DebugLevel)
 	logger := zap.New(core)
@@ -228,7 +294,14 @@ func recordConn(t *testing.T, client, server [][]byte, closeAtEnd bool, deadline
 	leftOut := &orphanSpans{}
 	h.sess.Orphans = leftOut
 	var cleared atomic.Int64
-	h.sess.OnPendingCleared = func() { cleared.Add(1) }
+	var clearedMu sync.Mutex
+	var clearedAt []int64
+	h.sess.OnPendingCleared = func() {
+		cleared.Add(1)
+		clearedMu.Lock()
+		clearedAt = append(clearedAt, h.sess.ClientStream.Consumed())
+		clearedMu.Unlock()
+	}
 	base := time.Date(2026, 10, 2, 10, 46, 0, 0, time.UTC)
 	var tick int64
 	var tickMu sync.Mutex
@@ -255,8 +328,11 @@ func recordConn(t *testing.T, client, server [][]byte, closeAtEnd bool, deadline
 		defer pushers.Done()
 		h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: cannedHandshakeResponse41(t, 1, false), ReadAt: at()}
 		for _, c := range client {
+			if c.ReadAt.IsZero() {
+				c.ReadAt = at()
+			}
 			select {
-			case h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: c, ReadAt: at()}:
+			case h.clientCh <- c:
 			case <-ctx.Done():
 				return
 			}
@@ -267,8 +343,11 @@ func recordConn(t *testing.T, client, server [][]byte, closeAtEnd bool, deadline
 		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: greetingBuf, ReadAt: at()}
 		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: cannedOK(t, 2, greeting.CapabilityFlags), ReadAt: at()}
 		for _, c := range server {
+			if c.ReadAt.IsZero() {
+				c.ReadAt = at()
+			}
 			select {
-			case h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: c, ReadAt: at()}:
+			case h.destCh <- c:
 			case <-ctx.Done():
 				return
 			}
@@ -295,12 +374,17 @@ func recordConn(t *testing.T, client, server [][]byte, closeAtEnd bool, deadline
 	if !rec.returned {
 		// FakeConn reads do not watch ctx: closing the streams is what lets a
 		// recorder waiting in one return.
+		rec.closedAt = time.Now()
 		_ = h.sess.ClientStream.Close()
 		_ = h.sess.DestStream.Close()
 		<-done
 	}
 	<-pushed
 	rec.cleared = cleared.Load()
+	clearedMu.Lock()
+	rec.clearedAt = clearedAt
+	clearedMu.Unlock()
+	rec.clientConsumed = h.sess.ClientStream.Consumed()
 	for {
 		select {
 		case m := <-mocks:
@@ -503,72 +587,6 @@ func TestRecordV2_LargeResultFramesAcrossAnyChunking(t *testing.T) {
 	}
 }
 
-// A capture that lost a read in the middle of the 8,209-row result: the reader
-// is at a packet boundary, and the next bytes it gets are the middle of a
-// later row's payload, 120 zero-padded digits. Read as a header, "0000" claims
-// a 3,158,064-byte packet, more than the connection carries after it: before,
-// the recorder waited for it for as long as the connection stayed open ("V2
-// parser: waiting client=false server=true, took 101689 of 141721 client bytes
-// and 4775272 of 4775272 server bytes"), and the stop drain gave up on the
-// connection a minute later.
-func TestRecordV2_BytesLostInsideALargeResultStopTheConnection(t *testing.T) {
-	t.Parallel()
-	xs := kitTraffic(t, []int{300, 301}, true)
-	s := layOut(xs)
-	big := s.packetAt[1]    // the 8,209-row query is the request's 2nd exchange
-	from := big[1+6+1+6000] // row 6000's header: count, 6 columns, EOF, 6000 rows
-	row := big[1+6+1+6400]  // a later row,
-	payload := row + 4 + len(lenenc("6400")) + len(lenenc("user-6400")) + len(lenenc("user6400@example.com")) + len(lenenc("ACTIVE")) + 3
-	to := payload + 10 // into its run of zeros
-	if !bytes.Equal(s.server[to:to+4], []byte("0000")) {
-		t.Fatalf("fixture: the cut does not land in the payload's zeros: %q", s.server[to:to+8])
-	}
-	server := cut(s.server, from, to)
-	if claimed := 0x303030; len(server)-from >= claimed {
-		t.Fatalf("fixture: %d bytes follow the cut, the misread header must claim more (%d)", len(server)-from, claimed)
-	}
-	rec := recordConn(t, chunked(s.client, 16384), chunked(server, 16384), false, 2*time.Minute)
-	requireFramingLost(t, rec)
-	if got := queryMocks(rec.mocks); got != 1 {
-		t.Fatalf("%d query mocks, want the 1 before the loss", got)
-	}
-}
-
-// A capture that lost whole packets in a result set (reads that each held a
-// few rows): before, the recorder ended the result at the terminator after
-// the loss and recorded it with the rows it still had, a mock that replays a
-// different answer than the server gave.
-func TestRecordV2_PacketsLostInsideAResultAreNotRecordedShort(t *testing.T) {
-	t.Parallel()
-	s := layOut(kitTraffic(t, []int{7}, false))
-	sel := s.packetAt[2] // the second SELECT of the request
-	server := cut(s.server, sel[1+6+1+5], sel[1+6+1+10])
-	rec := recordConn(t, chunked(s.client, 16384), chunked(server, 16384), true, 5*time.Second)
-	requireFramingLost(t, rec)
-}
-
-// The connection's response head does not decode ("invalid packet, payload is
-// empty": a capture hole put the reader on four zero bytes). Before, the
-// recorder dropped the exchange at DEBUG and went on: the rest of that
-// response was read as the NEXT command's, and every later SELECT of the
-// connection was recorded with the previous one's rows.
-//
-// Not parallel: the WARN is limited process-wide, and this test counts it.
-func TestRecordV2_UndecodableResponseHeadStopsTheConnection(t *testing.T) {
-	resetWarnLimiters()
-	s := layOut(kitTraffic(t, []int{7}, false))
-	sel := s.packetAt[2]
-	// The second SELECT's reply as the capture gave it: an empty packet where
-	// its column count should be, then the rest of it.
-	server := append(append(append([]byte(nil), s.server[:sel[0]]...), 0x00, 0x00, 0x00, 0x01), s.server[sel[0]:]...)
-	rec := recordConn(t, chunked(s.client, 16384), chunked(server, 16384), true, 5*time.Second)
-	requireFramingLost(t, rec)
-	warned := rec.logs.FilterMessageSnippet("failed to decode mysql response head").FilterLevelExact(zapcore.WarnLevel).Len()
-	if warned != 1 {
-		t.Fatalf("%d WARN lines for the undecodable response head, want 1 (it was logged at DEBUG, where an operator never sees why a connection stopped being recorded)", warned)
-	}
-}
-
 // A capture that lost client bytes from the middle of one command into the
 // next: the next packet header is read out of query text.
 func TestRecordV2_ClientBytesLostMidCommandStopTheConnection(t *testing.T) {
@@ -583,21 +601,6 @@ func TestRecordV2_ClientBytesLostMidCommandStopTheConnection(t *testing.T) {
 	to := len(xs[0].command) + 4 + 20
 	client := cut(s.client, from, to)
 	rec := recordConn(t, chunked(client, 64), chunked(s.server, 16384), true, 5*time.Second)
-	requireFramingLost(t, rec)
-}
-
-// A command this recorder has no decoder for still has a response (every
-// command but COM_STMT_CLOSE, COM_STMT_SEND_LONG_DATA and COM_QUIT does).
-// Before, it was recorded as answering nothing, and the next command was
-// paired with its response. COM_FIELD_LIST's reply is a run of column
-// definitions whose length nothing announces: the recording stops there.
-func TestRecordV2_ACommandItCannotSizeTheResponseOfStopsTheConnection(t *testing.T) {
-	t.Parallel()
-	xs := kitTraffic(t, []int{7}, false)
-	fieldList := exchange{command: wrapPacket(append([]byte{0x04}, "sessions\x00"...), 0),
-		reply: frame(append(sessionColumns(t, "payload"), eofPayload))}
-	s := layOut(append([]exchange{fieldList}, xs...))
-	rec := recordConn(t, chunked(s.client, 64), chunked(s.server, 16384), true, 5*time.Second)
 	requireFramingLost(t, rec)
 }
 
@@ -683,22 +686,6 @@ func TestRecordV2_AResponseOfSeveralResultsIsLeftOut(t *testing.T) {
 	}
 }
 
-// COM_CHANGE_USER can be answered with an auth exchange this recorder does
-// not follow. Recorded as the whole answer, the AuthSwitchRequest would be a
-// mock short of its reply: the recording stops before it.
-func TestRecordV2_AnExchangeItDoesNotFollowStopsTheConnection(t *testing.T) {
-	t.Parallel()
-	xs := kitTraffic(t, []int{7}, false)
-	changeUser := exchange{command: wrapPacket(append([]byte{0x11}, "app\x00\x00test\x00"...), 0),
-		reply: frame([][]byte{append(append([]byte{0xfe}, "mysql_native_password\x00"...), bytes.Repeat([]byte{0x22}, 20)...)})}
-	s := layOut(append(append([]exchange{}, xs[:2]...), changeUser))
-	rec := recordConn(t, chunked(s.client, 64), chunked(s.server, 16384), true, 5*time.Second)
-	requireFramingLost(t, rec)
-	if got := queryMocks(rec.mocks); got != 2 {
-		t.Fatalf("%d query mocks, want the 2 before COM_CHANGE_USER (and none for it)", got)
-	}
-}
-
 // joinedMidStream is a decrypted TLS stream of a pooled connection the capture
 // joined mid-stream: no handshake on it, so its framing is assumed
 // (CLIENT_DEPRECATE_EOF, which the server here offers). run starts RecordV2 on
@@ -707,6 +694,8 @@ type joinedMidStream struct {
 	h    *v2Harness
 	caps uint32
 	ctx  context.Context
+	// tick is the capture clock of exchange, in microseconds past wireBase.
+	tick int
 	// greeting is the server's, as the raw leg captured it.
 	greeting []byte
 }
@@ -756,11 +745,19 @@ func (j *joinedMidStream) ownLeg(t *testing.T, clientCaps uint32) {
 	})
 }
 
+// at is the capture time of the next chunk pushed: every chunk of the stream
+// is stamped on one clock, in the order it is pushed.
+func (j *joinedMidStream) at() time.Time {
+	j.tick++
+	return wireBase.Add(time.Duration(j.tick) * time.Microsecond)
+}
+
+// exchange pushes a command and its reply in the order a capture stamps them:
+// the command, then each packet of the reply after it.
 func (j *joinedMidStream) exchange(command []byte, reply [][]byte) {
-	at := time.Now()
-	j.h.pushClient(command, at)
+	j.h.pushClient(command, j.at())
 	for _, p := range reply {
-		j.h.pushDest(p, at)
+		j.h.pushDest(p, j.at())
 	}
 }
 
@@ -936,7 +933,8 @@ func TestRecordV2_PostTLS_APrepareOnAnAssumedFraming(t *testing.T) {
 	}
 	// 255 definitions under CLIENT_DEPRECATE_EOF: the next answer starts at
 	// sequence id 1, which an EOF of the PREPARE would also have. COM_SET_OPTION
-	// is answered with an EOF, so an EOF there is either; the recording stops.
+	// is answered with an EOF, so an EOF there is either: both exchanges are
+	// left out, and the recording goes on from the next command.
 	t.Run("an EOF that may be the PREPARE's or the next answer", func(t *testing.T) {
 		t.Parallel()
 		j := newJoinedMidStream(t)
@@ -948,17 +946,20 @@ func TestRecordV2_PostTLS_APrepareOnAnAssumedFraming(t *testing.T) {
 		if len(mocks) != 0 {
 			t.Fatalf("recorded %d mock(s); the first: %s for %s", len(mocks), describe(mocks[0]), mocks[0].Spec.Metadata["requestOperation"])
 		}
-		if !errors.Is(err, ErrFramingLost) {
-			t.Fatalf("RecordV2 = %v, want ErrFramingLost", err)
+		if err != nil {
+			t.Fatalf("RecordV2 = %v: the exchanges it cannot frame are left out, and the recording goes on", err)
 		}
 		if leftOut.count() != 2 {
-			t.Fatalf("%d exchanges left out, want the PREPARE and the COM_SET_OPTION the recording stopped in", leftOut.count())
+			t.Fatalf("%d exchanges left out, want the PREPARE and the COM_SET_OPTION", leftOut.count())
 		}
 	})
 	// What follows the PREPARE's definitions is checked on what it can be:
 	// its EOF, the start of the next answer, or the server's own ERR. A header
 	// read out of row data (the capture lost bytes) is none of them, and is
-	// refused before the 3 MB it claims are waited for.
+	// refused before the 3 MB it claims are waited for. As the connection
+	// ends, the recording stops there; where the next command's answer
+	// starts, that exchange is left out with the PREPARE, and the recording
+	// goes on from the command after it.
 	for _, next := range []struct {
 		name    string
 		command []byte
@@ -970,15 +971,18 @@ func TestRecordV2_PostTLS_APrepareOnAnAssumedFraming(t *testing.T) {
 			j.h.sess.Orphans = leftOut
 			j.exchange(prepare, prepareOK(true, defs(2), nil))
 			if next.command != nil {
-				j.h.pushClient(next.command, time.Now())
+				j.h.pushClient(next.command, j.at())
 			}
-			j.h.pushDest([]byte("0000 of a row"), time.Now())
+			j.h.pushDest([]byte("0000 of a row"), j.at())
 			mocks, err := j.run(t)
 			if len(mocks) != 0 {
 				t.Fatalf("recorded %d mock(s); the first: %s", len(mocks), describe(mocks[0]))
 			}
-			if !errors.Is(err, ErrFramingLost) {
+			if next.command == nil && !errors.Is(err, ErrFramingLost) {
 				t.Fatalf("RecordV2 = %v, want ErrFramingLost", err)
+			}
+			if next.command != nil && err != nil {
+				t.Fatalf("RecordV2 = %v: the exchange it cannot frame is left out, and the recording goes on", err)
 			}
 			if leftOut.count() == 0 {
 				t.Fatal("the PREPARE is neither recorded nor left out")
@@ -996,7 +1000,7 @@ func TestRecordV2_PostTLS_APrepareOnAnAssumedFraming(t *testing.T) {
 		j.h.sess.Orphans = leftOut
 		j.exchange(prepare, prepareOK(true, defs(2), nil))
 		timeout := append([]byte{0xff, 0xbf, 0x0f, '#'}, "HY000The client was disconnected by the server because of inactivity."...)
-		j.h.pushDest(wrapPacket(timeout, 0), time.Now())
+		j.h.pushDest(wrapPacket(timeout, 0), j.at())
 		mocks, err := j.run(t)
 		if err != nil {
 			t.Fatalf("RecordV2 = %v", err)
@@ -1015,7 +1019,7 @@ func TestRecordV2_PostTLS_APrepareOnAnAssumedFraming(t *testing.T) {
 		t.Parallel()
 		j := newJoinedMidStream(t)
 		j.exchange(prepare, prepareOK(true, defs(2), nil))
-		j.h.pushDest([]byte{0x30, 0x30, 0x30, 0x00, 'r', 'o', 'w'}, time.Now())
+		j.h.pushDest([]byte{0x30, 0x30, 0x30, 0x00, 'r', 'o', 'w'}, j.at())
 		mocks, err := j.run(t)
 		if len(mocks) != 0 {
 			t.Fatalf("recorded %d mock(s); the first: %s", len(mocks), describe(mocks[0]))
@@ -1032,7 +1036,7 @@ func TestRecordV2_PostTLS_APrepareOnAnAssumedFraming(t *testing.T) {
 		leftOut := &orphanSpans{}
 		j.h.sess.Orphans = leftOut
 		j.exchange(prepare, prepareOK(false, defs(2), nil))
-		j.h.pushClient(wrapPacket([]byte{mysql.COM_QUIT}, 0), time.Now())
+		j.h.pushClient(wrapPacket([]byte{mysql.COM_QUIT}, 0), j.at())
 		mocks, err := j.run(t)
 		if err != nil {
 			t.Fatalf("RecordV2 = %v", err)
@@ -1144,7 +1148,7 @@ func TestRecordV2_PostTLS_CommandsAfterAnUnsettledPrepareAreRead(t *testing.T) {
 			// The config mock, and the PREPARE read whole.
 			read := waitFor(func() bool { return cleared.Load() >= 2 })
 			pending.Store(true) // the COM_STMT_CLOSE's bytes, as the supervisor marks them
-			j.h.pushClient(closeStmt, time.Now())
+			j.h.pushClient(closeStmt, j.at())
 			settled := read && waitFor(func() bool { return !pending.Load() })
 			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
 			j.h.closeStreams()
@@ -1213,10 +1217,10 @@ func TestRecordV2_PostTLS_AnUnsettledPrepareIsLeftOutWhenTheRecordingStops(t *te
 	j.h.sess.OnPendingCleared = func() { cleared.Add(1) }
 	ctx, cancel := context.WithCancel(j.ctx)
 	defer cancel()
-	prepareAt := time.Now()
+	prepareAt := j.at()
 	j.h.pushClient(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO t VALUES (?, ?)"...), 0), prepareAt)
 	for _, p := range prepareOK(true, [][]byte{def, def}, nil) {
-		j.h.pushDest(p, prepareAt)
+		j.h.pushDest(p, j.at())
 	}
 	done := make(chan error, 1)
 	go func() { done <- RecordV2(ctx, j.h.logger, j.h.sess) }()
@@ -1540,6 +1544,10 @@ func recordBuffered(t *testing.T, xs []exchange) buffered {
 // the handshake, the lost command was sent after the handshake ended: the
 // window starts there. It started at the misread header, which arrived after
 // the lost command, and covered nothing.
+//
+// Server bytes lost inside a result stop nothing: that exchange alone is left
+// out, over a window that holds when its command was sent, and the recording
+// goes on (realign).
 func TestRecordV2_TheWindowLeftOutReachesTheParsersRetirement(t *testing.T) {
 	t.Parallel()
 	requireWindow := func(t *testing.T, b buffered, startBy time.Time, startWhat string) {
@@ -1558,13 +1566,22 @@ func TestRecordV2_TheWindowLeftOutReachesTheParsersRetirement(t *testing.T) {
 			t.Fatalf("the window left out ends at %v, before the last byte the connection had buffered arrived (%v): the test cases recorded in between are in neither this window nor the span counted from the parser's retirement, and are saved without their mocks", w[1].Format(time.StampMicro), b.lastArrival.Format(time.StampMicro))
 		}
 	}
-	t.Run("server bytes lost inside a result", func(t *testing.T) {
+	t.Run("server bytes lost inside a result: the exchange alone", func(t *testing.T) {
 		t.Parallel()
 		xs := kitTraffic(t, []int{7}, false)
 		sel := xs[2].reply // the second SELECT: rows 5 to 9 lost
 		xs[2].reply = append(append([][]byte{}, sel[:1+6+1+5]...), sel[1+6+1+10:]...)
 		b := recordBuffered(t, xs)
-		requireWindow(t, b, b.commandAt[2], "the SELECT it stopped in was sent")
+		if b.err != nil {
+			t.Fatalf("RecordV2 = %v: a response it cannot frame costs its own exchange, not the rest of the connection's recording", b.err)
+		}
+		if n := b.leftOut.count(); n != 1 {
+			t.Fatalf("%d windows left out, want the SELECT's alone", n)
+		}
+		w, _ := b.leftOut.last()
+		if w[0].After(b.commandAt[2]) || w[1].Before(b.commandAt[2]) {
+			t.Fatalf("the window left out is [%v, %v]; it must hold when the SELECT was sent (%v)", w[0].Format(time.StampMicro), w[1].Format(time.StampMicro), b.commandAt[2].Format(time.StampMicro))
+		}
 	})
 	t.Run("client bytes lost from the first command on", func(t *testing.T) {
 		t.Parallel()
