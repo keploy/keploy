@@ -119,6 +119,15 @@ type OutgoingOptions struct {
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
+	// DisableStatefulMocks turns OFF cursor-consumption of stateful data-plane
+	// mocks. Default (false) = ON: repeated identical dependency requests are
+	// served successive recorded responses in record order (then saturate on the
+	// last), so a stateful sequence (a counter, a created-then-read row) replays
+	// as 1,2,3 instead of 1,1,1. Set true to restore the legacy "serve the first
+	// recorded response every time" behaviour. Only affects mocks classified
+	// ConsumeCursorSaturate (DeriveLifetime rules #4/#5); at one recorded
+	// response it is a no-op.
+	DisableStatefulMocks bool
 	// MockNoiseDetection / MockNoiseStrict are the canonical spelling.
 	//
 	// MockNoiseDetection: detect request-body field drift vs the recorded mock

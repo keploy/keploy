@@ -98,6 +98,13 @@ type MockManager struct {
 	// testcase. Read only when MockFilterParams.AgentOwnsConsumed is set.
 	consumedPersistent map[string]models.MockState
 
+	// cursorMu guards cursors: the per-request-key cursor used to serve
+	// successive recorded responses for a stateful data-plane dependency
+	// (ConsumeCursorSaturate). Session-scoped — reset whenever the mock set is
+	// replaced (per test-set) so cursors don't bleed across test-sets.
+	cursorMu sync.Mutex
+	cursors  map[string]int
+
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
 	statelessUnfiltered map[models.Kind]map[string][]*models.Mock
@@ -933,6 +940,9 @@ func (o mockOwner) own(in []*models.Mock) []*models.Mock {
 // the startup tier this call builds, and is stamped with the rest of the
 // staging, before any tier is published.
 func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time) {
+	// A new mock set means new (or re-recorded) stateful sequences — drop the
+	// per-request cursors so each test-set replays its 1,2,3 from the start.
+	m.resetCursors()
 	// Track the earliest window-start we've ever seen on this manager.
 	// Used below to distinguish startup-init mocks (recorded before
 	// any test fired) from stale previous-test mocks. Once set, only
@@ -1498,6 +1508,44 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 		out = append(out, mk)
 	}
 	return out, nil
+}
+
+// NextMockIndex returns the record-ordered position to serve for the request
+// identified by key, given n recorded responses for it, then advances the
+// per-key cursor. It returns min(cursor, n-1), so once a request has been
+// replayed more times than it was recorded it saturates on the LAST recorded
+// response instead of missing — which keeps fixture re-reads (the same row read
+// many times, recorded once) working while a genuine stateful sequence
+// (1,2,3) is served in order. Session-scoped: the cursor map is cleared when
+// the mock set is replaced (per test-set). It satisfies the matcher's optional
+// cursor interface; parsers that do not type-assert it are unaffected.
+func (m *MockManager) NextMockIndex(key string, n int) int {
+	if n <= 1 {
+		// Zero or one recorded response: nothing to advance through; serving the
+		// first (only) response every time is identical to the legacy reuse
+		// behaviour, so there is no need to touch the cursor map.
+		return 0
+	}
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if m.cursors == nil {
+		m.cursors = make(map[string]int)
+	}
+	idx := m.cursors[key]
+	if idx > n-1 {
+		idx = n - 1
+	}
+	m.cursors[key] = idx + 1
+	return idx
+}
+
+// resetCursors drops every per-request stateful cursor. Called when the mock set
+// is replaced so a new test-set starts its stateful sequences from the first
+// recorded response.
+func (m *MockManager) resetCursors() {
+	m.cursorMu.Lock()
+	m.cursors = nil
+	m.cursorMu.Unlock()
 }
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set

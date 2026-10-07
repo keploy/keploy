@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,7 +73,7 @@ type matchDiag struct {
 // test.globalNoise body bucket (root-relative dotted paths, lowercased) so
 // manual noise config participates in mock matching with the same vocabulary
 // as response assertions.
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool) (bool, *models.Mock, *matchDiag, error) {
 
 	// Shared schema-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
@@ -167,6 +169,11 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
 		if ok {
+			// Stateful dependency: when several recorded responses share this
+			// exact request (a counter, a created-then-read row), serve them in
+			// record order via a per-request cursor instead of always the first,
+			// then saturate on the last. No-op for a single recording.
+			bestMatch = h.cursorPick(bestMatch, schemaMatched, input, mockDb, statefulMocks)
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
 			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil)
@@ -242,6 +249,83 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed, pool: unfilteredMocks}, nil
 	}
+}
+
+// mockCursor is the optional capability a mock store exposes to serve stateful
+// dependencies: NextMockIndex returns the record-ordered position to serve for a
+// request key given n recorded responses, advancing a per-key cursor (and
+// saturating at n-1). MockManager implements it; stores that don't are served
+// the first recording as before.
+type mockCursor interface {
+	NextMockIndex(key string, n int) int
+}
+
+// cursorPick advances a stateful dependency through its recorded responses. When
+// stateful mocks are enabled and bestMatch is a cursor-consumption mock
+// (ConsumeCursorSaturate), it gathers every schema-matched mock carrying the
+// SAME request body, orders them by record time, and returns the cursor-th one
+// so repeated identical requests get served 1,2,3,… and then saturate on the
+// last. Returns bestMatch unchanged when stateful mocks are off, the store
+// exposes no cursor, or there is only one recorded response for the request
+// (the common case, where cursor == reuse — byte-identical to legacy behaviour).
+func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, input *req, mockDb integrations.MockMemDb, statefulMocks bool) *models.Mock {
+	if !statefulMocks || bestMatch == nil || bestMatch.TestModeInfo.Consume != models.ConsumeCursorSaturate {
+		return bestMatch
+	}
+	if bestMatch.Spec.HTTPReq == nil {
+		return bestMatch
+	}
+	cs, ok := mockDb.(mockCursor)
+	if !ok {
+		return bestMatch
+	}
+	wantBody := bestMatch.Spec.HTTPReq.Body
+	group := make([]*models.Mock, 0, 4)
+	for _, m := range schemaMatched {
+		if m == nil || m.Spec.HTTPReq == nil {
+			continue
+		}
+		if m.TestModeInfo.Consume == models.ConsumeCursorSaturate && m.Spec.HTTPReq.Body == wantBody {
+			group = append(group, m)
+		}
+	}
+	if len(group) <= 1 {
+		return bestMatch // single recording: nothing to advance through
+	}
+	// Record order: request timestamp is stable across replay; SortOrder is
+	// mutated on every match so it cannot be used here. ID then Name break ties.
+	sort.SliceStable(group, func(i, j int) bool {
+		ti, tj := group[i].Spec.ReqTimestampMock, group[j].Spec.ReqTimestampMock
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		if group[i].TestModeInfo.ID != group[j].TestModeInfo.ID {
+			return group[i].TestModeInfo.ID < group[j].TestModeInfo.ID
+		}
+		return group[i].Name < group[j].Name
+	})
+	idx := cs.NextMockIndex(cursorKey(input, wantBody), len(group))
+	if idx < 0 || idx >= len(group) {
+		return bestMatch
+	}
+	return group[idx]
+}
+
+// cursorKey builds a stable per-request key so repeated identical requests share
+// one cursor. Method + URL + a hash of the request body is enough: the schema
+// match has already fixed method/URL/headers, and the body hash distinguishes
+// otherwise-equal paths without holding the whole body in the map key.
+func cursorKey(input *req, body string) string {
+	var b strings.Builder
+	b.WriteString(input.method)
+	b.WriteByte(' ')
+	if input.url != nil {
+		b.WriteString(input.url.String())
+	}
+	b.WriteByte('\x00')
+	sum := sha256.Sum256([]byte(body))
+	b.WriteString(hex.EncodeToString(sum[:]))
+	return b.String()
 }
 
 // FilterHTTPMocks Filter mocks to only HTTP mocks
