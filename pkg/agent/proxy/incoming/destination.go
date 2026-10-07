@@ -53,7 +53,7 @@ const appAddrProbeTimeout = 250 * time.Millisecond
 // So: try the assumption first, and only when it is refused, find out where the
 // application actually is. The happy path pays nothing — no probe, no
 // enumeration, one dial exactly as before.
-func (pm *IngressProxyManager) dialApp(addr string, logger *zap.Logger) (net.Conn, error) {
+func (pm *IngressProxyManager) dialApp(ctx context.Context, addr string, logger *zap.Logger) (net.Conn, error) {
 	// A previously resolved non-loopback address wins outright: once an
 	// application has been found somewhere else, every later connection for
 	// that port belongs there.
@@ -74,8 +74,15 @@ func (pm *IngressProxyManager) dialApp(addr string, logger *zap.Logger) (net.Con
 
 	alt, found := pm.resolveAppAddr(addr)
 	if !found {
-		// Nothing else is listening on this port either. Return the ORIGINAL
-		// error: it names the address the caller asked for, which is what the
+		// Refused on every local address: the application is most likely not
+		// listening YET (a restarted process, the next test binary starting a
+		// new one). Wait for it on the assumed address, bounded by the ingress
+		// listen timeout and ctx.
+		if isConnRefused(err) {
+			return dialIngressTarget(ctx, addr, ingressTargetListenTimeout)
+		}
+		// Not a refusal, so waiting would not help. Return the ORIGINAL error:
+		// it names the address the caller asked for, which is what the
 		// existing log lines and tests expect.
 		return nil, err
 	}

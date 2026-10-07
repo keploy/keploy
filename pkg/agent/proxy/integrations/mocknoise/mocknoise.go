@@ -84,7 +84,11 @@ type Adapter interface {
 	// Protobuf, RESP, BSON) supplies its own. m is provided for parsers that
 	// need headers/metadata to pick a decoder (e.g. HTTP JSON vs form); JSON-
 	// only parsers ignore it.
-	Diff(m *models.Mock, recorded, live []byte, known map[string][]string, valIsNoise func(string) bool) (drift map[string][]string, comparable bool)
+	// typeStrict names paths whose VALUE is ignored but whose TYPE must still
+	// match (learned-dynamic enforcement); valueChangesOnly restricts the result
+	// to value drift (the learn pass, so a type change is never learned). Both
+	// empty/false => prior behaviour.
+	Diff(m *models.Mock, recorded, live []byte, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (drift map[string][]string, comparable bool)
 }
 
 // JSONDiffer is the ready-made JSON implementation of Adapter.Diff. A parser
@@ -98,8 +102,8 @@ type JSONDiffer struct{}
 
 // Diff implements Adapter.Diff for JSON bodies via DetectJSONDrift. The mock is
 // unused — JSON needs no header/metadata to decode.
-func (JSONDiffer) Diff(_ *models.Mock, recorded, live []byte, known map[string][]string, valIsNoise func(string) bool) (map[string][]string, bool) {
-	return DetectJSONDrift(recorded, live, known, valIsNoise)
+func (JSONDiffer) Diff(_ *models.Mock, recorded, live []byte, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (map[string][]string, bool) {
+	return DetectJSONDrift(recorded, live, known, typeStrict, valueChangesOnly, valIsNoise)
 }
 
 // Engine runs the schema-noise learn/enforce flow for one protocol through its
@@ -154,7 +158,17 @@ func (e *Engine) Detect(m *models.Mock, liveBody []byte, userNoise map[string][]
 	if !ok {
 		return nil, false
 	}
-	return e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), e.adapter.RecordedValueIsNoise(m))
+	// Learn pass (JSON bodies): narrow learning to VALUE drift only
+	// (valueChangesOnly=true). Auto-noising tolerates fields whose VALUE varies
+	// between record and replay (ids, tokens, timestamps) while StrictReject
+	// still enforces their TYPE -- it marks each learned path typeStrict, except
+	// one the user also configured as noise, which stays full-ignore. A field
+	// whose TYPE changed (incl. null<->value) or was removed is not "a value
+	// that varies"; learning it would mask the type/shape drift type-enforcement
+	// exists to catch, so it is left strict. typeStrict is nil here (this is the
+	// learn pass, not the enforce pass). Non-JSON form bodies ignore this flag
+	// (value-only/type-strict is a JSON-body feature for now).
+	return e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), nil, true, e.adapter.RecordedValueIsNoise(m))
 }
 
 // Learn merges newly-detected drift into the mock's stored noise (monotonic —
@@ -215,7 +229,33 @@ func (e *Engine) StrictReject(m *models.Mock, liveBody []byte, userNoise map[str
 	if !ok {
 		return true, nil
 	}
-	d, comparable := e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), e.adapter.RecordedValueIsNoise(m))
+	// Enforcement: LEARNED paths (what the auto-noising detected) become
+	// type-strict for JSON parsers — value ignored, type still enforced. known
+	// keeps carrying them (as before) so NON-JSON parsers, which don't consult
+	// typeStrict, still fully exclude learned noise; typeStrict additionally marks
+	// them so a JSON parser type-enforces rather than fully ignores (collectJSON
+	// consults typeStrict first). User-configured noise stays full-ignore/regex.
+	learned := StripBodyPrefix(e.adapter.StoredNoise(m))
+	// User body noise is lowercased at ingest (decode.go), while learned noise
+	// keeps the recorded JSON case (e.g. "userId"), so the exclusion must compare
+	// case-insensitively — otherwise a user-ignored camelCase field would slip into
+	// typeStrict and get type-enforced.
+	userKeys := make(map[string]struct{}, len(userNoise))
+	for k := range userNoise {
+		userKeys[strings.ToLower(k)] = struct{}{}
+	}
+	typeStrict := make(map[string]struct{}, len(learned))
+	for k := range learned {
+		// A path the user ALSO configured as noise keeps the user's intent
+		// (full-ignore / value-regex); only purely auto-learned paths become
+		// type-strict. KnownNoise still carries it, so a non-JSON parser keeps
+		// excluding it.
+		if _, userConfigured := userKeys[strings.ToLower(k)]; userConfigured {
+			continue
+		}
+		typeStrict[k] = struct{}{}
+	}
+	d, comparable := e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), typeStrict, false, e.adapter.RecordedValueIsNoise(m))
 	if !comparable {
 		// No field structure to diff — fall back to byte equality so unequal
 		// opaque bodies are a real mismatch rather than a silent pass.
@@ -240,11 +280,14 @@ func (e *Engine) StrictReject(m *models.Mock, liveBody []byte, userNoise map[str
 // field structure to diff and the caller must treat any byte difference as a
 // real, non-learnable mismatch. This is the single JSON-diff kernel behind both
 // the HTTP and Pulsar schema-noise paths.
-func DetectJSONDrift(recordedBody, liveBody []byte, known map[string][]string, isRecordedNoise func(string) bool) (drift map[string][]string, comparable bool) {
+func DetectJSONDrift(recordedBody, liveBody []byte, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, isRecordedNoise func(string) bool) (drift map[string][]string, comparable bool) {
 	if !json.Valid(recordedBody) || !json.Valid(liveBody) {
 		return nil, false
 	}
-	paths := matcher.ChangedJSONFieldPaths(string(recordedBody), string(liveBody), known, isRecordedNoise)
+	// typeStrict paths ignore value but enforce type (learned-dynamic enforcement);
+	// valueChangesOnly restricts learning to value drift. Both default to the empty
+	// value, which keeps the prior behaviour.
+	paths := matcher.ChangedJSONFieldPaths(string(recordedBody), string(liveBody), known, typeStrict, valueChangesOnly, isRecordedNoise)
 	if len(paths) == 0 {
 		return nil, true
 	}

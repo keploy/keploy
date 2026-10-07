@@ -1481,12 +1481,16 @@ func buildClientTLSConfigV2(_ *supervisor.Session) *tls.Config {
 // no-response mocks after it, until the next response settles the framing
 // (heldPrepare); the client is read on meanwhile.
 //
-// Exits cleanly on io.EOF / fakeconn.ErrClosed from either stream, and with
-// ErrFramingLost the moment it can no longer tell where the connection's
-// packets begin and end: a command or response packet out of sequence, a
+// Exits cleanly on io.EOF / fakeconn.ErrClosed from either stream. It loses
+// the framing of an exchange the moment it can no longer tell where the
+// connection's packets begin and end: a response packet out of sequence, a
 // response head, definition or row that does not decode, or a command whose
-// response it cannot size. Each of those used to be skipped, which left the rest of a response on
-// the server stream to be paired with the next command.
+// response it cannot size. Each of those used to be skipped, which left the
+// rest of a response on the server stream to be paired with the next command.
+// Now the exchange is left out, and the recording goes on from the client's
+// next command and the server's answer to it (fail): the rest of the response
+// is skipped. A client that pipelines its commands, or lost framing of the
+// client's own stream, cannot be realigned: it exits with ErrFramingLost.
 //
 // handshakeEnd is when the handshake's last packet arrived: the first command
 // was sent after it.
@@ -1519,9 +1523,82 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// response, whichever was read later), or the handshake did: client bytes
 	// lost before the next command were sent after it.
 	lastEnd := handshakeEnd
+	// After a response that could not be framed was left out (fail), the
+	// recording goes on from the client's next command (clientRealign:
+	// nextCommandAfterFault) and from the server's answer to the next command
+	// it answers (serverRealign: realignAnswer). The rest of the response
+	// stays queued in the capture until then, under the capture's own bound
+	// per connection; past it the capture loses bytes as it does for any
+	// parser behind its connection, and counts what the connection carries
+	// from there as not recorded.
+	clientRealign, serverRealign := false, false
+	// lastAnswerEnd is when the last byte of the last answer read was
+	// captured. pipelined: the client once sent a command not after that, so
+	// its answers cannot be told to start after their commands, and a
+	// response of its that cannot be framed cannot be realigned.
+	var lastAnswerEnd time.Time
+	pipelined := false
+	// fail handles an exchange whose command was read at reqTs and whose
+	// response could not be handled (err). A stream or a recording that ended
+	// stops in no exchange (leaveOutInFlight). Lost framing leaves the
+	// exchange out alone, from its command to the last byte of its answer read
+	// (the test case that sent the command is recorded over that), and the
+	// recording goes on from the next command: fail returns nil. Any other
+	// error, or lost framing of a pipelining client's response, stops the
+	// recording in the exchange (leaveOutInFlight).
+	fail := func(reqTs time.Time, err error) error {
+		if err == nil || streamEnded(err) {
+			return err
+		}
+		if !errors.Is(err, ErrFramingLost) || pipelined {
+			reportFault(logger, sess, err, false)
+			return leaveOutInFlight(sess, reqTs, err)
+		}
+		if held != nil {
+			// What the server sent after the PREPARE's definitions is skipped
+			// with the rest of this exchange: nothing settles its framing.
+			h := held
+			held = nil
+			h.leaveOut(logger, sess, notRecorded("the response after the %s response was not framed, so nothing settles its framing", h.what))
+		}
+		carry = nil
+		decodeCtx.LastOp.Store(clientKey, wire.RESET)
+		sess.RecordOrphanWindow(reqTs, later(reqTs, sess.DestStream.LastReadTime()))
+		clearPending(sess)
+		reportFault(logger, sess, err, true)
+		lastEnd = later(lastEnd, reqTs)
+		clientRealign, serverRealign = true, true
+		return nil
+	}
+	// realignAnswer puts the server's stream at the start of the answer to the
+	// command read at reqTs, after a response left out (fail): what the server
+	// sent before that command was captured is the rest of the response left
+	// out (fakeconn.FakeConn.SkipThrough). A stream that cannot be cut there
+	// stops the recording, as lost framing does.
+	realignAnswer := func(reqTs time.Time) error {
+		n, last, err := sess.DestStream.SkipThrough(reqTs)
+		if err != nil {
+			if streamEnded(err) {
+				return err
+			}
+			err = framingLost("the answer to the command after a response left out cannot be found on the server's stream: %v", err)
+			warnFramingLost(logger, sess, "V2: mysql response framing lost; the connection is no longer recorded", err)
+			return leaveOutInFlight(sess, reqTs, err)
+		}
+		serverRealign = false
+		if !last.IsZero() {
+			lastAnswerEnd = last
+		}
+		logger.Debug("V2: skipped the rest of a mysql response left out; the recording goes on from the next command",
+			zap.String("connID", sess.ClientConnID), zap.Int64("skippedBytes", n))
+		return nil
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if !serverRealign {
+			lastAnswerEnd = sess.DestStream.LastReadTime()
 		}
 		var cmdBuf []byte
 		var err error
@@ -1537,6 +1614,17 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// (the handshake hands one over only when its sequence id is 0).
 			cmdBuf, respFirst, firstCmd = firstCmd, firstCmdRespSeq, nil
 			joined = continues(cmdBuf)
+		} else if clientRealign {
+			clientRealign = false
+			cmdBuf, respFirst, joined, err = nextCommandAfterFault(ctx, logger, sess)
+			if err != nil {
+				if errors.Is(err, ErrFramingLost) {
+					warnFramingLost(logger, sess, "V2: mysql client stream cannot be taken up after a response left out; the connection is no longer recorded", err)
+					// From the exchange left out on, as for client bytes lost.
+					sess.RecordOrphanWindow(lastEnd, stoppedAt(lastEnd))
+				}
+				return err
+			}
 		} else {
 			var cs commandSeq
 			cmdBuf, err = mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, cs.take)
@@ -1548,6 +1636,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					h := held
 					held = nil
 					if endErr := h.end(ctx, logger, sess, decodeCtx); endErr != nil {
+						reportFault(logger, sess, endErr, false)
 						return endErr
 					}
 				}
@@ -1570,6 +1659,16 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		// prefetch read in the handshake, or the read just above), so at least
 		// one chunk has been consumed and LastReadTime is set.
 		reqTs := sess.ClientStream.LastReadTime()
+		if !serverRealign && !lastAnswerEnd.IsZero() && !reqTs.After(lastAnswerEnd) {
+			// Sent before the last answer was read, or not known to be after
+			// it (no capture time, or a clock that stamped the two alike).
+			pipelined = true
+		}
+		if serverRealign && len(cmdBuf) > 4 && answered(cmdBuf[4]) {
+			if err := realignAnswer(reqTs); err != nil {
+				return err
+			}
+		}
 
 		cmdPkt, err := wire.DecodePayload(ctx, logger, cmdBuf, clientKey, decodeCtx)
 		if err != nil {
@@ -1581,22 +1680,30 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			if len(cmdBuf) > 4 && (cmdBuf[4] == mysql.COM_QUERY || cmdBuf[4] == mysql.COM_STMT_EXECUTE) {
 				op := cmdBuf[4]
 				if err := settleHeld(op, respFirst); err != nil {
-					return leaveOutInFlight(sess, reqTs, err)
+					if err := fail(reqTs, err); err != nil {
+						return err
+					}
+					continue
 				}
 				decodeCtx.LastOp.Store(clientKey, op)
 				seq := responseSeq(mysql.CommandStatusToString(op), respFirst)
 				_, resTs, rerr := collectResponseV2(ctx, logger, sess, decodeCtx, clientKey, op, &seq, &carry)
 				decodeCtx.LastOp.Store(clientKey, wire.RESET)
 				if rerr != nil && !errors.Is(rerr, errNotRecorded) {
-					return leaveOutInFlight(sess, reqTs, rerr)
+					if err := fail(reqTs, rerr); err != nil {
+						return err
+					}
+					continue
 				}
 				leaveOut(logger, sess, reqTs, resTs, fmt.Errorf("a %s that does not decode: %w", mysql.CommandStatusToString(op), err))
 				lastEnd = later(reqTs, resTs)
 				continue
 			}
-			err = framingLost("a command that does not decode (%v), whose response it cannot frame", err)
-			warnFramingLost(logger, sess, "V2: failed to decode mysql command; the connection is no longer recorded", err)
-			return leaveOutInFlight(sess, reqTs, err)
+			err = found("V2: failed to decode mysql command", framingLost("a command that does not decode (%v), whose response it cannot frame", err))
+			if err := fail(reqTs, err); err != nil {
+				return err
+			}
+			continue
 		}
 
 		// No-response commands: emit immediately with empty response,
@@ -1630,11 +1737,17 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// frames itself; any other's reply cannot be framed.
 			if cmdBuf[4] == comStmtFetch {
 				if err := settleHeld(comStmtFetch, respFirst); err != nil {
-					return leaveOutInFlight(sess, reqTs, err)
+					if err := fail(reqTs, err); err != nil {
+						return err
+					}
+					continue
 				}
 				seq := responseSeq("COM_STMT_FETCH", respFirst)
 				if err := frameFetchReply(ctx, logger, sess, decodeCtx, &seq, &carry); err != nil {
-					return leaveOutInFlight(sess, reqTs, err)
+					if err := fail(reqTs, err); err != nil {
+						return err
+					}
+					continue
 				}
 				decodeCtx.LastOp.Store(clientKey, wire.RESET)
 				resTs := sess.DestStream.LastReadTime()
@@ -1644,22 +1757,32 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			}
 			shape, known := singlePacketReply[cmdBuf[4]]
 			if !known {
-				err := framingLost("command %s, whose response it cannot frame", cmdPkt.Header.Type)
-				warnFramingLost(logger, sess, "V2: unsupported mysql command; the connection is no longer recorded", err)
-				return leaveOutInFlight(sess, reqTs, err)
+				err := found("V2: unsupported mysql command", framingLost("command %s, whose response it cannot frame", cmdPkt.Header.Type))
+				if err := fail(reqTs, err); err != nil {
+					return err
+				}
+				continue
 			}
 			if err := settleHeld(cmdBuf[4], respFirst); err != nil {
-				return leaveOutInFlight(sess, reqTs, err)
+				if err := fail(reqTs, err); err != nil {
+					return err
+				}
+				continue
 			}
 			seq := responseSeq(cmdPkt.Header.Type, respFirst)
 			reply, err := firstResponsePacket(ctx, logger, sess, &seq, &carry)
 			if err != nil {
-				return leaveOutInFlight(sess, reqTs, err)
+				if err := fail(reqTs, err); err != nil {
+					return err
+				}
+				continue
 			}
 			if len(reply) < 5 || !shape(reply[4]) {
-				err := framingLost("command %s answered with a packet that is not its reply", cmdPkt.Header.Type)
-				warnFramingLost(logger, sess, "V2: mysql response framing lost; the connection is no longer recorded", err)
-				return leaveOutInFlight(sess, reqTs, err)
+				err := framingLostAt(logger, sess, "command %s answered with a packet that is not its reply", cmdPkt.Header.Type)
+				if err := fail(reqTs, err); err != nil {
+					return err
+				}
+				continue
 			}
 			decodeCtx.LastOp.Store(clientKey, wire.RESET)
 			resTs := sess.DestStream.LastReadTime()
@@ -1669,7 +1792,10 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		}
 
 		if err := settleHeld(cmdBuf[4], respFirst); err != nil {
-			return leaveOutInFlight(sess, reqTs, err)
+			if err := fail(reqTs, err); err != nil {
+				return err
+			}
+			continue
 		}
 
 		// Load lastOp for response shape.
@@ -1693,7 +1819,10 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			continue
 		}
 		if err != nil {
-			return leaveOutInFlight(sess, reqTs, err)
+			if err := fail(reqTs, err); err != nil {
+				return err
+			}
+			continue
 		}
 		lastEnd = later(reqTs, resTs)
 
@@ -1739,8 +1868,7 @@ func collectResponseV2(ctx context.Context, logger *zap.Logger, sess *supervisor
 	}
 	firstPkt, err := wire.DecodePayload(ctx, logger, firstBuf, clientKey, decodeCtx)
 	if err != nil {
-		err = framingLost("the %s response's first packet does not decode: %v", command, err)
-		warnFramingLost(logger, sess, "V2: failed to decode mysql response head; the connection is no longer recorded", err)
+		err = found("V2: failed to decode mysql response head", framingLost("the %s response's first packet does not decode: %v", command, err))
 		return nil, sess.DestStream.LastReadTime(), err
 	}
 
@@ -1874,15 +2002,14 @@ func moreResults(ctx context.Context, logger *zap.Logger, sess *supervisor.Sessi
 	}
 }
 
-// framingLostAt is framingLost, logged.
+// framingLostAt is framingLost found in a response (found), logged where what
+// follows from it is decided (reportFault).
 func framingLostAt(logger *zap.Logger, sess *supervisor.Session, format string, args ...any) error {
-	err := framingLost(format, args...)
-	warnFramingLost(logger, sess, "V2: mysql response framing lost; the connection is no longer recorded", err)
-	return err
+	return found("V2: mysql response framing lost", framingLost(format, args...))
 }
 
-// undecodable ends the recording at a definition or a row that does not
-// decode. Its header's sequence id checked out, so it is lost framing all the
+// undecodable is the lost framing a definition or a row that does not decode
+// shows. Its header's sequence id checked out, so it is lost framing all the
 // same: a header misread out of row data that passed the check by chance (1 in
 // 256), or a packet short of the bytes a hole took. It is reported as framing
 // loss is (ErrFramingLost, logged at WARN, rate-limited), not as an error of
@@ -1904,13 +2031,11 @@ func terminatorFits(logger *zap.Logger, sess *supervisor.Session, decodeCtx *wir
 	return nil
 }
 
-// notAResponseHead ends the recording at a response whose first packet is
+// notAResponseHead is the lost framing of a response whose first packet is
 // neither OK, ERR nor the head of the response its command gets (an EOF
 // where a result set must start): the packet belongs to something else.
 func notAResponseHead(logger *zap.Logger, sess *supervisor.Session, command string, head *mysql.PacketBundle) error {
-	err := framingLost("the %s response starts with a %s packet", command, head.Header.Type)
-	warnFramingLost(logger, sess, "V2: failed to decode mysql response head; the connection is no longer recorded", err)
-	return err
+	return found("V2: failed to decode mysql response head", framingLost("the %s response starts with a %s packet", command, head.Header.Type))
 }
 
 // readResponsePacket reads the next packet of a response off DestStream,
@@ -1922,7 +2047,7 @@ func readResponsePacket(ctx context.Context, logger *zap.Logger, sess *superviso
 	})
 	if err != nil {
 		if errors.Is(err, ErrFramingLost) {
-			warnFramingLost(logger, sess, "V2: mysql response packet out of sequence; the connection is no longer recorded", err)
+			err = found("V2: mysql response packet out of sequence", err)
 		}
 		return nil, err
 	}
@@ -1938,9 +2063,7 @@ func readEOFPacket(ctx context.Context, logger *zap.Logger, sess *supervisor.Ses
 		return nil, err
 	}
 	if !mysqlUtils.IsEOFPacket(buf) {
-		err := framingLost("the %s of the %s response is not an EOF packet", part, seq.what)
-		warnFramingLost(logger, sess, "V2: mysql response framing lost; the connection is no longer recorded", err)
-		return nil, err
+		return nil, framingLostAt(logger, sess, "the %s of the %s response is not an EOF packet", part, seq.what)
 	}
 	return buf, nil
 }

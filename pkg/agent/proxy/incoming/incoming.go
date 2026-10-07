@@ -40,10 +40,12 @@ type IngressProxyManager struct {
 	active map[uint16]proxyStop
 	// appAddr caches, per relocated port, the address the application is
 	// actually listening on when it is NOT loopback. See dialApp.
-	appAddr map[uint16]string
-	logger  *zap.Logger
-	hooks   agent.Hooks
-	tcChan  chan *models.TestCase
+	appAddr  map[uint16]string
+	logger   *zap.Logger
+	hooks    agent.Hooks
+	tcChan   chan *models.TestCase
+	mockMode bool
+	requests bool
 	// incomingOpts is read by ingress capture goroutines on every
 	// captured request (CaptureHook call sites in http.go) and written
 	// by IngressProxyManager.Start on every recorder (re)connect. Pre-
@@ -93,6 +95,8 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
 		appAddr:     make(map[uint16]string),
+		mockMode:    cfg.Agent.MockMode,
+		requests:    cfg.Agent.RecordRequests,
 		synchronous: cfg.Agent.Synchronous,
 		mapping:     !cfg.DisableMapping,
 		sampling:    false,
@@ -255,6 +259,10 @@ func (pm *IngressProxyManager) StopAll() {
 
 func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 	eventChan, err := pm.hooks.WatchBindEvents(ctx)
+	if err != nil && pm.mockMode {
+		pm.logger.Debug("not watching app binds: the tests' calls to the app are found when they connect", zap.Error(err))
+		return
+	}
 	if err != nil {
 		pm.logger.Error("Failed to start watching for ingress events", zap.Error(err))
 		return
@@ -436,6 +444,32 @@ func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duratio
 	}
 }
 
+func dialIngressTarget(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+	deadline := time.Now().Add(timeout)
+	network := "tcp4"
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+			network = "tcp6"
+		}
+	}
+	for {
+		conn, err := net.DialTimeout(network, addr, max(time.Until(deadline), time.Millisecond))
+		// Retry only while the target refuses the connection (app not listening
+		// yet), bounded by the deadline. isConnRefused is platform-aware: on
+		// Windows a refused connect surfaces as WSAECONNREFUSED, not the POSIX
+		// ECONNREFUSED, so a bare errors.Is(err, syscall.ECONNREFUSED) never
+		// matched there and the dial gave up immediately instead of waiting.
+		if err == nil || !isConnRefused(err) || !time.Now().Before(deadline) {
+			return conn, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(ingressTargetPollInterval):
+		}
+	}
+}
+
 func (h *goTCPIngressHook) StopIngress(origPort uint16) error {
 	h.mu.Lock()
 	st, ok := h.forwarders[origPort]
@@ -480,7 +514,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 	if util.IsTLSClientHello(preface) {
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
-		upConn, err := pm.dialApp(finalAppAddr, logger)
+		upConn, err := pm.dialApp(ctx, finalAppAddr, logger)
 		if err != nil {
 			logger.Error("Failed to connect to upstream application for a TLS connection. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
 				zap.String("final_app_addr", finalAppAddr),
@@ -507,7 +541,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// (the original) instead.
 		actualPort := appPort
 
-		upConn, err := pm.dialApp(finalAppAddr, logger)
+		upConn, err := pm.dialApp(ctx, finalAppAddr, logger)
 		if err != nil {
 			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
 				zap.String("final_app_addr", finalAppAddr),
@@ -556,4 +590,18 @@ func (r *replayConn) CloseWrite() error {
 		return cw.CloseWrite()
 	}
 	return nil
+}
+
+func (pm *IngressProxyManager) ServeLive(ctx context.Context, conn net.Conn, upstream string, port uint16) {
+	if !pm.requests {
+		up, err := dialIngressTarget(ctx, upstream, ingressTargetListenTimeout)
+		if err != nil {
+			pm.logger.Debug("the app is not reachable", zap.String("upstream", upstream), zap.Error(err))
+			return
+		}
+		defer up.Close()
+		util.RelayRawPassthrough(conn, up)
+		return
+	}
+	pm.handleConnection(ctx, conn, upstream, pm.logger, pm.tcChan, make(chan struct{}, 1), port)
 }

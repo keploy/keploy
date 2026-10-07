@@ -2403,3 +2403,54 @@ func TestAgentReadyTimeout(t *testing.T) {
 		t.Fatalf("DefaultAgentReadyTimeout %v is shorter than the agent healthcheck budget (~310s)", DefaultAgentReadyTimeout)
 	}
 }
+
+// AgentHealthTicker must find an agent whose health answer takes longer than
+// its first check waits. Reached through a Kubernetes port-forward over a slow
+// link, every new connection costs several round trips before the request is
+// even sent (two stream set-ups, then the GET): about 735ms at a 245ms round
+// trip. A fixed 500ms per check cut every one of them off, so the agent was
+// never found ready, however long the caller waited.
+func TestAgentHealthTicker_ReachesAnAgentSlowerThanTheFirstCheck(t *testing.T) {
+	resetProbeOnce(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agent/health" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		time.Sleep(750 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`"OK"`))
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	readyCh := make(chan bool, 1)
+	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh, 100*time.Millisecond)
+
+	ready, open := <-readyCh
+	require.True(t, open && ready, "the agent answered every health check in 750ms and was never found ready")
+}
+
+// Each health check waits twice as long as the last one that ran out of time,
+// up to a ceiling; a check that failed fast (nothing listening yet) or got an
+// answer leaves the wait as it was, so a local agent keeps its quick check.
+func TestNextAgentHealthWait(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wait     time.Duration
+		timedOut bool
+		want     time.Duration
+	}{
+		{"first check timed out", agentHealthFirstWait, true, 2 * agentHealthFirstWait},
+		{"a later check timed out", 4 * time.Second, true, 8 * time.Second},
+		{"capped", agentHealthMaxWait, true, agentHealthMaxWait},
+		{"doubling past the cap stops at it", agentHealthMaxWait/2 + time.Second, true, agentHealthMaxWait},
+		{"failed fast", agentHealthFirstWait, false, agentHealthFirstWait},
+		{"answered", 2 * time.Second, false, 2 * time.Second},
+	} {
+		require.Equal(t, tc.want, nextAgentHealthWait(tc.wait, tc.timedOut), tc.name)
+	}
+}

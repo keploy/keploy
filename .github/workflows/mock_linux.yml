@@ -59,6 +59,25 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-linux.sh"
 
+      # `keploy mock record` must never destroy an existing recording when a
+      # re-record fails, is interrupted, or captures nothing. Records a baseline,
+      # re-records with an empty and a failing command (bytes must be unchanged),
+      # then re-records a different workload (fully replaced). (gaps W1/W14.)
+      - name: Run mock-mode non-destructive-record e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-nondestructive-linux.sh"
+
+      # An unknown verb on a command group (mock/ca/contract) must exit 8, not
+      # print help and exit 0 — a false success a CI job calling a mistyped verb
+      # would pass on. Pure CLI behaviour; no deps.
+      - name: Run mock CLI exit-codes e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-cli-exit-codes-linux.sh"
+
       - name: Run mock-mode parallel-scope e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -77,6 +96,16 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-agent-cannot-start-linux.sh"
+
+      # A command that runs in Podman is refused at once by this build, with
+      # exit code 4 and where to get a keploy that records it, and never after
+      # a sudo prompt; before, it ran as a native process and recorded
+      # nothing. Every spelling of a podman invocation, record, test and mock.
+      - name: Run podman-refusal e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/podman-refusal-linux.sh"
 
       # `keploy report` against keploy.yml files, overrides and reports that
       # keploy must refuse -- fast, naming the file and why, never blocking or

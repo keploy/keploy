@@ -108,7 +108,7 @@ func Authenticate(logger *zap.Logger, sessionToken string) func(http.Handler) ht
 // that swallows the error (the documented pytest fixture does) would otherwise
 // just stop scoping, with nothing but a bare 401 in the log to explain it.
 func nextStepFor(path string) string {
-	if strings.HasPrefix(path, "/agent/scope/") {
+	if strings.HasPrefix(path, "/agent/scope/") || strings.HasPrefix(path, "/agent/app/") {
 		return "your test runner must send 'Authorization: Bearer $" + token.MockAgentTokenEnv +
 			"' on the scope API; keploy exports that variable into the wrapped command alongside KEPLOY_MOCK_AGENT"
 	}

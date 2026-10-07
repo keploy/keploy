@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
@@ -36,6 +37,13 @@ const (
 	// subdirectory shaped like an OSS test-set. Reserved here so the
 	// test-set scanner never mistakes it for a recorded test-set.
 	FolderAPITests = "api-tests"
+	// MockStagingSuffix marks the directory `keploy mock record` captures into
+	// before promoting it over the real set. Reserved: a dir with this suffix is
+	// a transient staging set (normally promoted or discarded within one record),
+	// and the enumerators below skip it so a leftover from a hard kill is never
+	// listed as a phantom test-set. The single source of truth — the mock service
+	// builds the staging name from it too.
+	MockStagingSuffix = ".keploy-staging"
 )
 
 // NetworkTrafficDoc stores the request-response data of a network call (ingress or egress)
@@ -52,6 +60,7 @@ type NetworkTrafficDoc struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
+	Start        string              `json:"start,omitempty" yaml:"start,omitempty"`
 }
 
 // DocNoise is the unified on-disk representation of a mock's noise, written under
@@ -545,6 +554,10 @@ func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, m
 		if v.Name() == FolderReports || v.Name() == FolderTestReports || v.Name() == FolderSchema || v.Name() == FolderAPITests {
 			continue
 		}
+		// A leftover mock-record staging directory is not a test-set.
+		if strings.HasSuffix(v.Name(), MockStagingSuffix) {
+			continue
+		}
 
 		name := v.Name()
 
@@ -592,6 +605,10 @@ func ReadSessionIndicesAny(ctx context.Context, path string, logger *zap.Logger,
 	seen := make(map[string]struct{})
 	for _, v := range files {
 		if v.Name() == FolderReports || v.Name() == FolderTestReports || v.Name() == FolderSchema {
+			continue
+		}
+		// A leftover mock-record staging directory is not a test-set.
+		if strings.HasSuffix(v.Name(), MockStagingSuffix) {
 			continue
 		}
 

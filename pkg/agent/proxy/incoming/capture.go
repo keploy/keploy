@@ -120,7 +120,25 @@ func cloneResponseForCapture(resp *http.Response) *http.Response {
 	clone.Trailer = resp.Trailer.Clone()
 	clone.TransferEncoding = append([]string(nil), resp.TransferEncoding...)
 	clone.Body = http.NoBody
+	// Close is Go's verdict on reusing the connection, not a header the app
+	// sent: serialized, it writes "Connection: close" into every HTTP/1.0
+	// response, and the recording, read back, keeps it there, while the
+	// app's answer at replay never has it. The header the app sent is in
+	// Header, as Go's client reads it at replay.
+	clone.Close = false
 	return clone
+}
+
+// closeAfter marks resp to close the client's connection after it, which sync
+// and sampled recording do to free their slot, and returns resp as the app
+// sent it, for the recording: the app's answer at replay will not say so.
+func closeAfter(resp *http.Response) *http.Response {
+	sent := new(http.Response)
+	*sent = *resp
+	sent.Header = resp.Header.Clone()
+	resp.Close = true
+	resp.Header.Set("Connection", "close")
+	return sent
 }
 
 func dumpCapturedRequest(req *http.Request, body []byte) ([]byte, error) {

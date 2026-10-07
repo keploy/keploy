@@ -188,6 +188,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
 				}
 				report := &models.MockMismatchReport{
+					At:            time.Now(),
 					Protocol:      "MySQL",
 					ActualSummary: strings.TrimSpace(fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 160))),
 					ClosestMock:   miss.closestMock,

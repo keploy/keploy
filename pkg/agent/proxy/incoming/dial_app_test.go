@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -55,7 +56,7 @@ func TestDialApp_LoopbackIsUnchanged(t *testing.T) {
 	pm := newDialTestPM()
 	_, addr := listenOn(t, "127.0.0.1")
 
-	conn, err := pm.dialApp(addr, zap.NewNop())
+	conn, err := pm.dialApp(context.Background(), addr, zap.NewNop())
 	if err != nil {
 		t.Fatalf("dialApp on a loopback app: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestDialApp_FindsAnAppBoundToANonLoopbackAddress(t *testing.T) {
 	}
 	assumed := net.JoinHostPort("127.0.0.1", port)
 
-	conn, err := pm.dialApp(assumed, zap.NewNop())
+	conn, err := pm.dialApp(context.Background(), assumed, zap.NewNop())
 	if err != nil {
 		t.Fatalf("dialApp did not find the app on %s (dialled %s): %v", realAddr, assumed, err)
 	}
@@ -101,7 +102,7 @@ func TestDialApp_UsesTheCacheOnLaterConnections(t *testing.T) {
 	assumed := net.JoinHostPort("127.0.0.1", port)
 
 	for i := 0; i < 3; i++ {
-		conn, err := pm.dialApp(assumed, zap.NewNop())
+		conn, err := pm.dialApp(context.Background(), assumed, zap.NewNop())
 		if err != nil {
 			t.Fatalf("connection %d: %v", i, err)
 		}
@@ -124,7 +125,7 @@ func TestDialApp_DropsAStaleCacheEntry(t *testing.T) {
 	p, _ := portOf(dead)
 	pm.appAddr[p] = dead
 
-	if _, err := pm.dialApp(net.JoinHostPort("127.0.0.1", port), zap.NewNop()); err == nil {
+	if _, err := pm.dialApp(context.Background(), net.JoinHostPort("127.0.0.1", port), zap.NewNop()); err == nil {
 		t.Fatal("expected the dial to fail when nothing is listening anywhere")
 	}
 	if _, still := pm.appAddr[p]; still {
@@ -140,7 +141,7 @@ func TestDialApp_ReportsTheOriginalAddressWhenNothingIsListening(t *testing.T) {
 	ln, addr := listenOn(t, "127.0.0.1")
 	_ = ln.Close()
 
-	_, err := pm.dialApp(addr, zap.NewNop())
+	_, err := pm.dialApp(context.Background(), addr, zap.NewNop())
 	if err == nil {
 		t.Fatal("expected an error")
 	}

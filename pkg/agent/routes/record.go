@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/render"
 	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -74,6 +75,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 
 	r.Route(agentRoutePrefix, func(r chi.Router) {
 		r.Get("/health", a.Health)
+		r.Get("/ca", a.CACert)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)
 		r.Post("/mappings", a.HandleMappings)
@@ -85,6 +87,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
+		r.Get("/ids", a.HandleIDs)
 		r.Post("/test-capture/begin", a.BeginTestErrorCapture)
 		// Per-test scope API for `keploy mock record|replay` — a user's test
 		// runner marks per-test boundaries so mocks are attributed / restricted
@@ -93,6 +96,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/scope/end", a.HandleScopeEnd)
 		r.Get("/scope/windows", a.HandleScopeWindows)
 		r.Post("/scope/table", a.HandleScopeTable)
+		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
@@ -239,8 +243,31 @@ func (a *Agent) Stop(w http.ResponseWriter, _ *http.Request) {
 
 func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	// Tells the client that /storemocks takes a zstd-compressed stream
+	// (RFC 7694). An agent without this header gets the stream uncompressed.
+	w.Header().Set("Accept-Encoding", models.MockStreamEncodingZstd)
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
+}
+
+// CACert serves this run's MITM CA public certificate (PEM) to the native
+// client, which points the app's trust env vars at it. The MITM CA is generated
+// per run and its private key never leaves the agent; only the public
+// certificate is returned here. The route is token-guarded (it is NOT in
+// isAuthExempt), so only the keploy client that holds the session token can read
+// it. A 503 before SetupCA has established the CA lets the client distinguish
+// "not ready yet" from a transport failure.
+func (a *Agent) CACert(w http.ResponseWriter, _ *http.Request) {
+	certPEM := pTls.ActiveCACertPEM()
+	if len(certPEM) == 0 {
+		http.Error(w, "CA not ready", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(certPEM); err != nil {
+		a.logger.Debug("failed to write CA certificate response", zap.Error(err))
+	}
 }
 
 // HandlePcapStream is a long-lived chunked response that emits a
@@ -694,6 +721,7 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			starts.Default.Stamp(m)
 			if err := enc.Encode(m); err != nil {
 				// enc.Encode(m) folds two distinct failure modes into
 				// one error: (a) per-mock serialization errors (an

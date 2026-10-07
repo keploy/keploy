@@ -72,6 +72,42 @@ func (l Lifetime) String() string {
 	}
 }
 
+// ConsumeMode classifies how the matcher should consume a mock across repeated
+// identical requests within one replay. Like Lifetime it is a runtime-only
+// concept derived at ingest (see DeriveLifetime) and never touches the on-disk
+// wire format, so changing it changes replay behaviour only — recorders and
+// older replayers are unaffected.
+type ConsumeMode uint8
+
+const (
+	// ConsumeReuse serves the same recorded response for every identical
+	// request. This is the zero value and preserves the historical behaviour
+	// for session/config/connection mocks (handshakes, auth, SET/SHOW,
+	// prepared-statement setup) whose response does not advance across calls.
+	ConsumeReuse ConsumeMode = iota
+
+	// ConsumeCursorSaturate serves successive recorded responses in record
+	// order for repeated identical requests (a per-key cursor), then saturates
+	// on the last recorded response once the cursor passes the end. It makes a
+	// stateful dependency sequence (a counter, a created-then-read row) replay
+	// as 1,2,3 instead of 1,1,1 — closing a silent false pass — while a
+	// fixture re-read past the recorded count keeps getting the last response
+	// rather than a "no matching mock" miss. Applied to data-plane mocks
+	// (DeriveLifetime rules #4/#5). At N=1 (a single recorded response, the
+	// overwhelming case) it is byte-identical to ConsumeReuse.
+	ConsumeCursorSaturate
+)
+
+// String returns a human-readable label suitable for logs and telemetry.
+func (c ConsumeMode) String() string {
+	switch c {
+	case ConsumeCursorSaturate:
+		return "cursor-saturate"
+	default:
+		return "reuse"
+	}
+}
+
 // DeriveLifetime resolves a mock's runtime Lifetime from its on-disk
 // metadata tag, with a legacy-format fallback for recordings captured
 // before the tag convention was universally applied.
@@ -208,6 +244,14 @@ func (m *Mock) DeriveLifetime() {
 	// on every mock load.
 	if tag == "" && kindsWithImplicitSessionLifetime(m.Kind) {
 		m.TestModeInfo.Lifetime = LifetimeSession
+		// Data-plane mocks promoted to session here are the ones whose repeated
+		// identical requests must advance through the recorded responses (a
+		// counter, a created-then-read row) instead of replaying the first one
+		// forever. Mark them for cursor+saturate consumption; the matcher acts
+		// on this only when stateful mocks are enabled (the default).
+		if kindSupportsCursor(m.Kind) {
+			m.TestModeInfo.Consume = ConsumeCursorSaturate
+		}
 		atomic.AddUint64(&legacyKindFallbackFires, 1)
 		return
 	}
@@ -232,9 +276,26 @@ func (m *Mock) DeriveLifetime() {
 	// the narrow path above and returns before reaching here.
 	if !laxKindFallbackDisabled() && kindsWithImplicitSessionLifetime(m.Kind) {
 		m.TestModeInfo.Lifetime = LifetimeSession
+		// Same rationale as the untagged branch above: a non-canonical tag on a
+		// data-plane kind under lax mode is still a data mock whose repeated
+		// requests must advance, not reuse the first response.
+		if kindSupportsCursor(m.Kind) {
+			m.TestModeInfo.Consume = ConsumeCursorSaturate
+		}
 		return
 	}
 	m.TestModeInfo.Lifetime = LifetimePerTest
+}
+
+// kindSupportsCursor reports whether a data-plane kind's repeated identical
+// requests should be served as a record-ordered cursor (ConsumeCursorSaturate)
+// rather than reused. It is the cursor-eligible subset of
+// kindsWithImplicitSessionLifetime: DNS is excluded because resolution order is
+// non-deterministic, so cursoring it would make replay depend on an ordering
+// the application never guarantees (the AssertDependencies path excludes DNS for
+// the same reason).
+func kindSupportsCursor(k Kind) bool {
+	return k != DNS && kindsWithImplicitSessionLifetime(k)
 }
 
 // laxKindFallbackDisabled reports whether strict mode is forcing the

@@ -15,8 +15,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// testCA mints a throwaway signing CA for these cases.
-func testCA(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate) {
+// ipSANTestCA mints a throwaway signing CA for these cases.
+func ipSANTestCA(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -68,7 +68,7 @@ func (p *portConn) RemoteAddr() net.Addr {
 // verifies the peer — client-go against the API server ClusterIP, for one —
 // rejected it with "doesn't contain any IP SANs".
 func TestCertForClient_IPLiteralDestinationGetsIPSAN(t *testing.T) {
-	key, ca := testCA(t)
+	key, ca := ipSANTestCA(t)
 	logger := zap.NewNop()
 
 	for _, tc := range []struct {
@@ -116,7 +116,7 @@ func TestCertForClient_IPLiteralDestinationGetsIPSAN(t *testing.T) {
 // With SNI present the destHost must be ignored entirely, so the overwhelmingly
 // common path keeps minting exactly the certificate it did before.
 func TestCertForClient_SNIWinsOverDestHost(t *testing.T) {
-	key, ca := testCA(t)
+	key, ca := ipSANTestCA(t)
 	logger := zap.NewNop()
 	SrcPortToDstURL.Delete(40001)
 	getCertCache().Remove("api.example.com")
@@ -156,7 +156,7 @@ type fakeAddrConn struct{ net.Conn }
 func (fakeAddrConn) RemoteAddr() net.Addr { return nonTCPAddr{} }
 
 func TestCertForClient_NonTCPRemoteAddrDoesNotPanic(t *testing.T) {
-	key, ca := testCA(t)
+	key, ca := ipSANTestCA(t)
 	logger := zap.NewNop()
 	getCertCache().Remove("relay.example.com")
 
@@ -191,7 +191,7 @@ func TestCertForClient_NonTCPRemoteAddrDoesNotPanic(t *testing.T) {
 // or every such connection would file under key 0 and read back a destination
 // belonging to a different connection.
 func TestCertForClient_NonTCPRemoteAddrDoesNotTouchPortMap(t *testing.T) {
-	key, ca := testCA(t)
+	key, ca := ipSANTestCA(t)
 	logger := zap.NewNop()
 	SrcPortToDstURL.Delete(0)
 	getCertCache().Remove("a.example.com")
@@ -214,7 +214,7 @@ func TestCertForClient_NonTCPRemoteAddrDoesNotTouchPortMap(t *testing.T) {
 // this pin the IP fallback was written into it, so every consumer of the map
 // saw a value the client never sent.
 func TestCertForClient_DestHostDoesNotPolluteCapturedSNI(t *testing.T) {
-	key, ca := testCA(t)
+	key, ca := ipSANTestCA(t)
 	logger := zap.NewNop()
 	const port = 40777
 

@@ -1594,6 +1594,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			MockNoiseDetection:        r.config.Test.NoiseDetection(),
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
+			DisableStatefulMocks:      r.config.Test.DisableStatefulMocks,
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
@@ -1730,15 +1731,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
-		// The compose bring-up retry (pkg/client/app) answers a transient
-		// dependency crash by tearing the whole stack down, the injected
-		// keploy-agent included, and re-issuing `up`; the replacement agent boots
-		// empty. Everything this session stored on the agent lived in the process
-		// that just went away, and the setup above already ran, so without a check
-		// the tests would fire against an agent holding nothing and the run would
-		// report zero executed tests (keploy#4614). Re-register with the
-		// replacement, or fail this test set loudly rather than proceeding
-		// mockless.
+		// The compose bring-up retry (pkg/client/app) can leave keploy's agent
+		// replaced: compose starts again an agent it stopped, or recreates one
+		// under a recreate flag, and the replacement boots empty. The CLI sets
+		// it up again as this one was (pkg/platform/http/session.go); should that
+		// not have taken, everything this session stored on the agent lived in
+		// the process that went away, and the tests would fire against an agent
+		// holding nothing and report zero executed tests (keploy#4614).
+		// Re-register with the replacement, or fail this test set loudly rather
+		// than proceeding mockless.
 		if err := r.ensureAgentHoldsStoredMocks(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
 			totalConsumedMocks, useMappingBased, testCases); err != nil {
 			return models.TestSetStatusFailed, err
@@ -1854,6 +1855,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			MockNoiseDetection:        r.config.Test.NoiseDetection(),
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
+			DisableStatefulMocks:      r.config.Test.DisableStatefulMocks,
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
@@ -1965,6 +1967,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// var to exit the loop
 	var exitLoop bool
+	// captureOpened is whether a test of this set has opened its capture
+	// window: every later test's window carries in the misses made since the
+	// previous one closed (openTestErrorCapture).
+	var captureOpened bool
 	// var to store the error in the loop
 	var loopErr error
 	utils.TemplatizedValues = conf.Template
@@ -2308,6 +2314,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// startup section exists to close. The timestamp path needs no
 			// equivalent: it reloads them via disk.LoadBefore(firstWindowStart).
 			expectedNames := models.MergeStartupMockNames(expectedTestMockMappings[testCase.Name], startupMockNames)
+			// Open this test's capture window BEFORE moving the agent's mock
+			// window to it: moving it releases what the test recorded the app
+			// being pushed (a Pulsar MESSAGE), and a call the app makes at once
+			// in reaction is this test's. Opened after, that miss landed with
+			// no window open and was discarded.
+			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{})
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
@@ -2322,8 +2334,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// This ensures that replaceWith configuration takes precedence over global host/port overrides.
 
 			started := time.Now().UTC()
-
-			r.beginTestErrorCapture(runTestSetCtx)
 
 			resp, loopErr := r.hookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
 
@@ -2857,7 +2867,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// UnmatchedCalls is finalized for EVERY test, not just
 					// failed/obsolete ones: (1) a miss during an otherwise-passing
 					// test must still surface; (2) the per-test capture window
-					// opened by beginTestErrorCapture must be drained-and-closed
+					// opened by openTestErrorCapture must be drained-and-closed
 					// each iteration so a miss can't carry over to the next test.
 					// attachMockErrors (GetMockErrors -> result + summary store) is
 					// the single source of unmatched outgoing calls across all
@@ -3113,20 +3123,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// to expected would have that unexpected consumption tolerated — a
 			// test that should go OBSOLETE would pass instead.
 			streamExpected := models.MergeStartupMockNames(expectedTestMockMappings[tc.Name], startupMockNames)
+			// Open the per-test capture window before simulation, and before the
+			// agent's mock window moves to this test (see the non-streaming
+			// path). Unlike the non-streaming path we must NOT finalize it right
+			// after SimulateRequest (which returns at response headers) —
+			// outgoing mock calls keep happening while CompareHTTPStream consumes
+			// the stream body below. Every exit path therefore calls
+			// attachMockErrors only AFTER stream consumption has finished.
+			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{})
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
 				break
 			}
-
-			// Open the per-test capture window before simulation. Unlike the
-			// non-streaming path we must NOT finalize it right after
-			// SimulateRequest (which returns at response headers) — outgoing mock
-			// calls keep happening while CompareHTTPStream consumes the stream
-			// body below. Every exit path therefore calls attachMockErrors only
-			// AFTER stream consumption has finished.
-			r.beginTestErrorCapture(runTestSetCtx)
 
 			// Execute: SimulateRequest returns once response headers arrive;
 			// for streaming cases the body reader is drained later by
@@ -4333,7 +4343,7 @@ func (r *Replayer) probeMockStats(ctx context.Context) (models.MockStats, error)
 // fire against. The loaded count is only ever written by StoreMocks on the
 // agent process, so any non-zero value means that process received our store;
 // zero while a non-empty corpus was stored is the replacement-agent signature
-// (the bring-up retry boots a new agent, and nothing re-stores onto it).
+// (an agent the bring-up retry started that was not set up again).
 func agentHoldsStoredCorpus(stored, loaded int) bool {
 	return stored == 0 || loaded > 0
 }
@@ -4344,13 +4354,17 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // replacement agent when it does not.
 //
 // Why this exists: the compose bring-up retry (pkg/client/app,
-// shouldRetryComposeUp) answers a transient dependency crash by tearing the
-// whole stack down, the injected keploy-agent included, and re-issuing `up`;
-// the replacement agent boots empty. All of the session's replay state - the
-// stored corpus, the proxy's mock manager, the mock filter params - lived in
-// the agent that just went away, and the straight-line setup above has
-// already run, so nothing re-registers it: the tests fire against an agent
-// holding nothing and the run reports zero executed tests (keploy#4614).
+// shouldRetryComposeUp) answers a transient dependency crash by running `up`
+// again, and compose can replace the injected keploy-agent there: it starts
+// again an agent it stopped (every service attached), or recreates one (a
+// recreate flag), and the replacement boots empty. The CLI's agent session
+// sets the replacement up again once it answers (pkg/platform/http/
+// session.go); this is the check that it took, and the repair when it did not.
+// All of the session's replay state - the stored corpus, the proxy's mock
+// manager, the mock filter params - lived in the agent that went away, and
+// the straight-line setup above has already run: unrepaired, the tests fire
+// against an agent holding nothing and the run reports zero executed tests
+// (keploy#4614).
 //
 // The probe is the agent's non-draining /mock/stats loaded count rather than
 // GetConsumedMocks: that one drains, and polling it here would steal entries
@@ -5596,10 +5610,11 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 			zap.String("testCaseID", testCase.Name),
 			zap.Error(origErr))
 
-		// Re-open the per-test capture window so a mock miss on the re-send
-		// attributes to THIS test (the previous window was for the failed try).
-		r.beginTestErrorCapture(ctx)
-
+		// The test's capture window stays open across the re-send: what it
+		// holds is this test's — the misses carried in from before it
+		// (ContinueTestErrorCapture), those made as its mock window moved,
+		// and any the failed try made (it consumed no mock) — and reopening
+		// it would drop them.
 		resp, err := r.hookImpl.SimulateRequest(ctx, testCase, testSetID)
 		if err == nil {
 			return resp, true, nil
@@ -5690,13 +5705,37 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 	}
 }
 
+// openTestErrorCapture opens a test's mock-error capture window on the agent,
+// before the agent's mock window moves to the test, on BOTH the normal and
+// streaming paths; the matching attachMockErrors/GetMockErrors closes it (the
+// streaming path only after the stream body is fully consumed). The first test
+// of a set begins it (beginTestErrorCapture): what was missed before, the
+// app's startup, is no test's. Every later test continues it: the misses made
+// since the previous test's window closed, with no test running, are carried
+// into this one, the test running when they can first be reported, rather
+// than dropped. An agent without the continue capability begins instead.
+// Best-effort: a failure only degrades to the old behaviour.
+func (r *Replayer) openTestErrorCapture(ctx context.Context, opened *bool) {
+	first := !*opened
+	*opened = true
+	if !first {
+		if c, ok := r.instrumentation.(interface {
+			ContinueTestErrorCapture(context.Context) error
+		}); ok {
+			if err := c.ContinueTestErrorCapture(ctx); err != nil {
+				r.logger.Debug("failed to continue test error capture", zap.Error(err))
+			}
+			return
+		}
+	}
+	r.beginTestErrorCapture(ctx)
+}
+
 // beginTestErrorCapture opens a per-test mock-error capture window on the agent
 // (via an optional capability — older agents / non-agent instrumentations skip
 // it and fall back to the legacy global queue) so a mock miss during this test
-// attributes to THIS test instead of whichever test drains GetMockErrors next.
-// Called right before SimulateRequest on BOTH the normal and streaming paths;
-// the matching attachMockErrors/GetMockErrors closes the window (the streaming
-// path closes it only after the stream body is fully consumed).
+// attributes to THIS test instead of whichever test drains GetMockErrors next,
+// discarding what was missed with no window open.
 // Best-effort: a failure only degrades to the old behaviour.
 func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
 	if b, ok := r.instrumentation.(interface {
@@ -5717,10 +5756,10 @@ func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName
 	mockErrors, err := r.instrumentation.GetMockErrors(ctx)
 	if err != nil {
 		// Don't swallow silently. This test's misses can't be attached, but the
-		// agent-side window is reset by the next BeginTestErrorCapture (which
-		// discards a never-closed window), so the failure can't bleed into the
-		// next test. Log it so a persistent transport problem is visible rather
-		// than reports vanishing without a trace.
+		// agent-side window is reset when the next test opens its own (which
+		// drops a window never read, and says so), so the failure can't bleed
+		// into the next test. Log it so a persistent transport problem is
+		// visible rather than reports vanishing without a trace.
 		r.logger.Debug("failed to fetch mock errors for test; skipping unmatched-call attachment",
 			zap.String("testSetID", testSetID),
 			zap.String("testCaseID", testCaseName),

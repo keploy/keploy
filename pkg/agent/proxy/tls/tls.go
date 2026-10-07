@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net"
 	"time"
 
-	"github.com/cloudflare/cfssl/helpers"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -122,17 +122,17 @@ func destHostFrom(ctx context.Context) string {
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
 	preserveH2 := preferH2From(ctx)
 	destHost := destHostFrom(ctx)
-	// 1. Load the Proxy's Signing CA (Used to generate server certs)
-	caPrivKey, err := helpers.ParsePrivateKeyPEM(caPKey)
-	if err != nil {
-		utils.LogError(logger, err, "Failed to parse CA private key")
+	// 1. Load this run's signing CA (generated per run; see cagen.go). It is set
+	// by SetupCAForApp before the proxy serves; getActiveCA lazily mints an
+	// ephemeral one for callers that reach here without SetupCAForApp.
+	ca := getActiveCA(logger)
+	if ca == nil {
+		err := fmt.Errorf("no MITM CA available for this run")
+		utils.LogError(logger, err, "Failed to obtain the signing CA")
 		return nil, false, err
 	}
-	caCertParsed, err := helpers.ParseCertificatePEM(caCrt)
-	if err != nil {
-		utils.LogError(logger, err, "Failed to parse CA certificate")
-		return nil, false, err
-	}
+	caPrivKey := ca.signer
+	caCertParsed := ca.cert
 
 	config := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
@@ -159,7 +159,7 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	tlsConn := tls.Server(conn, config)
 
 	// Perform the handshake
-	err = tlsConn.Handshake()
+	err := tlsConn.Handshake()
 	if err != nil {
 		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
 		return nil, false, err

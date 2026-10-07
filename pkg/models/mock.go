@@ -117,6 +117,8 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
+	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	StartRef  string `json:"-" yaml:"-" bson:"-"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -224,6 +226,15 @@ type TestModeInfo struct {
 	// runs at every ingest site (disk load, StoreMocks, syncMock).
 	// Runtime-only, untagged; re-derived fresh on each reload.
 	LifetimeDerived bool `json:"-" bson:"-"`
+
+	// Consume classifies how the matcher consumes this mock across repeated
+	// identical requests — ConsumeReuse (serve the same response every time;
+	// the default for session/config/connection mocks) or ConsumeCursorSaturate
+	// (serve successive recorded responses in record order, then saturate on
+	// the last; for stateful data-plane mocks). Derived at ingest by
+	// DeriveLifetime alongside Lifetime; runtime-only, untagged, re-derived on
+	// each load for the same reason Lifetime is.
+	Consume ConsumeMode `json:"-" bson:"-"`
 
 	// IsStartup marks startup-window traffic: a mock captured either before
 	// the first inbound request (classic app-bootstrap, e.g. an AWS Secret

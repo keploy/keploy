@@ -1585,6 +1585,144 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	return nil
 }
 
+// mockFileVariants returns the three possible on-disk mock-file paths for a set
+// directory (yaml / json / gob) — the full set DeleteMocksForSet manages. The
+// base name defaults to "mocks" unless a custom MockName was configured.
+func (ys *MockYaml) mockFileVariants(setDir string) []string {
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+	return []string{
+		filepath.Join(setDir, mockFileName+"."+yaml.FormatYAML.FileExtension()),
+		filepath.Join(setDir, mockFileName+"."+yaml.FormatJSON.FileExtension()),
+		filepath.Join(setDir, mockFileName+".gob"),
+	}
+}
+
+// PromoteStagedSet replaces targetID's mock files with the ones record captured
+// into stagingID (an atomic rename for the common same-format case; a format
+// switch is rename-then-remove, see below), then removes the staging set. It is how
+// `keploy mock record` avoids destroying an existing recording: capture streams
+// into a staging set and is promoted only once the run has produced mocks and
+// finished cleanly, so a failed, interrupted or zero-capture run leaves the
+// existing set untouched (gaps W1/W14; design §P0b "no delete-first").
+//
+// The gob writer is an async, truncate-on-open stream, so Close() is called
+// first to flush and finalize staging's file before it is moved. A flush error
+// aborts the promote WITHOUT touching the target, so a corrupt or partial
+// staged set never overwrites a good recording. Then, for each format, the
+// staged file is renamed over the target (atomic on one filesystem) and any
+// stale target variant of a format that was not staged is removed — mirroring
+// DeleteMocksForSet's variant set so a prior format cannot shadow the promoted
+// one. An empty staging set is refused, so a bug upstream can never blank the
+// target.
+func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID string) error {
+	_ = ctx
+	for _, id := range []string{stagingID, targetID} {
+		if err := pathsafe.ValidateSingleSegment(id, false); err != nil {
+			return fmt.Errorf("rejecting PromoteStagedSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..'): %w", id, err)
+		}
+	}
+
+	// Finalize any open (gob) writer so staging's file is complete on disk before
+	// it is moved. No-op for yaml/json, whose writes are synchronous. A flush
+	// error means the staged recording is incomplete — do not promote it.
+	if err := ys.Close(); err != nil {
+		return fmt.Errorf("not promoting staged set %q: finalizing its mock file failed, so %q is left untouched: %w", stagingID, targetID, err)
+	}
+
+	stagingDir := filepath.Join(ys.MockPath, stagingID)
+	targetDir := filepath.Join(ys.MockPath, targetID)
+	stagingVariants := ys.mockFileVariants(stagingDir)
+	targetVariants := ys.mockFileVariants(targetDir)
+
+	// Record which formats were staged BEFORE moving anything — pass 1 renames
+	// the staged files away, so their absence afterwards must not be mistaken for
+	// "not staged" in pass 2 (which would then delete what was just promoted).
+	wasStaged := make([]bool, len(stagingVariants))
+	anyStaged := false
+	for i, sv := range stagingVariants {
+		if _, err := os.Stat(sv); err == nil {
+			wasStaged[i] = true
+			anyStaged = true
+		}
+	}
+	// Guard: never wipe the target based on an empty staging set.
+	if !anyStaged {
+		return fmt.Errorf("nothing staged to promote for %q; leaving %q untouched", stagingID, targetID)
+	}
+
+	if err := os.MkdirAll(targetDir, 0o777); err != nil {
+		return fmt.Errorf("creating target set dir %q: %w", targetDir, err)
+	}
+
+	// Promote in two passes so a complete recording is always present in the
+	// target. Pass 1 renames every staged file into place — an atomic replace per
+	// format; on the common same-format path this is the whole promote, and a
+	// failed rename leaves the previous recording untouched. Pass 2 then removes
+	// any target variant of a format that was NOT staged, so a prior format
+	// cannot shadow the promoted one. Removing first (the earlier single-pass
+	// form) could delete the old recording before the new rename and, if that
+	// rename then failed, leave the target empty — the data loss this function
+	// exists to prevent.
+	//
+	// Residual (crash-only, self-healing on the next record): if the format
+	// changed from gob to a text format, a crash between the passes leaves the
+	// old gob shadowing the new text file until the next record, since the read
+	// path prefers gob. No data is lost.
+	for i := range stagingVariants {
+		if !wasStaged[i] {
+			continue
+		}
+		if err := os.Rename(stagingVariants[i], targetVariants[i]); err != nil {
+			return fmt.Errorf("promoting staged mock file %q over %q: %w", stagingVariants[i], targetVariants[i], err)
+		}
+	}
+	for i := range targetVariants {
+		if wasStaged[i] {
+			continue
+		}
+		// Validate before the destructive remove, as DeleteMocksForSet does — the
+		// ID is already single-segment-checked and the filename is fixed, so this
+		// is defense-in-depth against a future path-construction change.
+		validated, verr := yaml.ValidatePath(targetVariants[i])
+		if verr != nil {
+			return fmt.Errorf("validating stale target mock path %q: %w", targetVariants[i], verr)
+		}
+		if rmErr := os.Remove(validated); rmErr != nil && !os.IsNotExist(rmErr) {
+			return fmt.Errorf("removing stale target mock file %q: %w", validated, rmErr)
+		}
+	}
+
+	if err := os.RemoveAll(stagingDir); err != nil {
+		ys.Logger.Warn("promoted the staged mock set but could not remove its staging directory; it is safe to delete",
+			zap.String("stagingDir", stagingDir), zap.Error(err))
+	}
+	ys.Logger.Info("promoted staged mock set", zap.String("from", stagingID), zap.String("to", targetID))
+	return nil
+}
+
+// DiscardStagedSet removes a staging set left by a record that did not complete
+// (failed, interrupted, or captured nothing), so the existing target set it was
+// never promoted over stays intact. Also called before capture to clear any
+// staging directory a previously-crashed run left behind.
+func (ys *MockYaml) DiscardStagedSet(ctx context.Context, stagingID string) error {
+	_ = ctx
+	if err := pathsafe.ValidateSingleSegment(stagingID, false); err != nil {
+		return fmt.Errorf("rejecting DiscardStagedSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..'): %w", stagingID, err)
+	}
+	// Release any open (gob) writer handle before removing the directory.
+	if err := ys.Close(); err != nil {
+		ys.Logger.Debug("discardStagedSet: closing the mock writer reported an error; removing the staging dir anyway", zap.Error(err))
+	}
+	stagingDir := filepath.Join(ys.MockPath, stagingID)
+	if err := os.RemoveAll(stagingDir); err != nil {
+		return fmt.Errorf("discarding staged set %q: %w", stagingID, err)
+	}
+	return nil
+}
+
 func (ys *MockYaml) GetCurrMockID() int64 {
 	return atomic.LoadInt64(&ys.idCounter)
 }
