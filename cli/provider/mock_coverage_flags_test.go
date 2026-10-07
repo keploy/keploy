@@ -122,3 +122,80 @@ func TestMockSetNameIsOneDirectory(t *testing.T) {
 }
 
 func ptr(f float64) *float64 { return &f }
+
+func TestMockSetNameRespectsKeployYml(t *testing.T) {
+	for _, tc := range []struct {
+		name, fromYml, flag, want string
+	}{
+		{name: "default", want: "default"},
+		{name: "keploy.yml names the set", fromYml: "orders", want: "orders"},
+		{name: "an explicit --name wins", fromYml: "orders", flag: "payments", want: "payments"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Mock.Name = "default"
+			c := NewCmdConfigurator(zap.NewNop(), cfg)
+			cmd := &cobra.Command{Use: "replay"}
+			if err := c.addMockFlags(cmd); err != nil {
+				t.Fatal(err)
+			}
+			if tc.fromYml != "" {
+				cfg.Mock.Name = tc.fromYml
+			}
+			if tc.flag != "" {
+				if err := cmd.Flags().Set("name", tc.flag); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := c.readMockSetName(cmd); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Mock.Name != tc.want {
+				t.Fatalf("set name = %q, want %q", cfg.Mock.Name, tc.want)
+			}
+		})
+	}
+}
+
+// A run-only list committed in keploy.yml survives the flag's empty default;
+// an explicit flag still replaces it.
+func TestMockRunOnlyFlagRespectsKeployYml(t *testing.T) {
+	t.Cleanup(viper.Reset)
+	for _, tc := range []struct {
+		name  string
+		file  []string
+		flags string
+		want  []string
+	}{
+		{name: "keploy.yml list survives the flag default", file: []string{"TestA", "TestB"}, want: []string{"TestA", "TestB"}},
+		{name: "an explicit flag overrides keploy.yml", file: []string{"TestA"}, flags: "TestC", want: []string{"TestC"}},
+		// A parametrized pytest name carries commas: it is one test.
+		{name: "a name with commas is one test", flags: "test_x[a,b]", want: []string{"test_x[a,b]"}},
+		{name: "neither runs every test", want: []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			cmd, cfg, c := replayCmd(t)
+			if tc.file != nil {
+				viper.Set("mock.runOnly", tc.file)
+				cfg.Mock.RunOnly = tc.file
+			}
+			if tc.flags != "" {
+				if err := cmd.Flags().Set("run-only", tc.flags); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := c.readMockRunOnly(cmd); err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.Mock.RunOnly) != len(tc.want) {
+				t.Fatalf("run-only %v, want %v", cfg.Mock.RunOnly, tc.want)
+			}
+			for i := range tc.want {
+				if cfg.Mock.RunOnly[i] != tc.want[i] {
+					t.Fatalf("run-only %v, want %v", cfg.Mock.RunOnly, tc.want)
+				}
+			}
+		})
+	}
+}

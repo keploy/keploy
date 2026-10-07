@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
@@ -18,6 +19,7 @@ import (
 
 // mockService implements Service for the `keploy mock record|replay` flow.
 type mockService struct {
+	ids *ids.Map
 	// servedAnnounced remembers which mocks have already been reported as
 	// served, so the poll loop and the end-of-run flush cannot announce the
 	// same mock twice. Guarded because the two run on different goroutines.
@@ -28,6 +30,7 @@ type mockService struct {
 	instrumentation Instrumentation
 	mockDB          MockDB
 	mappingDB       MappingDB // may be nil (suite-level only)
+	testDB          TestDB    // set only for --record-requests
 	store           Store
 	hooks           record.RecordHooks // reused so enterprise obfuscation/encryption applies on record
 	config          *config.Config
@@ -85,6 +88,11 @@ func (m *mockService) SetStore(store Store) {
 	if store != nil {
 		m.store = store
 	}
+}
+
+// SetTestDB gives Record a store for the app's incoming requests (--record-requests).
+func (m *mockService) SetTestDB(db TestDB) {
+	m.testDB = db
 }
 
 // SetRecordHooks replaces the record hooks (e.g. enterprise secret obfuscation).

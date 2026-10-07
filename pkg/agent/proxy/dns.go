@@ -509,6 +509,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				ParserErrorType: models.ErrMockNotFound,
 				Err:             fmt.Errorf("DNS mock not found for query: %s (%s)", question.Name, dns.TypeToString[question.Qtype]),
 				MismatchReport: &models.MockMismatchReport{
+					At:            time.Now(),
 					Protocol:      "DNS",
 					ActualSummary: fmt.Sprintf("%s %s", dns.TypeToString[question.Qtype], question.Name),
 					NextSteps:     "DNS mocks may be missing. Re-record to capture DNS queries.",

@@ -52,6 +52,12 @@ type DialTarget struct {
 	// (silently connect to an unrelated local server and record its traffic as
 	// the dependency's).
 	Fabricated bool
+
+	// Predialed is the connection opened to Addr while the application's
+	// handshake was held, if it was: DialDestination and DialDestinationTLS
+	// use it instead of dialling (Predialed.take). Callers of
+	// DialDestinationWith pass it to DialRaw / DialTLS in their own dial.
+	Predialed *Predialed
 }
 
 // DialDestination dials the application's original destination, restoring the
@@ -75,6 +81,12 @@ type DialTarget struct {
 // listening on the requested family at all, so no live service is being
 // passed over. A timeout or a reset is a different condition and is left alone.
 //
+// A connection whose handshake the proxy held (synhold) never gets here on a
+// refusal: its upstream was dialled without this fallback before the
+// application's connect completed, and the application saw the refusal
+// itself — and makes its own fallback, if it has one, as it would without
+// keploy.
+//
 // What this is NOT: a proof that the application would itself have tried the
 // counterpart. That stdlib fallback is name-driven — it happens because
 // "localhost" resolved to both addresses and the dialer walks the resolved set.
@@ -86,8 +98,7 @@ type DialTarget struct {
 // is a judgement, not a proof.
 func DialDestination(ctx context.Context, logger *zap.Logger, network string, target DialTarget) (net.Conn, error) {
 	return DialDestinationWith(ctx, logger, target, func(ctx context.Context, addr string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, network, addr)
+		return DialRaw(ctx, nil, network, addr, target.Predialed)
 	})
 }
 
@@ -97,8 +108,11 @@ func DialDestination(ctx context.Context, logger *zap.Logger, network string, ta
 func DialDestinationTLS(ctx context.Context, logger *zap.Logger, network string, target DialTarget, cfg *tls.Config) (net.Conn, error) {
 	requestedHost, _, _ := net.SplitHostPort(target.Addr)
 	return DialDestinationWith(ctx, logger, target, func(ctx context.Context, addr string) (net.Conn, error) {
-		d := &tls.Dialer{Config: tlsConfigForAddr(cfg, requestedHost, addr)}
-		return d.DialContext(ctx, network, addr)
+		c, err := DialTLS(ctx, nil, network, addr, tlsConfigForAddr(cfg, requestedHost, addr), target.Predialed)
+		if err != nil {
+			return nil, err // not a typed-nil *tls.Conn in a net.Conn
+		}
+		return c, nil
 	})
 }
 

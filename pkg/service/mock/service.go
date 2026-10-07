@@ -110,12 +110,38 @@ type ScopePusher interface {
 	PushScopeTable(ctx context.Context, table map[string][]string) error
 }
 
+// ScopeGatePusher is an optional Instrumentation extension: Replay uses it to
+// tell the agent which tests should run this replay (see ScopeGateSource).
+// run == nil lets every test run.
+type ScopeGatePusher interface {
+	PushScopeGate(ctx context.Context, run []string, reason string) error
+}
+
+type SetPusher interface {
+	PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) error
+}
+
+type MappingReader interface {
+	GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error)
+}
+
 // MockDB reads and writes a named mock set on disk. It is exactly the surface
 // the yaml mockdb already implements, so OSS wires the file store directly and
 // enterprise wraps it with registry upload/download.
 type MockDB interface {
 	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
 	DeleteMocksForSet(ctx context.Context, testSetID string) error
+	// PromoteStagedSet replaces targetID's mock files with the ones recorded into
+	// stagingID (an atomic rename for the common same-format case), then removes
+	// the staging set. Record captures into a staging set and promotes it only on
+	// a complete, non-empty run, so a failed, interrupted or zero-capture record
+	// never destroys an existing recording (gaps W1/W14; design §P0b "no
+	// delete-first").
+	PromoteStagedSet(ctx context.Context, stagingID, targetID string) error
+	// DiscardStagedSet removes a staging set left by a record that did not
+	// complete, leaving the target it was never promoted over intact. Also used
+	// before capture to clear a staging directory a crashed run left behind.
+	DiscardStagedSet(ctx context.Context, stagingID string) error
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	ResetCounterID()
@@ -129,7 +155,37 @@ type MockDB interface {
 type MappingDB interface {
 	UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
-	DeleteMappingsForSet(ctx context.Context, testSetID string) error
+}
+
+// CaseMapper is an optional MappingDB extension: Record writes which test cases each flow produced through it.
+type CaseMapper interface {
+	UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error
+}
+
+type BootMapper interface {
+	UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error
+}
+
+// IncomingReader is an optional Instrumentation extension: the agent's stream of the app's captured incoming requests.
+type IncomingReader interface {
+	GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error)
+}
+
+// TestDB stores the app's incoming requests as test cases under --record-requests.
+type TestDB interface {
+	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error
+	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+}
+
+// TestDBSetter is how the CLI hands the mock service a test-case store when --record-requests is set.
+type TestDBSetter interface {
+	SetTestDB(db TestDB)
+}
+
+// MappingDeleter is an optional MappingDB extension: Record drops the set's old mappings through it before a re-record.
+type MappingDeleter interface {
+	Delete(ctx context.Context, testSetID string) error
 }
 
 // Store is the mock-set persistence backend. OSS uses FileStore (mocks live on

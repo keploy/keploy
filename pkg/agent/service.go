@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -144,6 +146,17 @@ type RecordedWindowsSeeder interface {
 	SeedRecordedWindows(ws []models.TestWindow)
 }
 
+// StatefulCursorResetter is the optional extension implemented by proxies whose
+// mock manager keeps per-request cursors for stateful dependency replay (serving
+// successive recorded responses in record order). The agent calls it once per
+// test-set, on the staging call, so a stateful sequence replays from its first
+// recorded response in each test-set rather than carrying a cursor across sets.
+// Optional in the same style as StartupCutoffSeeder: a proxy that lacks it is a
+// no-op (a proxy without stateful cursors has nothing to reset).
+type StatefulCursorResetter interface {
+	ResetStatefulCursors()
+}
+
 // CarryOverPlanner is the optional extension implemented by proxies with a
 // carry-over tier (models.RegisterCarryOver). For the window that starts at
 // start it names the recorded-time range of registered per-test mocks the agent
@@ -215,6 +228,22 @@ type ProxyOptions struct {
 type DestInfo interface {
 	Get(ctx context.Context, srcPort uint16) (*NetworkAddress, error)
 	Delete(ctx context.Context, srcPort uint16) error
+}
+
+// ErrConnectingSocketGone is GetForHandshake's error when the application's
+// connecting socket no longer exists: it gave up on the connection.
+var ErrConnectingSocketGone = errors.New("the application's connecting socket is gone")
+
+// HandshakeDestInfo is a DestInfo that can name a redirected connection's
+// original destination while its handshake with the proxy is still in flight:
+// client is the application's end of the connection and proxy the proxy's,
+// as the SYN carries them. Get can only answer once the handshake completes,
+// which is too late for the proxy to make connect itself fail the way the
+// destination failed it (see synhold).
+type HandshakeDestInfo interface {
+	// CheckHandshakeLookup reports whether GetForHandshake can work here.
+	CheckHandshakeLookup(ctx context.Context) error
+	GetForHandshake(ctx context.Context, client, proxy netip.AddrPort) (*NetworkAddress, error)
 }
 
 type TestBenchInfo interface {

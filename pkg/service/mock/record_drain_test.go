@@ -92,8 +92,10 @@ func (r *recordingMockDB) InsertMock(_ context.Context, m *models.Mock, _ string
 	r.names = append(r.names, m.Name)
 	return nil
 }
-func (r *recordingMockDB) DeleteMocksForSet(context.Context, string) error { return nil }
-func (r *recordingMockDB) ResetCounterID()                                 {}
+func (r *recordingMockDB) DeleteMocksForSet(context.Context, string) error        { return nil }
+func (r *recordingMockDB) PromoteStagedSet(context.Context, string, string) error { return nil }
+func (r *recordingMockDB) DiscardStagedSet(context.Context, string) error         { return nil }
+func (r *recordingMockDB) ResetCounterID()                                        {}
 func (r *recordingMockDB) inserted() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -122,7 +124,7 @@ func (r *recordingMappingDB) Get(_ context.Context, _ string) (map[string][]mode
 	return make(map[string][]models.MockEntry), false, nil
 }
 
-func (r *recordingMappingDB) DeleteMappingsForSet(_ context.Context, testSetID string) error {
+func (r *recordingMappingDB) Delete(_ context.Context, testSetID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.deletedSets = append(r.deletedSets, testSetID)
@@ -173,7 +175,7 @@ func TestRecord_KeepsMockEmittedAfterRunnerExit(t *testing.T) {
 	deleted := mappingDB.deletedSets
 	mappingDB.mu.Unlock()
 	if len(deleted) == 0 || deleted[0] != "drain-test" {
-		t.Fatalf("expected DeleteMappingsForSet to be called for drain-test, got %v", deleted)
+		t.Fatalf("expected Delete to be called for drain-test, got %v", deleted)
 	}
 }
 

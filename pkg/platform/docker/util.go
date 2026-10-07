@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -114,16 +115,28 @@ func AgentTokenEnv() []string {
 // (utils.ExecuteCommand), the `docker stop` that tears this container down and
 // the Engine API client (FromEnv), none of which go through sudo.
 //
-// Anything else goes through sudo, told to keep that one variable and no other.
+// Anything else goes through sudo, told to keep that one variable and no other
+// (sudoKeepingToken). PrepareDockerCommand refuses a sudo that would not.
 func linuxDockerClient(root, passToken bool) string {
+	cli := engine.Active().CLI
 	switch {
 	case root:
-		return "docker"
+		return cli
 	case passToken:
-		return "sudo --preserve-env=" + token.Env + " docker"
+		return sudoKeepingToken + " " + cli
 	default:
-		return "sudo docker"
+		return "sudo " + cli
 	}
+}
+
+// agentSecurityOptFlags are the engine's --security-opt flags for keploy's
+// agent container, each with a leading space.
+func agentSecurityOptFlags() string {
+	var b strings.Builder
+	for _, opt := range engine.Active().AgentSecurityOpts {
+		b.WriteString(" --security-opt " + opt)
+	}
+	return b.String()
 }
 
 func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.Config, opts models.SetupOptions) (keployAlias string, err error) {
@@ -315,7 +328,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		alias := linuxDockerClient(os.Geteuid() == 0, passToken) + " container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
 			proxyPortStr + appPortsStr +
-			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
+			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE" + agentSecurityOptFlags() + " " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
 
@@ -326,6 +339,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
+		}
+		if opts.DisableHandshakeHold {
+			alias += " --disable-handshake-hold"
 		}
 		if opts.CapturePackets {
 			alias += " --capture-packets"
@@ -405,6 +421,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
+			if opts.DisableHandshakeHold {
+				alias += " --disable-handshake-hold"
+			}
 			if opts.CapturePackets {
 				alias += " --capture-packets"
 			}
@@ -467,6 +486,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
+		}
+		if opts.DisableHandshakeHold {
+			alias += " --disable-handshake-hold"
 		}
 		if opts.CapturePackets {
 			alias += " --capture-packets"
@@ -546,6 +568,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
+			if opts.DisableHandshakeHold {
+				alias += " --disable-handshake-hold"
+			}
 			if opts.CapturePackets {
 				alias += " --capture-packets"
 			}
@@ -607,6 +632,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
+		}
+		if opts.DisableHandshakeHold {
+			alias += " --disable-handshake-hold"
 		}
 		if opts.CapturePackets {
 			alias += " --capture-packets"
@@ -694,8 +722,11 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 // mockModeSuffix returns " --mock-mode" when the session is a `keploy mock`
 // record/replay run, so the containerised agent skips ingress/bind relocation.
 func mockModeSuffix(opts models.SetupOptions) string {
-	if opts.MockMode {
-		return " --mock-mode"
+	if !opts.MockMode {
+		return ""
 	}
-	return ""
+	if opts.RecordRequests {
+		return " --mock-mode --record-requests"
+	}
+	return " --mock-mode"
 }

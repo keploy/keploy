@@ -4,11 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -38,6 +44,7 @@ const mockDrainQuiet = 500 * time.Millisecond
 // pushes the set to the store, and propagates the runner's exit code.
 func (m *mockService) Record(ctx context.Context) error {
 	name := m.setName()
+	requests := m.requests()
 	m.logger.Info("Recording mocks for your test command",
 		zap.String("mock-set", name),
 		zap.String("command", m.userCommand))
@@ -70,14 +77,18 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 1. Instrument: start the agent, hooks and proxy in mock mode (no ingress
 	//    port relocation — the runner is not a server).
 	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
-		Container:     m.config.ContainerName,
-		FromContainer: m.config.FromContainer,
-		CommandType:   m.config.CommandType,
-		DockerDelay:   m.config.BuildDelay,
-		BuildDelay:    m.config.BuildDelay,
-		Mode:          models.MODE_RECORD,
-		MockMode:      true,
-		ConfigPath:    m.config.ConfigPath,
+		Container:        m.config.ContainerName,
+		FromContainer:    m.config.FromContainer,
+		CommandType:      m.config.CommandType,
+		DockerDelay:      m.config.BuildDelay,
+		BuildDelay:       m.config.BuildDelay,
+		Mode:             models.MODE_RECORD,
+		MockMode:         true,
+		ConfigPath:       m.config.ConfigPath,
+		PassThroughPorts: config.GetByPassPorts(m.config),
+		RecordRequests:   requests,
+
+		DisableHandshakeHold: m.config.Record.DisableHandshakeHold,
 	}); err != nil {
 		if parent.Err() != nil {
 			return nil
@@ -109,17 +120,48 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
-	// 3. Overwrite the named set in place: drop the previous mocks and mappings
-	//    so the re-record is a clean rewrite, not an append.
-	if err := m.mockDB.DeleteMocksForSet(persistCtx, name); err != nil {
-		m.logger.Debug("no existing mock set to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
+	restore, existed, err := m.saveSet(name)
+	if err != nil {
+		// No restorable copy of the set — refuse before deleting its mappings
+		// or cases below, so a failed backup can never destroy the recording.
+		stopReason = "could not back up the existing mock set before re-recording it"
+		utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name),
+			zap.String("next_step", "free up disk space or fix permissions on your keploy mocks folder, then retry — your existing recording was left untouched"))
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
-	if m.mappingDB != nil {
-		if err := m.mappingDB.DeleteMappingsForSet(persistCtx, name); err != nil {
-			m.logger.Debug("no existing mappings to delete (or delete failed)", zap.String("mock-set", name), zap.Error(err))
+	keep := false
+	defer func() { restore(keep) }()
+	// 3. Capture into a staging set and promote it over the named set only once
+	//    the run has produced mocks and finished cleanly. This replaces the old
+	//    delete-first, which dropped the existing recording before capture even
+	//    armed — so any failure, interrupt or zero-capture run left the user with
+	//    nothing (gaps W1/W14; design §P0b "no delete-first"). See
+	//    MockDB.PromoteStagedSet / DiscardStagedSet.
+	staging := stagingSetID(name)
+	// Clear any staging set a previously-crashed record left behind. This MUST
+	// succeed before we capture: appending into a dirty staging base would
+	// persist duplicate/stale mocks (yaml appends; a leftover gob would even be
+	// promoted and, being preferred on read, shadow the fresh recording) and then
+	// promote that polluted set over the real one. The real set is untouched
+	// here, so aborting now is safe and leaves it intact.
+	if err := m.mockDB.DiscardStagedSet(persistCtx, staging); err != nil {
+		stopReason = "failed to clear a leftover staging set before recording"
+		utils.LogError(m.logger, err, stopReason, zap.String("staging", staging),
+			zap.String("next_step", "remove the leftover staging directory under your keploy mocks folder (its name ends in "+yaml.MockStagingSuffix+") and retry"))
+		return fmt.Errorf("%s: %w", stopReason, err)
+	}
+	defer func() {
+		if !keep {
+			_ = m.mockDB.DiscardStagedSet(persistCtx, staging)
 		}
-	}
+	}()
 	m.mockDB.ResetCounterID()
+	m.deleteMappings(persistCtx, name)
+	if requests {
+		// The old cases stay until the run has ended so the new ones are numbered after them: a flow
+		// re-recorded on its own must not reuse the names of the flows the set carries.
+		defer m.deleteCases(persistCtx, name, m.caseNames(persistCtx, name))
+	}
 
 	// 4. Arm the record proxy and stream captured mocks.
 	captureCtx, stopCapture := context.WithCancel(context.WithoutCancel(ctx))
@@ -163,14 +205,14 @@ func (m *mockService) Record(ctx context.Context) error {
 	// only by persist, which runs on the one consumer goroutine.
 	insertedDoc := rec.NewInsertedMockDoc(persistCtx, m.hooks)
 	persist := func(mk *models.Mock) {
-		mctx := &rec.MockContext{Mock: mk, TestSetID: name}
+		mctx := &rec.MockContext{Mock: mk, TestSetID: staging}
 		if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
 			m.logger.Debug("BeforeMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 		}
 		if mctx.Skip {
 			return
 		}
-		encoded, encodedFormat, err := insertedDoc.Insert(m.mockDB, mk, name)
+		encoded, encodedFormat, err := insertedDoc.Insert(m.mockDB, mk, staging)
 		if err != nil {
 			if errors.Is(err, models.ErrMockEncode) {
 				m.logger.Warn("dropping one unencodable mock and continuing", zap.String("kind", mk.GetKind()), zap.Error(err))
@@ -180,12 +222,13 @@ func (m *mockService) Record(ctx context.Context) error {
 			return
 		}
 		if err := m.hooks.AfterMockInsert(ctx, &rec.MockContext{
-			Mock: mk, TestSetID: name, Encoded: encoded, EncodedFormat: encodedFormat,
+			Mock: mk, TestSetID: staging, Encoded: encoded, EncodedFormat: encodedFormat,
 		}); err != nil {
 			m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 		}
 		mockCount++
-		recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID})
+		kind := mk.Spec.Metadata["type"]
+		recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection", start: mk.Start, ref: mk.StartRef})
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -208,6 +251,10 @@ func (m *mockService) Record(ctx context.Context) error {
 			}
 		}
 	}()
+
+	// 4b. With --record-requests, also store the app's incoming requests as test cases.
+	var casesSeen atomic.Int64
+	capture := m.captureCases(captureCtx, persistCtx, name, &casesSeen, requests)
 
 	// 5. Release the compose app now that the capture is armed and draining.
 	//    This is the post-arm half of step 2 — see releaseComposeApp.
@@ -265,7 +312,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	drainStart := time.Now()
 	drainFrom.Store(drainStart.UnixNano())
 	m.drainTrailingMocks(consumerDone, drainStart, func() (uint64, bool) {
-		return uint64(heldSeen.Load() + heldDone.Load()), heldBusy.Load()
+		return uint64(heldSeen.Load() + heldDone.Load() + casesSeen.Load()), heldBusy.Load()
 	})
 	stopCapture()
 	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
@@ -273,9 +320,22 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.Int64("mocks_seen", mocksSeen.Load()),
 			zap.Duration("stalledFor", mockDrainStall))
 	}
+	capture.wait(mockDrainStall)
 
-	if parent.Err() != nil { // user Ctrl+C
-		m.logger.Info("recording stopped", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+	if parent.Err() != nil { // user stopped the recording (Ctrl+C, or a session stop)
+		if mockCount == 0 && len(capture.list()) == 0 {
+			if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+				m.logger.Debug("failed to discard an empty staging set after interrupt", zap.String("staging", staging), zap.Error(derr))
+			}
+			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged", zap.String("mock-set", name))
+			return nil
+		}
+		keep = true
+		if err := m.saveMocks(persistCtx, staging, name, mockCount); err != nil {
+			utils.LogError(m.logger, err, "recording stopped, but saving the captured mocks failed", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+			return nil
+		}
+		m.logger.Info("recording stopped; captured mocks saved", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return nil
 	}
 	// Not the user: the agent died under the test command. What was captured
@@ -289,56 +349,280 @@ func (m *mockService) Record(ctx context.Context) error {
 		cause = context.Cause(ctx)
 	}
 	if cause != nil {
+		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			m.logger.Debug("failed to discard staging set after an incomplete recording", zap.String("staging", staging), zap.Error(derr))
+		}
 		stopReason = "the recording did not finish"
 		utils.LogError(m.logger, cause, stopReason, zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		return fmt.Errorf("%s: %w", stopReason, cause)
 	}
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
+	var windows []models.ScopeWindow
 	if m.mappingDB != nil {
-		if reader, ok := m.instrumentation.(ScopeReader); ok {
-			scopeCtx, cancelScope := context.WithTimeout(persistCtx, agentEpilogueTimeout)
-			windows, werr := reader.GetScopeWindows(scopeCtx)
-			cancelScope()
-			if werr != nil {
-				m.logger.Debug("failed to read per-test scope windows; recording suite-level", zap.Error(werr))
-			} else if len(windows) > 0 {
-				byTest := correlateScopes(windows, recorded)
-				if len(byTest) > 0 {
-					if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
-						m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
-					} else {
-						m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
-					}
+		windows = m.agentWindows(persistCtx)
+	}
+	if len(windows) > 0 {
+		root := gitTop()
+		for i := range windows {
+			windows[i].Dir = setName(windows[i].Dir, root)
+		}
+	}
+	starts := appStarts(windows)
+	windows, suites := splitSuites(windows)
+	if err := repeatedScope(windows, existed); err != nil {
+		m.propagateExit(appErr, "record")
+		m.logger.Error(err.Error())
+		return err
+	}
+	keep = runnerPassed(appErr)
+	if keep && mockCount == 0 && len(capture.list()) == 0 {
+		keep = false
+		m.logger.Warn("no outgoing calls were captured; the existing mock set (if any) was left unchanged; the runner made no mockable dependency calls, or its traffic was not intercepted",
+			zap.String("mock-set", name),
+			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
+		m.propagateExit(appErr, "record")
+		return nil
+	}
+	if keep {
+		if err := m.saveMocks(persistCtx, staging, name, mockCount); err != nil {
+			keep = false
+			stopReason = "failed to promote the recorded mocks over the existing set"
+			utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name))
+			return fmt.Errorf("%s: %w", stopReason, err)
+		}
+	}
+	if keep && m.mappingDB != nil {
+		if len(windows) > 0 {
+			byTest := correlateScopes(windows, recorded)
+			owned := recorded
+			var plan bootPlan
+			if len(starts) > 0 {
+				plan = classify(windows, starts, suites, recorded)
+				byTest, owned = plan.tests, plan.perTest
+			}
+			byCase := correlateCases(windows, owned, capture.list(), stepWindows(windows))
+			for _, w := range windows {
+				if _, ok := byTest[w.Name]; !ok {
+					byTest[w.Name] = nil
 				}
+			}
+			if len(byTest) > 0 {
+				if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
+					m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
+				} else {
+					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
+				}
+			}
+			for _, w := range windows {
+				if w.Dir == "" {
+					continue
+				}
+				tc := byCase[w.Name]
+				tc.Dir = w.Dir
+				byCase[w.Name] = tc
+			}
+			if len(starts) > 0 {
+				m.upsertCases(persistCtx, name, byCase, nil, suites)
+				m.upsertBoots(persistCtx, name, plan.boots)
+			} else {
+				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded), suites)
 			}
 		}
 	}
 
+	if keep {
+		if err := m.hooks.AfterRecordingComplete(persistCtx, &rec.RecordingCompleteContext{TestSetID: name, Path: m.config.Path}); err != nil {
+			m.logger.Warn("AfterRecordingComplete hook failed", zap.Error(err), zap.String("mock-set", name))
+		}
+	}
+
 	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
-	if err := m.store.Push(persistCtx, name); err != nil {
+	if !runnerPassed(appErr) {
+		m.logger.Warn("tests failed; the recording was not kept or published, and the previous recording is left as it was", zap.String("mock-set", name))
+	} else if err := m.store.Push(persistCtx, name); err != nil {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
 
 	m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+	if capture != nil {
+		m.logger.Info("recorded test cases", zap.Int("cases", len(capture.list())), zap.String("mock-set", name))
+	}
 	if mockCount == 0 {
 		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
 			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
 	}
 
-	// 11. Propagate the runner's exit code so a CI 're-record on merge' job
+	// 13. Propagate the runner's exit code so a CI 're-record on merge' job
 	//     fails when the tests fail.
 	m.propagateExit(appErr, "record")
 	return nil
 }
 
+func (m *mockService) saveMocks(ctx context.Context, staging, name string, n int) error {
+	if n > 0 {
+		return m.mockDB.PromoteStagedSet(ctx, staging, name)
+	}
+	if err := m.mockDB.DiscardStagedSet(ctx, staging); err != nil {
+		m.logger.Debug("failed to discard an empty staging set", zap.String("staging", staging), zap.Error(err))
+	}
+	return m.mockDB.DeleteMocksForSet(ctx, name)
+}
+
+func runnerPassed(appErr models.AppError) bool {
+	switch appErr.AppErrorType {
+	case models.ErrAppStopped, models.ErrCtxCanceled, "":
+		return true
+	}
+	return false
+}
+
+// agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.
+func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
+	reader, ok := m.instrumentation.(ScopeReader)
+	if !ok {
+		return nil
+	}
+	scopeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
+	defer cancel()
+	windows, err := reader.GetScopeWindows(scopeCtx)
+	if err != nil {
+		m.logger.Debug("failed to read per-test scope windows from the agent", zap.Error(err))
+		return nil
+	}
+	return windows
+}
+
+// saveSet backs the named set up to a sibling .<name>.previous directory so a
+// refused or interrupted re-record can be undone, and returns a restore(keep)
+// closure plus whether the set existed. The backup is a HARD precondition: when
+// it cannot be made, saveSet returns an error and makes NO change, because the
+// caller is about to delete the live set's mappings and test cases — doing that
+// without a restorable copy is unrecoverable data loss. The caller must abort
+// on a non-nil error before any destructive step.
+func (m *mockService) saveSet(name string) (func(keep bool), bool, error) {
+	if m.config.Path == "" {
+		return func(bool) {}, true, nil
+	}
+	set := filepath.Join(m.config.Path, name)
+	saved := filepath.Join(m.config.Path, "."+name+".previous")
+	_ = os.RemoveAll(saved)
+	if _, err := os.Stat(set); errors.Is(err, fs.ErrNotExist) {
+		// Nothing to lose: a fresh set. On a refused run, drop whatever the
+		// aborted recording left behind.
+		return func(keep bool) {
+			if !keep {
+				_ = os.RemoveAll(set)
+			}
+		}, false, nil
+	}
+	if err := os.CopyFS(saved, os.DirFS(set)); err != nil {
+		_ = os.RemoveAll(saved)
+		return nil, true, fmt.Errorf("back up mock set %q before re-recording: %w", name, err)
+	}
+	return func(keep bool) {
+		if keep {
+			_ = os.RemoveAll(saved)
+			return
+		}
+		if rmErr := os.RemoveAll(set); rmErr != nil {
+			m.logger.Warn("could not put the previous recording back", zap.String("mock-set", name), zap.Error(rmErr))
+			return
+		}
+		if mvErr := os.Rename(saved, set); mvErr != nil {
+			m.logger.Warn("could not put the previous recording back; it is kept at "+saved, zap.String("mock-set", name), zap.Error(mvErr))
+		}
+	}, true, nil
+}
+
+// caseNames lists the test cases the set holds before a re-record.
+func (m *mockService) caseNames(ctx context.Context, name string) []string {
+	if m.testDB == nil {
+		return nil
+	}
+	tcs, err := m.testDB.GetTestCases(ctx, name)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(tcs))
+	for _, tc := range tcs {
+		ids = append(ids, tc.Name)
+	}
+	return ids
+}
+
+// deleteCases drops the set's old test cases so a re-record ends clean, as it does for mocks.
+func (m *mockService) deleteCases(ctx context.Context, name string, ids []string) {
+	if m.testDB == nil || len(ids) == 0 {
+		return
+	}
+	if err := m.testDB.DeleteTests(ctx, name, ids); err != nil {
+		m.logger.Debug("failed to delete the old test cases", zap.String("mock-set", name), zap.Error(err))
+	}
+}
+
+// upsertCases writes which test cases each flow produced into the mapping.
+func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) {
+	if len(byCase) == 0 && len(startup) == 0 && len(suites) == 0 {
+		return
+	}
+	mapper, ok := m.mappingDB.(CaseMapper)
+	if !ok {
+		m.logger.Warn("the mapping store cannot record test cases per flow", zap.String("mock-set", name))
+		return
+	}
+	if err := mapper.UpsertCases(ctx, name, byCase, startup, suites); err != nil {
+		m.logger.Warn("failed to write per-flow test cases", zap.Error(err))
+		return
+	}
+	m.logger.Info("wrote per-flow test cases", zap.Int("flows", len(byCase)), zap.String("mock-set", name))
+}
+
+func (m *mockService) upsertBoots(ctx context.Context, name string, boots []models.BootSpec) {
+	mapper, ok := m.mappingDB.(BootMapper)
+	if !ok {
+		m.logger.Warn("the mapping store cannot record app starts", zap.String("mock-set", name))
+		return
+	}
+	if err := mapper.UpsertBoots(ctx, name, boots); err != nil {
+		m.logger.Warn("failed to write the app starts", zap.Error(err))
+	}
+}
+
+// deleteMappings drops the set's old per-test mappings so a re-record cannot leave tests pointing at renamed mocks.
+func (m *mockService) deleteMappings(ctx context.Context, name string) {
+	if m.mappingDB == nil {
+		return
+	}
+	deleter, ok := m.mappingDB.(MappingDeleter)
+	if !ok {
+		m.logger.Warn("the mapping store cannot delete, so old per-test mappings may linger", zap.String("mock-set", name))
+		return
+	}
+	if err := deleter.Delete(ctx, name); err != nil {
+		m.logger.Debug("no existing mappings to overwrite (or delete failed)", zap.String("mock-set", name), zap.Error(err))
+	}
+}
+
 // capturedMock is one recorded mock's name + request timestamp + source worker
 // PID, used to correlate mocks into per-test scope windows.
 type capturedMock struct {
-	name string
-	ts   time.Time
-	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	name  string
+	ts    time.Time
+	pid   uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	end   time.Time
+	boot  bool
+	start string
+	ref   string
 }
+
+// stagingSetID returns the staging set name record captures into while recording
+// name, before promoting it over name on a complete, non-empty run. The suffix
+// (yaml.MockStagingSuffix) is reserved and skipped by test-set enumeration, so a
+// leftover staging dir from a hard kill is never listed as a phantom test-set.
+// Appended to an already-single-segment set name it adds no path separator, so a
+// promote or discard can never escape to touch a real set.
+func stagingSetID(name string) string { return name + yaml.MockStagingSuffix }
 
 // correlateScopes buckets each recorded mock into the per-test scope window its
 // request timestamp falls within, producing the mappings.yaml structure. A mock
@@ -395,6 +679,95 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 		byTest[windows[best].Name] = append(byTest[windows[best].Name], models.MockEntry{Name: mk.name})
 	}
 	return byTest
+}
+
+// correlateCases lists each flow's test cases by the window their request fell in; a case outside every window stays unmapped.
+func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, steps []models.ScopeWindow) map[string]models.MappedTestCase {
+	byTest := make(map[string]models.MappedTestCase)
+	spans := make(map[string]models.ScopeWindow, len(cases))
+	for _, c := range cases {
+		spans[c.name] = models.ScopeWindow{Name: c.name, Start: c.ts, End: c.end}
+	}
+	for test, entries := range correlateScopes(windows, cases) {
+		tc := models.MappedTestCase{CaseSteps: make(map[string]string, len(entries))}
+		for _, e := range entries {
+			tc.Cases = append(tc.Cases, e.Name)
+			tc.CaseSteps[e.Name] = containing(steps, spans[e.Name].Start)
+		}
+		byTest[test] = tc
+	}
+	var own []capturedMock
+	at := make(map[string]time.Time, len(mocks))
+	for _, mk := range mocks {
+		if !mk.boot {
+			own = append(own, mk)
+			at[mk.name] = mk.ts
+		}
+	}
+	holder := make(map[string]string, len(cases))
+	inFlow := make(map[string][]models.ScopeWindow)
+	for test, tc := range byTest {
+		for _, c := range tc.Cases {
+			holder[c] = test
+			inFlow[flowOf(windows, test)] = append(inFlow[flowOf(windows, test)], spans[c])
+		}
+	}
+	for test, entries := range correlateScopes(windows, own) {
+		for _, e := range entries {
+			c := containing(inFlow[flowOf(windows, test)], at[e.Name])
+			if c == "" {
+				continue
+			}
+			tc := byTest[holder[c]]
+			if tc.CaseMocks == nil {
+				tc.CaseMocks = map[string][]string{}
+			}
+			tc.CaseMocks[c] = append(tc.CaseMocks[c], e.Name)
+			byTest[holder[c]] = tc
+		}
+	}
+	for _, tc := range byTest {
+		for _, names := range tc.CaseMocks {
+			sort.SliceStable(names, func(i, j int) bool { return at[names[i]].Before(at[names[j]]) })
+		}
+	}
+	return byTest
+}
+
+func flowOf(windows []models.ScopeWindow, test string) string {
+	flow := test
+	for _, w := range windows {
+		if strings.HasPrefix(test, w.Name+"/") && len(w.Name) < len(flow) {
+			flow = w.Name
+		}
+	}
+	return flow
+}
+
+func startupMocks(windows []models.ScopeWindow, mocks []capturedMock) []models.MockEntry {
+	var out []models.MockEntry
+	for _, mk := range mocks {
+		if mk.boot || containing(windows, mk.ts) == "" {
+			out = append(out, models.MockEntry{Name: mk.name})
+		}
+	}
+	return out
+}
+
+func containing(windows []models.ScopeWindow, at time.Time) string {
+	best := -1
+	for i, w := range windows {
+		if at.Before(w.Start) || at.After(w.End) {
+			continue
+		}
+		if best == -1 || w.Start.After(windows[best].Start) {
+			best = i
+		}
+	}
+	if best == -1 {
+		return ""
+	}
+	return windows[best].Name
 }
 
 // drainTrailingMocks blocks until the agent has evidently finished handing over

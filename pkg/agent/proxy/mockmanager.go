@@ -68,6 +68,21 @@ type MockManager struct {
 	// walk + the session walk so legacy parsers keep seeing startup
 	// mocks in their "session" snapshot until they migrate.
 	startup *TreeDb
+	// startupKeys maps each mock the startup tree holds to its key there, so
+	// a change made to the same mock through the session tier can follow it
+	// into the startup tree (see mirrorStartup). Rebuilt with the tree; guarded
+	// by treesMu. An entry whose mock DeleteStartupMock removed stays until the
+	// next staging; every swap and remove is pointer-checked, so it is inert.
+	startupKeys map[*models.Mock]models.TestModeInfo
+	// startupShared is set while the startup tier may hold the session tier's
+	// own mocks — after a staging that filed them in both (see mirrorStartup)
+	// — and clear otherwise, so session updates pay for mirroring only then.
+	startupShared atomic.Bool
+	// mirrorMu makes a session-tier update or delete and its mirror into the
+	// startup tier one step, while startupShared. Without it two matchers
+	// updating the same recording at once could each mirror out of order and
+	// leave the tiers holding different copies. Taken before treesMu.
+	mirrorMu sync.Mutex
 
 	// global revision (legacy)
 	rev uint64
@@ -97,6 +112,13 @@ type MockManager struct {
 	// its OWN consumption history instead of a copy the client re-sends every
 	// testcase. Read only when MockFilterParams.AgentOwnsConsumed is set.
 	consumedPersistent map[string]models.MockState
+
+	// cursorMu guards cursors: the per-request-key cursor used to serve
+	// successive recorded responses for a stateful data-plane dependency
+	// (ConsumeCursorSaturate). Session-scoped — reset whenever the mock set is
+	// replaced (per test-set) so cursors don't bleed across test-sets.
+	cursorMu sync.Mutex
+	cursors  map[string]int
 
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
@@ -1157,6 +1179,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// RLock (see GetStartupMocks below).
 	unfilteredForTree := unfiltered
 	newStartup := NewTreeDb(customComparator)
+	newStartupKeys := make(map[*models.Mock]models.TestModeInfo, len(startupInit)+len(explicitStartup))
 	// H4 round-2: use a TIER-LOCAL TestModeInfo copy as the startup tree
 	// key rather than mutating mk.TestModeInfo.ID in place. The same
 	// *models.Mock pointer can appear in BOTH startupInit and
@@ -1190,7 +1213,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// ID on the copy. mk.TestModeInfo.ID is left untouched so the
 		// session tier's build, which stamps the same mock during
 		// BaseTime staging, does not corrupt the startup tree's idIndex.
-		newStartup.insert(tierKey(mk, idx), mk)
+		key := tierKey(mk, idx)
+		newStartup.insert(key, mk)
+		newStartupKeys[mk] = key
 	}
 	// Harvest the kinds present BEFORE any tier is swapped.
 	//
@@ -1243,11 +1268,17 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		}
 		// Tier-local key with an ID offset by a large constant so it cannot
 		// collide with the startup IDs above (0..N).
-		newStartup.insert(tierKey(mk, 1_000_000+idx), mk)
+		key := tierKey(mk, 1_000_000+idx)
+		newStartup.insert(key, mk)
+		newStartupKeys[mk] = key
 	}
 
 	m.treesMu.Lock()
 	m.startup = newStartup
+	m.startupKeys = newStartupKeys
+	// Initial staging files the session pool in the startup tier too; an
+	// explicit startup slice may share mocks with it as well.
+	m.startupShared.Store(isInitialStaging || len(explicitStartup) > 0)
 	m.treesMu.Unlock()
 	if m.logger != nil && len(startupInit) > 0 {
 		m.logger.Debug("routed startup-init mocks into startup tree",
@@ -1498,6 +1529,77 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 		out = append(out, mk)
 	}
 	return out, nil
+}
+
+// MockCursorIndex returns the record-ordered position to serve for the request
+// identified by key, given n recorded responses for it, WITHOUT advancing. It
+// returns min(cursor, n-1), so once a request has been replayed more times than
+// it was recorded it saturates on the LAST recorded response instead of missing
+// — which keeps fixture re-reads (the same row read many times, recorded once)
+// working while a genuine stateful sequence (1,2,3) is served in order. The
+// caller advances via AdvanceMockCursor only once the response is actually
+// served (a successful claim), so a failed/retried match does not skip a
+// recorded response. Session-scoped: the cursor map is cleared per test-set
+// (ResetStatefulCursors). Satisfies the matcher's optional cursor interface;
+// parsers that do not type-assert it are unaffected.
+func (m *MockManager) MockCursorIndex(key string, n int) int {
+	if n <= 1 {
+		// Zero or one recorded response: always the first (only) one — identical
+		// to the legacy reuse behaviour, no cursor state needed.
+		return 0
+	}
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	return clampCursor(m.cursors[key], n)
+}
+
+// AdvanceMockCursor moves the cursor for key one past servedIdx — the index the
+// caller actually served — taking the MAX with the current cursor so it is
+// monotonic and idempotent. Advancing from the served index (not current+1)
+// means two concurrent identical requests that both peeked the same index and
+// both served it settle the cursor to servedIdx+1 rather than jumping two,
+// which would skip a recorded response. Stored value tops out at n (reads clamp
+// to n-1), so a hot repeated request never grows it unbounded. Call it only
+// after the chosen response was actually served.
+func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
+	if n <= 1 {
+		return
+	}
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if m.cursors == nil {
+		m.cursors = make(map[string]int)
+	}
+	next := servedIdx + 1
+	if cur := m.cursors[key]; cur > next {
+		next = cur
+	}
+	if next > n {
+		next = n
+	}
+	m.cursors[key] = next
+}
+
+// clampCursor bounds a stored cursor to the last valid index [0, n-1].
+func clampCursor(cur, n int) int {
+	if cur > n-1 {
+		return n - 1
+	}
+	if cur < 0 {
+		return 0
+	}
+	return cur
+}
+
+// ResetStatefulCursors drops every per-request stateful cursor so the next
+// stateful sequence starts from its first recorded response. The agent calls it
+// once per test-set (on the staging call) via the StatefulCursorResetter
+// capability, so a sequence spans a whole test-set but does not carry across
+// sets. Safe to call when no cursors exist.
+func (m *MockManager) ResetStatefulCursors() {
+	m.cursorMu.Lock()
+	m.cursors = nil
+	m.cursorMu.Unlock()
 }
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set
@@ -2179,15 +2281,70 @@ func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
 
 // ---------- point updates / deletes (keep per-kind in sync) ----------
 
+// mirrorStartup keeps the startup tier's copy of a recording in step with the
+// session tier's. Staging at BaseTime files the session pool in BOTH tiers as
+// one shared pointer (see SetMocksWithWindow's isInitialStaging branch), and
+// GetSessionMocks — every parser's view of the reusable pool — lists the two
+// tiers as one, telling them apart by pointer. When a match replaced the
+// session tier's entry with an updated copy (a fresh sort order, learned
+// noise) and left the startup tier holding the old pointer, every matched
+// recording was listed twice from then on: a stateful dependency's cursor
+// counted each duplicate as another recording and replayed a 1,2,3 sequence as
+// 1,1,2,2,3, and a reader of the startup tier never saw what the match learned.
+// So the startup tier now holds the same copy as the session tier: replaced is
+// the copy the session tier held until this update. Called under mirrorMu.
+func (m *MockManager) mirrorStartup(replaced, new *models.Mock) {
+	m.treesMu.Lock()
+	defer m.treesMu.Unlock()
+	key, ok := m.startupKeys[replaced]
+	if !ok || m.startup == nil {
+		return
+	}
+	if m.startup.swapValue(key, replaced, new) {
+		delete(m.startupKeys, replaced)
+		m.startupKeys[new] = key
+	}
+}
+
+// mirrorStartupDelete removes from the startup tier the mock a delete just
+// took out of the session tier, when the startup tier holds it too (see
+// mirrorStartup); otherwise the deleted recording stayed in the pool every
+// parser reads through GetSessionMocks. Called under mirrorMu.
+func (m *MockManager) mirrorStartupDelete(removed *models.Mock) {
+	m.treesMu.Lock()
+	defer m.treesMu.Unlock()
+	key, ok := m.startupKeys[removed]
+	if !ok || m.startup == nil {
+		return
+	}
+	if m.startup.removeValue(key, removed) {
+		delete(m.startupKeys, removed)
+	}
+}
+
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
 	// Snapshot the legacy tree pointer safely
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
 	new.MarkPooled() // matchers can reach it from here on; see models.Mock.pooled
+	shared := m.startupShared.Load()
+	if shared {
+		m.mirrorMu.Lock()
+	}
 	// Update legacy/global tree first (it keeps its window index right; see
 	// TreeDb.update)
-	updatedGlobal := globalTree.update(old.TestModeInfo, new.TestModeInfo, new, *old)
+	updatedGlobal, replaced := globalTree.updateReplacing(old.TestModeInfo, new.TestModeInfo, new, *old)
+	if shared {
+		if updatedGlobal && replaced != nil {
+			// The copy the tree held, which is not always the caller's old: a
+			// concurrent match of the same recording may have replaced it
+			// first. Mirrored under the same lock as the update, so two
+			// matches cannot mirror out of order.
+			m.mirrorStartup(replaced, new)
+		}
+		m.mirrorMu.Unlock()
+	}
 
 	oldK, newK := old.Kind, new.Kind
 	var updatedOldKind, updatedNewKind bool
@@ -2377,9 +2534,19 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
+	shared := m.startupShared.Load()
+	if shared {
+		m.mirrorMu.Lock()
+	}
 	// Identity-checked for the same reason as DeleteFilteredMock: the key is
 	// tier-local, so a mock from another tier addresses a different entry here.
-	deletedGlobal := globalTree.deleteMock(mock.TestModeInfo, mock)
+	deletedGlobal, removed := globalTree.deleteMockReturning(mock.TestModeInfo, mock)
+	if shared {
+		if deletedGlobal && removed != nil {
+			m.mirrorStartupDelete(removed)
+		}
+		m.mirrorMu.Unlock()
+	}
 
 	// per-kind
 	k := mock.Kind
@@ -2865,9 +3032,13 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
 	}
+	if mock.Timestamp == 0 {
+		mock.Timestamp = time.Now().UnixNano() // when it was first served, so a client can tell which test used it
+	}
 	m.consumedMu.Lock()
 	if idx, exists := m.consumedIndex[mock.Name]; exists {
-		m.consumedList[idx] = mock // update state, preserve position
+		mock.Timestamp = m.consumedList[idx].Timestamp
+		m.consumedList[idx] = mock // update state, preserve position and first use
 	} else {
 		m.consumedIndex[mock.Name] = len(m.consumedList)
 		m.consumedList = append(m.consumedList, mock)

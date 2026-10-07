@@ -101,14 +101,21 @@ func TestGenerateKeployAgentService_CgroupV2Mount(t *testing.T) {
 		t.Errorf("v1 host: seccomp:unconfined is an over-grant (SYS_ADMIN already unblocks mount in default seccomp); got %s", formatSequence(secOpt))
 	}
 
-	// cgroup v2 host: least-privilege — no cgroup-mount SYS_ADMIN, no security_opt.
+	if !sequenceContains(secOpt, "label=disable") {
+		t.Errorf("v1 host: the engine's label=disable must stay alongside the cgroup-mount options, got %s", formatSequence(secOpt))
+	}
+
+	// cgroup v2 host: least-privilege — no cgroup-mount SYS_ADMIN, and no
+	// security_opt but the engine's own: label=disable, without which an
+	// SELinux host denies the agent bpf(2).
 	cgroupV2AvailableOnHost = func() bool { return true }
 	v2 := newSvc()
 	if sequenceContains(mappingValue(v2, "cap_add"), "SYS_ADMIN") {
 		t.Errorf("v2 host: SYS_ADMIN must not be granted for the cgroup mount")
 	}
-	if so := mappingValue(v2, "security_opt"); so != nil {
-		t.Errorf("v2 host: no security_opt should be added, got %s", formatSequence(so))
+	if so := mappingValue(v2, "security_opt"); formatSequence(so) != formatSequence(&yaml.Node{Kind: yaml.SequenceNode,
+		Content: []*yaml.Node{{Kind: yaml.ScalarNode, Value: "label=disable"}}}) {
+		t.Errorf("v2 host: security_opt must be exactly the engine's [label=disable], got %s", formatSequence(so))
 	}
 }
 

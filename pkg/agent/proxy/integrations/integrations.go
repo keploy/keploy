@@ -228,6 +228,26 @@ type MockMemDb interface {
 	WindowAware
 }
 
+// MockCursor is an optional MockMemDb capability that serves stateful
+// dependencies: repeated identical requests answered with successive recorded
+// responses in record order, then the last one again. MockCursorIndex returns
+// the position to serve for a request key given n recorded responses WITHOUT
+// advancing (a negative index means "no cursor": serve as if the capability
+// were absent); AdvanceMockCursor moves the key past servedIdx, saturating at
+// n, and is called only once the response is actually served, so a failed or
+// retried match does not skip a recording. The agent's MockManager implements
+// it, and every MockMemDb wrapper must forward it — a wrapper that drops it
+// silently turns stateful replay off for the calls it wraps.
+//
+// A peek and the commit after it must come from the same goroutine, with no
+// other peek of the same store in between: a wrapper may resolve per peek what
+// the commit then reuses (the proxy's per-connection views do). Parsers serve
+// one connection from one goroutine, one request at a time, which satisfies it.
+type MockCursor interface {
+	MockCursorIndex(key string, n int) int
+	AdvanceMockCursor(key string, servedIdx, n int)
+}
+
 // SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
 // snapshot narrowed to the mocks recorded inside one test window, without
 // walking the rest of it.

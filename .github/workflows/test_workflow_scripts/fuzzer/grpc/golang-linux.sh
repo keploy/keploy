@@ -103,6 +103,47 @@ check_test_report() {
     return 0
 }
 
+# wait_for_log FILE PATTERN...: wait until every PATTERN (an extended regex)
+# matches a line of FILE, or fail naming the ones that never did. Used instead
+# of a fixed sleep before driving the fuzzer: the server keploy launches as the
+# app can come up well after the client's control plane (a slow agent start),
+# and RPCs fired before it listens all fail. Waiting on the log rather than
+# probing the port keeps a probe connection out of the recording.
+wait_for_log() {
+  local file="$1"; shift
+  local i p missing
+  for i in $(seq 1 120); do
+    missing=()
+    for p in "$@"; do
+      grep -qE -- "$p" "$file" 2>/dev/null || missing+=("$p")
+    done
+    [ "${#missing[@]}" -eq 0 ] && return 0
+    sleep 1
+  done
+  echo "::error::timed out after 120s waiting in $file for: ${missing[*]}"
+  cat "$file" || true
+  return 1
+}
+
+# run_fuzz: drive the 1000 fuzz RPCs through the client's /run and fail unless
+# every one matched. During a record the server is real, so anything else (a
+# refused connection, a broken run) is the failure itself; caught here it
+# names its cause, instead of surfacing later as a recording with no tests.
+run_fuzz() {
+  local out
+  out=$(curl -sS -X POST http://localhost:18080/run \
+    -H 'Content-Type: application/json' \
+    -d '{"addr":"localhost:50051","seed":42,"total":1000,"text":false,"timeout_sec":60,"max_diffs":5}') || {
+    echo "::error::the fuzzer client did not answer /run"
+    return 1
+  }
+  echo "$out"
+  if ! printf '%s' "$out" | grep -q '"ok":true'; then
+    echo "::error::the fuzzer run did not pass while recording: every RPC must reach the server and match"
+    return 1
+  fi
+}
+
 check_for_errors() {
   local logfile=$1
   echo "Checking for errors in $logfile..."
@@ -162,17 +203,11 @@ if [ "$MODE" = "incoming" ]; then
   fi
   sleep 1
  done
+ # The server keploy launches must be listening, with keploy forwarding its
+ # port, before any RPC is fired.
+ wait_for_log record_incoming.txt "gRPC server listening on :50051" 'Started ingress forwarding.*"orig_port": 50051' || exit 1
  # Kick off 1000 unary RPC fuzz calls
- curl -sS -X POST http://localhost:18080/run \
-   -H 'Content-Type: application/json' \
-   -d '{
-     "addr": "localhost:50051",
-     "seed": 42,
-     "total": 1000,
-     "text": false,
-     "timeout_sec": 60,
-     "max_diffs": 5
-   }'
+ run_fuzz || exit 1
 
  sleep 10
 
@@ -247,12 +282,15 @@ if [ "$MODE" = "incoming" ]; then
      "$RECORD_BIN" record --storage-format json -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming_json.txt &
    fi
    sleep 10
+   # Likewise the yaml pass's client still holds :18080: stop it, or this
+   # pass's client cannot bind and the old one would serve this run.
+   sudo pkill -f "$FUZZER_CLIENT_BIN" || true
+   sleep 2
    "$FUZZER_CLIENT_BIN" --http :18080 2>&1 | tee client_incoming_json.txt &
    sleep 10
    for i in {1..60}; do nc -z localhost 18080 && break; sleep 1; done
-   curl -sS -X POST http://localhost:18080/run \
-     -H 'Content-Type: application/json' \
-     -d '{"addr":"localhost:50051","seed":42,"total":1000,"text":false,"timeout_sec":60,"max_diffs":5}'
+   wait_for_log record_incoming_json.txt "gRPC server listening on :50051" 'Started ingress forwarding.*"orig_port": 50051' || exit 1
+   run_fuzz || exit 1
    sleep 10
    REC_PID=$(pgrep keploy | sort -n | head -1)
    sudo kill -INT "$REC_PID" 2>/dev/null || true
@@ -277,7 +315,7 @@ elif [ "$MODE" = "outgoing" ]; then
 
  # Start server (no keploy here)
  "$FUZZER_SERVER_BIN" &> server_outgoing.txt &
- sleep 5
+ wait_for_log server_outgoing.txt "gRPC server listening on :50051" || exit 1
 
  # Record the client (it makes outgoing RPCs)
  "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing.txt &
@@ -291,16 +329,7 @@ elif [ "$MODE" = "outgoing" ]; then
   fi
   sleep 1
  done
- curl -sS -X POST http://localhost:18080/run \
-   -H 'Content-Type: application/json' \
-   -d '{
-     "addr": "localhost:50051",
-     "seed": 42,
-     "total": 1000,
-     "text": false,
-     "timeout_sec": 60,
-     "max_diffs": 5
-   }'
+ run_fuzz || exit 1
 
  sleep 10
 
@@ -328,14 +357,17 @@ elif [ "$MODE" = "outgoing" ]; then
 
  if json_pass_supported; then
    echo "🧪 Re-running outgoing with --storage-format json"
+   # The yaml pass leaves its server running; this pass records against a
+   # server of its own, as the incoming json pass does, so the old one must
+   # release :50051 first (a second server would fail to bind it).
+   sudo pkill -f "$FUZZER_SERVER_BIN" || true
+   sleep 2
    "$FUZZER_SERVER_BIN" &> server_outgoing_json.txt &
-   sleep 5
+   wait_for_log server_outgoing_json.txt "gRPC server listening on :50051" || exit 1
    "$RECORD_BIN" record --storage-format json -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing_json.txt &
    sleep 10
    for i in {1..60}; do nc -z localhost 18080 && break; sleep 1; done
-   curl -sS -X POST http://localhost:18080/run \
-     -H 'Content-Type: application/json' \
-     -d '{"addr":"localhost:50051","seed":42,"total":1000,"text":false,"timeout_sec":60,"max_diffs":5}'
+   run_fuzz || exit 1
    sleep 10
    REC_PID=$(pgrep keploy | sort -n | head -1)
    sudo kill -INT "$REC_PID" 2>/dev/null || true

@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -118,6 +119,83 @@ type ScopeReq struct {
 	// (Design A). Optional: 0/omitted falls back to the single global scope
 	// (correct for sequential single-worker runs and suite-level).
 	Pid int `json:"pid,omitempty"`
+	// At is the runner's own clock for this boundary; zero means the agent stamps its read time.
+	At    time.Time `json:"at,omitzero"`
+	Dir   string    `json:"dir,omitempty"`
+	Suite bool      `json:"suite,omitempty"`
+	// Outcome is the test's own verdict, sent with /agent/scope/end by a
+	// harness that knows it (ScopeOutcomePassed / Failed / Skipped; common
+	// spellings such as "pass", "fail", "pending" are accepted, see
+	// NormalizeScopeOutcome). Optional: without it the replay knows what the
+	// test used and missed, not whether it passed.
+	Outcome string `json:"outcome,omitempty"`
+	// CanSkip, sent with /agent/scope/begin, says the harness skips a test it
+	// is told to (ScopeBeginResp.Action). Only such a begin is gated: a harness
+	// that cannot skip would run the test anyway, against a pool the gate never
+	// narrowed for it.
+	CanSkip bool `json:"canSkip,omitempty"`
+}
+
+// The verdicts a harness reports in ScopeReq.Outcome, and ScopeOutcomeGated,
+// which the agent records for a test the replay told not to run.
+const (
+	ScopeOutcomePassed  = "passed"
+	ScopeOutcomeFailed  = "failed"
+	ScopeOutcomeSkipped = "skipped"
+	ScopeOutcomeGated   = "gated"
+)
+
+// maxScopeOutcome bounds a verdict a harness sends; anything longer is not one.
+const maxScopeOutcome = 32
+
+// NormalizeScopeOutcome maps a harness's verdict onto ScopeOutcomePassed,
+// Failed or Skipped, accepting the spellings test runners use (go test's
+// pass/fail, jest's pending, pytest's error and xfail). Anything else is
+// returned lower-cased and cut to a bounded length, so a policy matching
+// "passed" never proves it; "" stays "".
+func NormalizeScopeOutcome(s string) string {
+	v := strings.ToLower(strings.TrimSpace(s))
+	switch v {
+	case "", ScopeOutcomePassed, ScopeOutcomeFailed, ScopeOutcomeSkipped:
+		return v
+	case "pass", "ok", "success", "succeeded", "xpassed":
+		return ScopeOutcomePassed
+	case "fail", "error", "errored", "broken", "timedout", "timeout", "interrupted":
+		return ScopeOutcomeFailed
+	case "skip", "pending", "todo", "disabled", "ignored", "xfail", "xfailed":
+		return ScopeOutcomeSkipped
+	}
+	if len(v) > maxScopeOutcome {
+		v = v[:maxScopeOutcome]
+	}
+	return v
+}
+
+// ScopeBeginResp answers POST /agent/scope/begin. A test the replay gated out
+// (see ScopeGateReq), begun by a harness that can skip (ScopeReq.CanSkip),
+// gets Action ScopeActionSkip and the Reason; its harness skips it and sends
+// no end for it. Every other answer is exactly
+// {"status":"ok"}, as before, so a harness that predates gating — or decodes
+// the answer as strings — is unaffected, and a missing action means "run".
+type ScopeBeginResp struct {
+	Status string `json:"status"`
+	Action string `json:"action,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// ScopeActionSkip is the ScopeBeginResp.Action telling a harness to skip.
+const ScopeActionSkip = "skip"
+
+// ScopeGateReq is the body of POST /agent/replay/gate: the replay CLI names the
+// only tests that should run this replay (for instance, the ones a previous
+// replay proved pass with every dependency mocked). Any other test — other
+// than a subtest of a named one — is answered ScopeActionSkip at
+// /agent/scope/begin, with Reason. A nil Run removes the gate: every test runs,
+// the default. The gate applies in replay only, and ends with the replay
+// session.
+type ScopeGateReq struct {
+	Run    []string `json:"run"`
+	Reason string   `json:"reason,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -132,7 +210,20 @@ type ScopeWindow struct {
 	// record attributes a captured mock to this window if the mock's own source
 	// PID resolves (up the /proc tree) to this worker — exact even when windows
 	// from parallel workers overlap in time.
-	PID uint32 `json:"pid,omitempty"`
+	PID     uint32    `json:"pid,omitempty"`
+	Dir     string    `json:"dir,omitempty"`
+	Suite   bool      `json:"suite,omitempty"`
+	App     bool      `json:"app,omitempty"`
+	Port    uint16    `json:"port,omitempty"`
+	Program string    `json:"program,omitempty"`
+	Place   string    `json:"place,omitempty"`
+	N       int       `json:"n,omitempty"`
+	Ready   time.Time `json:"ready,omitzero"`
+	Ref     string    `json:"ref,omitempty"`
+	Worker  uint32    `json:"worker,omitempty"`
+	// Outcome is the verdict the test's harness reported when it ended the
+	// scope (ScopeReq.Outcome); "" when it reported none.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
@@ -140,6 +231,19 @@ type ScopeWindow struct {
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
+	Root     string              `json:"root,omitempty"`
+	Sets     map[string]SetTable `json:"sets,omitempty"`
+}
+
+type SetTable struct {
+	Boots  map[string][]string `json:"boots,omitempty"`
+	Tests  map[string][]Owned  `json:"tests,omitempty"`
+	Runner []string            `json:"runner,omitempty"`
+}
+
+type Owned struct {
+	Name  string `json:"name"`
+	Start string `json:"start,omitempty"`
 }
 
 // ErrMockStatsUnsupported reports that an agent cannot answer /agent/mock/stats
@@ -151,6 +255,10 @@ type ScopeTableReq struct {
 // Callers must treat it as "unknown", never as "no mocks stored": a caller that
 // conflates the two reads an unreportable agent as a replaced one.
 var ErrMockStatsUnsupported = errors.New("agent cannot report mock stats")
+
+// ErrScopeGateUnsupported is returned for an agent that cannot gate which
+// tests run (one that predates POST /agent/replay/gate).
+var ErrScopeGateUnsupported = errors.New("agent cannot gate which tests run")
 
 // MockStats is the body of GET /agent/mock/stats — a non-draining snapshot of
 // the mock session for the runner or the CLI end-of-run summary.
@@ -171,6 +279,17 @@ type StoreMocksReq struct {
 }
 
 const StoreMocksStreamContentType = "application/x-gob-stream"
+
+// MockStreamEncodingZstd is the Content-Encoding of a zstd-compressed /storemocks
+// stream. An agent that can decode it says so with "Accept-Encoding: zstd" on its
+// /health response (RFC 7694), and the client compresses only for such an agent:
+// an older one would read the compressed bytes as gob and fail the upload.
+const MockStreamEncodingZstd = "zstd"
+
+// MockStreamZstdWindow is the zstd window both ends of a /storemocks stream use.
+// The client encodes with it and the agent refuses a stream that needs more, so
+// a stream cannot make the agent allocate more than this for its window.
+const MockStreamZstdWindow = 8 << 20
 
 // MockStreamHeader is the first gob value on a /storemocks body; the counts
 // pre-size the agent's slices and split the following mocks into filtered then
@@ -270,4 +389,16 @@ type AfterTestRunReq struct {
 	TestRunID  string       `json:"testRunID"`
 	TestSetIDs []string     `json:"testSetIDs"`
 	Coverage   TestCoverage `json:"coverage"`
+}
+
+type AppStart struct {
+	At   time.Time `json:"at"`
+	PID  uint32    `json:"pid"`
+	Port uint16    `json:"port"`
+}
+
+type AppStartReq struct {
+	Port int       `json:"port"`
+	Pid  int       `json:"pid,omitempty"`
+	At   time.Time `json:"at,omitzero"`
 }

@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -120,6 +121,7 @@ func agentHealthcheckStartPeriod() time.Duration {
 var ComposeServiceHook func(serviceIdentifier string, serviceNode *yaml.Node)
 
 type Impl struct {
+	mockAgentURL string // where a test can mark its own start and end, set in mock mode
 	nativeDockerClient.APIClient
 	timeoutForDockerQuery time.Duration
 	logger                *zap.Logger
@@ -869,10 +871,16 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Debug {
 		command = append(command, "--debug")
 	}
+	if opts.MockMode && opts.AgentPort != 0 {
+		idc.mockAgentURL = fmt.Sprintf("http://localhost:%d", opts.AgentPort)
+	}
 	if opts.MockMode {
 		// `keploy mock record|replay` — the containerised agent must skip
 		// ingress/bind relocation (the wrapped process is a test runner).
 		command = append(command, "--mock-mode")
+	}
+	if opts.RecordRequests {
+		command = append(command, "--record-requests")
 	}
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
@@ -898,6 +906,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 	if opts.GlobalPassthrough {
 		command = append(command, "--global-passthrough")
+	}
+	if opts.DisableHandshakeHold {
+		command = append(command, "--disable-handshake-hold")
 	}
 	if opts.CapturePackets {
 		command = append(command, "--capture-packets")
@@ -985,17 +996,26 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		},
 	}
 
+	// The engine's own options first: on an SELinux host the agent cannot
+	// load eBPF without label=disable, whatever else it needs.
+	var securityOpts []*yaml.Node
+	for _, opt := range engine.Active().AgentSecurityOpts {
+		securityOpts = append(securityOpts, &yaml.Node{Kind: yaml.ScalarNode, Value: opt})
+	}
+	securityOptComment := "Required by keploy-agent to load eBPF under the container engine's security policy."
 	if needsCgroupV2Mount {
 		// Docker's default seccomp profile already permits mount(2) once
 		// CAP_SYS_ADMIN is granted (the mount rule includes CAP_SYS_ADMIN), so
 		// seccomp need not be relaxed. Its default AppArmor profile, however,
 		// denies mount outright, so AppArmor must be unconfined for the agent to
 		// mount a cgroup2 hierarchy on a legacy cgroup v1 host.
+		securityOpts = append(securityOpts, &yaml.Node{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"})
+		securityOptComment += "\nAlso required to mount a cgroup2 hierarchy for eBPF hooks on a legacy cgroup v1 host."
+	}
+	if len(securityOpts) > 0 {
 		serviceNode.Content = append(serviceNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "security_opt", HeadComment: "Required to mount a cgroup2 hierarchy for eBPF hooks on a legacy cgroup v1 host."},
-			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
-			}},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "security_opt", HeadComment: securityOptComment},
+			&yaml.Node{Kind: yaml.SequenceNode, Content: securityOpts},
 		)
 	}
 
@@ -1457,6 +1477,12 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 			certPath := fmt.Sprintf("%s/ca.crt", KeployTLSMountPath)
 			trustStorePath := fmt.Sprintf("%s/truststore.jks", KeployTLSMountPath)
 			idc.addServiceEnvVar(serviceContentNode, "NODE_EXTRA_CA_CERTS", certPath)
+			if idc.mockAgentURL != "" {
+				idc.addServiceEnvVar(serviceContentNode, "KEPLOY_MOCK_AGENT", idc.mockAgentURL)
+				if token.Session() != "" {
+					idc.addServiceEnvVar(serviceContentNode, token.MockAgentTokenEnv, "${"+token.MockAgentTokenEnv+"}")
+				}
+			}
 			idc.addServiceEnvVar(serviceContentNode, "REQUESTS_CA_BUNDLE", certPath)
 			idc.addServiceEnvVar(serviceContentNode, "SSL_CERT_FILE", certPath)
 			idc.addServiceEnvVar(serviceContentNode, "CARGO_HTTP_CAINFO", certPath)

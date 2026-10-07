@@ -790,6 +790,7 @@ func TestCarryOverLeavesUnregisteredKindsAlone(t *testing.T) {
 				mm.MarkMockAsUsed(*m)
 			}
 			for _, st := range mm.GetConsumedMocks() {
+				st.Timestamp = 0
 				trace = append(trace, fmt.Sprintf("  consumed %+v", st))
 			}
 		}

@@ -23,9 +23,16 @@ type pacingProxy struct {
 	mu      sync.Mutex
 	seeded  [][]models.TestWindow
 	sets    int
+	resets  int
 	lastF   []*models.Mock
 	lastU   []*models.Mock
 	lastWin [2]time.Time
+}
+
+func (p *pacingProxy) ResetStatefulCursors() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resets++
 }
 
 func (p *pacingProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock, start, end time.Time) error {
@@ -82,6 +89,38 @@ func TestUpdateMockParamsSeedsRecordedWindows(t *testing.T) {
 	}
 	if p.sets != 2 {
 		t.Fatalf("SetMocksWithWindow called %d times, want 2", p.sets)
+	}
+}
+
+// TestUpdateMockParamsResetsStatefulCursorsOncePerTestSet pins the stateful
+// cursor's reset boundary: the staging call (which carries recordedSetShape —
+// FirstRecordedTestStart and/or RecordedWindows) marks a new test-set and must
+// reset the cursors, while the per-test-case calls (empty shape) must NOT, so a
+// stateful sequence spans the whole test-set but does not carry across sets.
+func TestUpdateMockParamsResetsStatefulCursorsOncePerTestSet(t *testing.T) {
+	base := time.Date(2026, 9, 30, 9, 0, 0, 0, time.UTC)
+	p := &pacingProxy{}
+	a := residentAgent(p, nil, nil)
+
+	// Staging call for a test-set: FirstRecordedTestStart set → reset.
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime: models.BaseTime, BeforeTime: time.Now(), FirstRecordedTestStart: base,
+	}); err != nil {
+		t.Fatalf("staging UpdateMockParams: %v", err)
+	}
+	// Two per-test-case calls (empty shape) → must NOT reset.
+	for i := 0; i < 2; i++ {
+		if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+			AfterTime: base, BeforeTime: base.Add(time.Second),
+		}); err != nil {
+			t.Fatalf("per-test UpdateMockParams: %v", err)
+		}
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.resets != 1 {
+		t.Fatalf("ResetStatefulCursors called %d times, want exactly once (the staging call) — a sequence must span the whole test-set, not reset per test case", p.resets)
 	}
 }
 

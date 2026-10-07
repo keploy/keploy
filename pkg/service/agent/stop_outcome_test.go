@@ -214,3 +214,29 @@ func TestWriteStopOutcomeReplacesTheFileWhole(t *testing.T) {
 		t.Fatalf("path holds %s, want the new outcome", raw)
 	}
 }
+
+// Under compose the CLI can no longer ask a stopped agent which test ran when,
+// or with what verdict, so the account it leaves carries the windows too.
+func TestWriteStopOutcomeCarriesTheTestsWindows(t *testing.T) {
+	a := &Agent{Proxy: &outcomeProxy{}, logger: zap.NewNop()}
+	ctx := context.Background()
+	if err := a.BeginScope(ctx, "TestOrders", 4); err != nil {
+		t.Fatal(err)
+	}
+	a.NoteScopeOutcome("TestOrders", 4, models.ScopeOutcomePassed)
+	if err := a.EndScope(ctx, "TestOrders", 4); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "outcome.json")
+	if err := a.writeStopOutcome(ctx, path); err != nil {
+		t.Fatalf("writeStopOutcome: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	var got models.MockOutcome
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Windows) != 1 || got.Windows[0].Name != "TestOrders" || got.Windows[0].Outcome != models.ScopeOutcomePassed {
+		t.Fatalf("the outcome carries windows %+v, want TestOrders passed", got.Windows)
+	}
+}

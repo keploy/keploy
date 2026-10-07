@@ -413,7 +413,7 @@ func TestMatchDiagCarriesTheComparedPool(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			matched, _, diag, err := h.match(ctx, tc.live, db, nil, nil, nil, true, false, false)
+			matched, _, diag, err := h.match(ctx, tc.live, db, nil, nil, nil, true, false, false, true, true)
 			if err != nil || matched {
 				t.Fatalf("match() = (%v, %v), want a clean miss", matched, err)
 			}

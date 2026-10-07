@@ -1,4 +1,4 @@
-﻿package mapdb
+package mapdb
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestMappingDb_DeleteMappingsForSet(t *testing.T) {
+func TestMappingDb_DeleteClearsStaleMappings(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "mapdb-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -44,7 +44,7 @@ func TestMappingDb_DeleteMappingsForSet(t *testing.T) {
 	}
 
 	// 2. Delete mappings for the mock set
-	err = db.DeleteMappingsForSet(ctx, testSetID)
+	err = db.Delete(ctx, testSetID)
 	if err != nil {
 		t.Fatalf("failed to delete mappings: %v", err)
 	}
@@ -59,8 +59,8 @@ func TestMappingDb_DeleteMappingsForSet(t *testing.T) {
 	}
 
 	// 4. Calling delete on non-existent set should not return error
-	err = db.DeleteMappingsForSet(ctx, "non-existent-set")
+	err = db.Delete(ctx, "non-existent-set")
 	if err != nil {
-		t.Fatalf("DeleteMappingsForSet returned error for missing file: %v", err)
+		t.Fatalf("Delete returned error for missing file: %v", err)
 	}
 }
