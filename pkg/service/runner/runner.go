@@ -397,6 +397,8 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
 		outOpts.MockNoiseDetection = r.config.Test.NoiseDetection()
 		outOpts.MockNoiseStrict = r.config.Test.NoiseStrict()
+		outOpts.DisableStatefulMocks = r.config.Test.DisableStatefulMocks
+		outOpts.DisableMockCorrelation = r.config.Test.DisableMockCorrelation
 		outOpts.MysqlPorts = r.config.MysqlPorts
 		outOpts.DisableMysqlAutoDetect = r.config.DisableMysqlAutoDetect
 		outOpts.DisableMysqlEndpointDrift = r.config.DisableMysqlEndpointDrift

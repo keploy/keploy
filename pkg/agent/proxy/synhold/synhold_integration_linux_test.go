@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/google/nftables"
 	"go.uber.org/zap/zaptest"
+	"golang.org/x/sys/unix"
 )
 
 type plan struct {
@@ -422,6 +424,51 @@ func TestStartWaitsForAStoppingAgentsQueue(t *testing.T) {
 	}
 	if err := dialNow(t, port); classify(err) != "ECONNREFUSED" {
 		t.Fatalf("the new agent does not hold: %v, want refused", err)
+	}
+}
+
+// TestStartHoldsThroughSignals: Start holds the port although the thread it
+// runs on is sent SIGURG every few tens of microseconds, so that its probe
+// connections are signalled while they wait for their answer; twenty Starts
+// in a row must each hold.
+func TestStartHoldsThroughSignals(t *testing.T) {
+	requireRoot(t)
+	// Start runs on this thread, and every signal goes to it.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	tid := unix.Gettid()
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		// Shorter than a probe connection waits for its answer, so a probe
+		// is signalled while it waits; a raw sleep, because time.Sleep
+		// makes this pause about a millisecond.
+		pause := unix.NsecToTimespec((20 * time.Microsecond).Nanoseconds())
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = unix.Tgkill(os.Getpid(), tid, unix.SIGURG)
+			_ = unix.Nanosleep(&pause, nil)
+		}
+	}()
+	defer func() { close(stop); <-stopped }()
+
+	for i := 0; i < 20; i++ {
+		port := proxyListeners(t)
+		h, err := Start(context.Background(), zaptest.NewLogger(t), port, refuseAll)
+		if err != nil {
+			t.Fatalf("Start %d, signalled: %v", i, err)
+		}
+		if err := dialNow(t, port); classify(err) != "ECONNREFUSED" {
+			_ = h.Close()
+			t.Fatalf("Start %d, signalled, does not hold: %v, want refused", i, err)
+		}
+		if err := h.Close(); err != nil {
+			t.Fatalf("Close %d, signalled: %v", i, err)
+		}
 	}
 }
 

@@ -14,11 +14,14 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -137,8 +140,18 @@ type Agent struct {
 	scopeMu      sync.Mutex
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
-	scopeTable   map[string][]string    // replay: test name -> mock names (from mappings.yaml)
-	loadedMocks  int                    // replay: count of mocks stored, for /agent/mock/stats
+	scopeMeta    map[scopeKey]scopeMeta
+	scopeTable   map[string][]string // replay: test name -> mock names (from mappings.yaml)
+	loadedMocks  int                 // replay: count of mocks stored, for /agent/mock/stats
+	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
+	// Cleared by resetScopeState.
+	gateRun    map[string]struct{}
+	gateReason string
+	gateWarned bool // NoteUngatable said so this session
+	// replay: the scopes the gate told a harness to skip, and whether
+	// noteEndOfGated said so this session.
+	gatedScopes    map[scopeKey]struct{}
+	gatedEndWarned bool
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -483,9 +496,32 @@ const (
 	outgoingMockChanCap           = int(outgoingMockBufferBytes / nominalMockSizeBytes)
 )
 
+// resetScopeState clears the per-session scope bookkeeping — open scopes, the
+// closed per-test windows, and their metadata — at the start of a record or
+// replay session. A reused, long-lived agent process (compose, standalone)
+// serves many sessions back to back; without this, one session's windows would
+// bleed into the next and corrupt the mappings.yaml a later record builds from
+// GetScopeWindows. It does NOT touch scopeTable/loadedMocks: the CLI installs
+// those for a replay session via SetScopeTable before serving begins. The maps
+// are lazily re-created by openWindow/NoteScope, so nil is the correct zero.
+func (a *Agent) resetScopeState() {
+	a.scopeMu.Lock()
+	a.workerOpen = nil
+	a.scopeWindows = nil
+	a.scopeMeta = nil
+	// A gate belongs to the replay that installed it; the CLI installs this
+	// session's after the reset.
+	a.gateRun, a.gateReason, a.gateWarned = nil, "", false
+	a.gatedScopes, a.gatedEndWarned = nil, false
+	a.scopeMu.Unlock()
+}
+
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, outgoingMockChanCap)
 
+	starts.Default.Reset()
+	ids.Default.Reset()
+	a.resetScopeState()
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
 		return nil, err
@@ -525,6 +561,9 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	// standalone) never drains one replay's captured-on-miss mocks into a later,
 	// unrelated set. Harmless when --on-miss is not "record" (buffer stays empty).
 	httpparser.ResetCaptured()
+	starts.Default.Reset()
+	ids.Default.Reset()
+	a.resetScopeState()
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
@@ -666,6 +705,17 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 	return nil
 }
 
+// ContinueTestErrorCapture opens the next test's capture window, carrying in
+// the misses made since the previous test's window closed (the proxy's
+// ContinueTestErrorCapture). A proxy without it opens a window as Begin does.
+func (a *Agent) ContinueTestErrorCapture(ctx context.Context) error {
+	if c, ok := a.Proxy.(interface{ ContinueTestErrorCapture() }); ok {
+		c.ContinueTestErrorCapture()
+		return nil
+	}
+	return a.BeginTestErrorCapture(ctx)
+}
+
 // collectAsyncMocks returns the async subset (Mock.IsAsync, i.e. Spec.Async != nil).
 func collectAsyncMocks(mocks []*models.Mock) []*models.Mock {
 	var out []*models.Mock
@@ -741,11 +791,13 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	for _, m := range storage.filtered {
 		if m != nil {
 			m.DeriveLifetime()
+			mocknoise.MaterializeCorrelations(m)
 		}
 	}
 	for _, m := range storage.unfiltered {
 		if m != nil {
 			m.DeriveLifetime()
+			mocknoise.MaterializeCorrelations(m)
 		}
 	}
 
@@ -856,6 +908,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		}
 		mock := &m
 		mock.DeriveLifetime()
+		mocknoise.MaterializeCorrelations(mock)
 		if wantAsync && mock.IsAsync() {
 			asyncMocks = append(asyncMocks, mock)
 		}
@@ -1132,6 +1185,24 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	if len(params.RecordedWindows) > 0 {
 		if seeder, ok := a.Proxy.(coreAgent.RecordedWindowsSeeder); ok {
 			seeder.SeedRecordedWindows(params.RecordedWindows)
+		}
+	}
+	// A staging call (recordedSetShape populated: FirstRecordedTestStart and/or
+	// RecordedWindows) marks a new test-set. Reset the stateful-dependency
+	// cursors so each test-set replays its sequences (1,2,3…) from the start
+	// rather than carrying a cursor across sets, while the per-test-case calls
+	// (empty shape) leave them alone so a sequence spans the whole set. Optional
+	// capability: a proxy without stateful cursors is a no-op.
+	//
+	// This reuses the same shape-non-empty staging heuristic as the startup
+	// cutoff / recorded-window seeders above. A degenerate test-set whose cases
+	// all carry a zero request timestamp produces an empty shape, so none of
+	// these fire — the pre-existing limitation of that heuristic. Replacing it
+	// with an explicit MockFilterParams.Staging flag (for all three) is a
+	// tracked follow-up; real recordings always carry timestamps.
+	if !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
+		if resetter, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
+			resetter.ResetStatefulCursors()
 		}
 	}
 

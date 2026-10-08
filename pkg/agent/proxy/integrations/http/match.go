@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,7 +73,7 @@ type matchDiag struct {
 // test.globalNoise body bucket (root-relative dotted paths, lowercased) so
 // manual noise config participates in mock matching with the same vocabulary
 // as response assertions.
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 
 	// Shared schema-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
@@ -167,9 +169,37 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
 		if ok {
+			// Stateful dependency: when several recorded responses share this
+			// exact request (a counter, a created-then-read row), serve them in
+			// record order via a per-request cursor instead of always the first,
+			// then saturate on the last. No-op for a single recording.
+			bestMatch, commitCursor := h.cursorPick(bestMatch, schemaMatched, mockDb, statefulMocks)
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
-			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil)
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil, nil)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if !claimed {
+				continue
+			}
+			// Advance the cursor only now the response is actually served, so a
+			// failed claim + retry does not skip a recorded response.
+			if commitCursor != nil {
+				commitCursor()
+			}
+			return true, served, nil, nil
+		}
+
+		// App-random → dependency-echo correlation: a mock whose request carries
+		// an app-minted random value the dependency reflects back won't byte-match
+		// (the live value differs). Select it by matching every non-correlated
+		// field, capture the live value, and render it into the served response —
+		// run BEFORE the lenient key-schema / fuzzy passes so a correlated mock is
+		// not served stale or rejected by strict noise.
+		if okC, bestC, bindings := h.correlationMatch(input.body, schemaMatched, mockCorrelation); okC {
+			h.Logger.Debug("correlation match found", zap.String("mock name", bestC.Name))
+			served, claimed, err := h.claim(ctx, bestC, mockDb, nil, bindings)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -211,7 +241,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			if len(bodyMatched) == 1 {
 				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
 				detected, _ := noiseEngine.Detect(bodyMatched[0], input.body, userBodyNoise)
-				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, detected)
+				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, detected, nil)
 				if err != nil {
 					return false, nil, nil, err
 				}
@@ -231,7 +261,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if isMatched {
 			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
 			detected, _ := noiseEngine.Detect(bestMatch, input.body, userBodyNoise)
-			served, claimed, err := h.claim(ctx, bestMatch, mockDb, detected)
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, detected, nil)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -242,6 +272,93 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed, pool: unfilteredMocks}, nil
 	}
+}
+
+// cursorPick advances a stateful dependency through its recorded responses. When
+// stateful mocks are enabled and bestMatch is a cursor-consumption mock
+// (ConsumeCursorSaturate), it gathers every schema-matched mock carrying the
+// SAME request (method + URL + body), orders them by record time, and returns
+// the cursor-th one so repeated identical requests get served 1,2,3,… and then
+// saturate on the last. It returns a commit closure the caller must call once
+// the response is actually served (after a successful claim), so a failed/
+// retried match does not skip a recording; commit is nil when no cursoring
+// applies. Returns bestMatch unchanged (commit nil) when stateful mocks are off,
+// the store exposes no cursor, or there is only one recorded response for the
+// request (the common case, where cursor == reuse — byte-identical to legacy).
+//
+// Scope: the group is gathered by BYTE-EXACT request body, which covers stateful
+// dependencies whose repeated requests are identical (a counter, a created-then-
+// read row). A stateful request that carries a noisy/rotating field in its body
+// (so the recordings are NOT byte-equal) is not grouped here and replays as the
+// first recording; that case is handled by request→response correlation (masked
+// grouping), tracked separately — see correlation-auto-replay. This is a known,
+// documented limit, not a silent catch-all.
+func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, mockDb integrations.MockMemDb, statefulMocks bool) (*models.Mock, func()) {
+	if !statefulMocks || bestMatch == nil || bestMatch.TestModeInfo.Consume != models.ConsumeCursorSaturate {
+		return bestMatch, nil
+	}
+	if bestMatch.Spec.HTTPReq == nil {
+		return bestMatch, nil
+	}
+	cs, ok := mockDb.(integrations.MockCursor)
+	if !ok {
+		return bestMatch, nil
+	}
+	wantMethod := bestMatch.Spec.HTTPReq.Method
+	wantURL := bestMatch.Spec.HTTPReq.URL
+	wantBody := bestMatch.Spec.HTTPReq.Body
+	group := make([]*models.Mock, 0, 4)
+	for _, m := range schemaMatched {
+		if m == nil || m.Spec.HTTPReq == nil {
+			continue
+		}
+		// Same request = same ConsumeCursorSaturate class, method, URL and body.
+		// Method+URL matter because the auto-dynamic URL pass can schema-match
+		// recordings of DIFFERENT endpoints that share a body; grouping those
+		// would cursor across unrelated resources.
+		if m.TestModeInfo.Consume == models.ConsumeCursorSaturate &&
+			m.Spec.HTTPReq.Method == wantMethod &&
+			m.Spec.HTTPReq.URL == wantURL &&
+			m.Spec.HTTPReq.Body == wantBody {
+			group = append(group, m)
+		}
+	}
+	if len(group) <= 1 {
+		return bestMatch, nil // single recording: nothing to advance through
+	}
+	// Record order: request timestamp is stable across replay; SortOrder is
+	// mutated on every match so it cannot be used here. ID then Name break ties.
+	sort.SliceStable(group, func(i, j int) bool {
+		ti, tj := group[i].Spec.ReqTimestampMock, group[j].Spec.ReqTimestampMock
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		if group[i].TestModeInfo.ID != group[j].TestModeInfo.ID {
+			return group[i].TestModeInfo.ID < group[j].TestModeInfo.ID
+		}
+		return group[i].Name < group[j].Name
+	})
+	key := cursorKey(string(wantMethod), wantURL, wantBody)
+	idx := cs.MockCursorIndex(key, len(group))
+	if idx < 0 || idx >= len(group) {
+		return bestMatch, nil
+	}
+	n := len(group)
+	return group[idx], func() { cs.AdvanceMockCursor(key, idx, n) }
+}
+
+// cursorKey builds a stable per-request key so repeated identical requests share
+// one cursor. Method + URL + a hash of the request body is enough: the group is
+// gathered by the same method/URL/body, so the key must agree with it.
+func cursorKey(method, url, body string) string {
+	var b strings.Builder
+	b.WriteString(method)
+	b.WriteByte(' ')
+	b.WriteString(url)
+	b.WriteByte('\x00')
+	sum := sha256.Sum256([]byte(body))
+	b.WriteString(hex.EncodeToString(sum[:]))
+	return b.String()
 }
 
 // FilterHTTPMocks Filter mocks to only HTTP mocks
@@ -337,11 +454,24 @@ func pathMatchesModuloDynamicSegments(mockPath, reqPath string) bool {
 		if ms[i] == rs[i] {
 			continue
 		}
-		if looksDynamicSegment(ms[i]) && looksDynamicSegment(rs[i]) {
+		// Relax a differing segment only when BOTH sides are the SAME dynamic
+		// type-class — so /users/123 matches /users/456 (digits) but NOT
+		// /users/<uuid>: a segment that changed TYPE is a different resource, not
+		// the same id drifting. Was "both look dynamic (any shape)", which let a
+		// numeric id match a uuid/hash and collapse distinct calls onto one mock.
+		//
+		// The class is derived from each value's characters, so it is a proxy for
+		// "same id type", not a guarantee: a short (~16-char) hex-alphabet id that
+		// is coincidentally all-decimal on one side can class differently (digits
+		// vs hex) and false-reject. That is the loud, safe direction (a replay
+		// "mock missed" you can see), traded against the silent false-accept — the
+		// wrong mock served — that the old any-shape relax allowed. Longer
+		// hashes/uuids/nanoids are not realistically affected.
+		if c := urlSegmentTypeClass(ms[i]); c != "" && c == urlSegmentTypeClass(rs[i]) {
 			differed = true
 			continue
 		}
-		return false // a non-id segment differs -> genuinely different path
+		return false // a non-id segment, or a type change, -> genuinely different path
 	}
 	return differed
 }
@@ -412,11 +542,26 @@ var (
 // ("v1alpha1", "oauth2"), or word-like slugs — all ambiguous with static path
 // components and left to explicit url-noise config (test.globalNoise.url).
 func looksDynamicSegment(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	if reSegAllDigits.MatchString(s) || reSegUUID.MatchString(s) || reSegLongHex.MatchString(s) {
-		return true
+	return urlSegmentTypeClass(s) != ""
+}
+
+// urlSegmentTypeClass classifies a dynamic-looking URL path segment into a stable
+// type-class, or "" when the segment is not dynamic-looking. The classes mirror
+// looksDynamicSegment's recognized shapes so a LEARNED-dynamic segment can be
+// matched on TYPE (its value ignored, its class required to match) instead of the
+// value being re-guessed per request. Returning "" for every non-dynamic shape
+// keeps looksDynamicSegment byte-for-byte equivalent. See looksDynamicSegment for
+// why each shape is (or isn't) treated as dynamic.
+func urlSegmentTypeClass(s string) string {
+	switch {
+	case s == "":
+		return ""
+	case reSegAllDigits.MatchString(s):
+		return "digits"
+	case reSegUUID.MatchString(s):
+		return "uuid"
+	case reSegLongHex.MatchString(s):
+		return "hex"
 	}
 	if len(s) >= 16 {
 		hasDigit, hasAlpha := false, false
@@ -428,9 +573,11 @@ func looksDynamicSegment(s string) bool {
 				hasAlpha = true
 			}
 		}
-		return hasDigit && hasAlpha
+		if hasDigit && hasAlpha {
+			return "token"
+		}
 	}
-	return false
+	return ""
 }
 
 // relaxed header key matcher (presence-only)
@@ -469,22 +616,39 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	return true
 }
 
-// looksDynamicQueryValue reports whether a query-param VALUE looks like a
-// machine-generated token that legitimately varies between record and replay.
-// It reuses looksDynamicSegment (uuid / long hex / >=16-char alphanumeric mix)
-// but is deliberately STRICTER about bare integers: in a path, position gives a
-// number its meaning (/users/55 is unmistakably an id), whereas a bare small
-// integer in a query is overwhelmingly a page / limit / offset / count, and
-// collapsing ?page=2 onto ?page=3 would re-open the very "wrong recorded
-// response" bug this gate exists to close. So only a LONG digit run (epoch
-// seconds/millis, snowflake ids and the like) counts as dynamic.
+// queryValueTypeClass classifies a query-param VALUE into the dynamic
+// type-class it belongs to ("digits" / "uuid" / "hex" / "token"), or "" when it
+// is not machine-generated enough to treat as dynamic. It mirrors the path
+// classifier urlSegmentTypeClass but is deliberately STRICTER about bare
+// integers: in a path, position gives a number its meaning (/users/55 is
+// unmistakably an id), whereas a bare small integer in a query is overwhelmingly
+// a page / limit / offset / count, and collapsing ?page=2 onto ?page=3 would
+// re-open the very "wrong recorded response" bug this gate exists to close. So a
+// digit run counts as dynamic ("digits") only when it is LONG (epoch
+// seconds/millis, snowflake ids and the like); a short one is static ("").
+//
+// The class is what makes the auto-dynamic query relaxation TYPE-AWARE: a
+// differing value is tolerated only when both sides share the same class, so a
+// rotating ?id=<uuid> no longer collapses onto a numeric ?id=<10-digit> (a
+// different value space, hence a different resource).
 const minDynamicQueryDigits = 10
 
-func looksDynamicQueryValue(s string) bool {
+func queryValueTypeClass(s string) string {
 	if reSegAllDigits.MatchString(s) {
-		return len(s) >= minDynamicQueryDigits
+		if len(s) >= minDynamicQueryDigits {
+			return "digits"
+		}
+		return "" // short bare integer: page / limit / offset — never dynamic
 	}
-	return looksDynamicSegment(s)
+	return urlSegmentTypeClass(s)
+}
+
+// looksDynamicQueryValue reports whether a query-param VALUE looks like a
+// machine-generated token that legitimately varies between record and replay.
+// It is the boolean view of queryValueTypeClass and stays byte-for-byte
+// equivalent to "class != \"\"".
+func looksDynamicQueryValue(s string) bool {
+	return queryValueTypeClass(s) != ""
 }
 
 // maskAndSort applies url noise to every member and sorts the result, so two
@@ -538,8 +702,9 @@ func maskAndSort(vals []string, noiseRes []*regexp.Regexp) []string {
 // needs no config in the path (/items/<uuid>) would hard-fail in the query
 // (?id=<uuid>), which is the same non-deterministic-id 502 that pass 2 exists to
 // prevent. A differing member is tolerated only when it looks machine-generated
-// on BOTH sides (see looksDynamicQueryValue), so deterministic and
-// genuinely-distinct queries are never relaxed. Disable via
+// AND shares the same dynamic type-class on BOTH sides (see
+// queryValueTypeClass), so deterministic queries, genuinely-distinct values, and
+// cross-type drift (a uuid vs a number) are never relaxed. Disable via
 // OutgoingOptions.DisableAutoURLDynamic.
 func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Values, urlNoise []string, autoDynamic bool) bool {
 	shouldIgnore := func(key string) bool {
@@ -612,15 +777,27 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 				continue
 			}
 			// Fallback only (pass 2): tolerate a member that looks
-			// machine-generated on BOTH sides. Sorting can misalign two
-			// multi-value sets that each carry a dynamic member, so this is a
-			// best-effort relaxation for repeated params; the single-value case
-			// (len 1, the one that matters) is exact.
-			if autoDynamic && looksDynamicQueryValue(rv[i]) && looksDynamicQueryValue(av[i]) {
+			// machine-generated on BOTH sides AND shares the SAME dynamic
+			// type-class — so a rotating ?id=<uuid> matches another uuid but NOT a
+			// numeric ?id=<10-digit>: a value that changed TYPE is a different
+			// resource, not the same id drifting (mirrors MatchURLPath's
+			// type-aware path relax). Was "both look dynamic (any shape)", which
+			// let a uuid collapse onto a long int / hash and serve the wrong
+			// recorded response. Sorting can misalign two multi-value sets that
+			// each carry a dynamic member, so this is a best-effort relaxation for
+			// repeated params; the single-value case (len 1, the one that matters)
+			// is exact.
+			//
+			// Same proxy-not-guarantee trade-off as the path classifier: a
+			// ~16-char hex id coincidentally all-decimal on one side can class
+			// differently and false-reject (~1/900, negligible for longer ids) —
+			// the loud, safe direction versus the silent wrong-mock this replaces.
+			if c := queryValueTypeClass(rv[i]); autoDynamic && c != "" && c == queryValueTypeClass(av[i]) {
 				h.Logger.Debug("http query: value treated as auto-detected dynamic",
 					zap.String("param", key),
 					zap.String("mock value", rv[i]),
-					zap.String("request value", av[i]))
+					zap.String("request value", av[i]),
+					zap.String("type class", c))
 				continue
 			}
 			return false
@@ -1192,7 +1369,7 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 // leaves the mock unconsumed rather than reported as served. It returns the
 // mock to serve, m or a copy of it with the response loaded, and claimed=false
 // when another connection took m first.
-func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) (served *models.Mock, claimed bool, err error) {
+func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, bindings map[string]string) (served *models.Mock, claimed bool, err error) {
 	served, err = withResponse(m)
 	if err != nil {
 		return nil, false, err
@@ -1200,6 +1377,9 @@ func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.Mo
 	if !h.updateMock(ctx, m, mockDb, detectedNoise) {
 		return nil, false, nil
 	}
+	// Honor request→response correlations: render the live values captured from
+	// this request into the served response (on a copy; never the pooled mock).
+	served = renderCorrelations(served, bindings)
 	return served, true, nil
 }
 

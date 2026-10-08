@@ -391,6 +391,19 @@ type SimulationConfig struct {
 	ConfigHost      string
 	URLReplacements map[string]string
 	PortMappings    map[uint32]uint32
+	// TargetFromURL says an HTTP test case's URL already names where the app
+	// is, as it does once test.basePath has been put in it. What the recording
+	// kept of the address the app had then is another deployment's, and is
+	// left out of the request: the recorded app_port does not replace the
+	// URL's port, and the recorded Host header is not sent, so the request
+	// asks for the URL's host (see HostHeaderOf). An app behind an ingress or
+	// a virtual host is not reached under the name it was recorded with.
+	TargetFromURL bool
+	// SentTo, when set, is told where each HTTP request goes once everything
+	// that moves it (replaceWith, ports, TargetFromURL) has been applied: the
+	// URL it is sent to, the Host it asks for, and the Host header its test
+	// was recorded with ("" when it has none).
+	SentTo func(target *url.URL, host, recordedHost string)
 	// TLSConfig, when non-nil, is applied to the http.Transport used by
 	// the replay client. Lets callers pin a specific cert (e.g. for
 	// short-lived replay pods serving a self-signed cert) without
@@ -482,6 +495,18 @@ func urlHostPort(u *url.URL) (string, string) {
 type preparedHTTPRequest struct {
 	Request *http.Request
 	Client  *http.Client
+}
+
+// HostHeaderOf is the Host header a client sends for u: its host, and its port
+// unless that is the one its scheme has anyway. A front that routes by name
+// matches the header as written, and need not know "staging:443" for the
+// "staging" every client of https://staging asks it for.
+func HostHeaderOf(u *url.URL) string {
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		return strings.TrimSuffix(u.Host, ":"+port)
+	}
+	return u.Host
 }
 
 // prepareHTTPRequest handles all common request preparation logic shared between
@@ -678,7 +703,11 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	// app_port < config port < replaceWith URL replacements
 	// (explicit replacement port short-circuits lower-priority port overrides)
 	// < replaceWith port mappings.
-	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, true, logger)
+	appPort := tc.AppPort
+	if cfg.TargetFromURL {
+		appPort = 0
+	}
+	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, appPort, cfg.ConfigPort, true, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -700,9 +729,21 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 
 	// override host header if present in the request
 	hostHeader := tc.HTTPReq.Header["Host"]
-	if hostHeader != "" {
+	if cfg.TargetFromURL {
+		// Not left to the URL as it stands: ResolveTestTarget has written the
+		// scheme's own port into it, and "staging:443" is not the name a
+		// client of https://staging asks for.
+		req.Host = HostHeaderOf(req.URL)
+	} else if hostHeader != "" {
 		logger.Debug("overriding host header", zap.String("host", hostHeader))
 		req.Host = hostHeader
+	}
+	if cfg.SentTo != nil {
+		asked := req.Host
+		if asked == "" {
+			asked = req.URL.Host
+		}
+		cfg.SentTo(req.URL, asked, hostHeader)
 	}
 
 	// Creating the client and disabling redirects
@@ -781,11 +822,122 @@ func isPreResponseConnRefused(err error) bool {
 	return neterr.IsConnRefused(err)
 }
 
+// netHTTPServerClosedIdle is the text of net/http's errServerClosedIdle
+// (net/http/transport.go). net/http does not export the error, so its text
+// is all there is to know it by. This test provokes the real one, and fails if
+// the text changes:
+// TestIsTransportConnResetClassifiesAServerThatClosedTheConnectionFirst.
+const netHTTPServerClosedIdle = "http: server closed idle connection"
+
+// inErrorTree reports whether match holds for err or any error it wraps. It
+// walks the tree errors.Is walks: through Unwrap() error and Unwrap() []error
+// alike.
+func inErrorTree(err error, match func(error) bool) bool {
+	if err == nil {
+		return false
+	}
+	if match(err) {
+		return true
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		return inErrorTree(u.Unwrap(), match)
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			if inErrorTree(e, match) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isServerClosedIdle reports whether err, or any error it wraps, is net/http's
+// errServerClosedIdle.
+func isServerClosedIdle(err error) bool {
+	return inErrorTree(err, func(e error) bool { return e.Error() == netHTTPServerClosedIdle })
+}
+
+// isTimedOut reports whether err, or any error it wraps, says it timed out
+// (a Timeout method that returns true, as net.Error has): a context's deadline
+// (context.DeadlineExceeded); net/http's client timeout, awaiting the answer's
+// headers or reading its body; a deadline on the connection ("i/o timeout");
+// a dial, a TLS handshake or a name lookup that timed out.
+func isTimedOut(err error) bool {
+	return inErrorTree(err, func(e error) bool {
+		t, ok := e.(interface{ Timeout() bool })
+		return ok && t.Timeout()
+	})
+}
+
+// isAnswerCutShort reports whether err is the connection closing part-way
+// through the app's answer, by the answer's own framing: net/http reports that
+// as io.ErrUnexpectedEOF.
+func isAnswerCutShort(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// isConnDropped reports whether err is the connection to the app dropping: a
+// reset (ECONNRESET), a broken pipe (EPIPE), a bare io.EOF, or net/http's
+// errServerClosedIdle. One drop is reported as any of these. Which one depends
+// on timing: net/http reports a close its read loop reads before the request
+// is on the connection as errServerClosedIdle, which a request on a fresh
+// connection gets as is (on a reused one, net/http sends again a request it
+// can replay), and a close it reads after as io.EOF. By the error alone a
+// reset can also have come part-way through an answer (see
+// IsTransportConnReset). Every rule about a drop asks this one.
+func isConnDropped(err error) bool {
+	return neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) ||
+		errors.Is(err, io.EOF) || isServerClosedIdle(err)
+}
+
+// IsAppConnectionError reports whether err says a test request failed because
+// the connection to the app failed: it was refused (isPreResponseConnRefused,
+// which the refusal re-send and the gRPC dial ask), the app's host was not
+// found, it dropped (isConnDropped), or a gRPC call lost it before the server
+// answered (isGRPCConnectionLost). This is what a test result's
+// APP_CONNECTION_ERROR means, and replay asks only this to set it.
+//
+// A close part-way through an answer (isAnswerCutShort) is not one: the app
+// answered, if not completely. IsTransportConnReset takes it too, for the
+// re-send its caller gates on the mocks the request consumed, and so does
+// IsAppNoAnswer.
+func IsAppConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	return isPreResponseConnRefused(err) ||
+		(errors.As(err, &dnsErr) && dnsErr.IsNotFound) ||
+		isConnDropped(err) ||
+		isGRPCConnectionLost(err)
+}
+
+// IsAppNoAnswer reports whether err says a test request got no complete
+// answer: none came in time (isTimedOut), the request was cancelled (a stop:
+// context.Canceled), or the connection closed part-way through the answer
+// (isAnswerCutShort). grpc-go turns the end of a call's
+// context into a status and keeps no cause, so a gRPC call's is its code
+// (isGRPCNoAnswer). This is replay's no-answer mark, which holds off the mocks
+// prune and a new mappings.yaml, and replay asks only this to set it.
+//
+// It is not APP_CONNECTION_ERROR: a stop's cancel is not the app being down.
+// An answer that came back whole but does not decode (answerDoesNotDecode) is
+// an answer, so it is neither.
+func IsAppNoAnswer(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isTimedOut(err) ||
+		errors.Is(err, context.Canceled) ||
+		isAnswerCutShort(err) ||
+		isGRPCNoAnswer(err)
+}
+
 // IsTransportConnReset reports whether err is a transport-level connection
-// reset / unexpected close while exchanging the request with the app — i.e.
-// "connection reset by peer" (ECONNRESET), a broken pipe (EPIPE), or a bare
-// io.EOF / io.ErrUnexpectedEOF surfaced by net/http when the peer dropped the
-// connection.
+// reset / unexpected close while exchanging the request with the app: the
+// connection dropping before any of an answer came back (isConnDropped), or
+// closing part-way through one (isAnswerCutShort).
 //
 // This class is dominated, under loaded CI replaying a DOCKER app, by docker's
 // userland proxy (docker-proxy) resetting a freshly-accepted host-side
@@ -808,16 +960,10 @@ func IsTransportConnReset(err error) bool {
 	if err == nil {
 		return false
 	}
-	if neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) {
-		return true
-	}
 	// net/http surfaces a peer-side drop during the response read as a bare
 	// io.EOF / io.ErrUnexpectedEOF (no syscall in the chain) — the docker-proxy
 	// reset frequently lands here too (see the "EOF" hits in the reproduction).
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	return false
+	return isConnDropped(err) || isAnswerCutShort(err)
 }
 
 // doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
@@ -873,6 +1019,23 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 	}
 }
 
+// answerDoesNotDecode is the error of a test request whose answer came back,
+// whole by its own framing, but whose body does not decode as its
+// Content-Encoding says (an encoded answer with no body, such as a 204 or the
+// answer to a HEAD, or an encoded body cut short). It keeps the decoder's
+// error as text only, never wrapped: gzip reports a body with no bytes as
+// io.EOF and a short one as io.ErrUnexpectedEOF, and br reports both as
+// io.ErrUnexpectedEOF, the errors of a dropped connection and of an answer the
+// connection cut short, and the app did answer. Wrapped, they would read as a
+// drop to the reset re-send (IsTransportConnReset) and to APP_CONNECTION_ERROR
+// (IsAppConnectionError), and as no answer to replay's no-answer mark
+// (IsAppNoAnswer). A body that decodes but inflates past the cap is not one:
+// it keeps Decompress's error, which wraps ErrDecompressedTooLarge and none of
+// those.
+func answerDoesNotDecode(status int, encoding string, err error) error {
+	return fmt.Errorf("the app's %d answer does not decode as its Content-Encoding %q says: %v", status, encoding, err)
+}
+
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -910,11 +1073,17 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	// Decompress if needed
-	if httpResp.Header.Get("Content-Encoding") != "" {
-		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody, MaxDecompressedSize)
+	if enc := httpResp.Header.Get("Content-Encoding"); enc != "" {
+		respBody, err = Decompress(logger, enc, respBody, MaxDecompressedSize)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decode response body")
-			return nil, err
+			// A body that inflates past the cap decodes; it is only too large.
+			// It keeps Decompress's error, by which a caller tells it from a
+			// body that does not decode (ErrDecompressedTooLarge).
+			if errors.Is(err, ErrDecompressedTooLarge) {
+				return nil, err
+			}
+			return nil, answerDoesNotDecode(httpResp.StatusCode, enc, err)
 		}
 	}
 
@@ -988,6 +1157,13 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		if gzErr != nil {
 			httpResp.Body.Close()
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
+			// A body that ended, by its own framing, before its first byte
+			// (io.EOF), or whose first bytes are not a gzip header, is the
+			// answer not decoding. Any other error may have come from reading
+			// the body off the connection, and stays as it is.
+			if errors.Is(gzErr, io.EOF) || errors.Is(gzErr, gzip.ErrHeader) {
+				return nil, answerDoesNotDecode(httpResp.StatusCode, contentEncoding, gzErr)
+			}
 			return nil, gzErr
 		}
 		// Cap decompressed output so a bomb fails the test instead of
@@ -2936,7 +3112,43 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 	return err
 }
 
+// agentHealthFirstWait is how long the first agent health check waits for its
+// answer. An agent on the same host answers in well under a millisecond, and one
+// that is not up yet refuses the connection at once, so this keeps the local case
+// as quick as it always was.
+//
+// agentHealthMaxWait bounds the wait a run of slow answers can grow to (see
+// nextAgentHealthWait); the caller's context still bounds the whole wait.
+const (
+	agentHealthFirstWait = 500 * time.Millisecond
+	agentHealthMaxWait   = 30 * time.Second
+)
+
+// nextAgentHealthWait is how long the next agent health check waits: twice the
+// last wait when that check ran out of time, up to agentHealthMaxWait, and the
+// same wait otherwise. Only a check that timed out says the answer needs longer
+// to arrive than it was given; one refused at once (nothing listening yet) or
+// answered says nothing about the path, so it leaves the wait alone.
+//
+// A fixed wait cannot fit every path to the agent. Reached through a Kubernetes
+// port-forward, each new connection costs two stream set-ups before the request
+// is sent, so a check takes about three round trips: 735ms over a 245ms link.
+// A fixed 500ms cut every check off and the agent was never found ready.
+func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
+	if !timedOut {
+		return wait
+	}
+	if wait >= agentHealthMaxWait/2 {
+		return agentHealthMaxWait
+	}
+	return 2 * wait
+}
+
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals.
+//
+// Each check waits agentHealthFirstWait for its answer to begin with, and twice
+// as long after a check that ran out of time (nextAgentHealthWait), so an agent
+// behind a slow path is found ready instead of every check being cut off.
 //
 // When an agent first becomes healthy it also kicks off verifyControlPlaneGuarded
 // for it, off this goroutine and after the readiness signal, so the check never
@@ -2949,9 +3161,9 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 	defer ticker.Stop()
 	defer close(agentReadyCh)
 
-	client := &http.Client{
-		Timeout: 500 * time.Millisecond, // short timeout for health checks
-	}
+	// No client-wide timeout: each check waits as long as `wait` (below).
+	client := &http.Client{}
+	wait := agentHealthFirstWait
 	agentStarted := false
 
 	for {
@@ -2959,7 +3171,15 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			isHealthy := isAgentHealthy(ctx, logger, client, agentURI)
+			checkCtx, cancel := context.WithTimeout(ctx, wait)
+			isHealthy := isAgentHealthy(checkCtx, logger, client, agentURI)
+			timedOut := !isHealthy && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+			cancel()
+			if next := nextAgentHealthWait(wait, timedOut); next != wait {
+				logger.Debug("agent health check ran out of time; the next one waits longer",
+					zap.String("agentURI", agentURI), zap.Duration("waited", wait), zap.Duration("next_wait", next))
+				wait = next
+			}
 
 			if isHealthy && !agentStarted {
 				// Agent became healthy
@@ -4483,7 +4703,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 	utils.LogError(logger, nil, "the agent is NOT enforcing control-plane authentication: it accepted a request carrying an invalid token",
 		zap.Int("probe_status", resp.StatusCode),
 		zap.String("impact", "/agent/pcap/keylog streams live TLS session keys and /agent/stop and /agent/storemocks alter this session; any local user or neighbouring container that can reach the agent port can use them"),
-		zap.String("next_step", "the token this keploy process handed to the agent did not reach it — check that the agent was started with --token-file (native), or that "+token.Env+" reached the docker or docker compose client's environment (docker), and report this if you did not change how keploy starts its agent"))
+		zap.String("next_step", "the token this keploy process handed to the agent did not reach it — check that the agent was started with --token-file (native), or that "+token.Env+" reached the docker or docker compose client's environment (docker; a doas in front of docker compose resets that environment unless its doas.conf rule has keepenv or setenv { "+token.Env+" }), and report this if you did not change how keploy starts its agent"))
 }
 
 // controlPlaneProbeTimeout bounds the check above. Generous: the agent answered

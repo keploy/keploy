@@ -107,6 +107,7 @@ type OutgoingOptions struct {
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay time.Duration // This is the same as Application delay.
 	Mocking  bool          // used to enable/disable mocking
+	SwapIDs  bool
 	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
 	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
 	// default), "passthrough" (dial the real upstream, don't persist), or
@@ -118,6 +119,22 @@ type OutgoingOptions struct {
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
+	// DisableStatefulMocks turns OFF cursor-consumption of stateful data-plane
+	// mocks. Default (false) = ON: repeated identical dependency requests are
+	// served successive recorded responses in record order (then saturate on the
+	// last), so a stateful sequence (a counter, a created-then-read row) replays
+	// as 1,2,3 instead of 1,1,1. Set true to restore the legacy "serve the first
+	// recorded response every time" behaviour. Only affects mocks classified
+	// ConsumeCursorSaturate (DeriveLifetime rules #4/#5); at one recorded
+	// response it is a no-op.
+	DisableStatefulMocks bool
+	// DisableMockCorrelation turns OFF request→response echo correlation: when
+	// the app sends an app-minted random value (UUID / nonce / idempotency key)
+	// that the dependency reflects back, replay captures the live request value
+	// and renders it into the served response instead of replaying the stale
+	// recorded one. Default (false) = ON. Set true to fall back to serving the
+	// recorded value. Only affects mocks carrying Spec.Correlations.
+	DisableMockCorrelation bool
 	// MockNoiseDetection / MockNoiseStrict are the canonical spelling.
 	//
 	// MockNoiseDetection: detect request-body field drift vs the recorded mock
@@ -145,7 +162,6 @@ type OutgoingOptions struct {
 	// NoiseDetection() / NoiseStrict(), never directly.
 	SchemaNoiseDetection bool
 	SchemaNoiseStrict    bool
-	SkipTLSMITM          bool
 	// ConnKey names THIS connection's socket, as an opaque token on which the
 	// connection's two capture legs agree: the raw leg that carries its
 	// cleartext prelude (a MySQL greeting and SSLRequest) and the decrypted leg
@@ -187,6 +203,11 @@ type OutgoingOptions struct {
 	// Surfaced via --opportunistic-tls-intercept so the agent can
 	// pick the right per-connection branch in handleConnection.
 	OpportunisticTLSIntercept bool
+	// SkipTLSMITM sits with the other TLS switches, in the padding after them.
+	// OutgoingOptions is held by value in each connection's supervisor.Session,
+	// so a field placed where it takes a word of its own grows the Session of
+	// every connection.
+	SkipTLSMITM bool
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial
@@ -344,7 +365,9 @@ type SetupOptions struct {
 	// because the wrapped process is a test runner, not a server whose
 	// incoming traffic becomes test cases. Only outgoing calls are captured
 	// (record) or served (replay). Forwarded to the agent via --mock-mode.
-	MockMode          bool
+	MockMode bool
+	// RecordRequests keeps the ingress hooks on in mock mode so the app's incoming requests become test cases; forwarded as --record-requests.
+	RecordRequests    bool
 	GlobalPassthrough bool
 	// DisableHandshakeHold turns off holding each redirected connection's
 	// handshake until its destination answers (pkg/agent/proxy/synhold), so

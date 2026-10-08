@@ -95,10 +95,27 @@ for attempt in range(30):
             sys.exit(1)
         time.sleep(1)
 
+# The priced calls are one test, scoped the way a harness scopes it, with its
+# verdict sent at the end: under compose the agent is stopped with the runner,
+# so what the replay knows about the test comes from the account it leaves.
+# A failed scope call is ignored, so a step that takes the agent away runs
+# exactly as it would without one.
+TOKEN = os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
+def scope(path, body):
+    h = {"Content-Type": "application/json"}
+    if TOKEN:
+        h["Authorization"] = "Bearer " + TOKEN
+    try:
+        urllib.request.urlopen(urllib.request.Request(AGENT + path, data=json.dumps(body).encode(), headers=h, method="POST"), timeout=5).read()
+    except Exception as e:
+        print("scope call failed:", type(e).__name__, flush=True)
+
+scope("/agent/scope/begin", {"name": "compose_test"})
 for p in ["/price/aapl", "/price/msft", "/price/goog"]:
     body = get(p)
     assert body["path"] == p, body
     print("ok", p, body, flush=True)
+scope("/agent/scope/end", {"name": "compose_test", "outcome": "passed"})
 # A call the recording does not have, made only when asked. The runner does not
 # depend on its answer: it is there for keploy to report as missed.
 if os.environ.get("UNRECORDED"):
@@ -181,13 +198,26 @@ echo "recorded /price/ mocks: $MOCKS"
 [ "$MOCKS" -eq 3 ] || { echo "FAIL: expected 3 recorded /price/ calls, got $MOCKS — the app was released before the proxy was armed"; FAIL=1; }
 cleanup
 
-echo "== 2. replay with the dependency service DELETED (must serve from mocks) =="
-sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay \
-  -c "docker compose -f docker-compose.nodep.yml up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee rep.log
+# Step 2 runs the form keploy's docs give, `sudo docker compose up`. keploy is
+# root here, as it is for every compose command on its Linux command line (main
+# re-executes it under sudo first), so that sudo elevates nothing: keploy drops
+# it, and compose gets the agent's token straight from keploy. Running it
+# instead would lose the token through a sudo-rs before 0.2.7, and a
+# pass-through stand-in would never start compose at all. This `sudo`, first on
+# keploy's own PATH, fails loudly if keploy runs one; assert_agent_guarded then
+# proves the token still got to the agent.
+TRIPWIRE="$(mktemp -d)"
+printf '#!/bin/sh\necho "keploy ran sudo as root: sudo $*" >&2\nexit 97\n' > "$TRIPWIRE/sudo"
+chmod +x "$TRIPWIRE/sudo"
+
+echo "== 2. replay with the dependency service DELETED (must serve from mocks), under sudo docker compose =="
+sudo -E env PATH="$TRIPWIRE:$PATH" "$REPLAY_BIN" mock replay \
+  -c "sudo docker compose -f docker-compose.nodep.yml up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee rep.log
 RC=${PIPESTATUS[0]}
 echo "replay exit=$RC"
 [ "$RC" -eq 0 ] || { echo "FAIL: replay should pass entirely from mocks (exit 0), got $RC"; FAIL=1; }
 grep -q "RUNNER PASSED 3" rep.log || { echo "FAIL: the runner did not get all 3 answers from the mock set"; FAIL=1; }
+grep -q "keploy ran sudo as root" rep.log && { echo "FAIL: keploy, as root, ran the sudo in front of docker compose instead of dropping it"; FAIL=1; }
 assert_agent_guarded rep.log
 # --abort-on-container-exit stops the agent with the app, so the agent is gone
 # before keploy can ask it what it served. It leaves that account as it is
@@ -197,6 +227,8 @@ grep -q 'mock replay summary.*"missed": 0' rep.log || { echo "FAIL: the replay's
 grep -q 'mock replay summary.*"consumed": [1-9]' rep.log || { echo "FAIL: the replay served every answer from the recording, and its outcome says it served none"; FAIL=1; }
 grep -q "incomplete" rep.log && { echo "FAIL: the replay summary is incomplete under compose"; FAIL=1; }
 sudo grep -q '^isolated: true' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not prove the run isolated:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
+# The test's verdict and window reached the CLI from the stopped agent.
+sudo grep -A1 -x '    - name: compose_test' keploy/e2e/last-replay-tests.yaml | grep -qx '      outcome: passed' || { echo "FAIL: the replay does not know the scoped test passed under compose:"; sudo cat keploy/e2e/last-replay-tests.yaml; FAIL=1; }
 cleanup
 
 echo "== 3. --strict passes a compose replay it can now verify =="

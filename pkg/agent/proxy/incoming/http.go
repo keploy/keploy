@@ -513,7 +513,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	actualPort := appPort
 
 	// Dial Upstream
-	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
+	upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
 	if err != nil {
 		logger.Error("Failed to connect to upstream application. Verify the application is listening on the resolved address.",
 			zap.String("final_app_addr", finalAppAddr),
@@ -524,6 +524,13 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	defer func() {
 		_ = upConn.Close()
 	}()
+
+	// win is the open window of the exchange in flight (syncMock.OpenWindow),
+	// from its request's first byte until its capture has decided it: the mock
+	// manager holds every mock it may own until then, however long it streams.
+	// A capture takes it over; any other way out ends it here.
+	var win *syncMock.Window
+	defer func() { win.Close() }()
 
 	// forceCloseMode: only sync mode needs the traditional HTTP parsing loop
 	// (strict one-at-a-time ordering with forced close). Sampling mode now
@@ -577,7 +584,13 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// not lagging the wire by parser-iteration time + bufio fill jitter.
 	wireConn := &wireTimeConn{Conn: clientConn}
 	clientReader := bufio.NewReader(wireConn)
-	upstreamReader := bufio.NewReader(upConn)
+	// The app's side is read ahead of the client, and each piece stamped as
+	// it arrives: the arrival of a response's last byte (or of the close that
+	// ends its body) is where its exchange's window ends (respTimestamp
+	// below), however slow its client.
+	upAhead := newAheadReader(upConn)
+	defer upAhead.Close() // before upConn's close, which ends its read
+	upstreamReader := bufio.NewReader(upAhead)
 
 	for {
 		// iterStart is the loop entry time, captured BEFORE ReadRequest
@@ -638,6 +651,12 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// the sampling lock is released early, and the loop exits after one exchange.
 		pressureCloseMode := forceCloseMode || isIngressRecordingPaused()
 		captureEnabled := !isIngressRecordingPaused()
+		// The exchange may be captured: open its window before the request
+		// reaches the app, so no egress call it makes is ever older than it.
+		// One that cannot be captured opens none: nothing would decide it.
+		if captureEnabled {
+			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
+		}
 
 		// Request modifications for sync/sampling modes.
 		if forceCloseMode {
@@ -724,7 +743,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 
-		// Response modifications for sync/sampling modes.
+		// The response's headers are read. Stamped BEFORE the lock is given
+		// back below, so a response whose time this stays (one read whole with
+		// its headers) ends before the next request is read: see where the
+		// body's last byte moves it on, after resp.Write.
+		respTimestamp := time.Now()
+
+		// Response modifications for sync/sampling modes. appResp is the
+		// response as the app sent it, which is what is recorded.
+		appResp := resp
 		if forceCloseMode {
 			if resp.ContentLength == -1 || isChunked(resp.TransferEncoding) {
 				// Release the sync/sampling lock early on streaming
@@ -732,14 +759,24 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				// but keep capture enabled — the tee reads decoded
 				// body bytes and the capture-budget check handles
 				// genuinely oversized streams.
-				releaseLock()
 				streamingExchange = true
 			}
+			if streamingExchange {
+				// The lock is given back here, or was at a request body of
+				// unknown length, and the next request runs beside the rest of
+				// this one. The window yields at the headers: it still runs to
+				// the response's last byte (respTimestamp, below), but past
+				// the headers it leaves a mock another request claims to that
+				// request (from its start to its own yield: its headers if it
+				// gave the lock back early, else its last byte from the app),
+				// and one a window decided before it spans too to that window
+				// (syncMock.Window.Yield). Up to the headers it is as it was.
+				win.Yield(respTimestamp)
+				releaseLock()
+			}
 
-			resp.Close = true
-			resp.Header.Set("Connection", "close")
+			appResp = closeAfter(resp)
 		}
-		respTimestamp := time.Now()
 
 		// Re-evaluate capture eligibility after response headers.
 		// Also re-check memory pressure in case it started mid-exchange.
@@ -774,6 +811,33 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 		resp.Body.Close() // Close explicitly.
+
+		// The response's time is its LAST byte's: when that byte arrived from
+		// the app (for a body that ends when the app closes the connection,
+		// when the close did), not when its headers were read. It is the end
+		// of the exchange's window (reqTimestamp <= an egress call's time <=
+		// respTimestamp), for the resolve and for the recorded test case, so
+		// an egress call the app makes while it sends the body (a stream that
+		// fetches as it goes, a handler that flushes its headers first) is
+		// inside it. Left at the headers, the resolve stopped short of those
+		// calls, and the exchange was recorded without their mocks.
+		//
+		// The app's side is read ahead of the client (aheadReader), so a slow
+		// client does not stretch the window past when the app finished, up
+		// to the read-ahead's bounds; nor is it the moment the body was
+		// forwarded (the zero-copy loop's stamp). A body read whole with its
+		// headers keeps the headers' time, taken before the lock is given
+		// back. A window that goes on past its headers overlaps the requests
+		// run beside the rest of it, and the yield at the headers (above)
+		// keeps what they claim theirs.
+		if lastByte := upAhead.LastReadTime(); lastByte.After(respTimestamp) {
+			respTimestamp = lastByte
+		}
+		// The exchange is over: from its last byte on its request is in flight
+		// no more, and claims nothing over the requests that run beside a
+		// stream still being sent (a no-op for one that yielded at its
+		// headers already).
+		win.Yield(respTimestamp)
 
 		// Final memory pressure check before capture evaluation.
 		if !pressureCloseMode && isIngressRecordingPaused() {
@@ -830,6 +894,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if !shouldCapture {
+			win.Close()
+			win = nil
 			if forceCloseMode || pressureCloseMode {
 				return
 			}
@@ -851,11 +917,16 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		reqBytesTotal := reqCapture.Total()
 		respBytesTotal := respCapture.Total()
 		capturedReq := req
-		capturedResp := resp
+		capturedResp := appResp
 		capturedReqTS := reqTimestamp
 		capturedRespTS := respTimestamp
+		capturedWin := win
+		win = nil
 
+		pm.captures.Add(1)
 		go func() {
+			defer pm.captures.Done()
+			defer capturedWin.Close() // once the capture has decided it, or skipped it
 			exchangeCaptureSize, err := capturedExchangeSize(capturedReq, capturedResp, reqBodyBytes, respBodyBytes)
 			if err != nil {
 				logger.Error("Failed to estimate combined captured exchange size. This indicates an internal capture error; report it if it persists.",
@@ -923,7 +994,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
+			hooksUtils.CaptureHook(syncMock.WithWindow(ctx, capturedWin), logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 		}()
 
 		// Exit the loop in sync/sampling mode or when memory pressure requires closing.
@@ -1000,6 +1071,12 @@ func isStaleConnError(err error) bool {
 
 func writeBadGateway(c net.Conn) {
 	_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+}
+
+func (pm *IngressProxyManager) appGone(c net.Conn) {
+	if !pm.mockMode {
+		writeBadGateway(c)
+	}
 }
 
 // writeBadRequest is the client-side counterpart to writeBadGateway:
@@ -1157,6 +1234,13 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		return nil
 	}
 
+	// win is the open window of the exchange in flight (syncMock.OpenWindow),
+	// from its request's first byte until its capture has decided it: the mock
+	// manager holds every mock it may own until then, however long it streams.
+	// A capture takes it over; any other way out ends it here.
+	var win *syncMock.Window
+	defer func() { win.Close() }()
+
 	for {
 		if isIngressRecordingPaused() {
 			captureEnabled = false
@@ -1213,7 +1297,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if rerr := redial(); rerr != nil {
 					logger.Error("Upstream redial before upgrade failed. Verify the application is still listening on the resolved address.",
 						zap.String("upstream", upstreamAddr), zap.Error(rerr))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 			}
@@ -1224,7 +1308,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					zap.String("upgrade", req.Header.Get("Upgrade")),
 					zap.String("upstream", upstreamAddr),
 					zap.Error(err))
-				writeBadGateway(clientConn)
+				pm.appGone(clientConn)
 				return
 			}
 			// Drain bytes already buffered in our bufio readers before
@@ -1258,14 +1342,27 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			return
 		}
 
+		// An exchange that may be captured opens its window here, after every
+		// way it can turn out not to be (a bypass, an Upgrade tunnel, paused
+		// recording) and before the request reaches the app, so no egress call
+		// it makes is ever older than it. One that cannot be captured opens
+		// none: nothing would decide it, and a tunnel can last for hours.
+		if captureEnabled {
+			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
+		}
+
 		// MSG_PEEK before reusing a pooled upstream conn.
 		if !upConnFresh && !peekUpstreamLive(upConn) {
 			logger.Debug("Stale upstream pool entry detected (FIN in queue); redialing",
 				zap.String("upstream", upstreamAddr))
 			if err := redial(); err != nil {
-				logger.Error("Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
-					zap.String("upstream", upstreamAddr), zap.Error(err))
-				writeBadGateway(clientConn)
+				if pm.mockMode {
+					logger.Debug("the app is not listening after a restart; closing the call as the app would", zap.String("upstream", upstreamAddr), zap.Error(err))
+				} else {
+					logger.Error("Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
+						zap.String("upstream", upstreamAddr), zap.Error(err))
+				}
+				pm.appGone(clientConn)
 				if req.Body != nil {
 					_ = req.Body.Close()
 				}
@@ -1382,7 +1479,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if rerr := redial(); rerr != nil {
 					logger.Error("Replay redial after request-write failure failed. Verify the upstream application is still listening on the resolved address.",
 						zap.String("upstream", upstreamAddr), zap.Error(rerr))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 				// Replay from the pre-buffered body (or no body if
@@ -1397,7 +1494,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if rerr := req.Write(upConn); rerr != nil {
 					logger.Error("Replay of idempotent request failed after redial; upstream may be unhealthy or rejecting writes. Check application status and recent restarts on the resolved address.",
 						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 				if req.Body != nil {
@@ -1414,7 +1511,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					zap.Bool("idempotent", isIdempotentMethod(req.Method)),
 					zap.Int64("content_length", req.ContentLength),
 					zap.Error(err))
-				writeBadGateway(clientConn)
+				pm.appGone(clientConn)
 				return
 			}
 		} else if req.Body != nil {
@@ -1442,7 +1539,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if rerr := redial(); rerr != nil {
 					logger.Error("Replay redial after empty-response failed. Verify the upstream application is still listening on the resolved address.",
 						zap.String("upstream", upstreamAddr), zap.Error(rerr))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 				if preBufferedReqBody != nil {
@@ -1453,7 +1550,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if rerr := req.Write(upConn); rerr != nil {
 					logger.Error("Replay request write failed after redial; upstream may be unhealthy. Check application status on the resolved address.",
 						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 				if req.Body != nil {
@@ -1463,7 +1560,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if err != nil {
 					logger.Error("Replay response read failed; upstream returned no response on the redialed connection either. Check application logs for crashes/restarts.",
 						zap.String("upstream", upstreamAddr), zap.Error(err))
-					writeBadGateway(clientConn)
+					pm.appGone(clientConn)
 					return
 				}
 			} else {
@@ -1478,7 +1575,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					zap.Int64("content_length", req.ContentLength),
 					zap.Duration("time_since_request", time.Since(reqTimestamp)),
 					zap.Error(err))
-				writeBadGateway(clientConn)
+				pm.appGone(clientConn)
 				return
 			}
 		}
@@ -1499,10 +1596,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// hint and still hands back a keep-alive response. The loop
 		// exits at the req.Close || resp.Close check at the bottom of
 		// this iteration, which triggers the deferred releaseLock in
-		// the caller and frees the sampling slot.
+		// the caller and frees the sampling slot. appResp is the response
+		// as the app sent it, which is what is recorded.
+		appResp := resp
 		if forceCloseActive {
-			resp.Close = true
-			resp.Header.Set("Connection", "close")
+			appResp = closeAfter(resp)
 		}
 
 		if err := resp.Write(clientConn); err != nil {
@@ -1555,13 +1653,18 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				respBodyBytes = respCapture.Bytes()
 			}
 			capturedReq := req
-			capturedResp := resp
+			capturedResp := appResp
 			capturedReqTS := reqTimestamp
 			capturedRespTS := respTimestamp
 			actualPort := appPort
+			capturedWin := win
+			win = nil
 
+			pm.captures.Add(1)
 			go func() {
+				defer pm.captures.Done()
 				defer func() { <-captureHookSem }()
+				defer capturedWin.Close() // once the capture has decided it, or skipped it
 
 				exchSize, err := capturedExchangeSize(capturedReq, capturedResp, reqBodyBytes, respBodyBytes)
 				if err != nil || exchSize > maxHTTPCombinedCaptureBytes {
@@ -1586,9 +1689,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				defer parsedReq.Body.Close()
 				defer parsedResp.Body.Close()
-				hooksUtils.CaptureHook(ctx, logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
+				hooksUtils.CaptureHook(syncMock.WithWindow(ctx, capturedWin), logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 			}()
 		}
+		// Not captured: nothing will decide it.
+		win.Close()
+		win = nil
 
 		// Honor close signals from either side.
 		if req.Close || resp.Close {

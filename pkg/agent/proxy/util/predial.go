@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 )
 
 // Predialed is the upstream connection the proxy opened for an application's
@@ -32,8 +34,10 @@ type Predialed struct {
 	onClosed func()
 }
 
-// NewPredialed wraps conn, dialled to addr.
-func NewPredialed(addr string, conn net.Conn) *Predialed {
+// NewPredialed wraps conn, dialled to addr by DialUpstream: a pre-dialled
+// connection is read through its connseq.Upstream, as every connection to a
+// destination is, and watched through the Upstream's socket.
+func NewPredialed(addr string, conn *connseq.Upstream) *Predialed {
 	return &Predialed{addr: addr, conn: conn}
 }
 
@@ -143,6 +147,21 @@ func (p *Predialed) Return(taken, replay net.Conn) bool {
 	return true
 }
 
+// DialUpstream dials addr: every connection to a destination is opened here,
+// the pre-dialled ones too, and read through the connseq.Upstream it returns,
+// under any TLS, so the relay can number what the connection carries by what
+// the destination had sent (connseq.Upstream).
+func DialUpstream(ctx context.Context, d *net.Dialer, network, addr string) (*connseq.Upstream, error) {
+	if d == nil {
+		d = &net.Dialer{}
+	}
+	c, err := d.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return connseq.NewUpstream(c), nil
+}
+
 // DialRaw dials addr, or returns pre — the connection pre-dialled while the
 // application's handshake was held — the first time it is asked for its
 // address. Every dial of a connection's upstream goes through here or
@@ -159,11 +178,11 @@ func dialRaw(ctx context.Context, d *net.Dialer, network, addr string, pre *Pred
 	if c := pre.take(network, addr); c != nil {
 		return c, true, nil
 	}
-	if d == nil {
-		d = &net.Dialer{}
+	u, err := DialUpstream(ctx, d, network, addr)
+	if err != nil {
+		return nil, false, err
 	}
-	c, err := d.DialContext(ctx, network, addr)
-	return c, false, err
+	return u, false, nil
 }
 
 // DialTLS is tls.Dialer.DialContext over DialRaw: the same ServerName
@@ -207,12 +226,11 @@ func DialTLS(ctx context.Context, d *net.Dialer, network, addr string, cfg *tls.
 		// began. A dial made now — as it was before connections were
 		// pre-dialled — gets a fresh connection.
 		_ = raw.Close()
-		if d == nil {
-			d = &net.Dialer{}
-		}
-		if raw, err = d.DialContext(ctx, network, addr); err != nil {
+		var u *connseq.Upstream
+		if u, err = DialUpstream(ctx, d, network, addr); err != nil {
 			return nil, err
 		}
+		raw = u
 		conn = tls.Client(raw, cfg)
 		err = conn.HandshakeContext(ctx)
 	}

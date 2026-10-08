@@ -12,129 +12,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
-
-func TestRecordOverwriteDeletesMappingsBeforeRunnerStarts(t *testing.T) {
-	var order []string
-	mappingDB := &recordMappingDB{order: &order}
-	instr := &recordInstrumentation{order: &order}
-	mockDB := &recordMockDB{order: &order}
-	store := &recordStore{order: &order}
-	cfg := config.New()
-	cfg.Command = "go test ./..."
-	cfg.Mock.Name = "stale-map-demo"
-
-	svc := &mockService{
-		logger:          zap.NewNop(),
-		instrumentation: instr,
-		mockDB:          mockDB,
-		mappingDB:       mappingDB,
-		store:           store,
-		config:          cfg,
-	}
-
-	require.NoError(t, svc.Record(context.Background()))
-	require.True(t, mockDB.deleted)
-	require.True(t, mappingDB.deleted)
-	require.Equal(t, []string{"setup", "delete-mocks", "delete-mappings", "reset-counter", "get-outgoing", "run", "push", "notify-shutdown"}, order)
-}
-
-type recordInstrumentation struct {
-	order *[]string
-}
-
-func (i *recordInstrumentation) Setup(context.Context, string, models.SetupOptions) error {
-	*i.order = append(*i.order, "setup")
-	return nil
-}
-
-func (i *recordInstrumentation) GetOutgoing(context.Context, models.OutgoingOptions) (<-chan *models.Mock, error) {
-	*i.order = append(*i.order, "get-outgoing")
-	ch := make(chan *models.Mock)
-	close(ch)
-	return ch, nil
-}
-
-func (i *recordInstrumentation) MockOutgoing(context.Context, models.OutgoingOptions) error {
-	return nil
-}
-func (i *recordInstrumentation) StoreMocks(context.Context, []*models.Mock, []*models.Mock) error {
-	return nil
-}
-func (i *recordInstrumentation) UpdateMockParams(context.Context, models.MockFilterParams) error {
-	return nil
-}
-func (i *recordInstrumentation) GetConsumedMocks(context.Context) ([]models.MockState, error) {
-	return nil, nil
-}
-func (i *recordInstrumentation) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
-	return nil, nil
-}
-
-func (i *recordInstrumentation) Run(context.Context, models.RunOptions) models.AppError {
-	*i.order = append(*i.order, "run")
-	return models.AppError{AppErrorType: models.ErrAppStopped}
-}
-
-func (i *recordInstrumentation) MakeAgentReadyForDockerCompose(context.Context) error { return nil }
-func (i *recordInstrumentation) NotifyGracefulShutdown(context.Context) error {
-	*i.order = append(*i.order, "notify-shutdown")
-	return nil
-}
-
-type recordMockDB struct {
-	order   *[]string
-	deleted bool
-}
-
-func (db *recordMockDB) InsertMock(context.Context, *models.Mock, string) error { return nil }
-func (db *recordMockDB) DeleteMocksForSet(context.Context, string) error {
-	db.deleted = true
-	*db.order = append(*db.order, "delete-mocks")
-	return nil
-}
-func (db *recordMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
-	return nil, nil
-}
-func (db *recordMockDB) GetUnFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
-	return nil, nil
-}
-func (db *recordMockDB) ResetCounterID()    { *db.order = append(*db.order, "reset-counter") }
-func (db *recordMockDB) SetCounterID(int64) {}
-
-type recordMappingDB struct {
-	order   *[]string
-	deleted bool
-}
-
-func (db *recordMappingDB) DeleteMappingsForSet(context.Context, string) error {
-	db.deleted = true
-	*db.order = append(*db.order, "delete-mappings")
-	return nil
-}
-func (db *recordMappingDB) UpsertBatch(context.Context, string, map[string][]models.MockEntry) error {
-	return nil
-}
-func (db *recordMappingDB) Get(context.Context, string) (map[string][]models.MockEntry, bool, error) {
-	return nil, false, nil
-}
-
-type recordStore struct {
-	order *[]string
-}
-
-func (recordStore) Pull(context.Context, string) error { return nil }
-func (s recordStore) Push(context.Context, string) error {
-	*s.order = append(*s.order, "push")
-	return nil
-}
 
 // failsRecord is failsGroup for the stages only a recording has: a dying
 // agent fails a goroutine in the run's errgroup, and the stage in flight
@@ -227,6 +112,137 @@ func TestAnInterruptedRecordingIsNotAFailure(t *testing.T) {
 				t.Fatalf("an interrupted recording failed: %v", err)
 			}
 		})
+	}
+}
+
+type countingStore struct{ pushes int }
+
+func (s *countingStore) Pull(context.Context, string) error { return nil }
+
+func (s *countingStore) Push(context.Context, string) error {
+	s.pushes++
+	return nil
+}
+
+func TestRecordPublishesOnlyWhenTheTestsPassed(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		runResult models.AppError
+		pushes    int
+		exitCode  int
+		warned    bool
+	}{
+		{"passed", models.AppError{AppErrorType: models.ErrAppStopped}, 1, 0, false},
+		{"failed", models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 2}, 0, 2, true},
+		{"failed without a code", models.AppError{AppErrorType: models.ErrCommandError}, 0, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, tc.runResult), mocks: []*models.Mock{mockAt("mock-0", runnerT0)}}
+			cfg := instrConfig(base.composeInstr, utils.Native, "go test ./...")
+			cfg.Path = t.TempDir()
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			core, logs := observer.New(zap.WarnLevel)
+			store := &countingStore{}
+			if err := New(zap.New(core), base, stubMockDB{}, nil, store, nil, cfg).Record(context.Background()); err != nil {
+				t.Fatalf("Record returned %v", err)
+			}
+			if store.pushes != tc.pushes {
+				t.Fatalf("pushes = %d, want %d", store.pushes, tc.pushes)
+			}
+			if utils.ErrCode != tc.exitCode {
+				t.Fatalf("exit code = %d, want %d", utils.ErrCode, tc.exitCode)
+			}
+			warned := logs.FilterMessage("tests failed; the recording was not kept or published, and the previous recording is left as it was").Len() == 1
+			if warned != tc.warned {
+				t.Fatalf("warned = %v, want %v", warned, tc.warned)
+			}
+		})
+	}
+}
+
+func TestSaveSetPutsThePreviousRecordingBackUnlessKept(t *testing.T) {
+	dir := t.TempDir()
+	m := &mockService{logger: zap.NewNop(), config: &config.Config{Path: dir}}
+	set := filepath.Join(dir, "e2e")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(set, "old"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore, existed, err := m.saveSet("e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !existed {
+		t.Fatal("the set was there")
+	}
+	_ = os.Remove(filepath.Join(set, "old"))
+	_ = os.WriteFile(filepath.Join(set, "new"), nil, 0o644)
+	restore(false)
+	if _, err := os.Stat(filepath.Join(set, "old")); err != nil {
+		t.Fatal("the previous recording must be back")
+	}
+	if _, err := os.Stat(filepath.Join(set, "new")); err == nil {
+		t.Fatal("the dropped recording must be gone")
+	}
+
+	restore, existed, err = m.saveSet("fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if existed {
+		t.Fatal("the set was not there")
+	}
+	_ = os.MkdirAll(filepath.Join(dir, "fresh"), 0o755)
+	restore(false)
+	if _, err := os.Stat(filepath.Join(dir, "fresh")); err == nil {
+		t.Fatal("a dropped first recording leaves nothing behind")
+	}
+}
+
+// TestSaveSetRefusesWhenTheBackupCannotBeMade pins the data-loss guard: if the
+// pre-record backup cannot be written, saveSet must refuse (non-nil error, no
+// restore) and leave the existing set untouched, so the caller aborts before
+// deleting the set's mappings and cases.
+func TestSaveSetRefusesWhenTheBackupCannotBeMade(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses the directory permission used to force the backup to fail")
+	}
+	dir := t.TempDir()
+	set := filepath.Join(dir, "e2e")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(set, "old"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Make the mocks folder read-only so the .previous backup copy cannot be
+	// created — standing in for a full disk or a permissions problem.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	m := &mockService{logger: zap.NewNop(), config: &config.Config{Path: dir}}
+	restore, existed, err := m.saveSet("e2e")
+	if err == nil {
+		t.Fatal("saveSet must fail when it cannot back the set up")
+	}
+	if !existed {
+		t.Fatal("existed must stay true for a set that is present")
+	}
+	if restore != nil {
+		t.Fatal("a failed backup must not hand back a restore closure")
+	}
+
+	_ = os.Chmod(dir, 0o755)
+	if _, statErr := os.Stat(filepath.Join(set, "old")); statErr != nil {
+		t.Fatal("the live set must be left intact after a refused backup")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".e2e.previous")); !os.IsNotExist(statErr) {
+		t.Fatal("a failed backup must not leave a partial .previous behind")
 	}
 }
 

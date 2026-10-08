@@ -3,9 +3,7 @@ package recorder
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"io"
 	"testing"
 	"time"
 
@@ -261,9 +259,11 @@ func preparedFirst(t *testing.T, h *v2Harness, at func() time.Time) {
 
 // runRecordV2 records one connection: the handshake, then exchanges pushed by
 // push, then a close. It returns RecordV2's error and every mock emitted.
-func runRecordV2(t *testing.T, push func(h *v2Harness, at func() time.Time)) ([]*models.Mock, error) {
+func runRecordV2(t *testing.T, push func(h *v2Harness, at func() time.Time)) ([]*models.Mock, *orphanSpans, error) {
 	t.Helper()
 	h := newV2Harness(t)
+	leftOut := &orphanSpans{}
+	h.sess.Orphans = leftOut
 	base := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	tick := 0
 	at := func() time.Time { tick++; return base.Add(time.Duration(tick) * time.Millisecond) }
@@ -289,7 +289,7 @@ func runRecordV2(t *testing.T, push func(h *v2Harness, at func() time.Time)) ([]
 		case m := <-h.mocks:
 			got = append(got, m)
 		default:
-			return got, err
+			return got, leftOut, err
 		}
 	}
 }
@@ -304,12 +304,15 @@ func mocksOf(mocks []*models.Mock, op string) []*models.Mock {
 	return out
 }
 
-func TestRecordV2_UndecodableResponseIsAnError(t *testing.T) {
+// A response that does not decode is left out, its exchange alone, and the
+// recording goes on: the query after it is recorded.
+func TestRecordV2_UndecodableResponseIsLeftOut(t *testing.T) {
 	t.Parallel()
+	next := cannedCOMQuery(t, 0, "SELECT 1")
 	for _, c := range undecodableCases() {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := runRecordV2(t, func(h *v2Harness, at func() time.Time) {
+			got, leftOut, err := runRecordV2(t, func(h *v2Harness, at func() time.Time) {
 				if c.op == "COM_STMT_EXECUTE" {
 					preparedFirst(t, h, at)
 				}
@@ -317,8 +320,22 @@ func TestRecordV2_UndecodableResponseIsAnError(t *testing.T) {
 				for _, p := range c.reply(t, false) {
 					h.pushDest(p, at())
 				}
+				h.pushClient(next, at())
+				h.pushDest(wrapPacket([]byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, 1), at())
 			})
-			recorded := mocksOf(got, c.op)
+			// The query after the exchange is told from it by its text.
+			var recorded, after []*models.Mock
+			for _, m := range mocksOf(got, c.op) {
+				if qp, ok := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket); ok && qp.Query == "SELECT 1" {
+					continue
+				}
+				recorded = append(recorded, m)
+			}
+			for _, m := range mocksOf(got, "COM_QUERY") {
+				if qp, ok := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket); ok && qp.Query == "SELECT 1" {
+					after = append(after, m)
+				}
+			}
 			if c.op == "COM_STMT_EXECUTE" && len(mocksOf(got, "COM_STMT_PREPARE")) != 1 {
 				t.Fatalf("the COM_STMT_PREPARE before the execute was not recorded: %d mocks", len(got))
 			}
@@ -331,22 +348,21 @@ func TestRecordV2_UndecodableResponseIsAnError(t *testing.T) {
 				}
 				return
 			}
-			if err == nil {
-				t.Fatal("RecordV2 ended cleanly: the supervisor takes the parser for healthy, and nothing says the response was lost")
-			}
-			if errors.Is(err, io.EOF) {
-				t.Fatalf("RecordV2 = %v: an io.EOF passes for the connection closing", err)
-			}
 			// A definition or row that does not decode, behind a header whose
 			// sequence id checked out, is lost framing: a misread header that
-			// passed the check, or a packet short of bytes. It is reported as
-			// lost framing is: once, at WARN, rate-limited across connections,
-			// not again at ERROR for every connection it stops.
-			if !errors.Is(err, ErrFramingLost) {
-				t.Fatalf("RecordV2 = %v, want ErrFramingLost", err)
+			// passed the check, or a packet short of bytes. Its exchange is left
+			// out, and the recording goes on from the next command.
+			if err != nil {
+				t.Fatalf("RecordV2 = %v: the response that did not decode costs its own exchange, not the rest of the connection's recording", err)
 			}
 			if len(recorded) != 0 {
 				t.Fatalf("recorded %d %s mocks for a response that did not decode (the first has %d of 3 parts)", len(recorded), c.op, c.parts(recorded[0]))
+			}
+			if leftOut.count() != 1 {
+				t.Fatalf("%d exchanges left out, want the one that did not decode", leftOut.count())
+			}
+			if len(after) != 1 || describe(after[0]) != "a OK" {
+				t.Fatalf("the query after the response left out recorded %d mock(s), want its OK", len(after))
 			}
 		})
 	}

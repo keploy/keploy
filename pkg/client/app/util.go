@@ -8,8 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/compose/v2/pkg/api"
-	"go.keploy.io/server/v3/pkg/agent/token"
+	"github.com/docker/compose/v5/pkg/api"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -108,7 +107,8 @@ func findComposeFile(cmd string) []string {
 // through the COMPOSE_FILE environment variable instead.
 func isRewritableComposeCommand(appCmd string) bool {
 	lower := strings.ToLower(appCmd)
-	return strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose")
+	return strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose") ||
+		strings.Contains(lower, "podman compose") || strings.Contains(lower, "podman-compose")
 }
 
 // composeLaunchPlan decides how keploy hands its generated compose file to
@@ -135,26 +135,6 @@ func composeLaunchPlan(appCmd, newComposeFile, appComposePath, appServiceName st
 		abs = newComposeFile
 	}
 	return "", abs
-}
-
-// keepAgentTokenThroughSudo makes a compose command that runs under sudo keep
-// the agent's control-plane token. The generated keploy-agent service names
-// the token without a value and compose fills it in from its own environment
-// (see App.withAgentToken), but sudo's env_reset drops every variable it is
-// not told to keep — and `sudo docker compose up` is a spelling keploy
-// recognises as compose (utils.FindDockerCmd), so without this the agent would
-// come up with no token at all. --preserve-env names that one variable and
-// nothing else.
-//
-// Only a leading sudo is handled: that is the form keploy detects, and a
-// wrapper that calls sudo inside itself cannot be rewritten anyway.
-func keepAgentTokenThroughSudo(appCmd string) string {
-	trimmed := strings.TrimLeft(appCmd, " \t")
-	rest, ok := strings.CutPrefix(trimmed, "sudo ")
-	if !ok {
-		return appCmd
-	}
-	return appCmd[:len(appCmd)-len(trimmed)] + "sudo --preserve-env=" + token.Env + " " + rest
 }
 
 func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName string) string {
@@ -300,7 +280,7 @@ func composeUpSemantics(cmd string) docker.ComposeUpOptions {
 		}
 	}
 	// --exit-code-from IMPLIES --abort-on-container-exit. The CLI does this
-	// itself (compose v2.40.3 cmd/compose/up.go), and without it a command
+	// itself (compose v5.5.1 cmd/compose/up.go), and without it a command
 	// carrying only --exit-code-from would leave Up blocking after the app
 	// exited, where the shell-out returns. --abort-on-container-failure is the
 	// documented exception and keeps precedence.

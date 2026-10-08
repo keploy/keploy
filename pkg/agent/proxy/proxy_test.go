@@ -18,10 +18,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// newTLSTestServer spins up a TLS listener with a self-signed cert. The
-// handler hook (if non-nil) receives each accepted, fully-handshaked
-// *tls.Conn. Returns the listener and a teardown that closes it.
-func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []string, onAccept func(*tls.Conn)) (net.Listener, *tls.Config) {
+// newTestServerTLSConfig returns a server TLS config with a fresh self-signed
+// certificate for "test.local", offering nextProtos.
+func newTestServerTLSConfig(t *testing.T, nextProtos []string) *tls.Config {
 	t.Helper()
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -49,6 +48,15 @@ func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []s
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   nextProtos,
 	}
+	return cfg
+}
+
+// newTLSTestServer spins up a TLS listener with a self-signed cert. The
+// handler hook (if non-nil) receives each accepted, fully-handshaked
+// *tls.Conn. Returns the listener and the server's TLS config.
+func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []string, onAccept func(*tls.Conn)) (net.Listener, *tls.Config) {
+	t.Helper()
+	cfg := newTestServerTLSConfig(t, nextProtos)
 
 	// Wrap with a delaying listener so we can simulate slow upstream
 	// handshake behavior (the delay fires after TCP accept, before TLS
@@ -211,17 +219,30 @@ func TestStartSpeculativeUpstreamTLS_ContextCancelDuringDial(t *testing.T) {
 	}
 }
 
-// TestSpeculativeParallelism asserts that running the speculative upstream
-// dial in parallel with a simulated MITM client-facing handshake takes
-// ~max(client, upstream) rather than the sum. This is the core
+// TestSpeculativeParallelism asserts that the speculative upstream dial runs
+// in parallel with the MITM client-facing handshake. This is the core
 // optimization — the test must fail if someone accidentally reverts the
 // parallelization.
+//
+// The test plays the upstream server itself, and only starts serving once
+// startSpeculativeUpstreamTLS has returned. Its own work — standing in for the
+// client-facing handshake — is the server half of the upstream TLS handshake,
+// which can only complete if the speculative goroutine drives the client half
+// at the same time. So a dial run inline (start would block on a server that
+// is not answering yet), one deferred into join(), or a join() that redials
+// instead of handing over the speculative conn all fail; nothing is timed.
 func TestSpeculativeParallelism(t *testing.T) {
-	const upstreamDelay = 100 * time.Millisecond
-	const clientDelay = 100 * time.Millisecond
+	srvCfg := newTestServerTLSConfig(t, []string{"h2", "http/1.1"})
+	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer rawLn.Close()
 
-	ln, _ := newTLSTestServer(t, upstreamDelay, []string{"h2", "http/1.1"}, nil)
-	defer ln.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	_ = rawLn.(*net.TCPListener).SetDeadline(deadline)
 
 	cfg := &tls.Config{
 		InsecureSkipVerify: true, // nolint:gosec
@@ -229,31 +250,27 @@ func TestSpeculativeParallelism(t *testing.T) {
 		NextProtos:         []string{"h2", "http/1.1"},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Nobody serves TLS yet, so this returns only if the upstream handshake
+	// does not run inline.
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), rawLn.Addr().String(), cfg, nil)
+	defer s.abandon()
 
-	start := time.Now()
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg, nil)
-	// Simulate the MITM client-facing handshake.
-	time.Sleep(clientDelay)
+	raw, err := rawLn.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v — no upstream dial reached the server while the caller was busy (handshake run inline in start, or deferred into join)", err)
+	}
+	defer raw.Close()
+	if err := tls.Server(raw, srvCfg).HandshakeContext(ctx); err != nil {
+		t.Fatalf("the upstream handshake did not complete before join(): %v", err)
+	}
+
 	conn, err := s.join(ctx)
-	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
 	defer conn.Close()
-
-	// Parallel: elapsed ~= max(clientDelay, upstreamDelay) = 100ms.
-	// Serial would have been ~200ms. Tolerate ±40ms of jitter on top
-	// of the nominal 100ms upper bound (race detector adds overhead).
-	if elapsed > 160*time.Millisecond {
-		t.Fatalf("handshake took %v — serial regression? expected ~%v", elapsed, clientDelay)
-	}
-	// Lower bound sanity: it can't be faster than the upstream delay
-	// because the server waits that long before even starting the
-	// handshake.
-	if elapsed < upstreamDelay-20*time.Millisecond {
-		t.Fatalf("handshake took %v — improbably fast, mock misconfigured?", elapsed)
+	if got, want := conn.LocalAddr().String(), raw.RemoteAddr().String(); got != want {
+		t.Fatalf("join returned conn %s, not the speculatively handshaken %s", got, want)
 	}
 }
 

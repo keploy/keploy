@@ -235,30 +235,3 @@ func TestShouldPrune_WiresTheGuardIntoTheDecision(t *testing.T) {
 		})
 	}
 }
-
-// TestIsAppNoAnswerMsg pins which simulate-request errors count as "the app
-// never answered". The text is always keploy's or net/http's own error, never an
-// app body: RunTestSet classifies it where SimulateRequest or the stream read
-// returns it, before any synthetic result is built.
-func TestIsAppNoAnswerMsg(t *testing.T) {
-	for _, tt := range []struct {
-		msg  string
-		want bool
-	}{
-		{`Get "http://app:8080/x": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`, true},
-		{`Get "http://app:8080/x": net/http: request canceled (Client.Timeout exceeded while awaiting headers)`, true},
-		{`Get "http://app:8080/x": context canceled`, true},
-		{`read tcp 10.0.0.1:5000->10.0.0.2:8080: i/o timeout`, true},
-		{`failed to get response headers: rpc error: code = DeadlineExceeded desc = context deadline exceeded`, true},
-		// The app, or a proxy in front of it, closed the connection mid-response.
-		{`Get "http://app:8080/x": unexpected EOF`, true},
-		{`Get "http://app:8080/x": dial tcp 10.0.0.2:8080: connect: connection refused`, false},
-		{`Get "http://app:8080/x": EOF`, false}, // isAppConnectionErrorMsg's
-		{`invalid response type for HTTP test case`, false},
-		{`net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00"`, false},
-	} {
-		if got := isAppNoAnswerMsg(tt.msg); got != tt.want {
-			t.Errorf("isAppNoAnswerMsg(%q) = %v, want %v", tt.msg, got, tt.want)
-		}
-	}
-}

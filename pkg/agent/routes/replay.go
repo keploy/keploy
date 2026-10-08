@@ -6,10 +6,14 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/render"
+	"github.com/klauspost/compress/zstd"
+	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -85,24 +89,56 @@ func (a *Agent) GetMockErrors(w http.ResponseWriter, r *http.Request) {
 }
 
 // BeginTestErrorCapture opens a per-test mock-error capture window in the proxy
-// so the next GetMockErrors returns only this test's misses. Implemented via a
-// capability type-assertion so the agent.Service interface stays unchanged.
+// so the next GetMockErrors returns only this test's misses. With ?carry=1 it
+// carries in the misses made since the previous test's window closed (the
+// proxy's ContinueTestErrorCapture): the replayer asks for that for every test
+// after a set's first. Implemented via capability type-assertions so the
+// agent.Service interface stays unchanged.
 func (a *Agent) BeginTestErrorCapture(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if b, ok := a.svc.(interface {
+	var err error
+	if c, ok := a.svc.(interface {
+		ContinueTestErrorCapture(context.Context) error
+	}); ok && r.URL.Query().Get("carry") == "1" {
+		err = c.ContinueTestErrorCapture(r.Context())
+	} else if b, ok := a.svc.(interface {
 		BeginTestErrorCapture(context.Context) error
 	}); ok {
-		if err := b.BeginTestErrorCapture(r.Context()); err != nil {
-			respondAgent(w, r, http.StatusInternalServerError, err)
-			return
-		}
+		err = b.BeginTestErrorCapture(r.Context())
+	}
+	if err != nil {
+		respondAgent(w, r, http.StatusInternalServerError, err)
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
 }
 
+// storeMocksBody is a /storemocks body with its Content-Encoding undone: the
+// body itself when there is none, a streaming zstd reader for "zstd". Any other
+// encoding is an error, since reading it as gob would only fail later and less
+// clearly. Close releases the zstd reader; it does not close the request body.
+func storeMocksBody(r *http.Request) (io.ReadCloser, error) {
+	switch enc := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))); enc {
+	case "", "identity":
+		return io.NopCloser(r.Body), nil
+	case models.MockStreamEncodingZstd:
+		zr, err := zstd.NewReader(r.Body,
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderMaxWindow(models.MockStreamZstdWindow))
+		if err != nil {
+			return nil, fmt.Errorf("storemocks: start the zstd decoder: %w", err)
+		}
+		return zr.IOReadCloser(), nil
+	default:
+		return nil, fmt.Errorf("storemocks: unsupported Content-Encoding %q; this agent accepts %q or none", enc, models.MockStreamEncodingZstd)
+	}
+}
+
 // StoreMocks receives the mock corpus as a stream: a gob MockStreamHeader
 // followed by one gob Mock per frame, decoded mock-by-mock by StoreMocksStream.
+// The stream may be zstd-compressed (Content-Encoding: zstd), which the client
+// does only after this agent's /health has advertised it.
 func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-gob")
 
@@ -121,7 +157,15 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	dec := gob.NewDecoder(r.Body)
+	body, err := storeMocksBody(r)
+	if err != nil {
+		w.Header().Set("Accept-Encoding", models.MockStreamEncodingZstd)
+		writeErr(http.StatusUnsupportedMediaType, err)
+		return
+	}
+	defer body.Close()
+
+	dec := gob.NewDecoder(body)
 	var header models.MockStreamHeader
 	if err := dec.Decode(&header); err != nil {
 		writeErr(http.StatusBadRequest, fmt.Errorf("storemocks: decode stream header: %w", err))
@@ -171,4 +215,9 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(models.ConsumedScopeHeader, models.ConsumedScopePerTest)
 	}
 	respondAgent(w, r, http.StatusOK, nil)
+}
+
+func (a *Agent) HandleIDs(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ids.Default.Pairs())
 }

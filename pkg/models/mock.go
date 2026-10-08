@@ -117,6 +117,8 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
+	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	StartRef  string `json:"-" yaml:"-" bson:"-"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -224,6 +226,15 @@ type TestModeInfo struct {
 	// runs at every ingest site (disk load, StoreMocks, syncMock).
 	// Runtime-only, untagged; re-derived fresh on each reload.
 	LifetimeDerived bool `json:"-" bson:"-"`
+
+	// Consume classifies how the matcher consumes this mock across repeated
+	// identical requests — ConsumeReuse (serve the same response every time;
+	// the default for session/config/connection mocks) or ConsumeCursorSaturate
+	// (serve successive recorded responses in record order, then saturate on
+	// the last; for stateful data-plane mocks). Derived at ingest by
+	// DeriveLifetime alongside Lifetime; runtime-only, untagged, re-derived on
+	// each load for the same reason Lifetime is.
+	Consume ConsumeMode `json:"-" bson:"-"`
 
 	// IsStartup marks startup-window traffic: a mock captured either before
 	// the first inbound request (classic app-bootstrap, e.g. an AWS Secret
@@ -345,11 +356,37 @@ type MockSpec struct {
 	// fields drift between recording and replay.
 	ReqBodyNoise map[string][]string `json:"ReqBodyNoise,omitempty" yaml:"req_body_noise,omitempty" bson:"req_body_noise,omitempty"`
 
+	// Correlations records request→response value echoes on this dependency mock
+	// (see FieldCorrelation): a value the application mints and sends in the
+	// request that the dependency reflects back in its response (a UUID, nonce,
+	// idempotency key). Learned on the auto-replay pass and honored at serve
+	// time — the matcher captures the live request value and renders it into the
+	// served response, instead of replaying the recorded value (a mismatch) or
+	// masking it as noise (which hides real regressions). Kind-agnostic, same
+	// home as ReqBodyNoise. Additive / omitempty: an older replayer ignores it.
+	Correlations []FieldCorrelation `json:"Correlations,omitempty" yaml:"correlations,omitempty" bson:"correlations,omitempty"`
+
 	// Async, when non-nil, marks this mock as async-egress and carries the
 	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
 	// block — kept OUT of the flat parser Metadata above. Serialized as a
 	// top-level `async:` block on the recorded doc. See AsyncMeta.
 	Async *AsyncMeta `json:"Async,omitempty" yaml:"async,omitempty" bson:"async,omitempty"`
+}
+
+// FieldCorrelation ties a value in a dependency mock's REQUEST to where it is
+// echoed in that mock's RESPONSE, so replay can reproduce an app-minted value
+// (UUID / nonce / idempotency key) the dependency reflects back. On replay the
+// matcher matches the request field by presence + ValueClass (not value),
+// binds the live value, and renders it into each ResponsePath of the served
+// response. Paths use the kind-agnostic dotted vocabulary of ReqBodyNoise
+// (body.<path>, header.<name>, url.query.<name>). RecordedValue is the value as
+// recorded (never a live/secret value) and ValueClass names its shape
+// (e.g. "uuid", "hex", "nonce") for the presence/type match.
+type FieldCorrelation struct {
+	RequestPath   string   `json:"requestPath" yaml:"request_path" bson:"request_path"`
+	ResponsePaths []string `json:"responsePaths" yaml:"response_paths" bson:"response_paths"`
+	RecordedValue string   `json:"recordedValue,omitempty" yaml:"recorded_value,omitempty" bson:"recorded_value,omitempty"`
+	ValueClass    string   `json:"valueClass,omitempty" yaml:"value_class,omitempty" bson:"value_class,omitempty"`
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
@@ -1001,6 +1038,18 @@ func (m *Mock) DeepCopy() *Mock {
 			vc := make([]string, len(v))
 			copy(vc, v)
 			c.Spec.ReqBodyNoise[k] = vc
+		}
+	}
+
+	// Deep copy the request→response correlations (and each ResponsePaths slice)
+	// for the same reason as ReqBodyNoise: the clone must not share the slices.
+	if len(m.Spec.Correlations) > 0 {
+		c.Spec.Correlations = make([]FieldCorrelation, len(m.Spec.Correlations))
+		copy(c.Spec.Correlations, m.Spec.Correlations)
+		for i := range c.Spec.Correlations {
+			if rp := m.Spec.Correlations[i].ResponsePaths; len(rp) > 0 {
+				c.Spec.Correlations[i].ResponsePaths = append([]string(nil), rp...)
+			}
 		}
 	}
 
