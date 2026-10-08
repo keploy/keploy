@@ -46,9 +46,14 @@ func NewConnTLSUpgrader(srcConn, dstConn *net.Conn, logger *zap.Logger, handleCl
 	}
 }
 
-// isTLSClientHello checks if the first 5 bytes look like a TLS ClientHello.
-// Inlined here to avoid an import cycle with proxy/tls.
-func isTLSClientHello(data []byte) bool {
+// IsTLSClientHello reports whether the bytes open a TLS ClientHello: a
+// handshake record (0x16) carrying a TLS 1.x version. Inlined here rather than
+// imported from proxy/tls to avoid an import cycle.
+//
+// Exported because the ingress forwarder needs the same test, and a second
+// hand-rolled copy is how the two drift apart — a two-byte variant, for
+// instance, accepts records this one correctly rejects.
+func IsTLSClientHello(data []byte) bool {
 	if len(data) < 5 {
 		return false
 	}
@@ -77,7 +82,7 @@ func (u *ConnTLSUpgrader) UpgradeClientTLS(ctx context.Context, backdate time.Ti
 		return nil, false, false, err
 	}
 
-	if !isTLSClientHello(testBuffer) {
+	if !IsTLSClientHello(testBuffer) {
 		// Not TLS — wrap the connection with a MultiReader so the peeked
 		// bytes are replayed on subsequent reads.
 		safe := NewSafeConnWithReader(*u.srcConn, io.MultiReader(reader, realConn), u.logger)

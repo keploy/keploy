@@ -36,8 +36,11 @@ type IngressHook interface {
 }
 
 type IngressProxyManager struct {
-	mu       sync.Mutex
-	active   map[uint16]proxyStop
+	mu     sync.Mutex
+	active map[uint16]proxyStop
+	// appAddr caches, per relocated port, the address the application is
+	// actually listening on when it is NOT loopback. See dialApp.
+	appAddr  map[uint16]string
 	logger   *zap.Logger
 	hooks    agent.Hooks
 	tcChan   chan *models.TestCase
@@ -97,6 +100,7 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		hooks:       h,
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
+		appAddr:     make(map[uint16]string),
 		mockMode:    cfg.Agent.MockMode,
 		requests:    cfg.Agent.RecordRequests,
 		synchronous: cfg.Agent.Synchronous,
@@ -501,6 +505,40 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		utils.LogError(logger, err, "error reading initial bytes from client connection")
 		return
 	}
+	// TLS is relayed byte-for-byte, never parsed. The forwarder has no way to
+	// terminate it honestly: it holds neither the application's private key nor
+	// any trust the client already has, so a MITM leaf would simply be rejected.
+	//
+	// Without this branch a ClientHello falls through to the HTTP/1.1 parser
+	// below, which cannot parse it and answers in plaintext — the kubelet sees
+	// "server gave HTTP response to HTTPS client" and an HTTPS probe can never
+	// pass, so the pod never goes Ready and is dropped from its Service.
+	//
+	// The cost, stated plainly: inbound TLS is not captured. It is not captured
+	// today either (the connection is rejected outright), so nothing regresses;
+	// it does mean TLS-wrapped gRPC produces no test cases.
+	if util.IsTLSClientHello(preface) {
+		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
+
+		upConn, err := pm.dialApp(ctx, finalAppAddr, logger)
+		if err != nil {
+			logger.Error("Failed to connect to upstream application for a TLS connection. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
+				zap.String("final_app_addr", finalAppAddr),
+				zap.Error(err))
+			return
+		}
+		defer upConn.Close()
+
+		logger.Debug("passing an inbound TLS connection through uncaptured",
+			zap.String("final_app_addr", finalAppAddr), zap.Uint16("app_port", appPort))
+
+		// newReplayConn re-emits the peeked bytes, so the application's own TLS
+		// server receives an intact ClientHello and terminates with its own
+		// certificate — which is what the client was expecting all along.
+		forwardRawTCP(ctx, newReplayConn(preface, clientConn), upConn)
+		return
+	}
+
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
@@ -509,7 +547,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// (the original) instead.
 		actualPort := appPort
 
-		upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
+		upConn, err := pm.dialApp(ctx, finalAppAddr, logger)
 		if err != nil {
 			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
 				zap.String("final_app_addr", finalAppAddr),
@@ -542,6 +580,22 @@ func newReplayConn(initial []byte, c net.Conn) net.Conn {
 
 func (r *replayConn) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
+}
+
+// CloseWrite forwards the half-close to the wrapped connection.
+//
+// replayConn embeds net.Conn as an INTERFACE, so Go promotes only net.Conn's
+// method set and CloseWrite is not in it. Without this method the type
+// assertion inside proxyutil.CloseWriteIfPossible fails and the half-close is
+// silently dropped: the peer's io.Copy never sees a FIN and sits blocked until
+// something else closes the socket. util.Conn carries the same method for the
+// same reason — see the note on it in proxy/util.
+func (r *replayConn) CloseWrite() error {
+	type closeWriter interface{ CloseWrite() error }
+	if cw, ok := r.Conn.(closeWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }
 
 func (pm *IngressProxyManager) ServeLive(ctx context.Context, conn net.Conn, upstream string, port uint16) {

@@ -85,8 +85,43 @@ func preferH2From(ctx context.Context) bool {
 	return v
 }
 
+// destHostCtxKey carries the connection's real destination host into
+// HandleTLSConnection, by the same route and for the same reason as
+// preferH2CtxKey above: the function is passed as a value to the
+// ConnTLSUpgrader, so its signature cannot grow a parameter.
+//
+// Only the transparent (eBPF) egress path sets it. There, Go sends no SNI
+// when the app dials an IP literal (RFC 6066) and — unlike the CONNECT
+// tunnel, which pre-files the authority host in SrcPortToDstURL — nothing
+// else knows the destination at handshake time. Without it CertForClient
+// mints CN="" with no SAN, and any client that verifies the peer (every
+// in-cluster Kubernetes client, for one) rejects the leaf.
+//
+// Deliberately NOT routed through SrcPortToDstURL: that map is read by the
+// speculative upstream dial, the replay ALPN scoping, the MySQL recorder and
+// the v2 relay, and all four rely on it being empty when the app sent no SNI.
+type destHostCtxKey struct{}
+
+// WithDestHost marks ctx with the destination host (no port, no brackets)
+// that CertForClient should name the leaf after when the client sends no SNI.
+func WithDestHost(ctx context.Context, host string) context.Context {
+	if host == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, destHostCtxKey{}, host)
+}
+
+func destHostFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(destHostCtxKey{}).(string)
+	return v
+}
+
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
 	preserveH2 := preferH2From(ctx)
+	destHost := destHostFrom(ctx)
 	// 1. Load this run's signing CA (generated per run; see cagen.go). It is set
 	// by SetupCAForApp before the proxy serves; getActiveCA lazily mints an
 	// ephemeral one for callers that reach here without SetupCAForApp.
@@ -108,7 +143,7 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 			return &tls.Config{
 				NextProtos: nextProtos,
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
+					return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, destHost)
 				},
 				ClientAuth: tls.RequestClientCert,
 				VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {

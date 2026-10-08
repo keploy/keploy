@@ -513,7 +513,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	actualPort := appPort
 
 	// Dial Upstream
-	upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
+	upConn, err := pm.dialApp(ctx, finalAppAddr, logger)
 	if err != nil {
 		logger.Error("Failed to connect to upstream application. Verify the application is listening on the resolved address.",
 			zap.String("final_app_addr", finalAppAddr),
@@ -1861,7 +1861,19 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 // Keep-alive is preserved (no Connection: close injected), so the client
 // can reuse the connection for multiple requests.
 func forwardRawTCP(ctx context.Context, clientConn, upConn net.Conn) {
-	// Close connections on context cancellation (shutdown).
+	// Scope the shutdown watcher to THIS call. It used to wait on the caller's
+	// context, which is the forwarder's own lifetime context (cancelled only by
+	// StopIngress), so the goroutine and its two connection references survived
+	// until the whole ingress proxy shut down — long after the connection had
+	// finished. One leak per connection is survivable for the rare HTTP Upgrade
+	// that reaches here today; it is not survivable once every inbound TLS
+	// connection is routed through this pump.
+	//
+	// Cancelling on return is safe: this function returns only after BOTH
+	// copies have completed, so there is nothing left to carry, and every
+	// caller closes the same conns immediately afterwards anyway.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	go func() {
 		<-ctx.Done()
 		clientConn.Close()

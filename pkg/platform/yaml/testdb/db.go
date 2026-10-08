@@ -399,11 +399,13 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		default:
 			continue
 		}
-		if strings.Contains(j.Name(), "mocks") {
+		name := strings.TrimSuffix(j.Name(), fileExt)
+		// Skip a stray mocks file only. A test case's name is minted from its
+		// method and path, so matching "mocks" anywhere in the file name also
+		// dropped every test case of an endpoint like /api/mocks.
+		if name == "mocks" {
 			continue
 		}
-
-		name := strings.TrimSuffix(j.Name(), fileExt)
 		// First-wins: pre-sort guarantees the format-matching file is
 		// processed before its sibling, so any later occurrence of the
 		// same basename is by definition the non-preferred format.
