@@ -78,6 +78,8 @@ func (m *mockService) Record(ctx context.Context) error {
 		Mode:          models.MODE_RECORD,
 		MockMode:      true,
 		ConfigPath:    m.config.ConfigPath,
+
+		DisableHandshakeHold: m.config.Record.DisableHandshakeHold,
 	}); err != nil {
 		if parent.Err() != nil {
 			return nil

@@ -774,6 +774,21 @@ jobs:
     # bug — call-2 hits the 60s read_timeout, continue-on-error).
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/outbound-fin-stall-linux.yml
+  run_upstream_refusal_linux:
+    # Guard: an application whose dependency refuses, is unreachable or never
+    # answers gets, under keploy record, the connect result it gets without
+    # keploy (the proxy holds each handshake until the destination answers).
+    # Needs only the always-built binary, so it runs for fork PRs too.
+    needs: [build-and-upload]
+    uses: ./.github/workflows/upstream-refusal-linux.yml
+    with:
+      legs: core
+  run_upstream_refusal_linux_extended:
+    # Its arm64 and docker legs, on the artifacts built for same-repo PRs.
+    needs: [build-and-upload, build-docker-image-amd64, build-linux-arm64]
+    uses: ./.github/workflows/upstream-refusal-linux.yml
+    with:
+      legs: extended
   run_startup_mock_capture_linux:
     # Regression guard for a once-per-boot startup mock (e.g. an AWS
     # Secret Manager fetch at boot) being dropped from some recorded test
@@ -1330,6 +1345,8 @@ jobs:
       - run_mock_fromcontainer_linux
       - run_http_stale_pool_race_linux
       - run_outbound_fin_stall_linux
+      - run_upstream_refusal_linux
+      - run_upstream_refusal_linux_extended
       - run_startup_mock_capture_linux
       - run_repeated_headers_linux
       - run_unpublished_port_docker
@@ -1358,6 +1375,8 @@ jobs:
             "${{ needs.run_mock_fromcontainer_linux.result }}" \
             "${{ needs.run_http_stale_pool_race_linux.result }}" \
             "${{ needs.run_outbound_fin_stall_linux.result }}" \
+            "${{ needs.run_upstream_refusal_linux.result }}" \
+            "${{ needs.run_upstream_refusal_linux_extended.result }}" \
             "${{ needs.run_startup_mock_capture_linux.result }}" \
             "${{ needs.run_repeated_headers_linux.result }}" \
             "${{ needs.run_unpublished_port_docker.result }}" \

@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -215,6 +217,22 @@ type ProxyOptions struct {
 type DestInfo interface {
 	Get(ctx context.Context, srcPort uint16) (*NetworkAddress, error)
 	Delete(ctx context.Context, srcPort uint16) error
+}
+
+// ErrConnectingSocketGone is GetForHandshake's error when the application's
+// connecting socket no longer exists: it gave up on the connection.
+var ErrConnectingSocketGone = errors.New("the application's connecting socket is gone")
+
+// HandshakeDestInfo is a DestInfo that can name a redirected connection's
+// original destination while its handshake with the proxy is still in flight:
+// client is the application's end of the connection and proxy the proxy's,
+// as the SYN carries them. Get can only answer once the handshake completes,
+// which is too late for the proxy to make connect itself fail the way the
+// destination failed it (see synhold).
+type HandshakeDestInfo interface {
+	// CheckHandshakeLookup reports whether GetForHandshake can work here.
+	CheckHandshakeLookup(ctx context.Context) error
+	GetForHandshake(ctx context.Context, client, proxy netip.AddrPort) (*NetworkAddress, error)
 }
 
 type TestBenchInfo interface {

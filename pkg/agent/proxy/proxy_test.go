@@ -115,7 +115,7 @@ func TestStartSpeculativeUpstreamTLS_Join_Success(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg)
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg, nil)
 	conn, err := s.join(ctx)
 	if err != nil {
 		t.Fatalf("join: %v", err)
@@ -144,7 +144,7 @@ func TestStartSpeculativeUpstreamTLS_Abandon_Cleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg)
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg, nil)
 	s.abandon()
 
 	// Give the background drainer a moment to run if the dial had
@@ -173,7 +173,7 @@ func TestStartSpeculativeUpstreamTLS_DialFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), addr, cfg)
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), addr, cfg, nil)
 	conn, err := s.join(ctx)
 	if err == nil {
 		if conn != nil {
@@ -194,7 +194,7 @@ func TestStartSpeculativeUpstreamTLS_ContextCancelDuringDial(t *testing.T) {
 	}
 
 	parent, cancel := context.WithCancel(context.Background())
-	s := startSpeculativeUpstreamTLS(parent, zap.NewNop(), ln.Addr().String(), cfg)
+	s := startSpeculativeUpstreamTLS(parent, zap.NewNop(), ln.Addr().String(), cfg, nil)
 
 	// Cancel before the handshake completes.
 	time.Sleep(50 * time.Millisecond)
@@ -233,7 +233,7 @@ func TestSpeculativeParallelism(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg)
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg, nil)
 	// Simulate the MITM client-facing handshake.
 	time.Sleep(clientDelay)
 	conn, err := s.join(ctx)

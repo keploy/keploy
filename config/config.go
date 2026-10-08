@@ -145,7 +145,13 @@ type Record struct {
 	ChannelBindingShim bool   `json:"channelBindingShim" yaml:"channelBindingShim" mapstructure:"channelBindingShim"`
 	MemoryLimit        uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
 	GlobalPassthrough  bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	TLSPrivateKeyPath  string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	// DisableHandshakeHold: by default the proxy holds each connection's
+	// handshake until the real destination answers, so a refused or
+	// unreachable dependency fails the application's connect as it would
+	// without keploy (docs/reference/recording-proxy-handshakes.md). Set it to
+	// accept every connection at once instead.
+	DisableHandshakeHold bool   `json:"disableHandshakeHold" yaml:"disableHandshakeHold" mapstructure:"disableHandshakeHold"`
+	TLSPrivateKeyPath    string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 	// UpstreamTLS controls whether keploy authenticates the REAL upstream
 	// server when it dials out on the application's behalf. TLSPrivateKeyPath
 	// above is the client half of the same story (upstream mTLS); this is the
