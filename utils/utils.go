@@ -38,6 +38,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/strvals"
 )
@@ -465,18 +466,12 @@ func ConfigHeader() string {
 		"#   keploy config defaults -o FILE    # save them\n"
 }
 
-func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
-	file, err := os.Open(logFilePath)
-	if err != nil {
-		return fmt.Errorf("error opening log file: %s", err.Error())
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			LogError(logger, err, "Error closing log file")
-		}
-	}()
-
-	content, err := io.ReadAll(file)
+// attachLogFileToSentry attaches logFile, this run's log, to the crash report:
+// read through its name only while that is still this run's log, never
+// whatever a symlink there points at (a root run's crash would otherwise send
+// the link's target).
+func attachLogFileToSentry(logFile *os.File) error {
+	content, err := keployLog.ReadLogFile(logFile)
 	if err != nil {
 		return fmt.Errorf("error reading log file: %s", err.Error())
 	}
@@ -490,7 +485,7 @@ func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 
 // HandleRecovery handles the common logic for recovering from a panic.
 func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
-	err := attachLogFileToSentry(logger, "./keploy-logs.txt")
+	err := attachLogFileToSentry(LogFile)
 	if err != nil {
 		LogError(logger, err, "failed to attach log file to sentry")
 	}
