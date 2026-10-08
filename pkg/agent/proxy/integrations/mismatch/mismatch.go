@@ -251,6 +251,11 @@ func RenderFieldDiffs(diffs []models.MockFieldDiff) string {
 // mockMode is on when the agent serves a `keploy mock record|replay` session.
 // Such a run is recorded again with `keploy mock record`, not `keploy record`,
 // so the hints below name that command; every other run keeps the old text.
+//
+// It is one switch for the whole process, as the agent runs in one mode. Tests
+// in this package that set it restore it with t.Cleanup and must not call
+// t.Parallel: a parallel test would read the other's mode and fail on hint
+// text it never asked for.
 var mockMode atomic.Bool
 
 // SetMockMode is called by the agent at setup with its --mock-mode flag.
