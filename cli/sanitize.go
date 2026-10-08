@@ -38,6 +38,9 @@ func Sanitize(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 			err = sanitizeService.Sanitize(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to sanitize test cases")
+				// Not exit 0: a test set left with its secrets in it is a
+				// failed run, and a pipeline must be able to tell.
+				utils.SetExitCodeOnce(utils.ExitKeployError)
 				return nil
 			}
 
