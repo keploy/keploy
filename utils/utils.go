@@ -352,8 +352,16 @@ func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 }
 
 type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Body    string `json:"body"`
+	TagName string               `json:"tag_name"`
+	Body    string               `json:"body"`
+	Assets  []GitHubReleaseAsset `json:"assets"`
+}
+
+// GitHubReleaseAsset is one file of a release. Digest is GitHub's own
+// "sha256:<hex>" of it, which `keploy update` checks the download against.
+type GitHubReleaseAsset struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
@@ -562,8 +570,13 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 	repoOwner := "keploy"
 	repoName := "keploy"
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
+	return getGitHubRelease(ctx, logger, fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName))
+}
 
+// getGitHubRelease reads the release at apiURL. Anything but a 200 carrying a
+// tag is an error: a rate-limited answer decodes to an empty release, which
+// read as a version other than the running one -- an update to "".
+func getGitHubRelease(ctx context.Context, logger *zap.Logger, apiURL string) (GitHubRelease, error) {
 	client := http.Client{
 		Timeout: 4 * time.Second,
 	}
@@ -587,9 +600,15 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 		}
 	}()
 
+	if resp.StatusCode != http.StatusOK {
+		return GitHubRelease{}, fmt.Errorf("GitHub answered %s for %s", resp.Status, apiURL)
+	}
 	var release GitHubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return GitHubRelease{}, err
+	}
+	if release.TagName == "" {
+		return GitHubRelease{}, fmt.Errorf("GitHub's answer for %s names no release", apiURL)
 	}
 	return release, nil
 }
