@@ -298,3 +298,21 @@ func TestOnMarkRunsOnceWhenTheFirstAppIsMarked(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 }
+
+func TestStartIsTheRecordedStartOfTheMarksSet(t *testing.T) {
+	r := New(newFake(), time.Second)
+	r.SetTable("/r", map[string]models.SetTable{"a": {Start: t0}, "b": {}})
+	r.Begin(7, "s", "/r/a", true, at(0))
+	if got := r.Start(7, ""); !got.Equal(t0) {
+		t.Fatalf("worker's set start = %v", got)
+	}
+	if got := r.Start(0, "/r/a"); !got.Equal(t0) {
+		t.Fatalf("dir's set start = %v", got)
+	}
+	if got := r.Start(0, "/r/b"); !got.IsZero() {
+		t.Fatalf("set without a start = %v", got)
+	}
+	if got := r.Start(9, "/elsewhere"); !got.IsZero() {
+		t.Fatalf("no set = %v", got)
+	}
+}

@@ -475,6 +475,15 @@ func (r *Registry) Active() bool {
 	return r.sets != nil
 }
 
+func (r *Registry) Start(pid uint32, dir string) time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if w, ok := r.workers[pid]; ok && dir == "" {
+		dir = w.dir
+	}
+	return r.sets[r.setOf(dir)].Start
+}
+
 func (r *Registry) setOf(dir string) string {
 	if dir == "" {
 		return ""

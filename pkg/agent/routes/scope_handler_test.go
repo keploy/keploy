@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 )
@@ -82,34 +83,57 @@ func TestScopeHandlersWithoutATime(t *testing.T) {
 	}
 }
 
-func TestScopeHandlersDropTheRunnerTimeWhileItsClockIsShifted(t *testing.T) {
+func TestScopeHandlersAddTheOffsetBackWhileTheRunnersClockIsShifted(t *testing.T) {
 	var pids []int
-	OnMark = func(pid int) bool { pids = append(pids, pid); return true }
+	OnMark = func(pid int, _ time.Time) time.Duration { pids = append(pids, pid); return 48 * time.Hour }
 	t.Cleanup(func() { OnMark = nil })
+	at := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Millisecond)
+	body := func(s string) string { return strings.Replace(s, "AT", at.Format(time.RFC3339Nano), 1) }
 	svc := &timedScopeSvc{}
 	a := &Agent{logger: zap.NewNop(), svc: svc}
-	post(t, a.HandleScopeBegin, `{"name":"t","pid":7,"at":"2026-09-24T10:00:00Z"}`)
-	if svc.begun != "t" || !svc.at.IsZero() {
+	post(t, a.HandleScopeBegin, body(`{"name":"t","pid":7,"at":"AT"}`))
+	if svc.begun != "t" || !svc.at.Equal(at.Add(48*time.Hour)) {
 		t.Fatalf("begin got %q at %v", svc.begun, svc.at)
 	}
-	post(t, a.HandleScopeEnd, `{"name":"t","pid":7,"at":"2026-09-24T10:00:01Z"}`)
-	if svc.ended != "t" || !svc.at.IsZero() {
+	post(t, a.HandleScopeEnd, body(`{"name":"t","pid":7,"at":"AT"}`))
+	if svc.ended != "t" || !svc.at.Equal(at.Add(48*time.Hour)) {
 		t.Fatalf("end got %q at %v", svc.ended, svc.at)
 	}
-	post(t, a.HandleAppStart, `{"pid":9,"at":"2026-09-24T10:00:02Z"}`)
+	post(t, a.HandleAppStart, body(`{"pid":9,"at":"AT"}`))
 	if len(pids) != 3 || pids[0] != 0 || pids[1] != 0 || pids[2] != 9 {
 		t.Fatalf("OnMark saw %v", pids)
 	}
 }
 
 func TestScopeHandlersKeepTheRunnerTimeWhenItsClockIsNotShifted(t *testing.T) {
-	OnMark = func(int) bool { return false }
+	OnMark = func(int, time.Time) time.Duration { return 48 * time.Hour }
 	t.Cleanup(func() { OnMark = nil })
+	at := time.Now().UTC().Truncate(time.Millisecond)
 	svc := &timedScopeSvc{}
 	a := &Agent{logger: zap.NewNop(), svc: svc}
+	post(t, a.HandleScopeBegin, `{"name":"t","at":"`+at.Format(time.RFC3339Nano)+`"}`)
+	if !svc.at.Equal(at) {
+		t.Fatalf("begin at %v", svc.at)
+	}
+	OnMark = func(int, time.Time) time.Duration { return 0 }
 	post(t, a.HandleScopeBegin, `{"name":"t","at":"2026-09-24T10:00:00Z"}`)
 	if !svc.at.Equal(time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)) {
 		t.Fatalf("begin at %v", svc.at)
+	}
+}
+
+func TestScopeHandlersTellOnMarkTheSetsRecordedStart(t *testing.T) {
+	var got []time.Time
+	OnMark = func(_ int, start time.Time) time.Duration { got = append(got, start); return 0 }
+	t.Cleanup(func() { OnMark = nil; starts.Default.Reset() })
+	start := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	starts.Default.SetTable("/r", map[string]models.SetTable{"a": {Start: start}})
+	a := &Agent{logger: zap.NewNop(), svc: &timedScopeSvc{}}
+	post(t, a.HandleScopeBegin, `{"name":"s","pid":7,"dir":"/r/a","suite":true}`)
+	post(t, a.HandleScopeEnd, `{"name":"t","pid":7}`)
+	post(t, a.HandleScopeBegin, `{"name":"u","pid":8,"dir":"/r/b"}`)
+	if len(got) != 3 || !got[0].Equal(start) || !got[1].Equal(start) || !got[2].IsZero() {
+		t.Fatalf("OnMark saw %v", got)
 	}
 }
 
