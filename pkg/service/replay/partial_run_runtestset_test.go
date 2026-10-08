@@ -1,6 +1,8 @@
 package replay
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -561,7 +563,8 @@ func TestRunTestSetPartialRunDoesNotPruneMocks(t *testing.T) {
 
 // prClientTimeoutErr returns the error net/http itself produces when the app
 // accepts a request and never answers before the client gives up, so the test
-// classifies the exact text SimulateHTTP hands to CreateFailedTestResult.
+// classifies the error SimulateHTTP hands to CreateFailedTestResult: the
+// no-answer mark (pkg.IsAppNoAnswer) reads the error, not its text.
 func prClientTimeoutErr(t *testing.T) error {
 	t.Helper()
 	release := make(chan struct{})
@@ -577,6 +580,20 @@ func prClientTimeoutErr(t *testing.T) error {
 	if err == nil {
 		_ = resp.Body.Close()
 		t.Fatal("a server that never answers produced a response")
+	}
+	return err
+}
+
+// prRefusedErr returns the error net/http itself produces for a request to a
+// port nothing listens on: a refusal is known by its errno
+// (pkg.IsAppConnectionError), not by its text, so the test classifies what
+// SimulateHTTP hands to CreateFailedTestResult.
+func prRefusedErr(t *testing.T) error {
+	t.Helper()
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/test-4", closedLocalPort(t)))
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("a request to a closed port got an answer")
 	}
 	return err
 }
@@ -718,9 +735,7 @@ func TestRunTestSetLostResultBlocksThePrune(t *testing.T) {
 		err  func(*testing.T) error
 	}{
 		{"client timeout", prClientTimeoutErr},
-		{"connection refused", func(*testing.T) error {
-			return errors.New(`Get "http://127.0.0.1:8080/test-2": dial tcp 127.0.0.1:8080: connect: connection refused`)
-		}},
+		{"connection refused", prRefusedErr},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPartialRunHarness(t, 2, 0)
@@ -740,18 +755,62 @@ func TestRunTestSetLostResultBlocksThePrune(t *testing.T) {
 	}
 }
 
+// prDoesNotDecodeErr returns the error pkg.SimulateHTTP gives for an answer
+// that comes back whole but whose body does not decode as its Content-Encoding
+// says: the app answered.
+func prDoesNotDecodeErr(t *testing.T, encoding string, status int, body []byte) error {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", encoding)
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	tc := &models.TestCase{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{
+		Method: http.MethodGet, URL: srv.URL + "/test-2",
+		// As recorded traffic carries it: net/http leaves the body to keploy.
+		Header: map[string]string{"Accept-Encoding": encoding},
+	}}
+	_, err := pkg.SimulateHTTP(context.Background(), tc, "test-set-0", zap.NewNop(), pkg.SimulationConfig{APITimeout: 5})
+	if err == nil || !strings.Contains(err.Error(), "does not decode") {
+		t.Fatalf("got %v; want the error of an answer that does not decode", err)
+	}
+	return err
+}
+
 // TestRunTestSetOrdinaryFailureStillPrunes is the other side of the no-answer
 // rule: a test that failed for any other reason is an ordinary failure, and
 // with PreserveFailedMocks=false (what k8s-proxy auto-replay sets) the run
 // prunes exactly as before. That includes a failure whose recorded body was too
 // large to keep: the synthetic result then carries no body at all, and that is
-// not evidence that the app never answered.
+// not evidence that the app never answered. It includes an answer that does
+// not decode, too: its decoder's io.ErrUnexpectedEOF (a gzip body cut short; a
+// br body with no bytes) is kept as text only, and the no-answer mark
+// (pkg.IsAppNoAnswer) reads the error, not its text.
 func TestRunTestSetOrdinaryFailureStillPrunes(t *testing.T) {
-	for _, bodySkipped := range []bool{false, true} {
-		t.Run(fmt.Sprintf("recorded body skipped=%v", bodySkipped), func(t *testing.T) {
+	var whole bytes.Buffer
+	zw := gzip.NewWriter(&whole)
+	if _, err := zw.Write([]byte(`{"ok":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	malformed := errors.New(`Get "http://127.0.0.1:8080/test-2": net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00\x00"`)
+	for _, tc := range []struct {
+		name        string
+		err         error
+		bodySkipped bool
+	}{
+		{"recorded body skipped=false", malformed, false},
+		{"recorded body skipped=true", malformed, true},
+		{"a gzip answer cut short does not decode", prDoesNotDecodeErr(t, "gzip", http.StatusOK, whole.Bytes()[:whole.Len()-6]), false},
+		{"a br 204 with no body does not decode", prDoesNotDecodeErr(t, "br", http.StatusNoContent, nil), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			h := newPartialRunHarness(t, 2, 0)
-			h.cases[1].HTTPResp.BodySkipped = bodySkipped
-			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-2": errors.New(`Get "http://127.0.0.1:8080/test-2": net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00\x00"`)}}
+			h.cases[1].HTTPResp.BodySkipped = tc.bodySkipped
+			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-2": tc.err}}
 			h.replayer.config.Test.RemoveUnusedMocks = true
 			_ = h.run(t)
 
@@ -760,7 +819,7 @@ func TestRunTestSetOrdinaryFailureStillPrunes(t *testing.T) {
 				t.Fatalf("precondition: want a complete run with 1 pass and 1 failure, got %+v", rep)
 			}
 			if got := h.mocks.pruneCalls(); got != 1 {
-				t.Fatalf("a complete run with one ordinary failure made %d UpdateMocks calls; want 1", got)
+				t.Fatalf("a complete run with one ordinary failure (%v) made %d UpdateMocks calls; want 1", tc.err, got)
 			}
 		})
 	}
@@ -778,6 +837,7 @@ func TestRunTestSetOrdinaryFailureStillPrunes(t *testing.T) {
 func TestRunTestSetIncompleteRunDoesNotCreateMappings(t *testing.T) {
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	timeout := prClientTimeoutErr(t)
+	refused := prRefusedErr(t)
 	for _, tc := range []struct {
 		name          string
 		failNth       int
@@ -790,8 +850,7 @@ func TestRunTestSetIncompleteRunDoesNotCreateMappings(t *testing.T) {
 	}{
 		{name: "stopped early", failNth: 3},
 		{name: "a request got no answer", simErr: map[string]error{"test-4": timeout}},
-		{name: "a request was refused", simErr: map[string]error{"test-4": errors.New(
-			`Get "http://127.0.0.1:8080/test-4": dial tcp 127.0.0.1:8080: connect: connection refused`)}},
+		{name: "a request was refused", simErr: map[string]error{"test-4": refused}},
 		// The app runner fails with an internal error during test-4's filter call,
 		// and test-4 still runs: every verdict and result is in, the set is
 		// INTERNAL_ERR.
@@ -978,7 +1037,7 @@ func TestRunTestSetUnreadableResultsBlockThePrune(t *testing.T) {
 // this line is the only place that says why.
 func TestRunTestSetPruneRefusalNamesTheRule(t *testing.T) {
 	timeout := prClientTimeoutErr(t)
-	refused := errors.New(`Get "http://127.0.0.1:8080/test-4": dial tcp 127.0.0.1:8080: connect: connection refused`)
+	refused := prRefusedErr(t)
 	ordinary := errors.New(`net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00"`)
 	for _, tc := range []struct {
 		name     string
