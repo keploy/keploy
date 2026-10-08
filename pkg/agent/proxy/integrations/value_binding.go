@@ -114,10 +114,10 @@ type ValueIndex interface {
 	// up with. Whether such an id is then bound is MayBind's to say.
 	FirstCarried(m *models.Mock) []string
 	// MayBind reports whether the replay follows the recorded value v (see
-	// models.OutgoingOptions.RebindMinted / RebindValues). A creator whose
-	// ids it does not follow is still claimed by the request it answers,
-	// with nothing bound: so a request of the same shape that makes an id
-	// the replay follows is not taken for that creator's.
+	// models.Rebinding). A creator whose ids it does not follow is still
+	// claimed by the request it answers, with nothing bound: so a request of
+	// the same shape that makes an id the replay follows is not taken for
+	// that creator's.
 	MayBind(v string) bool
 	// Carries reports whether some request of the set carries v. Such a
 	// value is a recorded one: a live request that carries it did not mint

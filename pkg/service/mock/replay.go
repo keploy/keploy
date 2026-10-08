@@ -194,7 +194,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// where the ids bound can be read back when the run ends, though: the
 		// app's answers are compared with the recorded cases, and an answer
 		// that names an id of this run matches its case only with them.
-		RebindMinted: !m.config.Test.DisableMockRebinding && m.readsIDPairs(),
+		Rebind: m.rebinding(),
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -1151,6 +1151,16 @@ func testReceipts(flows []FlowMocks, consumedKnown, missesKnown bool) []TestRece
 // compiling without it — the same discipline ConsumedStateReader uses.
 type idPairReader interface {
 	GetIDPairs(ctx context.Context) (map[string]string, error)
+}
+
+// rebinding is what the replay asks the agent to follow: every UUID the app
+// generates, unless test.disableMockRebinding is set or the pairs it binds
+// cannot be read back (docker compose).
+func (m *mockService) rebinding() *models.Rebinding {
+	if m.config.Test.DisableMockRebinding || !m.readsIDPairs() {
+		return nil
+	}
+	return &models.Rebinding{Minted: true}
 }
 
 // readsIDPairs reports whether this replay can read, once the runner has

@@ -3727,7 +3727,7 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	}
 	// What the replay asked to be rebound decides, with the mocks staged next,
 	// whether the set gets a value index.
-	p.getMockManager().SetRebinding(opts.RebindMinted, opts.RebindValues)
+	p.getMockManager().SetRebinding(opts.Rebind.FollowsMinted(), opts.Rebind.Named())
 
 	// Drop any per-worker scopes from a prior session so a crashed worker that
 	// never sent /agent/scope/end cannot leak an allowlist that mis-scopes a

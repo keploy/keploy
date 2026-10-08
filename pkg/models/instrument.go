@@ -103,7 +103,6 @@ type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
 	TLSPrivateKey string
-	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay time.Duration // This is the same as Application delay.
 	Mocking  bool          // used to enable/disable mocking
@@ -135,63 +134,6 @@ type OutgoingOptions struct {
 	// recorded one. Default (false) = ON. Set true to fall back to serving the
 	// recorded value. Only affects mocks carrying Spec.Correlations.
 	DisableMockCorrelation bool
-	// RebindMinted and RebindValues turn ON following the ids an app mints
-	// (value rebinding), which is off when both are zero — so a driver that
-	// does not know them changes nothing.
-	//
-	// An app that mints its own ids sends a new one on every replay. With
-	// rebinding on, the agent binds a recorded id to this run's at the mock
-	// that first carried the recorded one, when the live request is that
-	// recorded request but for the id. From then on a request that carries
-	// this run's id (a read-back by the id the app was given) is matched
-	// against the recordings that carried the recorded one, and their answers
-	// name this run's id. The pairs the agent binds are what a replay reads
-	// back to compare the app's own answers with the recorded ones.
-	//
-	// It follows only what is certain. Only a generated UUID (versions 1, 4,
-	// 6, 7) is ever bound, and only to another UUID the recording does not
-	// carry. A pair is bound, and an answer rewritten, only for a request
-	// that IS a recorded one with this run's ids in place — never for one a
-	// lenient pass matched — and a recorded id has one id of this run for the
-	// whole test set. These therefore replay exactly as they do without
-	// rebinding:
-	//   - an id the app sends as recorded before anything was bound to it: a
-	//     constant, not one this run makes anew;
-	//   - an id first sent in a lookup that found it (GET, HEAD, OPTIONS,
-	//     TRACE answered with success): it existed before. (A lookup that
-	//     found nothing introduces nothing: the write after it is the
-	//     id's creator.)
-	//   - a second, different id for one recording: a retry that mints again,
-	//     more creates than were recorded, parallel workers that each replay
-	//     one recording with an id of their own;
-	//   - a create or a read-back whose request carries a field that changes
-	//     on every run and is not request-body noise;
-	//   - an id the app first sends in a header, in a form or NDJSON body, or
-	//     inside a longer string;
-	//   - every call of a replay under MockNoiseStrict.
-	//
-	// RebindMinted follows every generated UUID the app sends, without being
-	// told which values those are. `keploy mock replay` sets it: its driver
-	// is the user's own tests, which judge the app themselves. Not under
-	// docker compose, where it cannot read the pairs back: the agent stops
-	// with the project.
-	// RebindValues follows only the recorded values listed (those of them
-	// that are generated UUIDs), and only once the set's test cases have
-	// begun: what the app sends while it starts up binds nothing. `keploy
-	// test` sets it to the generated UUIDs in the test set's template map
-	// that a test case's response produces and no test case supplies first
-	// — values `keploy templatize` writes — because it compares the app's
-	// answers itself and must not follow a value that merely changed (a
-	// content hash a regression altered). It names none for a set it cannot
-	// follow through its own test cases (a streaming test case, only some of
-	// the set's test cases selected, several cycles, --base-path), so mocks
-	// and test cases are followed together or not at all.
-	//
-	// Either way a set is followed whole or not at all: only when every mock
-	// kind in it can be followed (HTTP; DNS carries no id) and every recorded
-	// request and response can be read (see integrations.BuildMockValueIndex).
-	RebindMinted bool
-	RebindValues []string
 	// MockNoiseDetection / MockNoiseStrict are the canonical spelling.
 	//
 	// MockNoiseDetection: detect request-body field drift vs the recorded mock
@@ -219,6 +161,14 @@ type OutgoingOptions struct {
 	// NoiseDetection() / NoiseStrict(), never directly.
 	SchemaNoiseDetection bool
 	SchemaNoiseStrict    bool
+	// Rebind turns ON following the ids an app mints (value rebinding): see
+	// Rebinding. nil is off, so a driver that does not know it changes
+	// nothing.
+	//
+	// It is one pointer, after the flags above, so that OutgoingOptions —
+	// which every connection's supervisor.Session holds a copy of — does not
+	// grow (supervisor.TestASessionStaysInThe640ByteSizeClass).
+	Rebind *Rebinding
 	// ConnKey names THIS connection's socket, as an opaque token on which the
 	// connection's two capture legs agree: the raw leg that carries its
 	// cleartext prelude (a MySQL greeting and SSLRequest) and the decrypted leg
@@ -325,6 +275,9 @@ type OutgoingOptions struct {
 	// is dropped). This is NOT a CA-bundle limitation: crypto/tls uses the
 	// system pool for free when RootCAs is nil.
 	UpstreamTLSVerify bool
+	// Synchronous sits with the flags above, not beside the strings at the
+	// top, where it padded the struct by seven bytes (see Rebind).
+	Synchronous bool
 	// UpstreamTLSRootCAs is the trust anchor set for those verifying dials.
 	// nil means "use Go's default" (crypto/tls falls back to the platform
 	// root pool) — it never means "trust nothing".
@@ -368,6 +321,78 @@ type OutgoingOptions struct {
 	// a connection whose destination is routable, since nothing keys a routable
 	// address by namespace. Runtime, per-connection: json:"-" like SrcPid.
 	NetNS string `json:"-"`
+}
+
+// Rebinding is what a replay asks the agent to follow (OutgoingOptions.Rebind).
+//
+// An app that mints its own ids sends a new one on every replay. With
+// rebinding on, the agent binds a recorded id to this run's at the mock
+// that first carried the recorded one, when the live request is that
+// recorded request but for the id. From then on a request that carries
+// this run's id (a read-back by the id the app was given) is matched
+// against the recordings that carried the recorded one, and their answers
+// name this run's id. The pairs the agent binds are what a replay reads
+// back to compare the app's own answers with the recorded ones.
+//
+// It follows only what is certain. Only a generated UUID (versions 1, 4,
+// 6, 7) is ever bound, and only to another UUID the recording does not
+// carry. A pair is bound, and an answer rewritten, only for a request
+// that IS a recorded one with this run's ids in place — never for one a
+// lenient pass matched — and a recorded id has one id of this run for the
+// whole test set. These therefore replay exactly as they do without
+// rebinding:
+//   - an id the app sends as recorded before anything was bound to it: a
+//     constant, not one this run makes anew;
+//   - an id first sent in a lookup that found it (GET, HEAD, OPTIONS or
+//     TRACE answered with anything but 404 — a 200, a 304, a 401 or 403, a
+//     redirect, a 410): it existed before. (A lookup answered 404 found
+//     nothing and introduces nothing: the write after it is the id's
+//     creator.)
+//   - a second, different id for one recording: a retry that mints again,
+//     more creates than were recorded, parallel workers that each replay
+//     one recording with an id of their own;
+//   - a create or a read-back whose request carries a field that changes
+//     on every run and is not request-body noise;
+//   - an id the app first sends in a header, in a form or NDJSON body, or
+//     inside a longer string;
+//   - every call of a replay under MockNoiseStrict.
+//
+// Minted follows every generated UUID the app sends, without being
+// told which values those are. `keploy mock replay` sets it: its driver
+// is the user's own tests, which judge the app themselves. Not under
+// docker compose, where it cannot read the pairs back: the agent stops
+// with the project.
+// Values follows only the recorded values listed (those of them
+// that are generated UUIDs), and only once the set's test cases have
+// begun: what the app sends while it starts up binds nothing. `keploy
+// test` sets it to the generated UUIDs in the test set's template map
+// that a test case's response produces and no test case supplies first
+// — values `keploy templatize` writes — because it compares the app's
+// answers itself and must not follow a value that merely changed (a
+// content hash a regression altered). It names none for a set it cannot
+// follow through its own test cases (a streaming test case, only some of
+// the set's test cases selected, several cycles, --base-path), so mocks
+// and test cases are followed together or not at all.
+//
+// Either way a set is followed whole or not at all: only when every mock
+// kind in it can be followed (HTTP; DNS carries no id) and every recorded
+// request and response can be read (see integrations.BuildMockValueIndex).
+type Rebinding struct {
+	Minted bool     `json:"minted,omitempty"`
+	Values []string `json:"values,omitempty"`
+}
+
+// FollowsMinted reports whether every generated UUID is followed; false for
+// a nil Rebinding.
+func (r *Rebinding) FollowsMinted() bool { return r != nil && r.Minted }
+
+// Named returns the recorded values named to be followed; nil for a nil
+// Rebinding.
+func (r *Rebinding) Named() []string {
+	if r == nil {
+		return nil
+	}
+	return r.Values
 }
 
 type ConditionalDstCfg struct {

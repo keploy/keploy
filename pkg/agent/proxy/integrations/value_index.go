@@ -60,7 +60,7 @@ var valueFreeKinds = map[models.Kind]bool{models.DNS: true}
 
 // BuildMockValueIndex indexes the given mocks (a mock listed twice counts
 // once). mayBind says which recorded values the replay may bind (see
-// models.OutgoingOptions.RebindMinted / RebindValues).
+// models.Rebinding).
 //
 // Every id (mocknoise.IsUUID) gets a creator, whether the replay follows it
 // or not. Two creates of one shape, one with an id the replay follows and an

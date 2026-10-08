@@ -254,13 +254,21 @@ func (r *Replayer) newRunIDs(testSetID string, testCases []*models.TestCase, tem
 	return l
 }
 
-// values are the recorded ids this replay follows, sorted: what the agent is
-// asked to bind (models.OutgoingOptions.RebindValues).
+// values are the recorded ids this replay follows, sorted.
 func (l *runIDs) values() []string {
 	if l == nil {
 		return nil
 	}
 	return slices.Sorted(maps.Keys(l.followed))
+}
+
+// rebinding is what the agent is asked to bind (models.OutgoingOptions.Rebind):
+// the recorded ids this replay follows; nil when it follows none.
+func (l *runIDs) rebinding() *models.Rebinding {
+	if l == nil {
+		return nil
+	}
+	return &models.Rebinding{Values: l.values()}
 }
 
 // templatesToWrite is the set's template values as they may be written back

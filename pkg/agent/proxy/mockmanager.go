@@ -1677,7 +1677,7 @@ func (m *MockManager) Bindings() *integrations.Bindings {
 }
 
 // SetRebinding records what the replay asked to be rebound
-// (models.OutgoingOptions.RebindMinted / RebindValues), for the next set
+// (models.OutgoingOptions.Rebind), for the next set
 // staged: nothing, the UUIDs the app generates, or the listed recorded values.
 func (m *MockManager) SetRebinding(minted bool, values []string) {
 	p := &rebindPolicy{minted: minted}

@@ -182,7 +182,7 @@ func TestRunTestSet_FollowsTheIDsTheAgentBound(t *testing.T) {
 
 			require.NotEmpty(t, h.agent.outgoing)
 			for _, opts := range h.agent.outgoing {
-				require.Equal(t, []string{idRecorded}, opts.RebindValues, "what the agent is asked to follow")
+				require.Equal(t, []string{idRecorded}, opts.Rebind.Named(), "what the agent is asked to follow")
 			}
 			require.Len(t, h.app.sent, 2)
 			require.Contains(t, h.app.sent[1], "/orders/"+idLive, "the read-back is sent with the id the app made")
@@ -269,7 +269,7 @@ func TestRunTestSet_ASetThatIsLeftAloneReplaysAsWithRebindingOff(t *testing.T) {
 			require.Equal(t, models.TestSetStatusFailed, h.run(t))
 
 			for _, opts := range h.agent.outgoing {
-				require.Empty(t, opts.RebindValues, "the agent is not asked to follow anything")
+				require.Nil(t, opts.Rebind, "the agent is not asked to follow anything")
 			}
 			require.Zero(t, h.agent.reads, "and is never asked what it bound")
 			for _, url := range h.app.sent {

@@ -57,7 +57,7 @@ func (a *rcAgent) GetIDPairs(context.Context) (map[string]string, error) {
 func (a *rcAgent) bind(recorded, live string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if len(a.asked) == 0 || !slices.Contains(a.asked[len(a.asked)-1].RebindValues, recorded) {
+	if len(a.asked) == 0 || !slices.Contains(a.asked[len(a.asked)-1].Rebind.Named(), recorded) {
 		return
 	}
 	if a.pairs == nil {

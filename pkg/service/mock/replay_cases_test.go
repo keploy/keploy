@@ -544,7 +544,7 @@ type bindingInstr struct {
 }
 
 func (b *bindingInstr) GetIDPairs(context.Context) (map[string]string, error) {
-	if len(b.asked) == 0 || !b.asked[len(b.asked)-1].RebindMinted {
+	if len(b.asked) == 0 || !b.asked[len(b.asked)-1].Rebind.FollowsMinted() {
 		return nil, nil
 	}
 	return b.pairs, nil
@@ -614,7 +614,7 @@ func TestReplayFollowsIDsOnlyWhereItCanReadThemBack(t *testing.T) {
 			require.NoError(t, svc.Replay(context.Background()))
 
 			require.Len(t, agent.asked, 1)
-			require.Equal(t, c.want, agent.asked[0].RebindMinted)
+			require.Equal(t, c.want, agent.asked[0].Rebind.FollowsMinted())
 			require.Len(t, got.Cases, 2)
 			for _, o := range got.Cases {
 				require.NotNil(t, o.Actual, "precondition: %s was paired with what the test sent", o.Case.Name)
