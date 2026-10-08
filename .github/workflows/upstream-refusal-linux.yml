@@ -11,6 +11,9 @@ name: Upstream Refusal (Linux)
 #                   completing when the agent died with its rules in place.
 #   record_native   keploy record on the host (amd64 and arm64), in a network
 #                   namespace the script builds, so every case is deterministic.
+#                   It also checks connected UDP and getaddrinfo's address
+#                   order, which the connect hook must leave alone: it
+#                   redirects UDP only to port 53 (DNS).
 #   record_docker   keploy record -c "docker run ...": the application runs in
 #                   the agent container's namespace.
 #
