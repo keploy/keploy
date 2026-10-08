@@ -24,6 +24,7 @@ type pacingProxy struct {
 	seeded  [][]models.TestWindow
 	sets    int
 	resets  int
+	unbinds int
 	lastF   []*models.Mock
 	lastU   []*models.Mock
 	lastWin [2]time.Time
@@ -33,6 +34,12 @@ func (p *pacingProxy) ResetStatefulCursors() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.resets++
+}
+
+func (p *pacingProxy) ResetValueBindings() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.unbinds++
 }
 
 func (p *pacingProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock, start, end time.Time) error {
@@ -121,6 +128,9 @@ func TestUpdateMockParamsResetsStatefulCursorsOncePerTestSet(t *testing.T) {
 	defer p.mu.Unlock()
 	if p.resets != 1 {
 		t.Fatalf("ResetStatefulCursors called %d times, want exactly once (the staging call) — a sequence must span the whole test-set, not reset per test case", p.resets)
+	}
+	if p.unbinds != 1 {
+		t.Fatalf("ResetValueBindings called %d times, want exactly once (the staging call) — an id bound in one test case must stay bound for the rest of the set, and not leak into the next set", p.unbinds)
 	}
 }
 

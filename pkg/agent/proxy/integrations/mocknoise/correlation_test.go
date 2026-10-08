@@ -89,3 +89,35 @@ func TestMaterializeCorrelations(t *testing.T) {
 		t.Fatalf("already-populated must be left unchanged, got %+v", pre.Spec.Correlations)
 	}
 }
+
+// ReplaceWords replaces whole words only, and returns its input when it
+// replaces nothing.
+func TestReplaceWords(t *testing.T) {
+	const rec, live = "0f8fad5b-d9cb-469f-a165-70867728950e", "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+	lookup := func(w string) (string, bool) {
+		if w == rec {
+			return live, true
+		}
+		return "", false
+	}
+	for in, want := range map[string]string{
+		`{"id":"` + rec + `"}`:               `{"id":"` + live + `"}`,
+		"/orders/" + rec + "/items?x=" + rec: "/orders/" + live + "/items?x=" + live,
+		rec:                                  live,
+		"order-" + rec:                       "order-" + rec, // a longer word
+		rec + "_thumb":                       rec + "_thumb",
+		rec + "." + rec:                      live + "." + live,
+		"no ids here":                        "no ids here",
+		"":                                   "",
+	} {
+		if got := ReplaceWords(in, lookup); got != want {
+			t.Errorf("ReplaceWords(%q) = %q, want %q", in, got, want)
+		}
+	}
+	var words []string
+	s := "a " + rec + " short1234 0123456789abcdef"
+	ScanWords(s, func(start, end int) { words = append(words, s[start:end]) })
+	if len(words) != 2 || words[0] != rec || words[1] != "0123456789abcdef" {
+		t.Fatalf("ScanWords found %q", words)
+	}
+}

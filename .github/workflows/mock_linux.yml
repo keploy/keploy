@@ -37,7 +37,8 @@ jobs:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     name: mock-mode (record_replay_build)
-    timeout-minutes: 20
+    # The steps take about 13 minutes together; the cap is for a step that hangs.
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -96,6 +97,26 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-stateful-linux.sh"
+
+      # A test that mints its own ids, creates with them and reads back by
+      # them must pass under replay: the read-back is answered with the live id.
+      - name: Run mock-mode value-rebinding e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-rebind-linux.sh"
+
+      # keploy record / keploy templatize / keploy test: an id the app mints
+      # on every run, once a template declares it dynamic, is followed through
+      # the test cases (the request sent, the answer expected) and the
+      # dependency mocks together. Also the only e2e of keploy templatize.
+      - name: Run value-rebinding record/test e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/rebind-test-linux.sh"
 
       - name: Run mock-mode offline e2e
         env:

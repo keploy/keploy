@@ -1,7 +1,9 @@
 package models
 
 import (
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,5 +55,51 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 	c.TestModeInfo.ID = 99
 	if m.TestModeInfo.ID != 3 {
 		t.Error("the copy shares TestModeInfo with the original")
+	}
+}
+
+// WithResponse hands back a mock that carries its response without ever
+// writing the mock it was asked about: that one is pooled, and other
+// connections may be matching or copying it.
+func TestWithResponseLoadsOntoACopy(t *testing.T) {
+	resident := &Mock{Name: "resident", Spec: MockSpec{HTTPResp: &HTTPResp{StatusCode: 200}}}
+	if got, err := resident.WithResponse(); got != resident || err != nil {
+		t.Fatalf("a mock that holds its response is returned as it is: %v, %v", got, err)
+	}
+	if got, err := (*Mock)(nil).WithResponse(); got != nil || err != nil {
+		t.Fatalf("no mock, no response: %v, %v", got, err)
+	}
+
+	loads := 0
+	spilled := &Mock{Name: "spilled"}
+	spilled.SetResponseHydrator(func() (*HTTPResp, []MongoResponse, error) {
+		loads++
+		return &HTTPResp{StatusCode: 201, Body: "loaded"}, nil, nil
+	})
+	spilled.MarkPooled()
+	for i := 1; i <= 2; i++ {
+		got, err := spilled.WithResponse()
+		if err != nil || got == spilled || got.Spec.HTTPResp == nil || got.Spec.HTTPResp.Body != "loaded" {
+			t.Fatalf("call %d: want a copy with the response loaded: %+v, %v", i, got, err)
+		}
+		if spilled.Spec.HTTPResp != nil || !spilled.HasSpilledResponse() {
+			t.Fatalf("call %d wrote the response into the pooled mock", i)
+		}
+		if got.HasSpilledResponse() || got.Pooled() {
+			t.Fatalf("call %d: the copy is loaded, and no pool holds it", i)
+		}
+		if loads != i {
+			t.Fatalf("call %d loaded the response %d times", i, loads)
+		}
+	}
+
+	broken := &Mock{Name: "broken"}
+	broken.SetResponseHydrator(func() (*HTTPResp, []MongoResponse, error) { return nil, nil, errors.New("store closed") })
+	got, err := broken.WithResponse()
+	if got != nil || err == nil || !strings.Contains(err.Error(), `"broken"`) || !strings.Contains(err.Error(), "store closed") {
+		t.Fatalf("a response that cannot be loaded is an error naming the mock: %v, %v", got, err)
+	}
+	if !broken.HasSpilledResponse() {
+		t.Fatal("a failed load must leave the mock as it was")
 	}
 }

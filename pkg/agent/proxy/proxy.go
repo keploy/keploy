@@ -3725,6 +3725,9 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	} else {
 		mm.ResetForReplaySession()
 	}
+	// What the replay asked to be rebound decides, with the mocks staged next,
+	// whether the set gets a value index.
+	p.getMockManager().SetRebinding(opts.RebindMinted, opts.RebindValues)
 
 	// Drop any per-worker scopes from a prior session so a crashed worker that
 	// never sent /agent/scope/end cannot leak an allowlist that mis-scopes a
@@ -3871,6 +3874,14 @@ func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
 func (p *Proxy) ResetStatefulCursors() {
 	if m := p.getMockManager(); m != nil {
 		m.ResetStatefulCursors()
+	}
+}
+
+// ResetValueBindings drops every recorded→live value binding. Satisfies the
+// agent's optional ValueBindingResetter extension interface.
+func (p *Proxy) ResetValueBindings() {
+	if m := p.getMockManager(); m != nil {
+		m.ResetValueBindings()
 	}
 }
 

@@ -58,6 +58,13 @@ type TestResult struct {
 	Result       Result      `json:"result" yaml:"result"`
 	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
 	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
+	// RunIDs are the ids the app made this run in place of recorded ones
+	// that this test case met (recorded -> live): those swapped into its
+	// expected response before it was compared — what Result shows as
+	// expected already has them — and those the app's answer names, in its
+	// body or a header. Empty when it met none. `keploy normalize` maps the
+	// live ids back with them before an answer becomes the expected one.
+	RunIDs map[string]string `json:"run_ids,omitempty" yaml:"run_ids,omitempty"`
 	// MockMismatches captures expected vs actually-consumed mocks for THIS test.
 	// Distinct from FailureInfo.MockMismatch (which only fires when the mock
 	// pool diverged AND the test case is OBSOLETE) — this field is set for

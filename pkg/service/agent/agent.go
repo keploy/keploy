@@ -1204,6 +1204,11 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		if resetter, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
 			resetter.ResetStatefulCursors()
 		}
+		// Value bindings are test-set state too: an id minted in one test-set
+		// must not rewrite the next set's mocks.
+		if resetter, ok := a.Proxy.(coreAgent.ValueBindingResetter); ok {
+			resetter.ResetValueBindings()
+		}
 	}
 
 	a.logger.Debug("UpdateMockParams called",

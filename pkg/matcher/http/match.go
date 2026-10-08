@@ -32,7 +32,10 @@ var jsonUnmarshal234 = json.Unmarshal
 // OSS bump.
 type MatchOption func(*matchOptions)
 
-type matchOptions struct{ autoHeaderNoise bool }
+type matchOptions struct {
+	autoHeaderNoise bool
+	settled         map[string]bool
+}
 
 // WithAutoHeaderNoise forgives a VALUE difference on response headers the server
 // mints fresh on every call — the HTTP date, request/correlation ids and
@@ -42,6 +45,20 @@ type matchOptions struct{ autoHeaderNoise bool }
 // failure. Off unless the caller asks.
 func WithAutoHeaderNoise(enabled bool) MatchOption {
 	return func(o *matchOptions) { o.autoHeaderNoise = enabled }
+}
+
+// WithSettledValues names values of this run that an expected response holds
+// and the app's answer must hold too.
+//
+// In a test set with templates, an expected field whose value a template
+// currently holds is otherwise never a difference: Match takes what the app
+// answered there as the template's new value (see
+// matcher.CompareResponsesKeeping). The ids a replay follows are settled where
+// the app first sent them to a dependency, and the expected response has been
+// rewritten to name them — so an answer naming anything else there is the app
+// answering with another id, and must fail.
+func WithSettledValues(values map[string]bool) MatchOption {
+	return func(o *matchOptions) { o.settled = values }
 }
 
 func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool, opts ...MatchOption) (bool, *models.Result) {
@@ -459,7 +476,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						utils.LogError(logger, err, "failed to parse the act response into json")
 						break
 					}
-					matcherUtils.CompareResponses(&expResponse, &actResponse, "")
+					matcherUtils.CompareResponsesKeeping(&expResponse, &actResponse, "", mo.settled)
 					jsonBytes, err := jsonMarshal234(expResponse)
 					if err != nil {
 						return false, nil

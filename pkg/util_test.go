@@ -1199,6 +1199,25 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 		assert.Equal(t, zap.DebugLevel, logs.FilterMessageSnippet("unsupported Content-Encoding").All()[0].Level)
 	})
 
+	// DecodesContentEncoding says which bodies are stored as plain text, for
+	// readers that scan recorded bodies. It must name exactly the encodings
+	// Decompress does not send down its unsupported-encoding fallback: one
+	// that learns a new encoding without the other would have such a reader
+	// trust a body it cannot read, or refuse one it can.
+	t.Run("DecodesContentEncodingAgreesWithDecompress", func(t *testing.T) {
+		for _, enc := range []string{"", "identity", "Identity", "gzip", "GZIP", " gzip ", "br", "Br",
+			"deflate", "zstd", "compress", "x-gzip", "gzip, br", "gzip,deflate", "unknown"} {
+			core, logs := observer.New(zap.DebugLevel)
+			obsLogger := zap.New(core)
+			stored, err := Compress(obsLogger, enc, []byte("plain body"))
+			require.NoError(t, err, enc)
+			_, err = Decompress(obsLogger, enc, stored, MaxDecompressedSize)
+			require.NoError(t, err, enc)
+			keptAsSent := logs.FilterMessageSnippet("unsupported Content-Encoding; storing body without decompression").Len() > 0
+			assert.Equal(t, !keptAsSent, DecodesContentEncoding(enc), "Content-Encoding %q", enc)
+		}
+	})
+
 	// A payload inflating past the caller's limit must error, not OOM (#3867).
 	// Uses real gzip/brotli through the public API so it fails if the capped
 	// read wiring is ever reverted. The sentinel lets callers distinguish

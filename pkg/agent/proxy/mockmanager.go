@@ -10,6 +10,9 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/ids"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -119,6 +122,21 @@ type MockManager struct {
 	// replaced (per test-set) so cursors don't bleed across test-sets.
 	cursorMu sync.Mutex
 	cursors  map[string]int
+
+	// bindings is the replay's one recorded→live value table
+	// (integrations.ValueBindings), whichever connection or test worker a call
+	// comes from. bindEpoch numbers its life: ResetValueBindings starts a new
+	// epoch, empty, at every test-set boundary, and what a match of an earlier
+	// epoch commits is dropped.
+	bindings    integrations.BindingTable
+	bindEpoch   atomic.Uint64
+	bindEpochMu sync.RWMutex // a bind checks the epoch and binds under R; a reset is W
+	// values is the staged set's value index (integrations.ValueIndex), built
+	// when a whole set is staged and kept until the next one; valuesStaged
+	// says one was (guarded by swapMu, as staging is).
+	values       atomic.Pointer[integrations.MockValueIndex]
+	rebinding    atomic.Pointer[rebindPolicy]
+	valuesStaged bool
 
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
@@ -470,6 +488,9 @@ func (m *MockManager) IsClosed() bool {
 // references to the cleared trees still observe valid (empty) trees
 // rather than panicking.
 func (m *MockManager) ResetForReplaySession() {
+	// A new replay session — on a reused, long-lived agent, the next `keploy
+	// mock replay` — must not inherit the last one's bindings.
+	m.ResetValueBindings()
 	m.connMu.Lock()
 	m.connectionTrees = make(map[string]*TreeDb)
 	m.connectionLastTs = make(map[string]time.Time)
@@ -1062,6 +1083,18 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			}
 			startupInit = append(startupInit, mk)
 		}
+		// The first staging of a set — after a session reset, or the first
+		// a new manager sees — hands over the whole set: index the app-random
+		// values its mocks carry (integrations.ValueIndex). A mid-set BaseTime
+		// staging may hand over a subset (a mapping-restricted pool), which
+		// must not replace what the whole set says.
+		if setBoundary || !m.valuesStaged {
+			m.values.Store(m.buildValueIndex(filtered, unfiltered, explicitStartup))
+			m.valuesStaged = true
+			// A new index starts a new binding epoch: a match that began
+			// under the previous set's index must not bind into this one's.
+			m.ResetValueBindings()
+		}
 	}
 
 	// Pre-filter per-test mocks by the outer test window. Zero start or
@@ -1600,6 +1633,137 @@ func (m *MockManager) ResetStatefulCursors() {
 	m.cursorMu.Lock()
 	m.cursors = nil
 	m.cursorMu.Unlock()
+}
+
+// Bindings implements integrations.ValueBindings: the replay's one binding
+// table, as it is now. nil when the staged set is not followed (it has no
+// value index: see integrations.BuildMockValueIndex).
+//
+// One table serves every caller. Parallel test workers that each mint their
+// own id for one shared recording are not told apart: the first to send its
+// id binds it, and the others are answered as they are without rebinding.
+//
+// A replay that named the ids to follow (keploy test) follows them only once
+// its test cases have begun: from the first test window the replay sets
+// (SetMocksWithWindow) until the set ends. A named id is one a test case's
+// answer produces, so the call that introduces it is made after that; a call
+// made before — the app starting up, keploy's own readiness probe reaching a
+// handler — is not it, and must not take the one binding the id gets. The
+// window stays open between test cases (nothing in this build closes it), so
+// a call made there is followed like any other.
+func (m *MockManager) Bindings() *integrations.Bindings {
+	if m.values.Load() == nil {
+		return nil
+	}
+	if p := m.rebinding.Load(); p != nil && p.named != nil && !m.IsTestWindowActive() {
+		return nil
+	}
+	return integrations.NewBindings(&m.bindings, m.bindEpoch.Load(), func(creator string, pairs map[string]string, epoch uint64) bool {
+		// The epoch check and the write are one step against a reset, or a
+		// match that straddles one could still bind into the next set.
+		m.bindEpochMu.RLock()
+		defer m.bindEpochMu.RUnlock()
+		if epoch != m.bindEpoch.Load() || !m.bindings.ClaimAndBind(creator, pairs) {
+			return false
+		}
+		// The replay CLI reads the ids this run made in place of recorded
+		// ones (/agent/ids) and acts on those pairs alone: every pair bound
+		// is one of them, and a recorded id never has two.
+		for rec, live := range pairs {
+			ids.Default.Add(rec, live)
+		}
+		return true
+	})
+}
+
+// SetRebinding records what the replay asked to be rebound
+// (models.OutgoingOptions.RebindMinted / RebindValues), for the next set
+// staged: nothing, the UUIDs the app generates, or the listed recorded values.
+func (m *MockManager) SetRebinding(minted bool, values []string) {
+	p := &rebindPolicy{minted: minted}
+	if !minted && len(values) > 0 {
+		p.named = make(map[string]bool, len(values))
+		for _, v := range values {
+			p.named[v] = true
+		}
+	}
+	m.rebinding.Store(p)
+}
+
+// rebindPolicy is what a replay asked to be rebound: every id the app mints
+// (minted), only the recorded ids it named (named), or — both zero — nothing.
+type rebindPolicy struct {
+	minted bool
+	named  map[string]bool
+}
+
+// mayBind is the policy as the value index asks it. Whoever asks, the one
+// value taken for an id the app mints is a UUID of a generated kind
+// (mocknoise.IsMintedUUID): a hex digest or a long token is as often derived
+// or configured — a content hash, a model name, a queue — and following one
+// would answer the app with whatever it sent. A replay that named ids follows
+// those among them.
+func (p *rebindPolicy) mayBind(recorded string) bool {
+	if !mocknoise.IsMintedUUID(recorded) {
+		return false
+	}
+	if p.named != nil {
+		return p.named[recorded]
+	}
+	return p.minted
+}
+
+// buildValueIndex indexes a staged set for the replay's rebinding policy;
+// nil when it asked for none, or the set is not followed.
+//
+// Why a set is not followed is a debug line, whatever the replay asked for:
+// most sets hold a database, a run that follows nothing is the run keploy
+// always made, and a healthy run should read the same with rebinding as
+// without. The replay CLI points here when a test fails over an id that was
+// not followed.
+func (m *MockManager) buildValueIndex(lists ...[]*models.Mock) *integrations.MockValueIndex {
+	p := m.rebinding.Load()
+	if p == nil || (!p.minted && len(p.named) == 0) {
+		return nil
+	}
+	ix, why := integrations.BuildMockValueIndex(p.mayBind, lists...)
+	if why != "" && m.logger != nil {
+		m.logger.Debug("the ids this run makes in place of recorded ones are not followed in this test set: mocks and test cases that name them replay as recorded", zap.String("why", why))
+	}
+	return ix
+}
+
+// ResetValueBindings starts a new, empty binding epoch. The agent calls it
+// with ResetStatefulCursors, once per test-set, so an id the app minted in one
+// test-set never rewrites a mock of the next — including one a match of the
+// old set commits after the reset.
+func (m *MockManager) ResetValueBindings() {
+	m.bindEpochMu.Lock()
+	defer m.bindEpochMu.Unlock()
+	m.bindEpoch.Add(1)
+	m.bindings.Reset()
+	// The ids the replay CLI reads are this epoch's bindings.
+	ids.Default.Reset()
+}
+
+// RequestValues implements integrations.ValueIndex.
+func (m *MockManager) RequestValues(mk *models.Mock) []string {
+	return m.values.Load().RequestValues(mk)
+}
+
+// FirstCarried implements integrations.ValueIndex.
+func (m *MockManager) FirstCarried(mk *models.Mock) []string {
+	return m.values.Load().FirstCarried(mk)
+}
+
+// Carries implements integrations.ValueIndex.
+func (m *MockManager) Carries(v string) bool {
+	return m.values.Load().Carries(v)
+}
+
+// MayBind implements integrations.ValueIndex.
+func (m *MockManager) MayBind(v string) bool {
+	return m.values.Load().MayBind(v)
 }
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set

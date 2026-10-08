@@ -105,6 +105,45 @@ func cloneStringAnyMap(src map[string]interface{}) map[string]interface{} {
 	return dst
 }
 
+// SetTemplateValues gives the templates of the test set being replayed the
+// given values, under the lock every render and update of them takes. A key
+// the set's templates do not hold is not added.
+func SetTemplateValues(values map[string]interface{}) {
+	if len(values) == 0 {
+		return
+	}
+	templateValuesMu.Lock()
+	defer templateValuesMu.Unlock()
+	for k, v := range values {
+		if _, held := utils.TemplatizedValues[k]; held {
+			utils.TemplatizedValues[k] = v
+		}
+	}
+}
+
+// TemplateValues returns a copy of the templates' values, taken under their
+// lock: what RestoreTemplateValues puts back.
+func TemplateValues() map[string]interface{} {
+	templateValuesMu.RLock()
+	defer templateValuesMu.RUnlock()
+	return cloneStringAnyMap(utils.TemplatizedValues)
+}
+
+// RestoreTemplateValues makes the templates' values exactly those given (a
+// copy TemplateValues took), under their lock. The map itself is kept: the
+// templates of the test set being replayed are that map.
+func RestoreTemplateValues(values map[string]interface{}) {
+	templateValuesMu.Lock()
+	defer templateValuesMu.Unlock()
+	if utils.TemplatizedValues == nil {
+		utils.TemplatizedValues = make(map[string]interface{}, len(values))
+	}
+	clear(utils.TemplatizedValues)
+	for k, v := range values {
+		utils.TemplatizedValues[k] = v
+	}
+}
+
 func snapshotTemplateState() (map[string]interface{}, map[string]interface{}) {
 	templateValuesMu.RLock()
 	defer templateValuesMu.RUnlock()
@@ -4202,7 +4241,8 @@ func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
 // errors.Is(err, ErrDecompressedTooLarge) distinguishes that from a corrupt
 // stream. The encoding is matched case-insensitively after trimming —
 // Compress uses the same matching, so a recorded body round-trips at replay.
-// An unsupported encoding (e.g. zstd, deflate) is returned undecompressed.
+// An unsupported encoding (e.g. zstd, deflate) is returned undecompressed;
+// DecodesContentEncoding says which those are.
 func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) ([]byte, error) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "br":
@@ -4247,6 +4287,20 @@ func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) (
 			zap.String("encoding", encoding))
 		return data, nil
 	}
+}
+
+// DecodesContentEncoding reports whether a body recorded with the given
+// Content-Encoding is stored as plain text: Decompress inflates it, or it was
+// never encoded ("" and identity). For any other encoding Decompress stores
+// the body as it was sent, and nothing can be read in it — a reader that scans
+// recorded bodies for values must treat such a body as one it has not seen.
+// The cases are Decompress's own; keep the two together.
+func DecodesContentEncoding(encoding string) bool {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity", "gzip", "br":
+		return true
+	}
+	return false
 }
 
 // Compress deflates data per the given Content-Encoding. The encoding is

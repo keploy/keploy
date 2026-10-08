@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -136,10 +138,56 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			return false, nil, &matchDiag{phase: models.MatchPhaseNoMocks}, nil
 		}
 
+		// Value rebinding (see rebind): a mock whose request carries a value
+		// this request's live value is bound to is matched as a copy carrying
+		// the live value. The pool itself is unchanged, so diagnostics keep
+		// naming recorded mocks. rb is nil — nothing below changes — unless the
+		// replay asked for rebinding and the staged set can be followed.
+		//
+		// It stays out of strict mode altogether. Strict tolerates only
+		// configured or learned noise, and an id that is followed is neither:
+		// a strict run is, to the byte, what it is without rebinding.
+		var rb *rebind
+		if !schemaNoiseStrict {
+			rb = newRebind(mockDb, input, func(in *req, m *models.Mock) bool {
+				return h.sameRequest(ctx, in, m, headerNoise, urlNoise, noiseEngine.KnownNoise(m, userBodyNoise))
+			})
+		}
+		candidates := rb.candidates(unfilteredMocks)
+		// learn is the request-body noise to record on a matched mock. It is
+		// what a replay without rebinding records, always: the pooled
+		// recording's body against the body as the app sent it — never a copy,
+		// never a body with ids put back. A set whose noise was learned with
+		// ids followed must still replay strictly where they are not (an older
+		// keploy, another consumer of the mocks, test.disableMockRebinding).
+		//
+		// lenient says the pass is one of the lenient ones. The exact and the
+		// correlation pass have noise to learn only when they matched a copy:
+		// without rebinding that request would have differed from the
+		// recording in its ids, and been matched leniently.
+		//
+		// Nor is anything learned when the recording echoes the request's
+		// value back (its correlations match the request): without
+		// rebinding the correlation pass matches such a request, and learns
+		// nothing.
+		learn := func(m *models.Mock, lenient bool) map[string][]string {
+			orig, viaCopy := rb.original(m)
+			if !lenient && !viaCopy {
+				return nil
+			}
+			if viaCopy {
+				if correlated, _, _ := h.correlationMatch(input.body, []*models.Mock{orig}, mockCorrelation); correlated {
+					return nil
+				}
+			}
+			detected, _ := noiseEngine.Detect(orig, input.body, userBodyNoise)
+			return detected
+		}
+
 		// Matching process
 		// Pass 1: exact URL + configured url-noise only. Deterministic and
 		// genuinely-distinct calls match here and are never relaxed.
-		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, false)
+		schemaMatched, err := h.SchemaMatch(ctx, input, candidates, headerNoise, urlNoise, false)
 		if err != nil {
 			return false, nil, nil, err
 		}
@@ -148,7 +196,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// (numeric/uuid/hex/long token) to vary — so a non-deterministic path id
 		// doesn't 502 with no config. Disable via OutgoingOptions.DisableAutoURLDynamic.
 		if len(schemaMatched) == 0 && autoURLDynamic {
-			schemaMatched, err = h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, true)
+			schemaMatched, err = h.SchemaMatch(ctx, input, candidates, headerNoise, urlNoise, true)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -161,6 +209,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if len(schemaMatched) == 0 {
 			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(unfilteredMocks), pool: unfilteredMocks}, nil
 		}
+		schemaMatched = rb.inOrder(schemaMatched)
 
 		h.Logger.Debug("http mock schema match results",
 			zap.Int("schema_matched", len(schemaMatched)),
@@ -175,8 +224,9 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			// then saturate on the last. No-op for a single recording.
 			bestMatch, commitCursor := h.cursorPick(bestMatch, schemaMatched, mockDb, statefulMocks)
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
-			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
-			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil, nil)
+			// Exact (byte-equal) body — nothing drifted, so no noise to detect,
+			// unless what matched is a copy (see learn).
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, learn(bestMatch, false), nil, rb)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -199,7 +249,65 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// not served stale or rejected by strict noise.
 		if okC, bestC, bindings := h.correlationMatch(input.body, schemaMatched, mockCorrelation); okC {
 			h.Logger.Debug("correlation match found", zap.String("mock name", bestC.Name))
-			served, claimed, err := h.claim(ctx, bestC, mockDb, nil, bindings)
+			// A create whose answer echoes its id is correlated, so it is
+			// matched here and not by the template pass below. When it is
+			// made with an id of this run it takes its place in its stateful
+			// group all the same (see the template pass).
+			// What is learned is decided by what matched, before the copy
+			// made for the cursor stands in for it.
+			learned := learn(bestC, false)
+			var commitCursor func()
+			if i := slices.Index(schemaMatched, bestC); i >= 0 {
+				if c, sent := rb.asSent(schemaMatched, i); c != nil {
+					bestC, commitCursor = h.cursorPick(c, sent, mockDb, statefulMocks)
+				}
+			}
+			served, claimed, err := h.claim(ctx, bestC, mockDb, learned, bindings, rb)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if !claimed {
+				continue
+			}
+			if commitCursor != nil {
+				commitCursor()
+			}
+			return true, served, nil, nil
+		}
+
+		// A create with the id the app minted this run: the request is a
+		// recording's but for the ids that recording introduced (see
+		// rebind.templateMatch). Run before the lenient passes, which would
+		// have to tell two such recordings apart by how alike two random ids
+		// happen to look — and cannot see a top-level JSON array at all.
+		if tm, sent := rb.templateMatch(schemaMatched); tm != nil {
+			// The same create recorded more than once (answered 201, then
+			// 409) is a stateful group like any other: this request takes its
+			// place in it, so that the next identical one gets the next
+			// recording.
+			tm, commitCursor := h.cursorPick(tm, sent, mockDb, statefulMocks)
+			h.Logger.Debug("template match found", zap.String("mock name", tm.Name))
+			served, claimed, err := h.claim(ctx, tm, mockDb, learn(tm, true), nil, rb)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if !claimed {
+				continue
+			}
+			if commitCursor != nil {
+				commitCursor()
+			}
+			return true, served, nil, nil
+		}
+
+		// A request that is a recorded one with this run's ids in place, but
+		// for request-body noise (a read-back that stamps the time): matched
+		// to that recording here. The exact pass needs the bodies byte for
+		// byte, and the lenient passes below choose as they do without
+		// rebinding, so neither would find it but by chance.
+		if fit := rb.fitting(schemaMatched); fit != nil {
+			h.Logger.Debug("rebound match found", zap.String("mock name", fit.Name))
+			served, claimed, err := h.claim(ctx, fit, mockDb, learn(fit, true), nil, rb)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -209,6 +317,29 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			return true, served, nil, nil
 		}
 
+		// The lenient passes choose among the recordings as they are, in the
+		// pool's order, exactly as they do without rebinding: from what the
+		// schema passes find among the recordings themselves. A copy carrying
+		// this run's ids would turn the choice — it reads as a few edits
+		// closer to the request — and would narrow it: an id in a URL path
+		// matches its own recording's URL on the exact pass, where without
+		// rebinding the dynamic-segment pass takes every recording of that
+		// path.
+		if rb != nil {
+			asMain, err := h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, false)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if len(asMain) == 0 && autoURLDynamic {
+				if asMain, err = h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, true); err != nil {
+					return false, nil, nil, err
+				}
+			}
+			if len(asMain) == 0 {
+				return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(unfilteredMocks), pool: unfilteredMocks}, nil
+			}
+			schemaMatched = asMain
+		}
 		shortListed := schemaMatched
 		// Schema match for JSON bodies
 		if pkg.IsJSON(input.body) {
@@ -235,13 +366,12 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 				if beforeStrict > 0 {
 					phase = models.MatchPhaseStrict
 				}
-				return false, nil, &matchDiag{phase: phase, candidates: len(unfilteredMocks), schemaMatched: schemaMatched, pool: unfilteredMocks}, nil
+				return false, nil, &matchDiag{phase: phase, candidates: len(unfilteredMocks), schemaMatched: rb.originals(schemaMatched), pool: unfilteredMocks}, nil
 			}
 
 			if len(bodyMatched) == 1 {
 				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
-				detected, _ := noiseEngine.Detect(bodyMatched[0], input.body, userBodyNoise)
-				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, detected, nil)
+				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, learn(bodyMatched[0], true), nil, rb)
 				if err != nil {
 					return false, nil, nil, err
 				}
@@ -260,8 +390,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
 		if isMatched {
 			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
-			detected, _ := noiseEngine.Detect(bestMatch, input.body, userBodyNoise)
-			served, claimed, err := h.claim(ctx, bestMatch, mockDb, detected, nil)
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, learn(bestMatch, true), nil, rb)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -270,7 +399,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			}
 			return true, served, nil, nil
 		}
-		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed, pool: unfilteredMocks}, nil
+		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: rb.originals(shortListed), pool: unfilteredMocks}, nil
 	}
 }
 
@@ -1363,23 +1492,83 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 	return true
 }
 
+// sameRequest reports whether in is the request the pooled mock m recorded, as
+// the matcher's exact passes read one: it passes the exact URL pass
+// (SchemaMatch with no auto-detected dynamic segment, so configured url noise
+// and the method, header and query rules are the matcher's own), and its body
+// is the recorded one — byte for byte, or, both being JSON documents, but for
+// the fields bodyNoise sets aside (mocknoise.SameJSONBut).
+func (h *HTTP) sameRequest(ctx context.Context, in *req, m *models.Mock, headerNoise map[string][]string, urlNoise []string, bodyNoise map[string][]string) bool {
+	if ms, err := h.SchemaMatch(ctx, in, []*models.Mock{m}, headerNoise, urlNoise, false); err != nil || len(ms) == 0 {
+		return false
+	}
+	recorded := m.Spec.HTTPReq.Body
+	return recorded == string(in.body) || mocknoise.SameJSONBut(recorded, string(in.body), bodyNoise)
+}
+
 // claim takes the matched mock m for this request: it loads m's response
-// (withResponse), then records the match (updateMock), which consumes a
+// (Mock.WithResponse), then records the match (updateMock), which consumes a
 // per-test mock. Loading comes first so that a response that cannot be loaded
 // leaves the mock unconsumed rather than reported as served. It returns the
 // mock to serve, m or a copy of it with the response loaded, and claimed=false
 // when another connection took m first.
-func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, bindings map[string]string) (served *models.Mock, claimed bool, err error) {
-	served, err = withResponse(m)
+//
+// m may be a rebound copy (see rebind): the POOLED original is what is loaded
+// and consumed. Whatever pass matched it, rebinding acts only when the live
+// request is that recording's own with this run's ids in place (rebind.fits):
+// the ids the recording introduced are then bound for the rest of the test
+// set, and the answer names this run's ids. Any other request is answered as
+// recorded, with nothing bound.
+func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, bindings map[string]string, rb *rebind) (served *models.Mock, claimed bool, err error) {
+	m, _ = rb.original(m)
+	served, err = m.WithResponse()
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("http: %w", err)
+	}
+	// A request that fits claims its creator (rebind.commit). The claim is
+	// refused when another request claimed the creator, or bound one of its
+	// ids, since this one was matched: requests that race for one creator
+	// (identical creates on several connections).
+	//
+	// A recording the pool shares (a session mock) is claimed before it is
+	// used: refused, it is not used — no noise saved on it, not counted as
+	// used — and the request is matched again, against the next creator. A
+	// per-test recording is consumed first, which only one request can do;
+	// a claim refused after that answers the request as recorded, from the
+	// recording it holds.
+	fits := rb.fits(m)
+	shared := reusable(m)
+	if fits && shared && !rb.commit(m) {
+		return nil, false, nil
 	}
 	if !h.updateMock(ctx, m, mockDb, detectedNoise) {
 		return nil, false, nil
 	}
+	if fits && !shared && !rb.commit(m) {
+		fits = false
+	}
 	// Honor request→response correlations: render the live values captured from
 	// this request into the served response (on a copy; never the pooled mock).
 	served = renderCorrelations(served, bindings)
+	if fits {
+		served = rb.render(served, m)
+	} else if disowned := rb.disowns(m); len(disowned) > 0 {
+		h.Logger.Warn("an id this run was following is a constant after all: the app made the call that introduced it again, exactly as recorded. What was bound to it was a call about something else; answers that do not name that id keep the recorded one from here on",
+			zap.String("mock", m.Name), zap.Strings("recorded_ids", disowned))
+	} else if recorded, live, ok := rb.other(m); ok && len(bindings) == 0 {
+		// Once per recording: an app that makes more of a call than was
+		// recorded would say it on every one.
+		if rb.binder.FirstNote("other:" + m.Name) {
+			h.Logger.Warn("answered a dependency call as recorded although it names another id: where the recorded call names an id this run made anew, this call carries neither that id nor the recorded one",
+				zap.String("mock", m.Name), zap.String("recorded_id", recorded), zap.String("this_runs_id", live),
+				zap.String("what_it_means", "the call asks about something the recording does not know by that id — another entity, a second id for the same one, or one more call than was recorded. The answer names the recorded id"))
+		}
+	} else if rb.unfollowed(m) {
+		// Why an id is not followed, for whoever looks: the replay CLI points
+		// here when a test fails over one.
+		h.Logger.Debug("answered a dependency call as recorded, without following ids: it is not the recorded call with this run's ids in place of the recorded ones (a field that is not request-body noise differs, or an id does not line up)",
+			zap.String("mock", m.Name))
+	}
 	return served, true, nil
 }
 
@@ -1411,16 +1600,7 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 		updatedMock.Spec.ReqBodyNoise = mergeReqBodyNoise(updatedMock.Spec.ReqBodyNoise, detectedNoise)
 	}
 
-	lifetime := updatedMock.TestModeInfo.Lifetime
-	rawConfig := false
-	if updatedMock.Spec.Metadata != nil {
-		rawConfig = updatedMock.Spec.Metadata["type"] == "config"
-	}
-	isSessionOrConnection := lifetime == models.LifetimeSession ||
-		lifetime == models.LifetimeConnection ||
-		(lifetime == models.LifetimePerTest && rawConfig)
-
-	if isSessionOrConnection {
+	if reusable(matchedMock) {
 		return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
 	}
 	// Per-test: consume via DeleteFilteredMock, with fallback to
@@ -1442,6 +1622,17 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 		return true
 	}
 	return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
+}
+
+// reusable reports whether a matched mock stays in the pool for every request
+// that matches it (session and connection mocks, and per-test config mocks),
+// rather than being consumed by the one it answers.
+func reusable(m *models.Mock) bool {
+	lifetime := m.TestModeInfo.Lifetime
+	rawConfig := m.Spec.Metadata != nil && m.Spec.Metadata["type"] == "config"
+	return lifetime == models.LifetimeSession ||
+		lifetime == models.LifetimeConnection ||
+		(lifetime == models.LifetimePerTest && rawConfig)
 }
 
 // filterStrictNoiseMatches enforces strict request-body matching on the

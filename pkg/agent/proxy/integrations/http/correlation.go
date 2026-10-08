@@ -144,7 +144,7 @@ func equalStrs(a, b []string) bool {
 // appRandomClass): a mis-replacement elsewhere is astronomically unlikely, and
 // it naturally covers echoes in arrays, headers (Location/ETag/Set-Cookie) and
 // non-JSON response bodies. It copies HTTPResp and its Header before mutating so
-// the pooled mock (which withResponse may return directly) is never touched.
+// the pooled mock (which Mock.WithResponse may return directly) is never touched.
 func renderCorrelations(served *models.Mock, bindings map[string]string) *models.Mock {
 	if served == nil || len(bindings) == 0 || len(served.Spec.Correlations) == 0 || served.Spec.HTTPResp == nil {
 		return served
@@ -166,6 +166,16 @@ func renderCorrelations(served *models.Mock, bindings map[string]string) *models
 	}
 	if !changed {
 		return served
+	}
+	// An integrity header over the body (Content-MD5, a checksum, an ETag
+	// that is its MD5) is recomputed for the body served, where it can be.
+	// Where it cannot (an algorithm reSign does not know, a body served
+	// encoded), the echo is served as it always was, with the header as
+	// recorded.
+	if rc.Body != served.Spec.HTTPResp.Body {
+		if signed := maps.Clone(rc.Header); reSign(signed, served.Spec.HTTPResp.Body, rc.Body) {
+			rc.Header = signed
+		}
 	}
 	out.Spec.HTTPResp = &rc
 	return out

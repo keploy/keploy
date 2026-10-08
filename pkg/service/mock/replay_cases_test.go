@@ -2,10 +2,13 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/ids"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
@@ -46,7 +49,7 @@ func TestPairCasesMatchesByCallWithinTheTestAndReportsTheUnseen(t *testing.T) {
 		httpCase("", "POST", "/orders", 201, `{"id":"b"}`, runnerT0.Add(10*time.Millisecond)),
 		httpCase("", "GET", "/orders", 500, `boom`, runnerT0.Add(250*time.Millisecond)),
 	}
-	compare := func(tc *models.TestCase, resp *models.HTTPResp) (bool, *models.Result) {
+	compare := func(tc *models.TestCase, _ *models.HTTPReq, resp *models.HTTPResp) (bool, *models.Result) {
 		return tc.HTTPResp.StatusCode == resp.StatusCode, &models.Result{StatusCode: models.IntResult{Expected: tc.HTTPResp.StatusCode, Actual: resp.StatusCode}}
 	}
 	out := pairCases(replayWindows, recorded, actual, compare)
@@ -146,7 +149,7 @@ func TestPairCasesAndAttributeMocksPickTheInnermostWindow(t *testing.T) {
 		httpCase("", "GET", "/orders/1", 200, `{}`, runnerT0.Add(25*time.Millisecond)),
 		httpCase("", "GET", "/orders", 200, `[]`, runnerT0.Add(60*time.Millisecond)),
 	}
-	compare := func(tc *models.TestCase, resp *models.HTTPResp) (bool, *models.Result) {
+	compare := func(tc *models.TestCase, _ *models.HTTPReq, resp *models.HTTPResp) (bool, *models.Result) {
 		return tc.HTTPResp.StatusCode == resp.StatusCode, &models.Result{}
 	}
 	for _, o := range pairCases(windows, recorded, actual, compare) {
@@ -214,7 +217,10 @@ func TestPairCasesDoesNotCompareGRPCAsHTTP(t *testing.T) {
 		httpCase("", "GET", "/orders", 200, `[]`, runnerT0.Add(30*time.Millisecond)),
 	}
 	calls := 0
-	out := pairCases(replayWindows, recorded, actual, func(*models.TestCase, *models.HTTPResp) (bool, *models.Result) { calls++; return true, nil })
+	out := pairCases(replayWindows, recorded, actual, func(*models.TestCase, *models.HTTPReq, *models.HTTPResp) (bool, *models.Result) {
+		calls++
+		return true, nil
+	})
 	require.Len(t, out, 2)
 	require.True(t, out[0].Skipped)
 	require.False(t, out[0].Passed)
@@ -240,7 +246,7 @@ func TestPairCasesFindsSubtestRequestsUnderTheTopLevelFlow(t *testing.T) {
 		httpCase("", "POST", "/testsuite", 400, `{"error":"name"}`, at(1.5)),
 		httpCase("", "POST", "/testsuite", 400, `{"error":"steps"}`, at(3.5)),
 	}
-	out := pairCases(windows, recorded, actual, func(tc *models.TestCase, resp *models.HTTPResp) (bool, *models.Result) {
+	out := pairCases(windows, recorded, actual, func(tc *models.TestCase, _ *models.HTTPReq, resp *models.HTTPResp) (bool, *models.Result) {
 		return tc.HTTPResp.Body == resp.Body, nil
 	})
 	require.Len(t, out, 2)
@@ -263,7 +269,7 @@ func TestPairCasesPrefersTheSameQueryWhenACallIsNotMade(t *testing.T) {
 		"pkg.TestA": {httpCase("open", "GET", "/items?status=open", 200, `open`, runnerT0), httpCase("closed", "GET", "/items?status=closed", 200, `closed`, runnerT0)},
 	}
 	actual := []*models.TestCase{httpCase("", "GET", "/items?status=closed", 200, `closed`, runnerT0.Add(10*time.Millisecond))}
-	compare := func(tc *models.TestCase, resp *models.HTTPResp) (bool, *models.Result) {
+	compare := func(tc *models.TestCase, _ *models.HTTPReq, resp *models.HTTPResp) (bool, *models.Result) {
 		return tc.HTTPResp.Body == resp.Body, nil
 	}
 	out := pairCases(replayWindows, recorded, actual, compare)
@@ -405,4 +411,215 @@ func TestPushScopeGateToAnAgentThatCannot(t *testing.T) {
 	t.Cleanup(func() { RegisterScopeGateSource(nil) })
 	m.pushScopeGate(context.Background(), "set", "")
 	require.Equal(t, 1, logs.FilterMessageSnippet("every test runs this replay").Len())
+}
+
+// The case comparison follows the ids the AGENT bound, and no others.
+//
+// The app's answer is compared with the recording as it is first; only when
+// that fails is it compared again with this run's ids mapped back to the
+// recorded ones. Each row says what a healthy app or a regression gets, and
+// what the same comparison gives with no pair at all (the recording as it is,
+// which is the comparison without rebinding).
+//
+// This replaces two tests of a rule that is gone: the expected response used
+// to be rewritten forward, with pairs read off the case's own request as well
+// as the agent's. A test that merely sent another id than was recorded then
+// had its expected response rewritten though nothing was followed, and a case
+// that passes without rebinding failed (the first "as recorded" row below).
+func TestCompareCaseFollowsTheIDsTheAgentBound(t *testing.T) {
+	const x, y, z = "0f8fad5b-d9cb-469f-a165-70867728950e", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "9b2f1c3e-5d4a-4e8f-8a1b-2c3d4e5f6a7b"
+	const x2, y2 = "11111111-1111-4111-8111-111111111111", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	id := func(v string) string { return `{"id":"` + v + `","qty":1}` }
+	get := func(v string) models.HTTPReq { return models.HTTPReq{Method: "GET", URL: "http://app/orders/" + v} }
+	post := models.HTTPReq{Method: "POST", URL: "http://app/orders", Body: `{"name":"widget"}`}
+	for _, c := range []struct {
+		name     string
+		recorded models.HTTPReq // the recorded case's request
+		expected string         // and its response body
+		sent     models.HTTPReq // what the test sent this run
+		answered string         // and what the app answered
+		pairs    map[string]string
+		pass     bool
+		main     bool // the verdict with no pair at all
+	}{
+		// A healthy app whose ids were followed.
+		{"a create answered with the id made this run", post, id(x), post, id(y), map[string]string{x: y}, true, false},
+		{"its read-back, asked for by that id", get(x), id(x), get(y), id(y), map[string]string{x: y}, true, false},
+		{"a list that names two ids made this run", get(""), `[` + id(x) + `,` + id(x2) + `]`, get(""), `[` + id(y) + `,` + id(y2) + `]`, map[string]string{x: y, x2: y2}, true, false},
+
+		// As recorded: what passes without rebinding passes with it,
+		// whatever the agent bound.
+		{"the test sent another id and the app answered as recorded", get(x), id(x), get(y), id(x), nil, true, true},
+		{"the same, in a run that bound the id elsewhere", get(x), id(x), get(y), id(x), map[string]string{x: z}, true, true},
+		{"an answer equal to the recording that names a live id", get(""), `{"id":"` + x + `","last":"` + y + `"}`, get(""), `{"id":"` + x + `","last":"` + y + `"}`, map[string]string{x: y}, true, true},
+
+		// The case's own request has the say.
+		{"the test sent Y where the recording has X, and the app made Z", get(x), id(x), get(y), id(z), map[string]string{x: z}, false, false},
+		{"the test sent the recorded id itself, and the app made Z", get(x), id(x), get(x), id(z), map[string]string{x: z}, false, false},
+		{"the id only in a header: the test sent Y, the app made Z",
+			models.HTTPReq{Method: "POST", URL: "http://app/orders", Header: map[string]string{"Idempotency-Key": x}}, id(x),
+			models.HTTPReq{Method: "POST", URL: "http://app/orders", Header: map[string]string{"Idempotency-Key": y}}, id(z), map[string]string{x: z}, false, false},
+		{"the id only in a form value: the test sent Y, the app made Z",
+			models.HTTPReq{Method: "POST", URL: "http://app/orders/lookup", Form: []models.FormData{{Key: "order", Values: []string{x}}}}, id(x),
+			models.HTTPReq{Method: "POST", URL: "http://app/orders/lookup", Form: []models.FormData{{Key: "order", Values: []string{y}}}}, id(z), map[string]string{x: z}, false, false},
+		{"the id only in a query parameter: the test sent Y, the app made Z",
+			models.HTTPReq{Method: "GET", URL: "http://app/orders", URLParams: map[string]string{"order": x}}, id(x),
+			models.HTTPReq{Method: "GET", URL: "http://app/orders", URLParams: map[string]string{"order": y}}, id(z), map[string]string{x: z}, false, false},
+		{"the id only in the body: the test sent Y, the app made Z",
+			models.HTTPReq{Method: "POST", URL: "http://app/orders/search", Body: `{"order":"` + x + `"}`}, id(x),
+			models.HTTPReq{Method: "POST", URL: "http://app/orders/search", Body: `{"order":"` + y + `"}`}, id(z), map[string]string{x: z}, false, false},
+		{"the id in a form value, sent as the app made it",
+			models.HTTPReq{Method: "POST", URL: "http://app/orders/lookup", Form: []models.FormData{{Key: "order", Values: []string{x}}}}, id(x),
+			models.HTTPReq{Method: "POST", URL: "http://app/orders/lookup", Form: []models.FormData{{Key: "order", Values: []string{y}}}}, id(y), map[string]string{x: y}, true, false},
+
+		// Nothing is taken from the request alone.
+		{"the test sent another id and the app echoed it, with no pair", get(x), id(x), get(y), id(y), nil, false, false},
+		{"the same, in a run that bound another id", get(x), id(x), get(y), id(y), map[string]string{x2: y2}, false, false},
+
+		// A followed id is still asserted.
+		{"the app answered with another entity's id", get(""), id(x2), get(""), id(y), map[string]string{x: y, x2: y2}, false, false},
+		{"something else differs too", post, id(x), post, `{"id":"` + y + `","qty":2}`, map[string]string{x: y}, false, false},
+		{"an id inside a longer token is another word", post, `{"ref":"order-` + x + `"}`, post, `{"ref":"order-` + y + `"}`, map[string]string{x: y}, false, false},
+		// One entity by two ids: the test asked for the id made this run, the
+		// app asked its dependency for another, and the closest recording
+		// answered as recorded. Mapped back, the two would read as one.
+		{"an answer that names an entity by this run's id and by the recorded one", get(x), `{"asked":"` + x + `","item":"` + x + `"}`, get(y), `{"asked":"` + y + `","item":"` + x + `"}`, map[string]string{x: y}, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{Name: "case", Kind: models.HTTP, HTTPReq: c.recorded, HTTPResp: models.HTTPResp{StatusCode: 200, Body: c.expected}}
+			answer := func() *models.HTTPResp { return &models.HTTPResp{StatusCode: 200, Body: c.answered} }
+			sent := c.sent
+
+			main, mainResult := (&mockService{config: &config.Config{}, logger: zap.NewNop()}).compareCase(tc, &sent, answer())
+			require.Equal(t, c.main, main, "what the comparison gives with no pair")
+
+			got := answer()
+			pass, result := (&mockService{config: &config.Config{}, logger: zap.NewNop(), ids: ids.New(c.pairs)}).compareCase(tc, &sent, got)
+			require.Equal(t, c.pass, pass)
+			if c.main {
+				require.Equal(t, mainResult, result, "what passes as recorded is not compared again")
+			}
+			require.Equal(t, c.expected, tc.HTTPResp.Body, "the recorded case is never changed")
+			require.Equal(t, c.answered, got.Body, "nor is the answer that is reported")
+		})
+	}
+}
+
+// An id of this run is mapped back as a whole word wherever the answer names
+// it: in a header as in the body. And a comparison that still fails says what
+// differs besides the ids.
+func TestCompareCaseMapsIDsBackInHeadersAndSaysWhatElseDiffers(t *testing.T) {
+	const x, y = "0f8fad5b-d9cb-469f-a165-70867728950e", "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+	m := &mockService{config: &config.Config{}, logger: zap.NewNop(), ids: ids.New(map[string]string{x: y})}
+	tc := httpCase("create", "POST", "http://app/orders", 201, `{"id":"`+x+`","qty":1}`, runnerT0)
+	tc.HTTPResp.Header = map[string]string{"Location": "/orders/" + x}
+
+	answer := &models.HTTPResp{StatusCode: 201, Header: map[string]string{"Location": "/orders/" + y}, Body: `{"id":"` + y + `","qty":1}`}
+	pass, _ := m.compareCase(tc, &tc.HTTPReq, answer)
+	require.True(t, pass)
+	require.Equal(t, "/orders/"+y, answer.Header["Location"], "the answer that is reported keeps this run's id")
+
+	answer = &models.HTTPResp{StatusCode: 201, Header: map[string]string{"Location": "/orders/" + y}, Body: `{"id":"` + y + `","qty":2}`}
+	pass, result := m.compareCase(tc, &tc.HTTPReq, answer)
+	require.False(t, pass)
+	require.JSONEq(t, `{"id":"`+x+`","qty":2}`, result.BodyResult[0].Actual, "the ids are not what differs")
+}
+
+// askedInstr is an agent that keeps what a replay asked of it.
+type askedInstr struct {
+	*runnerInstr
+	asked []models.OutgoingOptions
+}
+
+func (a *askedInstr) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
+	a.asked = append(a.asked, opts)
+	return a.runnerInstr.MockOutgoing(ctx, opts)
+}
+
+// bindingInstr is one that can also be asked for the ids it bound: the pair
+// it holds, when the replay asked it to follow ids.
+type bindingInstr struct {
+	*askedInstr
+	pairs map[string]string
+}
+
+func (b *bindingInstr) GetIDPairs(context.Context) (map[string]string, error) {
+	if len(b.asked) == 0 || !b.asked[len(b.asked)-1].RebindMinted {
+		return nil, nil
+	}
+	return b.pairs, nil
+}
+
+// A replay asks the agent to follow the ids the app generates only where it
+// can read back what was bound. The app's answers are compared with the
+// recorded cases, and an answer that names an id of this run matches its case
+// only with the pairs: under docker compose the agent is gone before they can
+// be read, so a compose replay follows nothing and its mocks are served, and
+// its cases compared, as they are without rebinding.
+// test.disableMockRebinding turns it off everywhere.
+func TestReplayFollowsIDsOnlyWhereItCanReadThemBack(t *testing.T) {
+	const x, y = "0f8fad5b-d9cb-469f-a165-70867728950e", "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+	for _, c := range []struct {
+		name    string
+		cmdType utils.CmdType
+		disable bool
+		reads   bool // the agent can be asked for the ids it bound
+		want    bool // the agent is asked to follow ids, and the cases pass
+	}{
+		{"natively", utils.Native, false, true, true},
+		{"natively, with rebinding off", utils.Native, true, true, false},
+		{"natively, with an agent that cannot be asked for its pairs", utils.Native, false, false, false},
+		{"under docker compose", utils.DockerCompose, false, true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			base := newRunnerInstr(t, sequentialMarks()...)
+			if c.cmdType == utils.DockerCompose {
+				// The agent is a service of the project: it comes up with it,
+				// and is gone, leaving its account, when the runner exits.
+				shortAgentBudget(t)
+				base.lifetime, base.runUntilReady = agentUpAfterRun, true
+				base.consumedErr, base.mockErrorsErr = errors.New("connection refused"), errors.New("connection refused")
+				base.leftOutcome = models.MockOutcome{Windows: sequentialMarks()}
+			}
+			// The app answers the create with the id it made this run, and
+			// the test reads the order back by that id.
+			base.incoming = []*models.TestCase{
+				httpCase("", "POST", "http://localhost:8080/orders", 201, `{"id":"`+y+`"}`, runnerT0.Add(5*time.Millisecond)),
+				httpCase("", "GET", "http://localhost:8080/orders/"+y, 200, `{"id":"`+y+`","qty":1}`, runnerT0.Add(6*time.Millisecond)),
+			}
+			agent := &bindingInstr{askedInstr: &askedInstr{runnerInstr: base}, pairs: map[string]string{x: y}}
+			var instr Instrumentation = agent
+			if !c.reads {
+				instr = agent.askedInstr
+			}
+			dir := t.TempDir()
+			mapDB := mapdb.New(zap.NewNop(), dir, "")
+			require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1", "get-order-1"}}}, nil, nil))
+			db := &memTestDB{existing: []*models.TestCase{
+				httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{"id":"`+x+`"}`, runnerT0),
+				httpCase("get-order-1", "GET", "http://localhost:8080/orders/"+x, 200, `{"id":"`+x+`","qty":1}`, runnerT0),
+			}}
+
+			var got ReplayOutcome
+			RegisterReplayOutcomeReporter(func(_ context.Context, o ReplayOutcome) { got = o })
+			t.Cleanup(func() { RegisterReplayOutcomeReporter(nil) })
+			cfg := instrConfig(base.composeInstr, c.cmdType, "./shop.test -test.v")
+			cfg.Path = dir
+			cfg.Test.DisableMockRebinding = c.disable
+			withRequests(cfg)
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			svc := New(zap.NewNop(), instr, stubMockDB{}, mapDB, nil, nil, cfg)
+			svc.(TestDBSetter).SetTestDB(db)
+			require.NoError(t, svc.Replay(context.Background()))
+
+			require.Len(t, agent.asked, 1)
+			require.Equal(t, c.want, agent.asked[0].RebindMinted)
+			require.Len(t, got.Cases, 2)
+			for _, o := range got.Cases {
+				require.NotNil(t, o.Actual, "precondition: %s was paired with what the test sent", o.Case.Name)
+				require.Equal(t, c.want, o.Passed, o.Case.Name)
+			}
+		})
+	}
 }

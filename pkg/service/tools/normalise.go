@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	models "go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -167,7 +168,7 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 		case models.HTTP:
 			// Store the original timestamp to preserve it during normalization
 			originalTimestamp := testCase.HTTPResp.Timestamp
-			testCase.HTTPResp = testCaseResult.Res
+			testCase.HTTPResp = withRecordedIDs(testCaseResult.Res, testCaseResult.RunIDs)
 			// Restore the original timestamp after normalization
 			testCase.HTTPResp.Timestamp = originalTimestamp
 
@@ -184,6 +185,30 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 		}
 	}
 	return nil
+}
+
+// withRecordedIDs is the answer of a replayed test case with the ids the app
+// made that run (TestResult.RunIDs, recorded -> live) mapped back to the
+// recorded ones, in its body and header values, as whole words.
+//
+// An id the app mints is another on every run, and a replay follows it only
+// from its recorded value: that is the one the set's mocks, its templates and
+// its other test cases name. Written into the expected response as the run
+// made it, the id would match no later run and could not be followed again.
+func withRecordedIDs(resp models.HTTPResp, runIDs map[string]string) models.HTTPResp {
+	if len(runIDs) == 0 {
+		return resp
+	}
+	recorded := make(map[string]string, len(runIDs))
+	for rec, live := range runIDs {
+		recorded[live] = rec
+	}
+	lookup := func(w string) (string, bool) {
+		rec, ok := recorded[w]
+		return rec, ok
+	}
+	resp, _ = mocknoise.ReplaceResponseWords(resp, lookup)
+	return resp
 }
 
 func (t *Tools) resolveLastUpdated(ctx context.Context) (models.LastUpdated, bool) {

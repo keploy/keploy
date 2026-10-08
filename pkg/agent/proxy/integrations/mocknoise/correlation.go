@@ -2,7 +2,6 @@ package mocknoise
 
 import (
 	"encoding/json"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -88,11 +87,14 @@ func flattenJSONBody(body string) map[string][]string {
 	return matcher.Flatten(j)
 }
 
-var (
-	uuidRe  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	hexRe   = regexp.MustCompile(`^[0-9a-fA-F]{16,}$`)
-	nonceRe = regexp.MustCompile(`^[0-9A-Za-z_-]{20,}$`)
-)
+// AppRandomClass reports whether v looks app-minted — a value the app
+// generates fresh on every run, so it differs between record and replay — and
+// names its class: "uuid", "hex" (16+ hex chars with a letter) or "nonce"
+// (20+ mixed-entropy url-safe chars). Low-entropy values (small ints, enum
+// strings, words) are never app-random: they collide across unrelated fields.
+func AppRandomClass(v string) (string, bool) {
+	return appRandomClass(v)
+}
 
 // appRandomClass reports whether v looks like a per-request application-minted
 // random value and names its class. Conservative by design — it accepts only
@@ -101,18 +103,113 @@ var (
 // letters+digits nonce; it rejects short strings, pure integers, and all-alpha
 // words (names, enum labels). A false positive here would wrongly wildcard a
 // field that must match exactly.
+//
+// It runs on every candidate word of every mock a replay stages, so it checks
+// bytes instead of matching regular expressions.
 func appRandomClass(v string) (string, bool) {
 	s := strings.TrimSpace(v)
 	switch {
-	case uuidRe.MatchString(s):
+	case isUUID(s):
 		return "uuid", true
-	case hexRe.MatchString(s) && hasHexLetter(s):
+	case len(s) >= 16 && all(s, isHex) && hasHexLetter(s):
 		return "hex", true
-	case nonceRe.MatchString(s) && hasMixedEntropy(s):
+	case len(s) >= 20 && all(s, isValueByte) && hasMixedEntropy(s):
 		return "nonce", true
 	}
 	return "", false
 }
+
+// isUUID reports whether s is 8-4-4-4-12 hex digits.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if s[i] != '-' {
+				return false
+			}
+		} else if !isHex(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func all(s string, ok func(byte) bool) bool {
+	for i := 0; i < len(s); i++ {
+		if !ok(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isHex(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// isValueByte reports whether c can be part of an app-random value: every
+// class AppRandomClass accepts is made of [0-9A-Za-z_-] alone, so a scanner
+// looking for such values can split text at any other byte.
+func isValueByte(c byte) bool { return valueBytes[c] }
+
+// minValueLen is the length of the shortest app-random value (a 16-char hex
+// token).
+const minValueLen = 16
+
+// ScanWords calls visit with the bounds of every maximal run of value bytes
+// (isValueByte) in s at least minValueLen long: every place an app-random
+// value can sit whole. One pass, no allocation.
+func ScanWords(s string, visit func(start, end int)) {
+	start := -1
+	for i := 0; i <= len(s); i++ {
+		if i < len(s) && valueBytes[s[i]] {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 && i-start >= minValueLen {
+			visit(start, i)
+		}
+		start = -1
+	}
+}
+
+// ReplaceWords returns s with every word (see ScanWords) that lookup knows
+// replaced by what it returns; s itself when none is. Whole words only: a
+// value that is part of a longer run of value bytes ("order-<uuid>") is
+// another word, and is left alone — everywhere the same way, so the mock side
+// and the test side of a replay never disagree about it.
+func ReplaceWords(s string, lookup func(word string) (string, bool)) string {
+	var b []byte
+	last := 0
+	ScanWords(s, func(start, end int) {
+		to, ok := lookup(s[start:end])
+		if !ok || to == s[start:end] {
+			return
+		}
+		if b == nil {
+			b = make([]byte, 0, len(s))
+		}
+		b = append(b, s[last:start]...)
+		b = append(b, to...)
+		last = end
+	})
+	if b == nil {
+		return s
+	}
+	return string(append(b, s[last:]...))
+}
+
+var valueBytes = func() (t [256]bool) {
+	for c := 0; c < 256; c++ {
+		b := byte(c)
+		t[c] = (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' || b == '-'
+	}
+	return t
+}()
 
 // hasHexLetter reports whether s contains at least one a-f/A-F hex letter, so a
 // long run of decimal digits (an id or epoch) is not classified as a hex token.

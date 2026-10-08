@@ -241,6 +241,45 @@ func (s *scopedMockDb) cursorKey(key string) string {
 	return scope + "\x00" + key
 }
 
+// Value bindings are the replay's, not a worker's: there is one table, and a
+// scoped view reads and writes the store's own.
+func (s *scopedMockDb) Bindings() *integrations.Bindings {
+	if b, ok := s.MockMemDb.(integrations.ValueBindings); ok {
+		return b.Bindings()
+	}
+	return nil
+}
+
+// The value index describes the whole staged set and carries no mock data a
+// worker should not see, so it passes straight through.
+func (s *scopedMockDb) RequestValues(m *models.Mock) []string {
+	if ix, ok := s.MockMemDb.(integrations.ValueIndex); ok {
+		return ix.RequestValues(m)
+	}
+	return nil
+}
+
+func (s *scopedMockDb) FirstCarried(m *models.Mock) []string {
+	if ix, ok := s.MockMemDb.(integrations.ValueIndex); ok {
+		return ix.FirstCarried(m)
+	}
+	return nil
+}
+
+func (s *scopedMockDb) Carries(v string) bool {
+	if ix, ok := s.MockMemDb.(integrations.ValueIndex); ok {
+		return ix.Carries(v)
+	}
+	return false
+}
+
+func (s *scopedMockDb) MayBind(v string) bool {
+	if ix, ok := s.MockMemDb.(integrations.ValueIndex); ok {
+		return ix.MayBind(v)
+	}
+	return false
+}
+
 // RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
 // pass straight through.
 func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
@@ -461,8 +500,14 @@ func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
 	return out
 }
 
-// Every MockMemDb the proxy hands a parser must keep the stateful cursor.
+// Every MockMemDb the proxy hands a parser must keep the stateful cursor and
+// value rebinding.
 var (
 	_ integrations.MockCursor = (*MockManager)(nil)
 	_ integrations.MockCursor = (*scopedMockDb)(nil)
+
+	_ integrations.ValueBindings = (*MockManager)(nil)
+	_ integrations.ValueBindings = (*scopedMockDb)(nil)
+	_ integrations.ValueIndex    = (*MockManager)(nil)
+	_ integrations.ValueIndex    = (*scopedMockDb)(nil)
 )

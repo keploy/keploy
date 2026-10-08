@@ -1420,6 +1420,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if conf == nil {
 		conf = &models.TestSet{}
 	}
+	// The recorded ids this replay follows through the set's mocks and test
+	// cases (see runIDs): the app-random ones in its template map. nil: none.
+	runIDs := r.newRunIDs(testSetID, testCases, conf.Template)
 
 	if conf.PreScript != "" {
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
@@ -1607,6 +1610,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
 			DisableStatefulMocks:      r.config.Test.DisableStatefulMocks,
 			DisableMockCorrelation:    r.config.Test.DisableMockCorrelation,
+			RebindValues:              runIDs.values(),
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
@@ -1869,6 +1873,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
 			DisableStatefulMocks:      r.config.Test.DisableStatefulMocks,
 			DisableMockCorrelation:    r.config.Test.DisableMockCorrelation,
+			RebindValues:              runIDs.values(),
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
@@ -2318,6 +2323,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			var testResult *models.Result
 			var testPass bool
 			var loopErr error
+			var followedIDs map[string]string
 
 			reqTime, respTime := testWindowOf(testCase)
 
@@ -2349,6 +2355,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			started := time.Now().UTC()
 
+			testCase = runIDs.outgoing(runTestSetCtx, testCase)
 			resp, loopErr := r.hookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
 
 			// A "connection reset by peer" / unexpected EOF while exchanging
@@ -2575,7 +2582,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					continue
 				}
-				testPass, testResult = r.compareHTTPRespForReplay(testCase, httpResp, testSetID, emitFailureLogs)
+				// The expected response names the ids the run made as the run
+				// does: by now the agent has bound what this test case made
+				// the app mint (see compareFollowed).
+				var expected *models.TestCase
+				expected, followedIDs = runIDs.expected(runTestSetCtx, testCase, httpResp)
+				testPass, testResult = r.compareFollowed(expected, testCase, httpResp, testSetID, emitFailureLogs, runIDs.settled())
 
 			case models.GRPC_EXPORT:
 				grpcResp, ok := resp.(*models.GrpcResp)
@@ -2773,6 +2785,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 						Noise:        testCase.Noise,
 						Result:       *testResult,
+						RunIDs:       followedIDs,
 						TimeTaken:    time.Since(started).String(),
 					}
 				case models.GRPC_EXPORT:
@@ -3547,6 +3560,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
 		utils.LogError(r.logger, err, stopReason)
 	}
+	// After the hook: it may still change a test case's verdict.
+	runIDs.logSummary(testSetID, testCaseResults)
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
 		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))
@@ -4009,7 +4024,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// forgets — this one erased `metadata:` and `appCommand:`
 			// both, and the loss was invisible because a test-set
 			// without either is the ordinary case.
-			err = testset.WriteTemplatedConfig(ctx, r.testSetConf, testSetID, utils.TemplatizedValues)
+			// An id that was followed this run is written as recorded, never
+			// as the run made it (see runIDs.templatesToWrite).
+			err = testset.WriteTemplatedConfig(ctx, r.testSetConf, testSetID, runIDs.templatesToWrite(utils.TemplatizedValues))
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
 			}
@@ -4516,8 +4533,9 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	return pass, result
 }
 
-func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
+func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool, opts ...httpMatcher.MatchOption) (bool, *models.Result) {
 	noiseConfig := r.httpNoiseConfig(testSetID)
+	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt()}, opts...)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.config.Test.SchemaMatch {
@@ -4527,7 +4545,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	}
 
 	if emitFailureLogs {
-		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, r.autoHeaderNoiseOpt())
+		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, opts...)
 		if pass {
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return pass, result
@@ -4542,13 +4560,58 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 		}
 	}
 
-	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, r.autoHeaderNoiseOpt())
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, opts...)
 	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 	if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 		return true, result
 	}
 
 	return pass, result
+}
+
+// compareFollowed compares the app's answer with a test case of a set whose
+// ids are followed (see runIDs). followed is the test case with this run's ids
+// in its expected response, recorded the test case as it is, and settled the
+// live ids bound so far.
+//
+// The answer is compared with followed first, the bound ids held as written
+// (httpMatcher.WithSettledValues): an app that answers with another id where
+// one it made is expected has changed. When that fails, it is compared with
+// asMain — the test case as a replay without following compares it: rendered
+// with the set's templates, no bound id held — and that verdict stands. A
+// dependency call the agent answered as recorded hands the app the recorded
+// id, and an app that passes it on is doing what it did when recorded. So
+// whatever passes without following passes with it, and following only ever
+// adds test cases that pass.
+//
+// That is also why a regression can pass here as it does without following:
+// an app that asks its dependency for another entity is answered by the
+// closest recording, as recorded, and its answer mixes this run's id with the
+// recorded one. Where the test case names the id written out, asMain expects
+// the recorded id where the app answers with its own, and it fails. Where it
+// names the id only through a placeholder, asMain expects this run's id there,
+// and the verdict is the one a replay without following gives.
+//
+// The first two comparisons only ask the matcher. It also teaches the set's
+// templates what an answer holds where a template's value is expected, so the
+// templates are put back as they were after each: only the comparison whose
+// verdict stands teaches them, prints a diff, auto-passes an added field or
+// prepares the answer for the report.
+func (r *Replayer) compareFollowed(followed, asMain *models.TestCase, answer *models.HTTPResp, testSetID string, emitFailureLogs bool, settled map[string]bool) (bool, *models.Result) {
+	strict := httpMatcher.WithSettledValues(settled)
+	if followed != asMain && !r.config.Test.SchemaMatch {
+		held := pkg.TemplateValues()
+		matches := func(tc *models.TestCase, opts ...httpMatcher.MatchOption) bool {
+			defer pkg.RestoreTemplateValues(held)
+			opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt()}, opts...)
+			pass, _ := httpMatcher.Match(tc, cloneHTTPResp(answer), r.httpNoiseConfig(testSetID), r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, opts...)
+			return pass
+		}
+		if !matches(followed, strict) && matches(asMain) {
+			return r.compareHTTPRespForReplay(asMain, answer, testSetID, emitFailureLogs)
+		}
+	}
+	return r.compareHTTPRespForReplay(followed, answer, testSetID, emitFailureLogs, strict)
 }
 
 // autoHeaderNoiseOpt ignores response headers Keploy already treats as

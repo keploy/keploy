@@ -189,6 +189,12 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 		DisableStatefulMocks:      m.config.Test.DisableStatefulMocks,
 		DisableMockCorrelation:    m.config.Test.DisableMockCorrelation,
+		// The driver is the user's own tests, which judge the app themselves:
+		// the UUIDs the app generates are followed through the mocks. Only
+		// where the ids bound can be read back when the run ends, though: the
+		// app's answers are compared with the recorded cases, and an answer
+		// that names an id of this run matches its case only with them.
+		RebindMinted: !m.config.Test.DisableMockRebinding && m.readsIDPairs(),
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -1050,6 +1056,14 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	} else {
 		summary = append(summary, zap.Int("missed", len(misses)))
 	}
+	if m.ids != nil {
+		if n := len(m.ids.Pairs()); n > 0 {
+			// ids the app made this run in place of recorded ones, which the
+			// mocks were matched and answered with (test.disableMockRebinding
+			// turns that off).
+			summary = append(summary, zap.Int("ids_rebound", n))
+		}
+	}
 	if consumedErr == nil && missesErr == nil {
 		m.logger.Info("mock replay summary", summary...)
 	} else {
@@ -1137,6 +1151,15 @@ func testReceipts(flows []FlowMocks, consumedKnown, missesKnown bool) []TestRece
 // compiling without it — the same discipline ConsumedStateReader uses.
 type idPairReader interface {
 	GetIDPairs(ctx context.Context) (map[string]string, error)
+}
+
+// readsIDPairs reports whether this replay can read, once the runner has
+// exited, the ids the agent bound (reportOutcome). Under docker compose it
+// cannot: the agent stops with the project, and the account it leaves of the
+// run holds no ids.
+func (m *mockService) readsIDPairs() bool {
+	_, ok := m.instrumentation.(idPairReader)
+	return ok && !m.isDockerCompose()
 }
 
 type servedMockPoller interface {

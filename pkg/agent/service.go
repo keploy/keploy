@@ -157,6 +157,15 @@ type StatefulCursorResetter interface {
 	ResetStatefulCursors()
 }
 
+// ValueBindingResetter is the optional extension implemented by proxies whose
+// mock manager keeps recorded→live value bindings (integrations.ValueBindings).
+// The agent calls it with ResetStatefulCursors, once per test-set, so an id the
+// app minted in one test-set never rewrites a mock of the next. A proxy without
+// bindings has nothing to reset.
+type ValueBindingResetter interface {
+	ResetValueBindings()
+}
+
 // CarryOverPlanner is the optional extension implemented by proxies with a
 // carry-over tier (models.RegisterCarryOver). For the window that starts at
 // start it names the recorded-time range of registered per-test mocks the agent

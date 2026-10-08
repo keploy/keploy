@@ -415,7 +415,7 @@ func TestRecordAndReplayPutASetupCallInTheParentTest(t *testing.T) {
 
 	recorded := map[string][]*models.TestCase{"e2e/orders.TestFlow": {httpCase("test-1", "POST", "/apps", 201, "{}", setup)}}
 	actual := []*models.TestCase{httpCase("", "POST", "/apps", 201, "{}", setup.Add(time.Millisecond))}
-	out := pairCases(flowMarks(), recorded, actual, func(*models.TestCase, *models.HTTPResp) (bool, *models.Result) { return true, nil })
+	out := pairCases(flowMarks(), recorded, actual, func(*models.TestCase, *models.HTTPReq, *models.HTTPResp) (bool, *models.Result) { return true, nil })
 	require.Len(t, out, 1)
 	require.NotNil(t, out[0].Actual, "replay sees the request where record put it")
 	require.True(t, out[0].Passed)

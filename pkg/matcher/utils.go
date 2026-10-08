@@ -984,7 +984,24 @@ func ParseIntoJSON(response string) (interface{}, error) {
 // CompareResponses compares response1 (expected) and response2 (actual),
 // updating utils.TemplatizedValues and mutating response1 where appropriate.
 func CompareResponses(response1, response2 *interface{}, key string) {
+	CompareResponsesKeeping(response1, response2, key, nil)
+}
+
+// CompareResponsesKeeping is CompareResponses for a run in which some values
+// are already settled.
+//
+// CompareResponses takes an expected leaf whose value a template currently
+// holds to be that template's field: whatever the app answered there becomes
+// the template's new value, and the leaf is no longer a difference. That is
+// how a value the app makes anew in this very response is learned. A settled
+// value is one the run has fixed some other way, and an answer that names
+// another in its place is a difference: such a leaf is left as it is and no
+// template is updated from it.
+func CompareResponsesKeeping(response1, response2 *interface{}, key string, settled map[string]bool) {
 	rev := reverseMap(utils.TemplatizedValues) // build once
+	for v := range settled {
+		delete(rev, v)
+	}
 	compareZip(response1, response2, key, rev)
 }
 

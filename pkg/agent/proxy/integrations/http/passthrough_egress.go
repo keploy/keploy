@@ -78,7 +78,7 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 		if !mockQueryMatches(m.Spec.HTTPReq, input.url, queryKeys) {
 			continue
 		}
-		loaded, err := withResponse(m)
+		loaded, err := m.WithResponse()
 		if err != nil {
 			// The caller falls back to a synthetic 200 when no recorded mock
 			// serves, so say once per mock name why this one did not.

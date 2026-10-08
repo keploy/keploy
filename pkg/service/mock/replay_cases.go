@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -157,7 +159,7 @@ func flowAt[V any](windows []models.ScopeWindow, at time.Time, known map[string]
 }
 
 // pairCases matches the requests the runner made this run with the cases each flow recorded, in order within the flow.
-func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestCase, actual []*models.TestCase, compare func(*models.TestCase, *models.HTTPResp) (bool, *models.Result)) []CaseOutcome {
+func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestCase, actual []*models.TestCase, compare func(recorded *models.TestCase, sent *models.HTTPReq, answer *models.HTTPResp) (bool, *models.Result)) []CaseOutcome {
 	if len(windows) == 0 {
 		return nil
 	}
@@ -198,7 +200,7 @@ func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestC
 					used[j] = true
 					resp := a.HTTPResp
 					outs[i].Actual = &resp
-					outs[i].Passed, outs[i].Result = compare(rc, &resp)
+					outs[i].Passed, outs[i].Result = compare(rc, &a.HTTPReq, &resp)
 					break
 				}
 			}
@@ -270,9 +272,24 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 }
 
 // compareCase checks the app's answer against the recorded one, forgiving the case's own noise and volatile headers.
-func (m *mockService) compareCase(tc *models.TestCase, actual *models.HTTPResp) (bool, *models.Result) {
-	tc = m.withRunIDs(tc)
-	return httpMatcher.Match(tc, actual, m.config.Test.GlobalNoise.Global, m.config.Test.IgnoreOrdering, m.config.Test.CompareAll, m.logger, false, httpMatcher.WithAutoHeaderNoise(true))
+//
+// The answer is compared with the recording as it is first, so whatever
+// passes without ids being followed passes with it. Only when that fails, and
+// the agent bound ids this run, is it compared once more with those ids put
+// back (asRecorded).
+func (m *mockService) compareCase(tc *models.TestCase, sent *models.HTTPReq, answer *models.HTTPResp) (bool, *models.Result) {
+	pass, result := m.matchCase(tc, answer)
+	if pass {
+		return pass, result
+	}
+	if recorded, changed := m.asRecorded(tc, sent, answer); changed {
+		return m.matchCase(tc, &recorded)
+	}
+	return pass, result
+}
+
+func (m *mockService) matchCase(tc *models.TestCase, answer *models.HTTPResp) (bool, *models.Result) {
+	return httpMatcher.Match(tc, answer, m.config.Test.GlobalNoise.Global, m.config.Test.IgnoreOrdering, m.config.Test.CompareAll, m.logger, false, httpMatcher.WithAutoHeaderNoise(true))
 }
 
 // recordedCases loads the cases each flow recorded, keyed by flow, in recorded order.
@@ -319,17 +336,64 @@ func (m *mockService) expectedMocks(ctx context.Context, name string) map[string
 	return byFlow
 }
 
-func (m *mockService) withRunIDs(tc *models.TestCase) *models.TestCase {
-	if m.ids == nil || m.ids.Empty() || tc == nil {
-		return tc
+// asRecorded is the app's answer to a case with the ids this run made mapped
+// back to the recorded ones they stand for, in its body and header values,
+// and whether that changed anything. The pairs are the agent's (the ids it
+// bound where the app first sent them to a dependency); ids are replaced as
+// whole words, as the agent replaces them in the mocks' answers.
+//
+// The case's own request has the say over each pair. Where the recorded
+// request names the recorded id, the test chose which entity it asked for, and
+// the pair is used only if the request it sent this run names the live id: a
+// test that sent Y where the recording has X, while the app made Z, asked for
+// one entity and was answered with another, and must fail. A recorded id the
+// recorded request does not name (a create's answer) was the app's to make,
+// and its live id is always mapped back.
+//
+// An answer that names the recorded id of a pair beside its live one names one
+// entity by two ids — a dependency call the agent answered as recorded handed
+// the app the recorded id, and the app's own id stands next to it — and that
+// pair is not used: mapped back, the two would read as one and pass.
+//
+// Nothing is taken from the request alone: without a pair from the agent the
+// answer stands as it is.
+func (m *mockService) asRecorded(tc *models.TestCase, sent *models.HTTPReq, answer *models.HTTPResp) (models.HTTPResp, bool) {
+	if m.ids == nil || m.ids.Empty() {
+		return *answer, false
 	}
-	out := *tc
-	out.HTTPResp.Body = m.ids.Rewrite(tc.HTTPResp.Body)
-	if len(tc.HTTPResp.Header) > 0 {
-		out.HTTPResp.Header = make(map[string]string, len(tc.HTTPResp.Header))
-		for k, v := range tc.HTTPResp.Header {
-			out.HTTPResp.Header[k] = m.ids.Rewrite(v)
+	recorded, live := requestWords(&tc.HTTPReq), requestWords(sent)
+	answered := responseWords(answer)
+	back := map[string]string{} // this run's id -> the recorded one
+	for rec, cur := range m.ids.Pairs() {
+		if answered[rec] {
+			continue
+		}
+		if !recorded[rec] || live[cur] {
+			back[cur] = rec
 		}
 	}
-	return &out
+	return mocknoise.ReplaceResponseWords(*answer, func(w string) (string, bool) {
+		rec, ok := back[w]
+		return rec, ok
+	})
+}
+
+// responseWords are the words of a response an id can be, from its body and
+// header values.
+func responseWords(resp *models.HTTPResp) map[string]bool {
+	out := map[string]bool{}
+	mocknoise.EachResponseText(resp, func(s string) {
+		mocknoise.ScanWords(s, func(start, end int) { out[s[start:end]] = true })
+	})
+	return out
+}
+
+// requestWords are the words of a request an id can be (mocknoise.ScanWords),
+// from every text of it: URL, body, header, query and form values.
+func requestWords(req *models.HTTPReq) map[string]bool {
+	out := map[string]bool{}
+	mocknoise.EachRequestText(req, func(s string) {
+		mocknoise.ScanWords(s, func(start, end int) { out[s[start:end]] = true })
+	})
+	return out
 }

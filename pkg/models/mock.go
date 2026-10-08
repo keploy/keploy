@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/gob"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -191,6 +192,22 @@ func (m *Mock) HydrateResponse() error {
 	}
 	m.responseHydrator = nil
 	return nil
+}
+
+// WithResponse returns m with its recorded response in Spec: m itself, or, when
+// the response is kept apart from the mock (HasSpilledResponse), a copy of m
+// with the response loaded. m may be a pooled mock that other connections are
+// matching or copying, and HydrateResponse writes the mock it runs on, so it
+// runs on the copy: a pooled mock is never hydrated.
+func (m *Mock) WithResponse() (*Mock, error) {
+	if m == nil || !m.HasSpilledResponse() {
+		return m, nil
+	}
+	loaded := m.ShallowCopy()
+	if err := loaded.HydrateResponse(); err != nil {
+		return nil, fmt.Errorf("load the recorded response of mock %q: %w", m.Name, err)
+	}
+	return loaded, nil
 }
 
 // TestModeInfo is in-memory-only bookkeeping attached to each Mock once it

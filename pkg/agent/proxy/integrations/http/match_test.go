@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -32,6 +35,59 @@ type mockMemDb struct {
 	deletedFiltered         *models.Mock
 	deleteFilteredReturn    bool
 	cursors                 map[string]int // backs MockCursorIndex/AdvanceMockCursor for cursor tests
+	bindings                integrations.BindingTable
+	epoch                   uint64
+	ix                      *integrations.MockValueIndex
+	ixBuilt                 bool
+	ixLen                   int
+	noRebind                bool            // the replay did not ask for rebinding
+	only                    map[string]bool // the recorded values the replay named to bind; nil: what the app mints (as keploy mock replay)
+	otherKinds              []*models.Mock  // the set's mocks of other kinds: indexed, never matched here
+}
+
+// The double binds with the agent's admission rules (integrations.BindingTable)
+// and indexes its mocks' values with the agent's index (integrations.
+// MockValueIndex), built from every mock it holds, so the index survives a
+// consumption just as the agent's does.
+func (m *mockMemDb) Bindings() *integrations.Bindings {
+	if m.noRebind || m.index() == nil {
+		return nil // as the agent: none unless the replay asked for rebinding and the set can be rebound
+	}
+	return integrations.NewBindings(&m.bindings, m.epoch, func(creator string, pairs map[string]string, epoch uint64) bool {
+		// the epoch the match began in has ended, or the table refuses
+		return epoch == m.epoch && m.bindings.ClaimAndBind(creator, pairs)
+	})
+}
+
+func (m *mockMemDb) RequestValues(mk *models.Mock) []string { return m.index().RequestValues(mk) }
+func (m *mockMemDb) FirstCarried(mk *models.Mock) []string  { return m.index().FirstCarried(mk) }
+func (m *mockMemDb) Carries(v string) bool                  { return m.index().Carries(v) }
+func (m *mockMemDb) MayBind(v string) bool                  { return m.index().MayBind(v) }
+
+// index is the agent's own value index over the double's mocks. The double
+// never drops a mock, so it is rebuilt only when a test adds one.
+func (m *mockMemDb) index() *integrations.MockValueIndex {
+	if !m.ixBuilt || m.ixLen != len(m.mocks) {
+		m.ixBuilt = true
+		mayBind := mocknoise.IsMintedUUID // as the agent: a generated UUID, and among those the named ones
+		if m.only != nil {
+			mayBind = func(v string) bool { return mocknoise.IsMintedUUID(v) && m.only[v] }
+		}
+		m.ix, _ = integrations.BuildMockValueIndex(mayBind, m.mocks, m.otherKinds)
+		m.ixLen = len(m.mocks)
+	}
+	return m.ix
+}
+
+// bound is the double's binding table as a map, for assertions.
+func (m *mockMemDb) bound(recs ...string) map[string]string {
+	out := map[string]string{}
+	for _, r := range recs {
+		if v, ok := m.bindings.Live(r); ok {
+			out[r] = v
+		}
+	}
+	return out
 }
 
 // MockCursorIndex / AdvanceMockCursor give the double the optional
