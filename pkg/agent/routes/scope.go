@@ -91,7 +91,8 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-begin request: %v", err), http.StatusBadRequest)
 		return
 	}
-	req.At = runnerAt(0, starts.Default.Start(uint32(req.Pid), req.Dir), req.At)
+	set, start := starts.Default.Start(uint32(req.Pid), req.Dir)
+	req.At = runnerAt(0, set, start, req.At)
 	// A test the replay gated out is told to skip before anything else: it
 	// opens no window and narrows no pool, so skipping it leaves the replay
 	// exactly as if it had never been begun — except for the record that it
@@ -129,7 +130,8 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-end request: %v", err), http.StatusBadRequest)
 		return
 	}
-	req.At = runnerAt(0, starts.Default.Start(uint32(req.Pid), req.Dir), req.At)
+	set, start := starts.Default.Start(uint32(req.Pid), req.Dir)
+	req.At = runnerAt(0, set, start, req.At)
 	starts.Default.End(uint32(req.Pid), req.Name, req.Suite, markTime(req.At))
 	if s, ok := a.svc.(scopeOutcomeNoter); ok {
 		if outcome := models.NormalizeScopeOutcome(req.Outcome); outcome != "" {
@@ -301,7 +303,7 @@ func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid app-start request: pid must be the app's pid", http.StatusBadRequest)
 		return
 	}
-	req.At = runnerAt(req.Pid, time.Time{}, req.At)
+	req.At = runnerAt(req.Pid, "", time.Time{}, req.At)
 	var placed bool
 	if req.Port == 0 {
 		placed = starts.Default.Mark(uint32(req.Pid), markTime(req.At))
@@ -315,13 +317,13 @@ func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {
 	render.JSON(w, r, map[string]string{"status": "ok"})
 }
 
-var OnMark func(pid int, start time.Time) time.Duration
+var OnMark func(pid int, set string, start time.Time, live []string) time.Duration
 
-func runnerAt(pid int, start, at time.Time) time.Time {
+func runnerAt(pid int, set string, start, at time.Time) time.Time {
 	if OnMark == nil {
 		return at
 	}
-	off := OnMark(pid, start)
+	off := OnMark(pid, set, start, starts.Default.Live())
 	if off == 0 || at.IsZero() {
 		return at
 	}

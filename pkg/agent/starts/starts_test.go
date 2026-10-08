@@ -1,6 +1,7 @@
 package starts
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -303,16 +304,43 @@ func TestStartIsTheRecordedStartOfTheMarksSet(t *testing.T) {
 	r := New(newFake(), time.Second)
 	r.SetTable("/r", map[string]models.SetTable{"a": {Start: t0}, "b": {}})
 	r.Begin(7, "s", "/r/a", true, at(0))
-	if got := r.Start(7, ""); !got.Equal(t0) {
-		t.Fatalf("worker's set start = %v", got)
+	if set, got := r.Start(7, ""); set != "a" || !got.Equal(t0) {
+		t.Fatalf("worker's set start = %q %v", set, got)
 	}
-	if got := r.Start(0, "/r/a"); !got.Equal(t0) {
-		t.Fatalf("dir's set start = %v", got)
+	if set, got := r.Start(0, "/r/a"); set != "a" || !got.Equal(t0) {
+		t.Fatalf("dir's set start = %q %v", set, got)
 	}
-	if got := r.Start(0, "/r/b"); !got.IsZero() {
-		t.Fatalf("set without a start = %v", got)
+	if set, got := r.Start(0, "/r/b"); set != "b" || !got.IsZero() {
+		t.Fatalf("set without a start = %q %v", set, got)
 	}
-	if got := r.Start(9, "/elsewhere"); !got.IsZero() {
-		t.Fatalf("no set = %v", got)
+	if set, got := r.Start(9, "/elsewhere"); set != "" || !got.IsZero() {
+		t.Fatalf("no set = %q %v", set, got)
+	}
+}
+
+func TestLiveNamesTheSetsWithASuiteOrATestOpen(t *testing.T) {
+	r := New(newFake(), time.Second)
+	r.SetTable("/r", map[string]models.SetTable{"a": {}, "b": {}, "c": {}})
+	if got := r.Live(); len(got) != 0 {
+		t.Fatalf("live before any mark: %v", got)
+	}
+	r.Begin(7, "/r/a", "/r/a", true, at(0))
+	r.Begin(8, "t1", "/r/b", false, at(1))
+	r.Begin(9, "t2", "/elsewhere", false, at(1))
+	if got := r.Live(); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("live = %v", got)
+	}
+	r.End(8, "t1", false, at(2))
+	if got := r.Live(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("a set whose only test ended is still live: %v", got)
+	}
+	r.Begin(7, "t3", "", false, at(3))
+	r.End(7, "t3", false, at(4))
+	if got := r.Live(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("a set whose suite is open is not live: %v", got)
+	}
+	r.End(7, "/r/a", true, at(5))
+	if got := r.Live(); len(got) != 0 {
+		t.Fatalf("live after every suite ended: %v", got)
 	}
 }

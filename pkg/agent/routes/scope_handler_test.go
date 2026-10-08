@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,10 @@ func TestScopeHandlersWithoutATime(t *testing.T) {
 
 func TestScopeHandlersAddTheOffsetBackWhileTheRunnersClockIsShifted(t *testing.T) {
 	var pids []int
-	OnMark = func(pid int, _ time.Time) time.Duration { pids = append(pids, pid); return 48 * time.Hour }
+	OnMark = func(pid int, _ string, _ time.Time, _ []string) time.Duration {
+		pids = append(pids, pid)
+		return 48 * time.Hour
+	}
 	t.Cleanup(func() { OnMark = nil })
 	at := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Millisecond)
 	body := func(s string) string { return strings.Replace(s, "AT", at.Format(time.RFC3339Nano), 1) }
@@ -106,7 +110,7 @@ func TestScopeHandlersAddTheOffsetBackWhileTheRunnersClockIsShifted(t *testing.T
 }
 
 func TestScopeHandlersKeepTheRunnerTimeWhenItsClockIsNotShifted(t *testing.T) {
-	OnMark = func(int, time.Time) time.Duration { return 48 * time.Hour }
+	OnMark = func(int, string, time.Time, []string) time.Duration { return 48 * time.Hour }
 	t.Cleanup(func() { OnMark = nil })
 	at := time.Now().UTC().Truncate(time.Millisecond)
 	svc := &timedScopeSvc{}
@@ -115,7 +119,7 @@ func TestScopeHandlersKeepTheRunnerTimeWhenItsClockIsNotShifted(t *testing.T) {
 	if !svc.at.Equal(at) {
 		t.Fatalf("begin at %v", svc.at)
 	}
-	OnMark = func(int, time.Time) time.Duration { return 0 }
+	OnMark = func(int, string, time.Time, []string) time.Duration { return 0 }
 	post(t, a.HandleScopeBegin, `{"name":"t","at":"2026-09-24T10:00:00Z"}`)
 	if !svc.at.Equal(time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)) {
 		t.Fatalf("begin at %v", svc.at)
@@ -123,16 +127,30 @@ func TestScopeHandlersKeepTheRunnerTimeWhenItsClockIsNotShifted(t *testing.T) {
 }
 
 func TestScopeHandlersTellOnMarkTheSetsRecordedStart(t *testing.T) {
-	var got []time.Time
-	OnMark = func(_ int, start time.Time) time.Duration { got = append(got, start); return 0 }
+	type call struct {
+		set   string
+		start time.Time
+		live  []string
+	}
+	var got []call
+	OnMark = func(_ int, set string, start time.Time, live []string) time.Duration {
+		got = append(got, call{set, start, live})
+		return 0
+	}
 	t.Cleanup(func() { OnMark = nil; starts.Default.Reset() })
 	start := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
-	starts.Default.SetTable("/r", map[string]models.SetTable{"a": {Start: start}})
+	starts.Default.SetTable("/r", map[string]models.SetTable{"a": {Start: start}, "b": {}})
 	a := &Agent{logger: zap.NewNop(), svc: &timedScopeSvc{}}
 	post(t, a.HandleScopeBegin, `{"name":"s","pid":7,"dir":"/r/a","suite":true}`)
 	post(t, a.HandleScopeEnd, `{"name":"t","pid":7}`)
 	post(t, a.HandleScopeBegin, `{"name":"u","pid":8,"dir":"/r/b"}`)
-	if len(got) != 3 || !got[0].Equal(start) || !got[1].Equal(start) || !got[2].IsZero() {
+	if len(got) != 3 || got[0].set != "a" || !got[0].start.Equal(start) || len(got[0].live) != 0 {
+		t.Fatalf("OnMark saw %v", got)
+	}
+	if got[1].set != "a" || !got[1].start.Equal(start) || !slices.Equal(got[1].live, []string{"a"}) {
+		t.Fatalf("OnMark saw %v", got)
+	}
+	if got[2].set != "b" || !got[2].start.IsZero() || !slices.Equal(got[2].live, []string{"a"}) {
 		t.Fatalf("OnMark saw %v", got)
 	}
 }

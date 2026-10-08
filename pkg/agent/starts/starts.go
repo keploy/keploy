@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ type worker struct {
 	pid    uint32
 	dir    string
 	frames []*frame
+	suite  bool
 }
 
 type procKey struct {
@@ -106,6 +108,7 @@ func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time)
 	}
 	if suite {
 		w.frames = []*frame{{place: "", opened: at, counts: map[string]int{}}}
+		w.suite = true
 		return
 	}
 	if len(w.frames) == 0 {
@@ -127,6 +130,7 @@ func (r *Registry) End(pid uint32, name string, suite bool, at time.Time) {
 	}
 	if suite {
 		w.frames = nil
+		w.suite = false
 		return
 	}
 	for i := len(w.frames) - 1; i >= 1; i-- {
@@ -475,13 +479,31 @@ func (r *Registry) Active() bool {
 	return r.sets != nil
 }
 
-func (r *Registry) Start(pid uint32, dir string) time.Time {
+func (r *Registry) Start(pid uint32, dir string) (string, time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if w, ok := r.workers[pid]; ok && dir == "" {
 		dir = w.dir
 	}
-	return r.sets[r.setOf(dir)].Start
+	set := r.setOf(dir)
+	return set, r.sets[set].Start
+}
+
+func (r *Registry) Live() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, w := range r.workers {
+		if !w.suite && len(w.frames) < 2 {
+			continue
+		}
+		set := r.setOf(w.dir)
+		if _, ok := r.sets[set]; ok && !slices.Contains(out, set) {
+			out = append(out, set)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (r *Registry) setOf(dir string) string {
