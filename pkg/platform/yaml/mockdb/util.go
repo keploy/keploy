@@ -37,6 +37,7 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		Kind:         mock.Kind,
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
+		Start:        mock.Start,
 		Async:        mock.Spec.Async,
 		// Unified noise block: the obfuscator value-regexes (mock.Noise) plus the
 		// request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys; regex
@@ -294,6 +295,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
+		Start:        mock.Start,
 		// Async-egress bookkeeping as a kind-agnostic top-level block, set on the
 		// envelope (like Noise) so it survives the per-kind spec projection. nil
 		// for ordinary mocks, so omitempty drops the key.
@@ -329,7 +331,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 				Header:    v.Header,
 				ReadDelay: v.ReadDelay,
 			}
-			err := req.Message.Encode(v.Message)
+			err := yaml.EncodeNode(&req.Message, v.Message)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode mongo request wiremessage into yaml")
 				return nil, err
@@ -342,7 +344,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 				Header:    v.Header,
 				ReadDelay: v.ReadDelay,
 			}
-			err := resp.Message.Encode(v.Message)
+			err := yaml.EncodeNode(&resp.Message, v.Message)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode mongo response wiremessage into yaml")
 				return nil, err
@@ -359,59 +361,26 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 
-		err := yamlDoc.Spec.Encode(mongoSpec)
+		err := yaml.EncodeNode(&yamlDoc.Spec, mongoSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the mongo input-output as yaml")
 			return nil, err
 		}
 
 	case models.HTTP:
-		httpSpec := models.HTTPSchema{
-			Metadata: mock.Spec.Metadata,
-
-			Request:          *mock.Spec.HTTPReq,
-			Response:         *mock.Spec.HTTPResp,
-			Created:          mock.Spec.Created,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(httpSpec)
+		err := yaml.EncodeNode(&yamlDoc.Spec, httpSpecOf(mock))
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
 			return nil, err
 		}
 	case models.DNS:
-		var dnsReq models.DNSReq
-		if mock.Spec.DNSReq != nil {
-			dnsReq = *mock.Spec.DNSReq
-		}
-		var dnsResp models.DNSResp
-		if mock.Spec.DNSResp != nil {
-			dnsResp = *mock.Spec.DNSResp
-		}
-		dnsSpec := models.DNSSchema{
-			Metadata: mock.Spec.Metadata,
-
-			Request:          dnsReq,
-			Response:         dnsResp,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(dnsSpec)
+		err := yaml.EncodeNode(&yamlDoc.Spec, dnsSpecOf(mock))
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the dns input-output as yaml")
 			return nil, err
 		}
 	case models.GENERIC:
-		genericSpec := models.GenericSchema{
-			Metadata: mock.Spec.Metadata,
-
-			GenericRequests:  mock.Spec.GenericRequests,
-			GenericResponses: mock.Spec.GenericResponses,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(genericSpec)
+		err := yaml.EncodeNode(&yamlDoc.Spec, genericSpecOf(mock))
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
 			return nil, err
@@ -421,7 +390,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		for _, v := range mock.Spec.PostgresRequestsV2 {
 
 			req := postgres.RequestYaml{}
-			err := req.Message.Encode(v.PacketBundle)
+			err := yaml.EncodeNode(&req.Message, v.PacketBundle)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode postgres request wiremessage into yaml")
 				return nil, err
@@ -431,7 +400,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		responses := []postgres.ResponseYaml{}
 		for _, v := range mock.Spec.PostgresResponsesV2 {
 			resp := postgres.ResponseYaml{}
-			err := resp.Message.Encode(v.PacketBundle)
+			err := yaml.EncodeNode(&resp.Message, v.PacketBundle)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode postgres response wiremessage into yaml")
 				return nil, err
@@ -448,21 +417,13 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
-		err := yamlDoc.Spec.Encode(sqlSpec)
+		err := yaml.EncodeNode(&yamlDoc.Spec, sqlSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the Postgres input-output as yaml")
 			return nil, err
 		}
 	case models.GRPC_EXPORT:
-		gRPCSpec := models.GrpcSpec{
-			Metadata: mock.Spec.Metadata,
-
-			GrpcReq:          *mock.Spec.GRPCReq,
-			GrpcResp:         *mock.Spec.GRPCResp,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(gRPCSpec)
+		err := yaml.EncodeNode(&yamlDoc.Spec, grpcSpecOf(mock))
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal gRPC of external call into yaml")
 			return nil, err
@@ -475,7 +436,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 				Header: v.Header,
 				Meta:   v.Meta,
 			}
-			err := req.Message.Encode(v.Message)
+			err := yaml.EncodeNode(&req.Message, v.Message)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode mysql request wiremessage into yaml")
 				return nil, err
@@ -488,7 +449,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 				Header: v.Header,
 				Meta:   v.Meta,
 			}
-			err := resp.Message.Encode(v.Message)
+			err := yaml.EncodeNode(&resp.Message, v.Message)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode mysql response wiremessage into yaml")
 				return nil, err
@@ -505,30 +466,13 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
-		err := yamlDoc.Spec.Encode(sqlSpec)
+		err := yaml.EncodeNode(&yamlDoc.Spec, sqlSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the MySQL input-output as yaml")
 			return nil, err
 		}
 	case models.HTTP2:
-		var http2Req models.HTTP2Req
-		if mock.Spec.HTTP2Req != nil {
-			http2Req = *mock.Spec.HTTP2Req
-		}
-		var http2Resp models.HTTP2Resp
-		if mock.Spec.HTTP2Resp != nil {
-			http2Resp = *mock.Spec.HTTP2Resp
-		}
-		http2Spec := models.HTTP2Schema{
-			Metadata: mock.Spec.Metadata,
-
-			Request:          http2Req,
-			Response:         http2Resp,
-			Created:          mock.Spec.Created,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(http2Spec)
+		err := yaml.EncodeNode(&yamlDoc.Spec, http2SpecOf(mock))
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the HTTP/2 input-output as yaml")
 			return nil, err
@@ -559,7 +503,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
-		if err := yamlDoc.Spec.Encode(spec); err != nil {
+		if err := yaml.EncodeNode(&yamlDoc.Spec, spec); err != nil {
 			utils.LogError(logger, err, "failed to marshal PostgresV3 mock as yaml",
 				zap.String("mock_name", mock.Name),
 				zap.String("mock_kind", string(mock.Kind)),
@@ -619,6 +563,13 @@ const (
 // which is the right behaviour because a null payload silently
 // corrupts replay.
 var errPostgresV3NilPayload = errors.New("postgres_v3 mock missing typed payload")
+
+// errPacketWithoutHeader is a MySQL or Mongo packet whose document has no
+// header. The recorders write one for every packet, and the header types the
+// packet's message, so the mock cannot be decoded. A mock file cut off
+// mid-write ends this way: YAML cannot tell a document that stops after a
+// packet's "- header:" from a complete one, so the decode is where it shows.
+var errPacketWithoutHeader = errors.New("packet has no header; the document is incomplete, as a mock file cut off mid-write leaves it")
 
 // postgresV3YamlSpec is the single on-disk envelope for v3 Postgres
 // mocks. The typed sub-pointer lives under `spec.postgresV3` with its
@@ -688,6 +639,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			Kind:         m.Kind,
 			Noise:        m.Noise.ValueNoise(),
 			ConnectionID: m.ConnectionID,
+			Start:        m.Start,
 		}
 		mapped, err := decodeWithMapper(m, &mock)
 		if err != nil {
@@ -763,7 +715,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 
 			mockSpec, err := decodeMongoMessage(&mongoSpec, logger)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("mock %q (%s): %w", m.Name, m.Kind, err)
 			}
 			mock.Spec = *mockSpec
 		case models.GRPC_EXPORT:
@@ -822,7 +774,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 
 			mockSpec, err := decodeMySQLMessage(context.Background(), logger, &mySQLSpec)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("mock %q (%s): %w", m.Name, m.Kind, err)
 			}
 			mock.Spec = *mockSpec
 		case models.HTTP2:
@@ -901,7 +853,10 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 	// Decode the requests
 
 	requests := []mysql.Request{}
-	for _, v := range yamlSpec.Requests {
+	for i, v := range yamlSpec.Requests {
+		if v.Header == nil {
+			return nil, fmt.Errorf("mysql request %d: %w", i, errPacketWithoutHeader)
+		}
 		req := mysql.Request{
 			PacketBundle: mysql.PacketBundle{
 				Header: v.Header,
@@ -1089,8 +1044,10 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 	// Decode the responses
 
 	responses := []mysql.Response{}
-	for _, v := range yamlSpec.Response {
-
+	for i, v := range yamlSpec.Response {
+		if v.Header == nil {
+			return nil, fmt.Errorf("mysql response %d: %w", i, errPacketWithoutHeader)
+		}
 		resp := mysql.Response{
 			PacketBundle: mysql.PacketBundle{
 				Header: v.Header,
@@ -1211,7 +1168,10 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 
 	// mongo request
 	requests := []models.MongoRequest{}
-	for _, v := range yamlSpec.Requests {
+	for i, v := range yamlSpec.Requests {
+		if v.Header == nil {
+			return nil, fmt.Errorf("mongo request %d: %w", i, errPacketWithoutHeader)
+		}
 		req := models.MongoRequest{
 			Header:    v.Header,
 			ReadDelay: v.ReadDelay,
@@ -1251,7 +1211,10 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 
 	// mongo response
 	responses := []models.MongoResponse{}
-	for _, v := range yamlSpec.Response {
+	for i, v := range yamlSpec.Response {
+		if v.Header == nil {
+			return nil, fmt.Errorf("mongo response %d: %w", i, errPacketWithoutHeader)
+		}
 		resp := models.MongoResponse{
 			Header:    v.Header,
 			ReadDelay: v.ReadDelay,
@@ -1353,6 +1316,7 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 			Kind:         m.Kind,
 			Noise:        m.Noise.ValueNoise(),
 			ConnectionID: m.ConnectionID,
+			Start:        m.Start,
 		}
 
 		switch m.Kind {

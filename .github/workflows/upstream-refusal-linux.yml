@@ -1,0 +1,193 @@
+name: Upstream Refusal (Linux)
+# Guard: under `keploy record`, an application connecting to a dependency that
+# refuses, is unreachable or never answers gets the connect result it would
+# get without keploy. Before the proxy held each handshake until the
+# destination answered (pkg/agent/proxy/synhold), every such connect
+# succeeded — the proxy's listener accepted it — and the application then
+# read EOF or hung, so a driver's retry-on-refused never ran.
+#
+#   hold_primitive  the hold itself, as root, on amd64 and arm64: every answer
+#                   on both address families, cleanup on stop, and handshakes
+#                   completing when the agent died with its rules in place.
+#   record_native   keploy record on the host (amd64 and arm64), in a network
+#                   namespace the script builds, so every case is deterministic.
+#   record_docker   keploy record -c "docker run ...": the application runs in
+#                   the agent container's namespace.
+#
+# `legs: core` needs only the always-built `build` binary, so it also runs for
+# pull requests from forks; `legs: extended` needs the arm64 binary and the
+# docker image, which are built for same-repo pull requests and main only.
+on:
+  workflow_call:
+    inputs:
+      legs:
+        description: 'core (hold tests, native amd64) or extended (native arm64, docker)'
+        type: string
+        required: true
+
+jobs:
+  hold_primitive:
+    if: ${{ inputs.legs == 'core' }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    name: upstream-refusal (hold, root, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install dependencies
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry mod download
+
+      # The runner's kernel must provide what the hold uses; a missing module
+      # is the runner's problem, and says so, rather than reading as a test
+      # failure.
+      - name: Check the runner's kernel has the netfilter modules
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/upstream_refusal/preflight.sh"
+
+      # Compiled as the runner user, run as root: the test installs nf_tables
+      # rules and binds an NFQUEUE.
+      - name: Build the hold integration test
+        run: go test -c -race -tags synhold_integration -o /tmp/synhold.test ./pkg/agent/proxy/synhold/
+
+      # A -run that matches nothing exits 0, so each test's PASS line is
+      # required explicitly.
+      - name: Run the hold integration test (root)
+        run: |
+          set -o pipefail
+          sudo /tmp/synhold.test -test.v | tee /tmp/synhold.out
+          for t in TestHeldHandshakesAreAnsweredAsDecided TestCloseLeavesNothingBehind \
+                   TestAnAgentThatDiedLetsHandshakesThrough TestANewConnectionOnAReusedPortIsNotHeldBehindTheAbandonedOne \
+                   TestShutdownAnswersTheHeldHandshakes TestStartRemovesOnlyAbandonedTables \
+                   TestStartWaitsForAStoppingAgentsQueue TestCloseRemovesItsTableWhileTheQueueIsStillBound \
+                   TestStartRefusesToHoldWhereARejectDoesNotTakeEffect TestCloseAnswersAHeldHandshake \
+                   TestStartHoldsThroughSignals; do
+            grep -q -- "--- PASS: $t" /tmp/synhold.out || { echo "::error::$t did not pass"; exit 1; }
+          done
+
+  record_native:
+    if: ${{ inputs.legs == 'core' }}
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    name: upstream-refusal native (record_with_build)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: .github/workflows/test_workflow_scripts/golang/upstream_refusal/probe/go.mod
+          cache: false
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Check the runner's kernel has the netfilter modules
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/upstream_refusal/preflight.sh"
+
+      - name: Install nft (the script checks the ruleset keploy leaves)
+        run: command -v nft || { sudo timeout 600 apt-get -y update -o Acquire::Retries=3 && sudo timeout 600 apt-get -y install -o Acquire::Retries=3 nftables; }
+
+      - name: Compare connect results with and without keploy
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/upstream_refusal/upstream-refusal-linux.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-refusal-native-logs
+          path: .github/workflows/test_workflow_scripts/golang/upstream_refusal/record_logs.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  record_native_arm64:
+    if: ${{ inputs.legs == 'extended' }}
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04-arm
+    name: upstream-refusal native (record_with_build_arm64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: .github/workflows/test_workflow_scripts/golang/upstream_refusal/probe/go.mod
+          cache: false
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build-no-race-linux-arm64
+
+      - name: Check the runner's kernel has the netfilter modules
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/upstream_refusal/preflight.sh"
+
+      - name: Install nft (the script checks the ruleset keploy leaves)
+        run: command -v nft || { sudo timeout 600 apt-get -y update -o Acquire::Retries=3 && sudo timeout 600 apt-get -y install -o Acquire::Retries=3 nftables; }
+
+      - name: Compare connect results with and without keploy
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/upstream_refusal/upstream-refusal-linux.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-refusal-native-arm64-logs
+          path: .github/workflows/test_workflow_scripts/golang/upstream_refusal/record_logs.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  record_docker:
+    if: ${{ inputs.legs == 'extended' }}
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    name: upstream-refusal docker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: .github/workflows/test_workflow_scripts/golang/upstream_refusal/probe/go.mod
+          cache: false
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Check the runner's kernel has the netfilter modules
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/upstream_refusal/preflight.sh"
+
+      - name: Compare connect results with and without keploy
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/upstream_refusal/upstream-refusal-docker.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-refusal-docker-logs
+          path: .github/workflows/test_workflow_scripts/golang/upstream_refusal/record_docker_logs.txt
+          if-no-files-found: warn
+          retention-days: 7

@@ -12,13 +12,16 @@ import (
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
+	"go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -71,8 +74,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		svc:    agent,
 	}
 
-	r.Route("/agent", func(r chi.Router) {
+	r.Route(agentRoutePrefix, func(r chi.Router) {
 		r.Get("/health", a.Health)
+		r.Get("/ca", a.CACert)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)
 		r.Post("/mappings", a.HandleMappings)
@@ -80,9 +84,11 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/storemocks", a.StoreMocks)
 		r.Post("/updatemockparams", a.UpdateMockParams)
 		r.Post("/stop", a.Stop)
+		r.Get("/record/pending", a.HandlePending)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
+		r.Get("/ids", a.HandleIDs)
 		r.Post("/test-capture/begin", a.BeginTestErrorCapture)
 		// Per-test scope API for `keploy mock record|replay` — a user's test
 		// runner marks per-test boundaries so mocks are attributed / restricted
@@ -91,8 +97,14 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/scope/end", a.HandleScopeEnd)
 		r.Get("/scope/windows", a.HandleScopeWindows)
 		r.Post("/scope/table", a.HandleScopeTable)
+		r.Post("/replay/gate", a.HandleScopeGate)
+		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
+		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
+		// Pollable, non-draining view of which mocks have been served. Distinct
+		// from /consumedmocks, which drains and is read once at end of run.
+		r.Get("/mock/served", a.HandleServedMocks)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		// Long-lived streaming endpoints. /pcap/traffic emits a
@@ -186,7 +198,7 @@ func (a *Agent) HandleAfterTestRun(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 	var req models.BeforeSimulateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid before-simulate request: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -201,7 +213,7 @@ func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
 	var req models.AfterSimulateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid after-simulate request: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -233,8 +245,31 @@ func (a *Agent) Stop(w http.ResponseWriter, _ *http.Request) {
 
 func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	// Tells the client that /storemocks takes a zstd-compressed stream
+	// (RFC 7694). An agent without this header gets the stream uncompressed.
+	w.Header().Set("Accept-Encoding", models.MockStreamEncodingZstd)
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
+}
+
+// CACert serves this run's MITM CA public certificate (PEM) to the native
+// client, which points the app's trust env vars at it. The MITM CA is generated
+// per run and its private key never leaves the agent; only the public
+// certificate is returned here. The route is token-guarded (it is NOT in
+// isAuthExempt), so only the keploy client that holds the session token can read
+// it. A 503 before SetupCA has established the CA lets the client distinguish
+// "not ready yet" from a transport failure.
+func (a *Agent) CACert(w http.ResponseWriter, _ *http.Request) {
+	certPEM := pTls.ActiveCACertPEM()
+	if len(certPEM) == 0 {
+		http.Error(w, "CA not ready", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(certPEM); err != nil {
+		a.logger.Debug("failed to write CA certificate response", zap.Error(err))
+	}
 }
 
 // HandlePcapStream is a long-lived chunked response that emits a
@@ -337,7 +372,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	var incomingReq models.IncomingReq
 	err := json.NewDecoder(r.Body).Decode(&incomingReq)
 	if err != nil {
-		http.Error(w, "Error decoding request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("failed to decode incoming request: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -345,9 +380,25 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"
 		a.logger.Error(stopReason, zap.Error(err))
-		http.Error(w, "Error starting incoming proxy", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("%s: %v", stopReason, err), http.StatusInternalServerError)
 		return // Important: return after handling the error
 	}
+
+	// Kept requests the mock manager leaves out this session because their
+	// window was given up while they were in flight (syncMock.Window.Keep),
+	// less those a later request is recorded in the place of
+	// (Window.Replaced). The manager serves every session of the agent's
+	// life, and a loss told in an earlier one can be taken back in this one,
+	// so this session's are on a tally of its own. Opened before the headers
+	// go out: once they are flushed the client may act on the open session,
+	// and a loss told then is this session's.
+	leftOut := syncmgr.Get().OpenLossTally()
+	defer leftOut.Close()
+	// The mocks parsers leave out this session (Session.ReportLeftOut), from
+	// the same point and for the same reason: the manager counts them over its
+	// life. None is ever taken back, so this session's are what that count
+	// grows by from here.
+	mocksLeftOutBefore := syncmgr.Get().MocksLeftOut()
 
 	a.logger.Debug("Streaming incoming test cases to client")
 
@@ -360,17 +411,220 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
 	var tcsSentSoFar int       // TCs sent to CLI this session
-	var tcsSuppressedSoFar int // TCs suppressed: pressure OR resync-hole overlapped the TC's HTTP window, or its mock was capacity-dropped
+	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's HTTP window, or its mock was capacity-dropped
+	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
+	// send checks one test case and streams it unless it is left out. It
+	// reports false once the stream is broken.
+	send := func(t *models.TestCase) bool {
+		// Whether t is streamed, left out or lost to a broken stream, this
+		// is the last that sees it.
+		defer discardUpload(a.logger, t)
+		// Skip this test case if memory pressure overlapped its HTTP window
+		// [request, response]: under pressure the paired mock may have been
+		// dropped, so sending the TC would orphan it at replay. We check the
+		// TC window against recorded pressure ranges (not individual mock
+		// drops) because that check is race-free regardless of when the
+		// mock's goroutine runs relative to this handler.
+		tcRespTime := t.HTTPResp.Timestamp
+		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+		// An exchange a connection carried but did not record as a mock
+		// strands its TC mock-less, whether or not a pressure range covers
+		// it: a parser's hole (a mongo/v2 reassembly resync), an exchange a
+		// parser left out (a MySQL response it cannot frame), a mock the
+		// incomplete flag left out, a connection that can no longer be
+		// recorded. Each is reported as an orphan span
+		// (Session.RecordOrphanWindow lists them); suppress any TC whose
+		// window overlaps one, same as for pressure. A span its parser
+		// reports once it gets to the exchange, behind the traffic, reaches
+		// only the TCs checked after it: without a watermark (the hold
+		// below), a TC streamed before it is saved without the mock, as the
+		// WARN that reports the exchange says.
+		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
+		// A capacity drop (outChan overflow / already-closed channel)
+		// feeds nothing into pressureRanges, so the pressure-overlap check
+		// above cannot catch it. Suppress by EXACT owning test name so a
+		// TC whose mock was capacity-dropped is not streamed mock-less
+		// (replay: match_phase=no_mocks), without over-suppressing any
+		// concurrent TC that kept all its mocks.
+		mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
+
+		if hasPressure || hasOrphan || mockDropped {
+			tcsSuppressedSoFar++
+			a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
+				zap.String("tc_name", t.Name),
+				zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
+				zap.Int("pressure_overlaps", pressureOverlaps),
+				zap.Int("orphan_overlaps", orphanOverlaps),
+				zap.Bool("capacity_drop", mockDropped),
+				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
+			)
+			return true
+		}
+
+		tcsSentSoFar++
+		// Stream each test case as JSON
+		// 1. Write metadata (JSON)
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Disposition", `form-data; name="metadata"`)
+		header.Set("Content-Type", "application/json")
+		part, err := mw.CreatePart(header)
+		if err != nil {
+			a.logger.Error("failed to create metadata part", zap.Error(err))
+			return false
+		}
+		if err := json.NewEncoder(part).Encode(t); err != nil {
+			a.logger.Error("failed to encode metadata", zap.Error(err))
+			return false
+		}
+
+		// 2. Write file part if exists
+		if t.HasBinaryFile {
+			a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
+			for _, form := range t.HTTPReq.Form {
+				for i, path := range form.Paths {
+					if path == "" {
+						continue
+					}
+
+					// Get filename from FileNames if available, or base of path
+					fileName := "binary_file"
+					if i < len(form.FileNames) {
+						fileName = form.FileNames[i]
+					} else {
+						fileName = filepath.Base(path)
+					}
+
+					fileHeader := textproto.MIMEHeader{}
+					fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
+					filePart, err := mw.CreatePart(fileHeader)
+					if err != nil {
+						a.logger.Error("failed to create file part", zap.Error(err))
+						return false
+					}
+
+					f, err := os.Open(path)
+					if err != nil {
+						a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
+						return false
+					}
+					if _, err := io.Copy(filePart, f); err != nil {
+						f.Close()
+						a.logger.Error("failed to copy file to stream", zap.Error(err))
+						return false
+					}
+					f.Close()
+					a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
+				}
+			}
+		}
+
+		// 3. Write delimiter part to force closure of previous part (file)
+		// This is critical: The client reads the file part until it sees the *next* boundary.
+		// Without this delimiter, the client blocks waiting for the *next testcase* to create a boundary,
+		// causing a deadlock if testcases are infrequent.
+		delimiterHeader := textproto.MIMEHeader{}
+		delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
+		if _, err := mw.CreatePart(delimiterHeader); err != nil {
+			a.logger.Error("failed to create delimiter part", zap.Error(err))
+			return false
+		}
+
+		flusher.Flush() // Immediately send data to the client
+		return true
+	}
+
+	// A capture that can tell when a test case's verdict under the rule for
+	// unrecorded traffic is final (the enterprise proxyless agent) holds each
+	// test case until it is: a span that overlaps it can become known after it
+	// completes (syncMock settle.go). Without one, test cases go at once.
+	var hold *syncmgr.TestCaseHold
+	if w := syncmgr.Get().Watermark(); w != nil {
+		hold = syncmgr.NewTestCaseHold(w, syncmgr.TestCaseHoldMax, syncmgr.TestCaseHoldBytes)
+		// A stream that ends while it holds test cases (its client went
+		// away, or it broke) sends none of them.
+		defer func() {
+			for _, t := range hold.Drain() {
+				discardUpload(a.logger, t)
+			}
+		}()
+	}
+	var holdTick *time.Ticker
+	defer func() {
+		if holdTick != nil {
+			holdTick.Stop()
+		}
+		syncmgr.Get().NoteHeld(time.Time{})
+	}()
+	// release sends what the hold lets go, and keeps a ticker going while it
+	// holds any. It reports false once the stream is broken.
+	release := func() bool {
+		released := hold.Release()
+		for i, h := range released {
+			if h.Unsettled {
+				tcsUnsettled++
+				// What held it, for the first of this recording and then
+				// one in 1,024: the bound can let many go.
+				if h.HeldBy != nil && (tcsUnsettled <= 64 || tcsUnsettled%1024 == 0) {
+					if ce := a.logger.Check(zap.DebugLevel, "agent: test case let go by the hold's bound before its verdict was final"); ce != nil {
+						ce.Write(zap.String("tc_name", h.TC.Name), zap.Int("unsettled", tcsUnsettled),
+							zap.Stringer("held_by", h.HeldBy))
+					}
+				}
+			}
+			if !send(h.TC) {
+				for _, rest := range released[i+1:] {
+					discardUpload(a.logger, rest.TC)
+				}
+				return false
+			}
+		}
+		// Every test case still held starts no earlier than the earliest:
+		// past the cap, the spans before it are the ones joined (Spans).
+		hold.EarliestStarts(func(_, _ string, start time.Time) { syncmgr.Get().CheckedBefore(start) })
+		if hold.Len() > 0 && holdTick == nil {
+			holdTick = time.NewTicker(syncmgr.TestCaseHoldTick)
+		} else if hold.Len() == 0 && holdTick != nil {
+			holdTick.Stop()
+			holdTick = nil
+		}
+		// What the stream still holds keeps a stop's drain going (PendingBefore).
+		syncmgr.Get().NoteHeld(hold.Oldest())
+		return true
+	}
 	for {
+		var tickC <-chan time.Time
+		if holdTick != nil {
+			tickC = holdTick.C
+		}
 		select {
 		case <-r.Context().Done():
 			a.logger.Debug("Client closed the connection or context was cancelled")
 			return
+		case <-tickC:
+			if !release() {
+				return
+			}
 		case t, ok := <-tc:
 			if !ok {
-				// Channel closed = recording session over.
+				// Channel closed = recording session over. What the hold
+				// still has goes as its verdicts settle, or its bound ends.
+				for hold != nil && hold.Len() > 0 {
+					if holdTick == nil {
+						holdTick = time.NewTicker(syncmgr.TestCaseHoldTick)
+					}
+					select {
+					case <-r.Context().Done():
+						return
+					case <-holdTick.C:
+					}
+					if !release() {
+						return
+					}
+				}
 				_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
-				orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
+				orphanRecorded, orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
+				pressureRecorded, pressureSpans := syncmgr.Get().PressureRangeCount()
 				// Suppression protects replay from test cases whose mocks
 				// were never captured, but it is coarse: the windows are
 				// timestamp-based and session-wide, so a connection that
@@ -385,129 +639,128 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					tcsSuppressedSoFar*100/total >= massSuppressionPercent {
 					logRecordingComplete = a.logger.Warn
 				}
+				// Read once: the warning and the summary say the same.
+				leftOutInFlight := leftOut.LeftOut()
+				if leftOutInFlight > 0 {
+					// Never captured, so never counted above: each stayed in
+					// flight while the mocks the agent held for the requests
+					// in flight passed their budget, or memory pressure let
+					// them go, and was left out rather than recorded without
+					// its mocks. The manager warns of the first and every
+					// 1024th; this is the session's count.
+					a.logger.Warn("agent: some test cases were left out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
+						zap.Uint64("test_cases", leftOutInFlight),
+						zap.Int64("hold_bound_bytes", syncmgr.MaxHeldBytes))
+				}
+				if tcsUnsettled > 0 {
+					// The capture's parsers ran more than the hold's bound
+					// behind: these were checked against what was known then.
+					a.logger.Warn("agent: some test cases were saved before the agent had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
+						zap.Int("test_cases", tcsUnsettled),
+						zap.Duration("held_up_to", syncmgr.TestCaseHoldMax))
+				}
 				logRecordingComplete("agent: recording complete",
 					zap.Int("tcs_sent_to_cli", tcsSentSoFar),
 					zap.Int("tcs_suppressed_total", tcsSuppressedSoFar),
-					zap.Int("pressure_ranges_total", syncmgr.Get().PressureRangeCount()),
-					zap.Int("orphan_ranges_total", orphanClosed),
+					// _total is how often each suppressor fired; the spans
+					// are what they were kept as, after overlapping and (past
+					// the cap) joining (syncMock.Spans).
+					zap.Int("pressure_ranges_total", pressureRecorded),
+					zap.Int("pressure_spans", pressureSpans),
+					zap.Int("orphan_ranges_total", orphanRecorded),
+					zap.Int("orphan_spans_closed", orphanClosed),
 					zap.Int("orphan_ranges_still_open", orphanOpen),
 					zap.Int64("mocks_dropped_by_pressure", finalDropped),
+					// Every mock a parser left out, the exchange it stopped
+					// on included, each reported with Session.ReportLeftOut
+					// (Session.ReportStoppedOn for the one it stopped on):
+					// for the incomplete-mock flag (a chunk the relay
+					// dropped, a short write, a decode error), for a reason
+					// of the parser's own, or for the server bytes that
+					// start a connection the capture joined mid-way, the
+					// answer to a request it does not have
+					// (Session.NextRequest). A parser's own reasons: a
+					// MySQL command that does not decode, that the replayer
+					// cannot serve, or whose response cannot be framed is
+					// left out alone, and the connection's recording goes
+					// on; an HTTP/1 request or response that does not
+					// decode stops the parser, and so does a MySQL command
+					// in which the framing of the client's stream is lost,
+					// or whose response cannot be framed with no way to
+					// take the connection up again after it (a client that
+					// pipelines its commands, say); an HTTP/2 stream reset
+					// before it completed is left out, which the capture
+					// did not lose: its call did not complete. Their WARN
+					// is rate-limited, so this is where each is counted:
+					// the ones reported while this session was open, as
+					// tcs_left_out_in_flight counts its test cases left out
+					// in flight, so a later session's summary does not
+					// count them again. What a connection carried after its
+					// recording stopped is in the orphan spans above, not
+					// here: it was never parsed into mocks to count.
+					zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()-mocksLeftOutBefore),
 					zap.Int64("mocks_added_successfully", finalAdded),
 					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
 					zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
+					zap.Int("tcs_released_unsettled", tcsUnsettled),
+					zap.Uint64("tcs_left_out_in_flight", leftOutInFlight),
 				)
 				return
 			}
 
-			// Skip this test case if memory pressure overlapped its HTTP window
-			// [request, response]: under pressure the paired mock may have been
-			// dropped, so sending the TC would orphan it at replay. We check the
-			// TC window against recorded pressure ranges (not individual mock
-			// drops) because that check is race-free regardless of when the
-			// mock's goroutine runs relative to this handler.
-			tcRespTime := t.HTTPResp.Timestamp
-			hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
-			// A mongo/v2 reassembly resync hole strands a delivered-but-unframable
-			// op: its TC records mock-less though no pressure range covers it. The
-			// enterprise parser reports the hole via Session.RecordOrphanWindow;
-			// suppress any TC whose window overlaps it, same as for pressure.
-			hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
-			// A capacity drop (outChan overflow / already-closed channel)
-			// feeds nothing into pressureRanges, so the pressure-overlap check
-			// above cannot catch it. Suppress by EXACT owning test name so a
-			// TC whose mock was capacity-dropped is not streamed mock-less
-			// (replay: match_phase=no_mocks), without over-suppressing any
-			// concurrent TC that kept all its mocks.
-			mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
-
-			if hasPressure || hasOrphan || mockDropped {
-				tcsSuppressedSoFar++
-				a.logger.Debug("agent: TC suppressed — memory pressure / resync-hole overlapped TC window or a mock was capacity-dropped, not sent to CLI",
-					zap.String("tc_name", t.Name),
-					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
-					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
-					zap.Int("pressure_overlaps", pressureOverlaps),
-					zap.Int("resync_orphan_overlaps", orphanOverlaps),
-					zap.Bool("capacity_drop", mockDropped),
-					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
-				)
+			if hold == nil {
+				if !send(t) {
+					return
+				}
 				continue
 			}
-
-			tcsSentSoFar++
-			// Stream each test case as JSON
-			// 1. Write metadata (JSON)
-			header := textproto.MIMEHeader{}
-			header.Set("Content-Disposition", `form-data; name="metadata"`)
-			header.Set("Content-Type", "application/json")
-			part, err := mw.CreatePart(header)
-			if err != nil {
-				a.logger.Error("failed to create metadata part", zap.Error(err))
+			// One that is final at once goes at once; behind held ones, it
+			// waits for the tick, which looks at them all.
+			wasEmpty := hold.Len() == 0
+			hold.Add(t, "", "")
+			if wasEmpty && !release() {
 				return
 			}
-			if err := json.NewEncoder(part).Encode(t); err != nil {
-				a.logger.Error("failed to encode metadata", zap.Error(err))
-				return
-			}
-
-			// 2. Write file part if exists
-			if t.HasBinaryFile {
-				a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
-				for _, form := range t.HTTPReq.Form {
-					for i, path := range form.Paths {
-						if path == "" {
-							continue
-						}
-
-						// Get filename from FileNames if available, or base of path
-						fileName := "binary_file"
-						if i < len(form.FileNames) {
-							fileName = form.FileNames[i]
-						} else {
-							fileName = filepath.Base(path)
-						}
-
-						fileHeader := textproto.MIMEHeader{}
-						fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
-						filePart, err := mw.CreatePart(fileHeader)
-						if err != nil {
-							a.logger.Error("failed to create file part", zap.Error(err))
-							return
-						}
-
-						f, err := os.Open(path)
-						if err != nil {
-							a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
-							return
-						}
-						if _, err := io.Copy(filePart, f); err != nil {
-							f.Close()
-							a.logger.Error("failed to copy file to stream", zap.Error(err))
-							return
-						}
-						f.Close()
-						a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
-
-						// Cleanup temp file
-						os.Remove(path)
-					}
-				}
-			}
-
-			// 3. Write delimiter part to force closure of previous part (file)
-			// This is critical: The client reads the file part until it sees the *next* boundary.
-			// Without this delimiter, the client blocks waiting for the *next testcase* to create a boundary,
-			// causing a deadlock if testcases are infrequent.
-			delimiterHeader := textproto.MIMEHeader{}
-			delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
-			if _, err := mw.CreatePart(delimiterHeader); err != nil {
-				a.logger.Error("failed to create delimiter part", zap.Error(err))
-				return
-			}
-
-			flusher.Flush() // Immediately send data to the client
 		}
 	}
+}
+
+// discardUpload deletes the files t's upload was written to (conn.Capture): t
+// owns them, and once its stream is done with it, streamed or not, nothing
+// else will.
+func discardUpload(logger *zap.Logger, t *models.TestCase) {
+	if t != nil && t.HasBinaryFile {
+		conn.RemoveFormFiles(logger, t.HTTPReq.Form)
+	}
+}
+
+// PendingResponse answers GET /agent/record/pending.
+type PendingResponse struct {
+	// Pending: the agent may still hand over a test case or a mock captured
+	// before the time asked about.
+	Pending bool `json:"pending"`
+}
+
+// HandlePending tells a recording's stop whether the agent may still hand over
+// a test case or a mock captured before ?before= (Unix nanoseconds): its
+// capture has not got past that time, or a test case it holds for its verdict
+// ended before it. The stop drains the agent's streams until it may not, and
+// not only until they fall quiet: a parser can be behind the traffic, and
+// quiet, for longer than any fixed grace. 501 when the agent cannot tell (its
+// capture has no watermark); the stop then goes by quiet alone.
+func (a *Agent) HandlePending(w http.ResponseWriter, r *http.Request) {
+	ns, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+	if err != nil {
+		http.Error(w, "before must be a Unix time in nanoseconds", http.StatusBadRequest)
+		return
+	}
+	pending, known := syncmgr.Get().PendingBefore(time.Unix(0, ns))
+	if !known {
+		http.Error(w, "this agent's capture cannot tell what it has yet to hand over", http.StatusNotImplemented)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(PendingResponse{Pending: pending})
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
@@ -530,7 +783,7 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 
 	var outgoingReq models.OutgoingReq
 	if err := json.NewDecoder(r.Body).Decode(&outgoingReq); err != nil {
-		http.Error(w, "Error decoding request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("failed to decode outgoing request: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -556,6 +809,7 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			starts.Default.Stamp(m)
 			if err := enc.Encode(m); err != nil {
 				// enc.Encode(m) folds two distinct failure modes into
 				// one error: (a) per-mock serialization errors (an
@@ -617,6 +871,14 @@ func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Establish the stream now, as the test-case and mock streams do, not
+	// with the first mapping: the client's request returns only once the
+	// headers arrive. A recording that emits no mappings (a DaemonSet or
+	// proxyless one) otherwise left the client's GetMappings blocked for the
+	// whole session, and its stop waited out the mapping drain's cap.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
 	enc := json.NewEncoder(w)
 
@@ -736,7 +998,7 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 					"read-only or out of space"),
 			zap.Error(err),
 		)
-		http.Error(w, "failed to mark agent as ready", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("failed to mark agent as ready: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -753,7 +1015,7 @@ func (a *Agent) HandleGracefulShutdown(w http.ResponseWriter, r *http.Request) {
 
 	if err := a.svc.SetGracefulShutdown(r.Context()); err != nil {
 		a.logger.Error("failed to set graceful shutdown flag", zap.Error(err))
-		http.Error(w, "failed to set graceful shutdown", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("failed to set graceful shutdown: %v", err), http.StatusInternalServerError)
 		return
 	}
 

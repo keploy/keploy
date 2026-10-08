@@ -37,6 +37,13 @@ jobs:
       # only fires if that stops being true, and it stays unset elsewhere so a
       # v6-less environment skips rather than fails.
       KEPLOY_TEST_IPV6_REQUIRED: "1"
+      # And for user namespaces, which this lane lets unprivileged users
+      # create (the step before the unit tests). utils' test of the process
+      # tree InterruptProcessTree signals starts a process in a nested pid
+      # namespace under `unshare --user`, the one real check that it never
+      # signals pid 1; without user namespaces it skips, and the package
+      # still reports ok. With this set it fails instead.
+      KEPLOY_TEST_USERNS_REQUIRED: "1"
       KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
       KEPLOY_TEST_MYSQL_USER: root
       KEPLOY_TEST_MYSQL_PASS: rootpass
@@ -76,8 +83,7 @@ jobs:
       
       - name: Installing build Essentials and gcc
         run: |
-          sudo timeout 600 apt-get -y update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120
-          sudo timeout 600 apt-get -y install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 build-essential gcc libc-dev  \
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" build-essential gcc libc-dev \
             pkg-config \
             libgl1-mesa-dev          \
             libxi-dev libxcursor-dev \
@@ -105,11 +111,36 @@ jobs:
           # new test-only deps by itself.
           go_retry list -deps -test ./... > /dev/null
 
+      # ubuntu-24.04 restricts unprivileged user namespaces through AppArmor
+      # by default (kernel.apparmor_restrict_unprivileged_userns=1), so
+      # `unshare --user` fails there (actions/runner-images#10443). Lift that
+      # for this job, which promises user namespaces to the tests
+      # (KEPLOY_TEST_USERNS_REQUIRED above). A runner without the setting
+      # fails this step, and the lane's promise has to be looked at again.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Running Unit Tests
         run: go test ./...
 
-      # The mock-manager's concurrency guards — the tier-key/HitCount race and
-      # the hitMu/treesMu lock order — are only meaningful under -race: without
+      # The compose library is behind the `composelib` build tag, so the plain
+      # run above exercises the SHELL-OUT path and never the library. Its own
+      # tests — and the App call sites that choose between the two — would go
+      # uncovered on every PR without this second run.
+      #
+      # Scoped to the two packages that have tagged tests rather than ./... ,
+      # because everything else is identical in both shapes and would just be
+      # run twice.
+      #
+      # Under -race: compose writes what it reports from several goroutines
+      # (the app's log streams, its container monitor), so a writer that is
+      # not safe for that is a data race the plain run passes. The live tests
+      # had one in their own buffers until they moved to syncBuffer.
+      - name: Running Unit Tests (compose library)
+        run: go test -race -tags composelib -count=1 ./pkg/client/app/... ./pkg/platform/docker/...
+
+      # The mock-manager's concurrency guards — the match-count race and the
+      # hitMu/treesMu lock order — are only meaningful under -race: without
       # it their tests pass on a build that races, so they read as coverage
       # while proving nothing. That applies past the mock manager: util/ keeps the
       # loopback fallback's process-wide atomic.Bool, and syncMock, supervisor and
@@ -120,3 +151,26 @@ jobs:
       # ./pkg/agent/proxy/ alone, which dominates either way.
       - name: Running Race Detector (agent proxy)
         run: go test -race -count=1 ./pkg/agent/proxy/...
+
+      # Same argument, different subtree: pkg/agent/token holds the
+      # control-plane token behind a mutex that Session and Adopt share, and a
+      # reader that slipped between them would hand the agent an empty token
+      # and serve the whole control plane unauthenticated. Plain `go test`
+      # cannot see that — the guard's absence is a data race, not a failed
+      # assertion — so the test that covers it only proves anything here.
+      - name: Running Race Detector (agent control-plane token)
+        run: go test -race -count=1 ./pkg/agent/token/...
+
+      # Same argument for replay: its test-set loop runs the application, its
+      # watcher and the tests on goroutines of their own, and one defect its
+      # tests pin is a data race: the teardown closed a channel the app watcher
+      # sends on, after a drain that had given up on the app. Plain `go test`
+      # passes a race by, so TestRunTestSetDrainThatGivesUpLeavesTheWatcherAlone
+      # proves something only here. The whole package, not the tests named
+      # for that loop, so the rest of its concurrency is raced too. Measured
+      # under -race: 4m09s on 14 cores and 6m22s with the test binary pinned to
+      # 4 CPUs (the size of ubuntu-latest), with no race. -timeout 20m gives
+      # that run about three times its 4-CPU time before go test calls it
+      # hung; the default 10m gives it less than twice.
+      - name: Running Race Detector (replay)
+        run: go test -race -count=1 -timeout 20m ./pkg/service/replay/

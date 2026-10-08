@@ -69,6 +69,10 @@ type testSetSetup struct {
 
 	consumedMu    sync.Mutex
 	totalConsumed map[string]models.MockState
+	// perTestRegion names the per-test mocks the set handed the agent, the
+	// only ones whose consumed entries an agent that says so reads
+	// (keployPkg.ConsumedForAgent).
+	perTestRegion map[string]struct{}
 }
 
 func (s *testSetSetup) mergeConsumed(mocks []models.MockState) {
@@ -82,9 +86,15 @@ func (s *testSetSetup) mergeConsumed(mocks []models.MockState) {
 	}
 }
 
-func (s *testSetSetup) snapshotConsumed() map[string]models.MockState {
+// snapshotConsumed returns the consumed history to send to the agent: only the
+// entries of the set's per-test mocks when perTestOnly (the agent has said it
+// reads no others), all of them otherwise.
+func (s *testSetSetup) snapshotConsumed(perTestOnly bool) map[string]models.MockState {
 	s.consumedMu.Lock()
 	defer s.consumedMu.Unlock()
+	if perTestOnly && s.perTestRegion != nil {
+		return keployPkg.ConsumedForAgent(s.totalConsumed, s.perTestRegion)
+	}
 	out := make(map[string]models.MockState, len(s.totalConsumed))
 	for k, v := range s.totalConsumed {
 		out[k] = v
@@ -339,6 +349,8 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			DockerDelay: r.config.BuildDelay,
 			BuildDelay:  r.config.BuildDelay,
 			Mode:        models.MODE_TEST,
+
+			DisableHandshakeHold: r.config.Record.DisableHandshakeHold,
 		}); err != nil {
 			return nil, fmt.Errorf("setup failed: %w", err)
 		}
@@ -383,8 +395,10 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.MongoPassword = r.config.Test.MongoPassword
 		outOpts.SQLDelay = time.Duration(r.config.Test.Delay) * time.Second
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
-		outOpts.SchemaNoiseDetection = r.config.Test.SchemaNoiseDetection
-		outOpts.SchemaNoiseStrict = r.config.Test.SchemaNoiseStrict
+		outOpts.MockNoiseDetection = r.config.Test.NoiseDetection()
+		outOpts.MockNoiseStrict = r.config.Test.NoiseStrict()
+		outOpts.DisableStatefulMocks = r.config.Test.DisableStatefulMocks
+		outOpts.DisableMockCorrelation = r.config.Test.DisableMockCorrelation
 		outOpts.MysqlPorts = r.config.MysqlPorts
 		outOpts.DisableMysqlAutoDetect = r.config.DisableMysqlAutoDetect
 		outOpts.DisableMysqlEndpointDrift = r.config.DisableMysqlEndpointDrift
@@ -433,13 +447,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 
 	// Disk fetch uses the widest window; per-test containment is
 	// enforced by the agent via UpdateMockParams at step time.
-	filtered, err := r.mockDB.GetFilteredMocks(gCtx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	filtered, unfiltered, err := r.loadMocks(gCtx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get filtered mocks: %w", err)
-	}
-	unfiltered, err := r.mockDB.GetUnFilteredMocks(gCtx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
+		return nil, err
 	}
 
 	// mockKindByName lets the mismatch-reporting path filter DNS
@@ -504,6 +514,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		mockKindByName:   mockKindByName,
 		useMappingBased:  useMappingBased,
 		totalConsumed:    map[string]models.MockState{},
+		perTestRegion:    keployPkg.PerTestRegion(filtered),
 		cleanup:          cleanup,
 	}, nil
 }
@@ -516,6 +527,29 @@ func (r *Runner) strictMockWindow() bool {
 		return true
 	}
 	return r.config.Test.StrictMockWindow
+}
+
+// loadMocks returns the test set's per-test and session pools over the widest
+// window, from one read of its mock file when the mock store can (see
+// keployPkg.TestSetMocksReader), otherwise with one read per pool.
+func (r *Runner) loadMocks(ctx context.Context, testSetID string, mocksThatHaveMappings, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, err error) {
+	if reader, ok := r.mockDB.(keployPkg.TestSetMocksReader); ok {
+		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+		if err != nil {
+			// The pass that failed is the one the per-test pool was read in.
+			return nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+		}
+		return set.Filtered, set.Unfiltered, nil
+	}
+	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+	}
+	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
+	}
+	return filtered, unfiltered, nil
 }
 
 // loadMappingsForSet returns the full per-test-case mapping and the
@@ -637,10 +671,19 @@ func (r *Runner) sendPerTestParams(ctx context.Context, setup *testSetSetup, exp
 		BeforeTime:         tcRespTime,
 		UseMappingBased:    setup.useMappingBased,
 		MockMapping:        expected,
-		TotalConsumedMocks: setup.snapshotConsumed(),
+		TotalConsumedMocks: setup.snapshotConsumed(r.agentReadsConsumedPerTestOnly()),
 		StrictMockWindow:   r.strictMockWindow(),
 	}
 	return r.instrumentation.UpdateMockParams(ctx, params)
+}
+
+// agentReadsConsumedPerTestOnly reports whether the agent has said it reads the
+// consumed history only for the per-test mocks it stages (see
+// models.ConsumedScopeHeader); until then the whole history is sent, because
+// agents from v3.0.0-beta1 through v3.3.22 also applied it to the session pool.
+func (r *Runner) agentReadsConsumedPerTestOnly() bool {
+	s, ok := r.instrumentation.(keployPkg.ConsumedScopeReader)
+	return ok && s.AgentReadsConsumedPerTestOnly()
 }
 
 // checkMockMismatches filters DNS entries from both the expected and

@@ -6,6 +6,21 @@ name: Mock Mode Regression (Linux)
 # and asserts (a) the suite still passes entirely from mocks, (b) per-test
 # mappings are written via the scope API, and (c) a failing runner propagates a
 # non-zero exit code. Runs the PR `build` binary for both record and replay.
+# Another replays two concurrent workers under different named scopes and
+# asserts each is served only its own scope's mocks. Another replays a stateful
+# dependency (one request recorded several times) and asserts record order,
+# per worker and per scope. Another replays with the
+# network off (loopback only), as on a laptop with its Wi-Fi off, and records a
+# dependency on loopback the same way. Another runs the same binary where its
+# agent cannot start, and asserts the run fails at once with the code that
+# names why, the test never run. Another gives it a keploy.yml, an override
+# and reports that are not regular files (a FIFO, or a symlink to /dev/zero:
+# git stores the symlink, not a FIFO) and asserts each is refused fast, saying
+# why. Another hangs up on a recording's terminal, as the VS Code extension's
+# Stop does, and asserts keploy stops as it does on SIGTERM. The last replays
+# a recording with `keploy test --base-path` against an app that is already
+# running, which uses no agent and no mocks at all, and asserts the tests are
+# sent to the base path and the report and the exit code follow their result.
 on:
   workflow_call:
     inputs:
@@ -25,7 +40,7 @@ jobs:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     name: mock-mode (record_replay_build)
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -49,9 +64,97 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-linux.sh"
 
+      # `keploy mock record` must never destroy an existing recording when a
+      # re-record fails, is interrupted, or captures nothing. Records a baseline,
+      # re-records with an empty and a failing command (bytes must be unchanged),
+      # then re-records a different workload (fully replaced). (gaps W1/W14.)
+      - name: Run mock-mode non-destructive-record e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-nondestructive-linux.sh"
+
+      # An unknown verb on a command group (mock/ca/contract) must exit 8, not
+      # print help and exit 0 — a false success a CI job calling a mistyped verb
+      # would pass on. Pure CLI behaviour; no deps.
+      - name: Run mock CLI exit-codes e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-cli-exit-codes-linux.sh"
+
       - name: Run mock-mode parallel-scope e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-parallel-linux.sh"
+
+      # A stateful dependency (the same request recorded several times) must
+      # replay in record order then saturate — unscoped, per concurrent scoped
+      # worker, and from the start again for a re-run of a test.
+      - name: Run mock-mode stateful-dependency e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-stateful-linux.sh"
+
+      - name: Run mock-mode offline e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-offline-linux.sh"
+
+      - name: Run mock-mode agent-cannot-start e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-agent-cannot-start-linux.sh"
+
+      # A command that runs in Podman is refused at once by this build, with
+      # exit code 4 and where to get a keploy that records it, and never after
+      # a sudo prompt; before, it ran as a native process and recorded
+      # nothing. Every spelling of a podman invocation, record, test and mock.
+      - name: Run podman-refusal e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/podman-refusal-linux.sh"
+
+      # `keploy report` against keploy.yml files, overrides and reports that
+      # keploy must refuse -- fast, naming the file and why, never blocking or
+      # running out of memory -- and ones it must still read. The script lists
+      # each case.
+      - name: Run mock-mode config-guard e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-config-guard-linux.sh"
+
+      # `keploy mock record` on a terminal that hangs up -- SIGHUP, then the
+      # terminal closed, with and without a gap between the two -- must stop
+      # as it does on SIGTERM: by itself, with SIGTERM's exit code, leaving
+      # nothing running and no keploy-logs.txt. The script says why.
+      - name: Run mock-mode hang-up e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-hangup-linux.sh"
+
+      # `keploy test --base-path <url>` replays a recording against an app that
+      # is already running: no agent, nothing mocked. Every recorded test, a
+      # streamed one included, must be sent to the base path (not to localhost
+      # on the recorded port, under the recorded Host, or with its URL
+      # unescaped), and the report and the exit code must follow the result.
+      # A base path keploy cannot read is refused before any test is sent, a
+      # test the base path cannot go in is failed without being sent, and a
+      # run stopped part-way fails no test it did not finish. It had stopped
+      # before the first test, on a call to the agent it never starts, with no
+      # report and exit code 0.
+      - name: Run base-path replay e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/base-path-linux.sh"

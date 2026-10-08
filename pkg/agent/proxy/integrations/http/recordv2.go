@@ -3,6 +3,7 @@ package http
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
@@ -35,14 +37,26 @@ import (
 // the legacy path uses.
 //
 // recordV2 loops over request/response pairs for HTTP/1.1 keepalive /
-// pipelining. It exits cleanly on either stream reaching EOF or Close,
-// on ctx cancellation, or on a malformed-HTTP decode error (in which
-// case it marks the session's mock incomplete so the supervisor can
-// abort and fall through to passthrough).
+// pipelining. Each request starts where Session.NextRequest finds it, so its
+// response is what the server sent after the request was captured: server
+// bytes captured before it (the answer to a request in flight when the capture
+// began or the agent restarted, a 408 the server sent on its own) are never
+// paired with it, and NextRequest says which of them it reports: it ends
+// with Session.EndExchanges, however it ends, so they are reported though it
+// never reads the server's stream past them. It exits
+// cleanly on either stream reaching EOF or Close,
+// on ctx cancellation, or on a malformed-HTTP decode error (the error is
+// returned, and the supervisor falls through to passthrough). An exchange
+// it stops on and cannot record (a request or response that does not
+// decode, a mock that cannot be built) is reported first, as every parser
+// reports the exchange it stops on (Session.ReportStoppedOn). A request the
+// server's stream ends without answering is not: with no response there is
+// no mock to lose.
 func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 	if sess == nil {
 		return errors.New("recordV2: nil supervisor session")
 	}
+	defer sess.EndExchanges()
 	logger := sess.Logger
 	if logger == nil {
 		logger = h.Logger
@@ -65,7 +79,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// First chunk's ReadAt is the request arrival timestamp. We grab
 		// it via ReadChunk so the timestamp is carried regardless of
 		// what ReadBytes does underneath.
-		firstChunk, err := sess.ClientStream.ReadChunk()
+		firstChunk, err := nextRequestV2(sess)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				logger.Debug("V2 HTTP record: client stream ended at start of request", zap.Error(err))
@@ -76,10 +90,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			}
 			utils.LogError(logger, err, "V2 HTTP record: initial request read failed")
 			return err
-		}
-		if len(firstChunk.Bytes) == 0 {
-			// Empty synthetic chunk (channel close sentinel): treat as EOF.
-			return nil
 		}
 		reqTs := firstChunk.ReadAt
 		finalReq := append([]byte(nil), firstChunk.Bytes...)
@@ -98,7 +108,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			sess.MarkMockIncomplete("http decode error: request read failed: " + err.Error())
+			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: request read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to read full request")
 			return err
 		}
@@ -119,29 +129,55 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		firstRespChunk, err := sess.DestStream.ReadChunk()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
-				sess.MarkMockIncomplete("http decode error: server closed before response")
+				// The stream ended with nothing of a response, so there is
+				// no mock to lose and nothing is reported. The server
+				// closed without answering: the keep-alive idle-close race,
+				// in which the app's HTTP client retries the request on a
+				// new connection, where it is recorded. Or, in an
+				// observe-only capture, the client gave up and closed. Or
+				// the session closed the stream: the supervisor's abort,
+				// whose fallthrough leaves out the rest of the connection,
+				// or the recording's stop.
+				//
+				// A mark on the incomplete-mock flag does not make it a loss
+				// either. Response bytes the capture lost stopped this
+				// connection's capture, as this parser cannot re-align
+				// after a hole, and the capture leaves out the test cases
+				// the connection carries from the loss on itself (the
+				// relay's OnCaptureDesync). A write the relay could not
+				// make (write_error) is a request the server never got:
+				// the same race, when the app writes its request in more
+				// than one piece.
 				logger.Debug("V2 HTTP record: dest stream ended before response", zap.Error(err))
 				return nil
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			sess.MarkMockIncomplete("http decode error: initial response read failed: " + err.Error())
+			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: initial response read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: initial response read failed")
 			return err
-		}
-		if len(firstRespChunk.Bytes) == 0 {
-			sess.MarkMockIncomplete("http decode error: empty initial response chunk")
-			return nil
 		}
 		finalResp := append([]byte(nil), firstRespChunk.Bytes...)
 		resTs := firstRespChunk.WrittenAt
 
-		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp)
+		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, requestMethod(finalReq))
+		// The stream ended before readResponseV2 found the response's end.
+		// Where keploy relays the connection it has read all the server sent,
+		// so that is the server's doing. An observe-only capture carries only
+		// what the client read, so when its stream ended with the connection
+		// (EndedWithConnection) it is the client that stopped reading and
+		// closed: the response is recorded as the client read it
+		// (FinalHTTP.RespReadInPart).
+		streamEnded := false
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// Legacy encodeHTTP treats EOF after some bytes as
 				// end-of-response. Respect that shape: emit what we have.
+				// Only a stream that ran out (io.EOF) ended where its capture
+				// did: ErrClosed is its reader being closed, possibly with
+				// chunks still on their way.
+				streamEnded = errors.Is(err, io.EOF)
 				if !gotLastWritten.IsZero() {
 					resTs = gotLastWritten
 				}
@@ -149,7 +185,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				sess.MarkMockIncomplete("http decode error: response read failed: " + err.Error())
+				sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: response read failed: "+err.Error())
 				utils.LogError(logger, err, "V2 HTTP record: failed to read full response")
 				return err
 			}
@@ -163,19 +199,54 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			Resp:             finalResp,
 			ReqTimestampMock: reqTs,
 			ResTimestampMock: resTs,
+			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
 		}, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
-			sess.MarkMockIncomplete("http decode error: " + err.Error())
+			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to build mock")
 			return err
 		}
 		if mock != nil {
+			// EmitMock takes the incomplete-mock flag itself. Clearing it
+			// again here would wipe a mark set while EmitMock delivered
+			// (AddMock can block for its send budget): that mark is the
+			// next exchange's, whose mock would then be recorded with
+			// nothing reporting it.
 			if emitErr := sess.EmitMock(mock); emitErr != nil {
 				return emitErr
 			}
+		} else {
+			// Nothing recorded for this exchange (a passthrough), so a mark
+			// set during it must not leave out the next exchange's mock.
+			sess.MarkMockComplete()
 		}
-		sess.MarkMockComplete()
 	}
+}
+
+// nextRequestV2 starts the next exchange (Session.NextRequest) and takes its
+// request's first chunk. A chunk with no request bytes, nothing but empty
+// lines (emptyLinesBefore), is no part of a request, so it is taken first, and
+// the request starts at the client's next chunk: its response is what the
+// server sent after that one was captured, and it is the connection's first
+// request when the capture began after the CRLF of a request it does not have.
+// The request's first chunk therefore always holds request bytes.
+func nextRequestV2(sess *supervisor.Session) (fakeconn.Chunk, error) {
+	for {
+		c, err := sess.ClientStream.Peek()
+		if err != nil {
+			return fakeconn.Chunk{}, err
+		}
+		if emptyLinesBefore(c.Bytes) < len(c.Bytes) {
+			break
+		}
+		if _, err := sess.ClientStream.ReadChunk(); err != nil {
+			return fakeconn.Chunk{}, err
+		}
+	}
+	if _, err := sess.NextRequest(models.HTTP, false); err != nil {
+		return fakeconn.Chunk{}, err
+	}
+	return sess.ClientStream.ReadChunk()
 }
 
 // readRequestV2 is the V2 counterpart of HandleChunkedRequests. It
@@ -187,8 +258,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 // Returns io.EOF if stream closes before the body is fully consumed.
 // Returns a decode error for malformed Content-Length / body framing.
 func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, finalReq *[]byte) error {
-	// 1. Complete headers.
-	for !hasCompleteHeaders(*finalReq) {
+	// 1. Complete headers: complete when messageHead finds the header section,
+	// not at the first "\r\n\r\n", which can be empty lines in front of the
+	// request line. Those are dropped (dropEmptyLinesBeforeRequest).
+	head, bodyStart, _, ok := messageHead(*finalReq, false)
+	for ; !ok; head, bodyStart, _, ok = messageHead(*finalReq, false) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -196,25 +270,18 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 		if err != nil {
 			return err
 		}
-		if len(chunk.Bytes) == 0 {
-			return io.EOF
-		}
 		*finalReq = append(*finalReq, chunk.Bytes...)
 	}
+	bodyStart -= dropEmptyLinesBeforeRequest(finalReq)
 
-	contentLengthHeader, transferEncodingHeader := parseHeaders(*finalReq)
+	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
 			return fmt.Errorf("invalid content-length: %w", err)
 		}
-		headerEnd := bytes.Index(*finalReq, []byte("\r\n\r\n"))
-		if headerEnd < 0 {
-			return fmt.Errorf("header terminator missing")
-		}
-		bodyLength := len(*finalReq) - headerEnd - 4
-		remaining := contentLength - bodyLength
+		remaining := contentLength - (len(*finalReq) - bodyStart)
 		for remaining > 0 {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -222,9 +289,6 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 			chunk, err := stream.ReadChunk()
 			if err != nil {
 				return err
-			}
-			if len(chunk.Bytes) == 0 {
-				return io.EOF
 			}
 			*finalReq = append(*finalReq, chunk.Bytes...)
 			remaining -= len(chunk.Bytes)
@@ -234,7 +298,18 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 
 	if transferEncodingHeader != "" &&
 		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-		for !bytes.HasSuffix(*finalReq, chunkedTerminator) {
+		// Frame the chunks (see chunkedBody): a suffix test on the buffer ended
+		// a body whose data ends like "0\r\n\r\n" at a chunk boundary, and
+		// never ended one that carries trailers.
+		var body chunkedBody
+		for {
+			done, err := body.complete(*finalReq)
+			if err != nil {
+				return err
+			}
+			if done {
+				return nil
+			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -242,12 +317,8 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 			if err != nil {
 				return err
 			}
-			if len(chunk.Bytes) == 0 {
-				return io.EOF
-			}
 			*finalReq = append(*finalReq, chunk.Bytes...)
 		}
-		return nil
 	}
 
 	// No body framing: the request is headers-only (e.g. GET / HTTP/1.1
@@ -265,17 +336,20 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 //   - Pull more chunks until response headers are complete.
 //   - Parse Content-Length / Transfer-Encoding from headers.
 //   - If Content-Length, read until the declared body length is met.
-//   - If Transfer-Encoding chunked, read until the last-chunk marker
-//     "0\r\n\r\n" appears as a suffix (the fix in SAP bug #4110).
+//   - If Transfer-Encoding chunked, read until the chunked framing ends
+//     (last-chunk, trailer section, final CRLF).
 //
 // Returns (lastWrittenAt, err). err may be io.EOF for the legitimate
 // "server closed after sending a full response" case; the caller
 // decides whether to emit a mock.
-func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte) (time.Time, error) {
+func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string) (time.Time, error) {
 	var lastWr time.Time
 
-	// 1. Complete headers.
-	for !hasCompleteHeaders(*finalResp) {
+	// 1. Complete headers: the final response's, past any interim 1xx.
+	for {
+		if _, _, _, ok := messageHead(*finalResp, true); ok {
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			return lastWr, err
 		}
@@ -286,26 +360,23 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		if !chunk.WrittenAt.IsZero() {
 			lastWr = chunk.WrittenAt
 		}
-		if len(chunk.Bytes) == 0 {
-			return lastWr, io.EOF
-		}
 		*finalResp = append(*finalResp, chunk.Bytes...)
 	}
 
-	// 2. Parse headers for body framing.
-	contentLengthHeader, transferEncodingHeader := parseHeaders(*finalResp)
+	// 2. Parse the final response's headers for body framing. The answer to
+	// a HEAD, a 204 and a 304 have no body whatever the headers say.
+	head, bodyStart, status, _ := messageHead(*finalResp, true)
+	if responseHasNoBody(reqMethod, status) {
+		return lastWr, nil
+	}
+	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
 			return lastWr, fmt.Errorf("invalid content-length: %w", err)
 		}
-		headerEnd := bytes.Index(*finalResp, []byte("\r\n\r\n"))
-		if headerEnd < 0 {
-			return lastWr, fmt.Errorf("header terminator missing")
-		}
-		bodyLength := len(*finalResp) - headerEnd - 4
-		remaining := contentLength - bodyLength
+		remaining := contentLength - (len(*finalResp) - bodyStart)
 		for remaining > 0 {
 			if err := ctx.Err(); err != nil {
 				return lastWr, err
@@ -317,9 +388,6 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 			if !chunk.WrittenAt.IsZero() {
 				lastWr = chunk.WrittenAt
 			}
-			if len(chunk.Bytes) == 0 {
-				return lastWr, io.EOF
-			}
 			*finalResp = append(*finalResp, chunk.Bytes...)
 			remaining -= len(chunk.Bytes)
 		}
@@ -328,11 +396,17 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 
 	if transferEncodingHeader != "" &&
 		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-		// Chunked: read until we see the last-chunk terminator as a
-		// suffix of finalResp. pUtil terminator detection (see chunk.go
-		// chunkedTerminator) uses HasSuffix so a body chunk that shares
-		// a TLS record with the terminator still exits cleanly.
-		for !bytes.HasSuffix(*finalResp, chunkedTerminator) {
+		// Chunked: read until the body's chunked framing ends (see
+		// chunkedBody), not until finalResp ends in "0\r\n\r\n".
+		body := chunkedBody{response: true}
+		for {
+			done, err := body.complete(*finalResp)
+			if err != nil {
+				return lastWr, err
+			}
+			if done {
+				return lastWr, nil
+			}
 			if err := ctx.Err(); err != nil {
 				return lastWr, err
 			}
@@ -343,12 +417,8 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 			if !chunk.WrittenAt.IsZero() {
 				lastWr = chunk.WrittenAt
 			}
-			if len(chunk.Bytes) == 0 {
-				return lastWr, io.EOF
-			}
 			*finalResp = append(*finalResp, chunk.Bytes...)
 		}
-		return lastWr, nil
 	}
 
 	// Neither Content-Length nor chunked: read until EOF (RFC 7230
@@ -365,17 +435,18 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		if !chunk.WrittenAt.IsZero() {
 			lastWr = chunk.WrittenAt
 		}
-		if len(chunk.Bytes) == 0 {
-			return lastWr, io.EOF
-		}
 		*finalResp = append(*finalResp, chunk.Bytes...)
 	}
 }
 
-// parseHeaders extracts Content-Length and Transfer-Encoding header
-// values (if any) from an HTTP message whose headers end with CRLFCRLF.
-// The parse is the same loose style the chunk.go helpers use: split on
-// '\n', trim '\r', skip malformed lines.
+// parseHeaders extracts the body-framing Content-Length and
+// Transfer-Encoding header values (if any) from an HTTP message whose
+// headers end with CRLFCRLF. The parse is the same loose style the chunk.go
+// helpers use: split on '\n', trim '\r', skip malformed lines.
+//
+// A chunked Transfer-Encoding overrides a Content-Length sent with it (RFC
+// 9112 §6.3), so contentLength is "" then: framing such a message by its
+// Content-Length would end it where its peer does not.
 func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 	lines := strings.Split(string(msg), "\n")
 	for _, line := range lines {
@@ -395,6 +466,9 @@ func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 		case "transfer-encoding":
 			transferEncoding = val
 		}
+	}
+	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+		contentLength = ""
 	}
 	return contentLength, transferEncoding
 }
@@ -445,6 +519,95 @@ func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
 	return ok && lane.IsPoll()
 }
 
+// parseFinalResponse parses the response m records: the final one, past any
+// interim 1xx responses in front of it (net/http does not skip them), which are
+// read off the same reader one after another, so their line endings do not
+// matter. One net/http will not read that way (an interim with a malformed
+// header line) is framed by its blank lines instead (finalResponse), as it was
+// before the interims were read. A response its client read only in part
+// (m.RespReadInPart) that does not parse whole is parsed as the client had it
+// (responseAsRead, from where the final response begins), and cut reports so.
+// What parses as it stands is never read that way: a bare-LF header section,
+// which responseAsRead cannot frame, still parses whole.
+//
+// An interim response is never recorded as the answer: one whose final
+// response never arrived (the stream ended after it, in its head, or in the
+// final one's status line) is an error wrapping io.ErrUnexpectedEOF, as a
+// response cut short is.
+func parseFinalResponse(m *FinalHTTP, req *http.Request) (resp *http.Response, cut bool, err error) {
+	rd := bytes.NewReader(m.Resp)
+	br := bufio.NewReader(rd)
+	interim, final := 0, 0 // final: where the response after the interims begins
+	for {
+		resp, err = http.ReadResponse(br, req)
+		if err != nil || !isInterimStatus(resp.StatusCode) {
+			break
+		}
+		interim = resp.StatusCode // no body: the next response follows it
+		final = len(m.Resp) - rd.Len() - br.Buffered()
+	}
+	if err == nil {
+		return resp, false, nil
+	}
+	if framed, ferr := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResponse(m.Resp))), req); ferr == nil && !isInterimStatus(framed.StatusCode) {
+		return framed, false, nil
+	}
+	if m.RespReadInPart {
+		asRead, rerr := http.ReadResponse(bufio.NewReader(bytes.NewReader(responseAsRead(m.Resp[final:]))), req)
+		if rerr == nil && !isInterimStatus(asRead.StatusCode) {
+			return asRead, true, nil
+		}
+	}
+	if interim != 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+		return nil, false, fmt.Errorf("parse response: the final response after a %d never arrived whole: %w",
+			interim, io.ErrUnexpectedEOF)
+	}
+	return nil, false, fmt.Errorf("parse response: %w", err)
+}
+
+// isInterimStatus reports whether code is an interim response (RFC 9110
+// §15.2), which a final response follows. Not 101: after it the connection
+// carries another protocol.
+func isInterimStatus(code int) bool {
+	return code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
+}
+
+// decompressReadInPart is pkg.Decompress for a body its client read only in
+// part: what decodes before the cut, which is as much as the client could
+// decode. A body cut before any of it decodes (in the gzip header, or none of
+// it read) decodes to nothing. The cut is expected here, so it is not logged as
+// a failure. An encoding it does not decode is kept as it is, as Decompress
+// keeps it.
+func decompressReadInPart(encoding string, data []byte, limit int64) ([]byte, error) {
+	var r io.Reader
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(data))
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return []byte{}, nil // cut in its header
+		}
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		r = zr
+	case "br":
+		r = brotli.NewReader(bytes.NewReader(data))
+	case "", "identity":
+		return data, nil
+	default:
+		return data, nil
+	}
+	out, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if int64(len(out)) > limit {
+		return nil, fmt.Errorf("%w of %d bytes (possible decompression bomb)", pkg.ErrDecompressedTooLarge, limit)
+	}
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, err
+	}
+	return out, nil
+}
+
 // buildHTTPMock constructs a *models.Mock with the same shape the legacy
 // parseFinalHTTP produces. Returns (nil, nil) when the request is a
 // pass-through (IsPassThrough true) so the caller skips emission.
@@ -485,19 +648,36 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 	}
 
-	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(m.Resp)), req)
+	respParsed, cut, err := parseFinalResponse(m, req)
 	if err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
+		return nil, err
 	}
 
 	var respBody []byte
 	if respParsed.Body != nil {
 		respBody, err = io.ReadAll(respParsed.Body)
+		// A body its client read in part is recorded as far as it read it:
+		// ReadAll returns what it read before the cut. Replay serves it with
+		// its own length (the Content-Length set below).
 		if err != nil {
-			return nil, fmt.Errorf("read response body: %w", err)
+			if !m.RespReadInPart || !errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, fmt.Errorf("read response body: %w", err)
+			}
+			cut = true
 		}
-		if respParsed.Header.Get("Content-Encoding") != "" {
-			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody, pkg.MaxDecompressedSize)
+		if enc := respParsed.Header.Get("Content-Encoding"); enc != "" {
+			// Read in part, a body with no length of its own (close-delimited)
+			// cannot be known to be whole either: it decodes as far as it goes.
+			// A whole one decodes the same either way.
+			//
+			// Not a response with no body by rule (to a HEAD, a 204, a 304):
+			// its encoding describes a body it does not carry, and it is
+			// recorded, or not, as a whole one is.
+			if (cut || m.RespReadInPart) && !responseHasNoBody(req.Method, respParsed.StatusCode) {
+				respBody, err = decompressReadInPart(enc, respBody, pkg.MaxDecompressedSize)
+			} else {
+				respBody, err = pkg.Decompress(h.Logger, enc, respBody, pkg.MaxDecompressedSize)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("decompress response body: %w", err)
 			}
@@ -568,6 +748,10 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 				StatusCode: respParsed.StatusCode,
 				Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 				Body:       string(respBody),
+
+				// Replay serves this response: keep what it takes to serve a
+				// repeated header (Set-Cookie) on its own lines.
+				HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 			},
 			Created:          time.Now().Unix(),
 			ReqTimestampMock: m.ReqTimestampMock,

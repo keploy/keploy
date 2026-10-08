@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,12 +20,15 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/config/loader"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 )
 
@@ -216,6 +220,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
+		// The overwrite consent, as a flag. Without one, the only way past
+		// the "it already exists" prompt was to answer it -- and in CI there
+		// is nobody to answer, so `config --generate` quietly wrote nothing
+		// and exited 0. Named to match `config defaults -o FILE --force`.
+		cmd.Flags().Bool("force", false, "Overwrite an existing keploy.yml without asking")
 	case "templatize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringSliceP("testsets", "t", c.cfg.Templatize.TestSets, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
@@ -249,6 +258,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable test-mock mapping production during record")
 		}
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Bool("disable-handshake-hold", false, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers (a refused or unreachable dependency then reads as EOF, not a connect error)")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
@@ -309,6 +319,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pid of the keploy client process; the launcher passes os.Getpid())")
+		// Only the PATH travels here. The token itself stays in a 0600 file,
+		// because argv is world-readable through /proc/<pid>/cmdline and `ps`,
+		// and the local users that would read it there are the ones this token
+		// exists to keep out of the control plane.
+		cmd.Flags().String("token-file", "", "path to the file holding this session's agent control-plane token (set by the keploy client)")
 		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.Agent.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -326,6 +341,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Bool("disable-handshake-hold", c.cfg.Agent.DisableHandshakeHold, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers")
 		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
 		// Agent-side mirrors of the record command's upstream-TLS flags.
@@ -347,6 +363,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// relocation (the wrapped process is a test runner, not a server).
 		cmd.Flags().Bool("mock-mode", c.cfg.Agent.MockMode, "Internal: agent-side mirror of `keploy mock` mode; disables ingress port relocation. Set by the orchestrator, not by users.")
 		_ = cmd.Flags().MarkHidden("mock-mode")
+		cmd.Flags().Bool("record-requests", c.cfg.Agent.RecordRequests, "Internal: keeps the ingress hooks on in mock mode. Set by the orchestrator, not by users.")
+		_ = cmd.Flags().MarkHidden("record-requests")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -449,7 +467,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "[DEPRECATED] This flag is ignored. Replay is now always deterministic.")
 		_ = cmd.Flags().MarkDeprecated("fallBack-on-miss", "replay is now always deterministic; this flag is ignored")
 		cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
-		cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
+		cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine. Write it as an http or https URL with a host (http://staging:8080/api) or as a path prefix (/api). Its host and port are where the HTTP tests are sent, under that host's name (test.host is not used, a test.port still replaces the port); gRPC tests go to that host on the port they were recorded on (or test.grpcPort). No outgoing call is mocked")
 		cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
 		cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 		cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
@@ -458,6 +476,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
+		cmd.Flags().Bool("mock-noise-detection", c.cfg.Test.MockNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared mock-noise adapter")
+		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter")
 		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared schema-noise adapter")
 		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared schema-noise adapter. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
 		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping (default behaviour demotes such cases to OBSOLETE). The per-test mappingDiff block is still written for diagnostics.")
@@ -513,8 +533,10 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"cmdType":                   "cmd-type",
 		"buildDelay":                "build-delay",
 		"containerName":             "container-name",
+		"fromContainer":             "from-container",
 		"networkName":               "network-name",
 		"passThroughPorts":          "pass-through-ports",
+		"disableHandshakeHold":      "disable-handshake-hold",
 		"memoryLimit":               "memory-limit",
 		"maxMemoryPerConnection":    "max-memory-per-conn",
 		"queueSize":                 "queue-size",
@@ -547,6 +569,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"disableMapping":            "disable-mapping",
 		"compareAll":                "compare-all",
 		"schemaMatch":               "schema-match",
+		"mockNoiseDetection":        "mock-noise-detection",
+		"mockNoiseStrict":           "mock-noise-strict",
 		"schemaNoiseDetection":      "schema-noise-detection",
 		"schemaNoiseStrict":         "schema-noise-strict",
 		"updateTestMapping":         "update-test-mapping",
@@ -608,7 +632,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	// expected to persist keploy.yml for reuse across invocations.
 	// The `agent` subcommand is a worker process spawned by the
 	// parent keploy: it still reads an existing keploy.yml via
-	// viper.ReadInConfig() in PreProcessFlags to pick up the same
+	// loader.Read in PreProcessFlags to pick up the same
 	// settings the parent resolved, but it has no use for writing
 	// a fresh one if the file is missing — the parent has already
 	// handed it the effective config via CLI flags + env. Running
@@ -643,7 +667,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	viper.SetEnvPrefix("KEPLOY")
 
 	// 3) Nested flag binding (your existing util)
-	if err := utils.BindFlagsToViper(c.logger, cmd, ""); err != nil {
+	if err := utils.BindFlagsToViper(c.logger, cmd, mockViperPrefix(cmd)); err != nil {
 		errMsg := "failed to bind cmd specific flags to viper"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
@@ -667,21 +691,31 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 
 	c.logger.Debug("config path is ", zap.String("configPath", configPath))
 
-	// 5) Read base keploy.yml exactly like before
-	viper.SetConfigName("keploy")
+	// 5) Read the base config: keploy.yaml or keploy.yml in configPath, and
+	// nothing else. viper's own lookup -- SetConfigName("keploy") with a
+	// config type set -- also took keploy.json/.toml/.env/.ini/... and a file
+	// named just `keploy`, all parsed as YAML. `keploy` is the binary itself
+	// when it is downloaded into the project, so a command run beside it
+	// stopped with "failed to read config file" (the YAML parser rejecting the
+	// binary: "invalid trailing UTF-8 octet" on macOS, "control characters are
+	// not allowed" on Linux) until a keploy.yml existed. Under the default
+	// --path, <path>/keploy is also where keploy keeps its tests, which
+	// utils.EnsureKeployPathIsFolder explains.
+	configFile := loader.Find(configPath)
 	viper.SetConfigType("yml")
-	viper.AddConfigPath(configPath)
-
-	if err := viper.ReadInConfig(); err != nil {
-		var notFound viper.ConfigFileNotFoundError
-		if !errors.As(err, &notFound) {
-			errMsg := "failed to read config file"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
+	if configFile == "" {
 		IsConfigFileFound = false
 		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
+		// keploy.yml is a file of the repository keploy runs in, which a cloned
+		// repo decides: loader.Read is viper's read of it, bounded -- a FIFO,
+		// a link to /dev/zero or a file past keploy's limits is refused, where
+		// viper.ReadInConfig blocked for good or ran out of memory.
+		if err := loader.Read(viper.GetViper(), configFile); err != nil {
+			errMsg := "failed to read config file"
+			utils.LogError(c.logger, err, errMsg, zap.String("file", configFile))
+			return errors.New(errMsg)
+		}
 		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the application folder (current working directory)
 		lastDir, err := utils.GetLastDirectory()
 		if err != nil {
@@ -702,8 +736,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		overridePath := filepath.Join(appDir, fmt.Sprintf("%s.keploy.yml", lastDir))
 
 		if _, statErr := os.Stat(overridePath); statErr == nil {
-			viper.SetConfigFile(overridePath)
-			if err := viper.MergeInConfig(); err != nil {
+			if err := loader.Merge(viper.GetViper(), overridePath); err != nil {
 				errMsg := fmt.Sprintf("failed to merge override config file: %s", overridePath)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
@@ -729,6 +762,14 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	return nil
 }
 
+// mockViperPrefix keeps `keploy mock record` flags out of the record.* config section, whose passThroughPorts holds rules, not ports.
+func mockViperPrefix(cmd *cobra.Command) string {
+	if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		return "mock"
+	}
+	return ""
+}
+
 // mentionsDockerBinary reports whether the command actually invokes docker,
 // as opposed to merely containing the word. Substring matching let
 // "./run-docker.sh" through — a wrapper by any reading, and the exact naming
@@ -741,13 +782,19 @@ func mentionsDockerBinary(command string) bool {
 			base = base[j+1:] // /usr/bin/docker -> docker
 		}
 		// The v1 binary takes any subcommand, so the name alone is enough.
-		if base == "docker-compose" {
+		// podman-compose is the same shape.
+		if base == "docker-compose" || base == "podman-compose" {
 			return true
 		}
 		// A bare "docker" token is not enough: `npm run docker` runs a script
 		// called docker. Require a subcommand that actually launches
-		// something, which is what the docker-run/docker-start modes rewrite.
-		if base == "docker" && i+1 < len(fields) {
+		// something, which is what the docker-run mode rewrites,
+		// and require it next: modifyDockerRun finds the run subcommand only
+		// right after the engine word (or `container`), and would find none
+		// in `docker --log-level=debug run`. Podman's CLI takes the same
+		// subcommands and flags; whether this build can drive it is
+		// refuseEngineCommand's to say.
+		if (base == "docker" || base == "podman") && i+1 < len(fields) {
 			switch fields[i+1] {
 			case "run", "start", "compose", "container":
 				return true
@@ -755,6 +802,79 @@ func mentionsDockerBinary(command string) bool {
 		}
 	}
 	return false
+}
+
+// refuseEngineCommand refuses a command that starts its application in a
+// container keploy cannot capture:
+//
+//   - one on a container engine this build cannot drive (engine.Unsupported);
+//   - one keploy would run as a host process: an engine invocation, as the
+//     command's application (engine.Invocation: a command that only starts
+//     dependencies in containers runs its application on the host, and is
+//     fine), that the kind detection does not spell out (sudo -E docker run,
+//     /usr/bin/podman run, the engine's own flags before the subcommand, a
+//     build before it, a subcommand keploy does not drive such as podman kube
+//     play). That resolves to native, keploy runs the engine CLI as the
+//     application, and the container it starts is out of sight: the run used
+//     to end with nothing recorded, and no word why.
+//
+// Callers pass the command that will actually run (a base path or
+// --from-container sets it aside, and then nothing is refused), and call it
+// before anything that could need root or write the keploy folder, so the
+// refusal never follows a sudo prompt.
+//
+// --cmd-type native as given, the user insisting the command runs on the
+// host, lets both through. Any other explicit kind lets the second through:
+// the user says it starts a container, and the docker path takes it as
+// written.
+func refuseEngineCommand(cmd *cobra.Command, command string) error {
+	if command == "" {
+		return nil
+	}
+	// The flag as given, not the type it resolved to: `--cmd-type=` resolves
+	// by detection, which is native for exactly the spellings this catches.
+	explicit := ""
+	if cmd.Flags().Changed("cmd-type") {
+		if v, err := cmd.Flags().GetString("cmd-type"); err == nil {
+			explicit = strings.ToLower(strings.TrimSpace(v))
+		}
+	}
+	if utils.CmdType(explicit) == utils.Native {
+		return nil
+	}
+	// Retrying cannot help either way: the command, or the keploy running
+	// it, has to change.
+	kind := utils.CmdType(explicit)
+	switch kind {
+	case "":
+		kind = utils.FindDockerCmd(command)
+	case utils.DockerRun, utils.DockerStart, utils.DockerCompose, utils.FromContainer:
+	default:
+		return nil // not a kind: resolveCommandType says so, which is the mistake to fix
+	}
+	if utils.IsDockerCmd(kind) {
+		// A container kind runs on the engine the command drives, detached
+		// or not.
+		if name := engine.Detect(command); !engine.Supported(name) {
+			utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+			return engine.Unsupported(name)
+		}
+		return nil
+	}
+	name, ok := engine.Invocation(command)
+	if !ok {
+		return nil
+	}
+	if !engine.Supported(name) {
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return engine.Unsupported(name)
+	}
+	utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+	return fmt.Errorf("keploy captures a container's traffic only from a command that starts with "+
+		"`%[1]s run`, `%[1]s compose` or `%[1]s-compose`, and this one would run as a host process, "+
+		"where keploy captures nothing from the container it starts. Write the command that starts the "+
+		"application that way: nothing in front of it (no sudo, path or wrapper) and no %[1]s option "+
+		"before the subcommand. Or pass --cmd-type native if the application itself runs on the host", name)
 }
 
 // resolveCommandType decides the CommandType for a record/test run.
@@ -778,11 +898,33 @@ func mentionsDockerBinary(command string) bool {
 // in config is warned about rather than silently ignored, so the trap that
 // made this flag inert for so long is at least visible.
 func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configured string) (string, error) {
+	kind, err := resolveCommandKind(logger, cmd, command, configured)
+	if err == nil && utils.CmdType(kind) == utils.DockerStart {
+		// Detected or given: it cannot work, so it is refused before
+		// anything starts (and without a sudo prompt: ShouldReexecWithSudo
+		// leaves it alone).
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return "", engine.StartUnsupported(engine.Detect(command))
+	}
+	return kind, err
+}
+
+// resolveCommandKind is resolveCommandType before the docker-start refusal.
+func resolveCommandKind(logger *zap.Logger, cmd *cobra.Command, command, configured string) (string, error) {
 	if cmd.Flags().Changed("cmd-type") {
 		// Normalised the same way FindDockerCmd normalises what it matches
 		// against, so `--cmd-type Docker-Compose` is not a fatal typo.
 		explicit := strings.ToLower(strings.TrimSpace(configured))
 		switch kind := utils.CmdType(explicit); kind {
+		case utils.FromContainer:
+			// --from-container is registered on the mock subcommands only, so
+			// on record/test this value names a mode the caller has no way to
+			// supply a container for. Refuse it where it cannot work rather
+			// than resolving to a kind that fails later without saying why.
+			if cmd.Flags().Lookup("from-container") == nil {
+				return "", fmt.Errorf("--cmd-type %s is only supported by `keploy mock record` and `keploy mock replay`", utils.FromContainer)
+			}
+			return explicit, nil
 		case utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose:
 			// docker-run and docker-start need to REWRITE the command —
 			// SetupDocker splices `--pid=container:…  --network=container:…`
@@ -817,8 +959,8 @@ func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configu
 			return string(utils.FindDockerCmd(command)), nil
 		default:
 			return "", fmt.Errorf(
-				"invalid --cmd-type value %q: allowed values are %q, %q, %q, and %q",
-				configured, utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose)
+				"invalid --cmd-type value %q: allowed values are %q, %q, %q, %q, and %q",
+				configured, utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose, utils.FromContainer)
 		}
 	}
 
@@ -826,7 +968,8 @@ func resolveCommandType(logger *zap.Logger, cmd *cobra.Command, command, configu
 	// Only warn when it would actually have made a difference. A config that
 	// merely agrees with auto-detection is not being ignored in any way the
 	// user can observe, and warning on every such run would be noise.
-	if kind := utils.CmdType(strings.ToLower(strings.TrimSpace(configured))); utils.IsDockerCmd(kind) && kind != detected {
+	if kind := utils.CmdType(strings.ToLower(strings.TrimSpace(configured))); utils.IsDockerCmd(kind) &&
+		kind != utils.FromContainer && kind != detected {
 		logger.Warn("cmdType in the config file is not honoured; pass --cmd-type on the command line instead",
 			zap.String("cmdType", configured),
 			zap.String("using", string(detected)),
@@ -943,6 +1086,42 @@ func isMachineReadableOutput(cmd *cobra.Command, cfgFormat string, jsonOutput bo
 // reportCmdName is the only command whose stdout is a report document, and so
 // the only one whose --format value can make stdout machine-readable.
 const reportCmdName = "report"
+
+// keployFolder turns a --path value into <path>/keploy, the folder keploy keeps
+// its tests, mocks and reports in, and refuses a file there
+// (utils.EnsureKeployPathIsFolder). Every command in this file that works in
+// that folder resolves it here and nowhere else. A command that skipped the
+// check failed later with "readdirent <path>/keploy: not a directory", or did
+// nothing, and exited 0.
+//
+// On a refusal it returns "": callers assign the result to cfg.Path, and main
+// restores the ownership of whatever cfg.Path names after the command.
+func (c *CmdConfigurator) keployFolder(path string) (string, error) {
+	folder, err := c.keployFolderPath(path)
+	if err != nil {
+		return "", err
+	}
+	if err := utils.EnsureKeployPathIsFolder(folder); err != nil {
+		utils.LogError(c.logger, err, "cannot use the keploy folder")
+		return "", err
+	}
+	return folder, nil
+}
+
+// keployFolderPath is keployFolder's resolution alone, with no look at what is
+// there. Only a run that never reads or writes the folder uses it directly:
+// `report --report-path <file>` reads that one file and nothing else, so a
+// file at <path>/keploy -- the downloaded binary, say -- is no reason to
+// refuse it. cfg.Path still gets the folder, as before the check existed:
+// the stores are built from it whether or not the run opens them.
+func (c *CmdConfigurator) keployFolderPath(path string) (string, error) {
+	absPath, err := utils.GetAbsPath(path)
+	if err != nil {
+		utils.LogError(c.logger, err, "error while getting absolute path")
+		return "", errors.New("failed to get the absolute path")
+	}
+	return absPath + "/keploy", nil
+}
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	// The --json flag isn't registered on every subcommand (record / agent
@@ -1095,7 +1274,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
 
 		testSets, err := cmd.Flags().GetStringSlice("test-sets")
 		if err != nil {
@@ -1137,6 +1315,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		c.cfg.Report.ReportPath = reportPath
+
+		// With --report-path the report is that one file (GenerateReport reads
+		// it and nothing else), so what sits at <path>/keploy does not matter.
+		// Without it, the report comes from the keploy folder, which has to be
+		// one.
+		if reportPath != "" {
+			c.cfg.Path, err = c.keployFolderPath(path)
+		} else {
+			c.cfg.Path, err = c.keployFolder(path)
+		}
+		if err != nil {
+			return err
+		}
 
 		// whether to print entire body for comparison
 		fb, err := cmd.Flags().GetBool("full")
@@ -1187,7 +1378,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+		if c.cfg.Path, err = c.keployFolder(path); err != nil {
+			return err
+		}
 
 		testSets, err := cmd.Flags().GetStringSlice("test-sets")
 		if err != nil {
@@ -1204,7 +1397,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+		if c.cfg.Path, err = c.keployFolder(path); err != nil {
+			return err
+		}
 
 		testSets, err := cmd.Flags().GetStringSlice("test-sets")
 		if err != nil {
@@ -1222,7 +1417,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 
-		c.cfg.Contract.Path = utils.ToAbsPath(c.logger, path)
+		if c.cfg.Path, err = c.keployFolder(path); err != nil {
+			return err
+		}
+		c.cfg.Contract.Path = c.cfg.Path
 
 		services, err := cmd.Flags().GetStringSlice("services")
 		if err != nil {
@@ -1250,8 +1448,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		}
 
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
-
 	case "config":
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
@@ -1274,7 +1470,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
-			c.cfg.Contract.Path = utils.ToAbsPath(c.logger, path)
+			if c.cfg.Path, err = c.keployFolder(path); err != nil {
+				return err
+			}
+			c.cfg.Contract.Path = c.cfg.Path
 
 			services, err := cmd.Flags().GetStringSlice("services")
 			if err != nil {
@@ -1302,9 +1501,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-
-			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 			return nil
+		}
+
+		// Before the command type: refusing an engine does not depend on it,
+		// and the --cmd-type checks would otherwise answer a podman command
+		// with a docker message. A base path sets the command aside below:
+		// nothing runs it.
+		runs := c.cfg.Command
+		if c.cfg.Test.BasePath != "" {
+			runs = ""
+		}
+		if err := refuseEngineCommand(cmd, runs); err != nil {
+			return err
 		}
 
 		// set the command type
@@ -1314,14 +1523,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.CommandType = commandType
 		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !nativeCommandSupportedHere() {
-			// Point at the editions that DO have a backend for this platform
-			// rather than only stating the refusal. Native interception on
-			// macOS and Windows ships in the Community and Enterprise editions;
-			// this build intercepts with eBPF, which those platforms lack.
-			return fmt.Errorf("running an application directly on %s/%s is not supported by this build of Keploy, which intercepts traffic with eBPF (Linux only).\n\n"+
-				"  - To record and replay an app running natively on macOS or Windows, use the Keploy Community or Enterprise edition: https://keploy.io/docs/server/installation/\n"+
-				"  - Or run your application in Docker, which this build supports on every platform: keploy record -c \"docker run ...\"",
-				runtime.GOOS, runtime.GOARCH)
+			return nativeUnsupportedError(runtime.GOOS, runtime.GOARCH)
 		}
 		// memory-limit non-Docker gate is applied after flag parsing below
 
@@ -1384,12 +1586,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-		absPath, err := utils.GetAbsPath(c.cfg.Path)
-		if err != nil {
-			utils.LogError(c.logger, err, "error while getting absolute path")
-			return errors.New("failed to get the absolute path")
+		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
+			return err
 		}
-		c.cfg.Path = absPath + "/keploy"
 
 		// Check and fix keploy folder permissions for native mode only
 		// (handles root-owned files from older sudo-based versions)
@@ -1547,11 +1746,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
-			c.cfg.Test.SchemaNoiseDetection, err = cmd.Flags().GetBool("schema-noise-detection")
-			if err != nil {
-				errMsg := "failed to read the --schema-noise-detection flag; check the flag name with --help and confirm this command supports it"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			// Both spellings are read and OR-ed. --schema-noise-* is the
+			// deprecated name kept working for existing scripts and CI jobs;
+			// --mock-noise-* is canonical. Neither can express "explicitly
+			// off" as distinct from "unset", so OR-ing loses nothing and means
+			// a user who passes either one gets the behaviour they asked for.
+			//
+			// Both are guarded on Changed||!IsSet for the same reason strict
+			// below is: AddFlags captured each flag's default from a ZERO
+			// config, and viper.Unmarshal fills c.cfg from keploy.yml only
+			// afterwards. An unguarded read therefore overwrites a yaml-only
+			// value with the flag's stale default — so `test.schemaNoise-
+			// Detection: true` in keploy.yml silently stopped working. That was
+			// already true of the deprecated key before this change; fixing it
+			// here because a rename whose whole claim is "your existing
+			// keploy.yml keeps working" cannot ship with that hole open.
+			if cmd.Flags().Changed("schema-noise-detection") || !viper.IsSet("test.schemaNoiseDetection") {
+				c.cfg.Test.SchemaNoiseDetection, err = cmd.Flags().GetBool("schema-noise-detection")
+				if err != nil {
+					errMsg := "failed to read the --schema-noise-detection flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+			if cmd.Flags().Changed("mock-noise-detection") || !viper.IsSet("test.mockNoiseDetection") {
+				c.cfg.Test.MockNoiseDetection, err = cmd.Flags().GetBool("mock-noise-detection")
+				if err != nil {
+					errMsg := "failed to read the --mock-noise-detection flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 			}
 
 			// Only let the flag override when it was explicitly passed or
@@ -1566,6 +1790,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 			}
+			if cmd.Flags().Changed("mock-noise-strict") || !viper.IsSet("test.mockNoiseStrict") {
+				c.cfg.Test.MockNoiseStrict, err = cmd.Flags().GetBool("mock-noise-strict")
+				if err != nil {
+					errMsg := "failed to read the --mock-noise-strict flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+			// Reconcile once, here, so every later reader sees one answer
+			// regardless of which spelling the user or their keploy.yml used.
+			c.cfg.Test.NormalizeMockNoise()
 
 			// enforce that the test-sets are provided when --must-pass is set to true
 			// to prevent accidental deletion of failed testcases in testsets which was due to application changes
@@ -1641,6 +1876,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
+		// The flag, when given, wins over keploy.yml's record.disableHandshakeHold.
+		if cmd.Flags().Changed("disable-handshake-hold") {
+			disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
+			if err != nil {
+				errMsg := "failed to read the disable-handshake-hold flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Record.DisableHandshakeHold = disableHandshakeHold
+		}
+
 		if cmd.Name() == "record" {
 			opportunisticTLSIntercept, err := cmd.Flags().GetBool("opportunistic-tls-intercept")
 			if err != nil {
@@ -1700,7 +1946,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 	case "normalize":
-		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
+		var err error
+		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
+			return err
+		}
 		tests, err := cmd.Flags().GetString("tests")
 		if err != nil {
 			errMsg := "failed to read tests to be normalized"
@@ -1722,7 +1971,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 	case "templatize":
-		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
+		var err error
+		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
+			return err
+		}
 	case "agent":
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
@@ -1731,6 +1983,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.GlobalPassthrough = globalPassthrough
+
+		disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
+		if err != nil {
+			errMsg := "failed to read the disable-handshake-hold flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.DisableHandshakeHold = disableHandshakeHold
 
 		capturePackets, err := cmd.Flags().GetBool("capture-packets")
 		if err != nil {
@@ -1763,6 +2023,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.MockMode = mockMode
+
+		recordRequests, err := cmd.Flags().GetBool("record-requests")
+		if err != nil {
+			errMsg := "failed to read the record-requests flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.RecordRequests = recordRequests
 
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on
 		// Changed() — but the gate now records that the flag was PRESENT
@@ -2075,7 +2343,6 @@ func bytesToMBCeil(b uint64) uint64 {
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
-	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {
@@ -2091,10 +2358,13 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg confi
 	}
 
 	configFilePath := filepath.Join(c.cfg.ConfigPath, "keploy.yml")
-	err = toolSvc.CreateConfig(ctx, configFilePath, string(configDataBytes))
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to create config file")
-		return errors.New("failed to create config file")
+	// "based on the flags that are used" -- so the file holds the flags that
+	// were used, not the defaults that were not.
+	if err := tools.WriteMinimalConfig(c.logger, configFilePath, string(configDataBytes)); err != nil {
+		// Wrapped, not replaced: a caller that cannot see EACCES or ENOSPC
+		// cannot tell the user which of them it was, and this used to throw
+		// the cause away AND stop logging it.
+		return fmt.Errorf("failed to create config file at %s: %w", configFilePath, err)
 	}
 	c.logger.Info("Generated config file based on the flags that are used")
 	return nil
@@ -2123,23 +2393,120 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	cmd.Flags().StringP("command", "c", c.cfg.Command, "Command that runs your test suite, e.g. \"pytest\" or \"go test ./...\"")
 	cmd.Flags().StringP("path", "p", ".", "Path to the local directory where the mock set is stored (keploy/<name>/)")
 	cmd.Flags().String("name", c.cfg.Mock.Name, "Name of the mock set to record into / replay from (default \"default\")")
-	cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker-run/docker-start/docker-compose)")
+	cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker-run/docker-start/docker-compose/from-container)")
 	cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container (docker/compose runs)")
+	cmd.Flags().String("from-container", c.cfg.FromContainer, "Record against an already-running container: keploy re-creates it under its own namespaces. Replaces -c")
 	cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 	cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "Time to wait for a docker container to build")
 	cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy to intercept outgoing calls")
 	cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server")
 	cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Destination ports to leave untouched (never mocked)")
 	cmd.Flags().Bool("local", c.cfg.Mock.Local, "Use the local file-backed mock store even when a cloud registry is configured")
+	cmd.Flags().Bool("disable-handshake-hold", false, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers")
 
 	switch cmd.Name() {
 	case "record":
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
+		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
+		cmd.Flags().Bool("emit-mock-events", c.cfg.Mock.EmitMockEvents, "Log one line per mock as it is first served (stdout; stderr under --json)")
 		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
+		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")
+		cmd.Flags().String("coverage-report", c.cfg.Mock.CoverageReport, "Coverage report the test command writes, when it is not a default location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...)")
+		cmd.Flags().StringArray("run-only", c.cfg.Mock.RunOnly, "Run only this test (repeat the flag for more; the name as the test runner's harness reports it, and a subtest runs with its test); the harness skips the rest")
 	}
+	return nil
+}
+
+// readMockBool copies a bool flag into dst unless keploy.yml set the key and the flag was left alone.
+func (c *CmdConfigurator) readMockBool(cmd *cobra.Command, flag, key string, dst *bool) error {
+	if !cmd.Flags().Changed(flag) && viper.IsSet(key) {
+		return nil
+	}
+	v, err := cmd.Flags().GetBool(flag)
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the "+flag+" flag")
+		return fmt.Errorf("failed to get the %s flag", flag)
+	}
+	*dst = v
+	return nil
+}
+
+// readMockSetName resolves --name (default "default") and refuses a name that
+// is not one directory. The set is keploy/<name>/: "team/payments" nested it
+// where keploy/.gitignore's /*/ entries do not reach -- committing a local
+// replay receipt, test command and all -- and "../x" put it outside keploy/.
+func (c *CmdConfigurator) readMockSetName(cmd *cobra.Command) error {
+	name, err := cmd.Flags().GetString("name")
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the name flag")
+		return errors.New("failed to get the name flag")
+	}
+	if cmd.Flags().Changed("name") {
+		c.cfg.Mock.Name = name
+	}
+	if c.cfg.Mock.Name == "" {
+		c.cfg.Mock.Name = "default"
+	}
+	if err := pathsafe.ValidateSingleSegment(c.cfg.Mock.Name, false); err != nil {
+		return fmt.Errorf("invalid mock set --name: %w", err)
+	}
+	return nil
+}
+
+// readMockCoverageFlags resolves --min-coverage and --coverage-report against
+// keploy.yml's mock.minCoverage and mock.coverageReport.
+//
+// Both are guarded like emit-mock-events: the flag defaults were captured from
+// a zero config before viper read keploy.yml, so an unguarded read would
+// replace a committed `mock.minCoverage: 80` with 0 and silently switch the
+// team's gate off. An explicit flag still wins over the file.
+func (c *CmdConfigurator) readMockCoverageFlags(cmd *cobra.Command) error {
+	if cmd.Flags().Changed("min-coverage") || !viper.IsSet("mock.minCoverage") {
+		minCov, err := cmd.Flags().GetFloat64("min-coverage")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the min-coverage flag")
+			return errors.New("failed to get the min-coverage flag")
+		}
+		c.cfg.Mock.MinCoverage = minCov
+	}
+	// NaN passes both range checks, and every comparison with it is false:
+	// a floor of NaN would never fail anything.
+	if v := c.cfg.Mock.MinCoverage; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 100 {
+		return fmt.Errorf("invalid --min-coverage %v: it is a percentage, from 0 (off) to 100", c.cfg.Mock.MinCoverage)
+	}
+	if v := c.cfg.Mock.MinCoverage; v > 0 && v < 1 {
+		// JaCoCo and Cobertura write coverage as a ratio (0.8 for 80%).
+		c.logger.Warn("--min-coverage is a percentage: this floor is under 1%",
+			zap.Float64("min-coverage", v),
+			zap.String("next_step", fmt.Sprintf("for %v%% write %v", v*100, v*100)))
+	}
+	if cmd.Flags().Changed("coverage-report") || !viper.IsSet("mock.coverageReport") {
+		covReport, err := cmd.Flags().GetString("coverage-report")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the coverage-report flag")
+			return errors.New("failed to get the coverage-report flag")
+		}
+		c.cfg.Mock.CoverageReport = covReport
+	}
+	return nil
+}
+
+// readMockRunOnly resolves --run-only against keploy.yml's mock.runOnly,
+// guarded like the coverage flags so an untouched flag does not erase a
+// committed list.
+func (c *CmdConfigurator) readMockRunOnly(cmd *cobra.Command) error {
+	if !cmd.Flags().Changed("run-only") && viper.IsSet("mock.runOnly") {
+		return nil
+	}
+	runOnly, err := cmd.Flags().GetStringArray("run-only")
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the run-only flag")
+		return errors.New("failed to get the run-only flag")
+	}
+	c.cfg.Mock.RunOnly = runOnly
 	return nil
 }
 
@@ -2147,12 +2514,43 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 // subcommands. It mirrors the record/test path (command type, platform gate,
 // keploy folder resolution + permissions) but reads the mock-specific flags.
 func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Command) error {
+	// Before the command type, as in validateFlags. --from-container without
+	// -c sets a configured command aside below: nothing runs it.
+	runs := c.cfg.Command
+	if cmd.Flags().Changed("from-container") && !cmd.Flags().Changed("command") {
+		runs = ""
+	}
+	if err := refuseEngineCommand(cmd, runs); err != nil {
+		return err
+	}
+
 	// Resolve the command type (native vs docker-*).
 	commandType, err := resolveCommandType(c.logger, cmd, c.cfg.Command, c.cfg.CommandType)
 	if err != nil {
 		return err
 	}
 	c.cfg.CommandType = commandType
+	// --from-container IS the command type. Nothing can detect it: detection
+	// reads the command string, and this mode has none. Refuse a contradicting
+	// --cmd-type rather than silently picking one, because the two disagree
+	// about something as load-bearing as whether a shell runs at all.
+	// Only the FLAG implies the kind, never a config-file value. The privilege
+	// decision is taken from raw argv before cobra parses anything
+	// (ShouldReexecWithSudo), so a fromContainer that exists only in keploy.yml
+	// would start the run unprivileged and die writing perf_event_paranoid -
+	// the same trap documented for cmdType above. Refusing it is the honest
+	// answer; silently honouring it is how that bug was shipped the first time.
+	if c.cfg.FromContainer != "" && !cmd.Flags().Changed("from-container") {
+		return fmt.Errorf("fromContainer in the config file is not honoured; pass --from-container on the command line instead")
+	}
+	if c.cfg.FromContainer != "" {
+		if cmd.Flags().Changed("cmd-type") && utils.CmdType(c.cfg.CommandType) != utils.FromContainer {
+			return fmt.Errorf("--from-container implies --cmd-type %s, but %q was given", utils.FromContainer, c.cfg.CommandType)
+		}
+		c.cfg.CommandType = string(utils.FromContainer)
+	} else if utils.CmdType(c.cfg.CommandType) == utils.FromContainer {
+		return fmt.Errorf("--cmd-type %s needs --from-container to name the container to record against", utils.FromContainer)
+	}
 	// Ask the same extension point `record`/`test` use (see the identical check
 	// above in validateFlags). This literal was copied here from the record path
 	// as it stood BEFORE that check became nativeCommandSupportedHere(), so it
@@ -2172,12 +2570,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		utils.LogError(c.logger, err, "failed to get the path")
 		return errors.New("failed to get the path")
 	}
-	absPath, err := utils.GetAbsPath(path)
-	if err != nil {
-		utils.LogError(c.logger, err, "error while getting absolute path")
-		return errors.New("failed to get the absolute path")
+	if c.cfg.Path, err = c.keployFolder(path); err != nil {
+		return err
 	}
-	c.cfg.Path = absPath + "/keploy"
 
 	// Fix folder permissions (and cache sudo creds) for native runs.
 	if !utils.IsDockerCmd(utils.CmdType(c.cfg.CommandType)) {
@@ -2187,10 +2582,29 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		}
 	}
 
-	if c.cfg.Command == "" {
+	// -c and --from-container are alternatives: one names a command to run, the
+	// other an already-running container to re-create. Exactly one is required,
+	// and accepting both would leave it ambiguous which one actually ran.
+	// Decided on what the USER passed, not on the resolved config: `keploy
+	// record` writes the command back into keploy.yml, so in any project that
+	// has recorded once viper has already populated cfg.Command - and reading
+	// that as "you passed -c" would make --from-container permanently
+	// unusable there, with an error about two flags the user only passed one of.
+	passedCommand := cmd.Flags().Changed("command")
+	passedFromContainer := cmd.Flags().Changed("from-container")
+	if passedFromContainer && !passedCommand {
+		// The flag wins over a stale command in the config file.
+		c.cfg.Command = ""
+	}
+	switch {
+	case passedCommand && passedFromContainer:
+		utils.LogError(c.logger, nil, "both -c and --from-container were given")
+		return errors.New("-c and --from-container are alternatives: pass one, not both")
+	case c.cfg.Command == "" && c.cfg.FromContainer == "":
 		utils.LogError(c.logger, nil, "missing required -c flag or command in config file")
 		c.logger.Info(`Example usage: keploy mock record -c "pytest"`)
-		return errors.New("command is required for keploy mock")
+		c.logger.Info(`          or: keploy mock record --from-container my-app`)
+		return errors.New("either a command (-c) or --from-container is required for keploy mock")
 	}
 
 	// Pass-through ports.
@@ -2202,16 +2616,8 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 	config.SetByPassPorts(c.cfg, bypassPorts)
 
 	// Mock-set name.
-	name, err := cmd.Flags().GetString("name")
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to get the name flag")
-		return errors.New("failed to get the name flag")
-	}
-	if name != "" {
-		c.cfg.Mock.Name = name
-	}
-	if c.cfg.Mock.Name == "" {
-		c.cfg.Mock.Name = "default"
+	if err := c.readMockSetName(cmd); err != nil {
+		return err
 	}
 
 	local, err := cmd.Flags().GetBool("local")
@@ -2220,6 +2626,16 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return errors.New("failed to get the local flag")
 	}
 	c.cfg.Mock.Local = local
+
+	// The flag, when given, wins over keploy.yml's record.disableHandshakeHold.
+	if cmd.Flags().Changed("disable-handshake-hold") {
+		disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to read the disable-handshake-hold flag")
+			return errors.New("failed to read the disable-handshake-hold flag")
+		}
+		c.cfg.Record.DisableHandshakeHold = disableHandshakeHold
+	}
 
 	switch cmd.Name() {
 	case "record":
@@ -2230,6 +2646,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 				return errors.New("failed to get the record-timer flag")
 			}
 			c.cfg.Mock.RecordTimer = d
+		}
+		if err := c.readMockBool(cmd, "record-requests", "mock.recordRequests", &c.cfg.Mock.RecordRequests); err != nil {
+			return err
 		}
 	case "replay":
 		onMiss, err := cmd.Flags().GetString("on-miss")
@@ -2253,6 +2672,20 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		}
 		c.cfg.Mock.Strict = strict
 
+		// Guarded on Changed||!IsSet for the reason spelled out for
+		// schema-noise-detection above: AddFlags captured this flag's default
+		// from a ZERO config, and viper fills c.cfg from keploy.yml only
+		// afterwards, so an unguarded read would overwrite
+		// `mock.emitMockEvents: true` in keploy.yml with a stale false.
+		if cmd.Flags().Changed("emit-mock-events") || !viper.IsSet("mock.emitMockEvents") {
+			emitMockEvents, err := cmd.Flags().GetBool("emit-mock-events")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the emit-mock-events flag")
+				return errors.New("failed to get the emit-mock-events flag")
+			}
+			c.cfg.Mock.EmitMockEvents = emitMockEvents
+		}
+
 		if cmd.Flags().Changed("delay") {
 			d, err := cmd.Flags().GetUint64("delay")
 			if err != nil {
@@ -2260,6 +2693,13 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 				return errors.New("failed to get the delay flag")
 			}
 			c.cfg.Test.Delay = d
+		}
+
+		if err := c.readMockCoverageFlags(cmd); err != nil {
+			return err
+		}
+		if err := c.readMockRunOnly(cmd); err != nil {
+			return err
 		}
 	}
 

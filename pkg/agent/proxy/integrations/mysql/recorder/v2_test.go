@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,6 +132,10 @@ type v2Harness struct {
 	dirs     chan directive.Directive
 	acks     chan directive.Ack
 	sess     *supervisor.Session
+	// captured numbers the chunks pushed, across both directions, in the
+	// order they are pushed (fakeconn.Chunk.ConnSeq): the order a producer
+	// captured them in.
+	captured atomic.Uint64
 }
 
 func newV2Harness(t *testing.T) *v2Harness {
@@ -163,11 +169,13 @@ func newV2Harness(t *testing.T) *v2Harness {
 }
 
 func (h *v2Harness) pushClient(payload []byte, ts time.Time) {
-	h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
+	h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: fakeconn.ConnSeqOf(h.captured.Add(1)),
+		Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
 }
 
 func (h *v2Harness) pushDest(payload []byte, ts time.Time) {
-	h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
+	h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: fakeconn.ConnSeqOf(h.captured.Add(1)),
+		Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
 }
 
 func (h *v2Harness) closeStreams() {
@@ -369,7 +377,12 @@ func TestRecordV2_TLSUpgrade_DirectiveAndResume(t *testing.T) {
 	}
 }
 
-func TestRecordV2_TLSUpgrade_FailureMarksIncompleteAndReturnsErr(t *testing.T) {
+// A failed TLS upgrade ends the recorder with the upgrade's error: the
+// supervisor falls through to passthrough on it, which leaves out the rest of
+// the connection and says so. It marks nothing on the incomplete-mock flag:
+// no mock is emitted after the return to take a mark, so one would only sit
+// there, reporting nothing.
+func TestRecordV2_TLSUpgrade_FailureReturnsItsErrorAndLeavesNoMark(t *testing.T) {
 	t.Parallel()
 	h := newV2Harness(t)
 
@@ -397,18 +410,18 @@ func TestRecordV2_TLSUpgrade_FailureMarksIncompleteAndReturnsErr(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("expected RecordV2 to return an error on TLS upgrade failure")
+		if !errors.Is(err, errFakeTLSFail) {
+			t.Fatalf("RecordV2 returned %v on a TLS upgrade failure, want the upgrade's error", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for RecordV2 to return")
 	}
 
-	if !h.sess.IsMockIncomplete() {
-		t.Error("expected session to be marked mock incomplete after TLS upgrade failure")
+	if h.sess.IsMockIncomplete() {
+		t.Error("the session is marked mock incomplete after the recorder returned: a mark nothing takes")
 	}
 
-	// Ensure no mocks were emitted (incomplete gate drops them).
+	// Ensure no mocks were emitted.
 	select {
 	case m := <-h.mocks:
 		t.Errorf("unexpected mock emitted after TLS failure: %+v", m)
@@ -499,7 +512,19 @@ func TestRecordV2_PostTLS_PooledConnSeq0(t *testing.T) {
 	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base.Add(20*time.Millisecond))
 	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
 
-	got := runPostTLS(t, h, postTLSCtx(t, handshakeBuf, sslReq, base, 3306), 2)
+	// The raw leg caches what it pushes (storePreTLSHandshakeV2); a connection
+	// joined mid-stream borrows that, never a queued entry not provably its own.
+	// The destination is a loopback server, which the cache keys by the
+	// connection's network namespace.
+	h.sess.Opts.NetNS = testNetNS
+	ctx := postTLSCtx(t, handshakeBuf, sslReq, base, 3306)
+	store, _ := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+	store.RememberLast(lastGreetingKey(h.sess.Opts.PassThroughScope, h.sess.Opts.NetNS, h.sess.Opts.DstCfg), models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{handshakeBuf},
+		ReqPackets:   [][]byte{sslReq},
+		ReqTimestamp: base,
+	})
+	got := runPostTLS(t, h, ctx, 2)
 
 	if got[0].Name != "config" {
 		t.Errorf("first mock = %q, want config", got[0].Name)

@@ -66,6 +66,73 @@ func TestWaitForIngressTargetWhenKnownSkipsUnknownPort(t *testing.T) {
 	}
 }
 
+func TestDialIngressTargetWaitsForAppToListen(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	listening := make(chan net.Listener, 1)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		l, err := net.Listen("tcp4", addr)
+		if err != nil {
+			listening <- nil
+			return
+		}
+		listening <- l
+	}()
+
+	conn, err := dialIngressTarget(context.Background(), addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dialIngressTarget returned error: %v", err)
+	}
+	_ = conn.Close()
+	if l := <-listening; l == nil {
+		t.Fatal("app listener could not rebind the port")
+	} else {
+		_ = l.Close()
+	}
+}
+
+func TestDialIngressTargetGivesUpAfterTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	start := time.Now()
+	if _, err := dialIngressTarget(context.Background(), addr, 100*time.Millisecond); err == nil {
+		t.Fatal("expected an error dialing a port nothing listens on")
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("expected to retry for the timeout then give up, took %s", elapsed)
+	}
+}
+
+func TestDialIngressTargetStopsOnCanceledContext(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if _, err := dialIngressTarget(ctx, addr, 5*time.Second); err == nil {
+		t.Fatal("expected an error dialing a port nothing listens on")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("canceled context should stop retries immediately, took %s", elapsed)
+	}
+}
+
 func newTestIngressHook() *goTCPIngressHook {
 	return newGoTCPIngressHook(&IngressProxyManager{logger: zap.NewNop()})
 }
@@ -197,5 +264,50 @@ func TestStartIngressReleasesPortWhenAcceptLoopExits(t *testing.T) {
 			t.Fatalf("port %d not released within 5s after context cancel without StopIngress", port)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestDialIngressTargetReachesAnIPv6App(t *testing.T) {
+	ln, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback: %v", err)
+	}
+	defer ln.Close()
+	conn, err := dialIngressTarget(context.Background(), ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("dialIngressTarget(%s): %v", ln.Addr(), err)
+	}
+	_ = conn.Close()
+}
+
+// nopIngressHook starts and stops forwarders without binding anything.
+type nopIngressHook struct{}
+
+func (nopIngressHook) StartIngress(context.Context, uint16, uint16) error { return nil }
+func (nopIngressHook) StopIngress(uint16) error                           { return nil }
+
+// While recording, keploy's forwarder holds the app's port and the app listens
+// on the port its bind was moved to. Asked where the app listens, the agent has
+// to look there: the socket on the app's own port is keploy's.
+func TestAppListenPortFollowsTheMovedBind(t *testing.T) {
+	pm := &IngressProxyManager{logger: zap.NewNop(), active: make(map[uint16]proxyStop)}
+	pm.ingressHook = nopIngressHook{}
+
+	if port, ok := pm.AppListenPort(8097); !ok || port != 8097 {
+		t.Fatalf("no forwarder: got %d, %v; want the app's own port", port, ok)
+	}
+	pm.StartIngressProxy(context.Background(), 8097, 41541)
+	if port, ok := pm.AppListenPort(8097); !ok || port != 41541 {
+		t.Fatalf("forwarded: got %d, %v; want the moved bind 41541", port, ok)
+	}
+	// A bind event without the new port: the forwarder holds 8097 and where
+	// the app went is not known.
+	pm.StartIngressProxy(context.Background(), 8098, 0)
+	if port, ok := pm.AppListenPort(8098); ok {
+		t.Fatalf("forwarded to an unknown port: got %d, ok; want not ok", port)
+	}
+	pm.StopAll()
+	if port, ok := pm.AppListenPort(8097); !ok || port != 8097 {
+		t.Fatalf("after StopAll: got %d, %v; want the app's own port", port, ok)
 	}
 }

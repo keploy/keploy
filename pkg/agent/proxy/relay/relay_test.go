@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
@@ -48,7 +49,7 @@ func newHarness(t *testing.T, cfg Config) *relayHarness {
 		cfg.Logger = zap.NewNop()
 	}
 
-	r := New(cfg, srcProxy, dstProxy)
+	r := New(cfg, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	h := &relayHarness{
@@ -291,6 +292,11 @@ func TestTeeSpillsOnChannelFull(t *testing.T) {
 		TeeChanBuf:           1,
 		PerConnCap:           1 << 30, // large → spill absorbs the burst, no drop
 		OnMarkMockIncomplete: drops.record,
+		// Nothing reads the FakeConn, so teardown waits out the stall
+		// window, which is time the process could run: on a starved host
+		// many times its length in wall time. The harness bounds teardown in
+		// wall time, so the window runs on an injected clock.
+		stallClock: newFakeStallClock(onTime),
 	})
 
 	// Send many small chunks while NOT draining the FakeConn — this used to
@@ -503,7 +509,7 @@ func TestDirectiveUpgradeTLS_PostUpgradeChunkUsesSocketReadTime(t *testing.T) {
 		TLSUpgradeFn: func(_ context.Context, conn net.Conn, _ bool, _ *tls.Config) (net.Conn, error) {
 			return conn, nil
 		},
-	}, srcProxy, dstProxy)
+	}, srcProxy, connseq.NewUpstream(dstProxy))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -683,7 +689,7 @@ func TestCleanShutdownOnCtxCancel(t *testing.T) {
 		_ = dstProxy.Close()
 	})
 
-	r := New(Config{}, srcProxy, dstProxy)
+	r := New(Config{}, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan error, 1)
@@ -732,7 +738,7 @@ func TestRunReturnsPromptlyWhenDestClosesWhileClientIdle(t *testing.T) {
 		_ = dstProxy.Close()
 	})
 
-	r := New(Config{}, srcProxy, dstProxy)
+	r := New(Config{}, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -796,7 +802,7 @@ func TestSecondRunReturnsError(t *testing.T) {
 		_ = dstProxy.Close()
 	})
 
-	r := New(Config{}, srcProxy, dstProxy)
+	r := New(Config{}, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() { _ = r.Run(ctx) }()

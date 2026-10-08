@@ -5,7 +5,8 @@ name: MySQL TLS Greeting-Stitch Regression (Linux)
 # The bug: recording MySQL over TLS splits into two legs — a raw plaintext leg
 # carrying the server greeting + SSLRequest, and a decrypted TLS-uprobe leg
 # carrying the command phase. The greeting is stashed in TLSHandshakeStore under
-# conn:<connKey> and port:<dstPort>, and PopWait CONSUMES it. A pooled MySQL
+# port:<dstPort>, tagged with the connection it came from (HandshakeOwner), and
+# the decrypted leg of the same connection CONSUMES it. A pooled MySQL
 # connection reused across cycles yields a decrypted leg with no handshake of its
 # own, so both keys miss. resolvePreTLSGreeting has a documented last-resort
 # fallback (cachedGreeting, backed by RememberLast/Last) for exactly that case —
@@ -20,6 +21,19 @@ name: MySQL TLS Greeting-Stitch Regression (Linux)
 # bug returns is for the guarding test to quietly stop exercising it. So the
 # second job mutates the fix back out and asserts the tests actually FAIL —
 # a vacuous regression test is treated as a red build, not a green one.
+#
+# The third job runs the same recorder against a REAL MySQL 8 server with a
+# pooled go-sql-driver client over TLS, and reads the server's own
+# Aborted_connects. It guards the greeting FETCH, the fallback for a pooled
+# connection opened before the recording, which has no greeting to stitch:
+#   - its commands are recorded promptly, not after the 30s stash wait;
+#   - consecutive recording sessions cost ONE greeting dial between them (each
+#     dial is an aborted handshake MySQL counts against the dialling host, and
+#     max_connect_errors blocks it; a DaemonSet agent dials from the node);
+#   - fresh connections whose raw legs land late, and in another order than
+#     their decrypted streams, each get their own greeting, and no capture is
+#     stitched into another connection's config mock.
+# It too mutates the fix out and requires the run to fail.
 on:
   workflow_call:
     inputs:
@@ -56,7 +70,7 @@ jobs:
       - name: Greeting-stitch regression tests
         run: |
           go test ./pkg/models/ ./pkg/agent/proxy/integrations/mysql/recorder/ \
-            -run 'TestStorePreTLSHandshakeV2|TestHandshakeLastPortKey|TestRecordV2_PostTLS_PooledConn|TestRecordV2_PostTLS_LostStash|TestTLSHandshakeStore|TestResolvePreTLSGreeting|TestRememberLast|TestAmbiguityLatch|TestTombstone|TestLastGreeting|TestGreetingServerIdentity|TestRecordV2_RawLeg|TestRawLegIdentity|TestHandshakeLastKey|TestLatchSurvives|TestIdentityRecords|TestPayloadlessEntriesAreBounded|TestLastForPortIsAtomic|TestLegacyPostTLSUsesTheLastGreetingCache' \
+            -run 'TestStorePreTLSHandshakeV2|TestHandshakeLastPortKey|TestRecordV2_PostTLS_PooledConn|TestRecordV2_PostTLS_LostStash|TestTLSHandshakeStore|TestResolvePreTLSGreeting|TestRememberLast|TestAmbiguityLatch|TestTombstone|TestLastGreeting|TestGreetingServerIdentity|TestRecordV2_RawLeg|TestRawLegIdentity|TestHandshakeLastKey|TestLatchSurvives|TestIdentityRecords|TestPayloadlessEntriesAreBounded|TestLastForPortIsAtomic|TestLegacyPostTLSUsesTheLastGreetingCache|TestAddrIsNetnsLocal|TestHandshakeServerKey|TestServerGreeting|TestFetchServerGreeting|TestRememberServerGreeting|TestRecordV2_PostTLS_FreshConnWithALateRawLeg|TestRecordV2_PostTLS_JoinedConnTakesOnly|TestRecordV2_PostTLS_FetchedCacheDoesNotPreempt|TestRecordV2_PostTLS_ConcurrentPooledConns|TestRecordV2_PostTLS_TeardownDuringStashWait|TestLegacyRawLegRemembers|TestLegacyPostTLS|TestPostTLSHandshakeV2|TestPopWaitForPairsByOwner|TestHandshakeOwnerMayTake|TestRecordV2_PostTLS_OneCaptureStitchesOneConfigMock|TestRecordV2_PostTLS_EachStreamGetsItsOwnConnectionsGreeting|TestRecordV2_PostTLS_ReplicasDoNotShareALoopbackGreeting|TestLastGreetingKey' \
             -race -count=3 -v
 
       - name: Full MySQL + models suites
@@ -298,3 +312,210 @@ jobs:
           fi
           echo "OK: an unbounded identity record fails its test, as it must."
           git checkout -- "$m"
+
+      # The per-server greeting memo, the no-wait path for a connection that
+      # joined mid-stream, and pairing each decrypted stream with its own raw
+      # leg. Each mutant removes one mechanism; the named tests must fail, and
+      # only a mutant that COMPILES can score a kill.
+      - name: Remove the greeting memo, the no-wait path and leg pairing, expect FAILURES
+        run: |
+          set -uo pipefail
+          r=pkg/agent/proxy/integrations/mysql/recorder
+          m=pkg/models/tls_handshake_store.go
+          expect_mutant_fails() {
+            local name="$1" file="$2" expr="$3" pkgs="$4" tests="$5"
+            cp "$file" /tmp/mutant.orig
+            perl -0pi -e "$expr" "$file"
+            if cmp -s "$file" /tmp/mutant.orig; then
+              echo "::error::mutant '$name' did not apply to $file; update it with the code it mutates"
+              exit 1
+            fi
+            if ! go vet $pkgs >/tmp/mutant-build.log 2>&1; then
+              cat /tmp/mutant-build.log
+              echo "::error::mutant '$name' does not compile, so a test failure would score a FALSE kill"
+              cp /tmp/mutant.orig "$file"; exit 1
+            fi
+            if go test $pkgs -run "$tests" -count=1 -timeout 300s >"/tmp/mutant-$name.log" 2>&1; then
+              tail -30 "/tmp/mutant-$name.log"
+              echo "::error::VACUOUS TEST: mutant '$name' still passes $tests"
+              cp /tmp/mutant.orig "$file"; exit 1
+            fi
+            echo "OK: mutant '$name' fails its tests, as it must."
+            cp /tmp/mutant.orig "$file"
+          }
+          across='TestHandshakeServerKey|TestFetchServerGreetingShared_OneDialPerServerAcrossSessions'
+
+          # One dial per SERVER: not per recording session...
+          expect_mutant_fails memo-key-per-session "$r/conn.go" \
+            's/return models\.HandshakeServerKey\(opts\.NetNS, opts\.DstCfg\)/return models.HandshakeServerKey(opts.NetNS, opts.DstCfg) + "|" + opts.PassThroughScope/' \
+            "./$r/" 'TestFetchServerGreetingShared_OneDialPerServerAcrossSessions'
+          # ...nor per pod for a routable address...
+          expect_mutant_fails routable-key-per-namespace "$m" \
+            's/\tif perr == nil && !ipIsNetnsLocal\(ip\) \{/\tif false \&\& perr == nil \&\& !ipIsNetnsLocal(ip) {/' \
+            "./pkg/models/ ./$r/" "$across"
+          # ...but a namespace-local address names a different server per pod,
+          expect_mutant_fails netns-local-not-qualified "$m" \
+            's/return serverKeyPrefix \+ "netns=" \+ netNS \+ "\|" \+ net\.JoinHostPort\(host, port\)/return serverKeyPrefix + net.JoinHostPort(host, port)/' \
+            "./pkg/models/ ./$r/" "$across"
+          # ...and with no namespace to tell pods apart nothing is shared at all.
+          expect_mutant_fails netns-unknown-shared "$m" \
+            's/\tif netNS == "" \{\n\t\treturn ""\n\t\}\n//' \
+            "./pkg/models/ ./$r/" "$across"
+          # A fetch never overwrites a greeting a raw leg captured meanwhile.
+          expect_mutant_fails fetch-overwrites-live "$r/conn.go" \
+            's/remembered := hsStore\.RememberServerGreetingIfAbsent\(key, buf\)/hsStore.RememberServerGreeting(key, buf, "")\n\t\tremembered := true/' \
+            "./$r/" 'TestFetchServerGreetingShared_KeepsARawLegGreetingWrittenDuringTheDial'
+          # A dialer that cannot reach its own connection's namespace fails that
+          # connection only: it is not remembered for the server, and a caller
+          # that shared its flight dials with its own dialer.
+          expect_mutant_fails dialer-failure-remembered "$r/conn.go" \
+            's/\t\t\t\tcase errors\.Is\(err, models\.ErrDstDialerUnavailable\):\n\t\t\t\t\t\/\/ This caller.s namespace, not the server: remember nothing\.\n//' \
+            "./$r/" 'TestFetchServerGreetingShared_CallerSpecificDialFailureIsNotAServerFailure'
+          expect_mutant_fails waiter-takes-leaders-dialer-failure "$r/conn.go" \
+            's/if !led && attempt == 0 && errors\.Is\(r\.Err, models\.ErrDstDialerUnavailable\) \{/if false \&\& !led \&\& attempt == 0 \&\& errors.Is(r.Err, models.ErrDstDialerUnavailable) {/' \
+            "./$r/" 'TestFetchServerGreetingShared_CallerSpecificDialFailureIsNotAServerFailure'
+          # A live greeting refreshes the memo...
+          expect_mutant_fails v2-raw-leg-not-remembered "$r/record_v2.go" \
+            's/\t\trememberServerGreeting\(ctx, sess\.Opts, handshake, serverID\)\n//' \
+            "./$r/" 'TestRecordV2_RawLegRemembersTheServerGreeting'
+          # ...only one that decodes...
+          expect_mutant_fails undecodable-live-memoized "$r/conn.go" \
+            's/\tif identity == "" \|\| len\(greeting\) < 5 \|\| greeting\[4\] != mysql\.HandshakeV10 \{/\tif false {/' \
+            "./$r/" 'TestRememberServerGreeting_LiveReplacesFetchedAndUndecodableIsIgnored'
+          # ...without rewriting a known server on every handshake...
+          expect_mutant_fails memo-rewritten-every-handshake "$m" \
+            's/\tif ok && cur\.live && identity != "" && cur\.identity == identity/\tif false \&\& ok \&\& cur.live \&\& identity != "" \&\& cur.identity == identity/' \
+            "./pkg/models/" 'TestServerGreetingRefresh'
+          # ...or taking the lock post-TLS streams wait on.
+          expect_mutant_fails memo-under-queue-lock "$m" \
+            's/\ts\.srvMu\.Lock\(\)\n\tdefer s\.srvMu\.Unlock\(\)\n\ts\.putServerGreetingLocked\(key, serverGreeting\{\n\t\tgreeting: append/\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\ts.putServerGreetingLocked(key, serverGreeting{\n\t\tgreeting: append/' \
+            "./pkg/models/" 'TestServerGreetingRefresh'
+          # A remembered greeting goes stale with the last-greeting TTL.
+          expect_mutant_fails memo-never-expires "$m" \
+            's/\tif !ok \|\| time\.Since\(cur\.seen\) > lastGreetingTTL \{/\tif !ok {/' \
+            "./pkg/models/" 'TestServerGreetingExpiresWithTheLastGreetingTTL'
+          # The app-scoped cache does not hand one replica's loopback server's
+          # greeting to another replica: the scope does not name a namespace.
+          expect_mutant_fails last-cache-key-shared-by-replicas "$r/conn.go" \
+            's/\t\tif host, _, err := net\.SplitHostPort\(dst\.Addr\); err == nil && models\.AddrIsNetnsLocal\(host\) \{/\t\tif host, _, err := net.SplitHostPort(dst.Addr); false \&\& err == nil \&\& models.AddrIsNetnsLocal(host) {/' \
+            "./$r/" 'TestLastGreetingKey|TestRecordV2_PostTLS_ReplicasDoNotShareALoopbackGreeting'
+          # A pod's loopback is dialled from the pod's namespace.
+          expect_mutant_fails namespace-dialer-ignored "$r/conn.go" \
+            's/if nsDial := models\.DstDialerFrom\(ctx\); nsDial != nil \{/if nsDial := models.DstDialerFrom(ctx); false \&\& nsDial != nil {/' \
+            "./$r/" 'TestFetchServerGreeting_DialsThroughTheConnectionsDialer'
+
+          # A connection that joined mid-stream does not wait (V2, then legacy)...
+          expect_mutant_fails v2-joined-waits "$r/record_v2.go" \
+            's/\tif joinedMidStream \{\n\t\t\/\/ Only an entry provably its own; see above\./\tif false \&\& joinedMidStream {\n\t\t\/\/ Only an entry provably its own; see above./' \
+            "./$r/" 'TestRecordV2_PostTLS_PooledConnRecordsPromptlyWithDefaultStashWait'
+          expect_mutant_fails legacy-joined-waits "$r/conn.go" \
+            's/\tif joinedMidStream \{\n\t\tif owner\.Conn == "" \{/\tif false \&\& joinedMidStream {\n\t\tif owner.Conn == "" {/' \
+            "./$r/" 'TestLegacyPostTLS_JoinedConnTakesOnlyItsOwnEntry'
+          # ...but a FRESH connection still waits for its own late raw leg...
+          expect_mutant_fails v2-fresh-skips-wait "$r/record_v2.go" \
+            's/\tif joinedMidStream \{\n\t\t\/\/ Only an entry provably its own; see above\./\tif true {\n\t\t\/\/ Only an entry provably its own; see above./' \
+            "./$r/" 'TestRecordV2_PostTLS_FreshConnWithALateRawLegGetsItsOwnGreetingNotTheMemo'
+          # ...and a joined connection takes no entry that is not provably its
+          # own: it may be a fresh connection's, not yet reached (V2, legacy).
+          expect_mutant_fails v2-joined-takes-others "$r/record_v2.go" \
+            's/\t\tif owner\.Conn != "" \{\n\t\t\tif entry, taker, src := take\(true, 0\); src != greetingNone \{/\t\tif true {\n\t\t\tif entry, taker, src := take(false, 0); src != greetingNone {/' \
+            "./$r/" 'TestRecordV2_PostTLS_JoinedConnTakesOnlyItsOwnEntry|TestResolvePreTLSGreeting_JoinedConnLeavesAFreshConnsLeg'
+          expect_mutant_fails legacy-joined-takes-others "$r/conn.go" \
+            's/\t\tif owner\.Conn == "" \{\n\t\t\treturn models\.TLSHandshakeEntry\{\}, models\.HandshakeOwner\{\}, false, false\n\t\t\}\n\t\tentry, taker, ok = hsStore\.PopWaitFor\(portKey, owner, true, 0\)/\t\tentry, taker, ok = hsStore.PopWaitFor(portKey, owner, false, 0)/' \
+            "./$r/" 'TestLegacyPostTLS_JoinedConnTakesOnlyItsOwnEntry'
+
+          # Each decrypted stream is paired with its OWN raw leg: never another
+          # known connection's or another process's, its own first...
+          expect_mutant_fails store-cross-connection "$m" \
+            's/\tif o\.Conn != "" && e\.Conn != "" \{\n\t\treturn o\.Conn == e\.Conn\n\t\}\n//' \
+            "./pkg/models/ ./$r/" 'TestHandshakeOwnerMayTake|TestPopWaitForPairsByOwner|TestResolvePreTLSGreeting_PairsEachStreamWithItsOwnLeg'
+          expect_mutant_fails store-cross-process "$m" \
+            's/\tif o\.Proc != "" && e\.Proc != "" \{\n\t\treturn o\.Proc == e\.Proc\n\t\}\n//' \
+            "./pkg/models/ ./$r/" 'TestHandshakeOwnerMayTake|TestPopWaitForPairsByOwner|TestResolvePreTLSGreeting_PairsEachStreamWithItsOwnLeg'
+          expect_mutant_fails store-own-not-first "$m" \
+            's/\t\tif owner\.Is\(q\[i\]\.owner\) \{/\t\tif false \&\& owner.Is(q[i].owner) {/' \
+            "./pkg/models/" 'TestPopWaitForPairsByOwner'
+          expect_mutant_fails legacy-fresh-pairs-by-arrival "$r/conn.go" \
+            's/\tentry, taker, ok = hsStore\.PopWaitFor\(portKey, owner, false, 5\*time\.Second\)/\tentry, taker, ok = hsStore.PopWaitFor(portKey, models.HandshakeOwner{}, false, 5*time.Second)/' \
+            "./$r/" 'TestLegacyPostTLS_EachStreamGetsItsOwnConnectionsGreeting'
+          # ...a full queue makes room at the expense of whoever fills it...
+          expect_mutant_fails queue-evicts-oldest-first "$m" \
+            's/\t\tq = evictForRoom\(q\)/\t\tq = q[1:]/' \
+            "./pkg/models/" 'TestTLSHandshakeStore_FullQueueEvictsFromTheProcessFillingIt'
+          # ...which the raw legs tag with their connection (V2, legacy)...
+          expect_mutant_fails v2-raw-leg-unowned "$r/record_v2.go" \
+            's/\thsStore\.PushFor\(portKey, models\.HandshakeOwnerOf\(sess\.Opts\), hsEntry\)/\thsStore.Push(portKey, hsEntry)/' \
+            "./$r/" 'TestRecordV2_PostTLS_EachStreamGetsItsOwnConnectionsGreeting'
+          expect_mutant_fails legacy-raw-leg-unowned "$r/conn.go" \
+            's/\t\t\thsStore\.PushFor\(portKey, models\.HandshakeOwnerOf\(opts\), hsEntry\)/\t\t\thsStore.Push(portKey, hsEntry)/' \
+            "./$r/" 'TestLegacyRawLegRemembersTheServerGreeting'
+          # ...and queue ONCE: a second copy is stitched into another stream,
+          # with the same ReqTimestampMock (treedb.sameMock)...
+          expect_mutant_fails v2-raw-leg-queued-twice "$r/record_v2.go" \
+            's/\thsStore\.PushFor\(portKey, models\.HandshakeOwnerOf\(sess\.Opts\), hsEntry\)\n/\thsStore.PushFor(portKey, models.HandshakeOwnerOf(sess.Opts), hsEntry)\n\thsStore.Push(portKey, hsEntry)\n/' \
+            "./$r/" 'TestRecordV2_PostTLS_OneCaptureStitchesOneConfigMock'
+          # ...and an unused entry goes back to its owner (V2, legacy).
+          expect_mutant_fails v2-restore-drops-owner "$r/record_v2.go" \
+            's/hsStore\.PushFor\(sharedKey, taker, sharedEntry\)/hsStore.PushFor(sharedKey, models.HandshakeOwner{Proc: taker.Proc}, sharedEntry)/' \
+            "./$r/" 'TestPostTLSHandshakeV2_RestoredGreetingCarriesNoTimestamp'
+          expect_mutant_fails legacy-restore-drops-owner "$r/conn.go" \
+            's/hsStore\.PushFor\(storeKey, taker, sharedEntry\)/hsStore.PushFor(storeKey, models.HandshakeOwner{Proc: taker.Proc}, sharedEntry)/' \
+            "./$r/" 'TestLegacyPostTLS_RestoresUnusedSharedGreeting'
+
+  # A real MySQL 8 server, a pooled TLS client, and the server's own count of
+  # aborted handshakes. See the header of this file and greeting_e2e_test.go.
+  mysql_tls_greeting_stitch_e2e:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: greeting-stitch e2e (real MySQL)
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Pooled connections opened before recording, two sessions, one greeting dial
+        run: .github/workflows/test_workflow_scripts/mysql-tls-greeting-e2e.sh -race
+
+      # The end-to-end run must catch the two regressions it exists for. Each
+      # mutant must compile, and the e2e must then FAIL.
+      - name: Remove the fix, expect the e2e to FAIL
+        run: |
+          set -uo pipefail
+          e2e=.github/workflows/test_workflow_scripts/mysql-tls-greeting-e2e.sh
+          mutate() {
+            local name="$1" file="$2" expr="$3"
+            cp "$file" /tmp/e2e-mutant.orig
+            perl -0pi -e "$expr" "$file"
+            if cmp -s "$file" /tmp/e2e-mutant.orig; then
+              echo "::error::e2e mutant '$name' did not apply to $file; update it with the code it mutates"
+              exit 1
+            fi
+            if ! go vet ./pkg/models/ ./pkg/agent/proxy/integrations/mysql/recorder/ >/tmp/e2e-mutant-build.log 2>&1; then
+              cat /tmp/e2e-mutant-build.log
+              echo "::error::e2e mutant '$name' does not compile, so a failure would score a FALSE kill"
+              cp /tmp/e2e-mutant.orig "$file"; exit 1
+            fi
+            if "$e2e" >"/tmp/e2e-mutant-$name.log" 2>&1; then
+              tail -40 "/tmp/e2e-mutant-$name.log"
+              echo "::error::VACUOUS E2E: mutant '$name' still passes the real-MySQL run"
+              cp /tmp/e2e-mutant.orig "$file"; exit 1
+            fi
+            grep -E 'greeting_e2e_test.go:[0-9]+: .*(want exactly 1|waited for a greeting|not its own|one capture stitched)' "/tmp/e2e-mutant-$name.log" | head -3
+            echo "OK: e2e mutant '$name' fails the real-MySQL run, as it must."
+            cp /tmp/e2e-mutant.orig "$file"
+          }
+          # Remembered per recording session again: a dial per session.
+          mutate memo-key-per-session pkg/agent/proxy/integrations/mysql/recorder/conn.go \
+            's/return models\.HandshakeServerKey\(opts\.NetNS, opts\.DstCfg\)/return models.HandshakeServerKey(opts.NetNS, opts.DstCfg) + "|" + opts.PassThroughScope/'
+          # A pooled connection waits out the stash bound again.
+          mutate joined-waits pkg/agent/proxy/integrations/mysql/recorder/record_v2.go \
+            's/\tif joinedMidStream \{\n\t\t\/\/ Only an entry provably its own; see above\./\tif false \&\& joinedMidStream {\n\t\t\/\/ Only an entry provably its own; see above./'
+          # Raw legs queued without their connection: streams pair by arrival
+          # order again, and the fresh connections take each other's greeting.
+          mutate raw-leg-unowned pkg/agent/proxy/integrations/mysql/recorder/record_v2.go \
+            's/\thsStore\.PushFor\(portKey, models\.HandshakeOwnerOf\(sess\.Opts\), hsEntry\)/\thsStore.Push(portKey, hsEntry)/'

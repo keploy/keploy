@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -25,6 +26,50 @@ func newTestHooks(t *testing.T) *Hooks {
 		proxyIP6:     [4]uint32{0, 0, 0, 1},
 		objectsMutex: sync.RWMutex{},
 		m:            sync.Mutex{},
+	}
+}
+
+// The address the agent hands the proxy's DNS server is where the kernel is
+// told to send the application's connections. A native agent shares the
+// application's network namespace, so that is loopback, whatever the machine's
+// network is — none at all, on a laptop with its network off. An agent started
+// with --is-docker is reached at its container's own address.
+func TestProxyIPv4IsWhereTheKernelSendsTheApplication(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		isDocker bool
+	}{
+		{"native", false},
+		{"--is-docker", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := "127.0.0.1"
+			if tc.isDocker {
+				ip, err := utils.GetContainerIPv4()
+				if err != nil {
+					t.Skipf("no non-loopback IPv4 address here for a container's agent to be reached at: %v", err)
+				}
+				want = ip
+			}
+			h := NewHooks(zap.NewNop(), &config.Config{})
+			// Not the constructor's loopback: the native case has to show that
+			// resolveProxyInfo wrote the address, not that nothing did.
+			h.proxyIP4 = "192.0.2.99"
+
+			info, err := h.resolveProxyInfo(context.Background(), config.Agent{IsDocker: tc.isDocker}, agent.HookCfg{IsDocker: tc.isDocker})
+			if err != nil {
+				t.Fatalf("the agent could not tell where its proxy is reached: %v", err)
+			}
+			if got := h.ProxyIPv4(); got != want {
+				t.Fatalf("the proxy is reached at %q, want %q", got, want)
+			}
+			if redirect, _ := IPv4ToUint32(h.ProxyIPv4()); redirect != info.IP4 {
+				t.Fatalf("ProxyIPv4 says %s, but the kernel is told to send connections to %08x", h.ProxyIPv4(), info.IP4)
+			}
+			if h.proxyIP6 != info.IP6 {
+				t.Fatalf("the hooks log the IPv6 redirect target as %08x, but the kernel is told %08x", h.proxyIP6, info.IP6)
+			}
+		})
 	}
 }
 

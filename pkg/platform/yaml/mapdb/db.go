@@ -2,6 +2,7 @@ package mapdb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 )
 
@@ -274,19 +276,168 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	return nil
 }
 
-// Exists reports whether mappings.yaml is on disk for the given
-// test-set. Used by the test-mode create-if-not-present write path —
-// distinct from Get's second return (which is "has at least one
-// non-empty test entry"). A file with only empty entries should still
-// count as "exists" so we don't overwrite the operator's intentional
-// empty mapping.
+func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	mapping.Boots = boots
+	mapping.Startup = nil
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
+func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error {
+	if len(byTest) == 0 && len(startup) == 0 && len(suites) == 0 {
+		return nil
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	at := make(map[string]int, len(mapping.TestCases))
+	for i, t := range mapping.TestCases {
+		at[t.ID] = i
+	}
+	testIDs := make([]string, 0, len(byTest))
+	for testID := range byTest {
+		testIDs = append(testIDs, testID)
+	}
+	sort.Strings(testIDs)
+	for _, testID := range testIDs {
+		in := byTest[testID]
+		i, ok := at[testID]
+		if !ok {
+			mapping.TestCases = append(mapping.TestCases, models.MappedTestCase{ID: testID})
+			i = len(mapping.TestCases) - 1
+		}
+		tc := &mapping.TestCases[i]
+		tc.Cases = mergeNames(tc.Cases, in.Cases)
+		tc.CaseMocks = mergeMaps(tc.CaseMocks, in.CaseMocks)
+		tc.CaseSteps = mergeMaps(tc.CaseSteps, in.CaseSteps)
+		if in.Dir != "" {
+			tc.Dir = in.Dir
+		}
+		if in.Starts > 0 {
+			tc.Starts = in.Starts
+		}
+	}
+	if len(suites) > 0 {
+		mapping.Suites = suites
+	}
+	if len(startup) > 0 {
+		mapping.Startup = startup
+	}
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	if !exists && effFormat == yaml.FormatYAML {
+		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+func mergeMaps[V any](existing, incoming map[string]V) map[string]V {
+	if len(incoming) == 0 {
+		return existing
+	}
+	if existing == nil {
+		existing = make(map[string]V, len(incoming))
+	}
+	for k, v := range incoming {
+		existing[k] = v
+	}
+	return existing
+}
+
+// mergeNames unions incoming names into existing ones, keeping order and dropping repeats.
+func mergeNames(existing, incoming []string) []string {
+	seen := make(map[string]struct{}, len(existing))
+	for _, n := range existing {
+		seen[n] = struct{}{}
+	}
+	merged := existing
+	for _, n := range incoming {
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		merged = append(merged, n)
+	}
+	return merged
+}
+
+// Exists reports whether the given test-set has a mappings file on disk, in
+// either format, as Get, GetStartup, Insert and UpsertBatch find it. Used by
+// the test-mode create-if-not-present write path — distinct from Get's second
+// return (which is "has at least one non-empty test entry"). A file with only
+// empty entries should still count as "exists" so we don't overwrite the
+// operator's intentional empty mapping.
 func (db *MappingDb) Exists(ctx context.Context, testSetID string) (bool, error) {
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
 		fileName = "mappings"
 	}
-	return yaml.FileExists(ctx, db.logger, mappingPath, fileName)
+	exists, _, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	return exists, err
+}
+
+// Delete removes the set's mappings file in every format; a missing file is not an error.
+func (db *MappingDb) Delete(_ context.Context, testSetID string) error {
+	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
+		return fmt.Errorf("rejecting Delete: testSetID %q must be a single-segment name under the mappings directory: %w", testSetID, err)
+	}
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		path, err := yaml.ValidatePath(filepath.Join(db.path, testSetID, fileName+"."+format.FileExtension()))
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			utils.LogError(db.logger, err, "failed to delete the mapping file", zap.String("path", path))
+			return err
+		}
+	}
+	return nil
 }
 
 // decodeMapping reads and decodes a test-set's mappings file.
@@ -324,6 +475,26 @@ func (db *MappingDb) decodeMapping(ctx context.Context, testSetID string) (*mode
 		return nil, "", false, err
 	}
 	return mapping, filepath.Join(mappingPath, fileName+"."+detected.FileExtension()), true, nil
+}
+
+func (db *MappingDb) GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error) {
+	m, _, _, err := db.decodeMapping(ctx, testSetID)
+	return m, err
+}
+
+// GetCases lists the test cases each flow recorded, keyed by flow.
+func (db *MappingDb) GetCases(ctx context.Context, testSetID string) (map[string][]string, error) {
+	mapping, _, present, err := db.decodeMapping(ctx, testSetID)
+	if err != nil || !present {
+		return map[string][]string{}, err
+	}
+	out := make(map[string][]string, len(mapping.TestCases))
+	for _, tc := range mapping.TestCases {
+		if len(tc.Cases) > 0 {
+			out[tc.ID] = append([]string(nil), tc.Cases...)
+		}
+	}
+	return out, nil
 }
 
 // GetStartup reads the test-set-scoped startup section from mappings.yaml.

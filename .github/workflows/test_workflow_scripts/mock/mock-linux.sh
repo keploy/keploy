@@ -23,6 +23,10 @@ if ! python3 -c "import pytest" 2>/dev/null; then
   python3 -m ensurepip --default-pip >/dev/null 2>&1 || true
   python3 -m pip install --quiet --disable-pip-version-check pytest
 fi
+# pytest-cov writes the coverage report step 4 reads back through keploy.
+if ! python3 -c "import pytest_cov" 2>/dev/null; then
+  python3 -m pip install --quiet --disable-pip-version-check pytest-cov
+fi
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-keploy}"
@@ -48,24 +52,75 @@ PY
 cat > conftest.py <<'PY'
 import os, json, urllib.request, pytest
 AGENT=os.environ.get("KEPLOY_MOCK_AGENT")
+TOKEN=os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
 def _post(p,b):
-    if not AGENT: return
+    if not AGENT: return None
+    # The agent guards its control plane with a bearer token and exports it
+    # here for exactly this caller. Absent when recording with an older
+    # released binary, hence the conditional.
+    h={"Content-Type":"application/json"}
+    if TOKEN: h["Authorization"]="Bearer "+TOKEN
     try:
         r=urllib.request.Request(AGENT+p,data=json.dumps(b).encode(),
-            headers={"Content-Type":"application/json"},method="POST")
-        urllib.request.urlopen(r,timeout=3).read()
-    except Exception: pass
+            headers=h,method="POST")
+        return json.loads(urllib.request.urlopen(r,timeout=3).read() or b"{}")
+    except Exception: return None
+# canSkip: this harness skips a test the replay says not to run. (Test-only:
+# KEPLOY_E2E_NO_SKIP plays a harness that predates skipping.)
 @pytest.fixture(autouse=True)
 def keploy_scope(request):
-    _post("/agent/scope/begin",{"name":request.node.name}); yield
-    _post("/agent/scope/end",{"name":request.node.name})
+    begin={"name":request.node.name}
+    if not os.environ.get("KEPLOY_E2E_NO_SKIP"): begin["canSkip"]=True
+    resp=_post("/agent/scope/begin",begin)
+    if resp and resp.get("action")=="skip":
+        # Told not to run this replay: skip, and send no end for it.
+        request.node._keploy_gated=True
+        pytest.skip(resp.get("reason") or "keploy: not run this replay")
+    yield
+# The end carries the test's own verdict -- the worst of its setup, call and
+# teardown (an expected failure proves nothing) -- once its teardown reported.
+_RANK={"passed":0,"skipped":1,"failed":2}
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    rep=(yield).get_result()
+    if getattr(item,"_keploy_gated",False): return
+    o="skipped" if hasattr(rep,"wasxfail") else rep.outcome
+    worst=getattr(item,"_keploy_worst",None)
+    if worst is None or _RANK[o]>_RANK[worst]: item._keploy_worst=o
+    if rep.when=="teardown":
+        _post("/agent/scope/end",{"name":item.name,"outcome":item._keploy_worst})
+PY
+
+# outcome_of NAME: the verdict the last replay gives a test (per-test file).
+outcome_of() {
+  python3 - "$1" <<'PY'
+import re, sys
+try:
+    t = open("keploy/e2e/last-replay-tests.yaml").read()
+except FileNotFoundError:
+    t = ""
+m = re.search(r"- name: " + re.escape(sys.argv[1]) + r"\n((?:\s+\w+: .*\n)*)", t)
+o = re.search(r"outcome: (\w+)", m.group(1)) if m else None
+print(o.group(1) if o else "none")
+PY
+}
+
+# The code under test, as its own module so step 4 can measure its coverage.
+# never_called() is the part no test reaches.
+cat > client.py <<PY
+import json, urllib.request
+BASE = "http://127.0.0.1:$PORT"
+def get(p):
+    with urllib.request.urlopen(BASE + p, timeout=5) as r:
+        return json.load(r)
+def never_called(x):
+    if x:
+        return "a"
+    return "b"
 PY
 
 cat > test_api.py <<PY
-import os, json, urllib.request
-BASE="http://127.0.0.1:$PORT"
-def get(p):
-    with urllib.request.urlopen(BASE+p, timeout=5) as r: return json.load(r)
+from client import get
 def test_users():  assert get("/users?id=1")["path"]=="/users?id=1"
 def test_items():  assert get("/items/42")["path"]=="/items/42"
 def test_health(): assert get("/health")["path"]=="/health"
@@ -90,6 +145,96 @@ echo "replay exit=$RC"
 [ "$RC" -eq 0 ] || { echo "FAIL: replay should pass entirely from mocks (exit 0), got $RC"; FAIL=1; }
 grep -q "3 passed" rep.log || { echo "FAIL: pytest did not report 3 passed under replay"; FAIL=1; }
 
+echo "== 2b. the replay left a receipt: local, git-ignored, and it says what was proven =="
+# keploy mock status, the editor and an agent all read the verdict from here.
+R=keploy/e2e/last-replay.yaml
+if [ ! -f "$R" ]; then
+  echo "FAIL: replay wrote no receipt at $R"; FAIL=1
+else
+  cat "$R"
+  grep -qx 'exitCode: 0' "$R" || { echo "FAIL: receipt exitCode is not 0 for a passing replay"; FAIL=1; }
+  grep -qx 'onMiss: fail' "$R" || { echo "FAIL: receipt does not record --on-miss fail"; FAIL=1; }
+  grep -qx 'missed: 0' "$R"   || { echo "FAIL: receipt does not record zero misses"; FAIL=1; }
+  grep -qE '^mocksDigest: [0-9a-f]{64}$' "$R" || { echo "FAIL: receipt has no digest of the recording it replayed"; FAIL=1; }
+  grep -qx 'isolated: true' "$R" || { echo "FAIL: receipt does not record the proven isolation"; FAIL=1; }
+  grep -qx 'runnerExitCode: 0' "$R" || { echo "FAIL: receipt does not record the test command's own exit"; FAIL=1; }
+  # Ownership is deliberately NOT asserted here: main.go chowns keploy/ back to
+  # $SUDO_USER after every mock command, so this would pass even if the
+  # receipt's own fchown were deleted. The unit tests cover that write.
+fi
+grep -qxF '/*/last-replay.yaml' keploy/.gitignore || { echo "FAIL: keploy/.gitignore does not ignore the receipt"; FAIL=1; }
+
+# The receipt must agree with the exit the shell saw, on EVERY run -- the green
+# path is the one place where a flat exitCode happens to be right.
+check_receipt_exit() {
+  want="$1"
+  got=$(sed -n 's/^exitCode: //p' keploy/e2e/last-replay.yaml)
+  [ "$got" = "$want" ] || { echo "FAIL: receipt says exitCode $got, the shell saw $want"; FAIL=1; }
+}
+check_receipt_exit 0
+
+echo "== 2a. the replay records each test's own verdict =="
+for t in test_users test_items test_health; do
+  got=$(outcome_of "$t")
+  [ "$got" = "passed" ] || { echo "FAIL: the replay gives $t the verdict '$got', want passed"; FAIL=1; }
+done
+grep -qx '    passed: 3' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not count 3 passed tests"; FAIL=1; }
+grep -qxF '/*/last-replay-tests.yaml' keploy/.gitignore || { echo "FAIL: keploy/.gitignore does not ignore the per-test results"; FAIL=1; }
+
+echo "== 2b'. a replay that runs only some tests skips the rest and says so =="
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider -rs test_api.py" --name e2e --run-only test_users --disable-tele 2>&1 | tee gated.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] || { echo "FAIL: a gated replay whose run tests pass should exit 0, got $RC"; FAIL=1; }
+grep -q "1 passed, 2 skipped" gated.log || { echo "FAIL: pytest did not skip the two gated tests"; FAIL=1; }
+# pytest's own skip line (the CLI also logs the reason, so match pytest's).
+grep -qE 'SKIPPED \[[0-9]+\] [^ ]+: not in --run-only' gated.log || { echo "FAIL: pytest did not skip with the gate's reason"; FAIL=1; }
+grep -q '^    gateNote:' keploy/e2e/last-replay.yaml && { echo "FAIL: the receipt says the gate did not hold, though the harness skipped"; FAIL=1; }
+for t in test_items test_health; do
+  got=$(outcome_of "$t")
+  [ "$got" = "gated" ] || { echo "FAIL: the replay gives gated $t the verdict '$got', want gated"; FAIL=1; }
+done
+[ "$(outcome_of test_users)" = "passed" ] || { echo "FAIL: the test the gate ran is not recorded as passed"; FAIL=1; }
+grep -qx '    gated: 2' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not count 2 gated tests"; FAIL=1; }
+grep -qx '    gateReason: not in --run-only' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not say why tests were gated"; FAIL=1; }
+
+echo "== 2b''. a harness that cannot skip runs every test, and the replay says so =="
+sudo -E env PATH="$PATH" KEPLOY_E2E_NO_SKIP=1 "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --run-only test_users --disable-tele 2>&1 | tee ungated.log
+grep -q "3 passed" ungated.log || { echo "FAIL: a harness that cannot skip should have run all 3 tests"; FAIL=1; }
+grep -q "asked to run only some tests, and did not" ungated.log || { echo "FAIL: keploy did not say the run was not the subset asked for"; FAIL=1; }
+grep -qx '    ungated: 2' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not count the 2 tests that ran outside the run list"; FAIL=1; }
+grep -q '^    gateNote: ' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not say the gate did not hold"; FAIL=1; }
+
+echo "== 2c. a replay that lets calls reach real services proves nothing =="
+# --on-miss passthrough: any call the recording lacks goes to the real
+# dependency, so whatever the tests say, the run did not prove isolation.
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --on-miss passthrough --disable-tele 2>&1 | tee passthrough.log
+grep -qx 'isolated: false' keploy/e2e/last-replay.yaml || { echo "FAIL: a passthrough replay claims isolation"; FAIL=1; }
+grep -q "did not prove the tests run with the dependencies off" passthrough.log || { echo "FAIL: the passthrough run did not say what it failed to prove"; FAIL=1; }
+# ...and the next proven replay puts the verdict back.
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --on-miss fail --disable-tele >/dev/null 2>&1
+grep -qx 'isolated: true' keploy/e2e/last-replay.yaml || { echo "FAIL: a proven replay did not restore the verdict"; FAIL=1; }
+
+echo "== 2d. a replay that serves NONE of the recorded calls verified nothing =="
+# A passing runner that exercises none of the recording is the H2 false pass:
+# nothing was served from the mocks, so a green exit would vouch for a run that
+# proved nothing. test_noop makes no dependency call, so loaded=3 / consumed=0.
+cat > test_noop.py <<PY
+def test_noop(): assert True
+PY
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_noop.py" --name e2e --disable-tele 2>&1 | tee nothing.log
+RC=${PIPESTATUS[0]}
+echo "nothing-served replay exit=$RC"
+[ "$RC" -ne 0 ] || { echo "FAIL: a replay that served no recorded call must exit non-zero (nothing verified)"; FAIL=1; }
+check_receipt_exit "$RC"
+grep -qx 'failedBy: nothing-verified' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not say the run verified nothing"; FAIL=1; }
+grep -qx 'consumed: 0' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not record zero consumed"; FAIL=1; }
+grep -q "verified nothing" nothing.log || { echo "FAIL: keploy did not say the run verified nothing"; FAIL=1; }
+# A genuine proof (passed, no miss) must still exit 0: 'nothing verified' must
+# not fire when a recorded call WAS served, or it would fail every real pass.
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --on-miss fail --disable-tele >/dev/null 2>&1
+RC=$?
+[ "$RC" -eq 0 ] || { echo "FAIL: a replay that served the recorded calls must still pass, got $RC"; FAIL=1; }
+
 echo "== 3. exit-code propagation: a failing runner must fail keploy =="
 cat > test_fail.py <<PY
 def test_boom(): assert False
@@ -98,6 +243,102 @@ sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p n
 RC=$?
 echo "failing-runner replay exit=$RC"
 [ "$RC" -ne 0 ] || { echo "FAIL: a failing runner must make keploy exit non-zero"; FAIL=1; }
+check_receipt_exit "$RC"
+grep -qx 'failedBy: runner' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not say the tests were what failed"; FAIL=1; }
+got=$(outcome_of test_boom)
+[ "$got" = "failed" ] || { echo "FAIL: the receipt gives the failing test_boom the verdict '$got', want failed"; FAIL=1; }
+
+echo "== 4. offline coverage and the --min-coverage gate =="
+# The same suite, with pytest-cov writing coverage.xml. The dependency is still
+# stopped, so this is the coverage of a run with every call replayed.
+COV_CMD="python3 -m pytest -q -p no:cacheprovider --cov=client --cov-report=xml test_api.py"
+rm -f coverage.xml
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "$COV_CMD" --name e2e --min-coverage 50 --disable-tele 2>&1 | tee cov-pass.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] || { echo "FAIL: replay above the coverage floor should pass, got $RC"; FAIL=1; }
+grep -q "offline coverage" cov-pass.log || { echo "FAIL: keploy did not report offline coverage"; FAIL=1; }
+# The receipt must carry the runner's own numbers, not keploy's guess.
+WANT_COV=$(python3 -c "import xml.etree.ElementTree as E; r=E.parse('coverage.xml').getroot(); print(r.get('lines-covered'), r.get('lines-valid'))")
+GOT_COV=$(python3 - <<'PY'
+import re
+t = open("keploy/e2e/last-replay.yaml").read()
+c = re.search(r"^    covered: (\d+)$", t, re.M); n = re.search(r"^    total: (\d+)$", t, re.M)
+print(c.group(1) if c else "?", n.group(1) if n else "?")
+PY
+)
+echo "coverage.xml: $WANT_COV, receipt: $GOT_COV"
+[ "$WANT_COV" = "$GOT_COV" ] || { echo "FAIL: receipt coverage ($GOT_COV) is not the runner's ($WANT_COV)"; FAIL=1; }
+
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "$COV_CMD" --name e2e --min-coverage 95 --disable-tele 2>&1 | tee cov-fail.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -ne 0 ] || { echo "FAIL: replay below the coverage floor must fail"; FAIL=1; }
+grep -q "less of the code than the floor" cov-fail.log || { echo "FAIL: the floor failure was not explained"; FAIL=1; }
+check_receipt_exit "$RC"
+# Below the floor is not a failing test, and not a lost proof.
+grep -qx 'failedBy: min-coverage' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not say the FLOOR failed the run"; FAIL=1; }
+grep -qx 'isolated: true' keploy/e2e/last-replay.yaml || { echo "FAIL: a coverage failure threw away the proven isolation"; FAIL=1; }
+grep -qx 'runnerExitCode: 0' keploy/e2e/last-replay.yaml || { echo "FAIL: a coverage failure was recorded as the tests failing"; FAIL=1; }
+
+# A report the command does not name and keploy does not guess: only
+# --coverage-report finds it. coverage.py writes it where .coveragerc says.
+mkdir -p reports
+cat > .coveragerc <<'CFG'
+[xml]
+output = reports/offline.xml
+CFG
+OUT_CMD="python3 -m pytest -q -p no:cacheprovider --cov=client --cov-report=xml test_api.py"
+rm -f coverage.xml reports/offline.xml
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "$OUT_CMD" --name e2e --min-coverage 50 --disable-tele 2>&1 | tee cov-elsewhere.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -ne 0 ] || { echo "FAIL: a report keploy cannot find must fail --min-coverage, not pass unmeasured"; FAIL=1; }
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "$OUT_CMD" --name e2e --coverage-report reports/offline.xml --min-coverage 50 --disable-tele 2>&1 | tee cov-named.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] || { echo "FAIL: --coverage-report did not find the report it was given, got $RC"; FAIL=1; }
+grep -q "offline coverage" cov-named.log || { echo "FAIL: the named report was not reported as offline coverage"; FAIL=1; }
+rm -f .coveragerc
+
+# No report is not a pass: a floor that cannot measure must not let the run through.
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --min-coverage 10 --disable-tele 2>&1 | tee cov-none.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -ne 0 ] || { echo "FAIL: --min-coverage with no coverage report must fail"; FAIL=1; }
+grep -q "no coverage report to check" cov-none.log || { echo "FAIL: the missing report was not explained"; FAIL=1; }
+
+echo "== 5. a suite that calls its own in-process server: said once, then counted =="
+# test_self.py's test makes 5 requests, each to a server it starts in-process
+# on a new port, as supertest's request(app) does: self-calls, which keploy
+# passes through to that real handler. The run's first is logged at INFO, the
+# rest at Debug, and their count when the run ends; one INFO line per
+# connection would flood the log.
+cat > test_self.py <<'PY'
+import http.server, json, socketserver, threading, urllib.request
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"path": self.path}).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+def own_server(path):
+    # TCPServer, not HTTPServer: no name lookup while keploy answers DNS.
+    # The timeout and the daemon thread let a self-call keploy does not pass
+    # through fail the test instead of hanging the run.
+    s = socketserver.TCPServer(("127.0.0.1", 0), H)
+    s.timeout = 5
+    t = threading.Thread(target=s.handle_request, daemon=True); t.start()
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{s.server_address[1]}{path}", timeout=5) as r:
+            return json.load(r)
+    finally:
+        t.join(6); s.server_close()
+def test_self_calls():
+    for i in range(5):
+        assert own_server(f"/self/{i}")["path"] == f"/self/{i}"
+PY
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_self.py" --name e2e --disable-tele 2>&1 | tee self.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] && grep -q "4 passed" self.log || { echo "FAIL: the suite with self-calls should pass (exit 0, 4 passed), got $RC"; FAIL=1; }
+SAID=$(grep -c "INFO.*self-call passed through to the run's own listener" self.log)
+[ "$SAID" -eq 1 ] || { echo "FAIL: 5 self-calls were said at INFO $SAID times, want once"; FAIL=1; }
+grep -qE "self-calls passed through to the run's own listeners.*\"calls\": 5" self.log ||
+  { echo "FAIL: the run's 5 self-calls were not counted when it ended"; FAIL=1; }
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK E2E: PASSED"; else echo "MOCK E2E: FAILED"; fi
 exit "$FAIL"

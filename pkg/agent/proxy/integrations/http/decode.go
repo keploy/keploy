@@ -34,10 +34,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		defer pUtil.Recover(h.Logger, clientConn, nil)
 		defer close(errCh)
 		for {
-			//Check if the expected header is present
-			if bytes.Contains(reqBuf, []byte("Expect: 100-continue")) {
-				h.Logger.Debug("The expect header is present in the request buffer and writing the 100 continue response to the client")
-				//Send the 100 continue response
+			// The whole header section first: only then is it known whether
+			// the client is waiting for a 100 (Continue) before its body.
+			if _, _, err := h.readRequestHead(ctx, &reqBuf, clientConn, nil); err != nil {
+				errCh <- err
+				return
+			}
+			if awaitsContinue(reqBuf) {
+				h.Logger.Debug("the client awaits a 100 Continue before its body; writing it")
 				_, err := clientConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 				if err != nil {
 					if ctx.Err() != nil {
@@ -47,16 +51,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- err
 					return
 				}
-				h.Logger.Debug("The 100 continue response has been sent to the user application")
-				//Read the request buffer again
-				newRequest, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to read the request buffer from the user application")
-					errCh <- err
-					return
-				}
-				//Append the new request buffer to the old request buffer
-				reqBuf = append(reqBuf, newRequest...)
+				// HandleChunkedRequests reads the body the client now sends,
+				// by its framing.
 			}
 
 			h.Logger.Debug("handling the chunked requests to read the complete request")
@@ -316,7 +312,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
+			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -427,21 +423,39 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	}
 }
 
+// withResponse returns m with its recorded response in Spec: m itself, or, when
+// the agent's disk store kept the response apart from the mock (strict mock
+// windows; see Mock.HasSpilledResponse), a copy of m with the response loaded.
+// m is a pooled mock that other connections may be matching or copying, and
+// HydrateResponse writes the mock it runs on, so it runs on the copy.
+func withResponse(m *models.Mock) (*models.Mock, error) {
+	if m == nil || !m.HasSpilledResponse() {
+		return m, nil
+	}
+	loaded := m.ShallowCopy()
+	if err := loaded.HydrateResponse(); err != nil {
+		return nil, fmt.Errorf("http: load the recorded response of mock %q: %w", m.Name, err)
+	}
+	return loaded, nil
+}
+
 // buildMockResponseBytes serializes a recorded HTTP mock's response to raw
 // wire bytes (status line + headers + recomputed Content-Length + body,
 // compressing the body when Content-Encoding is set). It lives here (not in
 // async.go) because it is the shared serializer for BOTH the ordinary
 // matched-mock path and the async serving branch.
+// A response still kept apart from its mock is loaded first (withResponse).
 func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	name := ""
 	if stub != nil {
 		name = stub.Name
 	}
+	stub, err := withResponse(stub)
+	if err != nil {
+		return nil, err
+	}
 	if stub == nil || stub.Spec.HTTPResp == nil {
 		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
-	}
-	if err := stub.HydrateResponse(); err != nil {
-		return nil, err
 	}
 	protoMajor, protoMinor := 1, 1
 	if stub.Spec.HTTPReq != nil {
@@ -450,7 +464,7 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
 		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
 	body := stub.Spec.HTTPResp.Body
-	header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+	header := pkg.ToWireHTTPHeader(stub.Spec.HTTPResp.Header, stub.Spec.HTTPResp.HeaderLineLengths)
 	var respBody string
 	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
 		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))

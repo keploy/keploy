@@ -1,13 +1,15 @@
 package proxy
 
 import (
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
+	"fmt"
+	"slices"
+	"sort"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 )
 
 // Per-PID (worker-keyed) mock scoping — "Design A".
@@ -60,28 +62,47 @@ type scopedMockDb struct {
 	integrations.MockMemDb
 	allow    map[string]struct{} // mock names this worker's current test may see
 	universe map[string]struct{} // union of ALL tests' mapped names (nil ⇒ no filtering)
+	pid      uint32
+	live     bool
+	view     string // allow mode: the scope the allowlist was resolved for; keys stateful cursors
+	// lastScope is the live-mode scope the latest cursor peek resolved; the
+	// commit after it reuses it. A view serves one connection, whose requests
+	// are sequential.
+	lastScope string
 }
 
 // keep returns the mocks visible to this worker: those in its allowlist plus any
 // that belong to no test (absent from the universe of mapped names).
 func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, error) {
+	if s.live && err == nil {
+		return byStart(s.pid, mocks), nil
+	}
 	if err != nil || s.allow == nil || s.universe == nil {
 		return mocks, err
 	}
 	out := mocks[:0:0]
 	for _, m := range mocks {
-		if m == nil {
-			continue
-		}
-		if _, mine := s.allow[m.Name]; mine {
+		if s.visible(m) {
 			out = append(out, m)
-			continue
-		}
-		if _, mapped := s.universe[m.Name]; !mapped {
-			out = append(out, m) // shared / unmapped mock — visible to everyone
 		}
 	}
 	return out, nil
+}
+
+// visible is keep's verdict on one mock. Without a filter every non-nil mock
+// is visible.
+func (s *scopedMockDb) visible(m *models.Mock) bool {
+	if m == nil {
+		return false
+	}
+	if s.allow == nil || s.universe == nil {
+		return true
+	}
+	if _, mine := s.allow[m.Name]; mine {
+		return true
+	}
+	_, mapped := s.universe[m.Name]
+	return !mapped // shared / unmapped mock — visible to everyone
 }
 
 func (s *scopedMockDb) GetFilteredMocks() ([]*models.Mock, error) {
@@ -98,6 +119,48 @@ func (s *scopedMockDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 
 func (s *scopedMockDb) GetSessionMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetSessionMocks())
+}
+
+// GetSessionMocksInWindow forwards the window index of the wrapped store through
+// the same name filter as GetSessionMocks; both filters are per mock, so their
+// order does not matter. A store without the index is walked.
+func (s *scopedMockDb) GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.SessionWindowReader); ok {
+		return s.keep(r.GetSessionMocksInWindow(start, end))
+	}
+	all, err := s.GetSessionMocks()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*models.Mock, 0, len(all))
+	for _, mk := range all {
+		if mk != nil && recordedIn(mk, start, end) {
+			out = append(out, mk)
+		}
+	}
+	return out, nil
+}
+
+// RangeSessionMocksWithKey forwards the key index of the wrapped store through
+// the same name filter as GetSessionMocks. A store without the index is
+// walked, which costs each lookup a whole GetSessionMocks snapshot; the agent
+// always wraps the mock manager, which has it.
+func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	if r, ok := s.MockMemDb.(integrations.SessionKeyReader); ok {
+		return r.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
+			return !s.visible(mk) || fn(mk)
+		})
+	}
+	all, err := s.GetSessionMocks()
+	if err != nil {
+		return err
+	}
+	for _, mk := range all {
+		if mk != nil && slices.Contains(ix.Keys(mk), key) && !fn(mk) {
+			break
+		}
+	}
+	return nil
 }
 
 func (s *scopedMockDb) GetUnFilteredMocks() ([]*models.Mock, error) {
@@ -133,6 +196,87 @@ func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
 		RevisionByKind(models.Kind) uint64
 	}); ok {
 		return r.RevisionByKind(kind)
+	}
+	return 0
+}
+
+// A scoped call's stateful cursors are its scope's own: two workers reading
+// the same request never advance each other, and a worker's next test (or a
+// re-run of one) starts its sequences from the first recording instead of
+// where the previous test left off. Dropping these on the wrap silently turned
+// stateful replay off for every scoped worker: repeated requests replayed
+// their first recording forever.
+//
+// The scope is the one this view's visibility uses. In live mode visibility
+// is resolved on every read (byStart), so the scope is too — per peek, and
+// the commit that follows it on this connection reuses it, so a test boundary
+// landing between the two cannot advance another scope's cursor. In allow
+// mode the allowlist was resolved when the connection was opened, and so was
+// its scope (view).
+func (s *scopedMockDb) MockCursorIndex(key string, n int) int {
+	c, ok := s.MockMemDb.(integrations.MockCursor)
+	if !ok {
+		return -1
+	}
+	if s.live {
+		s.lastScope = starts.Default.Scope(s.pid)
+	}
+	return c.MockCursorIndex(s.cursorKey(key), n)
+}
+
+func (s *scopedMockDb) AdvanceMockCursor(key string, servedIdx, n int) {
+	if c, ok := s.MockMemDb.(integrations.MockCursor); ok {
+		c.AdvanceMockCursor(s.cursorKey(key), servedIdx, n)
+	}
+}
+
+func (s *scopedMockDb) cursorKey(key string) string {
+	scope := s.view
+	if s.live {
+		scope = s.lastScope
+	}
+	if scope == "" {
+		return key
+	}
+	return scope + "\x00" + key
+}
+
+// RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
+// pass straight through.
+func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
+	if r, ok := s.MockMemDb.(integrations.RecordedWindowsReader); ok {
+		return r.RecordedWindows()
+	}
+	return nil
+}
+
+// WindowChanged of a manager without the signal returns nil, a channel that
+// never fires — the same "no signal" a consumer sees when the assertion fails.
+func (s *scopedMockDb) WindowChanged() <-chan struct{} {
+	if p, ok := s.MockMemDb.(integrations.WindowPacer); ok {
+		return p.WindowChanged()
+	}
+	return nil
+}
+
+// The carry-over tier is a read tier like the others, so it goes through keep().
+func (s *scopedMockDb) GetCarryOverMocks() ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {
+		return s.keep(r.GetCarryOverMocks())
+	}
+	return nil, nil
+}
+
+func (s *scopedMockDb) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {
+		return s.keep(r.GetCarryOverMocksByKind(kind))
+	}
+	return nil, nil
+}
+
+func (s *scopedMockDb) StagingEpoch() uint64 {
+	if p, ok := s.MockMemDb.(integrations.WindowPacer); ok {
+		return p.StagingEpoch()
 	}
 	return 0
 }
@@ -191,6 +335,12 @@ func (p *Proxy) SetWorkerScope(pid uint32, names []string) {
 	// Replace (never mutate) the inner map so a reference captured by scopedFor
 	// under RLock stays an immutable snapshot.
 	p.workerScope[pid] = set
+	// Each registration is a new scope (the worker's next test, or a re-run of
+	// the same one), so its stateful cursors start over.
+	if p.workerScopeGen == nil {
+		p.workerScopeGen = make(map[uint32]uint64)
+	}
+	p.workerScopeGen[pid]++
 	p.workerScopeMu.Unlock()
 }
 
@@ -237,6 +387,9 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	if kpid == 0 || mgr == nil {
 		return mgr
 	}
+	if starts.Default.Active() {
+		return &scopedMockDb{MockMemDb: mgr, pid: kpid, live: true}
+	}
 	p.workerScopeMu.RLock()
 	if len(p.workerScope) == 0 {
 		p.workerScopeMu.RUnlock()
@@ -245,10 +398,12 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	// Walk up the process tree to the nearest registered worker. Bounded so a
 	// reparent race or an unexpected /proc shape can never spin.
 	var allow map[string]struct{}
+	var gen uint64
 	pid := kpid
 	for i := 0; i < 32 && pid > 1; i++ {
 		if set, ok := p.workerScope[pid]; ok {
 			allow = set
+			gen = p.workerScopeGen[pid]
 			break
 		}
 		ppid, ok := ppidFromStat(pid)
@@ -263,29 +418,51 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	if allow == nil {
 		return mgr
 	}
-	return &scopedMockDb{MockMemDb: mgr, allow: allow, universe: universe}
+	return &scopedMockDb{MockMemDb: mgr, allow: allow, universe: universe, view: fmt.Sprintf("w%d.%d", pid, gen)}
 }
 
-// ppidFromStat reads the parent PID of pid from /proc/<pid>/stat. The comm field
-// (2nd) is parenthesised and may itself contain ')' and spaces, so the state and
-// ppid are read relative to the LAST ')': after it come " <state> <ppid> ...".
+// ppidFromStat reads the parent PID of pid from /proc/<pid>/stat
+// (utils.ReadProcStat).
 func ppidFromStat(pid uint32) (uint32, bool) {
-	b, err := os.ReadFile(filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10), "stat"))
-	if err != nil {
+	st, ok := utils.ReadProcStat(int(pid))
+	if !ok {
 		return 0, false
 	}
-	s := string(b)
-	close := strings.LastIndexByte(s, ')')
-	if close < 0 || close+2 >= len(s) {
-		return 0, false
-	}
-	fields := strings.Fields(s[close+2:]) // state, ppid, pgrp, ...
-	if len(fields) < 2 {
-		return 0, false
-	}
-	ppid, err := strconv.ParseUint(fields[1], 10, 32)
-	if err != nil {
-		return 0, false
-	}
-	return uint32(ppid), true
+	return uint32(st.PPID), true
 }
+
+func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
+	rank, universe, ok := starts.Default.View(pid, time.Now())
+	if !ok {
+		return mocks
+	}
+	type ranked struct {
+		m *models.Mock
+		r int
+	}
+	kept := make([]ranked, 0, len(mocks))
+	for _, m := range mocks {
+		if m == nil {
+			continue
+		}
+		if r, ok := rank[m.Name]; ok {
+			kept = append(kept, ranked{m, r})
+			continue
+		}
+		if _, known := universe[m.Name]; !known {
+			kept = append(kept, ranked{m, 9})
+		}
+	}
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].r < kept[j].r })
+	out := make([]*models.Mock, len(kept))
+	for i, k := range kept {
+		out[i] = k.m
+	}
+	return out
+}
+
+// Every MockMemDb the proxy hands a parser must keep the stateful cursor.
+var (
+	_ integrations.MockCursor = (*MockManager)(nil)
+	_ integrations.MockCursor = (*scopedMockDb)(nil)
+)

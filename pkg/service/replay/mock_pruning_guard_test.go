@@ -72,11 +72,11 @@ func TestShouldSkipPruning_AppUnreachableRunNeverPrunes(t *testing.T) {
 	}
 
 	// PreserveFailedMocks=false is the incident configuration.
-	if !shouldSkipPruning(0, len(results), 0, false, results) {
+	if !shouldSkipPruning(0, len(results), 0, false, anyAppConnectionError(results)) {
 		t.Fatal("an all-connection-refused run must skip pruning even with PreserveFailedMocks=false")
 	}
 	// ...and the guard must not depend on that flag being set.
-	if !shouldSkipPruning(0, len(results), 0, true, results) {
+	if !shouldSkipPruning(0, len(results), 0, true, anyAppConnectionError(results)) {
 		t.Fatal("an all-connection-refused run must skip pruning with PreserveFailedMocks=true too")
 	}
 }
@@ -86,10 +86,10 @@ func TestShouldSkipPruning_AppUnreachableRunNeverPrunes(t *testing.T) {
 // mocks are needed — regardless of WHY the tests failed.
 func TestShouldSkipPruning_ZeroPassingNeverPrunes(t *testing.T) {
 	allMockDiff := []models.TestResult{mockDiffResult("a"), mockDiffResult("b")}
-	if !shouldSkipPruning(0, 2, 0, false, allMockDiff) {
+	if !shouldSkipPruning(0, 2, 0, false, anyAppConnectionError(allMockDiff)) {
 		t.Fatal("zero passing tests must skip pruning: an empty keep-set is 'no information', not 'delete everything'")
 	}
-	if !shouldSkipPruning(0, 0, 0, false, nil) {
+	if !shouldSkipPruning(0, 0, 0, false, anyAppConnectionError(nil)) {
 		t.Fatal("a run with no results at all must skip pruning")
 	}
 }
@@ -100,21 +100,21 @@ func TestShouldSkipPruning_ZeroPassingNeverPrunes(t *testing.T) {
 func TestShouldSkipPruning_PruningStillWorks(t *testing.T) {
 	// All passing, no failures: the canonical prune case.
 	allPass := []models.TestResult{passedResult("a"), passedResult("b")}
-	if shouldSkipPruning(2, 0, 0, false, allPass) {
+	if shouldSkipPruning(2, 0, 0, false, anyAppConnectionError(allPass)) {
 		t.Fatal("a fully passing run must prune unused mocks")
 	}
 	// Mixed pass/fail with PreserveFailedMocks=false: there IS a keep-set from the
 	// passing tests, so pruning is justified (pre-existing behaviour, preserved).
 	mixed := []models.TestResult{passedResult("a"), mockDiffResult("b")}
-	if shouldSkipPruning(1, 1, 0, false, mixed) {
+	if shouldSkipPruning(1, 1, 0, false, anyAppConnectionError(mixed)) {
 		t.Fatal("a run with passing tests must still prune when PreserveFailedMocks is false")
 	}
 	// Same input, PreserveFailedMocks=true: the opt-in safety net still applies.
-	if !shouldSkipPruning(1, 1, 0, true, mixed) {
+	if !shouldSkipPruning(1, 1, 0, true, anyAppConnectionError(mixed)) {
 		t.Fatal("PreserveFailedMocks must still skip pruning when a test failed")
 	}
 	// Obsolete alone must also trip PreserveFailedMocks.
-	if !shouldSkipPruning(1, 0, 1, true, allPass) {
+	if !shouldSkipPruning(1, 0, 1, true, anyAppConnectionError(allPass)) {
 		t.Fatal("PreserveFailedMocks must skip pruning when a test is obsolete")
 	}
 }
@@ -125,7 +125,7 @@ func TestShouldSkipPruning_PruningStillWorks(t *testing.T) {
 // pruning would delete them.
 func TestShouldSkipPruning_PassingRunWithAConnectionErrorIsStillZeroSignal(t *testing.T) {
 	mixed := []models.TestResult{passedResult("a"), connRefusedResult("b")}
-	if !shouldSkipPruning(1, 1, 0, false, mixed) {
+	if !shouldSkipPruning(1, 1, 0, false, anyAppConnectionError(mixed)) {
 		t.Fatal("a run containing any app-connection failure must not prune, even if other tests passed")
 	}
 }
@@ -145,43 +145,92 @@ func TestShouldPrune_WiresTheGuardIntoTheDecision(t *testing.T) {
 	}}
 	healthy := []models.TestResult{{Status: models.TestStatusPassed}}
 
+	// complete is a run that scored every loaded test and read its results back;
+	// each case changes one thing from it.
+	complete := func(success, failure int, results []models.TestResult) pruneRun {
+		return pruneRun{allTestsGotAVerdict: true, resultsComplete: true, success: success, failure: failure,
+			appUnreachable: anyAppConnectionError(results)}
+	}
+	with := func(run pruneRun, change func(*pruneRun)) pruneRun { change(&run); return run }
+
 	tests := []struct {
 		name              string
 		removeUnusedMocks bool
 		instrument        bool
-		success, failure  int
-		results           []models.TestResult
+		run               pruneRun
 		want              bool
+		reason            string
 		why               string
 	}{
 		{
 			name: "app unreachable must not prune", removeUnusedMocks: true, instrument: true,
-			success: 0, failure: 3, results: appUnreachable, want: false,
+			run: complete(0, 3, appUnreachable), reason: "app_unreachable",
 			why: "the guard must reach the decision: every request failed to connect, so nothing " +
 				"vouches for any mock and pruning would destroy the recording over an infra fault",
 		},
 		{
 			name: "healthy passing run still prunes", removeUnusedMocks: true, instrument: true,
-			success: 3, failure: 0, results: healthy, want: true,
+			run: complete(3, 0, healthy), want: true,
 			why: "RemoveUnusedMocks is a documented feature; the guard must not disable it",
 		},
 		{
 			name: "feature off never prunes", removeUnusedMocks: false, instrument: true,
-			success: 3, failure: 0, results: healthy, want: false,
+			run: complete(3, 0, healthy), reason: "disabled",
 			why: "pruning is opt-in",
 		},
 		{
 			name: "not instrumenting never prunes", removeUnusedMocks: true, instrument: false,
-			success: 3, failure: 0, results: healthy, want: false,
+			run: complete(3, 0, healthy), reason: "disabled",
 			why: "without instrumentation there is no trustworthy consumed-mock set at all",
+		},
+		{
+			name: "a run that did not score every test never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.allTestsGotAVerdict = false }),
+			reason: "not_every_test_got_a_verdict",
+			why: "the tests the run never scored consumed nothing, and without mappings.yaml nothing " +
+				"else keeps their mocks out of the delete",
+		},
+		{
+			name: "an INTERNAL_ERR run never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.internalErr = true }),
+			reason: "internal_error",
+			why:    "keploy lost part of the run, so the report the other rules read may be short",
+		},
+		{
+			name: "unreadable results never prune", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, nil), func(r *pruneRun) { r.resultsComplete = false }),
+			reason: "results_unreadable",
+			why:    "the connection-error rule reads the results; without them it cannot see a refused request",
+		},
+		{
+			name: "a request that got no answer never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(1, 1, healthy), func(r *pruneRun) { r.noAnswer = true }),
+			reason: "no_answer",
+			why:    "a timed-out request consumed nothing for want of an answer, not for want of need",
+		},
+		{
+			name: "no test passed never prunes", removeUnusedMocks: true, instrument: true,
+			run: complete(0, 2, nil), reason: "no_test_passed",
+			why: "nothing vouches for any mock",
+		},
+		{
+			name: "preserveFailedMocks keeps a failing run's mocks", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(1, 1, healthy), func(r *pruneRun) { r.preserveFailedMocks = true }),
+			reason: "preserve_failed_mocks",
+			why:    "the caller opted in to keeping every mock when anything failed",
+		},
+		{
+			name: "a zero pruneRun never prunes", removeUnusedMocks: true, instrument: true,
+			reason: "not_every_test_got_a_verdict",
+			why:    "a caller that forgets a field must fail closed",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldPrune(tt.removeUnusedMocks, tt.instrument, tt.success, tt.failure, 0, false, tt.results)
-			if got != tt.want {
-				t.Errorf("shouldPrune = %v, want %v: %s", got, tt.want, tt.why)
+			got, reason := shouldPrune(tt.removeUnusedMocks, tt.instrument, tt.run)
+			if got != tt.want || reason != tt.reason {
+				t.Errorf("shouldPrune = (%v, %q), want (%v, %q): %s", got, reason, tt.want, tt.reason, tt.why)
 			}
 		})
 	}

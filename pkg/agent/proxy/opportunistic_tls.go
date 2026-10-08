@@ -64,13 +64,12 @@ type sniffResult struct {
 // opts carries the session's resolved upstream-TLS trust material
 // (see Proxy.applyUpstreamTLSOptions); it is threaded down to
 // hijackAndMITM, which owns the only upstream tls.Config on this path.
-func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn, dstAddr string, backdate time.Time, opts models.OutgoingOptions) error {
+func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn, dstAddr string, pre *util.Predialed, backdate time.Time, opts models.OutgoingOptions) error {
 	dialCtx, dialCancel := context.WithTimeout(ctx, opportunisticDialTimeout)
 	defer dialCancel()
-	var dialer net.Dialer
 	dstConn, err := util.DialDestinationWith(dialCtx, p.logger, util.DialTarget{Addr: dstAddr},
 		func(ctx context.Context, a string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp", a)
+			return util.DialRaw(ctx, nil, "tcp", a, pre)
 		})
 	if err != nil {
 		return fmt.Errorf("dial upstream %s: %w", dstAddr, err)

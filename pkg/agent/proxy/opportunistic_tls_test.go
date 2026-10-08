@@ -44,7 +44,7 @@ func TestOpportunisticTLSIntercept_NonTLS_ReturnsBoundedWhenPeerIdle(t *testing.
 
 	resCh := make(chan error, 1)
 	go func() {
-		resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn, ln.Addr().String(), time.Time{}, models.OutgoingOptions{})
+		resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn, ln.Addr().String(), nil, time.Time{}, models.OutgoingOptions{})
 	}()
 
 	// Client sends a plaintext (non-TLS) chunk, then closes — this makes
@@ -155,8 +155,7 @@ func TestOpportunisticTLSIntercept_NonTLS_BudgetExhaustedWithIdlePeer_KeepsRelay
 			p := &Proxy{logger: testLogger()}
 			resCh := make(chan error, 1)
 			go func() {
-				resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn,
-					ln.Addr().String(), time.Time{}, models.OutgoingOptions{})
+				resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn, ln.Addr().String(), nil, time.Time{}, models.OutgoingOptions{})
 			}()
 
 			var upstream net.Conn
@@ -314,8 +313,7 @@ func TestOpportunisticTLSIntercept_NonTLS_PeerBlockedInWriteStillReturns(t *test
 	p := &Proxy{logger: testLogger()}
 	resCh := make(chan error, 1)
 	go func() {
-		resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn,
-			ln.Addr().String(), time.Time{}, models.OutgoingOptions{})
+		resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn, ln.Addr().String(), nil, time.Time{}, models.OutgoingOptions{})
 	}()
 
 	upstream := <-upCh

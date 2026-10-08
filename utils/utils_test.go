@@ -271,3 +271,92 @@ func TestEphemeralPortRangeReportsUnknownWhenUnreadable(t *testing.T) {
 			lo, hi, known, defaultEphemeralLo, defaultEphemeralHi)
 	}
 }
+
+func TestNetworkNameFromDockerRun(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{"space form", "docker run --name app --network keploy-network img", "keploy-network"},
+		{"equals form", "docker run --name=app --network=keploy-network img", "keploy-network"},
+		{"net alias, space form", "docker run --net keploy-network img", "keploy-network"},
+		{"net alias, equals form", "docker run --net=keploy-network img", "keploy-network"},
+		{"no network", "docker run --name app img", ""},
+		// An empty "--flag=" must not be taken as the value and stop the scan.
+		{"empty equals then a real flag", "docker run --net= --network mynet img", "mynet"},
+		{"flag with no value", "docker run --network", ""},
+		{"empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NetworkNameFromDockerRun(tc.cmd); got != tc.want {
+				t.Fatalf("NetworkNameFromDockerRun(%q) = %q, want %q", tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
+
+// uniqueProcessGroups returns each process's group, as read, once: the
+// interrupt signals groups, and a group signalled twice is waited on twice.
+func TestUniqueProcessGroups(t *testing.T) {
+	groups := map[int]int{10: 10, 11: 10, 12: 12, 13: 10}
+	got, err := uniqueProcessGroups([]int{11, 12, 13, 10}, func(pid int) (int, error) { return groups[pid], nil })
+	if err != nil || fmt.Sprint(got) != "[10 12]" {
+		t.Fatalf("uniqueProcessGroups = %v, %v; want [10 12]", got, err)
+	}
+	failed := fmt.Errorf("process 12 is not in the process table")
+	if _, err := uniqueProcessGroups([]int{10, 12}, func(pid int) (int, error) {
+		if pid == 12 {
+			return 0, failed
+		}
+		return groups[pid], nil
+	}); err != failed {
+		t.Fatalf("uniqueProcessGroups with an unreadable group returned %v, want %v", err, failed)
+	}
+}
+
+// The shell runs `docker  run` and `docker<TAB>run` as `docker run`, so the
+// kind is the same.
+func TestFindDockerCmdReadsWordsNotSpacing(t *testing.T) {
+	for cmd, want := range map[string]CmdType{
+		"docker  run --name app img":     DockerRun,
+		"docker\trun --name app img":     DockerRun,
+		"  sudo   docker   compose  up ": DockerCompose,
+		"podman\n run app":               DockerRun,
+		"docker  start -a app":           DockerStart,
+		"python app.py":                  Native,
+	} {
+		if got := FindDockerCmd(cmd); got != want {
+			t.Errorf("FindDockerCmd(%q) = %q, want %q", cmd, got, want)
+		}
+	}
+}
+
+// keploy's flags for the container go right after its engine's run
+// subcommand, wherever that is.
+func TestRunSubcommandEnd(t *testing.T) {
+	for cmd, want := range map[string]string{
+		"docker run img":                            "docker run",
+		"sudo docker run img":                       "sudo docker run",
+		"docker container run img":                  "docker container run",
+		"sudo -u docker docker run img":             "sudo -u docker docker run",
+		"DOCKER_CONFIG=/srv/docker docker run img":  "DOCKER_CONFIG=/srv/docker docker run",
+		"/run/current-system/sw/bin/docker run img": "/run/current-system/sw/bin/docker run",
+		"docker pull img && docker run img":         "docker pull img && docker run",
+		"podman\n  run img":                         "podman\n  run",
+		`C:\Docker\docker.exe run img`:              `C:\Docker\docker.exe run`,
+		"docker start -a app":                       "",
+		"docker --log-level debug run img":          "",
+		"./run.sh":                                  "",
+	} {
+		at := RunSubcommandEnd(cmd)
+		got := ""
+		if at >= 0 {
+			got = cmd[:at]
+		}
+		if got != want {
+			t.Errorf("RunSubcommandEnd(%q) ends after %q, want after %q", cmd, got, want)
+		}
+	}
+}

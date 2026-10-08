@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
 )
 
@@ -45,10 +46,11 @@ const (
 	//
 	// It bounds STALLED time, not elapsed time: the wait ends the moment the
 	// parser takes anything at all, so an arbitrarily slow parser still
-	// receives every chunk. It only elapses when the parser frees nothing at
-	// all for this long, which is taken as "gone" — the whole remaining
-	// queue is then abandoned at once and reported, rather than the wait
-	// being re-entered per chunk.
+	// receives every chunk. And it is time the process could RUN, not wall
+	// time (see stallMeter): a starved process's parser cannot read either.
+	// It only elapses when the parser frees nothing at all for this long,
+	// which is taken as "gone" — the whole remaining queue is then abandoned
+	// at once and reported, rather than the wait being re-entered per chunk.
 	//
 	// Exposed as [Config.ConsumerStallGrace] rather than fixed in the tee so
 	// the owner picks the policy, the way net/http's Server.Shutdown takes
@@ -146,6 +148,13 @@ type Config struct {
 	// pkg/agent/proxy/proxy.go; zero and negative are passed through
 	// untouched so the default above applies.
 	ConsumerStallGrace time.Duration
+	// stallClock measures ConsumerStallGrace (see stallMeter); nil is the
+	// process's own clocks. Tests set it to drive the window.
+	stallClock stallClock
+	// beforeTee, when set, runs on a forwarder after it has written a chunk
+	// on and before it tees it. Tests set it to hold one direction's tee
+	// back, so the other direction's later capture is teed first.
+	beforeTee func(fakeconn.Direction)
 
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.
@@ -227,10 +236,14 @@ type Config struct {
 	OnMarkMockIncomplete func(reason string)
 
 	// OnCaptureDesync is invoked at most once per direction, the first time
-	// a chunk is dropped on that tee. Nil is safe.
+	// a chunk is dropped on that tee. It returns whether the hole costs the
+	// owner's recording anything, and the tee warns of the hole only then. An
+	// owner whose recording is stopping loses nothing at a hole: the
+	// connection is torn down with the recording. Nil is safe, and every
+	// hole is warned of.
 	//
-	// It is NOT a louder OnMarkMockIncomplete. That one is per-mock and is
-	// cleared by Session.MarkMockComplete after each cycle; this one reports
+	// It is NOT a louder OnMarkMockIncomplete. That one is per-mock and the
+	// next mock emitted takes it (Session.EmitMock); this one reports
 	// that the connection's byte stream now has a hole, which no later mock
 	// recovers from. Downstream parsers frame by length prefix, so after a
 	// hole the next header is read mid-body and every subsequent frame on
@@ -238,12 +251,20 @@ type Config struct {
 	// perfectly while producing zero further mocks, and the test cases
 	// recorded against it replay as match_phase=no_mocks.
 	//
-	// The expected implementation is to record the start of the hole and,
-	// when the connection ends, mark that whole span so the test cases
-	// overlapping it are suppressed instead of shipped mock-less. That is
-	// the half that closes the failure by construction; retirement (below)
-	// is the best-effort half that gets capture going again.
-	OnCaptureDesync func(reason string)
+	// The expected implementation suppresses the test cases recorded while
+	// the connection carries traffic from here on, instead of shipping them
+	// mock-less (syncMock.UnrecordedConn). A parser that cannot re-align
+	// (ParserCanResyncAfterGap false) is no longer fed, so the connection has
+	// stopped being recorded; one that can re-aligns at some later message,
+	// but when is known only once it gets there, possibly a full queue behind
+	// the traffic, by when the test cases in between have been streamed.
+	//
+	// It is called first, on the forwarder's goroutine as the chunk is lost,
+	// before the tee refuses anything after the hole, logs it, or ends a
+	// stream at it (EndAtHole): an owner that stops the connection's
+	// recording here stops it at the hole, before its parser can learn of
+	// it. It must not block.
+	OnCaptureDesync func(reason string) bool
 
 	// OnClientChunkTeed is invoked after each successful tee of a
 	// client-to-dest chunk into the parser's FakeConn. Callers wire
@@ -394,7 +415,7 @@ type Config struct {
 	// When a tee desyncs — a chunk lost to [DropPerConnCap] or
 	// [DropMemoryPressure] — the connection's captured byte stream has a
 	// hole in it. The tee already says so in its own words: it logs "capture
-	// desynced; this connection can no longer be recorded" and fires
+	// dropped a chunk" at Warn (once per direction) and fires
 	// [Config.OnCaptureDesync] so the owner can suppress the test cases
 	// recorded over the hole. Until now it then kept pushing anyway, and a
 	// length-prefix framer reading from the wrong offset does not merely
@@ -421,6 +442,27 @@ type Config struct {
 	// Either way the FORWARD path is untouched: the relay writes every byte
 	// to the real peer before it ever offers the chunk to a tee.
 	ParserCanResyncAfterGap bool
+
+	// EndAtHole, when set and ParserCanResyncAfterGap is false, ends a
+	// direction at its hole: once a tee has desynced and delivered every
+	// chunk it queued before the hole, it ends its FakeConn (io.EOF), and
+	// calls EndAtHole first, with the direction and the reason the chunk was
+	// lost ([DropPerConnCap] or [DropMemoryPressure]). The caller wires it to
+	// supervisor.Session.MarkEndedAtHole, so the parser that reaches the end
+	// learns it is the hole's and not the connection's. The tee then marks
+	// no mock incomplete (OnMarkMockIncomplete) for the lost chunk, nor for
+	// the chunks it refuses after it ([DropDesynced]): the parser learns of
+	// the hole where it is, and a mark would void whichever mock it emits
+	// next, one from before the hole. OnCaptureDesync fires as before.
+	//
+	// Nil (the default) keeps a desynced direction's FakeConn open, fed
+	// nothing, until the connection ends. Only a parser that reads each
+	// direction to its own end, and tells a hole's end from the
+	// connection's, may have it set ([integrations.EndAtHoleCapable]): one
+	// that does not would record what the hole cut as though the connection
+	// had closed there. The forward path is untouched either way, and so is
+	// the relay when the parser returns: a parser's return never ends it.
+	EndAtHole func(dir fakeconn.Direction, reason string)
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields

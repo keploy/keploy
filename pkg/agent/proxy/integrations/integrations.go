@@ -167,6 +167,48 @@ type GapResyncCapable interface {
 	CanResyncAfterGap() bool
 }
 
+// EndAtHoleCapable is the optional capability interface of a parser that
+// cannot re-align after a hole (GapResyncCapable not implemented, or answered
+// no) and reads each direction of its connection to that direction's own end.
+// Optional, like GapResyncCapable: the relay type-asserts for it.
+//
+// Such a parser is fed nothing of a direction after its hole, but without
+// this it is not told where the hole is: the direction is not ended, so the
+// parser waits for bytes that will not come. A parser that runs behind its
+// capture cannot place the hole from the incomplete-mock flag either: the
+// relay sets it when the chunk is lost, and the parser takes it when it reads
+// its next chunk, which can be a full queue of chunks teed before the hole
+// later. Everything the relay still delivers was teed before the hole.
+//
+// Returning true asks the relay to end a direction at its hole: once every
+// chunk teed before it is delivered, the direction's FakeConn returns io.EOF,
+// and the session says the stream ended at a hole, and why
+// (supervisor.Session.EndedAtHole), so the parser can tell it from the end of
+// the connection. The relay then marks no mock incomplete for the lost chunk,
+// nor for the chunks it refuses after it: a mark voids whichever mock is
+// emitted next, which is one from before the hole. The other direction is fed
+// as before, until the connection ends.
+//
+// It asserts that the parser reads each direction to its own end, and tells a
+// hole's end from the connection's (supervisor.Session.EndedAtHole): one that
+// does not would record what the hole cut as though the connection had closed
+// there. Mid-connection, only a parser that claims it sees one direction end
+// while the other goes on. Whenever the parser returns, at the end of both
+// directions or before, the relay goes on forwarding the application's bytes
+// until a peer closes: a parser's return never ends it.
+//
+// keploy/integrations' HTTP/2 recorder implements it, and asserts so at
+// compile time, so renaming the interface or its method breaks that build
+// rather than silently leaving the recorder waiting at its holes.
+type EndAtHoleCapable interface {
+	// CanEndAtHole reports whether this parser wants a direction that lost a
+	// chunk ended at the hole (see EndAtHoleCapable). It is consulted once
+	// per connection, before the relay starts, so it must not depend on
+	// per-connection state. A parser that can re-align after a hole keeps
+	// its feed whatever this answers.
+	CanEndAtHole() bool
+}
+
 func Register(name IntegrationType, p *Parsers) {
 	Registered[name] = p
 }
@@ -226,6 +268,69 @@ type MockMemDb interface {
 	MockWriter
 	MockConsumer
 	WindowAware
+}
+
+// MockCursor is an optional MockMemDb capability that serves stateful
+// dependencies: repeated identical requests answered with successive recorded
+// responses in record order, then the last one again. MockCursorIndex returns
+// the position to serve for a request key given n recorded responses WITHOUT
+// advancing (a negative index means "no cursor": serve as if the capability
+// were absent); AdvanceMockCursor moves the key past servedIdx, saturating at
+// n, and is called only once the response is actually served, so a failed or
+// retried match does not skip a recording. The agent's MockManager implements
+// it, and every MockMemDb wrapper must forward it — a wrapper that drops it
+// silently turns stateful replay off for the calls it wraps.
+//
+// A peek and the commit after it must come from the same goroutine, with no
+// other peek of the same store in between: a wrapper may resolve per peek what
+// the commit then reuses (the proxy's per-connection views do). Parsers serve
+// one connection from one goroutine, one request at a time, which satisfies it.
+type MockCursor interface {
+	MockCursorIndex(key string, n int) int
+	AdvanceMockCursor(key string, servedIdx, n int)
+}
+
+// SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
+// snapshot narrowed to the mocks recorded inside one test window, without
+// walking the rest of it.
+//
+// A replay re-stages every test's window but leaves the reusable pool whole,
+// and lax mode keeps a recording's per-test MySQL data mocks in that pool, so
+// it holds the traffic of every test in the set. A matcher that only wants the
+// current test's mocks would otherwise walk all of them on every command, and a
+// replay's total cost would grow with the square of its length.
+type SessionWindowReader interface {
+	// GetSessionMocksInWindow returns, in GetSessionMocks order, the mocks of
+	// that snapshot whose ReqTimestampMock lies in [start, end] (bounds
+	// included) or is unset: exactly GetSessionMocks filtered by that
+	// predicate.
+	GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error)
+}
+
+// MockIndex files mocks under the keys Keys gives them, so a matcher can find
+// its candidates in a large pool without walking it (see SessionKeyReader).
+//
+// Keys must depend only on what a mock recorded and how replay classified it
+// (its Lifetime and its "type" metadata), never on its place in a pool: a
+// store builds one index per MockIndex value and pool, and keeps it while the
+// pool lasts. So pass the same *MockIndex to every lookup, and declare it
+// once, at package level.
+type MockIndex struct {
+	Keys func(*models.Mock) []string
+}
+
+// SessionKeyReader is an optional MockMemDb extension: the GetSessionMocks
+// snapshot narrowed to the mocks an index files under one key, without
+// walking the rest of it. A replay's reusable pool holds every test's traffic
+// in lax mode, so a matcher that walked it for each command would cost more
+// with every test the set holds.
+type SessionKeyReader interface {
+	// RangeSessionMocksWithKey calls fn with each mock of the session tier
+	// that ix files under key, in GetSessionMocks order, until fn returns
+	// false. fn is called without the store's locks held, so it may call
+	// back into the store; the walk then sees the tier as it is by the time
+	// it gets there, as successive reads would.
+	RangeSessionMocksWithKey(ix *MockIndex, key string, fn func(*models.Mock) bool) error
 }
 
 // MockReader is the read-only facet of MockMemDb. Parsers that need
@@ -324,12 +429,13 @@ type MockReader interface {
 	// session / per-test pools.
 	GetConnectionMocks(connID string) ([]*models.Mock, error)
 
-	// SessionMockHitCounts returns per-mock atomic HitCount values for
-	// session- and connection-scoped mocks. Used by replay summary
-	// output and "which reusable mocks actually got reused?" telemetry.
-	// Key is mock.Name; value is the atomic counter's current read.
-	// Inherently racy as a snapshot — counters may increment during
-	// iteration — but that's tolerable for observability.
+	// SessionMockHitCounts returns the match counts of the session- and
+	// connection-scoped mocks in the pool, counted by MarkMockAsUsed over
+	// the current test set. Used by replay summary output and "which
+	// reusable mocks actually got reused?" telemetry. Key is mock.Name
+	// (mocks sharing a name share a count). Inherently racy as a
+	// snapshot — counters may increment during iteration — but that's
+	// tolerable for observability.
 	SessionMockHitCounts() map[string]uint64
 }
 
@@ -371,6 +477,64 @@ type MockConsumer interface {
 	// booting app's follow-on revalidation queries fail.
 	DeleteStartupMock(mock models.Mock) bool
 	MarkMockAsUsed(mock models.Mock) bool
+}
+
+// RecordedWindowsReader is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it). It exposes the recorded window of every
+// test of the set being replayed, selected or not, as the replayer seeded it at
+// staging (models.MockFilterParams.RecordedWindows).
+//
+// A parser whose protocol has traffic the test windows do not pace by
+// themselves — a broker's server push — uses it to hold that traffic until the
+// replay reaches the recorded window it belongs to:
+//
+//	sched := db.RecordedWindows()                 // nil: release everything
+//	start, _ := db.CurrentTestWindow()
+//	due := sched.Released(msg.Spec.ReqTimestampMock, start)
+//
+// The schedule is immutable; it is replaced (never mutated) at each set's
+// staging call, which also changes WindowPacer.StagingEpoch.
+//
+// The agent keeps the windows only while some kind has registered a carry-over
+// predicate (models.RegisterCarryOver); otherwise RecordedWindows is nil. A
+// parser that paces by them registers its kind, as the traffic it paces is
+// what carry-over exists for.
+type RecordedWindowsReader interface {
+	RecordedWindows() *models.WindowSchedule
+}
+
+// WindowPacer is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
+// MockManager implements it) for a parser that holds traffic until the replay
+// reaches a recorded window — FLOW permits that find nothing due yet — and must
+// serve it when the window moves, with no request of its own to wake it.
+//
+//   - WindowChanged returns a channel closed at the next test-window change,
+//     after the new window and trees are visible. Take it BEFORE reading the
+//     state it guards; each change hands out a fresh channel. It is also closed
+//     once when the manager is closed.
+//   - StagingEpoch changes at every staging call (a new set, or the set staged
+//     again for a replacement agent). State built from one staging snapshot,
+//     such as per-set delivery queues, is rebuilt when it changes.
+//
+// A MockMemDb without it gives no signal: serve held work at the connection's
+// next request instead.
+type WindowPacer interface {
+	WindowChanged() <-chan struct{}
+	StagingEpoch() uint64
+}
+
+// CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it) for a parser whose kind registered a
+// carry-over predicate (models.RegisterCarryOver). It returns, in recorded
+// order, the registered per-test mocks that are reachable outside their own
+// test window: loaded up to models.CarryOverLookahead ahead of their release
+// window, and kept after their window closes until consumed. Serve them after
+// the running test's own mocks (GetPerTestMocksInWindow), and consume them
+// through DeleteFilteredMock, which falls back per-test, then startup, then
+// carry-over, and reports a carry-over consume with MockState.CarryOver.
+type CarryOverReader interface {
+	GetCarryOverMocks() ([]*models.Mock, error)
+	GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error)
 }
 
 // WindowAware is the test-window facet of MockMemDb. Parsers that

@@ -25,6 +25,11 @@ type teleDB interface {
 
 type TestSetConfig interface {
 	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
+	// ReadForUpdate reports a config.yaml that did not parse instead of
+	// handing back a zero value. Read deliberately swallows that so
+	// secret hydration continues; a caller about to REPLACE the whole
+	// document must not.
+	ReadForUpdate(ctx context.Context, testSetID string) (*models.TestSet, error)
 	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 	ReadSecret(ctx context.Context, testSetID string) (map[string]interface{}, error)
 }

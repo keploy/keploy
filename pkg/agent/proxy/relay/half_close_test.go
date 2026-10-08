@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"io"
 	"net"
@@ -72,7 +73,7 @@ func newHalfCloseHarness(t *testing.T, cfg Config) *halfCloseHarness {
 	clientApp, srcProxy := pair()
 	dstProxy, destSvc := pair()
 
-	r := New(cfg, srcProxy, dstProxy)
+	r := New(cfg, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &halfCloseHarness{clientApp: clientApp, destSvc: destSvc, r: r, done: make(chan struct{})}
 	go func() {

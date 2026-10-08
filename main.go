@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
@@ -138,7 +142,7 @@ func start(ctx context.Context) {
 		return
 	}
 
-	// Nudge OSS users toward Keploy Community Edition. Placed AFTER the
+	// Nudge users of this open-source build toward Keploy. Placed AFTER the
 	// sudo re-exec gate (mirroring where the logo prints via the cobra
 	// PreRunE in cli/provider/cmd.go) so the original process is already
 	// replaced by syscall.Exec before this runs — guarantees the banner
@@ -235,14 +239,57 @@ func start(ctx context.Context) {
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
-		utils.ErrCode = exitCodeForCmdErr(err, os.Stderr)
+		utils.ErrCode = finalExitCode(err, utils.ErrCode, os.Stderr)
 	}
 
 	// Restore keploy folder ownership if running under sudo (for Docker mode)
-	// This ensures the next native run doesn't hit permission issues
-	if conf.Path != "" {
+	// so the next native run does not hit permission issues.
+	//
+	// Only after a command that can WRITE there. conf.Path is non-empty only
+	// once ValidateFlags has run, which is how this used to be gated -- an
+	// incidental signal, and one that turned `sudo keploy --version` into a
+	// recursive chown of the working tree the moment the config default for
+	// path stopped being the empty string. The commands that create a keploy/
+	// directory are the ones that get the restore.
+	if conf.Path != "" && writesKeployFolder(rootCmd, os.Args[1:]) {
 		utils.RestoreKeployFolderOwnership(logger, conf.Path)
 	}
+}
+
+// writesKeployFolder reports whether the command that just ran is one that
+// can create files under conf.Path. Everything else -- version, help, config,
+// login, a command that failed before it started -- has nothing to restore,
+// and a chown -R it never earned is a destructive thing to do on the strength
+// of a guess.
+func writesKeployFolder(root *cobra.Command, args []string) bool {
+	writes := map[string]bool{
+		"record": true, "test": true, "mock": true, "normalize": true,
+		"templatize": true, "contract": true, "import": true, "export": true,
+		"sanitize": true, "diff": true,
+	}
+	// Cobra resolves it, because argv cannot be read by eye: a root flag that
+	// takes a separate value (--storage-format json) puts a non-flag word
+	// before the command, and reading the first such word called that word
+	// the command. `keploy --storage-format json record` then answered "json",
+	// the restore was skipped, and a docker-mode record under sudo left the
+	// developer's keploy/ tree root-owned.
+	if root == nil {
+		return false
+	}
+	cmd, _, err := root.Find(args)
+	if err != nil || cmd == nil {
+		return false
+	}
+	// A command that only printed its own help wrote nothing.
+	if help, hErr := cmd.Flags().GetBool("help"); hErr == nil && help {
+		return false
+	}
+	for c := cmd; c != nil; c = c.Parent() {
+		if writes[c.Name()] {
+			return true
+		}
+	}
+	return false
 }
 
 // maybeAttachDebugFileSink reads KEPLOY_DEBUG_FILE and, if set, opens that
@@ -279,9 +326,10 @@ func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink)
 }
 
 // printEnterpriseUpgradeBanner emits a high-visibility nudge to install
-// the Keploy Enterprise binary — entry plan is Community Edition (free)
-// which unlocks the broader protocol/dependency set + AI features that
-// the OSS binary doesn't ship.
+// Keploy from keploy.io — free with an account — which adds the broader
+// protocol/dependency set, native macOS and Windows recording, and the AI
+// features that this open-source build doesn't ship, and Podman. User-facing text names
+// no editions: the product is just "keploy".
 //
 // Lives in the OSS binary's main.go (not in cli/root.go) so the
 // enterprise binary — which has its own main.go and does not import
@@ -349,19 +397,53 @@ func printEnterpriseUpgradeBanner() {
 	bar := "═══════════════════════════════════════════════════════════════════════════════"
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, orange+bar+reset)
-	fmt.Fprintf(os.Stderr, "  %s🚀  TRY KEPLOY COMMUNITY EDITION (FREE)%s\n", bold+orange, reset)
-	fmt.Fprintln(os.Stderr, "  You're on the open-source binary. Community Edition (free) adds:")
-	fmt.Fprintln(os.Stderr, "    • PostgreSQL, MongoDB, gRPC, HTTP/2, Kafka — on top of OSS's HTTP + MySQL")
+	fmt.Fprintf(os.Stderr, "  %s🚀  TRY THE FULL KEPLOY (FREE)%s\n", bold+orange, reset)
+	fmt.Fprintln(os.Stderr, "  This is Keploy's open-source build. Keploy from keploy.io (free with an account) adds:")
+	fmt.Fprintln(os.Stderr, "    • PostgreSQL, MongoDB, gRPC, HTTP/2, Kafka — on top of this build's HTTP + MySQL")
+	fmt.Fprintln(os.Stderr, "    • Recording apps running natively on macOS and Windows")
+	fmt.Fprintln(os.Stderr, "    • Recording and testing apps that run in Podman")
 	fmt.Fprintln(os.Stderr, "    • AI-powered test generation, sandbox replay, MCP for AI agents")
 	fmt.Fprintln(os.Stderr, "      (Claude Code, Cursor, Copilot, Gemini, …)")
-	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+"curl --silent -O -L https://keploy.io/ent/install.sh && source install.sh"+reset)
+	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+"curl --silent -O -L https://keploy.io/install.sh && source install.sh"+reset)
 	fmt.Fprintln(os.Stderr, orange+bar+reset)
 	fmt.Fprintln(os.Stderr)
 }
 
+// finalExitCode is the process's exit code once the root command has
+// returned: whatever already mirrors the wrapped runner, else the error's.
+//
+// `keploy mock` promises to propagate the test runner's exit code, and it puts
+// that code in utils.ErrCode. A command that ALSO returns an error -- a runner
+// that died while keploy was still bringing the environment up -- had it
+// overwritten here with a generic 1, so the same crash exited 7 or 1 depending
+// on which of two racing paths reported it. The contract every caller relies
+// on is unchanged: an error still exits non-zero, because a mirrored code is
+// never 0.
+func finalExitCode(err error, current int, w io.Writer) int {
+	if err == nil {
+		return current
+	}
+	if current != 0 {
+		return current
+	}
+	return exitCodeForCmdErr(err, w)
+}
+
+// isFlagError reports whether err is one of pflag's command-line parse errors.
+// Asked only of a usage error, to decide whether it has been printed already:
+// whether it IS a usage error is utils.IsUsageError's call, made from the tag.
+func isFlagError(err error) bool {
+	var notExist *pflag.NotExistError
+	var valueRequired *pflag.ValueRequiredError
+	var invalidValue *pflag.InvalidValueError
+	var invalidSyntax *pflag.InvalidSyntaxError
+	return errors.As(err, &notExist) || errors.As(err, &valueRequired) ||
+		errors.As(err, &invalidValue) || errors.As(err, &invalidSyntax)
+}
+
 // exitCodeForCmdErr maps an error returned by the root command onto the
-// process exit code, writing the unknown-command hint to w when that is what
-// went wrong.
+// process exit code, writing the error (unless it was printed where it was
+// raised) and the --help hint to w for a usage error.
 //
 // Any non-nil error means the command did not run successfully, so the
 // process must not report success. This used to convert only "unknown
@@ -374,9 +456,21 @@ func exitCodeForCmdErr(err error, w io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
-		fmt.Fprintln(w, "Error: ", err.Error())
+	if utils.IsUsageError(err) {
+		// A mistyped or unknown command/verb, a flag that could not be parsed,
+		// or the wrong number of arguments is a usage error, not a Keploy
+		// failure — the command never ran. ExitUsageError (8) lets CI tell
+		// that apart from a real failure (1). Covers unknown `mock` verbs,
+		// which previously printed help and exited 0 (design §P0b).
+		//
+		// A flag error was printed where it was raised, by the command's
+		// flag-error func; nothing has printed anything else yet (every
+		// command silences cobra's own printing), so say it here.
+		if !isFlagError(err) {
+			fmt.Fprintln(w, "Error: ", err.Error())
+		}
 		fmt.Fprintln(w, "Run 'keploy --help' for usage.")
+		return utils.ExitUsageError
 	}
-	return 1
+	return utils.ExitKeployError
 }

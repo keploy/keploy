@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type AppError struct {
@@ -178,13 +179,14 @@ func RenderOutOfScopeDestinationCauses(prefix string) string {
 // and the platform/UI APIs. Protocol parsers should build it via
 // pkg/agent/proxy/integrations/mismatch so vocabulary stays uniform.
 type MockMismatchReport struct {
-	Protocol      string // "HTTP", "MySQL", "PostgreSQL", "MongoDB", "gRPC", "HTTP/2", "Generic", "DNS"
-	ActualSummary string // Brief description of the actual request
-	Destination   string // outgoing call's destination/domain (HTTP Host, or host:port) — identifies WHICH upstream missed
-	ClosestMock   string // Name of the closest mock (empty if none)
-	Diff          string // Human-readable diff (protocol-specific)
-	NextSteps     string // Actionable suggestion for the user
-	MatchPhase    string // how far the match cascade got (MatchPhase* constants)
+	At            time.Time // when the call missed
+	Protocol      string    // "HTTP", "MySQL", "PostgreSQL", "MongoDB", "gRPC", "HTTP/2", "Generic", "DNS"
+	ActualSummary string    // Brief description of the actual request
+	Destination   string    // outgoing call's destination/domain (HTTP Host, or host:port) — identifies WHICH upstream missed
+	ClosestMock   string    // Name of the closest mock (empty if none)
+	Diff          string    // Human-readable diff (protocol-specific)
+	NextSteps     string    // Actionable suggestion for the user
+	MatchPhase    string    // how far the match cascade got (MatchPhase* constants)
 	// DestinationScope is the verdict on whether any mock the matcher
 	// compared against targeted this call's upstream (DestinationScope*
 	// constants; empty means the question was never answered). It is a
@@ -215,6 +217,7 @@ type ParserError struct {
 	ParserErrorType ParserErrorType
 	Err             error
 	MismatchReport  *MockMismatchReport // nil when no diff is available
+	At              time.Time           // when the miss reached the proxy; a miss with no report has only this to say when it happened
 }
 
 type ParserErrorType string

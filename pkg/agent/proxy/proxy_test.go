@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
-// newTLSTestServer spins up a TLS listener with a self-signed cert. The
-// handler hook (if non-nil) receives each accepted, fully-handshaked
-// *tls.Conn. Returns the listener and a teardown that closes it.
-func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []string, onAccept func(*tls.Conn)) (net.Listener, *tls.Config) {
+// newTestServerTLSConfig returns a server TLS config with a fresh self-signed
+// certificate for "test.local", offering nextProtos.
+func newTestServerTLSConfig(t *testing.T, nextProtos []string) *tls.Config {
 	t.Helper()
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -48,6 +48,15 @@ func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []s
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   nextProtos,
 	}
+	return cfg
+}
+
+// newTLSTestServer spins up a TLS listener with a self-signed cert. The
+// handler hook (if non-nil) receives each accepted, fully-handshaked
+// *tls.Conn. Returns the listener and the server's TLS config.
+func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []string, onAccept func(*tls.Conn)) (net.Listener, *tls.Config) {
+	t.Helper()
+	cfg := newTestServerTLSConfig(t, nextProtos)
 
 	// Wrap with a delaying listener so we can simulate slow upstream
 	// handshake behavior (the delay fires after TCP accept, before TLS
@@ -114,7 +123,7 @@ func TestStartSpeculativeUpstreamTLS_Join_Success(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg)
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg, nil)
 	conn, err := s.join(ctx)
 	if err != nil {
 		t.Fatalf("join: %v", err)
@@ -143,7 +152,7 @@ func TestStartSpeculativeUpstreamTLS_Abandon_Cleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg)
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg, nil)
 	s.abandon()
 
 	// Give the background drainer a moment to run if the dial had
@@ -172,7 +181,7 @@ func TestStartSpeculativeUpstreamTLS_DialFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), addr, cfg)
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), addr, cfg, nil)
 	conn, err := s.join(ctx)
 	if err == nil {
 		if conn != nil {
@@ -193,7 +202,7 @@ func TestStartSpeculativeUpstreamTLS_ContextCancelDuringDial(t *testing.T) {
 	}
 
 	parent, cancel := context.WithCancel(context.Background())
-	s := startSpeculativeUpstreamTLS(parent, zap.NewNop(), ln.Addr().String(), cfg)
+	s := startSpeculativeUpstreamTLS(parent, zap.NewNop(), ln.Addr().String(), cfg, nil)
 
 	// Cancel before the handshake completes.
 	time.Sleep(50 * time.Millisecond)
@@ -210,17 +219,30 @@ func TestStartSpeculativeUpstreamTLS_ContextCancelDuringDial(t *testing.T) {
 	}
 }
 
-// TestSpeculativeParallelism asserts that running the speculative upstream
-// dial in parallel with a simulated MITM client-facing handshake takes
-// ~max(client, upstream) rather than the sum. This is the core
+// TestSpeculativeParallelism asserts that the speculative upstream dial runs
+// in parallel with the MITM client-facing handshake. This is the core
 // optimization — the test must fail if someone accidentally reverts the
 // parallelization.
+//
+// The test plays the upstream server itself, and only starts serving once
+// startSpeculativeUpstreamTLS has returned. Its own work — standing in for the
+// client-facing handshake — is the server half of the upstream TLS handshake,
+// which can only complete if the speculative goroutine drives the client half
+// at the same time. So a dial run inline (start would block on a server that
+// is not answering yet), one deferred into join(), or a join() that redials
+// instead of handing over the speculative conn all fail; nothing is timed.
 func TestSpeculativeParallelism(t *testing.T) {
-	const upstreamDelay = 100 * time.Millisecond
-	const clientDelay = 100 * time.Millisecond
+	srvCfg := newTestServerTLSConfig(t, []string{"h2", "http/1.1"})
+	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer rawLn.Close()
 
-	ln, _ := newTLSTestServer(t, upstreamDelay, []string{"h2", "http/1.1"}, nil)
-	defer ln.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	_ = rawLn.(*net.TCPListener).SetDeadline(deadline)
 
 	cfg := &tls.Config{
 		InsecureSkipVerify: true, // nolint:gosec
@@ -228,31 +250,27 @@ func TestSpeculativeParallelism(t *testing.T) {
 		NextProtos:         []string{"h2", "http/1.1"},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Nobody serves TLS yet, so this returns only if the upstream handshake
+	// does not run inline.
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), rawLn.Addr().String(), cfg, nil)
+	defer s.abandon()
 
-	start := time.Now()
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg)
-	// Simulate the MITM client-facing handshake.
-	time.Sleep(clientDelay)
+	raw, err := rawLn.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v — no upstream dial reached the server while the caller was busy (handshake run inline in start, or deferred into join)", err)
+	}
+	defer raw.Close()
+	if err := tls.Server(raw, srvCfg).HandshakeContext(ctx); err != nil {
+		t.Fatalf("the upstream handshake did not complete before join(): %v", err)
+	}
+
 	conn, err := s.join(ctx)
-	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
 	defer conn.Close()
-
-	// Parallel: elapsed ~= max(clientDelay, upstreamDelay) = 100ms.
-	// Serial would have been ~200ms. Tolerate ±40ms of jitter on top
-	// of the nominal 100ms upper bound (race detector adds overhead).
-	if elapsed > 160*time.Millisecond {
-		t.Fatalf("handshake took %v — serial regression? expected ~%v", elapsed, clientDelay)
-	}
-	// Lower bound sanity: it can't be faster than the upstream delay
-	// because the server waits that long before even starting the
-	// handshake.
-	if elapsed < upstreamDelay-20*time.Millisecond {
-		t.Fatalf("handshake took %v — improbably fast, mock misconfigured?", elapsed)
+	if got, want := conn.LocalAddr().String(), raw.RemoteAddr().String(); got != want {
+		t.Fatalf("join returned conn %s, not the speculatively handshaken %s", got, want)
 	}
 }
 
@@ -433,4 +451,53 @@ func TestNewSnapshotsStallGrace(t *testing.T) {
 			t.Fatalf("recordBufferStallGrace = %v, want %v", got, want)
 		}
 	})
+}
+
+// TestMockClearsThePreviousTestSetsConsumption pins the cross-process invariant
+// the CLI's per-set latch now depends on.
+//
+// Under KEPLOY_AGENT_OWNS_CONSUMED the agent filters from its own
+// consumedPersistent. The replayer treats a successful MockOutgoing — which
+// lands here — as proof that the previous test set's consumption is gone, and
+// on that basis stops sending its own map. If Mock ever stops performing the
+// reset, the CLI hands set N+1's pool to an agent still holding set N's names:
+// mock names are unique only WITHIN a set, so set N's mock-1 (Usage: Deleted)
+// drops set N+1's unrelated mock-1, and filterOutDeleted stamps set N's
+// IsFiltered/SortOrder onto its mock-2. A wrong test result, silently, with
+// every suite green.
+//
+// TestPersistentConsumed_ClearedAtTestSetBoundary pins ResetForReplaySession in
+// isolation; nothing pinned that Mock actually calls it, and it is one
+// deletable line.
+func TestMockClearsThePreviousTestSetsConsumption(t *testing.T) {
+	p := New(zap.NewNop(), nil, &config.Config{})
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+	p.setMockManager(mm)
+
+	// The previous test set consumed two mocks. mock-2 is deliberately not
+	// Deleted: a clear that only swept Deleted entries would still stamp the
+	// old ordering onto the next set's same-named mock.
+	for _, st := range []models.MockState{
+		{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted},
+		{Name: "mock-2", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 7},
+	} {
+		if err := mm.flagMockAsUsed(st); err != nil {
+			t.Fatalf("flagMockAsUsed: %v", err)
+		}
+	}
+	if len(p.GetPersistentConsumed()) != 2 {
+		t.Fatalf("precondition: the previous set's consumption was not recorded")
+	}
+
+	// The test-set boundary. The error is ignored on purpose: Mock can fail
+	// later, at the nsswitch setup, and that failure is AFTER the reset — the
+	// property under test is the reset, not the call's overall success.
+	_ = p.Mock(context.Background(), models.OutgoingOptions{})
+
+	if got := p.GetPersistentConsumed(); len(got) != 0 {
+		t.Fatalf("Mock did not clear the previous test set's consumption: %#v — the replayer treats a "+
+			"successful MockOutgoing as proof that it did, and stops sending its own map, so this "+
+			"silently mis-filters the next test set", got)
+	}
 }

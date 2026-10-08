@@ -139,6 +139,10 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 					StatusCode: respParsed.StatusCode,
 					Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 					Body:       string(respBody),
+
+					// Replay serves this response: keep what it takes to serve a
+					// repeated header (Set-Cookie) on its own lines.
+					HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 				},
 				Created:          time.Now().Unix(),
 				ReqTimestampMock: reqTs,
@@ -161,7 +165,8 @@ func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCf
 	raw, err := pUtil.DialDestinationWith(ctx, h.Logger,
 		pUtil.DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated},
 		func(ctx context.Context, a string) (net.Conn, error) {
-			return d.DialContext(ctx, "tcp", a)
+			// Only replay misses dial here; no handshake was held for them.
+			return pUtil.DialRaw(ctx, d, "tcp", a, nil)
 		})
 	if err != nil {
 		return nil, err

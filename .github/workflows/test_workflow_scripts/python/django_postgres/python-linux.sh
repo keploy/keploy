@@ -21,10 +21,18 @@ python3 manage.py makemigrations
 python3 manage.py migrate
 
 # Configuration and cleanup
-sudo $RECORD_BIN config --generate
 sudo rm -rf keploy/  # Clean old test data
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"header": {"Allow":[],}}
+KEPLOY_CFG
 sleep 5  # Allow time for configuration changes
 
 APP_HOST="127.0.0.1"

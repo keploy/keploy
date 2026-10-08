@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -993,6 +994,83 @@ func TestToHTTPHeader_AcceptListValue_FoldedSingleHeader(t *testing.T) {
 	assert.Equal(t, "trace-id=abc,user-key=def,env=test", httpHeader["Baggage"][0])
 }
 
+// The wire lines of a recorded header, round-tripped: what ToYamlHTTPHeader and
+// ToYamlHTTPHeaderLineLengths store, ToWireHTTPHeader sends back out, and only
+// what they stored. A tenant header sent twice goes out twice, not folded; one
+// Accept line with commas in it stays one line (the dict(**headers) fix above).
+func TestToWireHTTPHeaderSendsTheRecordedLines(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wire http.Header
+	}{
+		{"a header repeated on two lines", http.Header{"X_tenant": {"acme", "acme"}}},
+		{"one line carrying commas", http.Header{"Accept": {"a, b"}}},
+		{"repeated lines carrying commas", http.Header{"Cookie": {"a=1,2", "b=3,,", ",c"}}},
+		{"an empty line among them", http.Header{"X-Empty": {"", "x", ""}}},
+		{"both together", http.Header{"X_tenant": {"acme", "acme"}, "Accept": {"a, b"}, "Host": {"h"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			header := ToYamlHTTPHeader(tc.wire)
+			lengths := ToYamlHTTPHeaderLineLengths(tc.wire)
+			for name, lines := range tc.wire {
+				if _, stored := lengths[name]; stored != (len(lines) > 1) {
+					t.Errorf("%s on %d line(s): lengths stored = %v", name, len(lines), stored)
+				}
+			}
+			assert.Equal(t, tc.wire, ToWireHTTPHeader(header, lengths))
+		})
+	}
+	assert.Nil(t, ToYamlHTTPHeaderLineLengths(http.Header{"Accept": {"a, b"}, "Host": {"h"}}),
+		"a header with no repeated line records no lengths, so nothing new reaches disk")
+}
+
+// A recording made before the lengths existed replays as it always did, and a
+// value that no longer is the lines it was recorded from (a template rendered,
+// a secret decrypted to something else, a hand edit) is sent as one line, not
+// cut at a guessed boundary.
+func TestToWireHTTPHeaderFoldsWhatItCannotSplit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   string
+		lengths []int
+	}{
+		{"no lengths: a recording from before them", "ab,ab", nil},
+		{"one length is not a repeated header", "ab,ab", []int{5}},
+		{"the value grew", "ab,abb", []int{2, 2}},
+		{"the value shrank", "ab,a", []int{2, 2}},
+		{"no comma where a line ended", "abXab", []int{2, 2}},
+		{"a line too long for the value", "ab", []int{2, 5}},
+		{"a negative length", "ab,ab", []int{-1, 5}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var lengths models.HeaderLineLengths
+			if tc.lengths != nil {
+				lengths = models.HeaderLineLengths{"X_tenant": tc.lengths}
+			}
+			got := ToWireHTTPHeader(map[string]string{"X_tenant": tc.value}, lengths)
+			assert.Equal(t, http.Header{"X_tenant": {tc.value}}, got)
+		})
+	}
+	// Lengths for a name the header no longer has add nothing.
+	got := ToWireHTTPHeader(map[string]string{"Accept": "a"}, models.HeaderLineLengths{"X_tenant": {2, 2}})
+	assert.Equal(t, http.Header{"Accept": {"a"}}, got)
+}
+
+// The recorded curl command reproduces the request that was recorded, a
+// repeated header on its own lines included.
+func TestMakeCurlCommandRepeatsARepeatedHeader(t *testing.T) {
+	curl := MakeCurlCommand(models.HTTPReq{
+		Method:            "GET",
+		URL:               "http://localhost:8080/v1/session",
+		Header:            map[string]string{"X_tenant": "acme,acme", "Accept": "a, b", "Content-Length": "0"},
+		HeaderLineLengths: models.HeaderLineLengths{"X_tenant": {4, 4}},
+	})
+	assert.Equal(t, 2, strings.Count(curl, "--header 'X_tenant: acme' \\\n"), curl)
+	assert.NotContains(t, curl, "acme,acme")
+	assert.Contains(t, curl, "--header 'Accept: a, b' \\\n")
+	assert.NotContains(t, curl, "Content-Length")
+}
+
 // TestParseHTTPRequest_And_Response_111 contains sub-tests for ParseHTTPRequest and
 // ParseHTTPResponse, validating both success and failure cases for parsing raw
 // HTTP data into their respective struct representations.
@@ -1887,6 +1965,99 @@ func TestHasExplicitPort_IPv6_777(t *testing.T) {
 	}
 }
 
+// A URL that already says where the app is (test.basePath) is where the
+// request goes under TargetFromURL, and under that address's name. The
+// recorded app_port otherwise replaces the URL's port, and the recorded Host
+// header the URL's host: the test goes to the port the app was recorded on,
+// asking for the app by the name it had there.
+func TestSimulateHTTP_TargetFromURLLeavesTheRecordedAddressOut(t *testing.T) {
+	// askedAs gets the Host header of each request the server answers.
+	askedAs := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		askedAs <- r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	serverHost := strings.TrimPrefix(server.URL, "http://")
+
+	// The port the test was recorded on: nothing listens there any more.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	recordedPort := uint16(l.Addr().(*net.TCPAddr).Port)
+	require.NoError(t, l.Close())
+
+	newCase := func(appPort uint16) *models.TestCase {
+		return &models.TestCase{
+			Name:    "get-orders",
+			AppPort: appPort,
+			HTTPReq: models.HTTPReq{
+				Method: "GET",
+				URL:    server.URL + "/orders",
+				Header: map[string]string{"Host": "recorded.internal:8080"},
+			},
+		}
+	}
+
+	resp, err := SimulateHTTP(context.Background(), newCase(recordedPort), "test-set", zap.NewNop(),
+		SimulationConfig{APITimeout: 5, TargetFromURL: true})
+	require.NoError(t, err, "the request must go to the URL's own port")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, serverHost, <-askedAs, "the app must be asked for by the URL's host")
+
+	// Without it the recorded port still wins, as it must for an app keploy
+	// starts, and so does the recorded name.
+	_, err = SimulateHTTP(context.Background(), newCase(recordedPort), "test-set", zap.NewNop(),
+		SimulationConfig{APITimeout: 5})
+	require.Error(t, err, "the recorded app_port did not replace the URL's port")
+	assert.Contains(t, err.Error(), fmt.Sprintf(":%d", recordedPort))
+
+	_, err = SimulateHTTP(context.Background(), newCase(0), "test-set", zap.NewNop(),
+		SimulationConfig{APITimeout: 5})
+	require.NoError(t, err)
+	assert.Equal(t, "recorded.internal:8080", <-askedAs, "the recorded Host header was not sent")
+}
+
+// Under TargetFromURL the app is asked for by the URL's host as a client
+// writes it: without the port when it is the scheme's own. ResolveTestTarget
+// writes that port into every URL, and left to Go the request asked for
+// "staging.example.com:443", which a front that matches the name as written
+// does not route to the app every client reaches as "staging.example.com".
+func TestPrepareHTTPRequest_TargetFromURLAsksForTheHostAsAClientWritesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, url  string
+		configPort uint32
+		want       string
+	}{
+		{"http and no port", "http://staging.example.com/orders", 0, "staging.example.com"},
+		{"https and no port", "https://staging.example.com/orders", 0, "staging.example.com"},
+		{"the scheme's own port written out", "https://staging.example.com:443/orders", 0, "staging.example.com"},
+		{"IPv6 and no port", "http://[::1]/orders", 0, "[::1]"},
+		{"a port of its own", "http://staging.example.com:8080/orders", 0, "staging.example.com:8080"},
+		{"the other scheme's port", "http://staging.example.com:443/orders", 0, "staging.example.com:443"},
+		{"a port set for the tests", "http://staging.example.com/orders", 8080, "staging.example.com:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			test := &models.TestCase{
+				Name:    "get-orders",
+				AppPort: 9090,
+				HTTPReq: models.HTTPReq{
+					Method: "GET",
+					URL:    tc.url,
+					Header: map[string]string{"Host": "recorded.internal:9090"},
+				},
+			}
+			prepared, err := prepareHTTPRequest(context.Background(), test, "test-set", zap.NewNop(),
+				SimulationConfig{TargetFromURL: true, ConfigPort: tc.configPort})
+			require.NoError(t, err)
+
+			// The request as it goes on the wire.
+			var wire bytes.Buffer
+			require.NoError(t, prepared.Request.Write(&wire))
+			assert.Contains(t, wire.String(), "\r\nHost: "+tc.want+"\r\n")
+		})
+	}
+}
+
 func TestResolveTestTarget(t *testing.T) {
 	logger := zap.NewNop()
 
@@ -2324,5 +2495,56 @@ func TestAgentReadyTimeout(t *testing.T) {
 	// (~310s), otherwise the CLI gives up while the agent is still starting.
 	if DefaultAgentReadyTimeout < 310*time.Second {
 		t.Fatalf("DefaultAgentReadyTimeout %v is shorter than the agent healthcheck budget (~310s)", DefaultAgentReadyTimeout)
+	}
+}
+
+// AgentHealthTicker must find an agent whose health answer takes longer than
+// its first check waits. Reached through a Kubernetes port-forward over a slow
+// link, every new connection costs several round trips before the request is
+// even sent (two stream set-ups, then the GET): about 735ms at a 245ms round
+// trip. A fixed 500ms per check cut every one of them off, so the agent was
+// never found ready, however long the caller waited.
+func TestAgentHealthTicker_ReachesAnAgentSlowerThanTheFirstCheck(t *testing.T) {
+	resetProbeOnce(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agent/health" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		time.Sleep(750 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`"OK"`))
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	readyCh := make(chan bool, 1)
+	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh, 100*time.Millisecond)
+
+	ready, open := <-readyCh
+	require.True(t, open && ready, "the agent answered every health check in 750ms and was never found ready")
+}
+
+// Each health check waits twice as long as the last one that ran out of time,
+// up to a ceiling; a check that failed fast (nothing listening yet) or got an
+// answer leaves the wait as it was, so a local agent keeps its quick check.
+func TestNextAgentHealthWait(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wait     time.Duration
+		timedOut bool
+		want     time.Duration
+	}{
+		{"first check timed out", agentHealthFirstWait, true, 2 * agentHealthFirstWait},
+		{"a later check timed out", 4 * time.Second, true, 8 * time.Second},
+		{"capped", agentHealthMaxWait, true, agentHealthMaxWait},
+		{"doubling past the cap stops at it", agentHealthMaxWait/2 + time.Second, true, agentHealthMaxWait},
+		{"failed fast", agentHealthFirstWait, false, agentHealthFirstWait},
+		{"answered", 2 * time.Second, false, 2 * time.Second},
+	} {
+		require.Equal(t, tc.want, nextAgentHealthWait(tc.wait, tc.timedOut), tc.name)
 	}
 }

@@ -93,7 +93,7 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	})
 	err := h.load(ctx, opts, setupOpts)
 	if err != nil {
-		return err
+		return privilegeFailure(err)
 	}
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -111,6 +111,78 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return nil
 	})
 
+	return nil
+}
+
+func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
+	h.BindEvents = objs.BindEvents
+	cg4, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupInet4Bind,
+		Program: objs.K_bind4,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the bind4 cgroup hook")
+		return err
+	}
+	h.cgBind4 = cg4
+
+	cg6, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupInet6Bind,
+		Program: objs.K_bind6,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the bind6 cgroup hook")
+		return err
+	}
+	h.cgBind6 = cg6
+
+	// post_bind4/6 are what make the kernel-allocated relocation port
+	// usable: bind4/6 set user_port = 0 so the kernel's allocator picks a
+	// port that is genuinely free (BPF cannot determine that — see
+	// find_free_port's comment in keploy/ebpf), and these hooks read the
+	// assigned port back out and publish the bind event.
+	//
+	// Non-fatal on purpose, and both-or-nothing: the flag below is only
+	// set when both attach, and without the flag bind4/6 keep their old
+	// guess-a-port behaviour. So a cgroup setup that rejects them records
+	// exactly as it did before rather than failing startup, while everyone
+	// else stops hitting "That port is already in use" on the relocated
+	// port. This covers ATTACH failure only — a program the kernel refuses
+	// to LOAD already fails LoadAndAssign above and aborts the agent, the
+	// same as every other program in this object.
+	pb4, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupInet4PostBind,
+		Program: objs.K_postBind4,
+	})
+	if err != nil {
+		h.logger.Warn("failed to attach the post_bind4 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
+	} else {
+		pb6, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupInet6PostBind,
+			Program: objs.K_postBind6,
+		})
+		if err != nil {
+			// Detach the v4 half too. With the flag off it would never do
+			// any work, and leaving it attached runs a guaranteed no-op
+			// program on every AF_INET bind on the machine for the whole
+			// session.
+			if cerr := pb4.Close(); cerr != nil {
+				h.logger.Debug("failed to detach post_bind4 after post_bind6 failed", zap.Error(cerr))
+			}
+			h.logger.Warn("failed to attach the post_bind6 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
+		} else {
+			h.cgPostBind4 = pb4
+			h.cgPostBind6 = pb6
+			h.kernelPortAlloc = true
+		}
+	}
+
+	h.logger.Debug("Attached ingress redirection hooks.",
+		zap.Bool("kernel_port_alloc", h.kernelPortAlloc))
 	return nil
 }
 
@@ -206,7 +278,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
 		if err != nil {
 			utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
-			return err
+			return tracepointFailure(err, tracefsMounted())
 		}
 		h.socket = socket
 	}
@@ -252,81 +324,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	h.sockops = sockops
 
-	if opts.Mode == models.MODE_RECORD && !setupOpts.MockMode {
-
-		// Skipped in mock mode (--mock-mode): the wrapped process is a test
-		// runner, not a server. Relocating any port it binds (a pytest
-		// live_server, a Playwright webServer, an httptest.NewServer) would
-		// double-record the runner's own loopback traffic and can crash it on a
-		// startup race. Mock mode captures ONLY egress, so no bind/ingress hooks.
-		h.BindEvents = objs.BindEvents
-		cg4, err := link.AttachCgroup(link.CgroupOptions{
-			Path:    cGroupPath,
-			Attach:  ebpf.AttachCGroupInet4Bind,
-			Program: objs.K_bind4,
-		})
-		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the bind4 cgroup hook")
-			return err
-		}
-		h.cgBind4 = cg4
-
-		cg6, err := link.AttachCgroup(link.CgroupOptions{
-			Path:    cGroupPath,
-			Attach:  ebpf.AttachCGroupInet6Bind,
-			Program: objs.K_bind6,
-		})
-		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the bind6 cgroup hook")
-			return err
-		}
-		h.cgBind6 = cg6
-
-		// post_bind4/6 are what make the kernel-allocated relocation port
-		// usable: bind4/6 set user_port = 0 so the kernel's allocator picks a
-		// port that is genuinely free (BPF cannot determine that — see
-		// find_free_port's comment in keploy/ebpf), and these hooks read the
-		// assigned port back out and publish the bind event.
-		//
-		// Non-fatal on purpose, and both-or-nothing: the flag below is only
-		// set when both attach, and without the flag bind4/6 keep their old
-		// guess-a-port behaviour. So a cgroup setup that rejects them records
-		// exactly as it did before rather than failing startup, while everyone
-		// else stops hitting "That port is already in use" on the relocated
-		// port. This covers ATTACH failure only — a program the kernel refuses
-		// to LOAD already fails LoadAndAssign above and aborts the agent, the
-		// same as every other program in this object.
-		pb4, err := link.AttachCgroup(link.CgroupOptions{
-			Path:    cGroupPath,
-			Attach:  ebpf.AttachCGroupInet4PostBind,
-			Program: objs.K_postBind4,
-		})
-		if err != nil {
-			h.logger.Warn("failed to attach the post_bind4 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
-		} else {
-			pb6, err := link.AttachCgroup(link.CgroupOptions{
-				Path:    cGroupPath,
-				Attach:  ebpf.AttachCGroupInet6PostBind,
-				Program: objs.K_postBind6,
-			})
-			if err != nil {
-				// Detach the v4 half too. With the flag off it would never do
-				// any work, and leaving it attached runs a guaranteed no-op
-				// program on every AF_INET bind on the machine for the whole
-				// session.
-				if cerr := pb4.Close(); cerr != nil {
-					h.logger.Debug("failed to detach post_bind4 after post_bind6 failed", zap.Error(cerr))
-				}
-				h.logger.Warn("failed to attach the post_bind6 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
-			} else {
-				h.cgPostBind4 = pb4
-				h.cgPostBind6 = pb6
-				h.kernelPortAlloc = true
+	// Ingress is captured while recording, and in mock mode whenever requests are on, so a replay can
+	// compare the app's actual responses with the recorded cases. In mock mode the wrapped process is a
+	// test runner, so a failure to attach here only means no requests are recorded; the egress capture
+	// the run depends on goes ahead.
+	if (opts.Mode == models.MODE_RECORD && !setupOpts.MockMode) || (setupOpts.MockMode && setupOpts.RecordRequests && len(agent.GetPortToSendToKernel(ctx, opts.Rules)) > 0) {
+		if err := h.attachIngress(cGroupPath, objs); err != nil {
+			if !setupOpts.MockMode {
+				return err
 			}
+			h.logger.Warn("the ingress hooks did not attach; the app's incoming requests will not be recorded as test cases", zap.Error(err))
 		}
-
-		h.logger.Debug("Attached ingress redirection hooks.",
-			zap.Bool("kernel_port_alloc", h.kernelPortAlloc))
 	}
 
 	c4, err := link.AttachCgroup(link.CgroupOptions{
@@ -484,23 +492,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if err != nil {
 		h.logger.Debug("Failed to register Client")
 	}
-	proxyInfo, err := h.GetProxyInfo(ctx, setupOpts, opts)
+	proxyInfo, err := h.resolveProxyInfo(ctx, setupOpts, opts)
 	if err != nil {
 		return err
-	}
-
-	if opts.IsDocker {
-		h.proxyIP4, err = utils.GetContainerIPv4()
-		if err != nil {
-			h.logger.Error("Failed to get the container IP", zap.Error(err))
-			return err
-		}
-		ipv6, err := ToIPv4MappedIPv6(h.proxyIP4)
-		if err != nil {
-			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", h.proxyIP4, err)
-		}
-		h.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.proxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
-		h.proxyIP6 = ipv6
 	}
 	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
 
@@ -513,6 +507,35 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	return nil
 }
+
+// resolveProxyInfo is GetProxyInfo, keeping the addresses it picked: where the
+// kernel is told to send the application's connections is where the
+// application reaches the proxy, and so what ProxyIPv4 reports. Looking the
+// address up a second time could come back with another interface's.
+func (h *Hooks) resolveProxyInfo(ctx context.Context, setupOpts config.Agent, opts agent.HookCfg) (structs.ProxyInfo, error) {
+	info, err := h.GetProxyInfo(ctx, setupOpts, opts)
+	if err != nil {
+		return structs.ProxyInfo{}, err
+	}
+	var ip4 [4]byte
+	binary.BigEndian.PutUint32(ip4[:], info.IP4)
+	h.proxyIP4 = net.IP(ip4[:]).String()
+	h.proxyIP6 = info.IP6
+	return info, nil
+}
+
+// ProxyIPv4 is the IPv4 address the application reaches the proxy at, once
+// Load has returned: loopback for a native agent, which shares the
+// application's network namespace, and for one started with --is-docker, its
+// container's own address, as GetProxyInfo decides.
+func (h *Hooks) ProxyIPv4() string {
+	return h.proxyIP4
+}
+
+// Compile-time proof that the Linux hooks report where the proxy is reached:
+// were the method renamed, the agent's type assertion would stop matching
+// and an --is-docker agent's DNS server would silently answer loopback.
+var _ agent.ProxyAddressReporter = (*Hooks)(nil)
 
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
@@ -581,7 +604,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	}
 	h.objectsMutex.Unlock()
 
-	if opts.Mode == models.MODE_RECORD {
+	if h.cgBind4 != nil || h.cgBind6 != nil {
 		if h.cgBind4 != nil {
 			if err := h.cgBind4.Close(); err != nil {
 				utils.LogError(h.logger, err, "failed to close the cgBind4")

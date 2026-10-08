@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"time"
 )
 
 type TestReport struct {
@@ -153,6 +154,26 @@ type UnmatchedCall struct {
 	// side-by-side whole-mock diff (left = mock, right = live request).
 	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`
 	ReceivedReq    string `json:"received_req,omitempty" yaml:"received_req,omitempty"`
+	// At is when the call missed, so a client can tell which test made it.
+	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+}
+
+// MockOutcome is the end of a mock replay as the agent saw it: the mocks it
+// served and the outgoing calls that matched none of them -- what
+// /consumedmocks and /mockerrors answer, in one document. A containerised
+// agent writes it as it stops (pkg/platform/docker AgentOutcomeFile), for the
+// one caller that cannot ask it over HTTP: a docker compose run, where the
+// agent is stopped along with the app.
+type MockOutcome struct {
+	Consumed []MockState     `json:"consumed"`
+	Missed   []UnmatchedCall `json:"missed"`
+	// Windows are the per-test scopes the runner reported (with their
+	// verdicts), which a CLI that can no longer reach the agent — under
+	// compose it is stopped with the runner — reads from here instead. A
+	// window is a few hundred bytes, so they share the account's read bound
+	// with the served and missed calls comfortably up to suites of tens of
+	// thousands of tests.
+	Windows []ScopeWindow `json:"windows,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
@@ -277,6 +298,13 @@ const (
 	RejectionHighRisk       RejectionReason = "HIGH_RISK_FAILURE" // response structure changed (status code, schema, headers)
 	RejectionLowRiskNoNoise RejectionReason = "LOW_RISK_NO_NOISE" // minor diffs that can't be auto-suppressed as noise
 )
+
+// ReasonLoopbackOutsideRun is the reason the agent logs when keploy passes a
+// call through to a listener owned by the run's own process tree (a self-call)
+// instead of serving it from a mock — so the log shows that a self-call reached
+// the real handler, not a recording; a broken self-handler fails the run rather
+// than passing on a stale mock.
+const ReasonLoopbackOutsideRun = "loopback_outside_run"
 
 // NoiseFailureReason explains why automatic noise extraction failed for a LOW_RISK_NO_NOISE test case.
 type NoiseFailureReason string

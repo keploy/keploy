@@ -1,5 +1,21 @@
 package supervisor
 
+import "errors"
+
+// ErrReported is wrapped by a parser error the parser has already reported
+// where it happened: at WARN, naming the connection, and rate-limited across
+// connections, so that one fault on many connections logs one line with a
+// count. For such a stop the dispatcher skips its WARN that the parser was
+// retired ("parser retired; this connection can no longer be recorded"), or
+// the fault would log a line per connection after all. The parser's line
+// takes that WARN's place, so it follows that WARN's rule: at WARN only while
+// the recording runs (Session.RecordingStopping), and at Debug as it stops.
+// Its Debug line for the passthrough fallback, which carries the error, is
+// logged as for any other stop. It changes nothing else: the retirement, its
+// passthrough and what the connection's recording leaves out are the same as
+// for any other parser error.
+var ErrReported = errors.New("supervisor: the parser reported why it stopped")
+
 // Status describes how a parser's Run ended.
 type Status int
 
