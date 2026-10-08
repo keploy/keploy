@@ -79,9 +79,10 @@ type Proxy interface {
 	// Per-PID (worker-keyed) mock scoping for parallel test runners (Design A).
 	// SetWorkerScope registers the per-test mock-name allowlist for a worker
 	// PID; ClearWorkerScope drops it (on scope end / no mapping);
-	// ClearAllWorkerScopes wipes every entry at session teardown. An outgoing
-	// call is attributed to a worker by walking its origin PID up the /proc
-	// tree to the nearest registered ancestor.
+	// ClearAllWorkerScopes wipes every entry when a replay session starts. A
+	// connection is attributed to a worker by walking its opener's PID up the
+	// /proc tree, once, when it opens; what it sees then follows the nearest
+	// registered worker on that chain, read by read.
 	SetWorkerScope(pid uint32, names []string)
 	ClearWorkerScope(pid uint32)
 	ClearAllWorkerScopes()
