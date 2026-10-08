@@ -1296,6 +1296,11 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 	return r.testDB.GetTestCases(ctx, testID)
 }
 
+// testSetDrainTimeout bounds the drain of a test set's goroutines (the
+// application and its watcher) once the set is over. A var, not a const, so a
+// test can shrink it rather than wait it out.
+var testSetDrainTimeout = 30 * time.Second
+
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, serveTest bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
@@ -1306,6 +1311,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	startTime := time.Now()
 	pruneBefore := startTime.UTC()
 
+	// exitLoopChan is never closed. The test loops below are its only readers,
+	// and they have finished by the time the deferred drain runs; its writers
+	// are the app watchers in runTestSetErrGrp, and a drain that times out
+	// leaves the group running. Closing it after the drain ordered nothing for
+	// the readers, and raced a watcher's send: the race detector caught the
+	// close and the send unordered once the drain had given up, and a watcher
+	// that sent after the close would have panicked.
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
 		// Notify the agent before cancelling the app context so proxy logs shutdown errors as debug.
@@ -1318,10 +1330,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		runTestSetCtxCancel()
 		// Bounded drain so a wedged per-test-set goroutine can't hang teardown/SIGINT.
-		if err := utils.DrainErrGroup(r.logger, "replay-testset", runTestSetErrGrp, 30*time.Second); err != nil {
+		if err := utils.DrainErrGroup(r.logger, "replay-testset", runTestSetErrGrp, testSetDrainTimeout); err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
-		close(exitLoopChan)
 	}()
 
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
@@ -2183,10 +2194,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// the cycle's own testsToRun is the only statement that stays true in all of
 	// those cases.
 	stoppedEarly := false
-	// Tests whose request got no answer, classified off the error in hand.
+	// Tests whose request got no answer, classified off the error in hand by
+	// pkg.IsAppNoAnswer.
 	var noAnswerTests []string
 	noteNoAnswer := func(name string, err error) {
-		if isAppNoAnswerMsg(err.Error()) {
+		if pkg.IsAppNoAnswer(err) {
 			noAnswerTests = append(noAnswerTests, name)
 		}
 	}
@@ -2380,7 +2392,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				noteNoAnswer(testCase.Name, loopErr)
 				currentFailures++
 				testSetStatus = models.TestSetStatusFailed
-				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, loopErr.Error())
+				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, loopErr)
 				// Finalize the capture window even on this early exit, so a miss
 				// during this (failed) test attaches here and isn't carried to
 				// the next test or lost.
@@ -2554,7 +2566,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					r.logger.Error("invalid response type for HTTP test case")
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
-					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for HTTP test case")
+					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("invalid response type for HTTP test case"))
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
@@ -2571,7 +2583,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					r.logger.Error("invalid response type for gRPC test case")
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
-					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for gRPC test case")
+					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("invalid response type for gRPC test case"))
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
@@ -2985,7 +2997,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// Finalize the capture window and persist a failed result so a
 					// miss during this test attaches here instead of leaking into a
 					// later test (or vanishing) when we bail out on this internal error.
-					failedResult := r.CreateFailedTestResult(testCase, testSetID, started, "internal error: test case result is nil")
+					failedResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("internal error: test case result is nil"))
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult)
 					if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 						utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil test case result")
@@ -2998,7 +3010,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// Matcher returned no result (e.g. a comparison path returning
 				// (false, nil)). Same as above: finalize the window + persist a
 				// failed result so the miss surfaces and can't carry forward.
-				failedResult := r.CreateFailedTestResult(testCase, testSetID, started, "internal error: comparison returned no result")
+				failedResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("internal error: comparison returned no result"))
 				r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult)
 				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 					utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil comparison result")
@@ -3169,7 +3181,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				noteNoAnswer(tc.Name, simErr)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
-				testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, simErr.Error())
+				testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, simErr)
 				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -3240,7 +3252,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						noteNoAnswer(tc.Name, streamErr)
 						failure++
 						testSetStatus = models.TestSetStatusFailed
-						testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, streamErr.Error())
+						testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, streamErr)
 						r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 						loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 						if loopErr != nil {
@@ -3282,7 +3294,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					r.logger.Error(errMsg)
 					failure++
 					testSetStatus = models.TestSetStatusFailed
-					testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, errMsg)
+					testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, errors.New(errMsg))
 					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
@@ -3330,7 +3342,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// below dereferences testResult.BodyResult. Finalize the window + persist
 				// a failed result so the miss surfaces and can't carry forward.
 				utils.LogError(r.logger, nil, "streaming test result is nil")
-				failedResult := r.CreateFailedTestResult(tc, testSetID, started, "internal error: streaming comparison returned no result")
+				failedResult := r.CreateFailedTestResult(tc, testSetID, started, errors.New("internal error: streaming comparison returned no result"))
 				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, failedResult)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
@@ -5083,33 +5095,6 @@ func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseID
 	return r.testDB.DeleteTests(ctx, testSetID, testCaseIDs)
 }
 
-// CreateFailedTestResult creates a test result for failed test cases
-// isAppConnectionErrorMsg reports whether a simulate-request error string is a
-// transport/connection-level failure (the app produced no response) rather than
-// a content diff. CreateFailedTestResult only receives the error message, so this
-// matches the stable net/syscall error texts (same string-classification
-// approach as isDockerComposeReplayShutdown above).
-func isAppConnectionErrorMsg(msg string) bool {
-	m := strings.ToLower(msg)
-	return strings.Contains(m, "connection refused") ||
-		strings.Contains(m, "connection reset by peer") ||
-		strings.Contains(m, "broken pipe") ||
-		strings.Contains(m, "no such host") ||
-		strings.Contains(m, ": eof")
-}
-
-// isAppNoAnswerMsg: no complete answer came back (timeout, cancellation, app
-// closed mid-response). Prune gate only, never APP_CONNECTION_ERROR: a stop's
-// cancellation is not the app being down.
-func isAppNoAnswerMsg(msg string) bool {
-	m := strings.ToLower(msg)
-	return strings.Contains(m, "client.timeout exceeded") ||
-		strings.Contains(m, "context deadline exceeded") ||
-		strings.Contains(m, "context canceled") ||
-		strings.Contains(m, "i/o timeout") ||
-		strings.Contains(m, "unexpected eof")
-}
-
 // appendCategoryUnique appends c only if it is not already present.
 func appendCategoryUnique(cats []models.FailureCategory, c models.FailureCategory) []models.FailureCategory {
 	for _, x := range cats {
@@ -5222,7 +5207,7 @@ type pruneRun struct {
 	allTestsGotAVerdict        bool // every loaded, non-ignored test was scored
 	internalErr                bool // the set ended INTERNAL_ERR
 	resultsComplete            bool // results read back, none short of the verdicts
-	noAnswer                   bool // a request got no answer (isAppNoAnswerMsg)
+	noAnswer                   bool // a request got no answer (pkg.IsAppNoAnswer)
 	appUnreachable             bool // anyAppConnectionError over the results read back
 	success, failure, obsolete int
 	preserveFailedMocks        bool
@@ -5237,7 +5222,10 @@ func shouldSkipPruning(success, failure, obsolete int, preserveFailedMocks, appU
 	return preserveFailedMocks && (failure > 0 || obsolete > 0)
 }
 
-func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID string, started time.Time, errorMessage string) *models.TestResult {
+// CreateFailedTestResult builds the result of a test case that failed without
+// a response to compare: err is why, and its text stands in for the response.
+func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID string, started time.Time, err error) *models.TestResult {
+	errorMessage := err.Error()
 	testCaseResult := &models.TestResult{
 		Kind:         testCase.Kind,
 		Name:         testSetID,
@@ -5346,11 +5334,13 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 
 	// Attribute a connection-level failure distinctly: the status_code=0 recorded
 	// above is the synthetic value we use when the app produced NO response. If the
-	// cause is a transport error (refused/reset/EOF/host unreachable) it is an
-	// app-unreachable/availability failure, NOT a content regression — label it so
-	// operators and downstream (k8s-proxy reads TestResult.FailureInfo) triage it
-	// as infra rather than a STATUS_CODE_CHANGED regression. Raw StatusCode stays 0.
-	if isAppConnectionErrorMsg(errorMessage) {
+	// cause is a transport error (pkg.IsAppConnectionError: refused, dropped, host
+	// not found) it is an app-unreachable/availability failure, NOT a content
+	// regression — label it so operators and downstream (k8s-proxy reads
+	// TestResult.FailureInfo) triage it as infra rather than a STATUS_CODE_CHANGED
+	// regression. Raw StatusCode stays 0. The error is classified, not its text:
+	// the reset re-send and the unreachable-port check read the same error.
+	if pkg.IsAppConnectionError(err) {
 		testCaseResult.FailureInfo.Category = appendCategoryUnique(testCaseResult.FailureInfo.Category, models.AppConnectionError)
 	}
 

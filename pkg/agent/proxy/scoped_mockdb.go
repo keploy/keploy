@@ -2,17 +2,14 @@ package proxy
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 )
 
 // Per-PID (worker-keyed) mock scoping — "Design A".
@@ -424,28 +421,14 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	return &scopedMockDb{MockMemDb: mgr, allow: allow, universe: universe, view: fmt.Sprintf("w%d.%d", pid, gen)}
 }
 
-// ppidFromStat reads the parent PID of pid from /proc/<pid>/stat. The comm field
-// (2nd) is parenthesised and may itself contain ')' and spaces, so the state and
-// ppid are read relative to the LAST ')': after it come " <state> <ppid> ...".
+// ppidFromStat reads the parent PID of pid from /proc/<pid>/stat
+// (utils.ReadProcStat).
 func ppidFromStat(pid uint32) (uint32, bool) {
-	b, err := os.ReadFile(filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10), "stat"))
-	if err != nil {
+	st, ok := utils.ReadProcStat(int(pid))
+	if !ok {
 		return 0, false
 	}
-	s := string(b)
-	close := strings.LastIndexByte(s, ')')
-	if close < 0 || close+2 >= len(s) {
-		return 0, false
-	}
-	fields := strings.Fields(s[close+2:]) // state, ppid, pgrp, ...
-	if len(fields) < 2 {
-		return 0, false
-	}
-	ppid, err := strconv.ParseUint(fields[1], 10, 32)
-	if err != nil {
-		return 0, false
-	}
-	return uint32(ppid), true
+	return uint32(st.PPID), true
 }
 
 func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {

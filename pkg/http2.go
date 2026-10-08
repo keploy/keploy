@@ -536,13 +536,35 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 	return false
 }
 
+// isGRPCConnectionLost reports whether err is a gRPC call whose connection to
+// the app failed before the server answered: the HTTP/2 connection
+// SimulateGRPC dialed reset, broke or closed before the server's preface came,
+// or what came was not one (an HTTP/1 server on the port). grpc-go reports
+// that as codes.Unavailable and keeps only the cause's text (toRPCErr), so the
+// code is all there is to know it by.
+func isGRPCConnectionLost(err error) bool {
+	return status.Code(err) == codes.Unavailable
+}
+
+// isGRPCNoAnswer reports whether err is a gRPC call that got no answer in time
+// or was cancelled. grpc-go turns the end of the call's context into
+// codes.DeadlineExceeded or codes.Canceled and keeps no cause, so the code is
+// all there is to know it by.
+func isGRPCNoAnswer(err error) bool {
+	switch status.Code(err) {
+	case codes.DeadlineExceeded, codes.Canceled:
+		return true
+	}
+	return false
+}
+
 // unreachableGRPCAuthority is err, or, when a gRPC call lost its connection
-// after the dial went through (Unavailable) at an address reach says the app
-// can never be reached at, the *UnreachableAppPortError saying why: docker
-// accepts a connection to a published port and drops it when the app listens
-// only on 127.0.0.1 in its container.
+// after the dial went through (isGRPCConnectionLost) at an address reach says
+// the app can never be reached at, the *UnreachableAppPortError saying why:
+// docker accepts a connection to a published port and drops it when the app
+// listens only on 127.0.0.1 in its container.
 func unreachableGRPCAuthority(ctx context.Context, reach AppPortReachability, authority string, err error) error {
-	if reach == nil || status.Code(err) != codes.Unavailable {
+	if reach == nil || !isGRPCConnectionLost(err) {
 		return err
 	}
 	host, port, splitErr := net.SplitHostPort(authority)

@@ -781,11 +781,122 @@ func isPreResponseConnRefused(err error) bool {
 	return neterr.IsConnRefused(err)
 }
 
+// netHTTPServerClosedIdle is the text of net/http's errServerClosedIdle
+// (net/http/transport.go). net/http does not export the error, so its text
+// is all there is to know it by. This test provokes the real one, and fails if
+// the text changes:
+// TestIsTransportConnResetClassifiesAServerThatClosedTheConnectionFirst.
+const netHTTPServerClosedIdle = "http: server closed idle connection"
+
+// inErrorTree reports whether match holds for err or any error it wraps. It
+// walks the tree errors.Is walks: through Unwrap() error and Unwrap() []error
+// alike.
+func inErrorTree(err error, match func(error) bool) bool {
+	if err == nil {
+		return false
+	}
+	if match(err) {
+		return true
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		return inErrorTree(u.Unwrap(), match)
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			if inErrorTree(e, match) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isServerClosedIdle reports whether err, or any error it wraps, is net/http's
+// errServerClosedIdle.
+func isServerClosedIdle(err error) bool {
+	return inErrorTree(err, func(e error) bool { return e.Error() == netHTTPServerClosedIdle })
+}
+
+// isTimedOut reports whether err, or any error it wraps, says it timed out
+// (a Timeout method that returns true, as net.Error has): a context's deadline
+// (context.DeadlineExceeded); net/http's client timeout, awaiting the answer's
+// headers or reading its body; a deadline on the connection ("i/o timeout");
+// a dial, a TLS handshake or a name lookup that timed out.
+func isTimedOut(err error) bool {
+	return inErrorTree(err, func(e error) bool {
+		t, ok := e.(interface{ Timeout() bool })
+		return ok && t.Timeout()
+	})
+}
+
+// isAnswerCutShort reports whether err is the connection closing part-way
+// through the app's answer, by the answer's own framing: net/http reports that
+// as io.ErrUnexpectedEOF.
+func isAnswerCutShort(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// isConnDropped reports whether err is the connection to the app dropping: a
+// reset (ECONNRESET), a broken pipe (EPIPE), a bare io.EOF, or net/http's
+// errServerClosedIdle. One drop is reported as any of these. Which one depends
+// on timing: net/http reports a close its read loop reads before the request
+// is on the connection as errServerClosedIdle, which a request on a fresh
+// connection gets as is (on a reused one, net/http sends again a request it
+// can replay), and a close it reads after as io.EOF. By the error alone a
+// reset can also have come part-way through an answer (see
+// IsTransportConnReset). Every rule about a drop asks this one.
+func isConnDropped(err error) bool {
+	return neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) ||
+		errors.Is(err, io.EOF) || isServerClosedIdle(err)
+}
+
+// IsAppConnectionError reports whether err says a test request failed because
+// the connection to the app failed: it was refused (isPreResponseConnRefused,
+// which the refusal re-send and the gRPC dial ask), the app's host was not
+// found, it dropped (isConnDropped), or a gRPC call lost it before the server
+// answered (isGRPCConnectionLost). This is what a test result's
+// APP_CONNECTION_ERROR means, and replay asks only this to set it.
+//
+// A close part-way through an answer (isAnswerCutShort) is not one: the app
+// answered, if not completely. IsTransportConnReset takes it too, for the
+// re-send its caller gates on the mocks the request consumed, and so does
+// IsAppNoAnswer.
+func IsAppConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	return isPreResponseConnRefused(err) ||
+		(errors.As(err, &dnsErr) && dnsErr.IsNotFound) ||
+		isConnDropped(err) ||
+		isGRPCConnectionLost(err)
+}
+
+// IsAppNoAnswer reports whether err says a test request got no complete
+// answer: none came in time (isTimedOut), the request was cancelled (a stop:
+// context.Canceled), or the connection closed part-way through the answer
+// (isAnswerCutShort). grpc-go turns the end of a call's
+// context into a status and keeps no cause, so a gRPC call's is its code
+// (isGRPCNoAnswer). This is replay's no-answer mark, which holds off the mocks
+// prune and a new mappings.yaml, and replay asks only this to set it.
+//
+// It is not APP_CONNECTION_ERROR: a stop's cancel is not the app being down.
+// An answer that came back whole but does not decode (answerDoesNotDecode) is
+// an answer, so it is neither.
+func IsAppNoAnswer(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isTimedOut(err) ||
+		errors.Is(err, context.Canceled) ||
+		isAnswerCutShort(err) ||
+		isGRPCNoAnswer(err)
+}
+
 // IsTransportConnReset reports whether err is a transport-level connection
-// reset / unexpected close while exchanging the request with the app — i.e.
-// "connection reset by peer" (ECONNRESET), a broken pipe (EPIPE), or a bare
-// io.EOF / io.ErrUnexpectedEOF surfaced by net/http when the peer dropped the
-// connection.
+// reset / unexpected close while exchanging the request with the app: the
+// connection dropping before any of an answer came back (isConnDropped), or
+// closing part-way through one (isAnswerCutShort).
 //
 // This class is dominated, under loaded CI replaying a DOCKER app, by docker's
 // userland proxy (docker-proxy) resetting a freshly-accepted host-side
@@ -808,16 +919,10 @@ func IsTransportConnReset(err error) bool {
 	if err == nil {
 		return false
 	}
-	if neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) {
-		return true
-	}
 	// net/http surfaces a peer-side drop during the response read as a bare
 	// io.EOF / io.ErrUnexpectedEOF (no syscall in the chain) — the docker-proxy
 	// reset frequently lands here too (see the "EOF" hits in the reproduction).
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	return false
+	return isConnDropped(err) || isAnswerCutShort(err)
 }
 
 // doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
@@ -873,6 +978,23 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 	}
 }
 
+// answerDoesNotDecode is the error of a test request whose answer came back,
+// whole by its own framing, but whose body does not decode as its
+// Content-Encoding says (an encoded answer with no body, such as a 204 or the
+// answer to a HEAD, or an encoded body cut short). It keeps the decoder's
+// error as text only, never wrapped: gzip reports a body with no bytes as
+// io.EOF and a short one as io.ErrUnexpectedEOF, and br reports both as
+// io.ErrUnexpectedEOF, the errors of a dropped connection and of an answer the
+// connection cut short, and the app did answer. Wrapped, they would read as a
+// drop to the reset re-send (IsTransportConnReset) and to APP_CONNECTION_ERROR
+// (IsAppConnectionError), and as no answer to replay's no-answer mark
+// (IsAppNoAnswer). A body that decodes but inflates past the cap is not one:
+// it keeps Decompress's error, which wraps ErrDecompressedTooLarge and none of
+// those.
+func answerDoesNotDecode(status int, encoding string, err error) error {
+	return fmt.Errorf("the app's %d answer does not decode as its Content-Encoding %q says: %v", status, encoding, err)
+}
+
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -910,11 +1032,17 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	// Decompress if needed
-	if httpResp.Header.Get("Content-Encoding") != "" {
-		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody, MaxDecompressedSize)
+	if enc := httpResp.Header.Get("Content-Encoding"); enc != "" {
+		respBody, err = Decompress(logger, enc, respBody, MaxDecompressedSize)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decode response body")
-			return nil, err
+			// A body that inflates past the cap decodes; it is only too large.
+			// It keeps Decompress's error, by which a caller tells it from a
+			// body that does not decode (ErrDecompressedTooLarge).
+			if errors.Is(err, ErrDecompressedTooLarge) {
+				return nil, err
+			}
+			return nil, answerDoesNotDecode(httpResp.StatusCode, enc, err)
 		}
 	}
 
@@ -988,6 +1116,13 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		if gzErr != nil {
 			httpResp.Body.Close()
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
+			// A body that ended, by its own framing, before its first byte
+			// (io.EOF), or whose first bytes are not a gzip header, is the
+			// answer not decoding. Any other error may have come from reading
+			// the body off the connection, and stays as it is.
+			if errors.Is(gzErr, io.EOF) || errors.Is(gzErr, gzip.ErrHeader) {
+				return nil, answerDoesNotDecode(httpResp.StatusCode, contentEncoding, gzErr)
+			}
 			return nil, gzErr
 		}
 		// Cap decompressed output so a bomb fails the test instead of

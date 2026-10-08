@@ -49,3 +49,13 @@ jobs:
       # the other implementation.
       - name: Test utils on darwin
         run: go test -count=1 ./utils/
+
+      # connseq.Upstream is the proxy's end of its connection to a destination.
+      # Off Linux it asks the socket for no count (received_others.go), so it
+      # numbers chunks by what was read. upstream_others_test.go checks that no
+      # socket is asked; it builds only off Linux, so only this job and the
+      # Windows one can run it. The numbering by what was read is checked by
+      # upstream_test.go, which builds everywhere. Neither file had run on
+      # macOS before this job.
+      - name: Test connseq on darwin
+        run: go test -count=1 ./pkg/agent/proxy/connseq/

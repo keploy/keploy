@@ -289,13 +289,13 @@ func TestRecordMySQLOutgoing_DeclineRelaysRatherThanDropping(t *testing.T) {
 	appSide, proxySide, cleanupPair := tcpConnPair(t)
 	defer cleanupPair()
 	defer func() { _ = appSide.Close() }()
-	dstConn, err := net.DialTimeout("tcp", upstream.Addr().String(), 5*time.Second)
+	dstConn, err := util.DialUpstream(context.Background(), &net.Dialer{Timeout: 5 * time.Second}, "tcp", upstream.Addr().String())
 	if err != nil {
 		t.Fatalf("dial upstream: %v", err)
 	}
 	defer func() { _ = dstConn.Close() }()
 
-	src, dst := proxySide, dstConn
+	src, dst := proxySide, net.Conn(dstConn)
 	upgrader := util.NewConnTLSUpgrader(&src, &dst, zap.NewNop(), nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
