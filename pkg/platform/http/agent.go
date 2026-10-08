@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -3027,6 +3028,44 @@ func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]str
 	if res.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("scope table returned status %d: %s", res.StatusCode, string(b))
+	}
+	return nil
+}
+
+// PushScopeGate tells the agent which tests should run this replay; run == nil
+// lets every test run. The gate is made again on a restarted agent, like the
+// scope table. An agent that cannot gate (older: 404; or 501) returns
+// models.ErrScopeGateUnsupported.
+func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason string) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			recorded := slices.Clone(run)
+			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeGate(c, recorded, reason) })
+		}
+	}()
+	body, err := json.Marshal(models.ScopeGateReq{Run: run, Reason: reason})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the scope gate: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create the scope-gate request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push the scope gate: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return models.ErrScopeGateUnsupported
+	}
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("scope gate returned status %d: %s", res.StatusCode, string(b))
 	}
 	return nil
 }

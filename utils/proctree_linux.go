@@ -3,94 +3,69 @@
 package utils
 
 import (
+	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 )
 
 // The process tree InterruptProcessTree signals, read from /proc.
 
-func getProcessGroupID(pid int) (int, error) {
-	statusPath := filepath.Join("/proc", strconv.Itoa(pid), "status")
-	statusBytes, err := os.ReadFile(statusPath)
-	if err != nil {
-		return 0, err
-	}
-
-	status := string(statusBytes)
-	for _, line := range strings.Split(status, "\n") {
-		if strings.HasPrefix(line, "NSpgid:") {
-			return extractIDFromStatusLine(line), nil
-		}
-	}
-
-	return 0, nil
-}
-
-// extractIDFromStatusLine extracts the ID from a status line in the format "Key:\tValue".
-func extractIDFromStatusLine(line string) int {
-	fields := strings.Fields(line)
-	if len(fields) == 2 {
-		id, err := strconv.Atoi(fields[1])
-		if err == nil {
-			return id
-		}
-	}
-	return -1
-}
-
-// findChildPIDs takes a parent PID and returns a slice of all descendant PIDs,
-// and how to read each one's process group.
+// findChildPIDs returns every descendant of parentPID, and how to read each
+// one's process group -- both from one snapshot of the process table, read
+// from /proc once (readProcTable) and taken by procTable.tree.
+//
+// All of it comes before InterruptProcessTree's first signal. It used to read
+// every process's status file once for each process it found in the tree,
+// and the tree's again for their groups: for an app keploy runs as
+// `sh -c "nyc npm start"` (sh, nyc, npm, sh, node), five reads of every
+// process on the host. On a host short of memory each read of a /proc file
+// waits on reclaim, and a replay held to 120 MB sent its app the SIGINT
+// 15.7 s after the test set was cancelled, all of it spent in that walk.
 func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
-	var childPIDs []int
+	return childPIDsIn(os.DirFS("/proc"), parentPID)
+}
 
-	// Recursive helper function to find all descendants of a given PID.
-	var findDescendants func(int)
-	findDescendants = func(pid int) {
-		procDirs, err := os.ReadDir("/proc")
-		if err != nil {
-			return
-		}
-
-		for _, procDir := range procDirs {
-			if !procDir.IsDir() {
-				continue
-			}
-
-			childPid, err := strconv.Atoi(procDir.Name())
-			if err != nil {
-				continue
-			}
-
-			statusPath := filepath.Join("/proc", procDir.Name(), "status")
-			statusBytes, err := os.ReadFile(statusPath)
-			if err != nil {
-				continue
-			}
-
-			status := string(statusBytes)
-			for _, line := range strings.Split(status, "\n") {
-				if strings.HasPrefix(line, "PPid:") {
-					fields := strings.Fields(line)
-					if len(fields) == 2 {
-						ppid, err := strconv.Atoi(fields[1])
-						if err != nil {
-							break
-						}
-						if ppid == pid {
-							childPIDs = append(childPIDs, childPid)
-							findDescendants(childPid)
-						}
-					}
-					break
-				}
-			}
-		}
+// childPIDsIn is findChildPIDs over proc, a /proc.
+func childPIDsIn(proc fs.FS, parentPID int) ([]int, func(pid int) (int, error), error) {
+	table, err := readProcTable(proc)
+	if err != nil {
+		return nil, nil, err
 	}
+	children, groupOf := table.tree(parentPID)
+	return children, groupOf, nil
+}
 
-	// Start the recursion with the initial parent PID.
-	findDescendants(parentPID)
-
-	return childPIDs, getProcessGroupID, nil
+// readProcTable reads the process table from proc, a /proc: one read of each
+// process's stat file, which holds both its parent and its process group,
+// parsed by ParseProcStat.
+//
+// stat, not status: its pgrp field is the group as seen from this /proc's pid
+// namespace, the one kill(2) takes, for a process in nested namespaces too,
+// where status's NSpgid line carries one group per namespace. A process that
+// exits between the listing and its read, or whose stat cannot be parsed, is
+// not in the table.
+func readProcTable(proc fs.FS) (procTable, error) {
+	entries, err := fs.ReadDir(proc, ".")
+	if err != nil {
+		return procTable{}, err
+	}
+	table := newProcTable(len(entries))
+	// Every stat is read into the same buffer (statBufSize holds any of them).
+	buf := make([]byte, statBufSize)
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || !entry.IsDir() {
+			continue
+		}
+		line, err := readStat(proc, entry.Name(), buf)
+		if err != nil {
+			continue
+		}
+		stat, ok := ParseProcStat(line)
+		if !ok {
+			continue
+		}
+		table.add(pid, stat.PPID, stat.PGRP)
+	}
+	return table, nil
 }

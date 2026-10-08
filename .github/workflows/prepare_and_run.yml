@@ -838,9 +838,11 @@ jobs:
   precheck-macos:
     # Pre-flight sanity on the self-hosted macOS runner: create the
     # workflow start lock that clean_up_docker_macos consumes, unlock
-    # the keychain, and confirm Docker Desktop is up. Fails fast
-    # BEFORE the parallel test jobs spin up, so a runner that booted
-    # without Docker Desktop doesn't waste 10 min of downstream time.
+    # the keychain, run the cases of the script clean_up_docker_macos
+    # sweeps the shared Docker daemon with, and confirm Docker Desktop
+    # is up. Fails fast BEFORE the parallel test jobs spin up, so a
+    # runner that booted without Docker Desktop doesn't waste 10 min of
+    # downstream time.
     # The docker image itself is loaded inside each downstream test
     # job via the download-image composite action — pre-loading here
     # would duplicate the artifact download + docker load for every
@@ -848,6 +850,12 @@ jobs:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, macOS, native]
     timeout-minutes: 10
+    # It runs the pull request's scripts on the machine these runners share,
+    # and uses its token only to check them out; this workflow has no
+    # permissions block, so without this the job would get the org's
+    # write-all default.
+    permissions:
+      contents: read
     steps:
       - name: Create workflow start lock
         run: |
@@ -861,6 +869,33 @@ jobs:
           security unlock-keychain -p $KEYCHAIN_PASSWORD
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        run: |
+          # Use unset instead of rm -rf ~/.gitconfig to avoid racing with
+          # concurrent jobs that also need gitconfig.
+          git config --global --unset-all url."git@github.com:".insteadOf 2>/dev/null || true
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf 2>/dev/null || true
+          git config --global --unset-all core.sshCommand 2>/dev/null || true
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # reap-stale-containers.sh decides which containers on this machine's
+      # one Docker daemon are leftovers, and a wrong decision there does not
+      # fail its own job: it removes a sibling job's containers. Its cases run
+      # here under the bash and the BSD tools these runners have (and on
+      # GitHub's images in macos-ci-scripts.yml), and clean_up_docker_macos
+      # sweeps only when they passed. They drive a fake docker CLI and touch
+      # nothing on the shared daemon. Only the script's own cases run here:
+      # the checks of the workflows around it read every workflow file, and
+      # run in macos-ci-scripts.yml, so that a mistake in an unrelated
+      # workflow cannot skip the macOS test jobs.
+      - name: Test the macOS Docker cleanup script
+        timeout-minutes: 5
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/macos/reap-stale-containers.tests.sh"
 
       - name: Verify Docker Desktop is running (macOS)
         run: |
@@ -886,8 +921,15 @@ jobs:
   clean_up_docker_macos:
     if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: [self-hosted, macOS, native]
-    needs: [run_python_docker_macos, run_golang_docker_macos]
+    # precheck-macos is here only for its result: the sweep below runs when
+    # the script's cases passed there, and without it here that result is
+    # empty and the sweep never runs. The test jobs already wait for it.
+    needs: [precheck-macos, run_python_docker_macos, run_golang_docker_macos]
     timeout-minutes: 10
+    # As for precheck-macos: the token is only for the checkout of the script
+    # this job sweeps with, and the default would be the org's write-all.
+    permissions:
+      contents: read
     steps:
       - name: Verify Docker Desktop is running (macOS)
         continue-on-error: true
@@ -921,34 +963,43 @@ jobs:
           echo "Cleaning up stale lock files older than 24 hours..."
           find "$LOCK_DIR" -name "prepare-macos-workflow-*.lock" -type f -mtime +1 -delete 2>/dev/null || true
 
-      - name: Stop long-running containers (macOS)
-        id: stop_longrunning
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
         run: |
-          # Stop containers running longer than 30 minutes, except buildx containers.
-          stopped_any=0
-          now=$(date +%s)
-          while read -r cid cname; do
-            started=$(docker inspect --format '{{.State.StartedAt}}' "$cid" 2>/dev/null || true)
-            if [ -z "$started" ]; then
-              continue
-            fi
-            started_norm=$(echo "$started" | sed -E 's/\.[0-9]+//; s/Z$/+0000/; s/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
-            epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$started_norm" "+%s" 2>/dev/null || echo 0)
-            if [ -z "$epoch" ] || [ "$epoch" -eq 0 ]; then
-              echo "Could not parse start time for container $cid: $started"
-              continue
-            fi
-            if [ "$epoch" -lt $((now - 1800)) ]; then
-              if [[ "$cname" == buildx* ]]; then
-                echo "Skipping buildx container $cid ($cname)"
-                continue
-              fi
-              echo "Removing long-running container $cid ($cname) started at $started"
-              docker rm -f "$cid" || true
-              stopped_any=1
-            fi
-          done < <(docker ps -a --format '{{.ID}} {{.Names}}')
-          echo "stopped_any=$stopped_any" >> $GITHUB_OUTPUT
+          # Use unset instead of rm -rf ~/.gitconfig to avoid racing with
+          # concurrent jobs that also need gitconfig.
+          git config --global --unset-all url."git@github.com:".insteadOf 2>/dev/null || true
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf 2>/dev/null || true
+          git config --global --unset-all core.sshCommand 2>/dev/null || true
+
+      # Only the sweep below needs the repository. A fetch that fails must
+      # cost this run the sweep and nothing else: with continue-on-error it
+      # neither fails the job (gate_macos needs it) nor skips this run's own
+      # cleanup further down, and the next run's cleanup sweeps again.
+      - name: Checkout repository
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      # Removes the containers no live job can own: those whose last lifecycle
+      # event is older than any job on these runners can be. The script says
+      # why that is the rule. It sweeps the Docker daemon every runner of this
+      # machine shares, while the other runners are mid-job, so it runs only
+      # when its cases passed on this machine (precheck-macos), and only on the
+      # copy this job checked out: after a failed checkout the workspace still
+      # holds whatever commit the runner's last job left there. The script
+      # never fails, but a docker call can hang on a wedged Docker Desktop VM;
+      # the timeout and continue-on-error make that cost the run its sweep,
+      # not the job (gate_macos needs it) and the run's own cleanup below.
+      # reap-stale-containers.workflows.tests.sh fails if either condition
+      # leaves this if:, precheck-macos leaves needs:, or either key leaves
+      # this step.
+      - name: Remove stale containers (macOS)
+        if: steps.checkout.outcome == 'success' && needs.precheck-macos.result == 'success'
+        timeout-minutes: 5
+        continue-on-error: true
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/macos/reap-stale-containers.sh"
 
       - name: Docker cleanup (scoped to this workflow run)
         run: |
@@ -971,6 +1022,24 @@ jobs:
             docker network rm "$net" 2>/dev/null || true
           done
 
+          # Both prunes run against the daemon the other runners' live jobs
+          # are using. They stay as written, without -a, because neither
+          # then takes anything a live job can still reach.
+          # `image prune` takes untagged images no container was made
+          # from. A job's application image is tagged with its JOB_ID by
+          # the build that makes it, and its keploy image with the run's
+          # v<sha> by download-image. Until that tag is on, the keploy
+          # image has only keploy/keploy:ci, which every run's tarball
+          # carries, so another run's `docker load` can take it and the
+          # prune can then delete the image. That costs the job nothing
+          # more: its `docker tag keploy/keploy:ci ...` already names the
+          # other run's image. The fault there is the shared tag.
+          # `volume prune` takes anonymous volumes no container mounts
+          # (Docker 23 and later). A live job's are mounted by its
+          # containers, started or not, and the volumes compose and keploy
+          # make for it (keploy-tls-certs, debugfs) have names.
+          # With -a these would take a sibling's just-loaded image and its
+          # named volumes, and `system prune` its Created containers.
           echo "Pruning dangling Docker images..."
           docker image prune -f 2>/dev/null || true
           echo "Pruning dangling Docker volumes..."

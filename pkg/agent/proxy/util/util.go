@@ -108,6 +108,12 @@ func (c *Conn) CloseWrite() error {
 	return CloseWriteIfPossible(c.Conn)
 }
 
+// NetConn is the conn c reads and writes through, the convention *tls.Conn
+// set for what looks beneath a wrapper: the relay finds the connection's
+// connseq.Upstream under it (a probe's replay of what it read, a CONNECT
+// tunnel's buffer).
+func (c *Conn) NetConn() net.Conn { return c.Conn }
+
 func (c *Conn) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

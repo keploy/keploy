@@ -68,6 +68,21 @@ type MockManager struct {
 	// walk + the session walk so legacy parsers keep seeing startup
 	// mocks in their "session" snapshot until they migrate.
 	startup *TreeDb
+	// startupKeys maps each mock the startup tree holds to its key there, so
+	// a change made to the same mock through the session tier can follow it
+	// into the startup tree (see mirrorStartup). Rebuilt with the tree; guarded
+	// by treesMu. An entry whose mock DeleteStartupMock removed stays until the
+	// next staging; every swap and remove is pointer-checked, so it is inert.
+	startupKeys map[*models.Mock]models.TestModeInfo
+	// startupShared is set while the startup tier may hold the session tier's
+	// own mocks — after a staging that filed them in both (see mirrorStartup)
+	// — and clear otherwise, so session updates pay for mirroring only then.
+	startupShared atomic.Bool
+	// mirrorMu makes a session-tier update or delete and its mirror into the
+	// startup tier one step, while startupShared. Without it two matchers
+	// updating the same recording at once could each mirror out of order and
+	// leave the tiers holding different copies. Taken before treesMu.
+	mirrorMu sync.Mutex
 
 	// global revision (legacy)
 	rev uint64
@@ -1164,6 +1179,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// RLock (see GetStartupMocks below).
 	unfilteredForTree := unfiltered
 	newStartup := NewTreeDb(customComparator)
+	newStartupKeys := make(map[*models.Mock]models.TestModeInfo, len(startupInit)+len(explicitStartup))
 	// H4 round-2: use a TIER-LOCAL TestModeInfo copy as the startup tree
 	// key rather than mutating mk.TestModeInfo.ID in place. The same
 	// *models.Mock pointer can appear in BOTH startupInit and
@@ -1197,7 +1213,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// ID on the copy. mk.TestModeInfo.ID is left untouched so the
 		// session tier's build, which stamps the same mock during
 		// BaseTime staging, does not corrupt the startup tree's idIndex.
-		newStartup.insert(tierKey(mk, idx), mk)
+		key := tierKey(mk, idx)
+		newStartup.insert(key, mk)
+		newStartupKeys[mk] = key
 	}
 	// Harvest the kinds present BEFORE any tier is swapped.
 	//
@@ -1250,11 +1268,17 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		}
 		// Tier-local key with an ID offset by a large constant so it cannot
 		// collide with the startup IDs above (0..N).
-		newStartup.insert(tierKey(mk, 1_000_000+idx), mk)
+		key := tierKey(mk, 1_000_000+idx)
+		newStartup.insert(key, mk)
+		newStartupKeys[mk] = key
 	}
 
 	m.treesMu.Lock()
 	m.startup = newStartup
+	m.startupKeys = newStartupKeys
+	// Initial staging files the session pool in the startup tier too; an
+	// explicit startup slice may share mocks with it as well.
+	m.startupShared.Store(isInitialStaging || len(explicitStartup) > 0)
 	m.treesMu.Unlock()
 	if m.logger != nil && len(startupInit) > 0 {
 		m.logger.Debug("routed startup-init mocks into startup tree",
@@ -2257,15 +2281,70 @@ func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
 
 // ---------- point updates / deletes (keep per-kind in sync) ----------
 
+// mirrorStartup keeps the startup tier's copy of a recording in step with the
+// session tier's. Staging at BaseTime files the session pool in BOTH tiers as
+// one shared pointer (see SetMocksWithWindow's isInitialStaging branch), and
+// GetSessionMocks — every parser's view of the reusable pool — lists the two
+// tiers as one, telling them apart by pointer. When a match replaced the
+// session tier's entry with an updated copy (a fresh sort order, learned
+// noise) and left the startup tier holding the old pointer, every matched
+// recording was listed twice from then on: a stateful dependency's cursor
+// counted each duplicate as another recording and replayed a 1,2,3 sequence as
+// 1,1,2,2,3, and a reader of the startup tier never saw what the match learned.
+// So the startup tier now holds the same copy as the session tier: replaced is
+// the copy the session tier held until this update. Called under mirrorMu.
+func (m *MockManager) mirrorStartup(replaced, new *models.Mock) {
+	m.treesMu.Lock()
+	defer m.treesMu.Unlock()
+	key, ok := m.startupKeys[replaced]
+	if !ok || m.startup == nil {
+		return
+	}
+	if m.startup.swapValue(key, replaced, new) {
+		delete(m.startupKeys, replaced)
+		m.startupKeys[new] = key
+	}
+}
+
+// mirrorStartupDelete removes from the startup tier the mock a delete just
+// took out of the session tier, when the startup tier holds it too (see
+// mirrorStartup); otherwise the deleted recording stayed in the pool every
+// parser reads through GetSessionMocks. Called under mirrorMu.
+func (m *MockManager) mirrorStartupDelete(removed *models.Mock) {
+	m.treesMu.Lock()
+	defer m.treesMu.Unlock()
+	key, ok := m.startupKeys[removed]
+	if !ok || m.startup == nil {
+		return
+	}
+	if m.startup.removeValue(key, removed) {
+		delete(m.startupKeys, removed)
+	}
+}
+
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
 	// Snapshot the legacy tree pointer safely
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
 	new.MarkPooled() // matchers can reach it from here on; see models.Mock.pooled
+	shared := m.startupShared.Load()
+	if shared {
+		m.mirrorMu.Lock()
+	}
 	// Update legacy/global tree first (it keeps its window index right; see
 	// TreeDb.update)
-	updatedGlobal := globalTree.update(old.TestModeInfo, new.TestModeInfo, new, *old)
+	updatedGlobal, replaced := globalTree.updateReplacing(old.TestModeInfo, new.TestModeInfo, new, *old)
+	if shared {
+		if updatedGlobal && replaced != nil {
+			// The copy the tree held, which is not always the caller's old: a
+			// concurrent match of the same recording may have replaced it
+			// first. Mirrored under the same lock as the update, so two
+			// matches cannot mirror out of order.
+			m.mirrorStartup(replaced, new)
+		}
+		m.mirrorMu.Unlock()
+	}
 
 	oldK, newK := old.Kind, new.Kind
 	var updatedOldKind, updatedNewKind bool
@@ -2455,9 +2534,19 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
+	shared := m.startupShared.Load()
+	if shared {
+		m.mirrorMu.Lock()
+	}
 	// Identity-checked for the same reason as DeleteFilteredMock: the key is
 	// tier-local, so a mock from another tier addresses a different entry here.
-	deletedGlobal := globalTree.deleteMock(mock.TestModeInfo, mock)
+	deletedGlobal, removed := globalTree.deleteMockReturning(mock.TestModeInfo, mock)
+	if shared {
+		if deletedGlobal && removed != nil {
+			m.mirrorStartupDelete(removed)
+		}
+		m.mirrorMu.Unlock()
+	}
 
 	// per-kind
 	k := mock.Kind
@@ -2494,19 +2583,22 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 }
 
 // DeleteStartupMock removes a matched startup-tier mock from the
-// startup tree so the next identical query at boot phase picks the
-// next-recorded same-shape mock in chronological order. This is the
-// boot-path analogue of DeleteFilteredMock for the startup tier.
+// startup tree so the next identical query served from that tier (at
+// boot phase, or by the startup-tier rescue after a test's per-test pool
+// misses) picks the next-recorded same-shape mock in chronological
+// order. This is the boot-path analogue of DeleteFilteredMock for the
+// startup tier.
 //
 // Required for boot-phase replay correctness: when an application
 // issues the same query repeatedly during recording while DB state
 // mutates, the recorder captures multiple same-shape mocks with
-// diverging responses. The matcher's boot-phase tiebreaker (see
-// mongo/v2 match.go: `bootPhaseAwareRequestTimeDiff`) orders them
-// earliest-first; this consumer advances through that order so the
-// booting app sees the same response chain it saw at record time.
-// Without consumption, the matcher repeatedly picks the same earliest
-// mock and follow-on revalidation queries fail.
+// diverging responses. The mongo/v2 matcher (keploy/integrations,
+// pkg/mongo/v2/match.go) serves startup-tier candidates that score the
+// same earliest-recorded first, at boot phase and in the startup-tier
+// rescue; this consumer advances through that order so the booting app
+// sees the same response chain it saw at record time. Without
+// consumption, the matcher repeatedly picks the same earliest mock and
+// follow-on revalidation queries fail.
 //
 // Implementation note: the startup tree is keyed by a tier-local
 // TestModeInfo copy (see the comment on the SetMocksWithWindow branch

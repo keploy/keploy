@@ -145,6 +145,8 @@ func TestARefusalAtAnUnreachableAppPortSaysSoAndIsNotRetried(t *testing.T) {
 			assert.Contains(t, err.Error(), wantMsg)
 			assert.True(t, neterr.IsConnRefused(err), "the refusal must still classify as one: %v", err)
 			assert.Contains(t, err.Error(), "connection refused")
+			assert.Contains(t, failedWith(tc, err).FailureInfo.Category, models.AppConnectionError,
+				"a test that failed with %v", err)
 			for _, e := range logs.All() {
 				assert.NotContains(t, e.Message, "not yet accepting", "misleading refusal message logged")
 				assert.NotContains(t, e.Message, "may still be coming up", "misleading refusal message logged")
@@ -194,6 +196,11 @@ func TestADroppedConnectionAtAnUnreachableAppPortSaysSo(t *testing.T) {
 			if tc.Kind == models.HTTP {
 				assert.True(t, pkg.IsTransportConnReset(err), "the reset must still classify as one: %v", err)
 			}
+			// However the drop is reported (net/http's io.EOF or reset, or its
+			// errServerClosedIdle, by a race inside it), the test is labelled
+			// APP_CONNECTION_ERROR.
+			assert.Contains(t, failedWith(tc, err).FailureInfo.Category, models.AppConnectionError,
+				"a test that failed with %v", err)
 			instr.mu.Lock()
 			defer instr.mu.Unlock()
 			assert.Equal(t, []string{authority}, instr.asked, "asked once, about the address the request was sent to")

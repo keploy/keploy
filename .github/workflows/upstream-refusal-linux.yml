@@ -71,7 +71,8 @@ jobs:
                    TestAnAgentThatDiedLetsHandshakesThrough TestANewConnectionOnAReusedPortIsNotHeldBehindTheAbandonedOne \
                    TestShutdownAnswersTheHeldHandshakes TestStartRemovesOnlyAbandonedTables \
                    TestStartWaitsForAStoppingAgentsQueue TestCloseRemovesItsTableWhileTheQueueIsStillBound \
-                   TestStartRefusesToHoldWhereARejectDoesNotTakeEffect TestCloseAnswersAHeldHandshake; do
+                   TestStartRefusesToHoldWhereARejectDoesNotTakeEffect TestCloseAnswersAHeldHandshake \
+                   TestStartHoldsThroughSignals; do
             grep -q -- "--- PASS: $t" /tmp/synhold.out || { echo "::error::$t did not pass"; exit 1; }
           done
 

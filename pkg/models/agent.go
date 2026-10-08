@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -122,6 +123,79 @@ type ScopeReq struct {
 	At    time.Time `json:"at,omitzero"`
 	Dir   string    `json:"dir,omitempty"`
 	Suite bool      `json:"suite,omitempty"`
+	// Outcome is the test's own verdict, sent with /agent/scope/end by a
+	// harness that knows it (ScopeOutcomePassed / Failed / Skipped; common
+	// spellings such as "pass", "fail", "pending" are accepted, see
+	// NormalizeScopeOutcome). Optional: without it the replay knows what the
+	// test used and missed, not whether it passed.
+	Outcome string `json:"outcome,omitempty"`
+	// CanSkip, sent with /agent/scope/begin, says the harness skips a test it
+	// is told to (ScopeBeginResp.Action). Only such a begin is gated: a harness
+	// that cannot skip would run the test anyway, against a pool the gate never
+	// narrowed for it.
+	CanSkip bool `json:"canSkip,omitempty"`
+}
+
+// The verdicts a harness reports in ScopeReq.Outcome, and ScopeOutcomeGated,
+// which the agent records for a test the replay told not to run.
+const (
+	ScopeOutcomePassed  = "passed"
+	ScopeOutcomeFailed  = "failed"
+	ScopeOutcomeSkipped = "skipped"
+	ScopeOutcomeGated   = "gated"
+)
+
+// maxScopeOutcome bounds a verdict a harness sends; anything longer is not one.
+const maxScopeOutcome = 32
+
+// NormalizeScopeOutcome maps a harness's verdict onto ScopeOutcomePassed,
+// Failed or Skipped, accepting the spellings test runners use (go test's
+// pass/fail, jest's pending, pytest's error and xfail). Anything else is
+// returned lower-cased and cut to a bounded length, so a policy matching
+// "passed" never proves it; "" stays "".
+func NormalizeScopeOutcome(s string) string {
+	v := strings.ToLower(strings.TrimSpace(s))
+	switch v {
+	case "", ScopeOutcomePassed, ScopeOutcomeFailed, ScopeOutcomeSkipped:
+		return v
+	case "pass", "ok", "success", "succeeded", "xpassed":
+		return ScopeOutcomePassed
+	case "fail", "error", "errored", "broken", "timedout", "timeout", "interrupted":
+		return ScopeOutcomeFailed
+	case "skip", "pending", "todo", "disabled", "ignored", "xfail", "xfailed":
+		return ScopeOutcomeSkipped
+	}
+	if len(v) > maxScopeOutcome {
+		v = v[:maxScopeOutcome]
+	}
+	return v
+}
+
+// ScopeBeginResp answers POST /agent/scope/begin. A test the replay gated out
+// (see ScopeGateReq), begun by a harness that can skip (ScopeReq.CanSkip),
+// gets Action ScopeActionSkip and the Reason; its harness skips it and sends
+// no end for it. Every other answer is exactly
+// {"status":"ok"}, as before, so a harness that predates gating — or decodes
+// the answer as strings — is unaffected, and a missing action means "run".
+type ScopeBeginResp struct {
+	Status string `json:"status"`
+	Action string `json:"action,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// ScopeActionSkip is the ScopeBeginResp.Action telling a harness to skip.
+const ScopeActionSkip = "skip"
+
+// ScopeGateReq is the body of POST /agent/replay/gate: the replay CLI names the
+// only tests that should run this replay (for instance, the ones a previous
+// replay proved pass with every dependency mocked). Any other test — other
+// than a subtest of a named one — is answered ScopeActionSkip at
+// /agent/scope/begin, with Reason. A nil Run removes the gate: every test runs,
+// the default. The gate applies in replay only, and ends with the replay
+// session.
+type ScopeGateReq struct {
+	Run    []string `json:"run"`
+	Reason string   `json:"reason,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -147,6 +221,9 @@ type ScopeWindow struct {
 	Ready   time.Time `json:"ready,omitzero"`
 	Ref     string    `json:"ref,omitempty"`
 	Worker  uint32    `json:"worker,omitempty"`
+	// Outcome is the verdict the test's harness reported when it ended the
+	// scope (ScopeReq.Outcome); "" when it reported none.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
@@ -178,6 +255,10 @@ type Owned struct {
 // Callers must treat it as "unknown", never as "no mocks stored": a caller that
 // conflates the two reads an unreportable agent as a replaced one.
 var ErrMockStatsUnsupported = errors.New("agent cannot report mock stats")
+
+// ErrScopeGateUnsupported is returned for an agent that cannot gate which
+// tests run (one that predates POST /agent/replay/gate).
+var ErrScopeGateUnsupported = errors.New("agent cannot gate which tests run")
 
 // MockStats is the body of GET /agent/mock/stats — a non-draining snapshot of
 // the mock session for the runner or the CLI end-of-run summary.

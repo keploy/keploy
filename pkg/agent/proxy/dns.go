@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
@@ -17,62 +18,147 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
-// startTCPDNSServer binds and serves the TCP DNS listener. See
-// startUDPDNSServer for the onListening (NotifyStartedFunc) contract.
-func (p *Proxy) startTCPDNSServer(_ context.Context, onListening func()) error {
-	addr := fmt.Sprintf(":%v", p.DNSPort)
+// dnsServer is one of the proxy's two DNS listeners, TCP or UDP, with the one
+// rule for stopping it (stop).
+type dnsServer struct {
+	srv    *dns.Server
+	logger *zap.Logger
 
-	handler := p
-	server := &dns.Server{
-		Addr:              addr,
-		Net:               "tcp",
-		Handler:           handler,
-		ReusePort:         true,
-		NotifyStartedFunc: onListening,
+	// settled is closed once srv has bound its socket, or once its serve call
+	// has returned without binding one. bound says which, and err why a serve
+	// call that did not bind returned. Both are written before settled is
+	// closed and read only after it is.
+	settled chan struct{}
+	settle  sync.Once
+	bound   bool
+	err     error
+
+	stopOnce sync.Once
+	stopErr  error
+}
+
+// newDNSServer builds the DNS server for network ("tcp" or "udp") on
+// p.DNSPort. Nothing is bound until serve.
+func (p *Proxy) newDNSServer(network string) *dnsServer {
+	s := &dnsServer{logger: p.logger, settled: make(chan struct{})}
+	s.srv = &dns.Server{
+		Addr:      fmt.Sprintf(":%v", p.DNSPort),
+		Net:       network,
+		Handler:   p,
+		ReusePort: true,
+		// miekg/dns calls it once the socket is bound, just before it serves,
+		// on the goroutine that called ListenAndServe. A failed bind never
+		// calls it.
+		NotifyStartedFunc: func() { s.settleAs(true, nil) },
+	}
+	return s
+}
+
+// name is s's network as its log lines and errors say it: TCP or UDP.
+func (s *dnsServer) name() string { return strings.ToUpper(s.srv.Net) }
+
+// settleAs settles s once: as bound, or as a serve call that returned with err
+// without binding.
+func (s *dnsServer) settleAs(bound bool, err error) {
+	s.settle.Do(func() {
+		s.bound, s.err = bound, err
+		close(s.settled)
+	})
+}
+
+// serve binds s's socket and serves on it until s is stopped, and returns: nil
+// once stopped, else the error, a failed bind's included, which it also logs,
+// in one line that is true of both (the error says which). Return it, never
+// swallow it: a DNS listener that died silently looks healthy.
+func (s *dnsServer) serve() (err error) {
+	// A serve call that bound has settled s already. This settles one that
+	// returned, or panicked, before it bound, so stop never waits on it.
+	defer func() { s.settleAs(false, err) }()
+	s.logger.Info(fmt.Sprintf("starting %s DNS server at addr %v", s.name(), s.srv.Addr))
+	err = s.srv.ListenAndServe()
+	if err != nil {
+		utils.LogError(s.logger, err, fmt.Sprintf("the %s DNS server failed to bind or stopped serving", s.name()), zap.String("addr", s.srv.Addr))
+	}
+	return err
+}
+
+// stop shuts s down. It is the one rule for that, followed by both of s's
+// stoppers, serveDNS as its context ends and stopDNSServers: wait until s has
+// bound or its serve call has returned without binding, and shut it down only
+// if it bound. miekg/dns refuses to shut down a server that has not bound yet
+// ("server not started"), and the bind that came after would then hold the
+// port for the life of the process. A server that never bound holds nothing.
+// Only the first call shuts s down; later ones return its result.
+func (s *dnsServer) stop() error {
+	s.stopOnce.Do(func() {
+		<-s.settled
+		if !s.bound {
+			return
+		}
+		if err := s.srv.Shutdown(); err != nil {
+			utils.LogError(s.logger, err, fmt.Sprintf("failed to stop the %s DNS server", s.name()))
+			s.stopErr = err
+			return
+		}
+		s.logger.Debug(fmt.Sprintf("%s DNS server stopped", s.name()))
+	})
+	return s.stopErr
+}
+
+// startDNSServers builds the TCP and UDP DNS servers, serves each on g until
+// ctx ends, and returns once both are bound: nothing gated on StartProxy,
+// notably the agent's readiness that releases the depends_on'd app container
+// in docker-compose replay, may see an unbound DNS socket. Without the wait a
+// reconstructed replay app's eager boot-time resolve of a recorded name raced
+// an unbound socket and died with UnknownHostException, tearing down the
+// whole stack (intermittent cloud-replay flake, saas/selfhosted pipeline
+// 9847). A failed bind fails the wait at once with its error (e.g.
+// "bind: address already in use"); dnsBindTimeout is only a backstop for a
+// socket that neither binds nor fails, one deadline for both servers.
+//
+// p.tcpDNS and p.udpDNS are set here, before the goroutines that serve and
+// stop them start, and each goroutine is handed its server.
+func (p *Proxy) startDNSServers(ctx context.Context, g *errgroup.Group) error {
+	p.tcpDNS, p.udpDNS = p.newDNSServer("tcp"), p.newDNSServer("udp")
+	for _, s := range []*dnsServer{p.tcpDNS, p.udpDNS} {
+		g.Go(func() error {
+			defer utils.Recover(p.logger)
+			return p.serveDNS(ctx, s)
+		})
 	}
 
-	p.TCPDNSServer = server
-
-	p.logger.Info(fmt.Sprintf("starting TCP DNS server at addr %v", server.Addr))
-	err := server.ListenAndServe()
-	if err != nil {
-		// Return (not swallow) the bind error so the errgroup surfaces it; a
-		// silently-dead TCP DNS listener otherwise looks healthy.
-		utils.LogError(p.logger, err, "failed to start tcp dns server", zap.String("addr", server.Addr))
-		return err
+	deadline := time.After(dnsBindTimeout)
+	for _, s := range []*dnsServer{p.udpDNS, p.tcpDNS} {
+		select {
+		case <-s.settled:
+			if !s.bound {
+				return fmt.Errorf("DNS server failed to start: %w", s.err)
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline:
+			return fmt.Errorf("%s DNS server did not report listening within %s", s.name(), dnsBindTimeout)
+		}
 	}
 	return nil
 }
 
-// startUDPDNSServer binds and serves the UDP DNS listener. onListening, if
-// non-nil, is invoked exactly once by miekg/dns AFTER the socket is bound and
-// just before it starts serving (NotifyStartedFunc) -- StartProxy waits on it
-// so the agent's readiness (which releases the depends_on'd app container in
-// docker-compose replay) cannot fire before DNS is actually answering. A failed
-// bind never invokes it (StartProxy's timeout surfaces that).
-func (p *Proxy) startUDPDNSServer(_ context.Context, onListening func()) error {
-	addr := fmt.Sprintf(":%v", p.DNSPort)
-
-	handler := p
-	server := &dns.Server{
-		Addr:              addr,
-		Net:               "udp",
-		Handler:           handler,
-		ReusePort:         true,
-		NotifyStartedFunc: onListening,
-	}
-
-	p.UDPDNSServer = server
-
-	p.logger.Info(fmt.Sprintf("starting UDP DNS server at addr %v", server.Addr))
-	err := server.ListenAndServe()
-	if err != nil {
-		utils.LogError(p.logger, err, "failed to start udp dns server", zap.String("addr", server.Addr))
+// serveDNS serves s until ctx ends, and then stops it.
+func (p *Proxy) serveDNS(ctx context.Context, s *dnsServer) error {
+	served := make(chan error, 1)
+	go func() {
+		defer utils.Recover(p.logger)
+		served <- s.serve()
+	}()
+	select {
+	case <-ctx.Done():
+		return s.stop()
+	case err := <-served:
 		return err
 	}
-	return nil
 }
 
 type dnsCacheEntry struct {
@@ -505,11 +591,13 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.String("hint", "DNS mocks may be missing. Re-record to capture DNS queries."),
 			)
+			missed := time.Now()
 			proxyErr := models.ParserError{
 				ParserErrorType: models.ErrMockNotFound,
 				Err:             fmt.Errorf("DNS mock not found for query: %s (%s)", question.Name, dns.TypeToString[question.Qtype]),
+				At:              missed,
 				MismatchReport: &models.MockMismatchReport{
-					At:            time.Now(),
+					At:            missed,
 					Protocol:      "DNS",
 					ActualSummary: fmt.Sprintf("%s %s", dns.TypeToString[question.Qtype], question.Name),
 					NextSteps:     "DNS mocks may be missing. Re-record to capture DNS queries.",
@@ -969,35 +1057,18 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	return resp, nil
 }
 
-func (p *Proxy) stopDNSServers(_ context.Context) error {
-	if err := p.stopTCPDNSServer(); err != nil {
-		return err
-	}
-	return p.stopUDPDNSServer()
-}
-
-func (p *Proxy) stopTCPDNSServer() error {
-	if p.TCPDNSServer != nil {
-		err := p.TCPDNSServer.Shutdown()
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to stop tcp dns server")
-			return err
+// stopDNSServers stops both DNS servers by dnsServer.stop, the rule serveDNS
+// stops each by as its context ends: whichever comes first shuts a server
+// down, and the other gets its result. Before StartProxy built them there is
+// nothing to stop.
+func (p *Proxy) stopDNSServers() error {
+	var errs []error
+	for _, s := range []*dnsServer{p.tcpDNS, p.udpDNS} {
+		if s != nil {
+			errs = append(errs, s.stop())
 		}
-		p.logger.Info("Tcp Dns server stopped successfully")
 	}
-	return nil
-}
-
-func (p *Proxy) stopUDPDNSServer() error {
-	if p.UDPDNSServer != nil {
-		err := p.UDPDNSServer.Shutdown()
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to stop udp dns server")
-			return err
-		}
-		p.logger.Info("Udp Dns server stopped successfully")
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 const (

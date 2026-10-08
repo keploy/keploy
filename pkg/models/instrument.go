@@ -128,6 +128,13 @@ type OutgoingOptions struct {
 	// ConsumeCursorSaturate (DeriveLifetime rules #4/#5); at one recorded
 	// response it is a no-op.
 	DisableStatefulMocks bool
+	// DisableMockCorrelation turns OFF request→response echo correlation: when
+	// the app sends an app-minted random value (UUID / nonce / idempotency key)
+	// that the dependency reflects back, replay captures the live request value
+	// and renders it into the served response instead of replaying the stale
+	// recorded one. Default (false) = ON. Set true to fall back to serving the
+	// recorded value. Only affects mocks carrying Spec.Correlations.
+	DisableMockCorrelation bool
 	// MockNoiseDetection / MockNoiseStrict are the canonical spelling.
 	//
 	// MockNoiseDetection: detect request-body field drift vs the recorded mock
@@ -155,7 +162,6 @@ type OutgoingOptions struct {
 	// NoiseDetection() / NoiseStrict(), never directly.
 	SchemaNoiseDetection bool
 	SchemaNoiseStrict    bool
-	SkipTLSMITM          bool
 	// ConnKey names THIS connection's socket, as an opaque token on which the
 	// connection's two capture legs agree: the raw leg that carries its
 	// cleartext prelude (a MySQL greeting and SSLRequest) and the decrypted leg
@@ -197,6 +203,11 @@ type OutgoingOptions struct {
 	// Surfaced via --opportunistic-tls-intercept so the agent can
 	// pick the right per-connection branch in handleConnection.
 	OpportunisticTLSIntercept bool
+	// SkipTLSMITM sits with the other TLS switches, in the padding after them.
+	// OutgoingOptions is held by value in each connection's supervisor.Session,
+	// so a field placed where it takes a word of its own grows the Session of
+	// every connection.
+	SkipTLSMITM bool
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial

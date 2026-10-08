@@ -32,6 +32,10 @@ type FlowMocks struct {
 	Expected []models.MockEntry
 	Consumed []models.MockState
 	Missed   []models.UnmatchedCall
+	// Outcome is the verdict of the test's latest run this replay
+	// (models.ScopeOutcome*, ScopeOutcomeGated when the replay told it not to
+	// run); "" when its harness reported none.
+	Outcome string
 }
 
 // CaseReader is an optional MappingDB extension: which cases each flow recorded.
@@ -232,6 +236,26 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 		}
 		if flow, ok := flowAt(windows, miss.At, expected); ok {
 			get(flow).Missed = append(get(flow).Missed, miss)
+		}
+	}
+	// The verdict of a test's latest run — "" when that run reported none, not
+	// an earlier run's. A test that recorded and used no mocks gets a line
+	// only for a verdict (a test the replay gated out has one).
+	latest := make(map[string]models.ScopeWindow)
+	for _, w := range windows {
+		if w.Name == "" {
+			continue
+		}
+		if prev, seen := latest[w.Name]; seen && w.End.Before(prev.End) {
+			continue
+		}
+		latest[w.Name] = w
+	}
+	for name, w := range latest {
+		if f, known := byFlow[name]; known {
+			f.Outcome = w.Outcome
+		} else if w.Outcome != "" {
+			get(name).Outcome = w.Outcome
 		}
 	}
 	if len(byFlow) == 0 {

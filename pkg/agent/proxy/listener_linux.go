@@ -5,12 +5,13 @@ package proxy
 import (
 	"bufio"
 	"encoding/hex"
-	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"go.keploy.io/server/v3/utils"
 )
 
 func listenerOwner(ip net.IP, port uint32) (int, bool) {
@@ -84,24 +85,11 @@ func descends(pid, ancestor int) bool {
 		if pid == ancestor {
 			return true
 		}
-		raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-		if err != nil {
+		st, ok := utils.ReadProcStat(pid)
+		if !ok {
 			return false
 		}
-		s := string(raw)
-		end := strings.LastIndexByte(s, ')')
-		if end < 0 || end+2 >= len(s) {
-			return false
-		}
-		fields := strings.Fields(s[end+2:])
-		if len(fields) < 2 {
-			return false
-		}
-		ppid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			return false
-		}
-		pid = ppid
+		pid = st.PPID
 	}
 	return pid == ancestor
 }

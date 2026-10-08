@@ -68,6 +68,12 @@ type IngressProxyManager struct {
 	sampling    bool
 	samplingSem chan struct{}
 
+	// captures counts the capture goroutines the HTTP/1 handlers started
+	// that have not returned yet. Done is each one's last step, so Wait says
+	// every capture they started is over (tests wait on it before they
+	// swap a hook or a semaphore those goroutines read).
+	captures sync.WaitGroup
+
 	ingressHook IngressHook
 
 	// relocated maps an app port whose bind the record hooks moved (keploy's
