@@ -391,6 +391,19 @@ type SimulationConfig struct {
 	ConfigHost      string
 	URLReplacements map[string]string
 	PortMappings    map[uint32]uint32
+	// TargetFromURL says an HTTP test case's URL already names where the app
+	// is, as it does once test.basePath has been put in it. What the recording
+	// kept of the address the app had then is another deployment's, and is
+	// left out of the request: the recorded app_port does not replace the
+	// URL's port, and the recorded Host header is not sent, so the request
+	// asks for the URL's host (see HostHeaderOf). An app behind an ingress or
+	// a virtual host is not reached under the name it was recorded with.
+	TargetFromURL bool
+	// SentTo, when set, is told where each HTTP request goes once everything
+	// that moves it (replaceWith, ports, TargetFromURL) has been applied: the
+	// URL it is sent to, the Host it asks for, and the Host header its test
+	// was recorded with ("" when it has none).
+	SentTo func(target *url.URL, host, recordedHost string)
 	// TLSConfig, when non-nil, is applied to the http.Transport used by
 	// the replay client. Lets callers pin a specific cert (e.g. for
 	// short-lived replay pods serving a self-signed cert) without
@@ -482,6 +495,18 @@ func urlHostPort(u *url.URL) (string, string) {
 type preparedHTTPRequest struct {
 	Request *http.Request
 	Client  *http.Client
+}
+
+// HostHeaderOf is the Host header a client sends for u: its host, and its port
+// unless that is the one its scheme has anyway. A front that routes by name
+// matches the header as written, and need not know "staging:443" for the
+// "staging" every client of https://staging asks it for.
+func HostHeaderOf(u *url.URL) string {
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		return strings.TrimSuffix(u.Host, ":"+port)
+	}
+	return u.Host
 }
 
 // prepareHTTPRequest handles all common request preparation logic shared between
@@ -678,7 +703,11 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	// app_port < config port < replaceWith URL replacements
 	// (explicit replacement port short-circuits lower-priority port overrides)
 	// < replaceWith port mappings.
-	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, true, logger)
+	appPort := tc.AppPort
+	if cfg.TargetFromURL {
+		appPort = 0
+	}
+	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, appPort, cfg.ConfigPort, true, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -700,9 +729,21 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 
 	// override host header if present in the request
 	hostHeader := tc.HTTPReq.Header["Host"]
-	if hostHeader != "" {
+	if cfg.TargetFromURL {
+		// Not left to the URL as it stands: ResolveTestTarget has written the
+		// scheme's own port into it, and "staging:443" is not the name a
+		// client of https://staging asks for.
+		req.Host = HostHeaderOf(req.URL)
+	} else if hostHeader != "" {
 		logger.Debug("overriding host header", zap.String("host", hostHeader))
 		req.Host = hostHeader
+	}
+	if cfg.SentTo != nil {
+		asked := req.Host
+		if asked == "" {
+			asked = req.URL.Host
+		}
+		cfg.SentTo(req.URL, asked, hostHeader)
 	}
 
 	// Creating the client and disabling redirects
