@@ -33,6 +33,11 @@ func listenerOwner(ip net.IP, port uint32) (int, bool) {
 	return int(pid), true
 }
 
+func listening(ip net.IP, port uint32) bool {
+	_, ok := listenerOwner(ip, port)
+	return ok
+}
+
 func descends(pid, ancestor int) bool {
 	for i := 0; i < 64 && pid > 1; i++ {
 		if pid == ancestor {

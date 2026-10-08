@@ -170,8 +170,7 @@ func unowned(dest *agent.NetworkAddress) bool {
 	if ip == nil || !ip.IsLoopback() {
 		return false
 	}
-	_, listening := listenerOwner(ip, dest.Port)
-	return !listening && (!recorded.has(dest.Port) || recorded.child(dest.Port))
+	return !listening(ip, dest.Port) && (!recorded.has(dest.Port) || recorded.child(dest.Port))
 }
 
 // decideHandshake is synhold's Decide for this proxy: it dials the held
@@ -309,9 +308,7 @@ func (p *Proxy) dialWhileHeld(ctx context.Context, lookup agent.HandshakeDestInf
 // holdState is the handshake hold's lifecycle on a proxy: armed with the
 // listener's context when the listener opens, started by the first session
 // whose connections dial their destination, stopped when the listener
-// closes. A replay served from mocks never dials, so it never loads the
-// netfilter modules or adds a hook, and its handshakes complete in the
-// kernel as before.
+// closes.
 type holdState struct {
 	mu   sync.Mutex
 	ctx  context.Context // nil until armed, and again once stopped
@@ -347,7 +344,7 @@ func (p *Proxy) ensureHandshakeHold(rule *agent.Session) {
 		return
 	}
 	p.hold.tried = rule
-	p.hold.stop = p.startHandshakeHold(p.hold.ctx, !p.hold.reported)
+	p.hold.stop = p.startHandshakeHold(p.hold.ctx, !p.hold.reported && p.dialsUpstream(rule))
 	if p.hold.stop == nil {
 		p.hold.reported = true // tried again with the next session
 	}

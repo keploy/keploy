@@ -408,13 +408,17 @@ func TestDecideHandshakeRefusesALoopbackPortNothingOwnsInMockMode(t *testing.T) 
 
 func TestHoldStartsForANativeMockReplay(t *testing.T) {
 	var checks atomic.Int32
-	p := &Proxy{logger: zap.NewNop(), DestInfo: fakeHandshakeDest{checkErr: errors.New("no tcp_diag"), checks: &checks}, Port: 16789, mockMode: true, appPID: 1}
+	core, logs := observer.New(zapcore.InfoLevel)
+	p := &Proxy{logger: zap.New(core), DestInfo: fakeHandshakeDest{checkErr: errors.New("no tcp_diag"), checks: &checks}, Port: 16789, mockMode: true, appPID: 1}
 	mocked := &agent.Session{Mode: models.MODE_TEST}
 	mocked.Mocking = true
 	p.armHandshakeHold(context.Background())
 	p.ensureHandshakeHold(mocked)
 	if n := checks.Load(); n != 1 {
 		t.Fatalf("a native mock replay tried to hold handshakes %d times, want once", n)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a mock replay on a host that cannot hold handshakes logged %v", logs.All())
 	}
 	p.IsDocker = true
 	p.ensureHandshakeHold(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: mocked.OutgoingOptions})
