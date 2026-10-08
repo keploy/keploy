@@ -1,11 +1,15 @@
 package testdb
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 func TestGetTestCases_SortingLogic(t *testing.T) {
@@ -350,4 +354,51 @@ func TestGetTestCases_EdgeCases(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A test case is named from its method and path, so an endpoint like
+// /api/mocks gets a file name containing "mocks". Reading the test set back must
+// keep it; only a stray mocks file in tests/ is skipped.
+func TestGetTestCases_KeepsCasesWhoseNameMentionsMocks(t *testing.T) {
+	dir := t.TempDir()
+	ts := New(zap.NewNop(), dir)
+
+	auto := httpTC("GET", "http://api.test/api/mocks")
+	named := namedTC("get-k8s-proxy-mocks-reference-1", "http://api.test/k8s-proxy/mocks/reference")
+	plain := httpTC("GET", "http://api.test/users")
+	for _, tc := range []*models.TestCase{auto, named, plain} {
+		if err := ts.InsertTestCase(t.Context(), tc, "set-1", false); err != nil {
+			t.Fatalf("InsertTestCase(%s): %v", tc.HTTPReq.URL, err)
+		}
+	}
+	if !strings.Contains(auto.Name, "mocks") {
+		t.Fatalf("precondition: expected the auto-minted name for /api/mocks to contain \"mocks\", got %q", auto.Name)
+	}
+
+	// A valid test case saved as tests/mocks.yaml must still not be read.
+	testsDir := filepath.Join(dir, "set-1", "tests")
+	src, err := os.ReadFile(filepath.Join(testsDir, plain.Name+".yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(testsDir, "mocks.yaml"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ts.GetTestCases(t.Context(), "set-1")
+	if err != nil {
+		t.Fatalf("GetTestCases: %v", err)
+	}
+	names := make(map[string]bool, len(got))
+	for _, tc := range got {
+		names[tc.Name] = true
+	}
+	for _, want := range []string{auto.Name, named.Name, plain.Name} {
+		if !names[want] {
+			t.Errorf("test case %q was not read back; got %v", want, names)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("expected 3 test cases (the stray mocks.yaml skipped), got %d: %v", len(got), names)
+	}
 }
