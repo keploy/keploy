@@ -151,6 +151,29 @@ func (p *Proxy) dialsUpstream(rule *agent.Session) bool {
 	return p.GlobalPassthrough || rule.OpportunisticTLSIntercept || !rule.Mocking
 }
 
+func (p *Proxy) refusesLocal() bool {
+	return p.mockMode && !p.IsDocker && p.appPID != 0
+}
+
+func unowned(dest *agent.NetworkAddress) bool {
+	host, _, err := net.SplitHostPort(destAddr(dest))
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip.IsUnspecified() {
+		ip = net.IPv4(127, 0, 0, 1)
+		if dest.Version == 6 {
+			ip = net.IPv6loopback
+		}
+	}
+	if ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	_, listening := listenerOwner(ip, dest.Port)
+	return !listening && (!recorded.has(dest.Port) || recorded.child(dest.Port))
+}
+
 // decideHandshake is synhold's Decide for this proxy: it dials the held
 // connection's destination, keeps the connection for handleConnection, and
 // answers the application's handshake the way the destination answered.
@@ -160,8 +183,20 @@ func (p *Proxy) decideHandshake(lookup agent.HandshakeDestInfo) synhold.Decide {
 		// connection's.
 		p.predials.drop(client)
 		rule := p.getSession()
-		if rule == nil || !p.dialsUpstream(rule) {
+		if rule == nil {
 			return synhold.Decision{Outcome: synhold.Accept}
+		}
+		if !p.dialsUpstream(rule) {
+			if !p.refusesLocal() {
+				return synhold.Decision{Outcome: synhold.Accept}
+			}
+			dest, err := lookup.GetForHandshake(ctx, client, proxy)
+			if err != nil || !unowned(dest) {
+				return synhold.Decision{Outcome: synhold.Accept}
+			}
+			p.logger.Debug("nothing listens at the local destination; refusing the connect",
+				zap.String("client", client.String()), zap.String("destination", destAddr(dest)))
+			return synhold.Decision{Outcome: synhold.Refuse}
 		}
 		dest, err := lookup.GetForHandshake(ctx, client, proxy)
 		if err != nil {
@@ -303,7 +338,7 @@ func (p *Proxy) armHandshakeHold(ctx context.Context) {
 // to take effect, if its connections dial their destination and the
 // listener is open.
 func (p *Proxy) ensureHandshakeHold(rule *agent.Session) {
-	if rule == nil || !p.dialsUpstream(rule) {
+	if rule == nil || !(p.dialsUpstream(rule) || p.refusesLocal()) {
 		return
 	}
 	p.hold.mu.Lock()
