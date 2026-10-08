@@ -344,3 +344,23 @@ func TestLiveNamesTheSetsWithASuiteOrATestOpen(t *testing.T) {
 		t.Fatalf("live after every suite ended: %v", got)
 	}
 }
+
+func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
+	f := newFake()
+	r := New(f, time.Second)
+	r.SetTable("/r", map[string]models.SetTable{"a": {}, "b": {}})
+	f.spawn(7, 1, at(0), "/tmp/a.test")
+	r.Begin(7, "/r/a", "/r/a", true, at(1))
+	r.Begin(8, "/r/b", "/r/b", true, at(1))
+	if got := r.Live(); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("live = %v", got)
+	}
+	delete(f.born, 7)
+	if got := r.Live(); !slices.Equal(got, []string{"b"}) {
+		t.Fatalf("a runner that died without ending its suite still holds its set: %v", got)
+	}
+	f.spawn(7, 1, at(5), "/tmp/other")
+	if got := r.Live(); !slices.Equal(got, []string{"b"}) {
+		t.Fatalf("a new process with the dead runner's pid holds its set: %v", got)
+	}
+}

@@ -48,6 +48,7 @@ type worker struct {
 	dir    string
 	frames []*frame
 	suite  bool
+	born   time.Time
 }
 
 type procKey struct {
@@ -151,6 +152,9 @@ func (r *Registry) worker(pid uint32) *worker {
 	w, ok := r.workers[pid]
 	if !ok {
 		w = &worker{pid: pid}
+		if r.proc != nil {
+			w.born, _ = r.proc.Birth(pid)
+		}
 		r.workers[pid] = w
 	}
 	return w
@@ -496,6 +500,11 @@ func (r *Registry) Live() []string {
 	for _, w := range r.workers {
 		if !w.suite && len(w.frames) < 2 {
 			continue
+		}
+		if !w.born.IsZero() {
+			if b, ok := r.proc.Birth(w.pid); !ok || !b.Equal(w.born) {
+				continue
+			}
 		}
 		set := r.setOf(w.dir)
 		if _, ok := r.sets[set]; ok && !slices.Contains(out, set) {
