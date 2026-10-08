@@ -143,7 +143,7 @@ func TestMatch_StatefulCursorKeyIsTheRequest(t *testing.T) {
 	}
 	var got []string
 	for _, in := range []*req{putGet("/counter"), putGet("/counter"), withAuth(), withAuth()} {
-		ok, stub, _, err := h.match(ctx, in, db, nil, nil, nil, true, false, false, true)
+		ok, stub, _, err := h.match(ctx, in, db, nil, nil, nil, true, false, false, true, true)
 		if err != nil || !ok || stub == nil {
 			t.Fatalf("ok=%v stub=%v err=%v", ok, stub, err)
 		}

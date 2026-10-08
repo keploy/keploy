@@ -24,7 +24,6 @@ import (
 	"time"
 
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
-	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"golang.org/x/sync/errgroup"
@@ -238,11 +237,13 @@ type Proxy struct {
 	// replaced, by ResetRecordedDNSMocks.
 	nodataRelayLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
 
+	// The DNS servers, set by startDNSServers before anything serves or
+	// stops them.
+	tcpDNS, udpDNS *dnsServer
+
 	//to store the nsswitch.conf file data
 	nsSwitchMutex             sync.Mutex
 	nsswitchData              []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
-	UDPDNSServer              *dns.Server
-	TCPDNSServer              *dns.Server
 	GlobalPassthrough         bool
 	OpportunisticTLSIntercept bool
 	// DisableHandshakeHold mirrors config.Agent.DisableHandshakeHold: accept
@@ -270,6 +271,15 @@ type Proxy struct {
 	treeMu     sync.Mutex
 	tree       map[net.Conn]int
 	caJavaHome string
+
+	// selfCalls counts the self-calls passed through, and selfCallOwners the
+	// processes of the run that served them: the run's first is logged at
+	// INFO, the rest at Debug, and their total when the run ends
+	// (logSelfCalls, from SetGracefulShutdown). selfCallsLogged is the total
+	// last logged, so a repeated shutdown call does not say it again.
+	selfCalls       atomic.Int64
+	selfCallOwners  sync.Map // owner pid -> struct{}
+	selfCallsLogged atomic.Int64
 
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
@@ -460,7 +470,7 @@ const (
 	maxRecordBufferStallGrace = 10 * time.Second
 
 	// dnsBindTimeout is the BACKSTOP for StartProxy's DNS-listener readiness
-	// wait. A real bind error fails fast via dnsErrCh, so this only bounds the
+	// wait. A real bind error fails it at once (startDNSServers), so this only bounds the
 	// pathological case of a socket that neither reports listening nor errors.
 	// Generous enough never to false-fail a healthy start (a bind is a syscall,
 	// near-instant) yet short enough that a truly stuck start surfaces as an
@@ -1448,6 +1458,7 @@ func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	if p.asyncEngine != nil {
 		p.asyncEngine.LogReport(p.logger)
 	}
+	p.logSelfCalls()
 	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
 	// Flush any in-flight packet capture so the test-set's pcap is
 	// finalised before the agent is allowed to exit.
@@ -1779,105 +1790,14 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// legacy default response.
 	p.captureDNSUpstream()
 
-	// Closed (via NotifyStartedFunc) once each DNS socket is bound. StartProxy
-	// blocks on both below before returning, so the agent's readiness -- and the
-	// docker-compose `depends_on: service_healthy` app-release gated on it --
-	// cannot fire before DNS is listening. Without this the reconstructed
-	// replay app's eager boot-time resolve of a recorded name races an unbound
-	// DNS socket and dies with UnknownHostException, tearing down the whole
-	// stack (intermittent cloud-replay flake, saas/selfhosted pipeline 9847).
-	tcpDNSReady := make(chan struct{})
-	udpDNSReady := make(chan struct{})
-	// A DNS bind failure closes neither ready channel; the goroutines below also
-	// report it here so the wait fails FAST with the real error (e.g. "bind:
-	// address already in use") instead of stalling to the timeout. Buffered for
-	// both servers so the send never blocks a goroutine that is exiting.
-	dnsErrCh := make(chan error, 2)
-
-	// start the TCP DNS server
-	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
-	g.Go(func() error {
-		defer utils.Recover(p.logger)
-		errCh := make(chan error, 1)
-		go func(errCh chan error) {
-			defer utils.Recover(p.logger)
-			err := p.startTCPDNSServer(ctx, func() { close(tcpDNSReady) })
-			if err != nil {
-				errCh <- err
-				dnsErrCh <- err
-			}
-		}(errCh)
-
-		select {
-		case <-ctx.Done():
-			if p.TCPDNSServer != nil {
-				err := p.TCPDNSServer.Shutdown()
-				if err != nil {
-					utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
-					return err
-				}
-			}
-			return nil
-		case err := <-errCh:
-			return err
-		}
-	})
-
-	// start the UDP DNS server
-	p.logger.Debug("Starting Udp Dns Server for handling Dns queries over UDP")
-	g.Go(func() error {
-		defer utils.Recover(p.logger)
-		errCh := make(chan error, 1)
-		go func(errCh chan error) {
-			defer utils.Recover(p.logger)
-			err := p.startUDPDNSServer(ctx, func() { close(udpDNSReady) })
-			if err != nil {
-				errCh <- err
-				dnsErrCh <- err
-			}
-		}(errCh)
-
-		select {
-		case <-ctx.Done():
-			if p.UDPDNSServer != nil {
-				err := p.UDPDNSServer.Shutdown()
-				if err != nil {
-					utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
-					return err
-				}
-			}
-			return nil
-		case err := <-errCh:
-			return err
-		}
-	})
-
 	// Wait for the proxy server to be ready or fail
 	if err := <-readyChan; err != nil {
 		return err
 	}
 
-	// ...then wait for the DNS listeners to actually be bound before returning,
-	// so nothing gated on StartProxy (notably the agent readiness that releases
-	// the app container) can observe an unbound DNS socket. ListenAndServe binds
-	// then serves; the NotifyStartedFunc set in start{TCP,UDP}DNSServer closes
-	// these once bound. A bind FAILURE reports on dnsErrCh, so we fail fast with
-	// the real error; dnsBindTimeout is only a backstop for a socket that neither
-	// binds nor errors. One shared deadline caps the total wait for both servers.
-	dnsBindDeadline := time.After(dnsBindTimeout)
-	for _, d := range []struct {
-		name string
-		ch   <-chan struct{}
-	}{{"UDP", udpDNSReady}, {"TCP", tcpDNSReady}} {
-		select {
-		case <-d.ch:
-		case err := <-dnsErrCh:
-			return fmt.Errorf("DNS server failed to start: %w", err)
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-dnsBindDeadline:
-			return fmt.Errorf("%s DNS server did not report listening within %s", d.name, dnsBindTimeout)
-		}
+	// Serve DNS over TCP and UDP, and wait for both to be bound.
+	if err := p.startDNSServers(ctx, g); err != nil {
+		return err
 	}
 
 	if p.auxiliaryHook != nil {
@@ -3496,11 +3416,8 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	// WaitGroup + ctx cancellation combination already covers the
 	// "stuck parser eventually exits" case without double-close
 	// races on the real sockets.
-	if p.UDPDNSServer != nil || p.TCPDNSServer != nil {
-		if err := p.stopDNSServers(ctx); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))
-
-		}
+	if err := p.stopDNSServers(); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))
 	}
 
 	// Channel-binding shim teardown — detach uprobes, drop allowlist
@@ -4326,6 +4243,7 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 				// them as unmatched calls would misdirect the user, so they
 				// stay out of the report (they are already logged).
 				errs = append(errs, models.UnmatchedCall{
+					At:            parserErr.At,
 					Protocol:      "unknown",
 					ActualSummary: parserErr.Err.Error(),
 					NextSteps:     "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details.",
@@ -4351,6 +4269,7 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	proxyErr := models.ParserError{
 		ParserErrorType: models.ErrMockNotFound,
 		Err:             err,
+		At:              time.Now(),
 	}
 	// Extract diff report from the error chain if available.
 	// Use errors.As to traverse wrapped errors.
@@ -4360,6 +4279,15 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	var reporter mismatchReporter
 	if errors.As(err, &reporter) && reporter != nil {
 		proxyErr.MismatchReport = reporter.MismatchReport()
+	}
+	// Every miss says when it happened: `keploy mock` files it under the test
+	// it was made in by that time, and drops one without it. A parser that
+	// built its report without one gets the time the miss reached here (a
+	// copy: the report is the parser's).
+	if r := proxyErr.MismatchReport; r != nil && r.At.IsZero() {
+		stamped := *r
+		stamped.At = proxyErr.At
+		proxyErr.MismatchReport = &stamped
 	}
 	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing
 	// miss funnels through here, so this one line covers HTTP, generic, MySQL,
@@ -4512,6 +4440,34 @@ func (p *Proxy) trackTree(conn net.Conn, owner int) func() {
 	}
 }
 
+// logSelfCalls logs how many self-calls the run passed through, and how many
+// of its processes served them, when there was more than the one already
+// logged at INFO, and only when the count has moved since it last did:
+// SetGracefulShutdown, which calls it, may be called more than once.
+func (p *Proxy) logSelfCalls() {
+	n := p.selfCalls.Load()
+	if n < 2 {
+		return
+	}
+	for {
+		last := p.selfCallsLogged.Load()
+		if n <= last {
+			return
+		}
+		if p.selfCallsLogged.CompareAndSwap(last, n) {
+			break
+		}
+	}
+	processes := 0
+	p.selfCallOwners.Range(func(_, _ any) bool {
+		processes++
+		return true
+	})
+	p.logger.Info("self-calls passed through to the run's own listeners; the real handler answered them, not a mock",
+		zap.Int64("calls", n), zap.Int("processes", processes),
+		zap.String("reason", models.ReasonLoopbackOutsideRun))
+}
+
 func (p *Proxy) closeDependencyConns() {
 	p.treeMu.Lock()
 	defer p.treeMu.Unlock()
@@ -4570,11 +4526,23 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	defer p.trackTree(srcConn, owner)()
 	// A self-call: the destination is a listener owned by the run's own process
 	// tree, so it is passed through to the real handler instead of served from a
-	// mock. Surfaced so a verdict can show a self-call reached the real handler
-	// (and a broken one fails the run) rather than passing on a stale mock.
-	p.logger.Info("self-call passed through to the run's own listener; the real handler answers it, not a mock",
-		zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
-		zap.String("reason", models.ReasonLoopbackOutsideRun))
+	// mock, and a broken self-handler fails the run rather than passing on a
+	// stale mock. The run's first self-call is logged at INFO and the rest at
+	// Debug; logSelfCalls logs the total when the run ends. A runner that calls
+	// its own in-process server (supertest's request(app) starts one per
+	// request) makes a self-call per connection, so a line each at INFO would
+	// flood the log.
+	p.selfCallOwners.LoadOrStore(owner, struct{}{})
+	if p.selfCalls.Add(1) == 1 {
+		p.logger.Info("self-call passed through to the run's own listener; the real handler answers it, not a mock",
+			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+			zap.String("reason", models.ReasonLoopbackOutsideRun),
+			zap.String("note", "further self-calls are logged at debug, and counted at the end of a run that finishes"))
+	} else {
+		p.logger.Debug("self-call passed through to the run's own listener; the real handler answers it, not a mock",
+			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+			zap.String("reason", models.ReasonLoopbackOutsideRun))
+	}
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
 		return true, nil

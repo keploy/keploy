@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	"github.com/docker/compose/v2/pkg/api"
+	"github.com/docker/compose/v5/pkg/api"
 )
 
 // The CLI treats --exit-code-from as implying --abort-on-container-exit, and

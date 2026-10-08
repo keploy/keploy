@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
@@ -53,7 +54,7 @@ func mustStartRelay(t *testing.T, pp *pipePair, bump func()) *relay.Relay {
 	r := relay.New(relay.Config{
 		Logger:       log,
 		BumpActivity: bump,
-	}, pp.proxySrc, pp.proxyDst)
+	}, pp.proxySrc, connseq.NewUpstream(pp.proxyDst))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

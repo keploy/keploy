@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -1137,38 +1136,110 @@ func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise confi
 	return headerOnly
 }
 
-// ReplaceBaseURL replaces the baseUrl of the old URL with the new URL's.
-func ReplaceBaseURL(newURL, oldURL string) (string, error) {
-	parsedOldURL, err := url.Parse(oldURL)
+// parseBasePath reads test.basePath, which takes one of two shapes: an http or
+// https URL with a host, as in "http://staging:8080/api", which names where
+// the app is and may add a prefix to every path; or a path prefix alone, as in
+// "/api", for the app at its usual address. Every other shape is an error.
+//
+// A scheme with no host ("http:staging:8080", "http:/staging", "http://") and
+// a host with no scheme ("staging/api", "localhost:8080") name no address a
+// test can be sent to: taken for either shape, they would send the tests to
+// test.host, which is localhost unless set. A user, a query or a fragment has
+// nowhere to go, since each test sends its own.
+func parseBasePath(basePath string) (*url.URL, error) {
+	shown := withoutUserinfo(basePath)
+	parsed, err := url.Parse(basePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse the old URL: %v", err)
+		// url.Parse's own error quotes what it was given, user and all.
+		var parseErr *url.Error
+		if errors.As(err, &parseErr) {
+			err = parseErr.Err
+		}
+		return nil, fmt.Errorf("%q is not a URL: %w", shown, err)
 	}
+	switch {
+	case parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "":
+		return nil, fmt.Errorf("%q has a user, a query or a fragment, which a base path cannot carry: each test sends its own", shown)
+	case parsed.Scheme == "" && parsed.Host == "" && strings.HasPrefix(parsed.Path, "/"):
+		return parsed, nil
+	case parsed.Scheme != "http" && parsed.Scheme != "https":
+		return nil, fmt.Errorf("%q is neither an http or https URL nor a path prefix that starts with /", shown)
+	case parsed.Hostname() == "":
+		// An opaque URL ("http:staging:8080") has no host either.
+		return nil, fmt.Errorf("%q names no host: write it as scheme://host", shown)
+	}
+	return parsed, nil
+}
 
-	parsedNewURL, err := url.Parse(newURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse the new URL: %v", err)
+// withoutUserinfo is a base path as a log line or an error shows it: with any
+// user and password taken out, whether or not it parses as a URL. The part it
+// reads as the host is the one url.Parse would: from "://" up to the first
+// "/", "?" or "#".
+func withoutUserinfo(basePath string) string {
+	scheme, rest, ok := strings.Cut(basePath, "://")
+	if !ok {
+		return basePath
 	}
-	// if scheme is empty, then add the scheme from the old URL in order to parse it correctly
-	if parsedNewURL.Scheme == "" {
-		parsedNewURL.Scheme = parsedOldURL.Scheme
-		parsedNewURL, err = url.Parse(parsedNewURL.String())
-		if err != nil {
-			return "", fmt.Errorf("failed to parse the scheme added new URL: %v", err)
+	end := strings.IndexAny(rest, "/?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	at := strings.LastIndex(rest[:end], "@")
+	if at < 0 {
+		return basePath
+	}
+	return scheme + "://" + rest[at+1:]
+}
+
+// splitURLOrigin cuts a URL after its host: "http://localhost:8080/orders?id=1"
+// is the scheme "http" and, after the host, the rest "/orders?id=1". It reads
+// nothing after the host, and reports false for a URL that does not start
+// with a scheme and a host.
+func splitURLOrigin(rawURL string) (scheme, rest string, ok bool) {
+	scheme, after, found := strings.Cut(rawURL, "://")
+	if !found || scheme == "" {
+		return "", "", false
+	}
+	for i, c := range scheme {
+		letter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		if !letter && (i == 0 || !strings.ContainsRune("0123456789+-.", c)) {
+			return "", "", false
 		}
 	}
-
-	parsedOldURL.Scheme = parsedNewURL.Scheme
-	parsedOldURL.Host = parsedNewURL.Host
-	apiPath := path.Join(parsedNewURL.Path, parsedOldURL.Path)
-
-	parsedOldURL.Path = apiPath
-	parsedOldURL.RawPath = apiPath
-	replacedURL := parsedOldURL.String()
-	decodedURL, err := url.PathUnescape(replacedURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode the URL: %v", err)
+	end := strings.IndexAny(after, "/?#")
+	if end < 0 {
+		end = len(after)
 	}
-	return decodedURL, nil
+	return scheme, after[end:], true
+}
+
+// ReplaceBaseURL points a recorded request URL at a base path: the base path's
+// scheme and host replace the URL's, and its path goes in front of the URL's.
+// A base path that is only a path ("/api") keeps the URL's scheme and leaves
+// the host empty, for the caller's usual host (test.host) to fill.
+//
+// Nothing after the URL's host is read or changed. Its path, query and
+// fragment are the bytes the app was sent when the test was recorded. Decoded
+// and written back they would be another request: %20 would become a space,
+// %2F a path separator, %23 the start of a fragment and %26 a second
+// parameter, a trailing slash would go, and so would a {{template}} as
+// written.
+func ReplaceBaseURL(newURL, oldURL string) (string, error) {
+	scheme, rest, ok := splitURLOrigin(oldURL)
+	if !ok {
+		return "", fmt.Errorf("the test's URL %q does not start with a scheme and a host, so it has none to replace", oldURL)
+	}
+	base, err := parseBasePath(newURL)
+	if err != nil {
+		return "", err
+	}
+	if base.Scheme != "" {
+		scheme = base.Scheme
+	}
+	// The host as a URL writes it, escaped: an IPv6 zone's % is %25 there,
+	// and the URL has to parse again.
+	host := strings.TrimPrefix((&url.URL{Host: base.Host}).String(), "//")
+	return scheme + "://" + host + strings.TrimRight(base.EscapedPath(), "/") + rest, nil
 }
 
 func mergeMaps(map1, map2 map[string][]string) map[string][]string {
@@ -1493,6 +1564,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 		ActualMocks:   []string{},
 		FailureReason: models.ErrMockNotFound,
 		MismatchReport: &models.MockMismatchReport{
+			At:            call.At,
 			Protocol:      call.Protocol,
 			ActualSummary: call.ActualSummary,
 			Destination:   call.Destination,

@@ -55,9 +55,21 @@ jobs:
       #                       idempotent request is redialed and replayed or
       #                       turned into a 502 for the user's application.
       #   .../integrations/http  the recorded-upstream-error markers.
+      #   .../proxy/connseq   the proxy's end of its connection to a
+      #                       destination (Upstream), which numbers the chunks
+      #                       of both directions. Off Linux it asks the socket
+      #                       for no count (received_others.go).
+      #                       upstream_others_test.go checks that no socket is
+      #                       asked and builds only off Linux, so only this job
+      #                       and the macOS one can run it; upstream_test.go
+      #                       checks the numbering by what was read. Neither
+      #                       had run on Windows before this job.
       #
-      # Every one of these was cross-compiled and executed on a real Windows
-      # host before being listed. pkg/agent/proxy is deliberately NOT here:
+      # Every one of these but connseq was cross-compiled and executed on a
+      # real Windows host before being listed. No Windows host was at hand for
+      # connseq: it was listed after its windows/amd64 test binary ran under
+      # Wine 10.0, where every test passes and a socketCounterOf that returns a
+      # counter fails four of them. pkg/agent/proxy is deliberately NOT here:
       # two of its tests read a source file by relative path, so I could not
       # separate "fails on Windows" from "fails in my harness" and will not
       # add a package on a guess. Widen this list as packages are shown to
@@ -67,5 +79,5 @@ jobs:
       # &&: under `shell: cmd` a multi-line block is a batch file that does not
       # stop on failure and reports only the last exit code.
       - name: Test amd64
-        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/...
+        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/...
         shell: cmd
