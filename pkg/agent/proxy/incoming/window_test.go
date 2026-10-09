@@ -692,34 +692,53 @@ func TestHandleHttp1Connection_KeptExchangeRecordsAMockItMadeWhileSendingItsBody
 // calls; but past the first's response headers a call made within the next request's
 // claim is the next request's (see syncMock.Window.Yield), whichever of the
 // two is decided first. What the first does that no other request claims is
-// its own.
+// its own. In each shape the next request's capture waits for the first's to
+// be decided: the first is decided first, the case where it could take what
+// the next request claims.
 //
 //   - a body sent at once: a handler that makes its call and then writes a
 //     chunked JSON body in one go (Go chunks any handler output over 2 KiB
 //     without a Content-Length), to a slow client, a body larger than the
 //     read-ahead holds (lowered here, and the app's socket buffer with it), so
 //     the app waits on the client and its last byte comes at the client's
-//     pace. The next request, waiting on the lock, makes its call at once and
-//     answers 300 ms later, so the first is decided first. Were its window to
-//     take every call up to its last byte, it would take the next request's:
-//     mapped to the wrong test case, which mapping-based replay of the next
-//     request cannot find.
+//     pace. The next request, waiting on the lock, makes its call and answers
+//     at once (Linux's TCP can hold the rest of a body that large back for
+//     hundreds of milliseconds, so the first is not done first by then). Were
+//     the first's window to take every call up to its last byte, it would take
+//     the next request's: mapped to the wrong test case, which mapping-based
+//     replay of the next request cannot find.
 //   - a stream that calls out after: the stream calls out again once the next
 //     request has been answered, before its body ends; the next request's
 //     capture is decided only after the stream's, so its window is still open
-//     then, and must claim nothing after its last byte.
+//     then, and must claim nothing after its last byte. (Every other way a
+//     response can end: TestHandleHttp1Connection_SyncCallAfterAResponseEndsIsNotThatResponses.)
 //   - a body sent at once, then a stream: as the first, and the next request is
 //     a stream that calls out after its headers, once the app has sent all of
 //     the first's body (the ingress has read its close), while the first's
 //     client is still slow to take it. Both windows yielded at their headers;
 //     the first's ends when its last byte came from the app, not when its
-//     client took it, so the call is the stream's.
+//     client took it, so the call is the stream's. The ingress does not order
+//     that call after the first's end (the app does), so the stream calls out
+//     only once the clock reads past the instant the close was read: on a
+//     clock as coarse as Windows' it could otherwise read that very instant.
 //   - a request body sent in chunks: the lock is given back before the request
 //     reaches the app; the response has a known length and its body goes on
 //     after its headers, while the next request makes its call. The next
 //     request calls out only once the first's headers are read: before them
 //     the two windows overlap with neither yielded, and the first resolved
 //     takes what both span, as on main.
+//
+// Every shape runs on the system clock, and on clocks as coarse as Windows'
+// (stubQuantizedClock): time.Now there moves on only at the system timer's
+// tick, 0.5 to 15.6 ms, so two events within one tick read the same instant.
+// Each call checked is one the ingress orders after the instant a window
+// yielded or ended at: by the lock it gives back, by the headers it forwards
+// (which the call waits on), or by the end of the response it forwards (which
+// the client answers). The ingress waits for the clock to pass that instant
+// before each (waitPastYield, endWaitBody); it did not, and on Windows such a
+// call could read the very instant the window yielded or ended at, which that
+// window claims: it went to that window's test case. Without the waits every
+// shape fails on the clock of Windows' default tick.
 func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestClaims(t *testing.T) {
 	const (
 		atOnce       = "a body sent at once"
@@ -727,9 +746,26 @@ func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestCl
 		stream       = "a stream that calls out after"
 		chunkReq     = "a request body sent in chunks"
 	)
-	for _, shape := range []string{atOnce, atOnceStream, stream, chunkReq} {
-		t.Run(shape, func(t *testing.T) {
+	type run struct {
+		shape string
+		tick  time.Duration // of the clock it runs on; 0 for the system's
+	}
+	var runs []run
+	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
+		for _, shape := range []string{atOnce, atOnceStream, stream, chunkReq} {
+			runs = append(runs, run{shape: shape, tick: tick})
+		}
+	}
+	for _, r := range runs {
+		shape, name := r.shape, r.shape
+		if r.tick != 0 {
+			name += ", " + clockName(r.tick)
+		}
+		t.Run(name, func(t *testing.T) {
 			stubIngressPaused(t, func() bool { return false })
+			if r.tick != 0 {
+				stubQuantizedClock(t, r.tick)
+			}
 			if shape == atOnce { // past the read-ahead's bound: the app waits on the client
 				prev := aheadMax
 				aheadMax = 8 << 10
@@ -747,8 +783,8 @@ func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestCl
 			for i := 0; i < models.StartupMockTestCaseWindow; i++ {
 				mgr.ResolveRange(old, old, "", true, false)
 			}
-			call := func() *models.Mock {
-				m := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: time.Now()},
+			call := func() *models.Mock { // stamped as a parser stamps it: by the clock the ingress reads
+				m := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: clockNow()},
 					TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
 				mgr.AddMock(m)
 				return m
@@ -764,6 +800,7 @@ func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestCl
 			nextAnswered := make(chan struct{})
 			firstHeadersRead := make(chan struct{}) // by the first exchange's client
 			firstSent := make(chan struct{})        // the ingress has read the first's close
+			var firstClosedAt time.Time             // when, by its clock: set before firstSent is closed
 			nextHeadersRead := make(chan struct{})  // by the next request's client
 			// The first request reached the app: its handler took the lock
 			// before it sent it on, so the next request's waits on it.
@@ -772,7 +809,10 @@ func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestCl
 				var once sync.Once
 				seen := func(n int, err error) {
 					if errors.Is(err, io.EOF) { // only the first's app closes before the end
-						once.Do(func() { close(firstSent) })
+						once.Do(func() {
+							firstClosedAt = clockNow()
+							close(firstSent)
+						})
 					}
 				}
 				aheadReadSeen.Store(&seen)
@@ -820,7 +860,6 @@ func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestCl
 								if !wait(nextAnswered) {
 									return
 								}
-								time.Sleep(5 * time.Millisecond)
 								after = call()
 								time.Sleep(5 * time.Millisecond)
 								_, _ = c.Write([]byte("8\r\ndata: 2\n\r\n0\r\n\r\n"))
@@ -844,15 +883,15 @@ func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestCl
 								if !wait(firstSent) || !wait(nextHeadersRead) {
 									return
 								}
+								for !clockNow().After(firstClosedAt) {
+									time.Sleep(50 * time.Microsecond)
+								}
 								after = call()
 								close(nextMade)
 								_, _ = c.Write([]byte("8\r\ndata: 2\n\r\n0\r\n\r\n"))
 								return
 							}
 							close(nextMade)
-							if shape != stream {
-								time.Sleep(300 * time.Millisecond) // the first is decided first
-							}
 							_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
 						}
 					}(c)
@@ -863,8 +902,8 @@ func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestCl
 			stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
 				req *http.Request, resp *http.Response, reqTS, respTS time.Time,
 				opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
-				if req.URL.Path == "/next" && (shape == stream || shape == atOnceStream) {
-					wait(firstDecided)
+				if req.URL.Path == "/next" && !wait(firstDecided) {
+					t.Error("fixture: the first exchange was not decided before the next one")
 				}
 				hooksUtils.Capture(ctx, logger, tc, req, resp, reqTS, respTS, opts, sync, mapping, appPort)
 				if req.URL.Path == "/first" {
@@ -890,6 +929,7 @@ func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestCl
 			if shape == chunkReq {
 				firstReq = "POST /first HTTP/1.1\r\nHost: app.local\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
 			}
+			awaitTickStart(r.tick)
 			if _, err := c1.Write([]byte(firstReq)); err != nil {
 				t.Fatal(err)
 			}
@@ -1004,6 +1044,380 @@ type gatedWriteConn struct {
 func (c gatedWriteConn) Write(p []byte) (int, error) {
 	<-c.gate
 	return c.Conn.Write(p)
+}
+
+// windowsTick is Windows' default timer tick: how often its time.Now moves on
+// unless a process asks for a finer one.
+const windowsTick = 15625 * time.Microsecond
+
+// stubQuantizedClock has the ingress, and the mocks a test stamps with
+// clockNow, read a clock of tick's resolution until the test ends: real time
+// cut down to the tick, as Windows' time.Now is (it moves on only at the
+// system timer's tick, 0.5 to 15.6 ms), so two events within one tick read the
+// same instant. The ingress's waits are real sleeps on it.
+func stubQuantizedClock(t *testing.T, tick time.Duration) {
+	t.Helper()
+	prev := stubbedClock.Swap(&ingressClock{
+		now:   func() time.Time { return time.Now().Truncate(tick) },
+		sleep: time.Sleep,
+	})
+	t.Cleanup(func() { stubbedClock.Store(prev) })
+}
+
+// awaitTickStart returns at the start of the clock's next tick: what a run
+// does in its first few milliseconds then falls in one tick, as it does on a
+// coarse clock unless the ingress waits for the clock. A run that straddled a
+// tick would pass without the waits it checks. At once for the system clock
+// (tick 0).
+func awaitTickStart(tick time.Duration) {
+	if tick > 0 {
+		time.Sleep(time.Until(time.Now().Truncate(tick).Add(tick)))
+	}
+}
+
+// clockName names a run by the clock it runs on (stubQuantizedClock's tick; 0
+// for the system clock).
+func clockName(tick time.Duration) string {
+	if tick == 0 {
+		return "on the system clock"
+	}
+	return "on a clock of " + tick.String() + " ticks"
+}
+
+// A request that keeps the lock to its response's last byte (one of known
+// length) gives it back as its handler returns, and the next request, waiting
+// on it, is read and makes its calls from then on. Its window ends at that last
+// byte, the end included, and it is decided first: a call stamped with that
+// very instant is its. So the client sees the end, and the lock is given back,
+// only once the clock reads past it (endWaitBody, waitPastYield). On a clock
+// as coarse as Windows' (stubQuantizedClock) the next request's call otherwise
+// read the instant the first exchange ended at, and went to the first's test
+// case: on Windows, any call the next request made in the tick the one before
+// it ended in, once the first's capture (which parses the exchange) was decided
+// after that call. Here it is: the first's capture waits for the next
+// request's call, and the next request's for the first's to be decided.
+func TestHandleHttp1Connection_SyncLockIsGivenBackOnlyOnceTheClockIsPastTheExchange(t *testing.T) {
+	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
+		t.Run(clockName(tick), func(t *testing.T) {
+			stubIngressPaused(t, func() bool { return false })
+			if tick != 0 {
+				stubQuantizedClock(t, tick)
+			}
+			mgr := syncMock.New(zap.NewNop())
+			out := make(chan *models.Mock, 16)
+			mgr.SetOutputChannel(out)
+			maps := make(chan models.TestMockMapping, 16)
+			mctx, mcancel := context.WithCancel(context.Background())
+			defer mcancel()
+			mgr.SetMappingChannel(mctx, maps)
+			mgr.SetFirstRequestSignaled()
+			old := time.Now().Add(-time.Minute)
+			for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+				mgr.ResolveRange(old, old, "", true, false)
+			}
+
+			up, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = up.Close() })
+			made := map[string]chan *models.Mock{"/first": make(chan *models.Mock, 1), "/next": make(chan *models.Mock, 1)}
+			firstArrived := make(chan struct{})
+			nextMade := make(chan struct{})
+			wait := func(c chan struct{}) bool {
+				select {
+				case <-c:
+					return true
+				case <-time.After(5 * time.Second):
+					return false
+				}
+			}
+			go func() {
+				for {
+					c, aerr := up.Accept()
+					if aerr != nil {
+						return
+					}
+					go func(c net.Conn) {
+						defer c.Close()
+						req, rerr := http.ReadRequest(bufio.NewReader(c))
+						if rerr != nil {
+							return
+						}
+						if req.URL.Path == "/first" {
+							close(firstArrived)
+						}
+						// A call out, stamped as a parser stamps it, then the answer.
+						m := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: clockNow()},
+							TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+						mgr.AddMock(m)
+						made[req.URL.Path] <- m
+						if req.URL.Path == "/next" {
+							close(nextMade)
+						}
+						_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+					}(c)
+				}
+			}()
+
+			firstDecided := make(chan struct{})
+			stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+				req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+				opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+				if req.URL.Path == "/first" {
+					if !wait(nextMade) {
+						t.Error("fixture: the next request never called out")
+					}
+					defer close(firstDecided)
+				} else if !wait(firstDecided) {
+					t.Error("fixture: the first exchange was not decided before the next one")
+				}
+				hooksUtils.Capture(ctx, logger, tc, req, resp, reqTS, respTS, opts, sync, mapping, appPort)
+			})
+			pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: true, mapping: true, samplingSem: make(chan struct{}, 1)}
+			ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+			defer cancel()
+			lock := make(chan struct{}, 1)
+			c1, done1 := ingressPipeOn(t, ctx, pm, up.Addr().String(), lock, nil)
+			awaitTickStart(tick)
+			if _, err := c1.Write([]byte("GET /first HTTP/1.1\r\nHost: app.local\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-firstArrived: // its handler holds the lock: it took it before it dialled the app
+			case <-time.After(5 * time.Second):
+				t.Fatal("fixture: the first request never reached the app")
+			}
+			c2, done2 := ingressPipeOn(t, ctx, pm, up.Addr().String(), lock, nil) // waits on the lock
+			if _, err := c2.Write([]byte("GET /next HTTP/1.1\r\nHost: app.local\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range []net.Conn{c1, c2} {
+				_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
+				resp, rerr := http.ReadResponse(bufio.NewReader(c), nil)
+				if rerr != nil {
+					t.Fatal(rerr)
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+			<-done1
+			<-done2
+			names := map[string]string{} // path -> test case name
+			for i := 0; i < 2; i++ {
+				select {
+				case tc := <-pm.tcChan:
+					names[strings.TrimPrefix(tc.HTTPReq.URL, "http://app.local")] = tc.Name
+				case <-time.After(5 * time.Second):
+					t.Fatal("an exchange was not recorded")
+				}
+			}
+			waitOpenWindows(t, mgr, 0, "after both were decided")
+
+			owner := map[string]string{}
+			for len(maps) > 0 {
+				e := <-maps
+				for _, id := range e.MockIDs {
+					owner[id] = e.TestName
+				}
+			}
+			for _, path := range []string{"/first", "/next"} {
+				m := <-made[path]
+				if got := owner[m.Name]; got != names[path] {
+					t.Errorf("the call %s made went to %q, want its test case %q", path, got, names[path])
+				}
+			}
+		})
+	}
+}
+
+// A stream that gave the lock back at its headers calls out once the client of
+// the request that ran beside it has seen that request's response end, as in
+// "a stream that calls out after" (whose next response is read whole with its
+// headers: TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOther-
+// RequestClaims), here for every other
+// way a response can end: with no body (204, an answer to HEAD), and with its
+// last bytes, its last chunk or its close a tick after its headers. The call
+// is the stream's, whichever of the two is decided first: the next request's
+// window ends at that end, and its client sees the end only once the clock
+// reads past it (endWaitBody, and the wait before a response with no body is
+// written). On a clock as coarse as Windows' the call otherwise read the very
+// instant the next request's window ended at, and went to its test case. A
+// late end comes at the start of a tick after the headers', so the wait at the
+// headers does not separate it: only a wait for the last byte does.
+func TestHandleHttp1Connection_SyncCallAfterAResponseEndsIsNotThatResponses(t *testing.T) {
+	ends := []struct {
+		name   string
+		method string
+		resp   string // the app's answer to the next request
+		later  string // the rest of it, written at the start of a later tick
+	}{
+		{"no content", http.MethodGet, "HTTP/1.1 204 No Content\r\n\r\n", ""},
+		{"an answer to HEAD", http.MethodHead, "HTTP/1.1 200 OK\r\nContent-Length: 1234\r\n\r\n", ""},
+		{"a known length ending a tick after its headers", http.MethodGet, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nok", "ok"},
+		{"chunks ending a tick after their headers", http.MethodGet, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n", "0\r\n\r\n"},
+		{"a close a tick after its headers", http.MethodGet, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok", "ok"},
+	}
+	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
+		for _, nextFirst := range []bool{false, true} {
+			for _, end := range ends {
+				order := "the stream decided first"
+				if nextFirst {
+					order = "the next request decided first"
+				}
+				t.Run(end.name+", "+order+", "+clockName(tick), func(t *testing.T) {
+					stubIngressPaused(t, func() bool { return false })
+					if tick != 0 {
+						stubQuantizedClock(t, tick)
+					}
+					mgr := syncMock.New(zap.NewNop())
+					out := make(chan *models.Mock, 16)
+					mgr.SetOutputChannel(out)
+					maps := make(chan models.TestMockMapping, 16)
+					mctx, mcancel := context.WithCancel(context.Background())
+					defer mcancel()
+					mgr.SetMappingChannel(mctx, maps)
+					mgr.SetFirstRequestSignaled()
+					old := time.Now().Add(-time.Minute)
+					for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+						mgr.ResolveRange(old, old, "", true, false)
+					}
+					made := map[string]chan *models.Mock{"/first": make(chan *models.Mock, 2), "/next": make(chan *models.Mock, 1)}
+					call := func(path string) { // stamped as a parser stamps it: by the clock the ingress reads
+						m := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: clockNow()},
+							TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+						mgr.AddMock(m)
+						made[path] <- m
+					}
+					wait := func(c chan struct{}) bool {
+						select {
+						case <-c:
+							return true
+						case <-time.After(5 * time.Second):
+							return false
+						}
+					}
+
+					up, err := net.Listen("tcp4", "127.0.0.1:0")
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = up.Close() })
+					firstArrived := make(chan struct{})
+					nextAnswered := make(chan struct{}) // its client has read all of it
+					go func() {
+						for {
+							c, aerr := up.Accept()
+							if aerr != nil {
+								return
+							}
+							go func(c net.Conn) {
+								defer c.Close()
+								req, rerr := http.ReadRequest(bufio.NewReader(c))
+								if rerr != nil {
+									return
+								}
+								call(req.URL.Path)
+								if req.URL.Path == "/first" {
+									close(firstArrived)
+									_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n8\r\ndata: 1\n\r\n"))
+									if !wait(nextAnswered) {
+										return
+									}
+									call("/first") // after the next response's end
+									_, _ = c.Write([]byte("8\r\ndata: 2\n\r\n0\r\n\r\n"))
+									return
+								}
+								_, _ = c.Write([]byte(end.resp))
+								if end.later != "" {
+									time.Sleep(time.Millisecond) // its headers are read
+									awaitTickStart(tick)
+									_, _ = c.Write([]byte(end.later))
+								}
+							}(c)
+						}
+					}()
+
+					firstDecided, nextDecided := make(chan struct{}), make(chan struct{})
+					stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+						req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+						opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+						decided, other := firstDecided, nextDecided
+						if req.URL.Path == "/next" {
+							decided, other = nextDecided, firstDecided
+						}
+						if nextFirst == (req.URL.Path == "/first") && !wait(other) {
+							t.Error("fixture: the exchanges were not decided in the order wanted")
+						}
+						hooksUtils.Capture(ctx, logger, tc, req, resp, reqTS, respTS, opts, sync, mapping, appPort)
+						close(decided)
+					})
+					pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: true, mapping: true, samplingSem: make(chan struct{}, 1)}
+					ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+					defer cancel()
+					lock := make(chan struct{}, 1)
+					c1, done1 := ingressPipeOn(t, ctx, pm, up.Addr().String(), lock, nil)
+					awaitTickStart(tick)
+					if _, err := c1.Write([]byte("GET /first HTTP/1.1\r\nHost: app.local\r\n\r\n")); err != nil {
+						t.Fatal(err)
+					}
+					if !wait(firstArrived) {
+						t.Fatal("fixture: the first request never reached the app")
+					}
+					c2, done2 := ingressPipeOn(t, ctx, pm, up.Addr().String(), lock, nil) // takes the lock given back at the stream's headers
+					if _, err := c2.Write([]byte(end.method + " /next HTTP/1.1\r\nHost: app.local\r\n\r\n")); err != nil {
+						t.Fatal(err)
+					}
+					for _, cl := range []struct {
+						conn   net.Conn
+						method string
+						read   chan struct{} // closed once it is read
+					}{{c2, end.method, nextAnswered}, {c1, http.MethodGet, nil}} {
+						_ = cl.conn.SetReadDeadline(time.Now().Add(8 * time.Second))
+						resp, rerr := http.ReadResponse(bufio.NewReader(cl.conn), &http.Request{Method: cl.method})
+						if rerr != nil {
+							t.Fatal(rerr)
+						}
+						_, _ = io.Copy(io.Discard, resp.Body)
+						resp.Body.Close()
+						if cl.read != nil {
+							close(cl.read)
+						}
+					}
+					<-done1
+					<-done2
+					names := map[string]string{} // path -> test case name
+					for i := 0; i < 2; i++ {
+						select {
+						case tc := <-pm.tcChan:
+							names[strings.TrimPrefix(tc.HTTPReq.URL, "http://app.local")] = tc.Name
+						case <-time.After(5 * time.Second):
+							t.Fatal("an exchange was not recorded")
+						}
+					}
+					waitOpenWindows(t, mgr, 0, "after both were decided")
+
+					owner := map[string]string{}
+					for len(maps) > 0 {
+						e := <-maps
+						for _, id := range e.MockIDs {
+							owner[id] = e.TestName
+						}
+					}
+					for _, c := range []struct{ what, path string }{
+						{"the stream's call before its headers", "/first"},
+						{"the next request's call", "/next"},
+						{"the stream's call after the next response's end", "/first"},
+					} {
+						m := <-made[c.path]
+						if got := owner[m.Name]; got != names[c.path] {
+							t.Errorf("%s went to %q, want %s's test case %q", c.what, got, c.path, names[c.path])
+						}
+					}
+				})
+			}
+		}
+	}
 }
 
 // The synchronous loop gives its lock back at the headers of a response of
