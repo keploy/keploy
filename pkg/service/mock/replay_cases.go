@@ -1,9 +1,11 @@
 package mock
 
 import (
+	"bytes"
 	"context"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -50,6 +52,7 @@ type replayDetail struct {
 	expected map[string][]models.MockEntry
 	recorded map[string][]*models.TestCase
 	actual   []*models.TestCase
+	failed   []string
 }
 
 // actualCapture keeps the app's incoming requests during a replay, in memory only.
@@ -332,4 +335,157 @@ func (m *mockService) withRunIDs(tc *models.TestCase) *models.TestCase {
 		}
 	}
 	return &out
+}
+
+// reportMisses prints each call no mock matched once, with the test it was
+// made in ("(outside any test)" when none) and how many times, and what the
+// matcher said about the first one: how far matching got, the closest mock,
+// and the protocol's own next step. In a `keploy mock` run the agent logs
+// misses at Debug, so this is where they show.
+func (m *mockService) reportMisses(misses []models.UnmatchedCall, byFlow []FlowMocks) {
+	m.reportMissesAs(misses, byFlow, "(outside any test)")
+}
+
+// reportMissesAs is reportMisses with the label for a miss no test's window
+// holds.
+func (m *mockService) reportMissesAs(misses []models.UnmatchedCall, byFlow []FlowMocks, unplaced string) {
+	type key struct{ test, protocol, call, dest string }
+	var order []key
+	n := map[key]int{}
+	first := map[key]models.UnmatchedCall{}
+	add := func(test string, miss models.UnmatchedCall) {
+		k := key{test, miss.Protocol, miss.ActualSummary, miss.Destination}
+		if n[k] == 0 {
+			order = append(order, k)
+			first[k] = miss
+		}
+		n[k]++
+	}
+	type call struct{ protocol, summary, dest string }
+	placed := map[call]int{}
+	for _, f := range byFlow {
+		for _, miss := range f.Missed {
+			add(f.Flow, miss)
+			placed[call{miss.Protocol, miss.ActualSummary, miss.Destination}]++
+		}
+	}
+	for _, miss := range misses {
+		k := call{miss.Protocol, miss.ActualSummary, miss.Destination}
+		if placed[k] > 0 {
+			placed[k]--
+			continue
+		}
+		add("", miss)
+	}
+	for _, k := range order {
+		test := k.test
+		if test == "" {
+			test = unplaced
+		}
+		fields := []zap.Field{zap.String("test", test), zap.String("protocol", k.protocol), zap.String("call", k.call), zap.String("destination", k.dest)}
+		if n[k] > 1 {
+			fields = append(fields, zap.Int("times", n[k]))
+		}
+		miss := first[k]
+		if miss.MatchPhase != "" {
+			fields = append(fields, zap.String("match_phase", miss.MatchPhase))
+		}
+		if miss.CandidateCount > 0 {
+			fields = append(fields, zap.Int("candidates", miss.CandidateCount))
+		}
+		if miss.ClosestMock != "" {
+			fields = append(fields, zap.String("closest", miss.ClosestMock))
+		}
+		if miss.DestinationScope != "" && miss.DestinationScope != models.DestinationScopeUnknown {
+			fields = append(fields, zap.String("destination_scope", miss.DestinationScope))
+		}
+		next := miss.NextSteps
+		if next == "" {
+			next = "record this call with --on-miss record, or re-record the set"
+		}
+		m.logger.Warn("no recorded mock matched a call", append(fields, zap.String("next_step", next))...)
+	}
+}
+
+// ranTests lists the top-level tests the replay reached, once each, in the
+// order they first appeared. A test run more than once (-count, a retry) is
+// listed once, with its latest run's verdict. A test the replay gated out
+// (--run-only) is listed with the verdict models.ScopeOutcomeGated: it did not
+// run, and a consumer must tell it apart from a test that did. Tests of the
+// same name in different folders stay apart.
+func ranTests(windows []models.ScopeWindow) []RanTest {
+	root := gitTop()
+	type key struct{ dir, name string }
+	var out []RanTest
+	at := map[key]int{}
+	ends := map[key]time.Time{}
+	for _, w := range windows {
+		if w.App || w.Suite || w.Name == "" || parentOf(windows, w.Name) != "" {
+			continue
+		}
+		k := key{w.Dir, w.Name}
+		t := RanTest{Name: w.Name, Set: setName(w.Dir, root), Status: w.Outcome}
+		i, seen := at[k]
+		if !seen {
+			at[k], ends[k] = len(out), w.End
+			out = append(out, t)
+			continue
+		}
+		if !w.End.Before(ends[k]) {
+			out[i], ends[k] = t, w.End
+		}
+	}
+	return out
+}
+
+type failScan struct {
+	mu     sync.Mutex
+	rest   []byte
+	failed []string
+	// overlong is set while the line being read passed maxFailScanLine.
+	overlong bool
+}
+
+// maxFailScanLine bounds the partial line failScan keeps between writes.
+const maxFailScanLine = 64 << 10
+
+func (f *failScan) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rest = append(f.rest, p...)
+	defer func() {
+		// A `--- FAIL:` line is short; a runner writing a long line with no
+		// newline must not grow this buffer without bound. Drop the partial
+		// line and the rest of it, so no text inside it is read as a line.
+		if len(f.rest) > maxFailScanLine {
+			f.rest, f.overlong = nil, true
+		}
+	}()
+	for {
+		i := bytes.IndexByte(f.rest, '\n')
+		if i < 0 {
+			break
+		}
+		line := string(f.rest[:i])
+		f.rest = f.rest[i+1:]
+		if f.overlong {
+			f.overlong = false
+			continue
+		}
+		if !strings.HasPrefix(line, "--- FAIL: ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 || strings.Contains(fields[2], "/") || slices.Contains(f.failed, fields[2]) {
+			continue
+		}
+		f.failed = append(f.failed, fields[2])
+	}
+	return len(p), nil
+}
+
+func (f *failScan) list() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.failed...)
 }
