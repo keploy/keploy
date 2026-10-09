@@ -61,6 +61,9 @@ func TestDepTypeForKind(t *testing.T) {
 		{kind: GENERIC, want: "generic"},
 		{kind: Aerospike, want: "aerospike"},
 		{kind: RevokedTests, want: "keploy-revoked-tests"},
+		// Never a row today: ExcludedFromDependencyAssertion keeps it out of
+		// the assertion. Listed so the table stays complete.
+		{kind: ConnectionFailure, want: "connectionfailure"},
 		// Degenerate input must not produce a half-formed row name.
 		{kind: Kind(""), want: ""},
 		{kind: Kind("  Http  "), want: "http"},
@@ -140,6 +143,8 @@ func TestDepTypeForKind_CoversEveryKind(t *testing.T) {
 		"DNS":          "dns",
 		"Aerospike":    "aerospike",
 		"RevokedTests": "keploy-revoked-tests",
+		// Excluded from the assertion, so never a row; covered for completeness.
+		"ConnectionFailure": "connectionfailure",
 	}
 
 	declared := kindConstantsInMockGo(t)

@@ -113,6 +113,22 @@ func DepTypeForKind(kind Kind) string {
 	return strings.ToLower(strings.TrimSpace(string(kind)))
 }
 
+// ExcludedFromDependencyAssertion reports whether mocks of kind stay out of the
+// per-test comparison of the mocks a test was recorded with against the mocks
+// it consumed at replay (the OBSOLETE demotion, --assert-dependencies, the
+// DepResult rows and the mismatch reports). It must be applied to BOTH sides
+// of that comparison: excluding a kind from one side only makes every test
+// that maps one of its mocks look like it lost a dependency.
+//
+//   - DNS: resolution order is non-deterministic.
+//   - ConnectionFailure: no keploy of this version consumes one at replay, so
+//     an expected connection failure would always look missing and demote the
+//     test to OBSOLETE. Leaving it out keeps a recording that has one behaving
+//     exactly as if it had none.
+func ExcludedFromDependencyAssertion(kind Kind) bool {
+	return kind == DNS || kind == ConnectionFailure
+}
+
 // DepRowName builds the stable DepResult.Name for a presence-checked
 // dependency. index is the dependency's position in the test's RECORDED
 // (filtered) dependency list — never its position among the emitted rows,

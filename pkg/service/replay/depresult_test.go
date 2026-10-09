@@ -687,6 +687,11 @@ func TestBuildDepResults_MissingRowsAgreeWithMockSubset(t *testing.T) {
 			expected: []models.MockEntry{{Name: "m1", Kind: "Http"}, {Name: "dns", Kind: "DNS"}},
 			consumed: []models.MockState{consumed("m1", models.HTTP)},
 		},
+		{
+			name:     "an unconsumed connection failure never counts as missing",
+			expected: []models.MockEntry{{Name: "m1", Kind: "Http"}, {Name: "cf", Kind: "ConnectionFailure"}},
+			consumed: []models.MockState{consumed("m1", models.HTTP)},
+		},
 	}
 
 	for _, tt := range tests {
@@ -694,14 +699,14 @@ func TestBuildDepResults_MissingRowsAgreeWithMockSubset(t *testing.T) {
 			// Reproduce the call site's filtered name slices verbatim.
 			var filteredExpected []string
 			for _, m := range tt.expected {
-				if isDNSMockEntry(m, nil) || tt.reusable[m.Name] {
+				if isUnassertedMockEntry(m, nil) || tt.reusable[m.Name] {
 					continue
 				}
 				filteredExpected = append(filteredExpected, m.Name)
 			}
 			var filteredConsumed []string
 			for _, m := range tt.consumed {
-				if m.Kind == models.DNS || isReusableTierState(m) {
+				if consumedOutsideAssertion(m) {
 					continue
 				}
 				filteredConsumed = append(filteredConsumed, m.Name)

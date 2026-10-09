@@ -293,13 +293,14 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	// collecting names/kinds/metadata is a significant overhead if
 	// the emitted log will be dropped by the logger anyway.
 	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
-	total, kept, prunedCount := 0, 0, 0
+	total, kept, prunedCount, copied := 0, 0, 0, 0
 	var prunedMocks []prunedMockInfo
 	if debugEnabled {
 		prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
 	}
+	fileLogger := ys.Logger.With(zap.String("mock_file", reader.Path()))
 	for {
-		mocks, readErr, decodeErr := nextMocks(reader, ys.Logger)
+		doc, readErr, decodeErr := nextDoc(reader, fileLogger, true)
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
@@ -310,7 +311,19 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		if decodeErr != nil {
 			return fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
 		}
-		for _, mock := range mocks {
+		if doc.verbatim {
+			// A document this keploy cannot decode is not one it can judge,
+			// and a connection failure is not one it changes: copied through
+			// as it is (see fileDoc.verbatim).
+			if err := rw.copyDoc(doc); err != nil {
+				return err
+			}
+			if !doc.incomplete {
+				copied++
+			}
+			continue
+		}
+		for _, mock := range doc.mocks {
 			total++
 			if pruneKeeps(mock, mockNames, pruneBefore, startupCutoffTime) {
 				if err := rw.write(mock); err != nil {
@@ -342,6 +355,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		zap.Int("total", total),
 		zap.Int("kept", kept),
 		zap.Int("pruned", prunedCount),
+		zap.Int("copiedVerbatim", copied),
 		zap.Any("prunedMocks", prunedMocks),
 		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
 		zap.Time("pruneBefore", pruneBefore))
@@ -558,16 +572,18 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 		return nil
 	}
 
-	// eachMock streams the file's mocks to fn, closing the file before it
-	// returns.
-	eachMock := func(fn func(*models.Mock) error) error {
+	// eachMock streams the file's mocks to fn, and the documents a rewrite
+	// does not re-encode (see fileDoc.verbatim) to onRaw when that is set,
+	// closing the file before it returns.
+	eachMock := func(fn func(*models.Mock) error, onRaw func(doc fileDoc) error) error {
 		reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
 		if err != nil {
 			return err
 		}
 		defer reader.Close()
+		fileLogger := ys.Logger.With(zap.String("mock_file", reader.Path()))
 		for {
-			mocks, readErr, decodeErr := nextMocks(reader, ys.Logger)
+			doc, readErr, decodeErr := nextDoc(reader, fileLogger, true)
 			if errors.Is(readErr, io.EOF) {
 				return nil
 			}
@@ -577,7 +593,15 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 			if decodeErr != nil {
 				return fmt.Errorf("failed to decode the mocks in %s for noise persistence: %w", reader.Path(), decodeErr)
 			}
-			for _, mock := range mocks {
+			if doc.verbatim {
+				if onRaw != nil {
+					if err := onRaw(doc); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			for _, mock := range doc.mocks {
 				if err := fn(mock); err != nil {
 					return err
 				}
@@ -592,7 +616,7 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 			return errStopScan
 		}
 		return nil
-	})
+	}, nil)
 	if err != nil && !errors.Is(err, errStopScan) {
 		return err
 	}
@@ -607,7 +631,7 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 		total++
 		merge(mock)
 		return rw.write(mock)
-	}); err != nil {
+	}, rw.copyDoc); err != nil {
 		return err
 	}
 	if err := rw.commit(); err != nil {
@@ -628,6 +652,22 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// over yaml). When selected it is mutually exclusive with yaml/json,
 	// so it gets to short-circuit before the format-detection block.
 	if ys.useGobFormat() {
+		// gob writes the struct as it is, with no per-kind encoder to refuse
+		// a connection failure the readers would skip (see
+		// connFailureSchemaOf), so refuse it here.
+		//
+		// The keploy that records the kind must never write it to gob at
+		// all: a gob reader up to v3.6.107 has no kind check and reads it as
+		// a mock with no metadata.destAddr, which sets recorded.unknown and
+		// turns loopback refusal off for the whole test set; and gob cannot
+		// refuse a field it does not know, so every keploy's gob prune would
+		// drop what a later format adds (see the ConnectionFailure kind).
+		if mock.Kind == models.ConnectionFailure {
+			if err := mock.ValidateConnFailure(); err != nil {
+				utils.LogError(ys.Logger, err, "refusing to write an invalid connection failure mock", zap.String("mock_name", mock.Name))
+				return fmt.Errorf("%w (gob): %w", models.ErrMockEncode, err)
+			}
+		}
 		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
 	}
 
@@ -1127,12 +1167,19 @@ func (ys *MockYaml) Close() error {
 // readGobMocks decodes every mock in a mocks.gob file (see forEachGobMock).
 // On a decode error it returns the mocks decoded before it with the error.
 func readGobMocks(path string) ([]*models.Mock, error) {
+	out, _, err := readGobMocksCut(path)
+	return out, err
+}
+
+// readGobMocksCut is readGobMocks that also says whether the file ended
+// part-way through a mock (see forEachGobMockCut).
+func readGobMocksCut(path string) ([]*models.Mock, bool, error) {
 	var out []*models.Mock
-	err := forEachGobMock(path, func(m *models.Mock) error {
+	cut, err := forEachGobMockCut(path, func(m *models.Mock) error {
 		out = append(out, m)
 		return nil
 	})
-	return out, err
+	return out, cut, err
 }
 
 // GetFilteredMocks returns the test set's per-test pool: every mock whose
@@ -1364,13 +1411,30 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	// short-circuit and return before the auto-detect reader runs.
 	gobPath := filepath.Join(path, mockFileName+".gob")
 	if _, err := os.Stat(gobPath); err == nil {
-		mocks, err := readGobMocks(gobPath)
+		mocks, cut, err := readGobMocksCut(gobPath)
 		if err != nil {
 			return models.TestSetMocks{}, err
 		}
+		logger := ys.Logger.With(zap.String("mock_file", gobPath))
+		if cut {
+			logger.Warn("the mock file ends part-way through its last mock, probably because a write was interrupted (the recorder stopped, or the disk filled), and that mock was not read",
+				zap.String("next_step", "re-record the test set"))
+		}
+		connFailures := 0
 		for _, mock := range mocks {
+			if mock.Kind == models.ConnectionFailure {
+				// gob has no per-kind decoder: a connection failure is
+				// validated here, as DecodeMocks and DecodeMocksJSON validate
+				// theirs.
+				if !connFailureSupported(mock, logger, false) {
+					addSkipped(&out, mock.Name, mock.Kind)
+					continue
+				}
+				connFailures++
+			}
 			r.route(mock, true)
 		}
+		warnConnFailuresNotReplayed(logger, testSetID, connFailures)
 		if want&poolPerTest != 0 {
 			out.Filtered = pkg.FilterTcsMocks(ctx, ys.Logger, r.perTest, afterTime, beforeTime, false)
 		}
@@ -1413,43 +1477,39 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	// existing recordings.
 	readerIsJSON := reader.Format() == yaml.FormatJSON
 
+	// The decoders' skip ERRORs name the mock, and mock names repeat in every
+	// test set, so they say which file.
+	logger := ys.Logger.With(zap.String("mock_file", reader.Path()))
 	hasContent := false
+	connFailures := 0
 	for {
-		var mocks []*models.Mock
-		if readerIsJSON {
-			jsonDoc, err := reader.ReadNextDocJSON()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return models.TestSetMocks{}, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
-			}
-			hasContent = true
-			mocks, err = DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{jsonDoc}, ys.Logger)
-			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from json doc", zap.String("session", filepath.Base(path)))
-				return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), err)
-			}
-		} else {
-			doc, err := reader.ReadNextDoc()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return models.TestSetMocks{}, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
-			}
-			hasContent = true
-			mocks, err = DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
-			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
-				return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), err)
-			}
+		doc, readErr, decodeErr := nextDoc(reader, logger, false)
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
-
-		for _, mock := range mocks {
+		if readErr != nil {
+			return models.TestSetMocks{}, fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
+		}
+		hasContent = true
+		if decodeErr != nil {
+			msg := "failed to decode the config mocks from doc"
+			if readerIsJSON {
+				msg = "failed to decode the config mocks from json doc"
+			}
+			utils.LogError(ys.Logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
+			return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
+		}
+		if len(doc.mocks) == 0 {
+			addSkipped(&out, doc.name, doc.kind)
+		}
+		for _, mock := range doc.mocks {
+			if mock.Kind == models.ConnectionFailure {
+				connFailures++
+			}
 			r.route(mock, false)
 		}
 	}
+	warnConnFailuresNotReplayed(logger, testSetID, connFailures)
 
 	if want&poolPerTest != 0 {
 		if !hasContent {
@@ -1493,6 +1553,18 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	r.sessionPools(ctx, ys.Logger, afterTime, beforeTime, &out)
 	out.AllPerTest = r.allPerTest
 	return out, nil
+}
+
+// addSkipped lists a document the decoders skipped in out.Skipped (see
+// models.TestSetMocks).
+func addSkipped(out *models.TestSetMocks, name string, kind models.Kind) {
+	if name == "" {
+		return
+	}
+	if out.Skipped == nil {
+		out.Skipped = map[string]models.Kind{}
+	}
+	out.Skipped[name] = kind
 }
 
 func (ys *MockYaml) getNextID() int64 {
