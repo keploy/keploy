@@ -337,14 +337,21 @@ func (m *mockService) withRunIDs(tc *models.TestCase) *models.TestCase {
 	return &out
 }
 
+// reportMisses prints each call no mock matched once, with the test it was
+// made in ("(outside any test)" when none) and how many times, and what the
+// matcher said about the first one: how far matching got, the closest mock,
+// and the protocol's own next step. In a `keploy mock` run the agent logs
+// misses at Debug, so this is where they show.
 func (m *mockService) reportMisses(misses []models.UnmatchedCall, byFlow []FlowMocks) {
 	type key struct{ test, protocol, call, dest string }
 	var order []key
 	n := map[key]int{}
+	first := map[key]models.UnmatchedCall{}
 	add := func(test string, miss models.UnmatchedCall) {
 		k := key{test, miss.Protocol, miss.ActualSummary, miss.Destination}
 		if n[k] == 0 {
 			order = append(order, k)
+			first[k] = miss
 		}
 		n[k]++
 	}
@@ -373,14 +380,33 @@ func (m *mockService) reportMisses(misses []models.UnmatchedCall, byFlow []FlowM
 		if n[k] > 1 {
 			fields = append(fields, zap.Int("times", n[k]))
 		}
-		m.logger.Warn("no recorded mock matched a call", append(fields, zap.String("next_step", "record this call with --on-miss record, or re-record the set"))...)
+		miss := first[k]
+		if miss.MatchPhase != "" {
+			fields = append(fields, zap.String("match_phase", miss.MatchPhase))
+		}
+		if miss.CandidateCount > 0 {
+			fields = append(fields, zap.Int("candidates", miss.CandidateCount))
+		}
+		if miss.ClosestMock != "" {
+			fields = append(fields, zap.String("closest", miss.ClosestMock))
+		}
+		if miss.DestinationScope != "" && miss.DestinationScope != models.DestinationScopeUnknown {
+			fields = append(fields, zap.String("destination_scope", miss.DestinationScope))
+		}
+		next := miss.NextSteps
+		if next == "" {
+			next = "record this call with --on-miss record, or re-record the set"
+		}
+		m.logger.Warn("no recorded mock matched a call", append(fields, zap.String("next_step", next))...)
 	}
 }
 
-// ranTests lists the top-level tests the replay ran, once each, in the order
-// they first ran. A test run more than once (-count, a retry) is listed once,
-// with its latest run's verdict; a test the replay gated out did not run and
-// is left out. Tests of the same name in different folders stay apart.
+// ranTests lists the top-level tests the replay reached, once each, in the
+// order they first appeared. A test run more than once (-count, a retry) is
+// listed once, with its latest run's verdict. A test the replay gated out
+// (--run-only) is listed with the verdict models.ScopeOutcomeGated: it did not
+// run, and a consumer must tell it apart from a test that did. Tests of the
+// same name in different folders stay apart.
 func ranTests(windows []models.ScopeWindow) []RanTest {
 	root := gitTop()
 	type key struct{ dir, name string }
@@ -388,7 +414,7 @@ func ranTests(windows []models.ScopeWindow) []RanTest {
 	at := map[key]int{}
 	ends := map[key]time.Time{}
 	for _, w := range windows {
-		if w.App || w.Suite || w.Name == "" || w.Outcome == models.ScopeOutcomeGated || parentOf(windows, w.Name) != "" {
+		if w.App || w.Suite || w.Name == "" || parentOf(windows, w.Name) != "" {
 			continue
 		}
 		k := key{w.Dir, w.Name}
@@ -410,6 +436,8 @@ type failScan struct {
 	mu     sync.Mutex
 	rest   []byte
 	failed []string
+	// overlong is set while the line being read passed maxFailScanLine.
+	overlong bool
 }
 
 // maxFailScanLine bounds the partial line failScan keeps between writes.
@@ -421,9 +449,10 @@ func (f *failScan) Write(p []byte) (int, error) {
 	f.rest = append(f.rest, p...)
 	defer func() {
 		// A `--- FAIL:` line is short; a runner writing a long line with no
-		// newline must not grow this buffer without bound.
+		// newline must not grow this buffer without bound. Drop the partial
+		// line and the rest of it, so no text inside it is read as a line.
 		if len(f.rest) > maxFailScanLine {
-			f.rest = f.rest[len(f.rest)-maxFailScanLine:]
+			f.rest, f.overlong = f.rest[:0], true
 		}
 	}()
 	for {
@@ -433,6 +462,10 @@ func (f *failScan) Write(p []byte) (int, error) {
 		}
 		line := string(f.rest[:i])
 		f.rest = f.rest[i+1:]
+		if f.overlong {
+			f.overlong = false
+			continue
+		}
 		if !strings.HasPrefix(line, "--- FAIL: ") {
 			continue
 		}

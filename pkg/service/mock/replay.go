@@ -273,15 +273,19 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//    the sender is the goroutine running exactly that Run.
 	var appErr models.AppError
 	scan := &failScan{}
-	utils.RunnerOut = scan
 	if composeAppExit != nil {
+		// The compose runner was started at step 2, on another goroutine:
+		// its output is not scanned (ReplayOutcome.Failed stays empty).
 		appErr = <-composeAppExit
 	} else {
+		// Set before Run starts the runner on this goroutine, cleared after.
+		utils.RunnerOut = scan
 		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		utils.RunnerOut = nil
 	}
-	utils.RunnerOut = nil
 
 	if parent.Err() != nil { // user Ctrl+C / a signal interrupted the replay
+		m.reportInterruptedMisses(ctx, composeAppExit != nil)
 		// A replay stopped by a signal before it finished did not verify the
 		// suite, so it must not exit 0 (a pass). Exit 128+N for the signal that
 		// stopped it (SIGINT→130, SIGHUP→129, SIGTERM→143); a non-signal cancel
@@ -1241,4 +1245,32 @@ func (m *mockService) announceServed(served map[string]models.MockState) {
 			// would otherwise read it as "when this happened".
 			zap.String("recordedReqTimestamp", state.ReqTimestampMock))
 	}
+}
+
+// interruptedReadTimeout bounds the reads an interrupted replay makes to name
+// its misses before it exits.
+const interruptedReadTimeout = 3 * time.Second
+
+// reportInterruptedMisses names the misses of a replay a signal stopped. The
+// agent logs them at Debug in a `keploy mock` run, so without this a replay
+// interrupted because a test hung on a missing mock would show none. Best
+// effort: the reads are bounded, and when they fail it says where to look.
+func (m *mockService) reportInterruptedMisses(ctx context.Context, fromCompose bool) {
+	const hint = "run the replay again with --debug to see each miss as it happens"
+	if fromCompose {
+		m.logger.Info("the replay was interrupted before its misses were read; " + hint)
+		return
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), interruptedReadTimeout)
+	defer cancel()
+	misses, err := m.instrumentation.GetMockErrors(rctx)
+	if err != nil {
+		m.logger.Info("the replay was interrupted and its misses could not be read; "+hint, zap.Error(err))
+		return
+	}
+	if len(misses) == 0 {
+		return
+	}
+	windows, _ := m.agentWindows(rctx)
+	m.reportMisses(misses, attributeMocks(testWindows(windows), nil, nil, misses))
 }

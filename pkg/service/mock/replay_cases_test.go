@@ -2,8 +2,7 @@ package mock
 
 import (
 	"context"
-	"go.uber.org/zap/zapcore"
-	"go.uber.org/zap/zaptest/observer"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +12,8 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestRequestKeyBlanksIdsInThePath(t *testing.T) {
@@ -431,10 +432,10 @@ func TestPushScopeGateToAnAgentThatCannot(t *testing.T) {
 	require.Equal(t, 1, logs.FilterMessageSnippet("every test runs this replay").Len())
 }
 
-// A replay lists each test it ran once, with its latest run's verdict; a test
-// the replay gated out did not run; same-named tests in two folders are two
-// tests.
-func TestRanTestsListsEachTestOnceAndLeavesGatedOut(t *testing.T) {
+// A replay lists each test once, with its latest run's verdict; a test the
+// replay gated out is listed as gated, so a consumer can tell it did not run;
+// same-named tests in two folders are two tests.
+func TestRanTestsListsEachTestOnceWithItsVerdict(t *testing.T) {
 	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
 	windows := []models.ScopeWindow{
 		{Name: "TestA", Dir: "e2e/orders", Start: at(0), End: at(100), Outcome: models.ScopeOutcomeFailed},
@@ -445,6 +446,80 @@ func TestRanTestsListsEachTestOnceAndLeavesGatedOut(t *testing.T) {
 	}
 	require.Equal(t, []RanTest{
 		{Name: "TestA", Set: "e2e/orders", Status: models.ScopeOutcomePassed},
+		{Name: "TestB", Set: "", Status: models.ScopeOutcomeGated},
 		{Name: "TestA", Set: "e2e/billing", Status: models.ScopeOutcomeSkipped},
 	}, ranTests(windows))
+}
+
+// A miss line carries what the matcher said about the call (how far matching
+// got, the closest mock) and the protocol's own next step over the generic one.
+func TestReportMissesCarriesTheMatchersDiagnosis(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	m := &mockService{logger: zap.New(core)}
+	miss := models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: "find on users", Destination: "127.0.0.1:27017", At: runnerT0.Add(time.Hour),
+		MatchPhase: "exhausted", CandidateCount: 3, ClosestMock: "mock-7", NextSteps: "re-record with keploy mock record"}
+	m.reportMisses([]models.UnmatchedCall{miss}, nil)
+	require.Equal(t, 1, logs.Len())
+	f := logs.All()[0].ContextMap()
+	require.Equal(t, "exhausted", f["match_phase"])
+	require.EqualValues(t, 3, f["candidates"])
+	require.Equal(t, "mock-7", f["closest"])
+	require.Equal(t, "re-record with keploy mock record", f["next_step"])
+}
+
+// missReader is the agent an interrupted replay asks for its misses.
+type missReader struct {
+	Instrumentation
+	misses  []models.UnmatchedCall
+	windows []models.ScopeWindow
+	err     error
+}
+
+func (r *missReader) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return r.misses, r.err
+}
+
+func (r *missReader) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return r.windows, nil
+}
+
+// A replay a signal stopped still names its misses, under their tests, even
+// though its context is already cancelled; when they cannot be read, it says
+// how to see them.
+func TestAnInterruptedReplayNamesItsMisses(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	at := runnerT0.Add(5 * time.Millisecond)
+	agent := &missReader{
+		misses:  []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /price", Destination: "127.0.0.1:9000", At: at}},
+		windows: []models.ScopeWindow{{Name: "TestA", Start: runnerT0, End: runnerT0.Add(time.Second)}},
+	}
+	m := &mockService{logger: zap.New(core), instrumentation: agent}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m.reportInterruptedMisses(ctx, false)
+	require.Equal(t, 1, logs.FilterMessage("no recorded mock matched a call").Len())
+	require.Equal(t, "TestA", logs.FilterMessage("no recorded mock matched a call").All()[0].ContextMap()["test"])
+
+	core, logs = observer.New(zap.InfoLevel)
+	m = &mockService{logger: zap.New(core), instrumentation: &missReader{err: context.DeadlineExceeded}}
+	m.reportInterruptedMisses(ctx, false)
+	require.Equal(t, 1, logs.FilterMessageSnippet("--debug").Len())
+}
+
+// A line longer than the scanner keeps is dropped whole: text inside it that
+// looks like a FAIL line is not one.
+func TestFailScanDropsAnOverlongLine(t *testing.T) {
+	f := &failScan{}
+	// One write longer than the cap whose last maxFailScanLine bytes begin
+	// with a FAIL-shaped text: keeping that tail would read it as a line.
+	inside := "--- FAIL: TestInside (0.00s) "
+	_, _ = f.Write([]byte(strings.Repeat("x", 10) + inside + strings.Repeat("y", maxFailScanLine-len(inside))))
+	_, _ = f.Write([]byte(" still the same long line\n--- FAIL: TestReal (0.00s)\n"))
+	require.Equal(t, []string{"TestReal"}, f.list())
 }

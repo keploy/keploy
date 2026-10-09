@@ -103,23 +103,78 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 	}
 	// Set the output of the command to stdout/stderr
 	cmd.Stdout = os.Stdout
-	if RunnerOut != nil {
-		cmd.Stdout = io.MultiWriter(os.Stdout, RunnerOut)
-	}
 	cmd.Stderr = os.Stderr
+	copied := teeRunnerOut(cmd)
 
 	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
 	err = cmd.Start()
+	copied.started()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}
 
 	err = cmd.Wait()
+	copied.drain()
 	if err != nil {
 		return CmdError{Type: Runtime, Err: err}
 	}
 
 	return CmdError{}
+}
+
+// runnerOutDrain bounds how long a finished runner waits for the rest of its
+// output to reach RunnerOut: a process the runner left running can hold the
+// pipe open for as long as it lives.
+const runnerOutDrain = 500 * time.Millisecond
+
+// runnerTee copies a runner's stdout to os.Stdout and RunnerOut.
+type runnerTee struct {
+	w    *os.File
+	done chan struct{}
+}
+
+// teeRunnerOut, when RunnerOut is set, gives cmd a pipe for stdout and copies
+// it to os.Stdout and RunnerOut. The pipe is an *os.File, so cmd.Wait waits
+// for the runner alone: given any other io.Writer, os/exec would also wait
+// for every process that inherited the runner's stdout to close it, up to
+// WaitDelay, and then fail a runner that exited 0.
+func teeRunnerOut(cmd *exec.Cmd) *runnerTee {
+	if RunnerOut == nil {
+		return nil
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		cmd.Stdout = io.MultiWriter(os.Stdout, RunnerOut)
+		return nil
+	}
+	cmd.Stdout = w
+	t := &runnerTee{w: w, done: make(chan struct{})}
+	out := RunnerOut
+	go func() {
+		defer close(t.done)
+		_, _ = io.Copy(io.MultiWriter(os.Stdout, out), r)
+		_ = r.Close()
+	}()
+	return t
+}
+
+// started closes the parent's copy of the pipe's write end, once the runner
+// holds its own, so the copy ends when the runner and its children do.
+func (t *runnerTee) started() {
+	if t != nil {
+		_ = t.w.Close()
+	}
+}
+
+// drain waits, briefly, for the output the runner wrote before it exited.
+func (t *runnerTee) drain() {
+	if t == nil {
+		return
+	}
+	select {
+	case <-t.done:
+	case <-time.After(runnerOutDrain):
+	}
 }
 
 // executeWithPTY runs the command inside a dedicated PTY (Pseudo-Terminal).
