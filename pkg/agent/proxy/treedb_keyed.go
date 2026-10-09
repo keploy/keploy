@@ -157,6 +157,35 @@ func (ki *keyIndex) follow(db *TreeDb, ix *integrations.MockIndex, curKey, newKe
 	return true
 }
 
+// swapInPlace replaces cur's entry under key with n, in every list that files
+// it, when n files under exactly cur's keys — the key does not change, so each
+// entry keeps its place in tree order. It reports false when n's keys differ,
+// or when a list that should file cur does not (the index no longer describes
+// the tree); the caller drops the index then, and the next lookup rebuilds it.
+// db.mu must be held for writing.
+func (ki *keyIndex) swapInPlace(db *TreeDb, ix *integrations.MockIndex, key models.TestModeInfo, cur, n *models.Mock) bool {
+	ks := distinctKeys(ix, n)
+	old := distinctKeys(ix, cur)
+	if len(ks) != len(old) {
+		return false
+	}
+	for _, k := range ks {
+		if !slices.Contains(old, k) {
+			return false
+		}
+	}
+	cmp := db.rbt.Comparator
+	for _, k := range ks {
+		l := ki.lists[k]
+		i := sort.Search(len(l), func(j int) bool { return cmp(l[j].key, key) >= 0 })
+		if i >= len(l) || l[i].mk != cur || cmp(l[i].key, key) != 0 {
+			return false
+		}
+		l[i].mk = n
+	}
+	return true
+}
+
 // rangeKeyed calls fn with the mocks the tree holds that ix files under key, in
 // tree order, until fn returns false.
 //

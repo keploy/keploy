@@ -65,6 +65,12 @@ type IngressProxyManager struct {
 	sampling    bool
 	samplingSem chan struct{}
 
+	// captures counts the capture goroutines the HTTP/1 handlers started
+	// that have not returned yet. Done is each one's last step, so Wait says
+	// every capture they started is over (tests wait on it before they
+	// swap a hook or a semaphore those goroutines read).
+	captures sync.WaitGroup
+
 	ingressHook IngressHook
 
 	// relocated maps an app port whose bind the record hooks moved (keploy's
@@ -536,6 +542,14 @@ func newReplayConn(initial []byte, c net.Conn) net.Conn {
 
 func (r *replayConn) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
+}
+
+// CloseWrite half-closes the connection underneath: net.Conn, embedded as an
+// interface, does not promote it. The HTTP/1 ingress ends what it sends with
+// it before it closes a connection whose client may still be sending
+// (lingerClose).
+func (r *replayConn) CloseWrite() error {
+	return util.CloseWriteIfPossible(r.Conn)
 }
 
 func (pm *IngressProxyManager) ServeLive(ctx context.Context, conn net.Conn, upstream string, port uint16) {

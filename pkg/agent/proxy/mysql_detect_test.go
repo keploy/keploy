@@ -1124,7 +1124,7 @@ func TestProbeHandsTheApplicationsOwnUpstreamBack(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			addr, conns := predialProbeServer(t, tc.serve)
 			p := testProxy(t)
-			upstream, err := net.Dial("tcp", addr)
+			upstream, err := util.DialUpstream(context.Background(), nil, "tcp", addr)
 			if err != nil {
 				t.Fatal(err)
 			}

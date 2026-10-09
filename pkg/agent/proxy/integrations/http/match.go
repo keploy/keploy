@@ -73,7 +73,7 @@ type matchDiag struct {
 // test.globalNoise body bucket (root-relative dotted paths, lowercased) so
 // manual noise config participates in mock matching with the same vocabulary
 // as response assertions.
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 
 	// Shared schema-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
@@ -176,7 +176,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			bestMatch, commitCursor := h.cursorPick(bestMatch, schemaMatched, mockDb, statefulMocks)
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
-			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil)
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil, nil)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -187,6 +187,24 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			// failed claim + retry does not skip a recorded response.
 			if commitCursor != nil {
 				commitCursor()
+			}
+			return true, served, nil, nil
+		}
+
+		// App-random → dependency-echo correlation: a mock whose request carries
+		// an app-minted random value the dependency reflects back won't byte-match
+		// (the live value differs). Select it by matching every non-correlated
+		// field, capture the live value, and render it into the served response —
+		// run BEFORE the lenient key-schema / fuzzy passes so a correlated mock is
+		// not served stale or rejected by strict noise.
+		if okC, bestC, bindings := h.correlationMatch(input.body, schemaMatched, mockCorrelation); okC {
+			h.Logger.Debug("correlation match found", zap.String("mock name", bestC.Name))
+			served, claimed, err := h.claim(ctx, bestC, mockDb, nil, bindings)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if !claimed {
+				continue
 			}
 			return true, served, nil, nil
 		}
@@ -223,7 +241,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			if len(bodyMatched) == 1 {
 				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
 				detected, _ := noiseEngine.Detect(bodyMatched[0], input.body, userBodyNoise)
-				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, detected)
+				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, detected, nil)
 				if err != nil {
 					return false, nil, nil, err
 				}
@@ -243,7 +261,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if isMatched {
 			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
 			detected, _ := noiseEngine.Detect(bestMatch, input.body, userBodyNoise)
-			served, claimed, err := h.claim(ctx, bestMatch, mockDb, detected)
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, detected, nil)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -254,18 +272,6 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed, pool: unfilteredMocks}, nil
 	}
-}
-
-// mockCursor is the optional capability a mock store exposes to serve stateful
-// dependencies. MockCursorIndex returns the record-ordered position to serve for
-// a request key given n recorded responses WITHOUT advancing; AdvanceMockCursor
-// advances the per-key cursor (saturating at n-1) and is called only once the
-// response is actually served, so a failed/retried match does not skip a
-// recording. MockManager implements it; stores that don't are served the first
-// recording as before.
-type mockCursor interface {
-	MockCursorIndex(key string, n int) int
-	AdvanceMockCursor(key string, servedIdx, n int)
 }
 
 // cursorPick advances a stateful dependency through its recorded responses. When
@@ -294,7 +300,7 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 	if bestMatch.Spec.HTTPReq == nil {
 		return bestMatch, nil
 	}
-	cs, ok := mockDb.(mockCursor)
+	cs, ok := mockDb.(integrations.MockCursor)
 	if !ok {
 		return bestMatch, nil
 	}
@@ -1363,7 +1369,7 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 // leaves the mock unconsumed rather than reported as served. It returns the
 // mock to serve, m or a copy of it with the response loaded, and claimed=false
 // when another connection took m first.
-func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) (served *models.Mock, claimed bool, err error) {
+func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, bindings map[string]string) (served *models.Mock, claimed bool, err error) {
 	served, err = withResponse(m)
 	if err != nil {
 		return nil, false, err
@@ -1371,6 +1377,9 @@ func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.Mo
 	if !h.updateMock(ctx, m, mockDb, detectedNoise) {
 		return nil, false, nil
 	}
+	// Honor request→response correlations: render the live values captured from
+	// this request into the served response (on a copy; never the pooled mock).
+	served = renderCorrelations(served, bindings)
 	return served, true, nil
 }
 

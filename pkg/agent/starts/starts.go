@@ -39,6 +39,7 @@ type frame struct {
 	place  string
 	opened time.Time
 	counts map[string]int
+	seq    uint64 // order of the Begin that opened it, unique per registry
 }
 
 type worker struct {
@@ -69,6 +70,7 @@ type Registry struct {
 	universe map[string]struct{}
 	marked   bool
 	onMark   []func()
+	begins   uint64 // Begin calls so far; numbers test frames
 }
 
 func New(p Proc, slack time.Duration) *Registry {
@@ -109,7 +111,8 @@ func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time)
 	if len(w.frames) == 0 {
 		w.frames = []*frame{{place: "", opened: at, counts: map[string]int{}}}
 	}
-	w.frames = append(w.frames, &frame{place: name, opened: at, counts: map[string]int{}})
+	r.begins++
+	w.frames = append(w.frames, &frame{place: name, opened: at, counts: map[string]int{}, seq: r.begins})
 }
 
 func (r *Registry) End(pid uint32, name string, suite bool, at time.Time) {
@@ -321,6 +324,31 @@ func (r *Registry) chain(pid uint32) ([]uint32, *worker) {
 	return path, nil
 }
 
+// Scope names the scope a call from pid runs in, resolved as View resolves
+// the test whose mocks it sees: the test frame currentFrame picks (a re-run of
+// the same test is a new frame, so a new scope), or, with no test open to it,
+// the registered worker it descends from. "" when pid belongs to no worker.
+//
+// It follows View's attribution exactly, so a call's stateful cursors are
+// those of the test whose recordings it is served — including currentFrame's
+// fallback, under which a worker between its own tests is attributed to the
+// one test open elsewhere. It does not tell app starts within one test apart.
+func (r *Registry) Scope(pid uint32) string {
+	if pid == 0 {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, w := r.chain(pid)
+	if w == nil {
+		return ""
+	}
+	if f := r.currentFrame(w); f != nil {
+		return fmt.Sprintf("t%d", f.seq)
+	}
+	return fmt.Sprintf("w%d", w.pid)
+}
+
 func (r *Registry) rootStart(pid uint32) *Start {
 	path, w := r.chain(pid)
 	if w == nil {
@@ -489,21 +517,31 @@ func (r *Registry) bind(s *Start) {
 }
 
 func (r *Registry) currentTest(w *worker) string {
-	if w != nil && len(w.frames) > 1 {
-		return w.frames[len(w.frames)-1].place
+	if f := r.currentFrame(w); f != nil {
+		return f.place
 	}
-	open := ""
+	return ""
+}
+
+// currentFrame is the test frame a call from w's process tree runs in: w's own
+// open test, or — for a worker with none (an app started once for the suite)
+// — the one test open on any worker, when exactly one is. nil otherwise.
+func (r *Registry) currentFrame(w *worker) *frame {
+	if w != nil && len(w.frames) > 1 {
+		return w.frames[len(w.frames)-1]
+	}
+	var open *frame
 	count := 0
 	for _, o := range r.workers {
 		if len(o.frames) > 1 {
-			open = o.frames[len(o.frames)-1].place
+			open = o.frames[len(o.frames)-1]
 			count++
 		}
 	}
 	if count == 1 {
 		return open
 	}
-	return ""
+	return nil
 }
 
 func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]struct{}, bool) {

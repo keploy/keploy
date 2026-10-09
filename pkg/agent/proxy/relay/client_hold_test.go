@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"io"
 	"net"
@@ -117,7 +118,7 @@ func newTCPHarness(t *testing.T, cfg Config) *tcpHarness {
 	clientApp, srcProxy := pair()
 	dstProxy, destSvc := pair()
 
-	r := New(cfg, srcProxy, dstProxy)
+	r := New(cfg, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &tcpHarness{clientApp: clientApp, destSvc: destSvc, r: r, cancel: cancel, done: make(chan struct{})}
 	go func() {
@@ -999,5 +1000,67 @@ func TestClientWriteHold_ReleaseDeliversTheDestStash(t *testing.T) {
 	}
 	if !bytes.Equal(got, stranded) {
 		t.Fatalf("client received % x, want % x", got, stranded)
+	}
+}
+
+// readChunkWithin reads the next chunk of fc, failing the test after 3s.
+func readChunkWithin(t *testing.T, fc *fakeconn.FakeConn) fakeconn.Chunk {
+	t.Helper()
+	_ = fc.SetReadDeadline(time.Now().Add(3 * time.Second))
+	defer func() { _ = fc.SetReadDeadline(time.Time{}) }()
+	c, err := fc.ReadChunk()
+	if err != nil {
+		t.Fatalf("no chunk on the parser's stream: %v", err)
+	}
+	return c
+}
+
+// A chunk a hold keeps from the destination is numbered like every other
+// client chunk, after the greeting the destination sent before it. The
+// parser asks NextRequest for held chunks: under MySQL's plaintext hold a
+// client sends its first command right after its HandshakeResponse, without
+// waiting for the server's OK, and an unnumbered chunk is refused
+// (fakeconn.ErrUnnumbered), which would end the connection's recording.
+func TestClientWriteHold_HeldChunkIsNumberedAfterTheGreeting(t *testing.T) {
+	t.Parallel()
+	h := newTCPHarness(t, Config{HoldClientWrites: true})
+	h.greetAndAwait(t)
+	greeting := readChunkWithin(t, h.r.DestStream())
+	if _, err := h.clientApp.Write([]byte("handshake response, then a command")); err != nil {
+		t.Fatal(err)
+	}
+	held := readChunkWithin(t, h.r.ClientStream())
+	if held.ConnSeq == 0 || !greeting.CapturedBefore(held.ConnSeq) {
+		t.Fatalf("the greeting is numbered %d, the held chunk %d: want a number, after the greeting",
+			greeting.ConnSeq, held.ConnSeq)
+	}
+}
+
+// A chunk the pre-dispatch pause stashes for the parser to look at is
+// numbered like every other client chunk, before the answer the destination
+// sends once it is let through.
+func TestPreDispatchPause_StashedClientChunkIsNumbered(t *testing.T) {
+	t.Parallel()
+	h := newTCPHarness(t, Config{PreDispatchPause: true})
+	if _, err := h.clientApp.Write([]byte("first-chunk")); err != nil {
+		t.Fatal(err)
+	}
+	stashed := readChunkWithin(t, h.r.ClientStream())
+	h.r.Directives() <- directive.ResumePreDispatch("parser-decided-no-tls")
+	if ack := awaitTCPAck(t, h); !ack.OK {
+		t.Fatalf("resume failed: %+v", ack)
+	}
+	buf := make([]byte, len("first-chunk"))
+	_ = h.destSvc.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.ReadFull(h.destSvc, buf); err != nil {
+		t.Fatalf("the destination never got the stashed chunk: %v", err)
+	}
+	if _, err := h.destSvc.Write([]byte("answer")); err != nil {
+		t.Fatal(err)
+	}
+	answer := readChunkWithin(t, h.r.DestStream())
+	if stashed.ConnSeq == 0 || !stashed.CapturedBefore(answer.ConnSeq) {
+		t.Fatalf("the stashed chunk is numbered %d, the answer %d: want a number, before the answer",
+			stashed.ConnSeq, answer.ConnSeq)
 	}
 }

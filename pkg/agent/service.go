@@ -44,6 +44,27 @@ type AuxiliaryProxyHook interface {
 	AfterStart(ctx context.Context, proxy Proxy) error
 }
 
+// TeardownableProxyHook is an optional extension of AuxiliaryProxyHook. When
+// the registered hook implements it, the proxy calls BeforeTeardown
+// synchronously during shutdown — after the listeners/handlers have stopped
+// and BEFORE the OS trust store is touched (TeardownNativeCA, which may fork
+// update-ca-certificates). It runs inside the proxy's awaited start()
+// goroutine, so it completes before the process exits.
+//
+// A hook that attaches uprobes in AfterStart MUST remove them here: an unjoined
+// teardown that races process exit (or the update-ca-certificates fork) can be
+// caught with a fatal signal pending, which makes the kernel's breakpoint
+// removal return -EINTR and leak the uprobe (and the int3) into every process
+// mapping the probed file. Running the teardown here removes that race.
+//
+// ctx is the proxy context and is already cancelled when this is called
+// (shutdown is what triggers it), so an implementation that needs to make a
+// context-bound call during teardown should derive a fresh one with
+// context.WithoutCancel.
+type TeardownableProxyHook interface {
+	BeforeTeardown(ctx context.Context) error
+}
+
 // Proxy listens on all available interfaces and forwards traffic to the destination.
 //
 // Proxy is the stable contract; window-aware methods live on the optional
@@ -79,9 +100,10 @@ type Proxy interface {
 	// Per-PID (worker-keyed) mock scoping for parallel test runners (Design A).
 	// SetWorkerScope registers the per-test mock-name allowlist for a worker
 	// PID; ClearWorkerScope drops it (on scope end / no mapping);
-	// ClearAllWorkerScopes wipes every entry at session teardown. An outgoing
-	// call is attributed to a worker by walking its origin PID up the /proc
-	// tree to the nearest registered ancestor.
+	// ClearAllWorkerScopes wipes every entry when a replay session starts. A
+	// connection is attributed to a worker by walking its opener's PID up the
+	// /proc tree, once, when it opens; what it sees then follows the nearest
+	// registered worker on that chain, read by read.
 	SetWorkerScope(pid uint32, names []string)
 	ClearWorkerScope(pid uint32)
 	ClearAllWorkerScopes()

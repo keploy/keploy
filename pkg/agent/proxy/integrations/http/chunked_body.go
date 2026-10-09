@@ -7,6 +7,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 )
 
 // errMalformedChunkedBody is returned when a chunked message body does not
@@ -187,14 +189,13 @@ func parseChunkSize(line []byte) (int, error) {
 // 103 Early Hints or an unsolicited 100 Continue can precede the final response
 // in the same read, and has no body). It returns that section (start line and
 // header fields), the offset of the body after it, the response status (0 for
-// a request), and ok=false while that section has not fully arrived. Empty
-// lines before a request line are skipped, as requestMethod skips them (RFC
-// 9112 §2.2): an old client sends a CRLF after a POST body, and two of them in
-// front of the next request are no empty header section.
+// a request), and ok=false while that section has not fully arrived. The
+// empty lines before a request line (emptyLinesBefore) are skipped: two of
+// them in front of the next request are no empty header section.
 func messageHead(msg []byte, response bool) (head []byte, bodyStart int, status int, ok bool) {
 	pos := 0
 	if !response {
-		pos = len(msg) - len(bytes.TrimLeft(msg, "\r\n"))
+		pos = emptyLinesBefore(msg)
 	}
 	for {
 		i := bytes.Index(msg[pos:], []byte("\r\n\r\n"))
@@ -206,7 +207,7 @@ func messageHead(msg []byte, response bool) (head []byte, bodyStart int, status 
 			return head, bodyStart, 0, true
 		}
 		status = responseStatus(head)
-		if status >= 100 && status < 200 && status != 101 {
+		if pUtil.IsInterimStatus(status) {
 			pos = bodyStart // an interim response: the final one follows
 			continue
 		}
@@ -241,7 +242,7 @@ func responseAsRead(resp []byte) []byte {
 		if i < 0 {
 			break
 		}
-		if status := responseStatus(resp[:i+4]); status >= 100 && status < 200 && status != 101 {
+		if pUtil.IsInterimStatus(responseStatus(resp[:i+4])) {
 			resp = resp[i+4:] // an interim response: the final one follows
 			continue
 		}
@@ -278,20 +279,29 @@ func responseStatus(head []byte) int {
 // but the connection then carries another protocol, which is no next HTTP
 // message.
 func responseHasNoBody(reqMethod string, status int) bool {
-	return reqMethod == "HEAD" || (status >= 100 && status < 200 && status != 101) || status == 204 || status == 304
+	return reqMethod == "HEAD" || pUtil.IsInterimStatus(status) || status == 204 || status == 304
 }
 
 // startsWithInterimResponse reports whether resp begins with an interim 1xx
 // response (a 100 Continue, a 103 Early Hints) rather than its final one.
 func startsWithInterimResponse(resp []byte) bool {
-	status := responseStatus(resp)
-	return status >= 100 && status < 200 && status != 101
+	return pUtil.IsInterimStatus(responseStatus(resp))
 }
 
-// requestMethod is the method token of an HTTP/1.x request, or "". Empty lines
-// before the request line are skipped, as a server does (RFC 9112 §2.2).
+// emptyLinesBefore is how many bytes of b are empty lines in front of a request
+// line: its leading CR and LF bytes. They are no part of the request (RFC 9112
+// §2.2: a server ignores at least one; a client may send them between
+// requests, and an old one sends a CRLF after a POST body). It is the one rule
+// for them: messageHead, requestMethod and dropEmptyLinesBeforeRequest skip
+// them by it, and nextRequestV2 takes a chunk that is nothing else.
+func emptyLinesBefore(b []byte) int {
+	return len(b) - len(bytes.TrimLeft(b, "\r\n"))
+}
+
+// requestMethod is the method token of an HTTP/1.x request, or "". The empty
+// lines before the request line (emptyLinesBefore) are skipped.
 func requestMethod(req []byte) string {
-	req = bytes.TrimLeft(req, "\r\n")
+	req = req[emptyLinesBefore(req):]
 	if i := bytes.IndexByte(req, ' '); i > 0 {
 		return string(req[:i])
 	}
@@ -299,14 +309,13 @@ func requestMethod(req []byte) string {
 }
 
 // dropEmptyLinesBeforeRequest removes the empty lines in front of req's request
-// line and returns how many bytes that was. They are not part of the request
-// (RFC 9112 §2.2: a server ignores at least one), and net/http.ReadRequest,
-// which replay and both record paths parse a framed request with, does not skip
-// them: it fails on them with `malformed HTTP request ""`. The bytes have
-// already been relayed where the proxy relays; this only keeps them out of
-// the request the proxy parses and records.
+// line (emptyLinesBefore) and returns how many bytes that was.
+// net/http.ReadRequest, which replay and both record paths parse a framed
+// request with, does not skip them: it fails on them with `malformed HTTP
+// request ""`. The bytes have already been relayed where the proxy relays;
+// this only keeps them out of the request the proxy parses and records.
 func dropEmptyLinesBeforeRequest(req *[]byte) int {
-	n := len(*req) - len(bytes.TrimLeft(*req, "\r\n"))
+	n := emptyLinesBefore(*req)
 	*req = (*req)[n:]
 	return n
 }

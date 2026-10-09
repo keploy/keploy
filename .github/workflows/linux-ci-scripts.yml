@@ -3,10 +3,10 @@ name: Linux CI scripts
 # Every Linux lane installs its apt packages through
 # test_workflow_scripts/apt-install.sh, so a mistake there fails lanes that
 # have nothing to do with the change. Its mirror failover only matters when a
-# mirror is failing, and its Ubuntu-only update only when a third-party index
-# is broken, which an ordinary run never shows. The tests make both happen on
-# purpose, against a stub mirror. They run on every change to the helper or
-# its tests.
+# mirror is failing or slow, and its Ubuntu-only update only when a third-party
+# index is broken, which an ordinary run never shows. The tests make all three
+# happen on purpose, against a stub mirror. They run on every change to the
+# helper or its tests.
 
 on:
   push:
@@ -27,17 +27,24 @@ permissions:
 
 jobs:
   apt-install:
-    # A healthy run takes about a minute: four ubuntu containers that fetch
-    # the package lists once each (the third-party case runs the helper four
-    # times, after the first from cached lists), one that builds the test
-    # repository, and two with no network. Each networked case is capped at
-    # 300 s, so a hung case fails with its log well inside this limit.
-    timeout-minutes: 20
+    # Seven ubuntu containers that fetch the package lists once each (through
+    # the stub, which asks the real mirror for each list only the first time),
+    # one that builds the test repository, and two with no network. About four
+    # minutes of a run are waits the cases are made of: against the stub, the
+    # 45 s limit of a control, two slices of 20 s and a budget of 90 s; in each
+    # of the two offline containers, half a minute of slices and budgets of 1
+    # to 8 s. The fetching and installing comes on top, and how long that takes
+    # on a runner is in the job's own history, not here.
+    #
+    # Each networked case is capped at 300 s and prints its log as soon as it
+    # has failed. Seven of them at the cap are 35 minutes, so this limit lets a
+    # run in which every one of them hangs end by itself, with every log.
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test apt-install.sh (mirror failover, third-party sources, source rewrite)
+      - name: Test apt-install.sh (mirror failover, slow mirrors, third-party sources, source rewrite)
         run: bash .github/workflows/test_workflow_scripts/apt-install.tests.sh
 
   # The shape the Ubuntu-only update is for, on the real thing: GitHub's own

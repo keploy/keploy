@@ -116,23 +116,74 @@ func (db *TreeDb) delete(key interface{}) bool {
 // deleteMock removes the entry at key only when it is the mock the caller
 // means. See sameMock for why the key alone is not enough.
 func (db *TreeDb) deleteMock(key interface{}, want models.Mock) bool {
+	ok, _ := db.deleteMockReturning(key, want)
+	return ok
+}
+
+// deleteMockReturning is deleteMock, also returning the mock it removed.
+func (db *TreeDb) deleteMockReturning(key interface{}, want models.Mock) (bool, *models.Mock) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	v, found := db.rbt.Get(key)
 	if !found {
-		return false
+		return false, nil
 	}
 	if !sameMock(v, want) {
-		return false
+		return false, nil
 	}
 	db.rbt.Remove(key)
 	if info, ok := key.(models.TestModeInfo); ok {
 		delete(db.idIndex, info.ID)
 	}
+	removed, _ := v.(*models.Mock)
+	return true, removed
+}
+
+// swapValue stores newObj under key in place of old, when the tree holds old
+// itself there (by pointer). The key does not change, so the window index stays
+// right whenever newObj keeps old's request time, and each key index swaps the
+// entry in place (or is dropped, when newObj files under other keys). It
+// reports whether it swapped.
+func (db *TreeDb) swapValue(key models.TestModeInfo, old, newObj *models.Mock) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	cur, found := db.rbt.Get(key)
+	if !found || cur != old {
+		return false
+	}
+	db.dropWindowUnlessFiled(key.ID, key.ID, newObj)
+	for ix, ki := range db.keyed {
+		if !ki.swapInPlace(db, ix, key, old, newObj) {
+			delete(db.keyed, ix)
+		}
+	}
+	db.rbt.Put(key, newObj)
+	return true
+}
+
+// removeValue removes the entry under key when the tree holds old itself there
+// (by pointer). It reports whether it removed.
+func (db *TreeDb) removeValue(key models.TestModeInfo, old *models.Mock) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	cur, found := db.rbt.Get(key)
+	if !found || cur != old {
+		return false
+	}
+	db.rbt.Remove(key)
+	delete(db.idIndex, key.ID)
 	return true
 }
 
 func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interface{}, want models.Mock) bool {
+	ok, _ := db.updateReplacing(oldKey, newKey, newObj, want)
+	return ok
+}
+
+// updateReplacing is update, also returning the mock the update replaced: the
+// one the tree held, which is not always the caller's (the ID-index fallback
+// finds the caller's recording under a newer copy).
+func (db *TreeDb) updateReplacing(oldKey interface{}, newKey interface{}, newObj interface{}, want models.Mock) (bool, *models.Mock) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -159,17 +210,18 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 		if okNew {
 			db.idIndex[newInfo.ID] = newInfo
 		}
-		return true
+		replaced, _ := cur.(*models.Mock)
+		return true, replaced
 	}
 
 	// If exact match fails, use ID index for O(1) lookup
 	if !okOld {
-		return false
+		return false, nil
 	}
 
 	currentKey, exists := db.idIndex[oldInfo.ID]
 	if !exists {
-		return false
+		return false, nil
 	}
 
 	// The ID index is keyed on ID ALONE, and ID is stamped from zero per tier,
@@ -185,7 +237,7 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 	// injecting a foreign tier's mock rather than merely rewriting one.
 	cur, curFound := db.rbt.Get(currentKey)
 	if !curFound || !sameMock(cur, want) {
-		return false
+		return false, nil
 	}
 
 	// Found by ID, update it
@@ -197,7 +249,8 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 	if okNew {
 		db.idIndex[newInfo.ID] = newInfo
 	}
-	return true
+	replaced, _ := cur.(*models.Mock)
+	return true, replaced
 }
 
 func (db *TreeDb) deleteAll() {

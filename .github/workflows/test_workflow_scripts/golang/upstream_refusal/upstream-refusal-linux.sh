@@ -11,6 +11,15 @@
 #   203.0.113.1, [2001:db8::1]  no route at all    -> ENETUNREACH
 #   127.0.0.1:<http>     a server that accepts     -> connected
 #
+# and connected UDP, which keploy redirects only for DNS (port 53):
+#   udp:127.0.0.1:<echo>  a UDP echo server        -> echoed
+#   udp:203.0.113.1, udp:[2001:db8::1]  no route   -> ENETUNREACH
+# with getaddrinfo's order for a name with an IPv4 and an IPv6 address: glibc
+# UDP-connects to each to sort them, so the unroutable IPv6 one comes last
+# (ORDER v4,v6), as it does without keploy; and a UDP socket that connect()s
+# to the echo server after a connect() or sendto() to a nameserver's port 53
+# names the echo server as its peer, not the nameserver keploy stored for it;
+#
 # and two connections whose destination must see exactly the one connection
 # the application made — the connection opened while the handshake was held
 # is the one the proxy uses:
@@ -40,7 +49,11 @@ WORK="$(mktemp -d)"
 trap 'cp "$WORK/record.log" "$HERE/record_logs.txt" 2>/dev/null || true; sudo rm -rf "$WORK"' EXIT
 
 (cd "$HERE/probe" && CGO_ENABLED=0 go build -o "$WORK/probe" .)
-cp "$HERE/count_server.py" "$HERE/idle_client.py" "$HERE/tls_idle_client.py" "$WORK/"
+cp "$HERE/count_server.py" "$HERE/idle_client.py" "$HERE/tls_idle_client.py" "$HERE/addr_order.py" \
+  "$HERE/udp_reconnect.py" "$WORK/"
+# The name addr_order.py looks up, bind-mounted over /etc/hosts in a mount
+# namespace of its own: on-link IPv4, IPv6 with no route.
+printf '198.18.0.4 dual.e2e.test\n2001:db8::1 dual.e2e.test\n' > "$WORK/hosts"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORK/key.pem" -out "$WORK/cert.pem" \
   -days 1 -subj /CN=localhost -addext subjectAltName=DNS:localhost >/dev/null 2>&1
 # keploy reads its installation id from here instead of asking the network.
@@ -70,19 +83,30 @@ python3 count_server.py idleclose 18083 idle_conns.txt >idle.log 2>&1 &
 IDLE_PID=$!
 python3 count_server.py tlsdeadline 18444 tlsidle_conns.txt cert.pem key.pem >tlsidle.log 2>&1 &
 TLSIDLE_PID=$!
-trap 'kill $HTTP_PID $TLS_PID $MAPPED_PID $IDLE_PID $TLSIDLE_PID 2>/dev/null || true' EXIT
+./probe -udpecho 127.0.0.1:18082 >udpecho.log 2>&1 &
+UDPECHO_PID=$!
+trap 'kill $HTTP_PID $TLS_PID $MAPPED_PID $IDLE_PID $TLSIDLE_PID $UDPECHO_PID 2>/dev/null || true' EXIT
 for p in 18080 18443 18081 18083 18444; do
   for _ in $(seq 50); do
     python3 -c "import socket; socket.create_connection(('127.0.0.1', $p), 1)" 2>/dev/null && break
     sleep 0.1
   done
 done
+for _ in $(seq 50); do
+  case "$(./probe udp:127.0.0.1:18082)" in *' echoed '*) break ;; esac
+  sleep 0.1
+done
 
 DESTS="127.0.0.1:59999 198.18.0.2:80 198.18.0.3:80 203.0.113.1:80 [2001:db8::1]:80 127.0.0.1:18080"
+DESTS="$DESTS udp:127.0.0.1:18082 udp:203.0.113.1:80 udp:[2001:db8::1]:80"
 # shellcheck disable=SC2086
 ./probe $DESTS > baseline.txt
 python3 idle_client.py 18083 > idle_baseline.txt
 python3 tls_idle_client.py 18444 > tlsidle_baseline.txt
+# shellcheck disable=SC2016
+ORDER='mount --bind "$1" /etc/hosts && exec python3 "$2" dual.e2e.test'
+unshare --mount sh -c "$ORDER" sh hosts addr_order.py > order_baseline.txt
+python3 udp_reconnect.py 127.0.0.1 18082 > reconnect_baseline.txt
 cat > app.sh <<APP
 #!/bin/sh
 ../probe $DESTS
@@ -97,6 +121,8 @@ print('V4MAPPED', s.recv(100).decode().strip())
 "
 python3 ../idle_client.py 18083
 python3 ../tls_idle_client.py 18444
+unshare --mount sh -c '$ORDER' sh ../hosts ../addr_order.py
+python3 ../udp_reconnect.py 127.0.0.1 18082
 APP
 chmod +x app.sh
 : > tls_conns.txt
@@ -111,6 +137,8 @@ grep '^HTTPS ' record.log > https.txt || true
 grep '^V4MAPPED ' record.log > mapped.txt || true
 grep '^IDLE ' record.log > idle_recorded.txt || true
 grep '^TLSIDLE ' record.log > tlsidle_recorded.txt || true
+grep '^ORDER ' record.log > order_recorded.txt || true
+grep '^RECONNECT ' record.log > reconnect_recorded.txt || true
 
 # The switch: with the hold turned off, a refused connect connects again.
 mkdir rec_off && cd rec_off
@@ -133,8 +161,36 @@ expect "$WORK/baseline.txt" 198.18.0.3:80 TIMEOUT
 expect "$WORK/baseline.txt" 203.0.113.1:80 ENETUNREACH
 expect "$WORK/baseline.txt" '[2001:db8::1]:80' ENETUNREACH
 expect "$WORK/baseline.txt" 127.0.0.1:18080 connected
+expect "$WORK/baseline.txt" udp:127.0.0.1:18082 echoed
+expect "$WORK/baseline.txt" udp:203.0.113.1:80 ENETUNREACH
+expect "$WORK/baseline.txt" 'udp:[2001:db8::1]:80' ENETUNREACH
 fail=0
 compare "$WORK/baseline.txt" "$WORK/recorded.txt" || fail=1
+order_want=$(cut -d' ' -f2 "$WORK/order_baseline.txt")
+order_got=$(cut -d' ' -f2 "$WORK/order_recorded.txt")
+if [ "$order_want" != "v4,v6" ]; then
+  echo "::error::fixture: without keploy getaddrinfo ordered dual.e2e.test '${order_want:-<none>}', expected v4,v6 (the IPv6 address has no route)"
+  fail=1
+elif [ "$order_got" != "$order_want" ]; then
+  echo "::error::getaddrinfo ordered dual.e2e.test '${order_got:-<none>}' under keploy record, '$order_want' without: its UDP probe of the unroutable IPv6 address connected"
+  fail=1
+else
+  echo "ok: getaddrinfo puts the unroutable IPv6 address last, as without keploy"
+fi
+# reconnects FILE: FILE's RECONNECT results, on one line.
+reconnects() { awk '$1 == "RECONNECT" { $1 = ""; sub(/^ /, ""); printf "%s%s", sep, $0; sep = "; " }' "$1"; }
+reconnect_want="connect peer=127.0.0.1:18082 echoed; sendto peer=127.0.0.1:18082 echoed"
+reconnect_base=$(reconnects "$WORK/reconnect_baseline.txt")
+reconnect_got=$(reconnects "$WORK/reconnect_recorded.txt")
+if [ "$reconnect_base" != "$reconnect_want" ]; then
+  echo "::error::fixture: without keploy the reconnected UDP socket gave '${reconnect_base:-<none>}', expected '$reconnect_want'"
+  fail=1
+elif [ "$reconnect_got" != "$reconnect_want" ]; then
+  echo "::error::a UDP socket that connect()ed elsewhere after a DNS connect()/sendto() gave '${reconnect_got:-<none>}' under keploy record, '$reconnect_want' without: getpeername kept naming the nameserver keploy stored for the DNS exchange"
+  fail=1
+else
+  echo "ok: a UDP socket that reconnects after a DNS exchange names its new peer, as without keploy"
+fi
 https=$(awk '{print $2}' "$WORK/https.txt")
 conns=$(tr -d ' ' < "$WORK/tls_conn_count.txt")
 if [ "$https" != "200" ]; then

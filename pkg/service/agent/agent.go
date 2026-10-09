@@ -18,6 +18,8 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -140,9 +142,17 @@ type Agent struct {
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
 	scopeMeta    map[scopeKey]scopeMeta
-	scopeStatus  map[scopeKey]string
 	scopeTable   map[string][]string // replay: test name -> mock names (from mappings.yaml)
 	loadedMocks  int                 // replay: count of mocks stored, for /agent/mock/stats
+	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
+	// Cleared by resetScopeState.
+	gateRun    map[string]struct{}
+	gateReason string
+	gateWarned bool // NoteUngatable said so this session
+	// replay: the scopes the gate told a harness to skip, and whether
+	// noteEndOfGated said so this session.
+	gatedScopes    map[scopeKey]struct{}
+	gatedEndWarned bool
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -189,6 +199,9 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	if path := stopOutcomePath(a.config.Agent.SetupOptions); path != "" {
 		a.armStopOutcome(path, utils.RegisterPreCancelHook)
 	}
+
+	// The mismatch hints name the command that records this kind of run again.
+	mismatch.SetMockMode(a.config.Agent.MockMode)
 
 	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)
@@ -500,6 +513,10 @@ func (a *Agent) resetScopeState() {
 	a.workerOpen = nil
 	a.scopeWindows = nil
 	a.scopeMeta = nil
+	// A gate belongs to the replay that installed it; the CLI installs this
+	// session's after the reset.
+	a.gateRun, a.gateReason, a.gateWarned = nil, "", false
+	a.gatedScopes, a.gatedEndWarned = nil, false
 	a.scopeMu.Unlock()
 }
 
@@ -778,11 +795,13 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	for _, m := range storage.filtered {
 		if m != nil {
 			m.DeriveLifetime()
+			mocknoise.MaterializeCorrelations(m)
 		}
 	}
 	for _, m := range storage.unfiltered {
 		if m != nil {
 			m.DeriveLifetime()
+			mocknoise.MaterializeCorrelations(m)
 		}
 	}
 
@@ -893,6 +912,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		}
 		mock := &m
 		mock.DeriveLifetime()
+		mocknoise.MaterializeCorrelations(mock)
 		if wantAsync && mock.IsAsync() {
 			asyncMocks = append(asyncMocks, mock)
 		}

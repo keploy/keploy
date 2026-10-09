@@ -76,13 +76,18 @@ The V2 session (`*supervisor.Session`) exposes:
 | `sess.Directives chan<- directive.Directive` | Send control messages (TLS upgrade, abort, finalize). |
 | `sess.Acks <-chan directive.Ack` | Receive acks for directives. |
 | `sess.Mocks chan<- *models.Mock` | Low-level mock channel (prefer `EmitMock`). |
-| `sess.EmitMock(m) error` | Emit a mock (runs hook chain, respects incomplete-mock gate). |
-| `sess.MarkMockIncomplete(reason)` | Drop the in-flight mock. |
-| `sess.MarkMockComplete()` | Clear the incomplete flag. |
-| `sess.IsMockIncomplete() bool` | Query before expensive work. |
+| `sess.EmitMock(m) error` | Emit a mock (runs hook chain). If the incomplete-mock flag is set, it takes the flag, leaves the mock out and reports it. |
+| `sess.MarkMockIncomplete(reason)` | Set the incomplete-mock flag: the next mock emitted is left out and reported. If you know which exchange you cannot record, report it with `ReportLeftOut` instead: the flag leaves out the next mock, which may be a healthy one. On a path that returns, report it with `ReportStoppedOn`: no mock is emitted after it to take the mark, and the exchange would go unreported. A request whose response never starts, because the server's stream ended first, is not an exchange you cannot record: there is no mock to lose, so report nothing (see below). |
+| `sess.IsMockIncomplete() bool` | Query before expensive work. A mock you then drop goes through `LeaveOutIfIncomplete`. |
+| `sess.LeaveOutIfIncomplete(m) bool` | Drop a mock without emitting it: takes the flag and reports the mock (its kind and times are enough). |
+| `sess.TakeMockIncomplete() (string, bool)` | Take the flag yourself, to scope a mark to the exchanges it hit. You must then report each exchange you leave out with `ReportLeftOut`. |
+| `sess.ReportLeftOut(m, reason)` | Report an exchange you leave out (its kind and times are enough): after `TakeMockIncomplete`, once per exchange the mark hit, with the reason you took; or, without the flag, for an exchange you know you cannot record, with your own reason. Reports its span (`[ReqTimestampMock, ResTimestampMock]`; none for a mock with no request time, which is still counted), counts it, logs the rate-limited WARN and clears pending work; does not touch the flag. `RecordOrphanWindow` alone counts and logs nothing. |
+| `sess.ReportStoppedOn(kind, reqTs, reason)` | Report the exchange you stop on, just before you return with an error on it (a request or response that does not decode, framing you lost in it). One rule for every parser: reported as `ReportLeftOut` reports one, spanned from its request to the stop (`StoppedAt`: the first of your stop, your death or retirement and a capture hole, where the span of what the connection carries after it starts, open from the moment the stop is stamped), and under the relay's mark when one is on the flag, which it takes. Without it, the exchange you were in and every exchange queued behind it are lost with no span and no count. Not for the end of a stream or a recording's stop, which leave nothing out. |
+| `sess.MarkMockComplete()` | Clear the flag after an exchange you record nothing for. Never after `EmitMock`, which takes the flag itself: a mark set while it delivered is the next mock's. |
 | `sess.AddPostRecordHook(h)` | Front-of-chain wrapper hook. |
 | `sess.Logger *zap.Logger` | Pre-scoped with connection fields. |
 | `sess.Ctx context.Context` | Supervisor-managed lifetime. Respect it. |
+| `sess.RecordingStopping() bool` | Whether the recording itself is stopping. A stop of your connection then costs the recording nothing: it ends with the recording, and no span opens after it. If your error wraps `supervisor.ErrReported`, your own log of the stop takes the place of the dispatcher's `parser retired` WARN: log it at WARN only while this is false, and at Debug once it is true, as the dispatcher does. |
 | `sess.Opts models.OutgoingOptions` | Config (bypass rules, passwords, TLS configs, noise). |
 
 #### Reading request/response bytes
@@ -100,6 +105,65 @@ if err != nil {
 }
 // chunk.ReadAt is the canonical request-first-byte timestamp.
 ```
+
+The same holds when `DestStream` ends before any of a request's response:
+return cleanly and report nothing, even with the incomplete-mock flag set.
+There is no response, so no mock is lost. It is most often the keep-alive
+idle-close race (the upstream closes a pooled connection as idle as the app
+sends on it), and the app's client retries on a new connection, where the
+call is recorded. Reporting it (`ReportStoppedOn`) would leave out every test
+case in flight at that moment. Response bytes the capture lost are not yours
+to report there: a parser that cannot re-align after a hole is no longer fed,
+and the capture leaves out the test cases the connection carries from the
+loss on itself.
+
+#### Pairing a request with its response: `NextRequest`
+
+A request/response parser starts every exchange with
+`sess.NextRequest(kind, false)`: it waits for the client's next request
+and returns its first chunk without taking it (read the request on as
+you would), and it sets the server stream's floor to that chunk. Server
+bytes captured before a request are never its answer, and the floor
+drops them however late they reach you. On a connection whose capture
+began after it was established (`Session.JoinedMidConnection`, which
+the producer sets once, when it makes the session), where the server
+stream starts with them, captured before the connection's first
+request, they answer a request the capture does not have (one in flight
+when the capture began): that run is reported once (`ReportLeftOut`).
+Every other run is dropped with a Debug line, with nothing left out for
+it there. It answers no request: on a connection captured from its first
+byte (the relay's), nothing was sent before the capture began, so bytes
+before its first request are the server's own, and a later run was sent
+between two requests (an error or a timeout the server sent on its own,
+such as MySQL's ERR at `wait_timeout` or an idle-close 408). Or it is
+what is left of an answer you stopped reading and left out, which you
+report yourself (`ReportLeftOut`) as you do: the MySQL recorder leaves
+out a response it cannot frame, goes on from the client's next command,
+and skips the rest of that response by capture time first
+(`fakeconn.FakeConn.SkipThrough`, which cuts the stream before the
+floor); the floor drops only what that skip left. The bytes captured
+before the connection's first request are the server stream's start,
+in the floor's run there however they leave the stream (the floor's
+read or such a skip), and nothing captured after that request is in
+that run, whatever floor is in force when you first read the stream:
+an answer in flight is reported over its own bytes. A parser that
+returns without reading the server's stream past its start (a client
+that sends only requests with no answer and closes, such as a pool's
+COM_QUIT, or closes in the middle of a request) never has the floor
+drop it there, so `defer sess.EndExchanges()` where your parser
+starts, to run however it returns: on a joined connection it reads the
+server's stream on until its start is behind it, and the answer in
+flight is reported all the same. A connection on which the client
+sends no request at all reports nothing: with no request, nothing
+orders the server's bytes against one. The order is
+the chunks' connection-wide capture sequence (`fakeconn.Chunk.ConnSeq`),
+which every producer numbers (`fakeconn.ConnSeqOf`): a client chunk after
+every byte the server had sent the producer when the chunk was read, read
+yet or not (the relay: `connseq.Upstream`); never compare timestamps to
+order the two directions. A parser that goes on to a
+request with an earlier answer still to read (MySQL's held PREPARE)
+passes `true` for as long as that is so, and the floor stays where it
+is. See the HTTP/1 and MySQL V2 recorders.
 
 For byte-stream-oriented protocols (HTTP/1), you can pass the FakeConn
 to a `bufio.Reader` — it satisfies `net.Conn`. Caveat:
@@ -170,7 +234,9 @@ case <-sess.Ctx.Done():
     return sess.Ctx.Err()
 }
 if !ack.OK {
-    sess.MarkMockIncomplete("tls upgrade failed")
+    // The supervisor falls through to passthrough on the error, which
+    // leaves out the rest of the connection and says so. No mark on the
+    // incomplete-mock flag: no mock is emitted after this to take it.
     return fmt.Errorf("tls upgrade: %w", ack.Err)
 }
 
@@ -190,8 +256,8 @@ for the reference pattern.
 ### Step 5 — Handle protocol-specific lifecycles
 
 - **HTTP/1 keepalive / pipelining**: loop reading request → response
-  pairs until `ClientStream.ReadChunk` returns `io.EOF` or
-  `ErrClosed`. See `pkg/agent/proxy/integrations/http/recordv2.go`.
+  pairs, each started with `sess.NextRequest`, until it returns
+  `io.EOF` or `ErrClosed`. See `pkg/agent/proxy/integrations/http/recordv2.go`.
 - **MySQL / Postgres multi-phase**: explicit state machine — handshake,
   optional TLS upgrade, auth, query loop. Reuse existing wire decoders
   that accept a `net.Conn` or `io.Reader` — they work on FakeConn

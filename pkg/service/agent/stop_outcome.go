@@ -112,7 +112,10 @@ func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the calls this replay could not match: %w", err)
 	}
-	body, err := json.Marshal(models.MockOutcome{Consumed: consumed, Missed: missed})
+	// The windows say which test ran when, and with what verdict; the CLI
+	// cannot ask a stopped agent for them.
+	windows, _ := a.GetScopeWindows(ctx)
+	body, err := json.Marshal(models.MockOutcome{Consumed: consumed, Missed: missed, Windows: windows})
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode the replay outcome: %w", err)
 	}

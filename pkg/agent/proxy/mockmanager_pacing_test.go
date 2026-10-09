@@ -817,11 +817,7 @@ func TestCarryOverSurvivesTheWorkerScopeWrap(t *testing.T) {
 		brokerMockAt("s3", pulsarKind, "SEND", 1700),
 	)
 	r.window(1)
-	var db interface{} = &scopedMockDb{
-		MockMemDb: r.mm,
-		allow:     map[string]struct{}{"s1": {}},
-		universe:  map[string]struct{}{"s1": {}, "s2": {}},
-	}
+	var db interface{} = workerScoped(t, r.mm, []string{"s1"}, []string{"s1", "s2"})
 	cr, ok := db.(integrations.CarryOverReader)
 	if !ok {
 		t.Fatal("the worker-scope wrap erases CarryOverReader")

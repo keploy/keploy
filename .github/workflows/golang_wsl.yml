@@ -56,6 +56,118 @@ jobs:
           repository: keploy/samples-go
           path: samples-go
 
+      # The sample is built inside WSL, so WSL needs a Go toolchain. It used to
+      # be jammy's golang-go, which brings Go 1.18 and gcc: 150 of the 154 MB
+      # of .debs this lane installed (82 MB of Go, 67 MB of gcc and what comes
+      # with it, on job 113004613552). On 2026-10-07 the Azure mirror served
+      # .debs at 60-185 kB/s in some regions and that download ran into
+      # apt-install.sh's time limit five times (job 113004700461 is one). Go
+      # now comes from the official linux-amd64 tarball, and gcc not at all.
+      #
+      # That changes the binary this lane tests, and is meant to:
+      #
+      #   before  Go 1.18 with cgo, since go found gcc: the sample was linked
+      #           against glibc, which Go then uses for the name lookups its
+      #           own resolver cannot do.
+      #   now     the Go that go.mod names, with CGO_ENABLED=0: the sample is
+      #           linked statically, and every name lookup is Go's own.
+      #
+      # The Go version is the one setup-go gives the Linux lane, which builds
+      # the same sample. The linkage is not that lane's: its runner has gcc
+      # (prepare_and_run.yml builds keploy with cgo on the same image), and
+      # where go finds a C compiler it builds with cgo. Here cgo would need
+      # gcc and libc6-dev inside WSL, which only apt brings: the 67 MB above,
+      # where curl, git, ca-certificates and jq came to 4 MB with their
+      # libraries in that job. That download is what failed. The sample has
+      # no C in it and builds without cgo; of all it links, only Go's own net
+      # package can use cgo. What this lane adds to the Linux one is the WSL kernel under
+      # keploy, not a second way to link the sample, and the glibc-linked
+      # build stays covered there.
+      #
+      # The tarball is kept in the Actions cache: a job that finds it there
+      # downloads no toolchain, and one that does not downloads it and saves
+      # it. A pull request reads the caches of its own runs and of main, so
+      # until a run on main has saved the tarball of a Go version, the first
+      # run of every pull request downloads it.
+      #
+      # These steps run on the Windows side, and before WSL is set up: WSL
+      # stops a distro a few seconds after its last process exits and what was
+      # mounted in it is gone, so a Windows-side step that can take a while
+      # does not belong between two WSL steps.
+      - name: Read the Go version from go.mod
+        id: go
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The toolchain line if there is one, else the go line: what
+          # setup-go's go-version-file reads. The checkout on Windows may
+          # have given go.mod CRLF line ends, hence the sub().
+          version="$(awk '{ sub(/\r$/, "") } $1 == "toolchain" { t = substr($2, 3) } $1 == "go" { g = $2 } END { print (t != "" ? t : g) }' go.mod)"
+          # go.mod names all three numbers today. A line without the last
+          # ("go 1.27") names no release, and no tarball: the first release
+          # of that line, go1.27.0, is taken then. setup-go takes the newest
+          # 1.27.x it finds instead, so the two lanes would build with
+          # different Go; the warning says so, and how to end it.
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "::warning::go.mod names Go $version without a patch release. The WSL lane takes go$version.0; setup-go, on the Linux lanes, takes the newest $version.x it finds. Name the patch release in go.mod (go $version.N) for both to build with the same Go."
+            version="$version.0"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+|rc[0-9]+|beta[0-9]+)$ ]]; then
+            echo "::error::could not read a Go version from go.mod (got '$version'); the WSL lane takes its Go toolchain from the go or toolchain line there"
+            exit 1
+          fi
+          echo "tarball=go$version.linux-amd64.tar.gz" >>"$GITHUB_OUTPUT"
+
+      - name: Restore the Go toolchain for WSL
+        id: go-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .wsl-go
+          key: wsl-${{ steps.go.outputs.tarball }}
+
+      - name: Download the Go toolchain for WSL
+        if: steps.go-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          TARBALL: ${{ steps.go.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          mkdir -p .wsl-go
+          # fetch <url> <file>. No transfer may hang or trickle to the job's
+          # timeout, which is what a slow apt mirror did to this lane. An
+          # attempt is given up when it has no connection after 20 s, when it
+          # stays under 200 kB/s for 30 s (the mirror trickled at 60-185), or
+          # when it is not done after 10 minutes, which at that rate is more
+          # than the 70.5 MB of go1.27.0. curl then starts over, up to five
+          # times, and not once 10 minutes have passed since the first
+          # attempt began: a download ends within some 20 minutes, whatever
+          # the network does. --retry-all-errors, because curl alone does not
+          # try again after a transfer that was cut short (exit 18). Into a
+          # file, which curl empties before it tries again; output that was
+          # captured from stdout would keep what the failed attempt wrote.
+          fetch() {
+            curl -fsSL --connect-timeout 20 --speed-limit 200000 --speed-time 30 --max-time 600 \
+              --retry 5 --retry-delay 2 --retry-all-errors --retry-max-time 600 -o "$2" "$1"
+          }
+          fetch "https://dl.google.com/go/$TARBALL" ".wsl-go/$TARBALL"
+          # The checksum comes from the same host, so it catches a download
+          # that was cut short or damaged, which would otherwise be cached
+          # for every later run. It is no defence against the host itself,
+          # which the other lanes trust as well when setup-go downloads Go.
+          # Kept out of .wsl-go, which is what the cache saves.
+          fetch "https://dl.google.com/go/$TARBALL.sha256" "$TARBALL.sha256"
+          echo "$(cat "$TARBALL.sha256") *.wsl-go/$TARBALL" | sha256sum -c -
+          rm "$TARBALL.sha256"
+
+      # Saved now rather than in a post step, which only saves when the whole
+      # job passes: a failing test must not make the next run download again.
+      - name: Save the Go toolchain for WSL
+        if: steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .wsl-go
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
       - name: Setup WSL (Ubuntu)
         uses: Vampire/setup-wsl@v6
         with:
@@ -76,20 +188,6 @@ jobs:
             echo "✗ Kernel version $KERNEL_VERSION is below required $REQUIRED_VERSION"
             exit 1
           fi
-
-      - name: Mount debugfs in WSL
-        shell: wsl-bash {0}
-        run: |
-          set -euo pipefail
-          # Check if debugfs is already mounted
-          if ! mountpoint -q /sys/kernel/debug; then
-            echo "Mounting debugfs..."
-            sudo mount -t debugfs debugfs /sys/kernel/debug
-          else
-            echo "debugfs is already mounted"
-          fi
-          # Verify the mount
-          mount | grep debugfs || echo "debugfs not found in mount output"
 
       - name: Prepare binaries for WSL
         shell: bash
@@ -120,11 +218,33 @@ jobs:
           WSLENV: WSL_WS/p
         run: |
           set -euo pipefail
-          # Once, not four times. golang-go alone pulls ~154 MB of gcc, and every
-          # repeat also re-fetched the ~47 MB of package lists. The helper gives
-          # apt a fallback mirror; see it for why azure.archive.ubuntu.com alone
-          # is not enough. Runs after the LF normalization above, which it needs.
-          bash "$WSL_WS/.github/workflows/test_workflow_scripts/apt-install.sh" golang-go curl git ca-certificates jq
+          # Once, not four times: every repeat also re-fetched the 50.7 MB of
+          # package lists. No golang-go here: it pulled Go 1.18 and gcc, 150 of
+          # this step's 154 MB, and Go now comes from the step below. The
+          # helper gives apt a fallback mirror and leaves a slow one; see it
+          # for why azure.archive.ubuntu.com alone is not enough. Runs after
+          # the LF normalization above, which it needs.
+          bash "$WSL_WS/.github/workflows/test_workflow_scripts/apt-install.sh" curl git ca-certificates jq
+
+      - name: Install Go in WSL
+        shell: wsl-bash {0}
+        env:
+          WSL_WS: ${{ github.workspace }}
+          WSLENV: WSL_WS/p
+        run: |
+          set -euo pipefail
+          sudo tar -C /usr/local -xzf "$WSL_WS/.wsl-go/${{ steps.go.outputs.tarball }}"
+          # Linked into /usr/local/bin, which is on PATH in every WSL step; a
+          # PATH set here would be gone in the next one.
+          sudo ln -sf /usr/local/go/bin/go /usr/local/go/bin/gofmt /usr/local/bin/
+          # cgo off; the comment above the first Go step says what that
+          # changes and why. Left to itself go decides by what it finds: no
+          # cgo without a C compiler on PATH, cgo with one. Said outright, so
+          # that it is this file that says how the sample is linked, and not
+          # whether the WSL image or a later step brings gcc.
+          go env -w CGO_ENABLED=0
+          go version
+          echo "CGO_ENABLED=$(go env CGO_ENABLED)"
 
       - name: Prepare CA tools in WSL
         shell: wsl-bash {0}
@@ -145,6 +265,14 @@ jobs:
           WSLENV: WSL_WS/p
         run: |
           set -euo pipefail
+          # keploy's eBPF hooks need debugfs (or tracefs), which WSL does not
+          # mount. Mount it here, in the session that runs keploy, and not in
+          # an earlier step: WSL stops a distro a few seconds after its last
+          # process exits, taking its mounts with it, and a Windows-side step
+          # in between can take longer than that. Then the agent finds neither
+          # mounted and the job fails before recording anything.
+          mountpoint -q /sys/kernel/debug || sudo mount -t debugfs debugfs /sys/kernel/debug
+          findmnt /sys/kernel/debug
           WS="${WSL_WS}"
           export RECORD_BIN="$WS/.wsl-bin/keploy_record"
           export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"

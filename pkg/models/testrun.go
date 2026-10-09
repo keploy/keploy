@@ -167,6 +167,13 @@ type UnmatchedCall struct {
 type MockOutcome struct {
 	Consumed []MockState     `json:"consumed"`
 	Missed   []UnmatchedCall `json:"missed"`
+	// Windows are the per-test scopes the runner reported (with their
+	// verdicts), which a CLI that can no longer reach the agent — under
+	// compose it is stopped with the runner — reads from here instead. A
+	// window is a few hundred bytes, so they share the account's read bound
+	// with the served and missed calls comfortably up to suites of tens of
+	// thousands of tests.
+	Windows []ScopeWindow `json:"windows,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
@@ -292,11 +299,11 @@ const (
 	RejectionLowRiskNoNoise RejectionReason = "LOW_RISK_NO_NOISE" // minor diffs that can't be auto-suppressed as noise
 )
 
-// ReasonLoopbackOutsideRun is recorded when keploy passes a call through to a
-// listener owned by the run's own process tree (a self-call) instead of serving
-// it from a mock — so a verdict can show that a self-call reached the real
-// handler, not a recording, and a broken self-handler fails the run rather than
-// passing on a stale mock.
+// ReasonLoopbackOutsideRun is the reason the agent logs when keploy passes a
+// call through to a listener owned by the run's own process tree (a self-call)
+// instead of serving it from a mock — so the log shows that a self-call reached
+// the real handler, not a recording; a broken self-handler fails the run rather
+// than passing on a stale mock.
 const ReasonLoopbackOutsideRun = "loopback_outside_run"
 
 // NoiseFailureReason explains why automatic noise extraction failed for a LOW_RISK_NO_NOISE test case.

@@ -156,7 +156,7 @@ func runFullStackMySQL(t *testing.T, wrapDest func(net.Conn, *zap.Logger) (net.C
 		}
 		defer func() { _ = clientConn.Close() }()
 
-		rawDest, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		rawDest, err := util.DialUpstream(ctx, &net.Dialer{Timeout: 5 * time.Second}, "tcp", addr)
 		if err != nil {
 			svErr <- fmt.Errorf("dial mysql: %w", err)
 			return
