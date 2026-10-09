@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -108,6 +110,12 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
+	case models.ConnectionFailure:
+		s, err := connFailureSchemaOf(mock, logger)
+		if err != nil {
+			return nil, true, err
+		}
+		spec = s
 	case models.PostgresV2:
 		// JSON-path spec for Postgres: serialise the raw PacketBundle
 		// structs directly instead of going through req.Message.Encode
@@ -477,6 +485,15 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the HTTP/2 input-output as yaml")
 			return nil, err
 		}
+	case models.ConnectionFailure:
+		spec, err := connFailureSchemaOf(mock, logger)
+		if err != nil {
+			return nil, err
+		}
+		if err := yaml.EncodeNode(&yamlDoc.Spec, spec); err != nil {
+			utils.LogError(logger, err, "failed to marshal the connection failure as yaml", zap.String("mock_name", mock.Name))
+			return nil, err
+		}
 	case models.PostgresV3:
 		// Single top-level Kind for all v3 Postgres sub-types. The sub-type
 		// lives in mock.Spec.PostgresV3.Type and selects which of the
@@ -629,7 +646,17 @@ func validatePostgresV3Spec(s *models.PostgresV3Spec) error {
 	return nil
 }
 
+// DecodeMocks decodes YAML mock documents into mocks. A document it cannot
+// read (a kind this keploy does not know, a connection failure it cannot
+// replay) is skipped, with an ERROR that says why.
 func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*models.Mock, error) {
+	return decodeMocks(yamlMocks, logger, false)
+}
+
+// decodeMocks is DecodeMocks for a read (rewrite false) or for a rewrite of
+// the mock file, which keeps every document it skips as written and so reports
+// the skip at Debug (see skipConnFailure).
+func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrite bool) ([]*models.Mock, error) {
 	mocks := []*models.Mock{}
 
 	for _, m := range yamlMocks {
@@ -823,8 +850,18 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				ReqTimestampMock: spec.ReqTimestampMock,
 				ResTimestampMock: spec.ResTimestampMock,
 			}
+		case models.ConnectionFailure:
+			s, err := decodeConnFailureYAML(&m.Spec)
+			if err != nil {
+				skipConnFailure(logger, m.Name, err, rewrite)
+				continue
+			}
+			mock.Spec = connFailureSpecOf(s)
+			if !connFailureSupported(&mock, logger, rewrite) {
+				continue
+			}
 		default:
-			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.String("type", string(m.Kind)))
+			logUnknownKind(logger, m.Name, m.Kind, rewrite)
 			continue
 		}
 		// Restore kind-agnostic schema-noise carried on the doc envelope onto the
@@ -839,6 +876,296 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 	}
 
 	return mocks, nil
+}
+
+// connFailureSchemaOf is the on-disk spec of a connection-failure mock, for
+// both encoders. A mock this keploy would refuse to read back is refused here
+// too, so a recording never holds one.
+func connFailureSchemaOf(mock *models.Mock, logger *zap.Logger) (models.ConnFailureSchema, error) {
+	if err := mock.ValidateConnFailure(); err != nil {
+		utils.LogError(logger, err, "refusing to write an invalid connection failure mock", zap.String("mock_name", mock.Name))
+		return models.ConnFailureSchema{}, err
+	}
+	return models.ConnFailureSchema{
+		Metadata:         mock.Spec.Metadata,
+		ConnFailureSpec:  *mock.Spec.ConnFailure,
+		ReqTimestampMock: mock.Spec.ReqTimestampMock,
+		ResTimestampMock: mock.Spec.ResTimestampMock,
+	}, nil
+}
+
+// connFailureSpecOf is the in-memory spec of a decoded connection failure.
+func connFailureSpecOf(s models.ConnFailureSchema) models.MockSpec {
+	cf := s.ConnFailureSpec
+	return models.MockSpec{
+		Metadata:         s.Metadata,
+		ConnFailure:      &cf,
+		ReqTimestampMock: s.ReqTimestampMock,
+		ResTimestampMock: s.ResTimestampMock,
+	}
+}
+
+// decodeConnFailureYAML decodes a connection failure's spec strictly. A field
+// the format does not have is refused (models.CheckConnFailureFields), and so
+// is a field whose value is not of the format's type (connFailureShapes): the
+// document was written by a newer keploy, or edited by hand, and reading it as
+// far as this keploy understands it would replay it without what it says. The
+// caller skips it (skipConnFailure). The checks are the JSON decoder's, so a
+// document gets the same verdict, with the same message, in either format;
+// yaml.v3 alone would also take `cause: 111` as text and `2026-10-08` as a time.
+func decodeConnFailureYAML(spec *yamlLib.Node) (models.ConnFailureSchema, error) {
+	var s models.ConnFailureSchema
+	switch {
+	case spec.Kind == 0 || yamlNull(spec):
+		return s, errConnFailureNoSpec
+	case spec.Kind != yamlLib.MappingNode:
+		return s, connFailureUndecodable(errConnFailureSpecNotMap)
+	}
+	// In sorted order, as the JSON decoder checks them, so a document with
+	// more than one fault names the same field in either format.
+	values := make(map[string]*yamlLib.Node, len(spec.Content)/2)
+	names := make([]string, 0, len(spec.Content)/2)
+	for i := 0; i+1 < len(spec.Content); i += 2 {
+		names = append(names, spec.Content[i].Value)
+		values[spec.Content[i].Value] = spec.Content[i+1]
+	}
+	slices.Sort(names)
+	if err := models.CheckConnFailureFields(names); err != nil {
+		return s, err
+	}
+	for _, name := range names {
+		if !yamlHasShape(values[name], connFailureShapes[name]) {
+			return s, connFailureUndecodable(wrongShape(name))
+		}
+	}
+	if err := spec.Decode(&s); err != nil {
+		return s, connFailureUndecodable(err)
+	}
+	return s, nil
+}
+
+// decodeConnFailureJSON is decodeConnFailureYAML for a JSON mock file. The
+// field names are checked exactly as written (encoding/json would match
+// "Address" to "address"), in sorted order, as the YAML decoder checks them.
+func decodeConnFailureJSON(spec json.RawMessage) (models.ConnFailureSchema, error) {
+	var s models.ConnFailureSchema
+	trimmed := bytes.TrimSpace(spec)
+	switch {
+	case len(trimmed) == 0 || string(trimmed) == "null":
+		return s, errConnFailureNoSpec
+	case trimmed[0] != '{':
+		return s, connFailureUndecodable(errConnFailureSpecNotMap)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(spec, &fields); err != nil {
+		return s, connFailureUndecodable(err)
+	}
+	names := make([]string, 0, len(fields))
+	for n := range fields {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	if err := models.CheckConnFailureFields(names); err != nil {
+		return s, err
+	}
+	for _, name := range names {
+		if !jsonHasShape(fields[name], connFailureShapes[name]) {
+			return s, connFailureUndecodable(wrongShape(name))
+		}
+	}
+	if err := json.Unmarshal(spec, &s); err != nil {
+		return s, connFailureUndecodable(err)
+	}
+	return s, nil
+}
+
+// cfShape is the type of a field of a connection failure's on-disk spec.
+type cfShape int
+
+const (
+	cfText    cfShape = iota // a string
+	cfTime                   // an RFC 3339 time, as encoding/json reads one
+	cfTextMap                // a map of strings
+)
+
+// connFailureShapes is the type of every field of models.ConnFailureSchema.
+// A null value is the field's zero value in both formats, as encoding/json
+// and yaml.v3 both read it. TestConnFailureShapesCoverTheFormat pins the keys
+// to the format's fields.
+var connFailureShapes = map[string]cfShape{
+	"metadata":         cfTextMap,
+	"address":          cfText,
+	"host":             cfText,
+	"phase":            cfText,
+	"outcome":          cfText,
+	"cause":            cfText,
+	"reqTimestampMock": cfTime,
+	"resTimestampMock": cfTime,
+}
+
+var (
+	errConnFailureNoSpec     = errors.New("the connection failure has no spec")
+	errConnFailureSpecNotMap = errors.New("its spec is not a map")
+)
+
+// wrongShape is the error for a field whose value is not of its type.
+func wrongShape(name string) error {
+	switch connFailureShapes[name] {
+	case cfTime:
+		return fmt.Errorf("field %q is not an RFC 3339 time", name)
+	case cfTextMap:
+		return fmt.Errorf("field %q is not a map of text", name)
+	default:
+		return fmt.Errorf("field %q is not text", name)
+	}
+}
+
+func yamlNull(n *yamlLib.Node) bool {
+	return n.Kind == yamlLib.ScalarNode && n.ShortTag() == "!!null"
+}
+
+func yamlHasShape(n *yamlLib.Node, shape cfShape) bool {
+	if yamlNull(n) {
+		return true
+	}
+	switch shape {
+	case cfTextMap:
+		if n.Kind != yamlLib.MappingNode {
+			return false
+		}
+		for i := 1; i < len(n.Content); i += 2 {
+			if !yamlHasShape(n.Content[i], cfText) {
+				return false
+			}
+		}
+		return true
+	case cfTime:
+		tag := n.ShortTag()
+		return n.Kind == yamlLib.ScalarNode && (tag == "!!str" || tag == "!!timestamp") && jsonTime(strconv.Quote(n.Value))
+	default:
+		return n.Kind == yamlLib.ScalarNode && n.ShortTag() == "!!str"
+	}
+}
+
+func jsonHasShape(raw json.RawMessage, shape cfShape) bool {
+	raw = bytes.TrimSpace(raw)
+	if string(raw) == "null" {
+		return true
+	}
+	switch shape {
+	case cfTextMap:
+		var m map[string]json.RawMessage
+		if len(raw) == 0 || raw[0] != '{' || json.Unmarshal(raw, &m) != nil {
+			return false
+		}
+		for _, v := range m {
+			if !jsonHasShape(v, cfText) {
+				return false
+			}
+		}
+		return true
+	case cfTime:
+		return len(raw) > 0 && raw[0] == '"' && jsonTime(string(raw))
+	default:
+		return len(raw) > 0 && raw[0] == '"'
+	}
+}
+
+// jsonTime reports whether quoted (a JSON string) is a time encoding/json
+// reads into a time.Time.
+func jsonTime(quoted string) bool {
+	var t time.Time
+	return t.UnmarshalJSON([]byte(quoted)) == nil
+}
+
+// connFailureUndecodable is the error for a connection failure whose spec does
+// not decode as this keploy's format: a field whose type a newer keploy
+// changed, or a hand edit.
+func connFailureUndecodable(err error) error {
+	return fmt.Errorf("the connection failure does not decode as this keploy's format, so it was written by a newer keploy or edited by hand (%v); upgrade keploy, or fix or re-record the mock", err)
+}
+
+// connFailureSupported validates a decoded connection failure, and skips
+// (skipConnFailure) one this keploy does not support (a phase or outcome from
+// a newer keploy) or a malformed one.
+func connFailureSupported(mock *models.Mock, logger *zap.Logger, rewrite bool) bool {
+	err := mock.ValidateConnFailure()
+	if err == nil {
+		return true
+	}
+	skipConnFailure(logger, mock.Name, err, rewrite)
+	return false
+}
+
+// skipConnFailure logs why a connection failure this keploy skips is skipped.
+// It is skipped, not fatal, the way a mock of an unknown kind is: it cannot be
+// replayed faithfully, and failing the whole test set over it would also stop
+// every test that does not depend on it. A read of the set says so at ERROR,
+// once per read; a rewrite (rewrite), which keeps the document as written (see
+// nextDoc) and follows a read that already said so, says it at Debug. The
+// caller's logger names the mock file, since mock names repeat in every test
+// set.
+func skipConnFailure(logger *zap.Logger, name string, err error, rewrite bool) {
+	if rewrite {
+		logger.Debug("kept as written: a connection failure mock this keploy cannot replay", zap.String("mock", name), zap.Error(err))
+		return
+	}
+	utils.LogError(logger, err, "skipping a connection failure mock this keploy cannot replay",
+		zap.String("mock", name),
+		zap.String("keploy_version", keployVersion()),
+		zap.String("next_step", "if the error says to upgrade, the mock was recorded by a newer keploy: upgrade keploy to replay it; otherwise fix or re-record the mock"))
+}
+
+// logUnknownKind reports a mock document of a kind this keploy cannot read,
+// which is then skipped. Which of three it is, this keploy cannot tell: a kind
+// from a newer keploy, one only keploy enterprise reads, or one an older keploy
+// wrote in a format this one no longer reads (the legacy Postgres and SQL
+// kinds), so the message names all three. A document with no kind at all is
+// not one of them: it is empty or commented out, and says so. A rewrite keeps
+// the document as written and reports it at Debug (see skipConnFailure). The
+// caller's logger names the mock file.
+func logUnknownKind(logger *zap.Logger, name string, kind models.Kind, rewrite bool) {
+	switch {
+	case rewrite:
+		logger.Debug("kept as written: a mock document this keploy cannot read", zap.String("kind", string(kind)), zap.String("mock", name))
+	case kind == "":
+		utils.LogError(logger, nil, "skipping a mock document with no kind (empty or commented out)",
+			zap.String("mock", name),
+			zap.String("next_step", "give the document its kind back, or delete it"))
+	default:
+		utils.LogError(logger, nil, fmt.Sprintf("this keploy cannot read mock kind %q, so it skips the mock: it was recorded by a newer keploy, needs keploy enterprise, or uses a format this keploy no longer reads", kind),
+			zap.String("kind", string(kind)),
+			zap.String("mock", name),
+			zap.String("keploy_version", keployVersion()),
+			zap.String("next_step", "upgrade keploy, use keploy enterprise, or re-record the test set"))
+	}
+}
+
+// warnConnFailuresNotReplayed logs, once per read of a test set's mocks, that
+// the set holds connection failures this keploy reads but does not replay, so
+// that a test which fails because a refused or failed connection did not
+// happen at replay says why.
+func warnConnFailuresNotReplayed(logger *zap.Logger, testSetID string, n int) {
+	if n == 0 {
+		return
+	}
+	what, them := "connection-failure mocks", "them"
+	if n == 1 {
+		what, them = "connection-failure mock", "it"
+	}
+	logger.Warn(fmt.Sprintf("%d %s in %s: keploy %s reads %s but cannot replay %s; tests that depend on a refused or failed connection may fail; upgrade keploy",
+		n, what, testSetID, keployVersion(), them, them),
+		zap.String("testSetID", testSetID),
+		zap.Int("connectionFailures", n))
+}
+
+// keployVersion is this binary's version for log lines; a build without one
+// (go run, go test) says so instead of logging an empty string.
+func keployVersion() string {
+	if utils.Version == "" {
+		return "unknown (development build)"
+	}
+	return utils.Version
 }
 
 func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.Spec) (*models.MockSpec, error) {
@@ -1302,6 +1629,11 @@ func decodePostgresV2Message(logger *zap.Logger, yamlSpec *postgres.Spec) (*mode
 // concrete types so unmarshal into `interface{}` yields a map — we recover
 // the typed Message by dispatching on Header.Opcode / Header.Type.
 func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]*models.Mock, error) {
+	return decodeMocksJSON(docs, logger, false)
+}
+
+// decodeMocksJSON is DecodeMocksJSON for a read or a rewrite (see decodeMocks).
+func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rewrite bool) ([]*models.Mock, error) {
 	mocks := make([]*models.Mock, 0, len(docs))
 	for _, m := range docs {
 		// Skip enterprise-only kinds the way DecodeMocks does.
@@ -1563,6 +1895,16 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				PostgresV3:       s.PostgresV3,
 				ReqTimestampMock: s.ReqTimestampMock,
 				ResTimestampMock: s.ResTimestampMock,
+			}
+		case models.ConnectionFailure:
+			s, err := decodeConnFailureJSON(m.Spec)
+			if err != nil {
+				skipConnFailure(logger, m.Name, err, rewrite)
+				continue
+			}
+			mock.Spec = connFailureSpecOf(s)
+			if !connFailureSupported(&mock, logger, rewrite) {
+				continue
 			}
 		default:
 			logger.Debug("skipping unsupported mock kind on JSON read", zap.String("kind", string(m.Kind)))

@@ -926,7 +926,7 @@ func TestMainLoopReportsTheConsumedFetchOutcomeToTheWarner(t *testing.T) {
 
 // THE ELIGIBILITY FILTER IS ONE FUNCTION, NOT TWO COPIES.
 //
-// `isDNSMockEntry(m, kinds) || reusable[m.Name]` decides two things that must
+// `isUnassertedMockEntry(m, kinds) || reusable[m.Name]` decides two things that must
 // agree: the persisted deps_checked bit (buildDepResults iterates the survivors)
 // and the user-facing "why nothing was asserted" warning (RunTestSet measures
 // them for noEligibleDeps, via filteredExpectedNames). It used to be written
@@ -964,10 +964,10 @@ func TestEligibilityFilterHasExactlyOneDefinition(t *testing.T) {
 					if !ok || bin.Op != token.LOR {
 						return true
 					}
-					// The composite predicate: a call to isDNSMockEntry on one
-					// side, an index into the reusable map on the other.
+					// The composite predicate: a call to isUnassertedMockEntry on
+					// one side, an index into the reusable map on the other.
 					idents := exprIdents([]ast.Expr{bin})
-					if idents["isDNSMockEntry"] && idents["reusableMockNames"] {
+					if idents["isUnassertedMockEntry"] && idents["reusableMockNames"] {
 						sites = append(sites, site{fn: fn.Name.Name, pos: fset.Position(bin.Pos()).String()})
 					}
 					return true

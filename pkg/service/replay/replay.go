@@ -1597,6 +1597,107 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 	}
+	// A document the decoders skipped is in no pool, but a mapping entry
+	// recorded without a kind can still name it. One the assertion leaves out
+	// (a connection failure this keploy cannot replay) must stay out of the
+	// expected side, so its kind is known by name too. Other skipped kinds
+	// keep the reports they had.
+	addSkippedKinds := func(skipped map[string]models.Kind) {
+		for name, kind := range skipped {
+			if _, ok := mockKindByName[name]; !ok && models.ExcludedFromDependencyAssertion(kind) {
+				mockKindByName[name] = kind
+			}
+		}
+	}
+	// loadMocksForAgent reads the set's mocks for the run (the mocking
+	// strategy and the mapping's maps, then the pools), learns their kinds,
+	// and stores on the agent what the agent holds: the pools less what this
+	// keploy never sends it (models.AgentBound: the connection failures). It
+	// returns those, so every count of what the agent holds (the compose
+	// guard's among them) agrees with what was sent. The compose and the
+	// native path both load through it.
+	loadMocksForAgent := func() (filtered, unfiltered []*models.Mock, err error) {
+		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		mocksThatHaveMappings := make(map[string]bool)
+		mocksWeNeed := make(map[string]bool)
+
+		// Startup mocks are needed by EVERY test, so they go into both maps.
+		// mocksThatHaveMappings alone would be wrong: GetFilteredMocks prunes on
+		// `isMappedToSpecificTest && !isNeededForCurrentRun`, so a name present
+		// only in the first map is dropped whenever a subset of tests is run.
+		for _, n := range startupMockNames {
+			mocksThatHaveMappings[n] = true
+			mocksWeNeed[n] = true
+		}
+
+		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
+			// Populate the Registry
+			for _, mocks := range expectedTestMockMappings {
+				for _, m := range mocks {
+					mocksThatHaveMappings[m.Name] = true
+				}
+			}
+
+			if len(selectedTests) > 0 {
+				for testID := range selectedTests {
+					if mocks, ok := expectedTestMockMappings[testID]; ok {
+						for _, m := range mocks {
+							mocksWeNeed[m.Name] = true
+						}
+					}
+				}
+			} else {
+				// Running all tests: every mapped mock is needed. Copy rather
+				// than alias — mocksWeNeed was already seeded with the startup
+				// names above, and `mocksWeNeed = mocksThatHaveMappings` would
+				// alias both variables to one map (harmless today, but it makes
+				// the two maps impossible to diverge later).
+				for n := range mocksThatHaveMappings {
+					mocksWeNeed[n] = true
+				}
+			}
+		}
+		// Get all mocks for mapping-based filtering
+		filtered, unfiltered, lookup, skipped, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
+		if err != nil {
+			return nil, nil, err
+		}
+		mockLookup = lookup
+		addKinds(filtered)
+		addKinds(unfiltered)
+		addSkippedKinds(skipped)
+		if filtered == nil && unfiltered == nil {
+			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
+		}
+		filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
+
+		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
+		if r.runDomainSet != nil {
+			for _, m := range filtered {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+			for _, m := range unfiltered {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+		}
+
+		if mutator, ok := r.hookImpl.(MockMutator); ok {
+			if err := mutator.AfterGetMocks(ctx, filtered, unfiltered); err != nil {
+				return nil, nil, err
+			}
+			// Honour any reusable retagging the mutator applied (e.g. the mongo/v2
+			// stable-metadata promotion): move retagged mocks from the per-test pool
+			// into the reusable pool so SetMocksWithWindow does not window-filter them.
+			filtered, unfiltered = rebalanceReusableMocks(filtered, unfiltered)
+		}
+
+		if err := r.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
+			utils.LogError(r.logger, err, "failed to store mocks on agent")
+			return nil, nil, err
+		}
+		perTestRegion = pkg.PerTestRegion(filtered)
+		return filtered, unfiltered, nil
+	}
 
 	if r.instrument && cmdType == utils.DockerCompose {
 		if !serveTest {
@@ -1717,87 +1818,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
-		mocksThatHaveMappings := make(map[string]bool)
-
-		mocksWeNeed := make(map[string]bool)
-
-		// Startup mocks are needed by EVERY test, so they go into both maps.
-		// mocksThatHaveMappings alone would be wrong: GetFilteredMocks prunes on
-		// `isMappedToSpecificTest && !isNeededForCurrentRun`, so a name present
-		// only in the first map is dropped whenever a subset of tests is run.
-		for _, n := range startupMockNames {
-			mocksThatHaveMappings[n] = true
-			mocksWeNeed[n] = true
-		}
-
-		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
-			// Populate the Registry
-			for _, mocks := range expectedTestMockMappings {
-				for _, m := range mocks {
-					mocksThatHaveMappings[m.Name] = true
-				}
-			}
-
-			if len(selectedTests) > 0 {
-				for testID := range selectedTests {
-					if mocks, ok := expectedTestMockMappings[testID]; ok {
-						for _, m := range mocks {
-							mocksWeNeed[m.Name] = true
-						}
-					}
-				}
-			} else {
-				// Running all tests: every mapped mock is needed. Copy rather
-				// than alias — mocksWeNeed was already seeded with the startup
-				// names above, and `mocksWeNeed = mocksThatHaveMappings` would
-				// alias both variables to one map (harmless today, but it makes
-				// the two maps impossible to diverge later).
-				for n := range mocksThatHaveMappings {
-					mocksWeNeed[n] = true
-				}
-			}
-		}
-		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, lookup, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
+		filteredMocks, unfilteredMocks, err := loadMocksForAgent()
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
-		mockLookup = lookup
-
-		addKinds(filteredMocks)
-		addKinds(unfilteredMocks)
-
-		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
-		if r.runDomainSet != nil {
-			for _, m := range filteredMocks {
-				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
-			}
-			for _, m := range unfilteredMocks {
-				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
-			}
-		}
-
-		if filteredMocks == nil && unfilteredMocks == nil {
-			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
-		}
-
-		if mutator, ok := r.hookImpl.(MockMutator); ok {
-			if err := mutator.AfterGetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
-				return models.TestSetStatusFailed, err
-			}
-			// Honour any reusable retagging the mutator applied (e.g. the mongo/v2
-			// stable-metadata promotion): move retagged mocks from the per-test pool
-			// into the reusable pool so SetMocksWithWindow does not window-filter them.
-			filteredMocks, unfilteredMocks = rebalanceReusableMocks(filteredMocks, unfilteredMocks)
-		}
-
-		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to store mocks on agent")
-			return models.TestSetStatusFailed, err
-		}
-		perTestRegion = pkg.PerTestRegion(filteredMocks)
 
 		if !isMappingEnabled {
 			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
@@ -1863,78 +1887,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if cmdType != utils.DockerCompose && !r.noAgent {
 
-		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
-		mocksThatHaveMappings := make(map[string]bool)
-
-		mocksWeNeed := make(map[string]bool)
-
-		// Startup mocks are needed by EVERY test, so they go into both maps.
-		// mocksThatHaveMappings alone would be wrong: GetFilteredMocks prunes on
-		// `isMappedToSpecificTest && !isNeededForCurrentRun`, so a name present
-		// only in the first map is dropped whenever a subset of tests is run.
-		for _, n := range startupMockNames {
-			mocksThatHaveMappings[n] = true
-			mocksWeNeed[n] = true
-		}
-
-		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
-			// Populate the Registry
-			for _, mocks := range expectedTestMockMappings {
-				for _, m := range mocks {
-					mocksThatHaveMappings[m.Name] = true
-				}
-			}
-
-			if len(selectedTests) > 0 {
-				for testID := range selectedTests {
-					if mocks, ok := expectedTestMockMappings[testID]; ok {
-						for _, m := range mocks {
-							mocksWeNeed[m.Name] = true
-						}
-					}
-				}
-			} else {
-				// Running all tests: every mapped mock is needed. Copy rather
-				// than alias — mocksWeNeed was already seeded with the startup
-				// names above, and `mocksWeNeed = mocksThatHaveMappings` would
-				// alias both variables to one map (harmless today, but it makes
-				// the two maps impossible to diverge later).
-				for n := range mocksThatHaveMappings {
-					mocksWeNeed[n] = true
-				}
-			}
-		}
-		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, lookup, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
+		filteredMocks, unfilteredMocks, err := loadMocksForAgent()
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
-		mockLookup = lookup
-		addKinds(filteredMocks)
-		addKinds(unfilteredMocks)
-		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
-		if r.runDomainSet != nil {
-			for _, m := range filteredMocks {
-				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
-			}
-			for _, m := range unfilteredMocks {
-				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
-			}
-		}
-		if mutator, ok := r.hookImpl.(MockMutator); ok {
-			if err := mutator.AfterGetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
-				return models.TestSetStatusFailed, err
-			}
-			// Honour any reusable retagging the mutator applied (see the
-			// non-DockerCompose branch above for the rationale).
-			filteredMocks, unfilteredMocks = rebalanceReusableMocks(filteredMocks, unfilteredMocks)
-		}
-		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to store mocks on agent")
-			return models.TestSetStatusFailed, err
-		}
-		perTestRegion = pkg.PerTestRegion(filteredMocks)
 		r.beforeFirstTestSet(ctx, testRunID)
 		isMappingEnabled := !r.config.DisableMapping
 
@@ -2580,12 +2536,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			// Compute non-DNS expected and consumed name slices once; reused for subset check and mismatch reporting.
 			// Only PER-TEST mocks participate in the consumed-vs-expected
-			// assertion. DNS (non-deterministic resolution order) and
+			// assertion. DNS (non-deterministic resolution order),
+			// connection failures (nothing consumes one at replay yet) and
 			// reusable/startup-tier mocks (session / connection / config,
 			// recorded once at app boot and shared across tests) stay in the
-			// mapping but are excluded here: they are not deterministically
-			// attributed to a single test's window, so including them would
-			// falsely demote tests to OBSOLETE.
+			// mapping but are excluded here, from both sides: including them
+			// would falsely demote tests to OBSOLETE.
 			//
 			// eligibleExpectedEntries is the SHARED filter — literally the
 			// same call buildDepResults makes. Both the verdict signal
@@ -2601,9 +2557,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				filteredExpectedNames = append(filteredExpectedNames, m.Name)
 			}
 
+			// consumedOutsideAssertion is the consumed-side twin of
+			// eligibleExpectedEntries (and the filter buildDepResults uses), so
+			// the two sides exclude the same kinds.
 			filteredMockNames := make([]string, 0, len(consumedMocks))
 			for _, m := range consumedMocks {
-				if m.Kind == models.DNS || isReusableTierState(m) {
+				if consumedOutsideAssertion(m) {
 					continue
 				}
 				filteredMockNames = append(filteredMockNames, m.Name)
@@ -4073,6 +4032,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if shouldWriteMappings {
+		// Only a set that holds connection failures can have mapping entries
+		// for them to keep: every other set is written as before, with no
+		// second read of its mapping file.
+		if holdsConnFailures(mockKindByName) {
+			onDisk, _, err := r.mappingDB.Get(ctx, testSetID)
+			var onDiskStartup []models.MockEntry
+			if err == nil {
+				onDiskStartup, err = r.mappingDB.GetStartup(ctx, testSetID)
+			}
+			if err == nil {
+				keepConnFailureMappings(actualTestMockMappings, onDisk, onDiskStartup, mockKindByName)
+			} else {
+				r.logger.Debug("could not read the mapping file to keep its connection-failure entries", zap.String("testSetID", testSetID), zap.Error(err))
+			}
+		}
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
@@ -4258,12 +4232,15 @@ func (r *Replayer) getTestSetMocks(ctx context.Context, reader pkg.TestSetMocksR
 //
 // The lookup is built here, before AfterGetMocks may change the mocks in place
 // (a mutator decrypts them, for one), so it describes them as they are on disk.
-func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, err error) {
+// skipped is the documents the store's decoders skipped, by name, with their
+// kinds (models.TestSetMocks.Skipped); nil from a store that reads one pool per
+// call.
+func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, skipped map[string]models.Kind, err error) {
 	reader, ok := r.mockDB.(pkg.TestSetMocksReader)
 	if !ok {
 		filtered, unfiltered, err = r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		allSession := unfiltered
 		if len(mocksThatHaveMappings) > 0 {
@@ -4274,13 +4251,13 @@ func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocks
 				allSession = nil
 			}
 		}
-		return filtered, unfiltered, newMockLookup(filtered, allSession), nil
+		return filtered, unfiltered, newMockLookup(filtered, allSession), nil, nil
 	}
 	set, err := r.getTestSetMocks(ctx, reader, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), nil
+	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), set.Skipped, nil
 }
 
 // readMockLookup reads the report's mock lookup for a test set whose mocks
@@ -6076,7 +6053,13 @@ func rebalanceReusableMocks(filtered, unfiltered []*models.Mock) ([]*models.Mock
 			// than carrying it forward (SetMocksWithWindow skips nils anyway).
 			continue
 		}
-		if isReusableTierMock(m) {
+		// A window-bound mock (a connection failure) stays per-test even when
+		// a mutator re-tagged it reusable: moving it to the reusable pool
+		// would serve a failure recorded in one test to every test. This
+		// keploy never reaches it (its only caller has dropped the connection
+		// failures, which it does not replay, by models.AgentBound); it is
+		// here for the keploy that replays them, which keeps them in the pools.
+		if isReusableTierMock(m) && !models.WindowBound(m.Kind) {
 			unfiltered = append(unfiltered, m)
 			continue
 		}
@@ -6143,24 +6126,20 @@ func isMockSubset(actual []string, expected []string) bool {
 }
 
 // buildExpectedMockInfos converts the per-test expected mock list (from the
-// recorded mappings) into the MockMismatchInfo.ExpectedMocks shape. DNS
-// entries are filtered out both at the entry level (m.Kind == "DNS") and via
-// the mockKindByName lookup, because DNS resolution order is non-deterministic
-// and including it produces noisy spurious mismatches downstream. Resolves an
-// empty Kind by looking up mockKindByName so the consumer always gets a kind
-// label when one is available.
+// recorded mappings) into the MockMismatchInfo.ExpectedMocks shape. Entries of
+// a kind the per-test assertion leaves out (isUnassertedMockEntry: DNS, whose
+// resolution order is non-deterministic, and connection failures, which
+// nothing consumes at replay yet) are filtered out both at the entry level and
+// via the mockKindByName lookup; listed here they would only ever show as
+// spurious "expected, not consumed" entries. Resolves an empty Kind by looking
+// up mockKindByName so the consumer always gets a kind label when one is
+// available.
 //
 // Extracted from RunTestSet for unit-testability.
 func buildExpectedMockInfos(expectedMocks []models.MockEntry, mockKindByName map[string]models.Kind) []models.MockMismatchMock {
 	out := make([]models.MockMismatchMock, 0, len(expectedMocks))
 	for _, m := range expectedMocks {
-		isDNS := strings.EqualFold(m.Kind, string(models.DNS))
-		if !isDNS {
-			if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
-				isDNS = true
-			}
-		}
-		if isDNS {
+		if isUnassertedMockEntry(m, mockKindByName) {
 			continue
 		}
 		resolvedKind := m.Kind
@@ -6178,7 +6157,9 @@ func buildExpectedMockInfos(expectedMocks []models.MockEntry, mockKindByName map
 // instrumentation/agent) into the MockMismatchInfo.ActualMocks shape.
 // `known` gates the build: when false (e.g. GetConsumedMocks failed for THIS
 // test in non-instrument mode) we return an empty slice rather than walking
-// stale data attributed to the wrong test case. DNS entries are filtered.
+// stale data attributed to the wrong test case. Kinds the per-test assertion
+// leaves out (models.ExcludedFromDependencyAssertion) are filtered, as they are
+// from the expected list.
 //
 // Extracted from RunTestSet for unit-testability.
 func buildActualMockInfos(consumed []models.MockState, known bool) []models.MockMismatchMock {
@@ -6187,7 +6168,7 @@ func buildActualMockInfos(consumed []models.MockState, known bool) []models.Mock
 		return out
 	}
 	for _, m := range consumed {
-		if m.Kind == models.DNS {
+		if models.ExcludedFromDependencyAssertion(m.Kind) {
 			continue
 		}
 		out = append(out, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})

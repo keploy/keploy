@@ -1354,9 +1354,10 @@ func retainNoisyTestCaseMocks(noisyTestCaseNames []string, mapping *models.Mappi
 // the expected set flags a mismatch — UNLESS it is a mock that doesn't
 // participate in the per-test comparison. Only PER-TEST mocks are compared;
 // reusable/startup-tier mocks (session / connection / config, recorded once at
-// app boot and reused) and DNS (non-deterministic resolution order) are
-// ignored, mirroring the non-streaming path's filtering. They belong in the
-// mapping but must not, by their reuse, falsely demote a test to OBSOLETE.
+// app boot and reused), DNS (non-deterministic resolution order) and connection
+// failures are ignored through consumedOutsideAssertion, the filter the
+// non-streaming path uses. They belong in the mapping but must not falsely
+// demote a test to OBSOLETE.
 func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []string) bool {
 	expectedMap := make(map[string]bool)
 	for _, name := range expectedMocks {
@@ -1366,10 +1367,8 @@ func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []st
 	for _, m := range consumedMocks {
 		if !expectedMap[m.Name] {
 			// An extra consumed mock that wasn't in the mapping is a mismatch
-			// ONLY if it's a per-test mock. Reusable/startup-tier mocks
-			// (session/connection/config) and DNS are excluded from the
-			// comparison — they are reused / non-deterministically attributed.
-			if m.Kind != models.DNS && !isReusableTierState(m) {
+			// ONLY if it takes part in the per-test comparison.
+			if !consumedOutsideAssertion(m) {
 				return false
 			}
 		}
@@ -1514,6 +1513,60 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 		ID:    testCaseID,
 		Mocks: newMocks,
 	})
+}
+
+// keepConnFailureMappings adds to the mapping write the connection-failure
+// entries the mapping on disk holds for what the write is about to replace:
+// mapdb.Insert replaces a written test's entries, and the startup section when
+// the write has one. The written entries come from what this run consumed, and
+// this keploy never consumes a connection failure, so without this a
+// --update-test-mapping run would strip them from the recording for good, and
+// a keploy that replays them would no longer serve one to its test (or at
+// boot). An entry is a connection failure by its own kind or, for an entry
+// recorded without one, by mockKindByName.
+func keepConnFailureMappings(write *models.Mapping, onDisk map[string][]models.MockEntry, onDiskStartup []models.MockEntry, mockKindByName map[string]models.Kind) {
+	if write == nil {
+		return
+	}
+	keep := func(written, disk []models.MockEntry) []models.MockEntry {
+		have := make(map[string]bool, len(written))
+		for _, m := range written {
+			have[m.Name] = true
+		}
+		for _, e := range disk {
+			if have[e.Name] || !isConnFailureEntry(e, mockKindByName) {
+				continue
+			}
+			written = append(written, e)
+			have[e.Name] = true
+		}
+		return written
+	}
+	for i := range write.TestCases {
+		write.TestCases[i].Mocks = keep(write.TestCases[i].Mocks, onDisk[write.TestCases[i].ID])
+	}
+	if len(write.Startup) > 0 {
+		write.Startup = keep(write.Startup, onDiskStartup)
+	}
+}
+
+// holdsConnFailures reports whether a test set's mocks (mockKindByName, which
+// lists the ones the decoders skipped too) include a connection failure: only
+// then can its mapping hold entries keepConnFailureMappings keeps.
+func holdsConnFailures(mockKindByName map[string]models.Kind) bool {
+	for _, k := range mockKindByName {
+		if k == models.ConnectionFailure {
+			return true
+		}
+	}
+	return false
+}
+
+func isConnFailureEntry(e models.MockEntry, mockKindByName map[string]models.Kind) bool {
+	if e.Kind != "" {
+		return models.Kind(e.Kind) == models.ConnectionFailure
+	}
+	return mockKindByName[e.Name] == models.ConnectionFailure
 }
 
 type TestFailure struct {

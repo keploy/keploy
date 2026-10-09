@@ -64,3 +64,25 @@ func TestRecordedPortsStartEmptyAfterReset(t *testing.T) {
 		t.Fatal("a new session must not keep the previous session's ports")
 	}
 }
+
+// A connection failure says the destination was NOT reached, and it carries no
+// metadata.destAddr: counted like any mock without a known port, it would make
+// every port "recorded" and switch off the loopback refusal rules for the
+// whole test set.
+func TestRecordedPortsIgnoreConnectionFailures(t *testing.T) {
+	cf := &models.Mock{Kind: models.ConnectionFailure, Spec: models.MockSpec{
+		ConnFailure: &models.ConnFailureSpec{Address: "127.0.0.1:5432", Phase: models.ConnFailurePhaseConnect, Outcome: models.ConnFailureRefused},
+	}}
+	var r recordedPorts
+	r.add([]*models.Mock{cf}, []*models.Mock{
+		{Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:9000"}}},
+	})
+	if !r.has(9000) {
+		t.Fatal("port 9000 was called in the recording")
+	}
+	for _, p := range []uint32{5432, 41234} {
+		if r.has(p) {
+			t.Fatalf("port %d must not count as recorded: a connection failure is not a call that reached it", p)
+		}
+	}
+}

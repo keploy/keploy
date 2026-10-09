@@ -3649,7 +3649,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 
 	strict := strictWindowEnabled(strictPerCall)
 	isNonKeploy := false
-	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 
 	for _, mock := range m {
 		if mock == nil {
@@ -3660,6 +3660,21 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		p := mock.DeepCopy()
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
+		}
+		// A window-bound mock (a connection failure) is served from its own
+		// window or the startup band and nowhere else, in both modes — see
+		// placeWindowBound. Routed before every rule below, each of which can
+		// otherwise hand it to every test: the untimed branch, the session
+		// short-circuit, the config/connection tag fallback, lax promotion.
+		if models.WindowBound(p.Kind) {
+			if placeWindowBound(p, afterTime, beforeTime, firstWindowStart) == windowBoundDropped {
+				droppedWindowBound++
+				continue
+			}
+			p.TestModeInfo.Lifetime = models.LifetimePerTest
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
 		}
 		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing",
@@ -3828,11 +3843,12 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			unfilteredMocks = append(unfilteredMocks, p)
 		}
 	}
-	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 || droppedWindowBound > 0 {
 		logger.Debug("filterByTimeStamp tier-aware outcome (see separate counts for reasons)",
 			zap.Int("dropped_out_of_window", droppedOutOfWindow),
 			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
 			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Int("dropped_window_bound_outside_own_window", droppedWindowBound),
 			zap.Bool("strict", strict),
 			zap.Time("after", afterTime),
 			zap.Time("before", beforeTime),
@@ -3896,6 +3912,13 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			}
 			p := mk.DeepCopy()
 			lt := effectiveLifetimeForRouting(p)
+			if models.WindowBound(p.Kind) {
+				// Never a reusable pool, whatever its tag says (see
+				// placeWindowBound). With no window there is nothing to place
+				// it in, so it goes where every per-test mock goes.
+				lt = models.LifetimePerTest
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+			}
 			switch lt {
 			case models.LifetimeSession:
 				p.TestModeInfo.IsFiltered = false
@@ -3912,7 +3935,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 	}
 
 	strict := strictWindowEnabled(strictPerCall)
-	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 	isNonKeploy := false
 
 	for _, mk := range m {
@@ -3922,6 +3945,23 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		p := mk.DeepCopy()
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
+		}
+		// Window-bound: own window or startup band only, in both modes. Same
+		// rule, same reason, as in filterByTimeStampTierAware.
+		if models.WindowBound(p.Kind) {
+			switch placeWindowBound(p, afterTime, beforeTime, firstWindowStart) {
+			case windowBoundInWindow:
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+				p.TestModeInfo.IsFiltered = true
+				filtered = append(filtered, p)
+			case windowBoundStartup:
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+				p.TestModeInfo.IsFiltered = true
+				startup = append(startup, p)
+			default:
+				droppedWindowBound++
+			}
+			continue
 		}
 		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing",
@@ -4004,11 +4044,12 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		}
 	}
 
-	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 || droppedWindowBound > 0 {
 		logger.Debug("FilterByTimeStampThreeTier outcome",
 			zap.Int("dropped_out_of_window", droppedOutOfWindow),
 			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
 			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Int("dropped_window_bound_outside_own_window", droppedWindowBound),
 			zap.Int("perTest", len(filtered)),
 			zap.Int("session", len(unfiltered)),
 			zap.Int("startup", len(startup)),
@@ -4021,6 +4062,39 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
 	return filtered, unfiltered, startup
+}
+
+// windowBoundPlace is where the filters put a window-bound mock.
+type windowBoundPlace int
+
+const (
+	windowBoundDropped windowBoundPlace = iota
+	windowBoundInWindow
+	windowBoundStartup
+)
+
+// placeWindowBound places a models.WindowBound mock (a connection failure) for
+// the test window [afterTime, beforeTime]: in the window when its request time
+// is inside it; in the startup band when it predates firstWindowStart (app
+// boot, before any test); dropped in every other case, strict mode or lax.
+//
+// Lax mode promotes an out-of-window per-test mock to the session pool, which
+// every later test reads; a window-bound mock without both timestamps, or with
+// its response before its request, cannot be placed in any window at all and
+// would otherwise go to the per-test pool of every test. Either way a failure
+// recorded in one test would fail connects in others, so neither happens.
+func placeWindowBound(p *models.Mock, afterTime, beforeTime, firstWindowStart time.Time) windowBoundPlace {
+	req, res := p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock
+	if req.IsZero() || res.IsZero() || res.Before(req) {
+		return windowBoundDropped
+	}
+	if !req.Before(afterTime) && !req.After(beforeTime) {
+		return windowBoundInWindow
+	}
+	if !firstWindowStart.IsZero() && req.Before(firstWindowStart) {
+		return windowBoundStartup
+	}
+	return windowBoundDropped
 }
 
 // effectiveLifetimeForRouting resolves a mock's Lifetime for
