@@ -802,6 +802,11 @@ jobs:
     # (a tenant header sent twice; a mock's two Set-Cookie lines).
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/repeated-headers-linux.yml
+  run_interim_responses_linux:
+    # Guard: an app's interim (1xx) responses are forwarded to the client and
+    # the final response is recorded, in default and --sync record.
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/interim-responses-linux.yml
   run_unpublished_port_docker:
     # Guard: a test recorded on an app port the docker command does not
     # publish is named at record time and fails at replay saying so.
@@ -1418,6 +1423,7 @@ jobs:
       - run_upstream_refusal_linux_extended
       - run_startup_mock_capture_linux
       - run_repeated_headers_linux
+      - run_interim_responses_linux
       - run_unpublished_port_docker
       - run_golang_docker
       - run_fuzzer_linux
@@ -1448,6 +1454,7 @@ jobs:
             "${{ needs.run_upstream_refusal_linux_extended.result }}" \
             "${{ needs.run_startup_mock_capture_linux.result }}" \
             "${{ needs.run_repeated_headers_linux.result }}" \
+            "${{ needs.run_interim_responses_linux.result }}" \
             "${{ needs.run_unpublished_port_docker.result }}" \
             "${{ needs.run_golang_docker.result }}" \
             "${{ needs.run_fuzzer_linux.result }}" \
