@@ -49,7 +49,10 @@ func TestRunnerOutDoesNotWaitForBackgroundChildren(t *testing.T) {
 	if cmdErr.Err != nil {
 		t.Fatalf("the runner exited 0, want no error, got %v", cmdErr.Err)
 	}
-	if took > time.Second {
+	// The bug waits out the 2s WaitDelay; the fix waits at most the 500ms
+	// drain while the background child holds the pipe. 1.5s tells them apart
+	// with room for a busy machine.
+	if took > 1500*time.Millisecond {
 		t.Fatalf("the runner exited at once but ExecuteCommand took %s", took)
 	}
 	if !strings.Contains(out.String(), "--- FAIL: TestX") {
