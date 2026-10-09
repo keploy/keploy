@@ -373,3 +373,120 @@ func TestResetRecordedDNSMocks_NilTrackersNeverPanic(t *testing.T) {
 	p := &Proxy{logger: zap.NewNop()}
 	p.ResetRecordedDNSMocks()
 }
+
+// bigMXRecords is how many MX records bigMXAnswer holds, each with an AAAA
+// and an A record for its host.
+const bigMXRecords = 12
+
+// bigMXAnswer is an MX answer like gmail.com's, with its extra records, over
+// the 512 bytes a UDP client takes by default even compressed.
+func bigMXAnswer(t *testing.T) *dns.Msg {
+	t.Helper()
+	m := new(dns.Msg)
+	m.SetQuestion("gmail.com.", dns.TypeMX)
+	m.Response = true
+	for i := 0; i < bigMXRecords; i++ {
+		mx, err := dns.NewRR(fmt.Sprintf("gmail.com. 300 IN MX %d alt%d.gmail-smtp-in.l.google.com.", i*10, i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Answer = append(m.Answer, mx)
+		for _, s := range []string{
+			fmt.Sprintf("alt%d.gmail-smtp-in.l.google.com. 300 IN AAAA 2607:f8b0:4004:c1b::%x", i, 0x100+i),
+			fmt.Sprintf("alt%d.gmail-smtp-in.l.google.com. 300 IN A 142.250.27.%d", i, 26+i),
+		} {
+			rr, err := dns.NewRR(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Extra = append(m.Extra, rr)
+		}
+	}
+	m.Compress = true
+	if b, _ := m.Pack(); len(b) <= dns.MinMsgSize {
+		t.Fatalf("the fixture is %d bytes compressed, want it over %d", len(b), dns.MinMsgSize)
+	}
+	m.Compress = false
+	return m
+}
+
+// serveDNSOn runs p's DNS handler on a loopback listener of network ("udp" or
+// "tcp") and returns its address.
+func serveDNSOn(t *testing.T, p *Proxy, network string) string {
+	t.Helper()
+	srv := &dns.Server{Handler: p}
+	switch network {
+	case "udp":
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.PacketConn = pc
+	default:
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.Listener = l
+	}
+	started := make(chan struct{})
+	failed := make(chan error, 1)
+	srv.NotifyStartedFunc = func() { close(started) }
+	go func() { failed <- srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	select {
+	case <-started:
+	case err := <-failed:
+		t.Fatalf("the DNS server did not start: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the DNS server did not start")
+	}
+	if srv.PacketConn != nil {
+		return srv.PacketConn.LocalAddr().String()
+	}
+	return srv.Listener.Addr().String()
+}
+
+// A DNS answer over UDP fits what the client takes -- 512 bytes, or the EDNS0
+// size it advertised -- and over TCP is whole. Written whole over UDP, gmail's
+// MX answer was cut off by the client's read and failed to parse ("dns:
+// overflowing header size"), while recording and when its mock was replayed.
+func TestServeDNS_AnswersFitTheClient(t *testing.T) {
+	p := newTestProxyForDNS(false)
+	p.dnsCache = newDNSCache()
+	p.dnsCache.Add(generateCacheKey("gmail.com.", dns.TypeMX), dnsCacheEntry{Msg: bigMXAnswer(t), FromUpstream: true})
+	query := func(network string, edns uint16) (*dns.Msg, error) {
+		q := new(dns.Msg)
+		q.SetQuestion("gmail.com.", dns.TypeMX)
+		if edns > 0 {
+			q.SetEdns0(edns, false)
+		}
+		c := &dns.Client{Net: network, Timeout: 5 * time.Second}
+		if edns > 0 {
+			c.UDPSize = edns
+		}
+		r, _, err := c.Exchange(q, serveDNSOn(t, p, network))
+		return r, err
+	}
+
+	whole := func(r *dns.Msg) bool {
+		return r != nil && !r.Truncated && len(r.Answer) == bigMXRecords && len(r.Extra) == 2*bigMXRecords
+	}
+	// 512 bytes: every MX record fits once compressed, so only extra records
+	// go, and TC tells the client it may ask again over TCP for the rest.
+	r, err := query("udp", 0)
+	if err != nil {
+		t.Fatalf("a UDP client without EDNS0 could not read the answer: %v", err)
+	}
+	if len(r.Answer) != bigMXRecords || len(r.Extra) >= 2*bigMXRecords || !r.Truncated {
+		t.Errorf("a UDP client without EDNS0 got %d answers, %d extras, TC=%v; want every answer, fewer extras, TC", len(r.Answer), len(r.Extra), r.Truncated)
+	}
+	for _, size := range []uint16{1232, 4096} {
+		if r, err := query("udp", size); err != nil || !whole(r) {
+			t.Errorf("a UDP client advertising %d bytes got %v, %v; want the whole answer", size, r, err)
+		}
+	}
+	if r, err := query("tcp", 0); err != nil || !whole(r) {
+		t.Errorf("a TCP client got %v, %v; want the whole answer", r, err)
+	}
+}

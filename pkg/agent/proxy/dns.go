@@ -353,10 +353,30 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		msg.Extra = append(msg.Extra, resp.Extra...)
 	}
 
+	// Over UDP an answer may be no larger than the client takes: 512 bytes,
+	// or the size it advertised with EDNS0 (RFC 1035 4.2.1, RFC 6891 6.2.5).
+	// Written whole, a larger one -- gmail.com's MX answer with its extra
+	// records -- was cut off by the client's read and failed to parse ("dns:
+	// overflowing header size"), while recording and when its mock was
+	// replayed. Truncate drops what does not fit, extra records first, and
+	// sets TC when it drops any record, so the client can ask over TCP.
+	if addr := w.RemoteAddr(); addr != nil && addr.Network() == "udp" {
+		msg.Truncate(udpAnswerSize(r))
+	}
+
 	err := w.WriteMsg(msg)
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to write dns info back to the client")
 	}
+}
+
+// udpAnswerSize is the most a UDP answer to r may be: the EDNS0 buffer size r
+// advertises, or 512 bytes.
+func udpAnswerSize(r *dns.Msg) int {
+	if opt := r.IsEdns0(); opt != nil && int(opt.UDPSize()) > dns.MinMsgSize {
+		return int(opt.UDPSize())
+	}
+	return dns.MinMsgSize
 }
 
 // isRedundantSearchExpansion reports whether name is a search-list expansion
