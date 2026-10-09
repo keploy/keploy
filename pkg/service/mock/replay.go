@@ -962,10 +962,18 @@ type ReplayOutcome struct {
 	Mocks  []FlowMocks
 	Starts map[string]int
 	Sets   []string
-	Tests  []RanTest
+	// Tests is each top-level test the replay ran, once (see ranTests).
+	Tests []RanTest
+	// Failed names the top-level tests the runner printed `--- FAIL:` for.
+	// Best-effort: it is read from the runner's stdout as keploy starts it, so
+	// it is empty under compose and on Windows, and for `go test -json`.
 	Failed []string
 }
 
+// RanTest is one top-level test a replay ran: its name, the set (folder) it
+// belongs to, and its verdict as its harness reported it at the end of the
+// test (models.ScopeOutcomePassed, Failed or Skipped; "" when it reported
+// none).
 type RanTest struct {
 	Name   string
 	Set    string

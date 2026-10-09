@@ -47,7 +47,7 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 		}
 		dir := suiteAt(suites, mk.ts)
 		if dir == "" {
-			dir = dirAt(tests, mk.ts)
+			dir = dirAt(tests, mk.ts, mk.pid)
 		}
 		j, ok := runner[dir]
 		if !ok {
@@ -90,7 +90,27 @@ func testAt(tests []models.ScopeWindow, worker uint32, at time.Time) string {
 	return pick[0].Name
 }
 
-func dirAt(tests []models.ScopeWindow, at time.Time) string {
+// dirAt is the folder a start-up call made at `at` belongs to, when no suite
+// mark says: the folder of the next test to start after it, else of the last
+// test. Tests of the process that made the call (pid) are preferred, so with
+// packages running in parallel (go test ./...) a package's start-up is not
+// filed under another package; with no PID match, any test counts.
+func dirAt(tests []models.ScopeWindow, at time.Time, pid uint32) string {
+	if pid != 0 {
+		var own []models.ScopeWindow
+		for _, w := range tests {
+			if w.PID == pid {
+				own = append(own, w)
+			}
+		}
+		if d := dirAtTime(own, at); d != "" {
+			return d
+		}
+	}
+	return dirAtTime(tests, at)
+}
+
+func dirAtTime(tests []models.ScopeWindow, at time.Time) string {
 	next, last := -1, -1
 	for i, w := range tests {
 		if w.Dir == "" {

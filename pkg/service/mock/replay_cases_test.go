@@ -430,3 +430,21 @@ func TestPushScopeGateToAnAgentThatCannot(t *testing.T) {
 	m.pushScopeGate(context.Background(), "set", "")
 	require.Equal(t, 1, logs.FilterMessageSnippet("every test runs this replay").Len())
 }
+
+// A replay lists each test it ran once, with its latest run's verdict; a test
+// the replay gated out did not run; same-named tests in two folders are two
+// tests.
+func TestRanTestsListsEachTestOnceAndLeavesGatedOut(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{
+		{Name: "TestA", Dir: "e2e/orders", Start: at(0), End: at(100), Outcome: models.ScopeOutcomeFailed},
+		{Name: "TestA/step", Dir: "e2e/orders", Start: at(10), End: at(90)},
+		{Name: "TestB", Start: at(150), End: at(150), Outcome: models.ScopeOutcomeGated},
+		{Name: "TestA", Dir: "e2e/orders", Start: at(200), End: at(300), Outcome: models.ScopeOutcomePassed},
+		{Name: "TestA", Dir: "e2e/billing", Start: at(400), End: at(500), Outcome: models.ScopeOutcomeSkipped},
+	}
+	require.Equal(t, []RanTest{
+		{Name: "TestA", Set: "e2e/orders", Status: models.ScopeOutcomePassed},
+		{Name: "TestA", Set: "e2e/billing", Status: models.ScopeOutcomeSkipped},
+	}, ranTests(windows))
+}

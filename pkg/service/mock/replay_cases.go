@@ -348,15 +348,16 @@ func (m *mockService) reportMisses(misses []models.UnmatchedCall, byFlow []FlowM
 		}
 		n[k]++
 	}
-	placed := map[string]int{}
+	type call struct{ protocol, summary, dest string }
+	placed := map[call]int{}
 	for _, f := range byFlow {
 		for _, miss := range f.Missed {
 			add(f.Flow, miss)
-			placed[miss.Protocol+" "+miss.ActualSummary+" "+miss.Destination]++
+			placed[call{miss.Protocol, miss.ActualSummary, miss.Destination}]++
 		}
 	}
 	for _, miss := range misses {
-		k := miss.Protocol + " " + miss.ActualSummary + " " + miss.Destination
+		k := call{miss.Protocol, miss.ActualSummary, miss.Destination}
 		if placed[k] > 0 {
 			placed[k]--
 			continue
@@ -376,14 +377,31 @@ func (m *mockService) reportMisses(misses []models.UnmatchedCall, byFlow []FlowM
 	}
 }
 
+// ranTests lists the top-level tests the replay ran, once each, in the order
+// they first ran. A test run more than once (-count, a retry) is listed once,
+// with its latest run's verdict; a test the replay gated out did not run and
+// is left out. Tests of the same name in different folders stay apart.
 func ranTests(windows []models.ScopeWindow) []RanTest {
 	root := gitTop()
+	type key struct{ dir, name string }
 	var out []RanTest
+	at := map[key]int{}
+	ends := map[key]time.Time{}
 	for _, w := range windows {
-		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
+		if w.App || w.Suite || w.Name == "" || w.Outcome == models.ScopeOutcomeGated || parentOf(windows, w.Name) != "" {
 			continue
 		}
-		out = append(out, RanTest{Name: w.Name, Set: setName(w.Dir, root), Status: w.Outcome})
+		k := key{w.Dir, w.Name}
+		t := RanTest{Name: w.Name, Set: setName(w.Dir, root), Status: w.Outcome}
+		i, seen := at[k]
+		if !seen {
+			at[k], ends[k] = len(out), w.End
+			out = append(out, t)
+			continue
+		}
+		if !w.End.Before(ends[k]) {
+			out[i], ends[k] = t, w.End
+		}
 	}
 	return out
 }
@@ -394,10 +412,20 @@ type failScan struct {
 	failed []string
 }
 
+// maxFailScanLine bounds the partial line failScan keeps between writes.
+const maxFailScanLine = 64 << 10
+
 func (f *failScan) Write(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rest = append(f.rest, p...)
+	defer func() {
+		// A `--- FAIL:` line is short; a runner writing a long line with no
+		// newline must not grow this buffer without bound.
+		if len(f.rest) > maxFailScanLine {
+			f.rest = f.rest[len(f.rest)-maxFailScanLine:]
+		}
+	}()
 	for {
 		i := bytes.IndexByte(f.rest, '\n')
 		if i < 0 {

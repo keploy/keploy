@@ -98,3 +98,26 @@ func TestTestAtUsesTheOnlyOpenTestWhenTheCallerHasNone(t *testing.T) {
 		t.Fatalf("two workers with open tests must be ambiguous, got %q", got)
 	}
 }
+
+// With packages running in parallel, a start-up call belongs to a test of the
+// process that made it, not to whichever package's test starts next.
+func TestDirAtPrefersTheCallersProcess(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	tests := []models.ScopeWindow{
+		{Name: "TestOrders", Dir: "e2e/orders", PID: 10, Start: at(300), End: at(400)},
+		{Name: "TestBilling", Dir: "e2e/billing", PID: 20, Start: at(100), End: at(200)},
+	}
+	for _, c := range []struct {
+		pid  uint32
+		want string
+	}{
+		{10, "e2e/orders"},  // pid 10's call goes to pid 10's package
+		{20, "e2e/billing"}, // and pid 20's to its own
+		{0, "e2e/billing"},  // no pid: the next test to start
+		{99, "e2e/billing"}, // an unknown pid falls back to time
+	} {
+		if got := dirAt(tests, at(50), c.pid); got != c.want {
+			t.Fatalf("pid %d: got %q, want %q", c.pid, got, c.want)
+		}
+	}
+}
