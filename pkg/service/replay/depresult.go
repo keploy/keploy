@@ -142,6 +142,9 @@ func httpTargetFromReq(req *models.HTTPReq) string {
 // WHAT IS EXCLUDED, and why it is not the bug:
 //
 //   - DNS: resolution order is non-deterministic.
+//   - Connection failures: no keploy of this version consumes one at replay,
+//     so an expected one would always look missing (see
+//     models.ExcludedFromDependencyAssertion).
 //   - Reusable tiers (session / connection / config): recorded once at app
 //     boot and shared across every test, so they are not deterministically
 //     attributed to one test's window. Asserting their presence per test would
@@ -162,12 +165,24 @@ func eligibleExpectedEntries(
 ) []models.MockEntry {
 	eligible := make([]models.MockEntry, 0, len(expected))
 	for _, m := range expected {
-		if isDNSMockEntry(m, mockKindByName) || reusableMockNames[m.Name] {
+		if isUnassertedMockEntry(m, mockKindByName) || reusableMockNames[m.Name] {
 			continue
 		}
 		eligible = append(eligible, m)
 	}
 	return eligible
+}
+
+// consumedOutsideAssertion reports whether a consumed mock is left out of the
+// consumed side of the per-test assertion: a kind the assertion excludes
+// (models.ExcludedFromDependencyAssertion — DNS, connection failures) or a
+// reusable tier. It is the consumed-side twin of eligibleExpectedEntries, and
+// every consumed-side filter (filteredMockNames in RunTestSet, buildDepResults,
+// isMockSubsetWithConfig) calls it, so the two sides exclude the same kinds:
+// a kind left out of one side only makes every test that maps one of its
+// mocks look like it lost a dependency.
+func consumedOutsideAssertion(m models.MockState) bool {
+	return models.ExcludedFromDependencyAssertion(m.Kind) || isReusableTierState(m)
 }
 
 // buildDepResults is the first writer of models.Result.DepResult
@@ -180,6 +195,7 @@ func eligibleExpectedEntries(
 // assertion applies:
 //
 //   - DNS is excluded: resolution order is non-deterministic.
+//   - Connection failures are excluded: nothing consumes one at replay yet.
 //   - Reusable tiers (session / connection / config) are excluded: they are
 //     recorded once at app boot and shared across every test, so they are not
 //     deterministically attributed to a single test's window. Including them
@@ -220,7 +236,7 @@ func eligibleExpectedEntries(
 // carry the same information for ~40 bytes, and leave a clean test's
 // `dep_result: []` byte-identical to a pre-slice-4 report.
 //
-// The consumed side applies the same DNS + reusable-tier filter that
+// The consumed side applies the same filter (consumedOutsideAssertion) that
 // filteredMockNames does at the call site, so "this function produced a row
 // with Normal=false" and "isMockSubset(filteredMockNames, filteredExpected)
 // returned false" are the same signal computed from the same inputs. That
@@ -254,7 +270,7 @@ func buildDepResults(
 
 	consumedNames := make(map[string]bool, len(consumed))
 	for _, m := range consumed {
-		if m.Kind == models.DNS || isReusableTierState(m) {
+		if consumedOutsideAssertion(m) {
 			continue
 		}
 		consumedNames[m.Name] = true
@@ -452,15 +468,21 @@ func depTargetFor(m models.MockEntry, lookup map[string]mockDisplayInfo) string 
 	return lookup[m.Name].target
 }
 
-// isDNSMockEntry reports whether a mapping entry refers to a DNS mock, using
-// the entry's own Kind first and the loaded-mock lookup as a fallback for
-// entries recorded without one. Extracted so buildDepResults and the inline
-// filteredExpectedNames loop in RunTestSet cannot drift apart.
-func isDNSMockEntry(m models.MockEntry, mockKindByName map[string]models.Kind) bool {
-	if strings.EqualFold(m.Kind, string(models.DNS)) {
+// isUnassertedMockEntry reports whether a mapping entry refers to a mock of a
+// kind the per-test assertion leaves out (models.ExcludedFromDependencyAssertion:
+// DNS, connection failures), using the entry's own Kind first and the
+// loaded-mock lookup as a fallback for entries recorded without one. Extracted
+// so buildDepResults, the filteredExpectedNames list in RunTestSet and the
+// mismatch report cannot drift apart.
+//
+// The entry's own Kind is enough for a connection failure the decoder skipped
+// (one this keploy does not support): it is in no lookup, but the mapping
+// still lists it, and it must not be counted as expected.
+func isUnassertedMockEntry(m models.MockEntry, mockKindByName map[string]models.Kind) bool {
+	if strings.EqualFold(m.Kind, string(models.DNS)) || models.ExcludedFromDependencyAssertion(models.Kind(m.Kind)) {
 		return true
 	}
-	if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
+	if kind, ok := mockKindByName[m.Name]; ok && models.ExcludedFromDependencyAssertion(kind) {
 		return true
 	}
 	return false

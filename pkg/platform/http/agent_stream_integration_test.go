@@ -109,6 +109,34 @@ func TestStoreMocks_StreamsToAgent(t *testing.T) {
 	}
 }
 
+// This keploy does not replay connection failures, so it never sends one to
+// the agent: an agent that predates the kind would read it as a mock with no
+// metadata.destAddr, whose unknown port turns loopback refusal off for the
+// whole test set. The caller's slices are left as they were.
+func TestStoreMocks_NeverSendsAConnectionFailureToTheAgent(t *testing.T) {
+	svc := &stubSvc{}
+	r := chi.NewRouter()
+	routes.DefaultRoutes{}.New(r, svc, zap.NewNop())
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	client := newClient(t, srv.URL+"/agent")
+	f := []*models.Mock{{Name: "f1", Kind: models.HTTP}, {Name: "cf-1", Kind: models.ConnectionFailure}, {Name: "f2", Kind: models.Mongo}}
+	u := []*models.Mock{{Name: "cf-2", Kind: models.ConnectionFailure}, {Name: "u1", Kind: models.DNS}}
+	if err := client.StoreMocks(context.Background(), f, u); err != nil {
+		t.Fatalf("StoreMocks: %v", err)
+	}
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if got := strings.Join(svc.names, ","); got != "f1,f2,u1" || svc.filtered != 2 || svc.unfiltered != 1 {
+		t.Fatalf("the agent got %q (filtered %d, unfiltered %d); want f1,f2,u1 (2, 1): no connection failure", got, svc.filtered, svc.unfiltered)
+	}
+	if len(f) != 3 || f[1].Name != "cf-1" || len(u) != 2 || u[0].Name != "cf-2" {
+		t.Fatal("StoreMocks changed the caller's slices")
+	}
+}
+
 // compressibleCorpus is n HTTP mocks whose bodies repeat the way recorded API
 // responses do, so a compressed stream comes out much smaller than the raw one.
 func compressibleCorpus(n int) []*models.Mock {

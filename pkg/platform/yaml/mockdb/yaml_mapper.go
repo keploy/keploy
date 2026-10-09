@@ -33,6 +33,10 @@ var builtinYAMLKinds = map[models.Kind]struct{}{
 	models.Mongo:       {},
 	models.GRPC_EXPORT: {},
 	models.DNS:         {},
+	// The connection-failure format is keploy's own contract between the
+	// keploy that records a failure and the one that replays it (and Validate's
+	// "upgrade keploy" rule depends on it), so no mapper may reshape it.
+	models.ConnectionFailure: {},
 }
 
 // RegisterMockYAMLMapper registers mapper as the encode/decode

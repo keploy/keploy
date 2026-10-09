@@ -1057,3 +1057,39 @@ func TestCarryOverNeedsSeededWindows(t *testing.T) {
 		t.Fatal("a lookahead range was planned with no seeded windows")
 	}
 }
+
+// A connection failure belongs to the test window it was recorded in. Even a
+// carry-over registration for its kind cannot load it ahead of that window or
+// keep it past it: either way it would fail a connect in a test that never
+// saw the failure.
+func TestConnectionFailuresNeverEnterTheCarryOverTier(t *testing.T) {
+	registerSends(t)
+	t.Cleanup(models.RegisterCarryOver(models.ConnectionFailure, func(*models.Mock) bool { return true }))
+	r := newCarryRig(t,
+		brokerMockAt("cf2", models.ConnectionFailure, "", 2050),   // in W2
+		brokerMockAt("s2", pulsarKind, "SEND", 2060),              // in W2, the control
+		brokerMockAt("cfgap", models.ConnectionFailure, "", 2500), // in the gap after W2
+	)
+	carried := func() []string {
+		ms, _ := r.mm.GetCarryOverMocks()
+		return pacedNames(ms)
+	}
+
+	r.window(1)
+	if got := carried(); !eqNames(got, []string{"s2"}) {
+		t.Fatalf("W1: carry-over = %v; want only the SEND, loaded a second ahead", got)
+	}
+	r.window(2)
+	if got := r.perTestNames(); !eqNames(got, []string{"cf2", "s2"}) {
+		t.Fatalf("W2: per-test = %v; a connection failure is served in its own window", got)
+	}
+	r.window(3)
+	if got := carried(); !eqNames(got, []string{"s2"}) {
+		t.Fatalf("W3: carry-over = %v; W2 closed with both unconsumed and only the SEND may be carried", got)
+	}
+	for _, n := range []string{"cf2", "cfgap"} {
+		if r.consume(n) {
+			t.Fatalf("W3: %s was consumable outside its own window", n)
+		}
+	}
+}

@@ -229,15 +229,27 @@ const pruneEnterpriseJSONDoc = `{"version":"api.keploy.io/v1beta1","kind":"Acme-
 // document, decode them all, filter, then write the kept mocks. It is the
 // oracle the streaming prune must match byte for byte. Returns nil when the
 // old prune removed the file (nothing kept, yaml/json).
+//
+// One change since, made on purpose: a document the decoders skip is no
+// longer dropped but kept, in its place, exactly as it was read — what the
+// prune cannot decode it cannot judge — and so is a connection failure, which
+// nothing in this keploy changes (see nextMocks).
 func readAllPrune(t *testing.T, path string, mockNames map[string]models.MockState, pruneBefore, startupCutoffTime time.Time) []byte {
 	t.Helper()
-	var mocks []*models.Mock
+	// entry is a decoded mock, or a document the decoders skipped, as read.
+	type entry struct {
+		mock *models.Mock
+		raw  []byte
+	}
+	var entries []entry
 	ext := filepath.Ext(path)
 	if ext == ".gob" {
-		var err error
-		mocks, err = readGobMocks(path)
+		mocks, err := readGobMocks(path)
 		if err != nil {
 			t.Fatal(err)
+		}
+		for _, m := range mocks {
+			entries = append(entries, entry{mock: m})
 		}
 	} else {
 		f := yaml.FormatYAML
@@ -249,58 +261,68 @@ func readAllPrune(t *testing.T, path string, mockNames map[string]models.MockSta
 			t.Fatal(err)
 		}
 		defer reader.Close()
-		if f == yaml.FormatJSON {
-			var docs []*yaml.NetworkTrafficDocJSON
-			for {
-				d, err := reader.ReadNextDocJSON()
+		for {
+			var decoded []*models.Mock
+			var raw []byte
+			if f == yaml.FormatJSON {
+				d, b, err := reader.ReadNextDocJSONBytes()
 				if errors.Is(err, io.EOF) {
 					break
 				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				docs = append(docs, d)
-			}
-			if mocks, err = DecodeMocksJSON(docs, zap.NewNop()); err != nil {
-				t.Fatal(err)
-			}
-		} else {
-			var docs []*yaml.NetworkTrafficDoc
-			for {
-				d, err := reader.ReadNextDoc()
+				raw = b
+				if decoded, err = DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{d}, zap.NewNop()); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				d, b, err := reader.ReadNextDocBytes()
 				if errors.Is(err, io.EOF) {
 					break
 				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				docs = append(docs, d)
+				raw = b
+				if decoded, err = DecodeMocks([]*yaml.NetworkTrafficDoc{d}, zap.NewNop()); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if mocks, err = DecodeMocks(docs, zap.NewNop()); err != nil {
-				t.Fatal(err)
+			if len(decoded) == 0 || (len(decoded) == 1 && decoded[0].Kind == models.ConnectionFailure) {
+				entries = append(entries, entry{raw: raw})
+				continue
+			}
+			for _, m := range decoded {
+				entries = append(entries, entry{mock: m})
 			}
 		}
 	}
-	var kept []*models.Mock
-	for _, mock := range mocks {
+	var kept []entry
+	for _, e := range entries {
+		mock := e.mock
+		if mock == nil {
+			kept = append(kept, e)
+			continue
+		}
 		if mock.Spec.Metadata["type"] == "config" {
-			kept = append(kept, mock)
+			kept = append(kept, e)
 			continue
 		}
 		if st, ok := mockNames[mock.Name]; ok {
 			if len(st.ReqBodyNoise) > 0 {
 				mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
 			}
-			kept = append(kept, mock)
+			kept = append(kept, e)
 			continue
 		}
 		if !mock.Spec.ReqTimestampMock.IsZero() && mock.Spec.ReqTimestampMock.After(pruneBefore) {
-			kept = append(kept, mock)
+			kept = append(kept, e)
 			continue
 		}
 		if !startupCutoffTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
 			mock.Spec.ReqTimestampMock.Before(startupCutoffTime) {
-			kept = append(kept, mock)
+			kept = append(kept, e)
 			continue
 		}
 	}
@@ -309,8 +331,8 @@ func readAllPrune(t *testing.T, path string, mockNames map[string]models.MockSta
 	case ".gob":
 		buf.WriteString(gobMockMagic)
 		enc := gob.NewEncoder(&buf)
-		for _, m := range kept {
-			if err := enc.Encode(m); err != nil {
+		for _, e := range kept {
+			if err := enc.Encode(e.mock); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -320,10 +342,15 @@ func readAllPrune(t *testing.T, path string, mockNames map[string]models.MockSta
 			return nil
 		}
 		enc := json.NewEncoder(&buf)
-		for _, m := range kept {
-			doc, handled, err := EncodeMockJSON(m, zap.NewNop())
+		for _, e := range kept {
+			if e.mock == nil {
+				buf.Write(e.raw)
+				buf.WriteString("\n")
+				continue
+			}
+			doc, handled, err := EncodeMockJSON(e.mock, zap.NewNop())
 			if err != nil || !handled {
-				t.Fatalf("EncodeMockJSON(%s): handled=%v err=%v", m.Name, handled, err)
+				t.Fatalf("EncodeMockJSON(%s): handled=%v err=%v", e.mock.Name, handled, err)
 			}
 			if err := enc.Encode(doc); err != nil {
 				t.Fatal(err)
@@ -335,11 +362,15 @@ func readAllPrune(t *testing.T, path string, mockNames map[string]models.MockSta
 			return nil
 		}
 		buf.WriteString(utils.GetVersionAsComment())
-		for i, m := range kept {
+		for i, e := range kept {
 			if i > 0 {
 				buf.WriteString("---\n")
 			}
-			doc, err := EncodeMock(m, zap.NewNop())
+			if e.mock == nil {
+				buf.Write(e.raw)
+				continue
+			}
+			doc, err := EncodeMock(e.mock, zap.NewNop())
 			if err != nil {
 				t.Fatal(err)
 			}
