@@ -189,20 +189,6 @@ jobs:
             exit 1
           fi
 
-      - name: Mount debugfs in WSL
-        shell: wsl-bash {0}
-        run: |
-          set -euo pipefail
-          # Check if debugfs is already mounted
-          if ! mountpoint -q /sys/kernel/debug; then
-            echo "Mounting debugfs..."
-            sudo mount -t debugfs debugfs /sys/kernel/debug
-          else
-            echo "debugfs is already mounted"
-          fi
-          # Verify the mount
-          mount | grep debugfs || echo "debugfs not found in mount output"
-
       - name: Prepare binaries for WSL
         shell: bash
         run: |
@@ -279,6 +265,14 @@ jobs:
           WSLENV: WSL_WS/p
         run: |
           set -euo pipefail
+          # keploy's eBPF hooks need debugfs (or tracefs), which WSL does not
+          # mount. Mount it here, in the session that runs keploy, and not in
+          # an earlier step: WSL stops a distro a few seconds after its last
+          # process exits, taking its mounts with it, and a Windows-side step
+          # in between can take longer than that. Then the agent finds neither
+          # mounted and the job fails before recording anything.
+          mountpoint -q /sys/kernel/debug || sudo mount -t debugfs debugfs /sys/kernel/debug
+          findmnt /sys/kernel/debug
           WS="${WSL_WS}"
           export RECORD_BIN="$WS/.wsl-bin/keploy_record"
           export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"

@@ -75,7 +75,8 @@ jobs:
                    TestShutdownAnswersTheHeldHandshakes TestStartRemovesOnlyAbandonedTables \
                    TestStartWaitsForAStoppingAgentsQueue TestCloseRemovesItsTableWhileTheQueueIsStillBound \
                    TestStartRefusesToHoldWhereARejectDoesNotTakeEffect TestCloseAnswersAHeldHandshake \
-                   TestStartHoldsThroughSignals; do
+                   TestStartHoldsThroughSignals TestLocalPortsAreNeverHandedOutTwice \
+                   TestARetransmittedSYNGetsTheAnswerAlreadyGiven; do
             grep -q -- "--- PASS: $t" /tmp/synhold.out || { echo "::error::$t did not pass"; exit 1; }
           done
 
