@@ -74,6 +74,57 @@ func freePort(t *testing.T, host string) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
+// localPorts gives each connection a test makes a local port that no earlier
+// connection in the test had. A test that tells its connections' decisions
+// apart by their port needs this, and freePort alone does not give it: the
+// kernel offers a port again once its socket is gone, and on the other
+// address family at once (127.0.0.1:p and [::1]:p never conflict). Two
+// connections would then be counted as one connection decided twice.
+type localPorts struct {
+	offer func(t *testing.T, host string) int // freePort; a test scripts repeats
+	used  map[int]bool
+}
+
+func newLocalPorts() *localPorts {
+	return &localPorts{offer: freePort, used: map[int]bool{}}
+}
+
+func (p *localPorts) next(t *testing.T, host string) int {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		port := p.offer(t, host)
+		if !p.used[port] {
+			p.used[port] = true
+			return port
+		}
+	}
+	t.Fatalf("no port on %s that this test has not used already", host)
+	return 0
+}
+
+// TestLocalPortsAreNeverHandedOutTwice: a port the kernel offers again — on
+// the other family, or on the same one once its socket is gone — is passed
+// over, so no two of a test's connections share a port and have their
+// decisions counted together.
+func TestLocalPortsAreNeverHandedOutTwice(t *testing.T) {
+	offers := []int{40001, 40001, 40003, 40001, 40003, 40005}
+	p := &localPorts{used: map[int]bool{}, offer: func(t *testing.T, _ string) int {
+		if len(offers) == 0 {
+			t.Fatal("asked for more ports than the kernel offered")
+		}
+		n := offers[0]
+		offers = offers[1:]
+		return n
+	}}
+	var got []int
+	for _, host := range []string{"127.0.0.1", "::1", "127.0.0.1"} {
+		got = append(got, p.next(t, host))
+	}
+	if want := []int{40001, 40003, 40005}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ports handed out = %v, want %v", got, want)
+	}
+}
+
 func classify(err error) string {
 	for _, e := range []struct {
 		n string
@@ -127,6 +178,9 @@ func TestHeldHandshakesAreAnsweredAsDecided(t *testing.T) {
 	}
 	defer h.Close()
 
+	// The decisions are counted by the connection's port, so each connection
+	// has a port of its own.
+	ports := newLocalPorts()
 	for _, host := range []string{"127.0.0.1", "::1"} {
 		for _, tc := range []struct {
 			plan plan
@@ -140,7 +194,7 @@ func TestHeldHandshakesAreAnsweredAsDecided(t *testing.T) {
 			{plan{200 * time.Millisecond, NetUnreachable}, "ENETUNREACH"},
 			{plan{0, Drop}, "TIMEOUT"},
 		} {
-			lp := freePort(t, host)
+			lp := ports.next(t, host)
 			mu.Lock()
 			plans[uint16(lp)] = tc.plan
 			mu.Unlock()
@@ -165,6 +219,39 @@ func TestHeldHandshakesAreAnsweredAsDecided(t *testing.T) {
 			if tc.plan.out != Drop && n != 1 {
 				t.Errorf("%s %v: decided %d times, want once", host, tc.plan.out, n)
 			}
+		}
+	}
+}
+
+// TestARetransmittedSYNGetsTheAnswerAlreadyGiven: a copy of a SYN that comes
+// after its handshake was answered gets the same answer. It is not decided
+// again, which would dial the destination again. Drop leaves the client
+// retransmitting the SYN (first after 1 s) until its connect times out, on
+// both address families.
+func TestARetransmittedSYNGetsTheAnswerAlreadyGiven(t *testing.T) {
+	requireRoot(t)
+	port := proxyListeners(t)
+	var decided atomic.Int32
+	h, err := Start(context.Background(), zaptest.NewLogger(t), port,
+		func(context.Context, netip.AddrPort, netip.AddrPort) Decision {
+			decided.Add(1)
+			return Decision{Outcome: Drop}
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	for _, host := range []string{"127.0.0.1", "::1"} {
+		before := decided.Load()
+		c, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(int(port))), 2500*time.Millisecond)
+		if c != nil {
+			_ = c.Close()
+		}
+		if got := classify(err); got != "TIMEOUT" {
+			t.Fatalf("%s: connect = %s (%v), want it to time out unanswered", host, got, err)
+		}
+		if n := decided.Load() - before; n != 1 {
+			t.Errorf("%s: decided %d times, want once: a retransmission of an answered SYN was decided again", host, n)
 		}
 	}
 }
