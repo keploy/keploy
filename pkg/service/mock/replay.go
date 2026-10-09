@@ -373,7 +373,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		failedBy = FailedByStrict
 		keployFailure = errors.New("--strict could not verify this replay: the agent never reported which recorded calls were missed")
 		m.logger.Error("replay failed under --strict: the agent never reported which calls were missed, so a clean run could not be proven",
-			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended"))
+			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended; run the replay again with --debug to see each miss as it happens"))
 	}
 	// Misses that WERE reported fail the run whatever else went unread.
 	if m.config.Mock.Strict && missed > 0 && utils.ErrCode == 0 {
@@ -1087,6 +1087,11 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			// stops, and what needs explaining is why this one did not.
 			summary = append(summary, zap.NamedError("reason", consumedErr))
 			next = "the keploy-agent container writes what it served and missed as compose stops it; check its logs above for why this one did not, and that its image is the one this keploy version runs"
+		}
+		if missesErr != nil {
+			// The agent logs each miss at Debug in a `keploy mock` run, so its
+			// logs name them only under --debug.
+			next += "; run the replay again with --debug to see each miss as it happens"
 		}
 		m.logger.Warn("mock replay summary (incomplete: the agent did not report the whole outcome)",
 			append(summary, zap.String("next_step", next))...)
