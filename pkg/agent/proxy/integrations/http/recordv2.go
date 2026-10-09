@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -540,7 +541,7 @@ func parseFinalResponse(m *FinalHTTP, req *http.Request) (resp *http.Response, c
 	interim, final := 0, 0 // final: where the response after the interims begins
 	for {
 		resp, err = http.ReadResponse(br, req)
-		if err != nil || !isInterimStatus(resp.StatusCode) {
+		if err != nil || !pUtil.IsInterimStatus(resp.StatusCode) {
 			break
 		}
 		interim = resp.StatusCode // no body: the next response follows it
@@ -549,12 +550,12 @@ func parseFinalResponse(m *FinalHTTP, req *http.Request) (resp *http.Response, c
 	if err == nil {
 		return resp, false, nil
 	}
-	if framed, ferr := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResponse(m.Resp))), req); ferr == nil && !isInterimStatus(framed.StatusCode) {
+	if framed, ferr := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResponse(m.Resp))), req); ferr == nil && !pUtil.IsInterimStatus(framed.StatusCode) {
 		return framed, false, nil
 	}
 	if m.RespReadInPart {
 		asRead, rerr := http.ReadResponse(bufio.NewReader(bytes.NewReader(responseAsRead(m.Resp[final:]))), req)
-		if rerr == nil && !isInterimStatus(asRead.StatusCode) {
+		if rerr == nil && !pUtil.IsInterimStatus(asRead.StatusCode) {
 			return asRead, true, nil
 		}
 	}
@@ -563,13 +564,6 @@ func parseFinalResponse(m *FinalHTTP, req *http.Request) (resp *http.Response, c
 			interim, io.ErrUnexpectedEOF)
 	}
 	return nil, false, fmt.Errorf("parse response: %w", err)
-}
-
-// isInterimStatus reports whether code is an interim response (RFC 9110
-// §15.2), which a final response follows. Not 101: after it the connection
-// carries another protocol.
-func isInterimStatus(code int) bool {
-	return code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
 }
 
 // decompressReadInPart is pkg.Decompress for a body its client read only in

@@ -544,6 +544,14 @@ func (r *replayConn) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
 
+// CloseWrite half-closes the connection underneath: net.Conn, embedded as an
+// interface, does not promote it. The HTTP/1 ingress ends what it sends with
+// it before it closes a connection whose client may still be sending
+// (lingerClose).
+func (r *replayConn) CloseWrite() error {
+	return util.CloseWriteIfPossible(r.Conn)
+}
+
 func (pm *IngressProxyManager) ServeLive(ctx context.Context, conn net.Conn, upstream string, port uint16) {
 	if !pm.requests {
 		up, err := dialIngressTarget(ctx, upstream, ingressTargetListenTimeout)

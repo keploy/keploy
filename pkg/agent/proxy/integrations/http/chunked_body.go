@@ -7,6 +7,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 )
 
 // errMalformedChunkedBody is returned when a chunked message body does not
@@ -205,7 +207,7 @@ func messageHead(msg []byte, response bool) (head []byte, bodyStart int, status 
 			return head, bodyStart, 0, true
 		}
 		status = responseStatus(head)
-		if status >= 100 && status < 200 && status != 101 {
+		if pUtil.IsInterimStatus(status) {
 			pos = bodyStart // an interim response: the final one follows
 			continue
 		}
@@ -240,7 +242,7 @@ func responseAsRead(resp []byte) []byte {
 		if i < 0 {
 			break
 		}
-		if status := responseStatus(resp[:i+4]); status >= 100 && status < 200 && status != 101 {
+		if pUtil.IsInterimStatus(responseStatus(resp[:i+4])) {
 			resp = resp[i+4:] // an interim response: the final one follows
 			continue
 		}
@@ -277,14 +279,13 @@ func responseStatus(head []byte) int {
 // but the connection then carries another protocol, which is no next HTTP
 // message.
 func responseHasNoBody(reqMethod string, status int) bool {
-	return reqMethod == "HEAD" || (status >= 100 && status < 200 && status != 101) || status == 204 || status == 304
+	return reqMethod == "HEAD" || pUtil.IsInterimStatus(status) || status == 204 || status == 304
 }
 
 // startsWithInterimResponse reports whether resp begins with an interim 1xx
 // response (a 100 Continue, a 103 Early Hints) rather than its final one.
 func startsWithInterimResponse(resp []byte) bool {
-	status := responseStatus(resp)
-	return status >= 100 && status < 200 && status != 101
+	return pUtil.IsInterimStatus(responseStatus(resp))
 }
 
 // emptyLinesBefore is how many bytes of b are empty lines in front of a request

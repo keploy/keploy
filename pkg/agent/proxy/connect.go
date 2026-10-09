@@ -151,7 +151,9 @@ func handleConnectTunnel(
 		}
 
 		proxyReader = bufio.NewReader(dstConn)
-		resp, err := http.ReadResponse(proxyReader, req)
+		// The proxy's final response: a client takes any interim (1xx) ones
+		// before it (RFC 9110 15.2).
+		resp, err := util.ReadFinalResponse(proxyReader, req, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CONNECT response from proxy: %w", err)
 		}
