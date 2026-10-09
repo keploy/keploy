@@ -167,6 +167,10 @@ func (t *runnerTee) started() {
 }
 
 // drain waits, briefly, for the output the runner wrote before it exited.
+// When it gives up, a process the runner left running still holds the pipe:
+// the copy goes on for as long as that process lives (and while keploy does;
+// after keploy exits, its next write to stdout fails with SIGPIPE, where it
+// wrote to the terminal before).
 func (t *runnerTee) drain() {
 	if t == nil {
 		return

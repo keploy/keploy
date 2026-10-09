@@ -966,7 +966,8 @@ type ReplayOutcome struct {
 	Mocks  []FlowMocks
 	Starts map[string]int
 	Sets   []string
-	// Tests is each top-level test the replay ran, once (see ranTests).
+	// Tests is each top-level test the replay reached, once, gated ones
+	// included (see ranTests).
 	Tests []RanTest
 	// Failed names the top-level tests the runner printed `--- FAIL:` for.
 	// Best-effort: it is read from the runner's stdout as keploy starts it, so
@@ -974,10 +975,11 @@ type ReplayOutcome struct {
 	Failed []string
 }
 
-// RanTest is one top-level test a replay ran: its name, the set (folder) it
-// belongs to, and its verdict as its harness reported it at the end of the
+// RanTest is one top-level test a replay reached: its name, the set (folder)
+// it belongs to, and its verdict as its harness reported it at the end of the
 // test (models.ScopeOutcomePassed, Failed or Skipped; "" when it reported
-// none).
+// none), or models.ScopeOutcomeGated, with no set, for a test the replay told
+// not to run.
 type RanTest struct {
 	Name   string
 	Set    string
@@ -1271,6 +1273,9 @@ func (m *mockService) reportInterruptedMisses(ctx context.Context, fromCompose b
 	if len(misses) == 0 {
 		return
 	}
+	// The agent returns only tests that ended: the one the signal cut off,
+	// often the one that hung on a missing mock, never sent its end, so a
+	// miss no window holds may be its, not outside every test.
 	windows, _ := m.agentWindows(rctx)
-	m.reportMisses(misses, attributeMocks(testWindows(windows), nil, nil, misses))
+	m.reportMissesAs(misses, attributeMocks(testWindows(windows), nil, nil, misses), "(not in a finished test)")
 }

@@ -506,6 +506,14 @@ func TestAnInterruptedReplayNamesItsMisses(t *testing.T) {
 	require.Equal(t, 1, logs.FilterMessage("no recorded mock matched a call").Len())
 	require.Equal(t, "TestA", logs.FilterMessage("no recorded mock matched a call").All()[0].ContextMap()["test"])
 
+	// The test the signal cut off never ended, so the agent has no window for
+	// it: its miss is not said to be outside every test.
+	core, logs = observer.New(zap.InfoLevel)
+	agent.windows = nil
+	m = &mockService{logger: zap.New(core), instrumentation: agent}
+	m.reportInterruptedMisses(ctx, false)
+	require.Equal(t, "(not in a finished test)", logs.FilterMessage("no recorded mock matched a call").All()[0].ContextMap()["test"])
+
 	core, logs = observer.New(zap.InfoLevel)
 	m = &mockService{logger: zap.New(core), instrumentation: &missReader{err: context.DeadlineExceeded}}
 	m.reportInterruptedMisses(ctx, false)

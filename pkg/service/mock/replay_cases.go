@@ -343,6 +343,12 @@ func (m *mockService) withRunIDs(tc *models.TestCase) *models.TestCase {
 // and the protocol's own next step. In a `keploy mock` run the agent logs
 // misses at Debug, so this is where they show.
 func (m *mockService) reportMisses(misses []models.UnmatchedCall, byFlow []FlowMocks) {
+	m.reportMissesAs(misses, byFlow, "(outside any test)")
+}
+
+// reportMissesAs is reportMisses with the label for a miss no test's window
+// holds.
+func (m *mockService) reportMissesAs(misses []models.UnmatchedCall, byFlow []FlowMocks, unplaced string) {
 	type key struct{ test, protocol, call, dest string }
 	var order []key
 	n := map[key]int{}
@@ -374,7 +380,7 @@ func (m *mockService) reportMisses(misses []models.UnmatchedCall, byFlow []FlowM
 	for _, k := range order {
 		test := k.test
 		if test == "" {
-			test = "(outside any test)"
+			test = unplaced
 		}
 		fields := []zap.Field{zap.String("test", test), zap.String("protocol", k.protocol), zap.String("call", k.call), zap.String("destination", k.dest)}
 		if n[k] > 1 {
@@ -452,7 +458,7 @@ func (f *failScan) Write(p []byte) (int, error) {
 		// newline must not grow this buffer without bound. Drop the partial
 		// line and the rest of it, so no text inside it is read as a line.
 		if len(f.rest) > maxFailScanLine {
-			f.rest, f.overlong = f.rest[:0], true
+			f.rest, f.overlong = nil, true
 		}
 	}()
 	for {
