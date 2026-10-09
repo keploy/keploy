@@ -11,12 +11,15 @@ import (
 )
 
 // unreachablePortWarner warns while recording, once per app port, that the test
-// cases recorded on that port cannot be replayed: replay sends each test from
-// the host to the port it was recorded on, and the instrumentation says the host
-// cannot reach the app there (in Docker mode, a port the docker command does not
-// publish; the app calling its own in-container server is recorded as ingress
-// on such a port). Without it the first sign is a replay refusing every one of
-// those tests.
+// cases recorded on that port will not reach the app on a replay that sends
+// them where it does by default: replay sends each test from the host to the
+// port it was recorded on, and the instrumentation says the host cannot reach
+// the app there (in Docker mode, a port the docker command does not publish as
+// itself; the app calling its own in-container server is recorded as ingress on
+// such a port). A replay with a port map in keploy.yml (test.replaceWith) can
+// still send those tests to a host port their port is published on, and the
+// reason says so where there is one. Without it the first sign is a replay
+// refusing every one of those tests.
 //
 // It asks about the address replay will use by default: test.host and the
 // recorded port. A keploy.yml that sends replay elsewhere (test.port, a
@@ -48,11 +51,11 @@ func (w *unreachablePortWarner) check(ctx context.Context, tc *models.TestCase) 
 	}
 	w.checked[tc.AppPort] = true
 	// It runs in line with the recording; reach bounds its own wait.
-	reason := w.reach.UnreachableAppPort(ctx, w.host, tc.AppPort)
+	reason := w.reach.UnreachableAppPort(ctx, w.host, tc.AppPort, tc.AppPort)
 	if reason == "" {
 		return
 	}
-	w.logger.Warn(fmt.Sprintf("test cases recorded on the app's port %d cannot be replayed: %s", tc.AppPort, reason),
+	w.logger.Warn(fmt.Sprintf("test cases recorded on the app's port %d cannot be replayed at that port from the host: %s", tc.AppPort, reason),
 		zap.String("first testcase on the port", tc.Name))
 }
 

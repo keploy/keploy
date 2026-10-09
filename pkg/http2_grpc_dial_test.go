@@ -22,7 +22,7 @@ func TestDialTCPWithConnRefusedRetry_RetriesBoundedOnPersistentRefusal(t *testin
 	_ = ln.Close() // nothing listening now → refused
 
 	start := time.Now()
-	conn, err := dialTCPWithConnRefusedRetry(context.Background(), zap.NewNop(), addr, nil)
+	conn, err := dialTCPWithConnRefusedRetry(context.Background(), zap.NewNop(), addr, nil, 0)
 	elapsed := time.Since(start)
 	if err == nil {
 		_ = conn.Close()
@@ -60,7 +60,7 @@ func TestDialTCPWithConnRefusedRetry_RetriesThenConnects(t *testing.T) {
 		}
 	}()
 
-	conn, err := dialTCPWithConnRefusedRetry(context.Background(), zap.NewNop(), addr, nil)
+	conn, err := dialTCPWithConnRefusedRetry(context.Background(), zap.NewNop(), addr, nil, 0)
 	l := <-ready
 	if l != nil {
 		_ = l.Close()
@@ -86,7 +86,7 @@ func TestDialTCPWithConnRefusedRetry_RespectsContext(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), connRefusedRetryBackoff/2)
 	defer cancel()
-	if _, err := dialTCPWithConnRefusedRetry(ctx, zap.NewNop(), addr, nil); err == nil {
+	if _, err := dialTCPWithConnRefusedRetry(ctx, zap.NewNop(), addr, nil, 0); err == nil {
 		t.Fatal("expected an error when the context is cancelled mid-retry")
 	}
 }

@@ -88,10 +88,10 @@ type unpublishedPortInstr struct {
 	asked  []string
 }
 
-func (u *unpublishedPortInstr) UnreachableAppPort(_ context.Context, host string, port uint16) string {
+func (u *unpublishedPortInstr) UnreachableAppPort(_ context.Context, host string, port, appPort uint16) string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.asked = append(u.asked, net.JoinHostPort(host, strconv.Itoa(int(port))))
+	u.asked = append(u.asked, fmt.Sprintf("%s for %d", net.JoinHostPort(host, strconv.Itoa(int(port))), appPort))
 	return u.reason
 }
 
@@ -153,8 +153,56 @@ func TestARefusalAtAnUnreachableAppPortSaysSoAndIsNotRetried(t *testing.T) {
 			}
 			instr.mu.Lock()
 			defer instr.mu.Unlock()
-			assert.Equal(t, []string{authority}, instr.asked,
-				"asked once, about the address the request was sent to, and not re-sent")
+			assert.Equal(t, []string{fmt.Sprintf("%s for %d", authority, port)}, instr.asked,
+				"asked once, about the address the request was sent to and the port it was recorded on, and not re-sent")
+		})
+	}
+}
+
+// A test that test.port (--port), or test.grpcPort for gRPC, sends to another
+// host port than the one it was recorded on is asked about as that: the host
+// port it goes to, for the app's port it was recorded on. A compose file that
+// publishes "18067:8080", replayed with --port 18067, is the app's port 8080
+// reached through host port 18067; asking about host port 18067 alone made a
+// refusal while the app was starting look like a port that can never reach it.
+// When the address is unreachable after all, the error names both ports.
+func TestARedirectedTestIsAskedAboutForTheAppPortItWasRecordedOn(t *testing.T) {
+	const reason = "host port N is published to the app's port 9000 instead of its port 8080"
+	port := closedLocalPort(t)
+	for _, tc := range []struct {
+		tc  *models.TestCase
+		cfg config.Test
+	}{
+		{
+			tc: &models.TestCase{
+				Name: "get-ping-1", Kind: models.HTTP, AppPort: 8080,
+				HTTPReq: models.HTTPReq{Method: "GET", URL: "http://127.0.0.1:18057/ping", Header: map[string]string{}},
+			},
+			cfg: config.Test{APITimeout: 5, Port: uint32(port)},
+		},
+		{
+			tc: &models.TestCase{
+				Name: "grpc-echo-1", Kind: models.GRPC_EXPORT, AppPort: 8080,
+				GrpcReq: models.GrpcReq{Headers: models.GrpcHeaders{PseudoHeaders: map[string]string{
+					":authority": "127.0.0.1:18057", ":path": "/echo.Echo/Ping", ":method": "POST", ":scheme": "http",
+				}}},
+			},
+			cfg: config.Test{APITimeout: 5, GRPCPort: uint32(port)},
+		},
+	} {
+		t.Run(string(tc.tc.Kind), func(t *testing.T) {
+			instr := &unpublishedPortInstr{prInstr: &prInstr{}, reason: reason}
+			h := NewHooks(zap.NewNop(), &config.Config{Test: tc.cfg}, instr)
+
+			_, err := h.SimulateRequest(context.Background(), tc.tc, "test-set-0")
+			if err == nil {
+				t.Fatal("a request to a closed port succeeded")
+			}
+			assert.Contains(t, err.Error(), fmt.Sprintf("the app's port 8080 cannot be reached from the host at port %d: %s", port, reason))
+			instr.mu.Lock()
+			defer instr.mu.Unlock()
+			assert.Equal(t, []string{fmt.Sprintf("localhost:%d for 8080", port)}, instr.asked,
+				"asked about the host port the request was sent to, for the app's port it was recorded on")
 		})
 	}
 }
@@ -203,7 +251,7 @@ func TestADroppedConnectionAtAnUnreachableAppPortSaysSo(t *testing.T) {
 				"a test that failed with %v", err)
 			instr.mu.Lock()
 			defer instr.mu.Unlock()
-			assert.Equal(t, []string{authority}, instr.asked, "asked once, about the address the request was sent to")
+			assert.Equal(t, []string{fmt.Sprintf("%s for %d", authority, n)}, instr.asked, "asked once, about the address the request was sent to")
 		})
 	}
 }

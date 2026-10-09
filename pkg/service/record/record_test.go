@@ -2221,10 +2221,10 @@ type unpublishedInstr struct {
 	asked       []string
 }
 
-func (u *unpublishedInstr) UnreachableAppPort(_ context.Context, host string, port uint16) string {
+func (u *unpublishedInstr) UnreachableAppPort(_ context.Context, host string, port, appPort uint16) string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.asked = append(u.asked, fmt.Sprintf("%s:%d", host, port))
+	u.asked = append(u.asked, fmt.Sprintf("%s:%d for %d", host, port, appPort))
 	return u.unpublished[port]
 }
 
@@ -2292,13 +2292,13 @@ func TestStart_WarnsOnceForATestCaseRecordedOnAnUnreachablePort(t *testing.T) {
 
 	warned := logs.FilterMessageSnippet("8096").All()
 	require.Len(t, warned, 1, "want one warning for port 8096, got: %v", logs.All())
-	assert.Equal(t, "test cases recorded on the app's port 8096 cannot be replayed: "+reason, warned[0].Message)
+	assert.Equal(t, "test cases recorded on the app's port 8096 cannot be replayed at that port from the host: "+reason, warned[0].Message)
 	assert.Equal(t, "test-2", warned[0].ContextMap()["first testcase on the port"],
 		"the warning names the first test case recorded on the port, by the name the insert gave it")
 	assert.Empty(t, logs.FilterMessageSnippet("8095").All(), "a reachable port warned")
 
 	instr.mu.Lock()
 	defer instr.mu.Unlock()
-	assert.Equal(t, []string{"localhost:8095", "localhost:8096"}, instr.asked,
-		"each port is checked once, at the address replay will send its tests to")
+	assert.Equal(t, []string{"localhost:8095 for 8095", "localhost:8096 for 8096"}, instr.asked,
+		"each port is checked once, at the address replay will send its tests to by default: the port they were recorded on")
 }
