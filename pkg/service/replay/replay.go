@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1049,7 +1050,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 			if !backupCreated {
 				if err := r.createBackup(testSet); err != nil {
-					utils.LogError(r.logger, err, "failed to create backup, proceeding with test case deletion", zap.String("testSet", testSet))
+					utils.LogError(r.logger, err, "failed to create backup; skipping test case deletion", zap.String("testSet", testSet))
+					break
 				}
 				backupCreated = true
 			}
@@ -5659,29 +5661,41 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 				return err
 			}
 		} else {
-			// It's a file, copy it.
-			srcFile, err := os.Open(srcPath)
-			if err != nil {
-				return err
-			}
-			defer srcFile.Close()
-
-			dstFile, err := os.Create(dstPath)
-			if err != nil {
-				return err
-			}
-			defer dstFile.Close()
-
-			if _, err := io.Copy(dstFile, srcFile); err != nil {
-				return err
-			}
-
-			if err := os.Chmod(dstPath, fileInfo.Mode()); err != nil {
+			if err := copyFile(srcPath, dstPath, fileInfo.Mode()); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// copyFile keeps defers scoped to one file so handles close before the next copy.
+func copyFile(srcPath, dstPath string, mode fs.FileMode) (err error) {
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := srcFile.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+
+	dstFile, err := os.Create(dstPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := dstFile.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return err
+	}
+
+	return os.Chmod(dstPath, mode)
 }
 
 // maxResetResends bounds how many times a transport-reset test request is
