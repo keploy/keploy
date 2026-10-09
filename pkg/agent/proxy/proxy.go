@@ -330,6 +330,10 @@ type Proxy struct {
 	isGracefulShutdown atomic.Bool
 
 	auxiliaryHook agent.AuxiliaryProxyHook
+	// teardownOnce guards runAuxTeardown so the auxiliary hook's
+	// BeforeTeardown runs at most once across start()'s mutually-exclusive
+	// shutdown paths (skipListener return / listener defer).
+	teardownOnce sync.Once
 
 	// skipListener disables the TCP accept loop. When true, the proxy
 	// does not bind a port. DNS, parser init, and session state still run.
@@ -1497,6 +1501,24 @@ func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
 	p.auxiliaryHook = h
 }
 
+// runAuxTeardown invokes the auxiliary hook's BeforeTeardown (if it implements
+// TeardownableProxyHook), at most once, synchronously. start() calls it on the
+// shutdown path before TeardownNativeCA so a hook that attached uprobes removes
+// them while still inside the awaited start() goroutine — before the process
+// exits and before any update-ca-certificates fork — closing the race that
+// otherwise leaks the uprobe.
+func (p *Proxy) runAuxTeardown(ctx context.Context) {
+	h, ok := p.auxiliaryHook.(agent.TeardownableProxyHook)
+	if !ok {
+		return
+	}
+	p.teardownOnce.Do(func() {
+		if err := h.BeforeTeardown(ctx); err != nil {
+			utils.LogError(p.logger, err, "auxiliary proxy hook teardown failed")
+		}
+	})
+}
+
 // getMockManager returns the current mock manager in a thread-safe manner.
 func (p *Proxy) getMockManager() *MockManager {
 	p.sessionMu.RLock()
@@ -1936,6 +1958,11 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 		p.nsSwitchMutex.Unlock()
+		// Remove TLS uprobes (and any other hook-owned kernel state) BEFORE
+		// forking update-ca-certificates below: a uprobe teardown that races
+		// that fork can inherit the last link reference into the child and
+		// then be killed mid-removal, leaking the breakpoint.
+		p.runAuxTeardown(ctx)
 		// Remove this run's MITM CA from the OS trust store so trust does not
 		// persist after the run (no-op in docker/k8s mode and for a persisted
 		// per-user CA).
@@ -2047,6 +2074,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 		p.nsSwitchMutex.Unlock()
+		// Remove TLS uprobes (and any other hook-owned kernel state) before
+		// forking update-ca-certificates below — see the skipListener path.
+		p.runAuxTeardown(ctx)
 		// Remove this run's MITM CA from the OS trust store so trust does not
 		// persist after the run (no-op in docker/k8s mode and for a persisted
 		// per-user CA).
