@@ -278,7 +278,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// its output is not scanned (ReplayOutcome.Failed stays empty).
 		appErr = <-composeAppExit
 	} else {
-		// Set before Run starts the runner on this goroutine, cleared after.
+		// Set before Run, which starts the runner and waits for it, and
+		// cleared after; nothing else reads it in between.
 		utils.RunnerOut = scan
 		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
 		utils.RunnerOut = nil

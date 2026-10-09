@@ -8,9 +8,9 @@ import (
 )
 
 // RunnerOut, when set, also receives the stdout of the next runner
-// ExecuteCommand starts (see teeRunnerOut). `keploy mock replay` sets it on
-// the goroutine that starts the runner, just before it does, and clears it
-// once the runner exits; nothing else reads it.
+// ExecuteCommand starts (see teeRunnerOut). `keploy mock replay` sets it just
+// before the call that starts the runner and waits for it to exit, and clears
+// it after; nothing else reads it.
 var RunnerOut io.Writer
 
 type JSONWriter struct {

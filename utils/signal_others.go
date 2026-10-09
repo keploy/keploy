@@ -144,7 +144,8 @@ func teeRunnerOut(cmd *exec.Cmd) *runnerTee {
 	}
 	r, w, err := os.Pipe()
 	if err != nil {
-		cmd.Stdout = io.MultiWriter(os.Stdout, RunnerOut)
+		// No pipe: leave the runner's stdout as it is and scan nothing. Any
+		// other io.Writer would tie the runner's exit to its children's.
 		return nil
 	}
 	cmd.Stdout = w
