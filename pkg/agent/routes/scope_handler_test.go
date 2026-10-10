@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 )
@@ -79,6 +81,77 @@ func TestScopeHandlersWithoutATime(t *testing.T) {
 	post(t, a.HandleScopeBegin, `{"name":"t","pid":42}`)
 	if svc.begun != "t" || !svc.at.IsZero() {
 		t.Fatalf("begin got %q at %v", svc.begun, svc.at)
+	}
+}
+
+func TestScopeHandlersAddTheOffsetBackWhileTheRunnersClockIsShifted(t *testing.T) {
+	var pids []int
+	OnMark = func(pid int, _ string, _ time.Time, _ []string) time.Duration {
+		pids = append(pids, pid)
+		return 48 * time.Hour
+	}
+	t.Cleanup(func() { OnMark = nil })
+	at := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Millisecond)
+	body := func(s string) string { return strings.Replace(s, "AT", at.Format(time.RFC3339Nano), 1) }
+	svc := &timedScopeSvc{}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	post(t, a.HandleScopeBegin, body(`{"name":"t","pid":7,"at":"AT"}`))
+	if svc.begun != "t" || !svc.at.Equal(at.Add(48*time.Hour)) {
+		t.Fatalf("begin got %q at %v", svc.begun, svc.at)
+	}
+	post(t, a.HandleScopeEnd, body(`{"name":"t","pid":7,"at":"AT"}`))
+	if svc.ended != "t" || !svc.at.Equal(at.Add(48*time.Hour)) {
+		t.Fatalf("end got %q at %v", svc.ended, svc.at)
+	}
+	post(t, a.HandleAppStart, body(`{"pid":9,"at":"AT"}`))
+	if len(pids) != 3 || pids[0] != 0 || pids[1] != 0 || pids[2] != 9 {
+		t.Fatalf("OnMark saw %v", pids)
+	}
+}
+
+func TestScopeHandlersKeepTheRunnerTimeWhenItsClockIsNotShifted(t *testing.T) {
+	OnMark = func(int, string, time.Time, []string) time.Duration { return 48 * time.Hour }
+	t.Cleanup(func() { OnMark = nil })
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	svc := &timedScopeSvc{}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	post(t, a.HandleScopeBegin, `{"name":"t","at":"`+at.Format(time.RFC3339Nano)+`"}`)
+	if !svc.at.Equal(at) {
+		t.Fatalf("begin at %v", svc.at)
+	}
+	OnMark = func(int, string, time.Time, []string) time.Duration { return 0 }
+	post(t, a.HandleScopeBegin, `{"name":"t","at":"2026-09-24T10:00:00Z"}`)
+	if !svc.at.Equal(time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)) {
+		t.Fatalf("begin at %v", svc.at)
+	}
+}
+
+func TestScopeHandlersTellOnMarkTheSetsRecordedStart(t *testing.T) {
+	type call struct {
+		set   string
+		start time.Time
+		live  []string
+	}
+	var got []call
+	OnMark = func(_ int, set string, start time.Time, live []string) time.Duration {
+		got = append(got, call{set, start, live})
+		return 0
+	}
+	t.Cleanup(func() { OnMark = nil; starts.Default.Reset() })
+	start := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	starts.Default.SetTable("/r", map[string]models.SetTable{"a": {Start: start}, "b": {}})
+	a := &Agent{logger: zap.NewNop(), svc: &timedScopeSvc{}}
+	post(t, a.HandleScopeBegin, `{"name":"s","pid":7,"dir":"/r/a","suite":true}`)
+	post(t, a.HandleScopeEnd, `{"name":"t","pid":7}`)
+	post(t, a.HandleScopeBegin, `{"name":"u","pid":8,"dir":"/r/b"}`)
+	if len(got) != 3 || got[0].set != "a" || !got[0].start.Equal(start) || len(got[0].live) != 0 {
+		t.Fatalf("OnMark saw %v", got)
+	}
+	if got[1].set != "a" || !got[1].start.Equal(start) || !slices.Equal(got[1].live, []string{"a"}) {
+		t.Fatalf("OnMark saw %v", got)
+	}
+	if got[2].set != "b" || !got[2].start.IsZero() || !slices.Equal(got[2].live, []string{"a"}) {
+		t.Fatalf("OnMark saw %v", got)
 	}
 }
 
@@ -220,5 +293,31 @@ func TestScopeGateWithoutTheCapability(t *testing.T) {
 	}
 	if got := begin(t, a, `{"name":"x"}`); got["action"] != "" {
 		t.Fatalf("without a gate every test runs: %v", got)
+	}
+}
+
+type anchorHooks struct {
+	agent.AgentHook
+	got []time.Time
+}
+
+func (h *anchorHooks) SetFreezeAnchor(_ context.Context, at time.Time) error {
+	h.got = append(h.got, at)
+	return nil
+}
+
+func TestScopeTableAnchorsTheClockAtTheFirstSuiteStart(t *testing.T) {
+	h := &anchorHooks{}
+	prev := agent.ActiveHooks
+	agent.ActiveHooks = h
+	t.Cleanup(func() { agent.ActiveHooks = prev })
+	a := &Agent{logger: zap.NewNop(), svc: &plainScopeSvc{}}
+	post(t, a.HandleScopeTable, `{"sets":{"a":{"start":"2026-10-06T10:00:05Z"},"b":{"start":"2026-10-06T10:00:01Z"},"c":{}}}`)
+	if len(h.got) != 1 || !h.got[0].Equal(time.Date(2026, 10, 6, 10, 0, 1, 0, time.UTC)) {
+		t.Fatalf("anchored at %v", h.got)
+	}
+	post(t, a.HandleScopeTable, `{"sets":{"a":{}}}`)
+	if len(h.got) != 1 {
+		t.Fatalf("anchored without a suite start: %v", h.got)
 	}
 }

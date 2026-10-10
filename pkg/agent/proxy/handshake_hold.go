@@ -152,6 +152,28 @@ func (p *Proxy) dialsUpstream(rule *agent.Session) bool {
 	return p.GlobalPassthrough || rule.OpportunisticTLSIntercept || !rule.Mocking
 }
 
+func (p *Proxy) refusesLocal() bool {
+	return p.mockMode && !p.IsDocker && p.appPID != 0
+}
+
+func unowned(dest *agent.NetworkAddress) bool {
+	host, _, err := net.SplitHostPort(destAddr(dest))
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip.IsUnspecified() {
+		ip = net.IPv4(127, 0, 0, 1)
+		if dest.Version == 6 {
+			ip = net.IPv6loopback
+		}
+	}
+	if ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	return !listening(ip, dest.Port) && (!recorded.has(dest.Port) || recorded.child(dest.Port))
+}
+
 // decideHandshake is synhold's Decide for this proxy: it dials the held
 // connection's destination, keeps the connection for handleConnection, and
 // answers the application's handshake the way the destination answered.
@@ -161,8 +183,20 @@ func (p *Proxy) decideHandshake(lookup agent.HandshakeDestInfo) synhold.Decide {
 		// connection's.
 		p.predials.drop(client)
 		rule := p.getSession()
-		if rule == nil || !p.dialsUpstream(rule) {
+		if rule == nil {
 			return synhold.Decision{Outcome: synhold.Accept}
+		}
+		if !p.dialsUpstream(rule) {
+			if !p.refusesLocal() {
+				return synhold.Decision{Outcome: synhold.Accept}
+			}
+			dest, err := lookup.GetForHandshake(ctx, client, proxy)
+			if err != nil || !unowned(dest) {
+				return synhold.Decision{Outcome: synhold.Accept}
+			}
+			p.logger.Debug("nothing listens at the local destination; refusing the connect",
+				zap.String("client", client.String()), zap.String("destination", destAddr(dest)))
+			return synhold.Decision{Outcome: synhold.Refuse}
 		}
 		dest, err := lookup.GetForHandshake(ctx, client, proxy)
 		if err != nil {
@@ -274,9 +308,7 @@ func (p *Proxy) dialWhileHeld(ctx context.Context, lookup agent.HandshakeDestInf
 // holdState is the handshake hold's lifecycle on a proxy: armed with the
 // listener's context when the listener opens, started by the first session
 // whose connections dial their destination, stopped when the listener
-// closes. A replay served from mocks never dials, so it never loads the
-// netfilter modules or adds a hook, and its handshakes complete in the
-// kernel as before.
+// closes.
 type holdState struct {
 	mu   sync.Mutex
 	ctx  context.Context // nil until armed, and again once stopped
@@ -303,7 +335,7 @@ func (p *Proxy) armHandshakeHold(ctx context.Context) {
 // to take effect, if its connections dial their destination and the
 // listener is open.
 func (p *Proxy) ensureHandshakeHold(rule *agent.Session) {
-	if rule == nil || !p.dialsUpstream(rule) {
+	if rule == nil || !(p.dialsUpstream(rule) || p.refusesLocal()) {
 		return
 	}
 	p.hold.mu.Lock()
@@ -312,7 +344,7 @@ func (p *Proxy) ensureHandshakeHold(rule *agent.Session) {
 		return
 	}
 	p.hold.tried = rule
-	p.hold.stop = p.startHandshakeHold(p.hold.ctx, !p.hold.reported)
+	p.hold.stop = p.startHandshakeHold(p.hold.ctx, !p.hold.reported && p.dialsUpstream(rule))
 	if p.hold.stop == nil {
 		p.hold.reported = true // tried again with the next session
 	}

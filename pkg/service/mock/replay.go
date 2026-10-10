@@ -926,6 +926,13 @@ func setTable(mapping *models.Mapping, root string) map[string]models.SetTable {
 		st.Tests[tc.ID] = owned
 		sets[setName(tc.Dir, root)] = st
 	}
+	for _, su := range mapping.Suites {
+		k := setName(su.Dir, root)
+		if st, ok := sets[k]; ok && !su.Start.IsZero() && (st.Start.IsZero() || su.Start.Before(st.Start)) {
+			st.Start = su.Start
+			sets[k] = st
+		}
+	}
 	return sets
 }
 
