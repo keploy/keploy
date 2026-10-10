@@ -1505,6 +1505,30 @@ var SrcPortToDstURL = sync.Map{}
 // to delete its mapping.
 var srcPortOwner = sync.Map{}
 
+// srcPortDstHost maps a source port to the host (an IP literal) of the
+// destination the proxy recovered for that connection before any TLS
+// handshake. CertForClient names the leaf after it only when the ClientHello
+// carried no SNI and SrcPortToDstURL holds no CONNECT target. It is kept apart
+// from SrcPortToDstURL on purpose: that map's readers (upstream ServerName,
+// speculative dial, replay h2 scoping, parser dials) treat its value as the
+// name the APP asked for, and an IP there would change what they do.
+var srcPortDstHost = sync.Map{}
+
+// SeedSrcPortDstHost records host as port's destination host for this
+// connection, replacing whatever a previous connection on the same (recycled)
+// port left behind — here and in SrcPortToDstURL, which nothing has filled for
+// THIS connection yet (the CONNECT path and CertForClient store into it later,
+// so a CONNECT target still wins). An empty host only clears. The entry is
+// dropped by ReleaseSrcPortIfOwner together with SrcPortToDstURL.
+func SeedSrcPortDstHost(port int, host string) {
+	SrcPortToDstURL.Delete(port)
+	if host == "" {
+		srcPortDstHost.Delete(port)
+		return
+	}
+	srcPortDstHost.Store(port, host)
+}
+
 // ClaimSrcPort records token as the current owner of port. The newest
 // connection on a (possibly recycled) source port wins, overwriting any stale
 // owner left by a previous connection whose cleanup has not yet run.
@@ -1519,6 +1543,7 @@ func ClaimSrcPort(port int, token int64) {
 func ReleaseSrcPortIfOwner(port int, token int64) bool {
 	if srcPortOwner.CompareAndDelete(port, token) {
 		SrcPortToDstURL.Delete(port)
+		srcPortDstHost.Delete(port)
 		return true
 	}
 	return false
@@ -1615,6 +1640,18 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	}
 
 	SrcPortToDstURL.Store(sourcePort, dstURL)
+
+	// Still no name: fall back to the destination the proxy seeded for this
+	// port (SeedSrcPortDstHost). crypto/tls sends no SNI for an IP-literal
+	// destination (e.g. client-go dialling https://10.96.0.1:443), and a leaf
+	// minted for "" has no SAN, so the client rejects it with "doesn't contain
+	// any IP SANs"; cfssl turns an IP host into an IP SAN. Only the leaf uses
+	// it — SrcPortToDstURL above keeps the SNI-or-CONNECT value.
+	if dstURL == "" {
+		if seeded, ok := srcPortDstHost.Load(sourcePort); ok {
+			dstURL, _ = seeded.(string)
+		}
+	}
 
 	// Cache key = host + backdate bucket + CA identity. Keying on the hostname
 	// alone was wrong twice over: (1) it ignored backdate, so a frozen-time

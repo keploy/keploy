@@ -44,12 +44,14 @@ func TestReleaseSrcPortIfOwner_RecycleClobber(t *testing.T) {
 }
 
 // TestReleaseSrcPortIfOwner_NormalLifecycle covers the common single-owner
-// case: claim, store, release deletes the mapping and the owner entry.
+// case: claim, seed, store, release deletes the mapping, the seed and the
+// owner entry.
 func TestReleaseSrcPortIfOwner_NormalLifecycle(t *testing.T) {
 	const port = 54322
 	const token int64 = 2001
 
 	ClaimSrcPort(port, token)
+	SeedSrcPortDstHost(port, "10.96.0.1")
 	SrcPortToDstURL.Store(port, "x:443")
 
 	if !ReleaseSrcPortIfOwner(port, token) {
@@ -57,6 +59,9 @@ func TestReleaseSrcPortIfOwner_NormalLifecycle(t *testing.T) {
 	}
 	if _, ok := SrcPortToDstURL.Load(port); ok {
 		t.Fatal("mapping not deleted by the owner's cleanup")
+	}
+	if _, ok := srcPortDstHost.Load(port); ok {
+		t.Fatal("seeded destination host not deleted by the owner's cleanup")
 	}
 	if _, ok := srcPortOwner.Load(port); ok {
 		t.Fatal("owner entry leaked after release")

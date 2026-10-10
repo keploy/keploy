@@ -3,12 +3,17 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
+	proxytls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 )
@@ -345,5 +350,77 @@ func TestHandleConnectTunnel_EmptyHost(t *testing.T) {
 				t.Fatalf("a host-less CONNECT target was accepted (TargetHost=%q, TargetAddr=%q)", res.TargetHost, res.TargetAddr)
 			}
 		})
+	}
+}
+
+// TestHandleConnectTunnel_TargetOutranksSeededDstHost pins the ordering
+// handleConnection relies on: it seeds the eBPF destination IP for the source
+// port before it parses CONNECT, and the CONNECT target filed afterwards — not
+// that IP — still names the MITM leaf for a client that sends no SNI.
+func TestHandleConnectTunnel_TargetOutranksSeededDstHost(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	type clientRes struct {
+		leaf *x509.Certificate
+		err  error
+	}
+	clientCh := make(chan clientRes, 1)
+	go func() {
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			clientCh <- clientRes{err: err}
+			return
+		}
+		defer c.Close()
+		if _, err := c.Write([]byte("CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n")); err != nil {
+			clientCh <- clientRes{err: err}
+			return
+		}
+		// Consume the 200 byte by byte so no TLS bytes are read ahead.
+		var resp []byte
+		b := make([]byte, 1)
+		for !bytes.HasSuffix(resp, []byte("\r\n\r\n")) {
+			if _, err := c.Read(b); err != nil {
+				clientCh <- clientRes{err: err}
+				return
+			}
+			resp = append(resp, b[0])
+		}
+		tc := tls.Client(c, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // inspecting the MITM leaf, not trusting it
+		if err := tc.Handshake(); err != nil {
+			clientCh <- clientRes{err: err}
+			return
+		}
+		clientCh <- clientRes{leaf: tc.ConnectionState().PeerCertificates[0]}
+	}()
+
+	srv, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	defer srv.Close()
+	port := srv.RemoteAddr().(*net.TCPAddr).Port
+	t.Cleanup(func() { proxytls.SeedSrcPortDstHost(port, "") })
+	proxytls.SeedSrcPortDstHost(port, "10.96.0.1")
+
+	result, err := handleConnectTunnel(testLogger(), srv, nil, true)
+	if err != nil {
+		t.Fatalf("handleConnectTunnel: %v", err)
+	}
+	inner := &util.Conn{Conn: srv, Reader: result.BufferedReader, Logger: testLogger()}
+	if _, _, err := proxytls.HandleTLSConnection(context.Background(), testLogger(), inner, time.Time{}); err != nil {
+		t.Fatalf("MITM handshake: %v", err)
+	}
+
+	r := <-clientCh
+	if r.err != nil {
+		t.Fatalf("client: %v", r.err)
+	}
+	if len(r.leaf.DNSNames) != 1 || r.leaf.DNSNames[0] != "api.example.com" || len(r.leaf.IPAddresses) != 0 {
+		t.Fatalf("leaf SANs = %v / %v, want the CONNECT target and no IP", r.leaf.DNSNames, r.leaf.IPAddresses)
 	}
 }

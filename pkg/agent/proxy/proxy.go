@@ -2270,6 +2270,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		starts.Default.Dest(fmt.Sprint(clientConnID), dstAddr)
 	}
 
+	// Seed this port's destination host before any path below can terminate
+	// the app's TLS. crypto/tls sends no SNI for an IP literal (client-go
+	// dials https://10.96.0.1:443), and without a name CertForClient mints a
+	// leaf with no SAN that the client rejects. The CONNECT path runs later and
+	// files its target in SrcPortToDstURL, which CertForClient prefers. A
+	// dstAddr with no host only clears a recycled port's stale entry.
+	dstHost, _, _ := net.SplitHostPort(dstAddr)
+	pTls.SeedSrcPortDstHost(sourcePort, dstHost)
+
 	if predialed != nil {
 		if predialed.Addr() != dstAddr {
 			// Not this connection's: a pre-dial left by an earlier

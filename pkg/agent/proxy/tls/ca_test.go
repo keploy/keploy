@@ -2,15 +2,18 @@ package tls
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -784,5 +787,175 @@ func TestGenerateTrustStore_RejectsTruncatedTrailingBlock(t *testing.T) {
 	}
 	if _, statErr := os.Stat(jksPath); statErr == nil {
 		t.Fatal("truststore file should not exist when generateTrustStore errored — leaving a partial JKS would defeat the guard")
+	}
+}
+
+// leafOf returns the parsed leaf of a CertForClient result.
+func leafOf(t *testing.T, cert *tls.Certificate) *x509.Certificate {
+	t.Helper()
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+	return leaf
+}
+
+// helperPortHello is helperClientHello with sni, whose source-port entries
+// in SrcPortToDstURL / srcPortDstHost are removed when the test ends.
+func helperPortHello(t *testing.T, sni string) (*tls.ClientHelloInfo, int) {
+	t.Helper()
+	hello, cleanup, err := helperClientHello(sni)
+	if err != nil {
+		t.Fatalf("client hello: %v", err)
+	}
+	port := hello.Conn.RemoteAddr().(*net.TCPAddr).Port
+	t.Cleanup(func() {
+		SeedSrcPortDstHost(port, "")
+		cleanup()
+	})
+	return hello, port
+}
+
+// TestCertForClient_NoSNI_SeededIPGetsIPSAN is the regression test for an
+// in-cluster client-go dialling https://10.96.0.1:443: crypto/tls sends no SNI
+// for an IP literal, so before the seed the leaf was minted for "" and the
+// client failed with "doesn't contain any IP SANs". With the proxy's seed the
+// leaf carries the IP SAN and verifies, while SrcPortToDstURL keeps saying the
+// app sent no SNI.
+func TestCertForClient_NoSNI_SeededIPGetsIPSAN(t *testing.T) {
+	resetCertCacheForTest()
+	t.Cleanup(resetCertCacheForTest)
+	caKey, caCert := helperCA(t)
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+	opts := x509.VerifyOptions{DNSName: "10.96.0.1", Roots: roots}
+	hello, port := helperPortHello(t, "")
+
+	// Without the seed: today's leaf, which the client rejects.
+	cert, err := CertForClient(zap.NewNop(), hello, caKey, caCert, time.Time{})
+	if err != nil {
+		t.Fatalf("CertForClient (unseeded): %v", err)
+	}
+	if _, err := leafOf(t, cert).Verify(opts); err == nil || !strings.Contains(err.Error(), "IP SANs") {
+		t.Fatalf("unseeded leaf: want the \"doesn't contain any IP SANs\" failure, got %v", err)
+	}
+
+	SeedSrcPortDstHost(port, "10.96.0.1")
+	cert, err = CertForClient(zap.NewNop(), hello, caKey, caCert, time.Time{})
+	if err != nil {
+		t.Fatalf("CertForClient (seeded): %v", err)
+	}
+	leaf := leafOf(t, cert)
+	if len(leaf.IPAddresses) != 1 || !leaf.IPAddresses[0].Equal(net.ParseIP("10.96.0.1")) {
+		t.Fatalf("leaf IP SANs = %v, want [10.96.0.1]", leaf.IPAddresses)
+	}
+	if _, err := leaf.Verify(opts); err != nil {
+		t.Fatalf("seeded leaf must verify for 10.96.0.1: %v", err)
+	}
+	if v, _ := SrcPortToDstURL.Load(port); v != "" {
+		t.Fatalf("SrcPortToDstURL = %q, want \"\" (the app sent no SNI)", v)
+	}
+}
+
+// TestCertForClient_SNIOutranksSeed pins that a client which DOES send SNI is
+// untouched by the seed: the leaf is still named after the SNI.
+func TestCertForClient_SNIOutranksSeed(t *testing.T) {
+	resetCertCacheForTest()
+	t.Cleanup(resetCertCacheForTest)
+	caKey, caCert := helperCA(t)
+	hello, port := helperPortHello(t, "api.example.com")
+	SeedSrcPortDstHost(port, "10.96.0.1")
+
+	cert, err := CertForClient(zap.NewNop(), hello, caKey, caCert, time.Time{})
+	if err != nil {
+		t.Fatalf("CertForClient: %v", err)
+	}
+	leaf := leafOf(t, cert)
+	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != "api.example.com" || len(leaf.IPAddresses) != 0 {
+		t.Fatalf("leaf SANs = %v / %v, want [api.example.com] and no IP", leaf.DNSNames, leaf.IPAddresses)
+	}
+	if v, _ := SrcPortToDstURL.Load(port); v != "api.example.com" {
+		t.Fatalf("SrcPortToDstURL = %q, want the SNI", v)
+	}
+}
+
+// TestSeedSrcPortDstHost_RecycledPortThenConnectTarget covers the seed's
+// lifecycle on one source port: it replaces what an earlier connection on the
+// recycled port left behind (its seed and its SrcPortToDstURL entry), and a
+// CONNECT target stored after it (connect.go) still names the leaf.
+func TestSeedSrcPortDstHost_RecycledPortThenConnectTarget(t *testing.T) {
+	resetCertCacheForTest()
+	t.Cleanup(resetCertCacheForTest)
+	caKey, caCert := helperCA(t)
+	hello, port := helperPortHello(t, "")
+
+	// Left behind by an earlier connection whose cleanup lost the port.
+	srcPortDstHost.Store(port, "10.0.0.9")
+	SrcPortToDstURL.Store(port, "appA.svc")
+
+	SeedSrcPortDstHost(port, "10.96.0.1")
+	if v, _ := srcPortDstHost.Load(port); v != "10.96.0.1" {
+		t.Fatalf("seed = %v, want 10.96.0.1", v)
+	}
+	if v, ok := SrcPortToDstURL.Load(port); ok {
+		t.Fatalf("stale SrcPortToDstURL entry %q survived the seed", v)
+	}
+
+	// The CONNECT path runs after the seed and files its target.
+	SrcPortToDstURL.Store(port, "api.example.com")
+	cert, err := CertForClient(zap.NewNop(), hello, caKey, caCert, time.Time{})
+	if err != nil {
+		t.Fatalf("CertForClient: %v", err)
+	}
+	leaf := leafOf(t, cert)
+	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != "api.example.com" || len(leaf.IPAddresses) != 0 {
+		t.Fatalf("leaf SANs = %v / %v, want the CONNECT target and no IP", leaf.DNSNames, leaf.IPAddresses)
+	}
+
+	SeedSrcPortDstHost(port, "")
+	if v, ok := srcPortDstHost.Load(port); ok {
+		t.Fatalf("an empty host must clear the seed, got %v", v)
+	}
+}
+
+// TestHandleTLSConnection_IPLiteralClientVerifiesSeededLeaf drives the real
+// MITM with a verifying Go client whose ServerName is an IP literal, exactly
+// what client-go does for https://10.96.0.1:443: crypto/tls omits the SNI, so
+// only the seed can name the leaf.
+func TestHandleTLSConnection_IPLiteralClientVerifiesSeededLeaf(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	ca := getActiveCA(zap.NewNop())
+	if ca == nil {
+		t.Fatal("no active CA")
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.cert)
+
+	srvErr := make(chan error, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			srvErr <- aerr
+			return
+		}
+		defer c.Close()
+		port := c.RemoteAddr().(*net.TCPAddr).Port
+		defer SeedSrcPortDstHost(port, "")
+		SeedSrcPortDstHost(port, "10.96.0.1")
+		_, _, herr := HandleTLSConnection(context.Background(), zap.NewNop(), c, time.Time{})
+		srvErr <- herr
+	}()
+
+	client, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{ServerName: "10.96.0.1", RootCAs: roots})
+	if err != nil {
+		t.Fatalf("client handshake against the seeded leaf: %v", err)
+	}
+	defer client.Close()
+	if err := <-srvErr; err != nil {
+		t.Fatalf("MITM handshake: %v", err)
 	}
 }
