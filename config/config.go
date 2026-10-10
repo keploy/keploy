@@ -124,6 +124,9 @@ type Record struct {
 	BasePath    string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata    string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	// IncludeStaticAssets records static assets and binary downloads that are
+	// otherwise skipped based on the HTTP response's Content-Type.
+	IncludeStaticAssets bool `json:"includeStaticAssets" yaml:"includeStaticAssets" mapstructure:"includeStaticAssets"`
 	// TestCaseNaming controls how default test case filenames are generated.
 	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
 	// "sequential" preserves the legacy `test-N.yaml` numbering.

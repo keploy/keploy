@@ -334,6 +334,9 @@ type ConditionalDstCfg struct {
 type IncomingOptions struct {
 	Filters  []Filter
 	BasePath string
+	// IncludeStaticAssets disables the default filtering of successful HTTP
+	// GET/HEAD responses containing static assets or recognized binary downloads.
+	IncludeStaticAssets bool
 }
 
 type SetupOptions struct {
