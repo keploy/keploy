@@ -213,6 +213,17 @@ type MockMismatchReport struct {
 // infrastructure/decode failures when building UnmatchedCalls for reports.
 var ErrNoMockMatched = errors.New("no matching mock found")
 
+// ErrUnmatchedCallsUnread says a read of a test's unmatched calls is
+// incomplete: the agent could not vouch that every call no mock answered
+// reached the list it returned (its error drain stopped, the read was given up,
+// or a miss could not be queued), or the list could not be fetched at all. It
+// comes back WITH whatever was read, so a caller that only reports misses keeps
+// them, while one that judges must treat the test's evidence as unknown: under
+// the proven switch the replayer marks the test FailureInfo.UnmatchedCallsUnread
+// and its test set is not judged. Only an agent with the proven switch on
+// reports it.
+var ErrUnmatchedCallsUnread = errors.New("the unmatched calls of this test could not all be read")
+
 type ParserError struct {
 	ParserErrorType ParserErrorType
 	Err             error

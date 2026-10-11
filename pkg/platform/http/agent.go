@@ -2694,6 +2694,11 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 	if err := json.NewDecoder(res.Body).Decode(&mockErrors); err != nil {
 		return nil, fmt.Errorf("failed to decode mock errors response: %s", err.Error())
 	}
+	// The agent read incompletely (proven switch): the list is what it read,
+	// and the error says it may be missing calls.
+	if cause := res.Header.Get(models.UnmatchedCallsUnreadHeader); cause != "" {
+		return mockErrors, fmt.Errorf("%w (agent: %s)", models.ErrUnmatchedCallsUnread, cause)
+	}
 	return mockErrors, nil
 }
 

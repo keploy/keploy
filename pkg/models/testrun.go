@@ -132,6 +132,12 @@ type FailureInfo struct {
 	MockMismatch   *MockMismatchInfo  `json:"mock_mismatch,omitempty" yaml:"mock_mismatch,omitempty"`
 	MatchedCalls   []MatchedCall      `json:"matched_calls,omitempty" yaml:"matched_calls,omitempty"`
 	UnmatchedCalls []UnmatchedCall    `json:"unmatched_calls,omitempty" yaml:"unmatched_calls,omitempty"`
+	// UnmatchedCallsUnread says UnmatchedCalls may be missing calls: the
+	// agent's record of the calls no mock answered during this test could not
+	// all be read (models.ErrUnmatchedCallsUnread, or the read failed). The
+	// test's evidence is unknown, so its test set is not judged. Set only under
+	// the proven switch.
+	UnmatchedCallsUnread bool `json:"unmatched_calls_unread,omitempty" yaml:"unmatched_calls_unread,omitempty"`
 }
 
 // MockMismatchMock identifies a mock in the expected/actual mock sets carried by

@@ -248,6 +248,10 @@ type prInstr struct {
 	// returns.
 	release chan struct{}
 	stopped chan struct{}
+	// mockErrorsFor, when set, answers every GetMockErrors call: what the agent
+	// read of the calls no mock answered during the test that just ran. The
+	// replayer reads them once per test, in test order.
+	mockErrorsFor func() ([]models.UnmatchedCall, error)
 }
 
 func (f *prInstr) AgentReadsConsumedPerTestOnly() bool {
@@ -287,13 +291,21 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 	}
 }
 func (f *prInstr) GetErrorChannel() <-chan error                                    { return make(chan error) }
-func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error)    { return nil, nil }
+func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error)    { return f.errs() }
 func (f *prInstr) BeforeSimulate(context.Context, *time.Time, string, string) error { return nil }
 func (f *prInstr) AfterSimulate(context.Context, string, string) error              { return nil }
 func (f *prInstr) BeforeTestRun(context.Context, string) error                      { return nil }
 func (f *prInstr) BeforeTestSetCompose(context.Context, string, string, bool) error { return nil }
 func (f *prInstr) AfterTestRun(context.Context, string, []string, models.TestCoverage) error {
 	return nil
+}
+
+// errs answers GetMockErrors: mockErrorsFor when a test set it, else no miss.
+func (f *prInstr) errs() ([]models.UnmatchedCall, error) {
+	if f.mockErrorsFor != nil {
+		return f.mockErrorsFor()
+	}
+	return nil, nil
 }
 func (f *prInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
 	f.mu.Lock()

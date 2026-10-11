@@ -182,6 +182,9 @@ type runShape struct {
 	// into APP_FAULT, so the status describes the partial run itself rather
 	// than something that went wrong independently.
 	downgradedFromPassed bool
+	// notJudged is why an otherwise judged set is INTERNAL_ERR: evidence its
+	// verdict needs could not be read (proven switch). Empty otherwise.
+	notJudged string
 }
 
 const partialRunReason = "replay stopped before every test ran - the tests missing from the totals were not " +
@@ -230,6 +233,9 @@ func describeTestSetFailure(status models.TestSetStatus, testCaseResults []model
 		}
 		return ""
 	case models.TestSetStatusInternalErr:
+		if shape.notJudged != "" {
+			return withUnverifiedNote(shape.notJudged, shape)
+		}
 		return withUnverifiedNote("replay failed with an internal error - please report this issue if it persists", shape)
 	default:
 		return ""
@@ -3868,6 +3874,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatus = resolvedStatus
 	}
 
+	// A test whose unmatched calls could not all be read has no verdict, so its
+	// set has none either: neither PASSED nor FAILED, and nothing a judge may
+	// read as either (proven switch).
+	notJudged := ""
+	unreadMisses := testsWithUnreadMisses(testCaseResults)
+	if len(unreadMisses) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed) {
+		notJudged = unreadMissesReason(unreadMisses)
+		r.logger.Error("test-set is not judged: the calls some of its tests made that no mock answered could not all be read from keploy's agent",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", unreadMisses),
+			zap.String("next_step", "check the agent's log for why the read was incomplete, then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+	}
+
 	appFailure := getLastAppErr()
 	appLogs := appFailure.AppLogs
 
@@ -3981,7 +4001,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade}),
+		FailureReason: describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged}),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
@@ -6083,7 +6103,7 @@ func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName
 		return
 	}
 	mockErrors, err := r.instrumentation.GetMockErrors(ctx)
-	if err != nil {
+	if err != nil && !provenswitch.On() {
 		// Don't swallow silently. This test's misses can't be attached, but the
 		// agent-side window is reset when the next test opens its own (which
 		// drops a window never read, and says so), so the failure can't bleed
@@ -6094,6 +6114,18 @@ func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName
 			zap.String("testCaseID", testCaseName),
 			zap.Error(err))
 		return
+	}
+	if err != nil {
+		// Under the proven switch a miss fails its test, so a test whose misses
+		// could not all be read has no verdict: it is marked, whatever was read
+		// is still attached, and its test set is not judged (see
+		// testsWithUnreadMisses).
+		markUnmatchedCallsUnread(result)
+		r.logger.Error("could not read every call this test made that no mock answered; its test set is not judged",
+			zap.String("testSetID", testSetID),
+			zap.String("testCaseID", testCaseName),
+			zap.Int("callsRead", len(mockErrors)),
+			zap.Error(err))
 	}
 	for _, me := range mockErrors {
 		if result != nil {

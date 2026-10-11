@@ -188,6 +188,51 @@ if [ "$streaming_reported" != true ]; then
     exit 1
 fi
 
+# The same replay under the proven switch (KEPLOY_PROVEN=1, the proven model's
+# staging gate). The agent then waits for its error drain on events instead of
+# a 2 s deadline, never drops a miss for want of room in its error channel, and
+# says when a read of a test's misses is incomplete (models.
+# ErrUnmatchedCallsUnread), which leaves the test's set unjudged. Here nothing
+# is lost: the forced misses must still reach their streaming tests, no test may
+# be marked unmatched_calls_unread, and no set INTERNAL_ERR. The agent is
+# started through sudo, which drops KEPLOY_PROVEN, so its own debug line is the
+# proof the switch reached it as --proven.
+rm -rf ./keploy/reports
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./sse-redis-app" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs_proven.txt
+if grep "WARNING: DATA RACE" test_logs_proven.txt; then
+    echo "::error::Race condition detected in the proven-switch replay"
+    docker compose down 2>/dev/null || true
+    exit 1
+fi
+if ! grep -q "staging switch is on in this agent" test_logs_proven.txt; then
+    echo "::error::the agent never said the proven switch is on: KEPLOY_PROVEN=1 did not reach it as --proven"
+    grep -n "agent" test_logs_proven.txt | head -20
+    docker compose down 2>/dev/null || true
+    exit 1
+fi
+shopt -s nullglob
+proven_reports=( ./keploy/reports/test-run-*/test-set-*-report.yaml )
+shopt -u nullglob
+proven_streaming_reported=false
+for rf in "${proven_reports[@]}"; do
+    if grep -q 'unmatched_calls_unread: true' "$rf" || grep -q '^status: INTERNAL_ERR' "$rf"; then
+        echo "::error::$(basename "$rf"): a read of a test's misses was incomplete under the proven switch, though nothing was lost"
+        grep -n 'unmatched_calls_unread\|^status\|failure_reason' "$rf" | head -20
+        docker compose down 2>/dev/null || true
+        exit 1
+    fi
+    if grep -q 'unmatched_calls:' "$rf"; then
+        proven_streaming_reported=true
+    fi
+done
+if [ "$proven_streaming_reported" != true ]; then
+    echo "::error::under the proven switch the forced streaming misses never reached a test"
+    tail -40 test_logs_proven.txt
+    docker compose down 2>/dev/null || true
+    exit 1
+fi
+echo "✓ under KEPLOY_PROVEN=1 the agent got the switch, every forced miss reached its test, and no read was incomplete"
+
 echo "streaming mock-mismatch e2e passed: a streaming test reported the forced unmatched Redis read"
 docker compose down 2>/dev/null || true
 exit 0

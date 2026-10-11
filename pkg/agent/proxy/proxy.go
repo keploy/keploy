@@ -37,6 +37,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -168,6 +169,17 @@ type Proxy struct {
 	// owner to consume the marker); when false we use the legacy direct sweep.
 	errDrainActive atomic.Bool
 	errDrainOnce   sync.Once
+	// errDrainDone is closed when the StartErrorDrain goroutine exits. Under the
+	// proven switch a miss waits for the drain to take it, and GetMockErrors
+	// waits for the drain to reach its flush marker, each until this closes:
+	// the events that end those waits, in place of a deadline. Set before
+	// errDrainActive goes true, so a reader that sees the drain active sees it.
+	errDrainDone chan struct{}
+	// missesLost is set, under the proven switch, when a miss could not be
+	// queued for its test: the error drain had stopped, or never ran. The next
+	// GetMockErrors then reports its read incomplete (ErrUnmatchedCallsUnread)
+	// instead of returning a list that a miss is missing from.
+	missesLost atomic.Bool
 	// pendingMockErrors retains mock-not-found errors that arrive while no test
 	// capture window is active (activeTestErrors is nil) — e.g. between tests,
 	// or when the replayer/agent predates the BeginTestErrorCapture wiring.
@@ -4034,10 +4046,13 @@ func (*flushMarker) Error() string { return "keploy: capture flush marker" }
 
 func (p *Proxy) StartErrorDrain(ctx context.Context) {
 	p.errDrainOnce.Do(func() {
+		done := make(chan struct{})
+		p.errDrainDone = done
 		p.errDrainActive.Store(true)
 		var discarded atomic.Int64
 		go func() {
 			defer utils.Recover(p.logger)
+			defer close(done)
 			defer p.errDrainActive.Store(false)
 			for {
 				select {
@@ -4188,7 +4203,7 @@ func (p *Proxy) GetErrorChannel() <-chan error {
 // GetMockErrors drains all mock-not-found errors and returns them.
 // When StartErrorDrain is active, it reads from the test accumulator instead
 // of the channel (which is drained by the background goroutine).
-func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
+func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
 	// Rendezvous with the drain goroutine BEFORE taking captureMu: push a flush
 	// marker and wait until the goroutine pulls it. FIFO ordering then
 	// guarantees every error the goroutine had already received from errChannel
@@ -4196,22 +4211,38 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 	// strand an in-flight miss (the remaining race the previous fix left open).
 	// The app has already responded by now, so this test's pushes precede the
 	// marker. A bounded wait keeps a stalled drain from blocking replay.
+	//
+	// Under the proven switch nothing is bounded by a clock: the waits end on
+	// the marker being reached, the drain stopping, or the caller giving up
+	// (unreadCause), and a read that could not vouch for every miss says so
+	// (ErrUnmatchedCallsUnread) rather than returning a list a miss may be
+	// missing from. On a starved machine the drain is slow, not wrong, and a
+	// deadline would turn slow into a verdict.
+	proven := provenswitch.On()
+	unreadCause := ""
 	rendezvousOK := false
 	drainActive := p.errDrainActive.Load()
 	if drainActive && p.errChannel != nil {
 		marker := &flushMarker{done: make(chan struct{})}
-		select {
-		case p.errChannel <- marker:
+		if proven {
+			rendezvousOK, unreadCause = p.flushOnEvents(ctx, marker)
+		} else {
 			select {
-			case <-marker.done:
-				rendezvousOK = true
-			case <-time.After(2 * time.Second):
-				// drain stalled — DON'T close the window below (see end).
+			case p.errChannel <- marker:
+				select {
+				case <-marker.done:
+					rendezvousOK = true
+				case <-time.After(2 * time.Second):
+					// drain stalled — DON'T close the window below (see end).
+				}
+			default:
+				// errChannel full (drain is behind) — marker not enqueued; DON'T
+				// close the window below.
 			}
-		default:
-			// errChannel full (drain is behind) — marker not enqueued; DON'T
-			// close the window below.
 		}
+	}
+	if proven && p.missesLost.Swap(false) && unreadCause == "" {
+		unreadCause = "a miss could not be queued for its test: keploy's error drain was not running"
 	}
 
 	p.captureMu.Lock()
@@ -4310,15 +4341,61 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 			}
 		}
 	}
+	if unreadCause != "" {
+		return errs, fmt.Errorf("%w: %s", models.ErrUnmatchedCallsUnread, unreadCause)
+	}
 	return errs, nil
 }
 
+// flushOnEvents is the proven switch's rendezvous with the error drain: queue
+// the flush marker and wait for the drain to reach it, ending only on events.
+// It returns whether the drain reached the marker, and when it did not, why:
+// the drain stopped (nothing will route a miss into the window again) or the
+// caller gave up on the read (its context ended).
+func (p *Proxy) flushOnEvents(ctx context.Context, marker *flushMarker) (bool, string) {
+	select {
+	case p.errChannel <- marker:
+	case <-p.errDrainDone:
+		return false, "keploy's error drain stopped before this read"
+	case <-ctx.Done():
+		return false, "the read was given up before the error drain took it: " + context.Cause(ctx).Error()
+	}
+	select {
+	case <-marker.done:
+		return true, ""
+	case <-p.errDrainDone:
+		return false, "keploy's error drain stopped before it routed every miss"
+	case <-ctx.Done():
+		return false, "the read was given up before the error drain routed every miss: " + context.Cause(ctx).Error()
+	}
+}
+
 // SendError sends an error to the error channel for external monitoring.
+//
+// Under the proven switch a miss is never dropped for want of room: while the
+// error drain runs it waits for the drain to take it, which the drain always
+// does (it holds nothing a sender holds). A miss that still cannot be queued,
+// because the drain has stopped or never started, is lost, and the next
+// GetMockErrors reports its read incomplete instead of silently short.
 func (p *Proxy) SendError(err error) {
+	proven := provenswitch.On() && isMockNotFoundErr(err)
+	if proven && p.errDrainActive.Load() {
+		select {
+		case p.errChannel <- err:
+			return
+		case <-p.errDrainDone:
+		}
+		p.missesLost.Store(true)
+		p.logger.Error("keploy's error drain stopped; a call no mock answered could not be reported to its test", zap.Error(err))
+		return
+	}
 	select {
 	case p.errChannel <- err:
 	default:
 		p.logger.Error("Error channel is full, dropping error", zap.Error(err))
+		if proven {
+			p.missesLost.Store(true)
+		}
 	}
 }
 
