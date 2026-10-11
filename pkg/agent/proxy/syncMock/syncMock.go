@@ -463,6 +463,13 @@ type SyncMockManager struct {
 	// watermark says when a test case's verdict is final (settle.go); nil
 	// when nothing can tell.
 	watermark atomic.Pointer[watermarkBox]
+	// added is the watermarks AddWatermark added beside it (settle.go):
+	// copy-on-write under addedMu.
+	added   atomic.Pointer[[]*watermarkBox]
+	addedMu sync.Mutex
+	// incoming is what the ingress has yet to hand the recorder's stream:
+	// test cases being built, and the queues they wait in (settle.go).
+	incoming incomingBacklog
 	// heldOldest is the earliest end (UnixNano) of a test case the recorder's
 	// stream holds for its verdict (NoteHeld); 0 when none.
 	heldOldest atomic.Int64

@@ -152,6 +152,23 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				utils.SetExitCodeOnce(utils.ExitKeployError)
 				return nil
 			}
+			// A recording's client owns this agent's lifetime. A stop signal,
+			// often the same one the client got (`pkill -INT keploy`, a
+			// container stop), waits while the client still holds a frame
+			// stream open: the client is draining what this agent captured
+			// before the stop, and stops the agent once it has (POST
+			// /agent/stop). A client that dies drops its streams (and the
+			// parent-death watchdog above stops a native agent); a second
+			// signal stops the agent at once.
+			utils.SetSignalHold(func(stopNow <-chan struct{}) {
+				if routes.RecordingClients() == 0 {
+					return
+				}
+				logger.Info("a recording's client is still saving what this agent captured before the stop; the agent stops once it has finished, or at a second signal")
+				if !routes.WaitForRecordingClients(stopNow) {
+					logger.Warn("stopping the agent while a recording's client was still saving what it captured before the stop: what the client had not received yet is lost")
+				}
+			})
 			go func() {
 				select {
 				case <-ctx.Done():

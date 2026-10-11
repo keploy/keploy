@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 	yamlLib "gopkg.in/yaml.v3"
@@ -567,6 +569,7 @@ type recTelemetry struct {
 	suiteRecorded    bool
 	sessionTestCount int64
 	sessionRecorded  bool
+	sessionStatus    string
 }
 
 func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]int, metadata map[string]interface{}) {
@@ -579,11 +582,12 @@ func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]
 func (tl *recTelemetry) RecordedTestCaseMock(string)  {}
 func (tl *recTelemetry) RecordedMocks(map[string]int) {}
 func (tl *recTelemetry) RecordedTestAndMocks()        {}
-func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, _ string, _ string) {
+func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, status string, _ string) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	tl.sessionTestCount = testCount
 	tl.sessionRecorded = true
+	tl.sessionStatus = status
 }
 
 type recTestSetConf struct{}
@@ -2301,4 +2305,158 @@ func TestStart_WarnsOnceForATestCaseRecordedOnAnUnreachablePort(t *testing.T) {
 	defer instr.mu.Unlock()
 	assert.Equal(t, []string{"localhost:8095 for 8095", "localhost:8096 for 8096"}, instr.asked,
 		"each port is checked once, at the address replay will send its tests to by default: the port they were recorded on")
+}
+
+// stuckBacklogInstr is an agent that, once the recording stops, says it still
+// holds what it captured before the stop and never gets further.
+type stuckBacklogInstr struct{ *blockingInstr }
+
+func (s *stuckBacklogInstr) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return models.AgentBacklog{Verdict: models.BacklogPending, Progress: 1, WaitingOn: "connection 3: its parser is stuck"}, nil
+}
+
+// A recording whose agent still held captures from before the stop when the
+// stop stopped waiting for them is incomplete: the run ends with a Keploy-side
+// failure exit code and an incomplete session, never as a success.
+func TestStart_ABacklogTheAgentNeverHandsOverFailsTheRun(t *testing.T) {
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	testDB := &recTestDB{}
+	tele := &recTelemetry{}
+	core, logs := observer.New(zapcore.ErrorLevel)
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          testDB,
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       tele,
+		instrumentation: &stuckBacklogInstr{&blockingInstr{f}},
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		frameQuiet:      5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	select {
+	case f.incoming <- &models.TestCase{Name: "test-1", Kind: models.HTTP}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("recorder never consumed the test case")
+	}
+	waitForPersistedTestCase(t, testDB, "test-1")
+
+	cancel()
+	// The agent's frame streams stay open: it holds more, and never hands it
+	// over. Its mapping stream is done.
+	close(f.mappings)
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	if utils.ErrCode != utils.ExitKeployError {
+		t.Fatalf("exit code %d, want %d: a recording that lost what the agent held at the stop must fail", utils.ErrCode, utils.ExitKeployError)
+	}
+	tele.mu.Lock()
+	status := tele.sessionStatus
+	tele.mu.Unlock()
+	if status != "incomplete" {
+		t.Fatalf("session status %q, want incomplete", status)
+	}
+	if logs.FilterMessageSnippet("the recording is incomplete").Len() == 0 {
+		t.Fatalf("the run did not say it was incomplete at ERROR: %v", logs.All())
+	}
+}
+
+// lifetimeInstr is an agent whose lifetime is the context its Setup got, as a
+// native agent's process, or a docker agent's container, is. Once the
+// recording stops it says it still holds what it captured before the stop,
+// moving through it, until released.
+type lifetimeInstr struct {
+	*blockingInstr
+	setupCtx atomic.Pointer[context.Context]
+	release  chan struct{}
+	looks    atomic.Uint64
+}
+
+func (l *lifetimeInstr) Setup(ctx context.Context, _ string, _ models.SetupOptions) error {
+	l.setupCtx.Store(&ctx)
+	return nil
+}
+
+func (l *lifetimeInstr) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	n := l.looks.Add(1)
+	select {
+	case <-l.release:
+		return models.AgentBacklog{Verdict: models.BacklogClear}, nil
+	default:
+		return models.AgentBacklog{Verdict: models.BacklogPending, Progress: n}, nil
+	}
+}
+
+// The agent outlives a Ctrl+C until the stop has drained what it captured
+// before the stop: its lifetime (the context Setup got) ends after the drains,
+// not as the interrupt lands. Ended then, the agent closed the streams the
+// drains were reading, and what its parsers still held was lost with it.
+func TestStart_TheAgentOutlivesTheInterruptUntilTheDrainsAreDone(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	testDB := &recTestDB{}
+	inst := &lifetimeInstr{blockingInstr: &blockingInstr{f}, release: make(chan struct{})}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          testDB,
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: inst,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		frameQuiet:      5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	select {
+	case f.incoming <- &models.TestCase{Name: "test-1", Kind: models.HTTP}:
+	case <-time.After(30 * time.Second):
+		t.Fatal("recorder never consumed the test case")
+	}
+	waitForPersistedTestCase(t, testDB, "test-1")
+	agentLife := *inst.setupCtx.Load()
+
+	cancel() // Ctrl+C
+	close(f.mappings)
+	deadline := time.Now().Add(30 * time.Second)
+	for inst.looks.Load() < 6 {
+		if time.Now().After(deadline) {
+			t.Fatal("the drains never asked the agent what it held")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if agentLife.Err() != nil {
+		t.Fatal("the agent was stopped at the interrupt, while the drains still waited for what it held from before the stop")
+	}
+	close(inst.release)
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	if agentLife.Err() == nil {
+		t.Fatal("the agent was not stopped once the drains were done")
+	}
 }

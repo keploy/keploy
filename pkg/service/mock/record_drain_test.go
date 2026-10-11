@@ -360,7 +360,7 @@ func TestRecord_SlowPersistIsNotCutOff(t *testing.T) {
 // pendingInstrumentation is an agent whose parser is behind: a mock requested
 // before the runner exited comes only after a quiet stretch longer than the
 // drain's quiet bound, and the agent says it may still hand one over until
-// then (AgentClient.PendingBefore).
+// then (AgentClient.BacklogBefore).
 type pendingInstrumentation struct {
 	trickleInstrumentation
 	quietFor time.Duration
@@ -368,9 +368,12 @@ type pendingInstrumentation struct {
 	asked    atomic.Int32
 }
 
-func (p *pendingInstrumentation) PendingBefore(context.Context, time.Time) (bool, bool, error) {
+func (p *pendingInstrumentation) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
 	p.asked.Add(1)
-	return p.pending.Load(), true, nil
+	if p.pending.Load() {
+		return models.AgentBacklog{Verdict: models.BacklogPending}, nil
+	}
+	return models.AgentBacklog{Verdict: models.BacklogClear}, nil
 }
 
 func (p *pendingInstrumentation) Run(_ context.Context, _ models.RunOptions) models.AppError {
@@ -413,5 +416,39 @@ func TestRecord_DrainWaitsWhileTheAgentSaysItHoldsMore(t *testing.T) {
 	inst.wg.Wait()
 	if got := db.inserted(); len(got) != 1 || inst.asked.Load() == 0 {
 		t.Fatalf("persisted %v (the agent was asked %d times): the drain ended while the agent said it still held a mock", got, inst.asked.Load())
+	}
+}
+
+// unansweredInstrumentation is pendingInstrumentation whose agent does not
+// answer the drain's looks while its parser is behind (a /record/pending that
+// times out), and says it holds nothing more once it has handed the mock over.
+type unansweredInstrumentation struct {
+	pendingInstrumentation
+}
+
+func (p *unansweredInstrumentation) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	p.asked.Add(1)
+	if p.pending.Load() {
+		return models.AgentBacklog{}, context.DeadlineExceeded
+	}
+	return models.AgentBacklog{Verdict: models.BacklogClear}, nil
+}
+
+// A look the agent does not answer is never read as "nothing pending": the
+// drain waits, and the mock the parser hands over later is saved (P7).
+func TestRecord_ALookTheAgentDoesNotAnswerDoesNotLoseAMock(t *testing.T) {
+	inst := &unansweredInstrumentation{pendingInstrumentation{
+		trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)},
+		quietFor:               4 * mockDrainQuiet,
+	}}
+	db := &recordingMockDB{}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "unanswered-test"
+	if err := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background()); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	inst.wg.Wait()
+	if got := db.inserted(); len(got) != 1 || inst.asked.Load() == 0 {
+		t.Fatalf("persisted %v (the agent was asked %d times): a look it did not answer ended the drain", got, inst.asked.Load())
 	}
 }

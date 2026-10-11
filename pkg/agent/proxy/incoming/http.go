@@ -1007,9 +1007,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		capturedWin := win
 		win = nil
 
+		// Being built until it is in the recorder's queue (or given up): a
+		// recording's stop waits for it (syncMock BacklogBefore). Noted
+		// here, as the response completes, not when the goroutine runs.
+		built := syncMock.FromContextOrGlobal(ctx).BuildingTestCase(capturedRespTS)
 		pm.captures.Add(1)
 		go func() {
 			defer pm.captures.Done()
+			defer built()
 			defer capturedWin.Close() // once the capture has decided it, or skipped it
 			exchangeCaptureSize, err := capturedExchangeSize(capturedReq, capturedResp, reqBodyBytes, respBodyBytes)
 			if err != nil {
@@ -1782,9 +1787,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			capturedWin := win
 			win = nil
 
+			// Being built until it is in the recorder's queue (or given
+			// up): a recording's stop waits for it (syncMock
+			// BacklogBefore).
+			built := syncMock.FromContextOrGlobal(ctx).BuildingTestCase(capturedRespTS)
 			pm.captures.Add(1)
 			go func() {
 				defer pm.captures.Done()
+				defer built()
 				defer releaseCaptureSlot()
 				defer capturedWin.Close() // once the capture has decided it, or skipped it
 

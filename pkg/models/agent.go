@@ -410,3 +410,53 @@ type AppStartReq struct {
 	Pid  int       `json:"pid,omitempty"`
 	At   time.Time `json:"at,omitzero"`
 }
+
+// BacklogVerdict is what the agent answers when a recording's stop asks
+// whether it may still hand over something captured before the stop
+// (GET /agent/record/pending, AgentBacklog). It has three values, and a fourth
+// for an agent that can never tell: an answer that did not come is never read
+// as "nothing pending".
+type BacklogVerdict int
+
+const (
+	// BacklogCannotTell: no answer came (a timeout, a transport error, an
+	// error status, a body that does not decode). The agent may still hold
+	// something; the stop keeps waiting while it can. The zero value, so an
+	// answer that was never filled in is never taken for BacklogClear.
+	BacklogCannotTell BacklogVerdict = iota
+	// BacklogPending: the agent may still hand over something captured
+	// before the stop.
+	BacklogPending
+	// BacklogClear: the agent will hand over nothing more captured before
+	// the stop.
+	BacklogClear
+	// BacklogUnsupported: the agent cannot tell, and never will (it predates
+	// the route, or its capture has no watermark). The stop goes by its
+	// streams' quiet alone.
+	BacklogUnsupported
+)
+
+func (v BacklogVerdict) String() string {
+	switch v {
+	case BacklogPending:
+		return "pending"
+	case BacklogClear:
+		return "clear"
+	case BacklogUnsupported:
+		return "unsupported"
+	}
+	return "cannot tell"
+}
+
+// AgentBacklog is the agent's answer to whether it may still hand over a test
+// case or a mock captured before a time.
+type AgentBacklog struct {
+	Verdict BacklogVerdict
+	// Progress is a count that moves whenever the agent's capture gets
+	// further: with BacklogPending, a stop tells a backlog being worked
+	// through from one that is not moving. Zero from an agent that predates
+	// it.
+	Progress uint64
+	// WaitingOn says what is pending, when the agent can tell.
+	WaitingOn string
+}

@@ -3,6 +3,7 @@ package utils
 import (
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -92,3 +93,58 @@ func WaitWhileProgressing(done <-chan struct{}, stall time.Duration, progress fu
 		}
 	}
 }
+
+// BacklogLooks is a stop's looks at what the agent still holds from before
+// it (models.AgentBacklog), each taken once the stop's stream has gone quiet,
+// and the rule that says whether it keeps waiting (Look).
+type BacklogLooks struct {
+	// Stall is how many looks in a row without progress end the wait.
+	Stall int
+
+	stalled  int
+	frames   uint64
+	progress uint64
+	answered bool
+}
+
+// Look takes one look: the agent's answer, and how many frames the stop has
+// handed on so far (on any of its streams). It reports whether the stop keeps
+// waiting, and gaveUp when it does not because the backlog made no progress.
+//
+//   - clear: the agent will hand over nothing more from before the stop.
+//     The wait ends.
+//   - unsupported: the agent can never tell. The wait ends; the stop goes by
+//     its streams' quiet alone.
+//   - pending, or cannot tell (no answer came): the stop keeps waiting. An
+//     answer that did not come is never read as "nothing pending".
+//
+// A wait is bounded by progress, not time: a look that finds a frame handed
+// on since the last one, or the agent's capture further along
+// (AgentBacklog.Progress, from a pending answer), resets the count; Stall
+// looks in a row with neither end the wait, gaveUp.
+func (l *BacklogLooks) Look(b models.AgentBacklog, frames uint64) (wait, gaveUp bool) {
+	switch b.Verdict {
+	case models.BacklogClear, models.BacklogUnsupported:
+		return false, false
+	}
+	moved := frames != l.frames
+	l.frames = frames
+	if b.Verdict == models.BacklogPending {
+		if !l.answered || b.Progress != l.progress {
+			moved = true
+		}
+		l.progress, l.answered = b.Progress, true
+	}
+	if moved {
+		l.stalled = 0
+	} else {
+		l.stalled++
+	}
+	if l.stalled >= l.Stall {
+		return false, true
+	}
+	return true, false
+}
+
+// Stalled is how many looks in a row saw no progress.
+func (l *BacklogLooks) Stalled() int { return l.stalled }

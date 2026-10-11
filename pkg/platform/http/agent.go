@@ -2748,40 +2748,57 @@ func (a *AgentClient) openTestErrorCapture(ctx context.Context, carry bool) erro
 	return nil
 }
 
-// PendingBefore asks the agent whether it may still hand over a test case or a
-// mock captured before `before` (GET /agent/record/pending). known is false when
-// it cannot tell: an agent that predates the route, or a capture without a
-// watermark (proxy mode). A recording's stop then goes by its streams' quiet
-// alone.
-func (a *AgentClient) PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error) {
+// agentBacklogProbeTimeout bounds one look at the agent's backlog
+// (BacklogBefore). It decides nothing: a look that runs out is
+// BacklogCannotTell, never "nothing pending", and the stop looks again.
+const agentBacklogProbeTimeout = 2 * time.Second
+
+// BacklogBefore asks the agent whether it may still hand over a test case or a
+// mock captured before `before` (GET /agent/record/pending). The verdict has
+// three values and a fourth: pending, clear, cannot tell (no answer came: a
+// timeout, a transport error, an error status, a body that does not decode;
+// err says why), and unsupported (404: an agent that predates the route; 501:
+// a capture without a watermark), when the stop can only go by its streams'
+// quiet. A look that cannot tell is never read as clear.
+func (a *AgentClient) BacklogBefore(ctx context.Context, before time.Time) (models.AgentBacklog, error) {
 	if a.conf.Agent.AgentURI == "" {
-		return false, false, nil
+		return models.AgentBacklog{Verdict: models.BacklogUnsupported}, nil
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	reqCtx, cancel := context.WithTimeout(ctx, agentBacklogProbeTimeout)
 	defer cancel()
 	url := fmt.Sprintf("%s/record/pending?before=%d", a.conf.Agent.AgentURI, before.UnixNano())
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return false, false, err
+		return models.AgentBacklog{}, err
 	}
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return false, false, err
+		return models.AgentBacklog{}, err
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
-	if resp.StatusCode != http.StatusOK {
-		return false, false, nil // 404 (older agent), 501 (cannot tell)
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound, http.StatusNotImplemented:
+		return models.AgentBacklog{Verdict: models.BacklogUnsupported}, nil
+	default:
+		return models.AgentBacklog{}, fmt.Errorf("the agent answered %s", resp.Status)
 	}
 	var out struct {
-		Pending bool `json:"pending"`
+		Pending   bool   `json:"pending"`
+		Progress  uint64 `json:"progress"`
+		WaitingOn string `json:"waitingOn"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return false, false, err
+		return models.AgentBacklog{}, err
 	}
-	return out.Pending, true, nil
+	b := models.AgentBacklog{Verdict: models.BacklogClear, Progress: out.Progress, WaitingOn: out.WaitingOn}
+	if out.Pending {
+		b.Verdict = models.BacklogPending
+	}
+	return b, nil
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.

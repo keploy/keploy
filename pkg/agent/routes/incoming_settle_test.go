@@ -230,14 +230,21 @@ type backlogWatermark struct {
 func (w *backlogWatermark) PendingBefore(time.Time) bool { return w.pending.Load() }
 
 // A recording's stop asks the agent whether it may still hand over something
-// captured before it; an agent whose capture cannot tell says so (501), and
-// the stop goes by quiet alone.
+// captured before it, and how far its capture has got; an agent whose capture
+// cannot tell says so (501), and the stop goes by quiet alone.
 func TestHandlePending(t *testing.T) {
 	a := &Agent{logger: zap.NewNop()}
-	ask := func() (int, string) {
+	ask := func() (int, PendingResponse) {
+		t.Helper()
 		rr := httptest.NewRecorder()
 		a.HandlePending(rr, httptest.NewRequest(http.MethodGet, "/agent/record/pending?before=1000", nil))
-		return rr.Code, strings.TrimSpace(rr.Body.String())
+		var out PendingResponse
+		if rr.Code == http.StatusOK {
+			if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+				t.Fatalf("answer %q: %v", rr.Body.String(), err)
+			}
+		}
+		return rr.Code, out
 	}
 	syncmgr.Get().SetWatermark(nil)
 	if code, _ := ask(); code != http.StatusNotImplemented {
@@ -247,22 +254,32 @@ func TestHandlePending(t *testing.T) {
 	syncmgr.Get().SetWatermark(w)
 	t.Cleanup(func() { syncmgr.Get().SetWatermark(nil); syncmgr.Get().NoteHeld(time.Time{}) })
 	w.pending.Store(true)
-	if code, body := ask(); code != http.StatusOK || body != `{"pending":true}` {
-		t.Fatalf("capture behind: %d %s", code, body)
+	if code, got := ask(); code != http.StatusOK || !got.Pending || got.WaitingOn == "" {
+		t.Fatalf("capture behind: %d %+v, want pending, saying what it waits on", code, got)
 	}
 	w.pending.Store(false)
-	if code, body := ask(); code != http.StatusOK || body != `{"pending":false}` {
-		t.Fatalf("capture through: %d %s", code, body)
+	if code, got := ask(); code != http.StatusOK || got.Pending || got.WaitingOn != "" {
+		t.Fatalf("capture through: %d %+v", code, got)
 	}
 	// A test case held for its verdict that ended before the time asked
 	// about is pending too.
 	syncmgr.Get().NoteHeld(time.Unix(0, 999))
-	if _, body := ask(); body != `{"pending":true}` {
-		t.Fatalf("a held test case from before: %s", body)
+	if _, got := ask(); !got.Pending {
+		t.Fatalf("a held test case from before: %+v", got)
 	}
 	syncmgr.Get().NoteHeld(time.Unix(0, 1001))
-	if _, body := ask(); body != `{"pending":false}` {
-		t.Fatalf("a held test case from after: %s", body)
+	if _, got := ask(); got.Pending {
+		t.Fatalf("a held test case from after: %+v", got)
+	}
+	// So is one the ingress is still building.
+	done := syncmgr.Get().BuildingTestCase(time.Unix(0, 900))
+	if _, got := ask(); !got.Pending {
+		t.Fatalf("a test case being built from before: %+v", got)
+	}
+	_, b0 := ask()
+	done()
+	if _, got := ask(); got.Pending || got.Progress == b0.Progress {
+		t.Fatalf("a built test case: %+v, want clear with progress counted", got)
 	}
 }
 

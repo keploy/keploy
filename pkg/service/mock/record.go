@@ -784,6 +784,7 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 	defer quiet.Stop()
 
 	last, _ := held()
+	looks := utils.BacklogLooks{Stall: mockDrainStallLooks}
 	for {
 		select {
 		case <-consumerDone:
@@ -797,14 +798,17 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 			// Quiet means the stream brought nothing held while the consumer
 			// was free to take it: a consumer still persisting one is not
 			// quiet, however long the write takes.
-			if now, busy := held(); now != last || busy {
+			now, busy := held()
+			if now != last || busy {
 				last = now
 				quiet.Reset(mockDrainQuiet)
 				continue
 			}
 			// Quiet is not proof: an agent whose capture can tell says whether
-			// it may still hand over a mock from before the runner exited.
-			if m.agentPendingBefore(from) {
+			// it may still hand over a mock from before the runner exited,
+			// and one that does not answer may still hold one
+			// (holdForBacklog).
+			if m.holdForBacklog(from, &looks, now) {
 				quiet.Reset(mockDrainQuiet)
 				continue
 			}
@@ -813,22 +817,50 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 	}
 }
 
-// pendingReader is an agent client that can ask the agent whether it may still
-// hand over something captured before a time (AgentClient.PendingBefore).
-type pendingReader interface {
-	PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error)
+// backlogReader is an agent client that can ask the agent whether it may still
+// hand over something captured before a time (AgentClient.BacklogBefore).
+type backlogReader interface {
+	BacklogBefore(ctx context.Context, before time.Time) (models.AgentBacklog, error)
 }
 
-// agentPendingBefore reports whether the agent says it may still hand over a
-// mock captured before `before`. False when it cannot tell.
-func (m *mockService) agentPendingBefore(before time.Time) bool {
-	pr, ok := m.instrumentation.(pendingReader)
+// mockDrainStallLooks is how many looks in a row the drain makes at a backlog
+// the agent says is pending, or does not answer about, with nothing handed
+// over and no progress in the agent's capture between them, before it stops
+// waiting and reports what is lost. A count, not a time: each look comes once
+// the stream has been quiet for mockDrainQuiet, so the drain waits at least
+// that times this on a backlog that does not move, well past the agent's own
+// hang bound (a parser that holds work and makes no progress is retired,
+// which is progress here).
+const mockDrainStallLooks = 180
+
+// holdForBacklog decides, for the trailing drain once the stream has gone
+// quiet, whether it goes on waiting for what the agent still holds from
+// before the runner exited (true) or ends (false), by the agent's answer
+// (utils.BacklogLooks.Look): clear or unsupported end it; pending, or no
+// answer at all, keep it going, never read as "nothing pending". frames is
+// the drain's own progress so far. A wait that sees no progress for
+// mockDrainStallLooks looks ends with an error that says what the agent still
+// held, and the run fails (a Keploy-side exit code, never over the runner's
+// own).
+func (m *mockService) holdForBacklog(before time.Time, looks *utils.BacklogLooks, frames uint64) bool {
+	br, ok := m.instrumentation.(backlogReader)
 	if !ok {
 		return false
 	}
-	pending, known, err := pr.PendingBefore(context.Background(), before)
-	if err != nil {
-		m.logger.Debug("could not ask the agent what it has yet to hand over; going by the stream's quiet", zap.Error(err))
+	b, err := br.BacklogBefore(context.Background(), before)
+	wait, gaveUp := looks.Look(b, frames)
+	if gaveUp {
+		m.logger.Error("stopped waiting for the keploy agent to hand over the mocks it captured before the run ended: it made no progress",
+			zap.Stringer("agent_says", b.Verdict),
+			zap.String("waiting_on", b.WaitingOn),
+			zap.Int("looks_without_progress", looks.Stalled()),
+			zap.NamedError("last_look_error", err),
+			zap.String("next_step", "the mocks the agent still held are not saved, and the run ends as failed. Re-record; if the agent was starved of CPU, give it more"))
+		utils.SetExitCodeOnce(utils.ExitKeployError)
+		return false
 	}
-	return known && pending
+	if wait && b.Verdict == models.BacklogCannotTell && looks.Stalled() == 1 {
+		m.logger.Info("could not ask the keploy agent what it still holds from before the run ended; waiting for it", zap.Error(err))
+	}
+	return wait
 }

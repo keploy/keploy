@@ -111,13 +111,18 @@ func (o drainOpts[T]) beforeHand(item T) (handed func()) {
 // still has frames queued there: at 110 req/s the CLI that stopped reading at
 // the stop and gave the stream one 30 s wait lost the mocks of 1,655 of 3,300
 // tests. So a stop does not end the forwarding. The drain ends when the stream
-// closes, when nothing will consume it (abandoned), or once, for
-// mappingIdleGrace, it has delivered nothing captured before the stop: the
-// agent holds its streams open for the whole session, so quiet is the only
-// sign that what it held is through. Frames captured after the stop, and
-// undated ones, say nothing about that backlog and do not extend it; see
-// drainOpts.afterStop for whether they are forwarded. There is no bound on the
-// total: a sink still draining is never cut off.
+// closes, when nothing will consume it (abandoned), or once the agent says it
+// holds nothing more from before the stop: each time the stream has delivered
+// nothing captured before the stop for mappingIdleGrace, the drain asks it
+// (holdForBacklog). The agent holds its streams open for the whole session,
+// and its parsers can be quiet, behind the traffic, for longer than any grace,
+// so quiet alone ends a drain only with an agent that can never tell. One
+// that does not answer is waited for, and a backlog that makes no progress
+// look after look ends the drain loudly, the recording failed. Frames
+// captured after the stop, and undated ones, say nothing about that backlog
+// and do not extend it; see drainOpts.afterStop for whether they are
+// forwarded. There is no bound on the total: a sink still draining is never
+// cut off.
 //
 // A frame taken off the stream is always handed over, unless no consumer will
 // ever come (abandoned), when dropped logs it. When the drain ends, closeStream
@@ -145,6 +150,9 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 	// sinceStop counts the frames handed on since the stop. giveUp ends the
 	// drain at a second interrupt, and says what it got.
 	var sinceStop int
+	// looks is this drain's looks at what the agent still holds from before
+	// the stop, once its stream falls quiet (holdForBacklog).
+	var looks backlogLooks
 	giveUp := func() {
 		o.closeStream()
 		r.logger.Warn("stopped saving what the agent captured before the stop, at a second interrupt",
@@ -233,8 +241,11 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 		case <-idleC:
 			// Quiet is not proof: an agent whose capture can tell says whether
 			// it may still hand over something from before the stop (a parser
-			// behind the traffic can be quiet for longer than any grace).
-			if r.agentPendingBefore(stoppedAt) {
+			// behind the traffic can be quiet for longer than any grace). One
+			// that does not answer may still hold something: only its "no",
+			// or a stall it makes no progress through, ends the drain
+			// (holdForBacklog).
+			if r.holdForBacklog(stoppedAt, &looks, o.kind) {
 				quietUntil = time.Now().Add(quiet)
 				resetTimer(idle, quiet)
 				continue
@@ -274,6 +285,9 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			return
 		case item, ok := <-stream:
 			if !ok {
+				if !stoppedAt.IsZero() {
+					r.agentEndedDrain(o.kind, &looks)
+				}
 				return
 			}
 			if forward, progress := keep(item); forward && !hand(item, progress) {
@@ -487,30 +501,143 @@ type Recorder struct {
 	frameProgress atomic.Uint64
 
 	// frameQuiet is how long a frame stream must go without delivering
-	// anything captured before the stop for its drain to end
-	// (forwardUntilDrained); zero means mappingIdleGrace. A field so tests
-	// that are not about the drain need not wait it out.
+	// anything captured before the stop for its drain to ask the agent what
+	// it still holds (forwardUntilDrained); zero means mappingIdleGrace. A
+	// field so tests that are not about the drain need not wait it out.
 	frameQuiet time.Duration
+
+	// backlogHolds counts the looks at which a frame drain kept waiting for
+	// what the agent still held from before the stop (holdForBacklog):
+	// progress for the stop's outer drains (drainProgress).
+	backlogHolds atomic.Uint64
+	// captureLost is set when a frame drain stopped waiting for what the
+	// agent still held from before the stop: the recording is incomplete,
+	// and ends as failed.
+	captureLost atomic.Bool
+	// unsupportedBacklogOnce says once that the agent cannot tell what it
+	// still holds.
+	unsupportedBacklogOnce sync.Once
 }
 
-// pendingReader is an agent client that can ask the agent whether it may still
-// hand over something captured before a time (AgentClient.PendingBefore).
-type pendingReader interface {
-	PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error)
+// backlogReader is an agent client that can ask the agent whether it may still
+// hand over something captured before a time (AgentClient.BacklogBefore).
+type backlogReader interface {
+	BacklogBefore(ctx context.Context, before time.Time) (models.AgentBacklog, error)
 }
 
-// agentPendingBefore reports whether the agent says it may still hand over a
-// test case or a mock captured before `before`. False when it cannot tell.
-func (r *Recorder) agentPendingBefore(before time.Time) bool {
-	pr, ok := r.instrumentation.(pendingReader)
+// drainStallLooks is how many looks in a row a drain makes at a backlog the
+// agent says is pending, or does not answer about, with no frame handed over
+// and no progress in the agent's capture between them, before it stops
+// waiting and reports what is lost (holdForBacklog). A count, not a time: each
+// look comes once the stream has been quiet for the drain's quiet bound
+// (mappingIdleGrace), so the drain waits at least that times this on a
+// backlog that does not move. That is well past the agent's own hang bound (a
+// parser that holds work and makes no progress is retired, and a retired
+// parser is progress here), so it is reached only when the agent itself can
+// no longer move.
+const drainStallLooks = 30
+
+// backlogLooks is one drain's looks at what the agent still holds from before
+// the stop (holdForBacklog).
+type backlogLooks struct {
+	utils.BacklogLooks
+	// toldUnanswered: the drain has said that the agent does not answer.
+	toldUnanswered bool
+	// last is the agent's answer at the drain's last look, and looked says
+	// there was one.
+	last   models.BacklogVerdict
+	looked bool
+}
+
+// agentEndedDrain reports a frame stream the agent ended on its own after the
+// stop, before its drain was done with it: the agent went away (it was
+// killed, or crashed) before it said it held nothing more from before the
+// stop, and what it still held is lost. Said at WARN; when the agent's last
+// answer was that it still held something, or it did not answer, the loss is
+// all but certain, and the recording fails (captureLost).
+func (r *Recorder) agentEndedDrain(kind string, looks *backlogLooks) {
+	held := looks.looked && (looks.last == models.BacklogPending || looks.last == models.BacklogCannotTell)
+	if held {
+		r.captureLost.Store(true)
+		r.logger.Error("the keploy agent ended its stream while it still held what it captured before the stop: that is lost",
+			zap.String("frames", kind),
+			zap.Stringer("agent_said", looks.last),
+			zap.String("next_step", "the agent was stopped or crashed before the recording's stop had saved what it held; the recording ends as failed. Do not stop the agent separately from the recording; re-record"))
+		return
+	}
+	r.logger.Warn("the keploy agent ended its stream before it said it held nothing more from before the stop: what it still held, if anything, is lost",
+		zap.String("frames", kind),
+		zap.String("next_step", "stop the recording, not the agent: the recording stops the agent once it has saved what the agent captured"))
+}
+
+// holdForBacklog decides, for a drain whose stream has gone quiet after the
+// stop, whether it goes on waiting for what the agent still holds from before
+// the stop (true) or ends (false). It asks the agent (AgentClient.BacklogBefore)
+// and goes by its answer (utils.BacklogLooks.Look):
+//
+//   - clear: the agent will hand over nothing more from before the stop. End.
+//   - unsupported: the agent can never tell (it predates the question, or its
+//     capture has no watermark). End on the quiet, as before such an agent
+//     could be asked; said once.
+//   - pending, or cannot tell (no answer came): wait. An answer that did not
+//     come is never read as "nothing pending": the agent may be starved, and
+//     what it holds is lost the moment the stream is ended. A stream whose
+//     agent dies ends on its own (the stream closes).
+//
+// A wait is bounded by progress, not time: a look that finds a frame handed
+// over since the last one (on any stream), or the agent's capture further
+// along, resets the count; drainStallLooks looks in a row without either end
+// the wait, and the drain, with an error that says what the agent still held,
+// and the recording ends as failed (captureLost). Every look that waits counts
+// as progress for the stop's outer drains (drainProgress), which would
+// otherwise take a drain waiting on the agent for a wedged one.
+func (r *Recorder) holdForBacklog(stoppedAt time.Time, looks *backlogLooks, kind string) bool {
+	br, ok := r.instrumentation.(backlogReader)
 	if !ok {
 		return false
 	}
-	pending, known, err := pr.PendingBefore(context.Background(), before)
-	if err != nil {
-		r.logger.Debug("could not ask the agent what it has yet to hand over; going by the streams' quiet", zap.Error(err))
+	if looks.Stall == 0 {
+		looks.Stall = drainStallLooks
 	}
-	return known && pending
+	b, err := br.BacklogBefore(context.Background(), stoppedAt)
+	looks.last, looks.looked = b.Verdict, true
+	wait, gaveUp := looks.Look(b, r.frameProgress.Load())
+	switch {
+	case gaveUp:
+		r.captureLost.Store(true)
+		r.logger.Error("stopped waiting for the keploy agent to hand over what it captured before the stop: it made no progress",
+			zap.String("frames", kind),
+			zap.Stringer("agent_says", b.Verdict),
+			zap.String("waiting_on", b.WaitingOn),
+			zap.Int("looks_without_progress", looks.Stalled()),
+			zap.Duration("quiet_before_each_look", r.frameQuietGrace()),
+			zap.NamedError("last_look_error", err),
+			zap.String("next_step", "what the agent still held is not saved: test cases it had captured may be missing, or saved without their mocks, and the recording ends as failed. Re-record; if the agent was starved of CPU, give it more"))
+		return false
+	case !wait:
+		if b.Verdict == models.BacklogUnsupported {
+			r.unsupportedBacklogOnce.Do(func() {
+				r.logger.Info("the keploy agent cannot say whether it still holds what it captured before the stop; each stream ends once it has been quiet for a while",
+					zap.Duration("quiet", r.frameQuietGrace()),
+					zap.String("next_step", "use an agent of the same version as this CLI: one that can tell holds the streams open until its parsers are through"))
+			})
+		}
+		return false
+	}
+	if b.Verdict == models.BacklogCannotTell && !looks.toldUnanswered {
+		looks.toldUnanswered = true
+		r.logger.Info("could not ask the keploy agent what it still holds from before the stop; waiting for it",
+			zap.String("frames", kind), zap.Error(err))
+	}
+	r.backlogHolds.Add(1)
+	return true
+}
+
+// drainProgress is what the stop's outer drains wait on while it moves: the
+// frames handed on, and every look at which a frame drain decided to keep
+// waiting for the agent (holdForBacklog), which bounds its own wait.
+func (r *Recorder) drainProgress() uint64 {
+	return r.frameProgress.Load() + r.backlogHolds.Load()
 }
 
 // drainProgressEvery is how often a stop that is still saving what the agent
@@ -527,7 +654,7 @@ func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 	go func() {
 		t := time.NewTicker(every)
 		defer t.Stop()
-		last := start
+		last, lastHolds := start, r.backlogHolds.Load()
 		for {
 			select {
 			case <-done:
@@ -536,11 +663,16 @@ func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 				return
 			case <-t.C:
 			}
-			if now := r.frameProgress.Load(); now != last {
-				last = now
+			now, holds := r.frameProgress.Load(), r.backlogHolds.Load()
+			switch {
+			case now != last:
 				r.logger.Info("Still saving what Keploy captured before the stop; press Ctrl+C again to stop now, and lose the rest",
 					zap.Uint64("savedSinceTheStop", now-start))
+			case holds != lastHolds:
+				r.logger.Info("Waiting for the keploy agent to finish parsing what it captured before the stop (its parsers are behind the traffic); press Ctrl+C again to stop now, and lose the rest",
+					zap.Uint64("savedSinceTheStop", now-start))
 			}
+			last, lastHolds = now, holds
 		}
 	}()
 	return func() { close(done) }
@@ -981,11 +1113,21 @@ func (r *Recorder) Start(ctx context.Context) error {
 	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
 	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
 
-	// Propagate parent context cancellation to setupCtx
-	// This ensures that when Ctrl+C is pressed, setupCtx is cancelled immediately
+	// A Ctrl+C while the agent is still being set up cancels the setup
+	// (setupCtx), at once. Once it is set up, the agent records until the
+	// stop has drained what it captured before the stop: setupCtx is the
+	// agent's lifetime (its process, or its container, stops when it ends),
+	// and the stop defer cancels it after the frame drains
+	// (forwardUntilDrained), not as the interrupt lands. Cancelled then, the
+	// agent closed the streams the drains were reading, and what its parsers
+	// still held from before the stop was lost with it.
+	setupRunning := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		setupCtxCancel()
+		select {
+		case <-ctx.Done():
+			setupCtxCancel()
+		case <-setupRunning:
+		}
 	}()
 
 	reqErrGrp, _ := errgroup.WithContext(ctx)
@@ -1102,7 +1244,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		drainFrames := func() {
 			reqCtxCancel()
 			defer r.reportDrainProgress(drainProgressEvery)()
-			if err, _ := utils.DrainErrGroupProgress(r.logger, "record-req", reqErrGrp, 30*time.Second, r.frameProgress.Load); err != nil {
+			if err, _ := utils.DrainErrGroupProgress(r.logger, "record-req", reqErrGrp, 30*time.Second, r.drainProgress); err != nil {
 				utils.LogError(r.logger, err, "failed to stop request processing")
 			}
 		}
@@ -1134,7 +1276,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		// only if this drain actually joined every persist goroutine; on the
 		// timeout path a mock/test-case writer may still be in flight (see below).
 		recordDrainedCleanly := true
-		if err, timedOut := utils.DrainErrGroupProgress(r.logger, "record", errGrp, 30*time.Second, r.frameProgress.Load); err != nil {
+		if err, timedOut := utils.DrainErrGroupProgress(r.logger, "record", errGrp, 30*time.Second, r.drainProgress); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		} else if timedOut {
 			recordDrainedCleanly = false
@@ -1349,12 +1491,26 @@ func (r *Recorder) Start(ctx context.Context) error {
 		// previously emitted nothing — the highest-signal "stuck" cases).
 		// "completed" for a clean exit / user Ctrl+C, "aborted" when a
 		// stopReason was set; stop_reason carries the categorized cause.
+		// A drain that stopped waiting for what the agent still held from
+		// before the stop (holdForBacklog) left the recording incomplete:
+		// said once more here, where the run ends, and the run fails.
+		incomplete := r.captureLost.Load()
+		if incomplete {
+			r.logger.Error("the recording is incomplete: the keploy agent still held captures from before the stop when Keploy stopped waiting for them",
+				zap.String("testSetID", newTestSetID),
+				zap.String("next_step", "the error above names what it was waiting on; re-record this test set"))
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+		}
 		if recordingStarted || stopReason != "" {
 			status := "completed"
-			if stopReason != "" {
+			reason := stopReason
+			switch {
+			case stopReason != "":
 				status = "aborted"
+			case incomplete:
+				status, reason = "incomplete", "the agent's captures from before the stop were not all handed over"
 			}
-			r.telemetry.RecordSessionCompleted(int64(testCountSnapshot), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status, stopReason)
+			r.telemetry.RecordSessionCompleted(int64(testCountSnapshot), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status, reason)
 		}
 		/*
 		 * THE UI JOIN ANNOTATION, written once, at stop.
@@ -1530,6 +1686,11 @@ func (r *Recorder) Start(ctx context.Context) error {
 		}
 		return r.instrumentation.Setup(c, r.config.Command, o)
 	})
+	if err == nil {
+		// The agent is up: from here a Ctrl+C no longer stops it; the stop
+		// defer does, once the drains are done.
+		close(setupRunning)
+	}
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error

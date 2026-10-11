@@ -15,6 +15,17 @@
 #
 # Runs the whole record -> replay in each storage format (yaml, then json when
 # both binaries support it), since the line lengths must survive both.
+#
+# Then once more with the capture lagging: KEPLOY_DEBUG_PARSER_LAG makes every
+# recorded connection's parser run that far behind its traffic, as a starved
+# agent's do, while the app is answered as fast as ever, and the recording is
+# stopped the moment the last request is answered. The agent then still holds
+# the upstream's mock when the stop comes, for longer than the stop's quiet
+# bound, and every test case completes before its mock is parsed. The run
+# passes only when the stop waits for the parsers (the agent's capture
+# watermark, /agent/record/pending) and the agent holds each test case until
+# its mocks are in: otherwise the /login test is saved without its mock, and
+# its replay, with the upstream gone, fails.
 
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
@@ -98,14 +109,27 @@ drive_requests() {
     expect 400 -H 'X_tenant: acme, globex' "http://127.0.0.1:${APP_PORT}/tenant"
     # Two Set-Cookie lines from the upstream.
     expect 200 "http://127.0.0.1:${APP_PORT}/login"
-    sleep 5
+    # STOP_AFTER: how long the recording runs on after the last answer. The
+    # lag run stops it at once, with the agent's parsers still behind.
+    sleep "${STOP_AFTER:-5}"
     sudo pkill -INT keploy 2>/dev/null || true
     return $failed
 }
 
+# PARSER_LAG is how far behind the lag run's parsers run: well past the stop's
+# quiet bound (3s), so a stop that goes by quiet alone ends before the agent
+# has parsed the /login mock.
+PARSER_LAG=8s
+
 run_format() {
-    local format=$1 fmt_flag=()
+    # mode: "" for a normal run, "lag" for the run with the capture lagging.
+    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5
     [ "$format" = json ] && fmt_flag=(--storage-format json)
+    if [ "$mode" = lag ]; then
+        lag_env=(KEPLOY_DEBUG_PARSER_LAG="$PARSER_LAG")
+        stop_after=0
+        format="${format}_lag"
+    fi
     echo "=================== $format ==================="
     rm -rf keploy/ keploy.yml
     # The app's http.server stamps each response with the current Date.
@@ -119,12 +143,13 @@ KEPLOY_CFG
     upstream_pid=$!
     wait_for_port "$UPSTREAM_PORT" upstream || return 1
 
-    drive_requests > "driver_logs_${format}.txt" 2>&1 &
+    STOP_AFTER=$stop_after drive_requests > "driver_logs_${format}.txt" 2>&1 &
     local driver_pid=$!
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record "${fmt_flag[@]}" \
+    sudo -E env PATH="$PATH" "${lag_env[@]}" "$RECORD_BIN" record "${fmt_flag[@]}" \
         -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT}" \
         --generateGithubActions=false > "record_logs_${format}.txt" 2>&1
-    echo "record exit status: $?"
+    local record_status=$?
+    echo "record exit status: $record_status"
     if ! wait "$driver_pid"; then
         echo "::error::the request driver failed while recording ($format)"
         cat "driver_logs_${format}.txt"
@@ -136,6 +161,25 @@ KEPLOY_CFG
         echo "::error::data race detected during record ($format)"
         tail -200 "record_logs_${format}.txt"
         return 1
+    fi
+    if [ "$mode" = lag ]; then
+        # The lag was really induced: the agent says so at WARN when it is.
+        if ! grep -q 'KEPLOY_DEBUG_PARSER_LAG is set' "record_logs_${format}.txt"; then
+            echo "::error::the agent did not run its parsers behind the traffic: KEPLOY_DEBUG_PARSER_LAG had no effect ($format)"
+            tail -100 "record_logs_${format}.txt"
+            return 1
+        fi
+        # A stop that gave up on what the agent held reports it, and fails.
+        if grep -qE 'stopped waiting for the keploy agent|the recording is incomplete' "record_logs_${format}.txt"; then
+            echo "::error::the stop gave up on captures the agent held from before it ($format)"
+            grep -E 'stopped waiting for the keploy agent|the recording is incomplete' "record_logs_${format}.txt"
+            return 1
+        fi
+        if [ "$record_status" -ne 0 ]; then
+            echo "::error::record exited $record_status with its capture lagging ($format)"
+            tail -100 "record_logs_${format}.txt"
+            return 1
+        fi
     fi
 
     # The upstream goes away: at replay only the mock can answer /login.
@@ -207,4 +251,6 @@ else
     echo "json pass skipped: a binary does not support --storage-format"
 fi
 echo "PASS: repeated headers replay on their recorded lines"
+run_format yaml lag || exit 1
+echo "PASS: a recording whose capture lags its traffic keeps every test case and its mocks"
 exit 0
