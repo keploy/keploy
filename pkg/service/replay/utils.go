@@ -662,7 +662,10 @@ func healthProbePathForLog(configured string) string {
 // as the target of the readiness gate's HTTP stage.
 type httpProbeTarget struct {
 	scheme, host, port string
-	ok                 bool
+	// appPort is the app's port the test was recorded on, which port leads
+	// to; 0 when not known.
+	appPort uint16
+	ok      bool
 	// src, when set, is where the target came from: the gate asks it again
 	// while probing, and takes the set's next target from it when the host
 	// turns out unable to reach this one.
@@ -691,9 +694,13 @@ type httpProbeTarget struct {
 // A test whose address reach says the host can never reach (in Docker mode, a
 // port the run command does not publish) is not evidence of anything: probing it
 // spends the whole ceiling on every set. It is skipped for the next test, and
-// each address is asked about once here. Whether the app listens where a
-// published port reaches it is often unknown this early (the app is still
-// starting), so the gate asks again while it probes; see lostReach.
+// each address is asked about once here for each app port its tests were
+// recorded on: whether an address reaches the app depends on the app port it
+// has to lead to, so one test's verdict is not another's when --port sends
+// tests recorded on different app ports to one host port. Whether the app
+// listens where a published port reaches it is often unknown this early (the
+// app is still starting), so the gate asks again while it probes; see
+// lostReach.
 //
 // Returns ok=false when no test case resolves (empty set, non-HTTP set, or an
 // unresolvable or unreachable target); the caller then keeps the TCP-accept stage
@@ -707,8 +714,8 @@ func resolveTestSetProbeTarget(ctx context.Context, testCfg config.Test, testCas
 }
 
 // probeTargetSource walks a test set's HTTP tests, in order, for readiness-gate
-// probe targets: each distinct address once, skipping those reach says the
-// host cannot reach.
+// probe targets: each distinct address once for each app port, skipping those
+// reach says the host cannot reach.
 type probeTargetSource struct {
 	testCfg   config.Test
 	testCases []*models.TestCase
@@ -716,7 +723,7 @@ type probeTargetSource struct {
 	logger    *zap.Logger
 	reach     pkg.AppPortReachability
 	next      int             // the next test case to look at
-	seen      map[string]bool // addresses already returned or skipped
+	seen      map[string]bool // addresses, for an app port, already returned or skipped
 }
 
 // nextTarget is the next address the set's tests dial that the host may reach,
@@ -733,16 +740,17 @@ func (s *probeTargetSource) nextTarget(ctx context.Context) httpProbeTarget {
 			continue
 		}
 		addr := net.JoinHostPort(host, port)
-		if s.seen[addr] {
+		key := addr + " for " + strconv.Itoa(int(tc.AppPort))
+		if s.seen[key] {
 			continue
 		}
-		s.seen[addr] = true
-		if s.reach != nil && probeTargetUnreachable(ctx, s.reach, host, port) {
+		s.seen[key] = true
+		if s.reach != nil && probeTargetUnreachable(ctx, s.reach, host, port, tc.AppPort) {
 			s.logger.Debug("readiness gate: not probing a test the host cannot reach",
-				zap.String("testcase", tc.Name), zap.String("address", addr))
+				zap.String("testcase", tc.Name), zap.String("address", addr), zap.Uint16("appPort", tc.AppPort))
 			continue
 		}
-		return httpProbeTarget{scheme: scheme, host: host, port: port, ok: true, src: s}
+		return httpProbeTarget{scheme: scheme, host: host, port: port, appPort: tc.AppPort, ok: true, src: s}
 	}
 	return httpProbeTarget{}
 }
@@ -775,17 +783,18 @@ func (t httpProbeTarget) lostReach(ctx context.Context) func() bool {
 			interval = min(2*interval, probeReachRecheckMax)
 		}
 		due = time.Now().Add(interval)
-		return probeTargetUnreachable(ctx, t.src.reach, t.host, t.port)
+		return probeTargetUnreachable(ctx, t.src.reach, t.host, t.port, t.appPort)
 	}
 }
 
-// probeTargetUnreachable asks reach about host:port. reach bounds its own wait.
-func probeTargetUnreachable(ctx context.Context, reach pkg.AppPortReachability, host, port string) bool {
+// probeTargetUnreachable asks reach about host:port, for the app's server on
+// appPort (0: not known). reach bounds its own wait.
+func probeTargetUnreachable(ctx context.Context, reach pkg.AppPortReachability, host, port string, appPort uint16) bool {
 	n, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || n == 0 {
 		return false
 	}
-	return reach.UnreachableAppPort(ctx, host, uint16(n)) != ""
+	return reach.UnreachableAppPort(ctx, host, uint16(n), appPort) != ""
 }
 
 // appPortReachabilityOf is the instrumentation's AppPortReachability when it

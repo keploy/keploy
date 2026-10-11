@@ -420,22 +420,28 @@ type SimulationConfig struct {
 // AppPortReachability is implemented by an instrumentation that can tell a
 // failed connection to an address the app can NEVER be reached at from one to
 // an app that is still starting. In Docker mode the host reaches the app only
-// through the ports its docker command publishes, and replay sends each test
-// from the host to the port it was recorded on, so a test recorded on a port
-// the command does not publish is refused every time (the app calling its own
-// in-container server is recorded as ingress on such a port). A test on a
-// published port where the app listens only on 127.0.0.1 inside the container
-// fails every time too, as a dropped connection: docker accepts it, finds
-// nothing listening on the container's own address, and drops it.
+// through the ports its docker command publishes. Replay sends each test from
+// the host to the port it was recorded on, unless test.port (--port), a
+// protocol port or replaceWith sends it to another host port. That host port
+// then has to be published to where the app serves the test: the app's port
+// the test was recorded on, or, for an app that has moved since the recording,
+// the port it listens on now. A test sent to a port the command does not
+// publish is refused every time (the app calling its own in-container server
+// is recorded as ingress on such a port). A test on a published port where the
+// app listens only on 127.0.0.1 inside the container fails every time too, as
+// a dropped connection: docker accepts it, finds nothing listening on the
+// container's own address, and drops it.
 type AppPortReachability interface {
 	// UnreachableAppPort explains why a connection to host:port cannot reach
-	// the app, and how to fix that, as a clause that reads after "the app's
-	// port N cannot be reached from the host: ". It returns "" when the
-	// address can reach the app or it cannot tell.
+	// the app's server on appPort, and how to fix that, as a clause that reads
+	// after the prefix UnreachableAppPortError gives it. appPort is the port the
+	// test was recorded on, where the app listened in its container then; 0
+	// when it is not known, and then port is all there is to go on. It returns
+	// "" when the address can reach the app or it cannot tell.
 	//
 	// It bounds its own wait: it is asked from a recording's insert loop, a
 	// readiness gate and a failing test, with whatever context they hold.
-	UnreachableAppPort(ctx context.Context, host string, port uint16) string
+	UnreachableAppPort(ctx context.Context, host string, port, appPort uint16) string
 }
 
 // UnreachableAppPortError is a test request that failed to connect at an
@@ -443,12 +449,25 @@ type AppPortReachability interface {
 // so it still classifies as one everywhere that matters; the one thing that
 // must not act on it is a re-send (see IsUnreachableAppPort).
 type UnreachableAppPortError struct {
-	Port   uint16
-	Reason string
-	Err    error
+	// Port is the port the request was sent to on the host.
+	Port uint16
+	// AppPort is the app's port the test was recorded on; 0 when not known.
+	AppPort uint16
+	Reason  string
+	Err     error
 }
 
+// Error names the app's port the test was recorded on and, when the request
+// went to another host port, that one too: "the app's port 8080 cannot be
+// reached from the host at port 18080: <reason>". A test that does not say its
+// app port names the host port alone.
 func (e *UnreachableAppPortError) Error() string {
+	switch {
+	case e.AppPort == 0:
+		return fmt.Sprintf("the app cannot be reached from the host at port %d: %s: %v", e.Port, e.Reason, e.Err)
+	case e.AppPort != e.Port:
+		return fmt.Sprintf("the app's port %d cannot be reached from the host at port %d: %s: %v", e.AppPort, e.Port, e.Reason, e.Err)
+	}
 	return fmt.Sprintf("the app's port %d cannot be reached from the host: %s: %v", e.Port, e.Reason, e.Err)
 }
 
@@ -462,9 +481,9 @@ func IsUnreachableAppPort(err error) bool {
 }
 
 // unreachableAppPort asks reach, if set, whether the address a connection
-// failed at is one the app can never be reached at, and returns the error to
-// fail with if it is.
-func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, port string, refused error) error {
+// failed at is one the app's server on appPort (0: not known) can never be
+// reached at, and returns the error to fail with if it is.
+func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, port string, appPort uint16, refused error) error {
 	if reach == nil {
 		return nil
 	}
@@ -472,11 +491,11 @@ func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, po
 	if err != nil || n == 0 {
 		return nil
 	}
-	reason := reach.UnreachableAppPort(ctx, host, uint16(n))
+	reason := reach.UnreachableAppPort(ctx, host, uint16(n), appPort)
 	if reason == "" {
 		return nil
 	}
-	return &UnreachableAppPortError{Port: uint16(n), Reason: reason, Err: refused}
+	return &UnreachableAppPortError{Port: uint16(n), AppPort: appPort, Reason: reason, Err: refused}
 }
 
 // urlHostPort is the host and port a request to u dials.
@@ -495,6 +514,11 @@ func urlHostPort(u *url.URL) (string, string) {
 type preparedHTTPRequest struct {
 	Request *http.Request
 	Client  *http.Client
+	// AppPort is the app's port the request is for: the one its test was
+	// recorded on, which test.port or replaceWith may have sent to another
+	// host port. 0 when not known, or when the URL names where the app is
+	// (SimulationConfig.TargetFromURL).
+	AppPort uint16
 }
 
 // HostHeaderOf is the Host header a client sends for u: its host, and its port
@@ -796,6 +820,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	return &preparedHTTPRequest{
 		Request: req,
 		Client:  client,
+		AppPort: appPort,
 	}, nil
 }
 
@@ -971,9 +996,10 @@ func IsTransportConnReset(err error) bool {
 // rewound via GetBody). Any other error, or a real response, returns
 // immediately — so a genuinely crashed/unreachable app still fails fast after
 // the bounded retries, and a mid-response reset is never retried. A refusal,
-// reset or drop at an address reach says the app can never be reached at fails
-// at once, saying why, as an *UnreachableAppPortError.
-func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability) (*http.Response, error) {
+// reset or drop at an address reach says the app's server on appPort (the port
+// the test was recorded on, 0 when not known) can never be reached at fails at
+// once, saying why, as an *UnreachableAppPortError.
+func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability, appPort uint16) (*http.Response, error) {
 	asked := false
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
@@ -987,7 +1013,7 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 		if !asked && (refused || IsTransportConnReset(err)) {
 			asked = true
 			host, port := urlHostPort(req.URL)
-			if unreachable := unreachableAppPort(ctx, reach, host, port, err); unreachable != nil {
+			if unreachable := unreachableAppPort(ctx, reach, host, port, appPort, err); unreachable != nil {
 				return nil, unreachable
 			}
 		}
@@ -1051,7 +1077,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -1134,7 +1160,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq

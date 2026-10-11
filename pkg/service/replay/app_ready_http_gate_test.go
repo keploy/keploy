@@ -3,11 +3,14 @@ package replay
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -240,7 +243,7 @@ type portReach struct {
 	asked       map[string]int
 }
 
-func (p *portReach) UnreachableAppPort(_ context.Context, host string, port uint16) string {
+func (p *portReach) UnreachableAppPort(_ context.Context, host string, port, _ uint16) string {
 	p.asked[net.JoinHostPort(host, strconv.Itoa(int(port)))]++
 	if p.unreachable[port] {
 		return "it is not published on the host"
@@ -279,6 +282,112 @@ func TestResolveTestSetProbeTargetSkipsAnUnreachableTest(t *testing.T) {
 	}
 }
 
+// remapReach is the Docker instrumentation for an app whose port 8080 is
+// published on host port publishedOn: a test reaches the app at that host port
+// for app port 8080, and nowhere else. It records every question.
+type remapReach struct {
+	publishedOn uint16
+	mu          sync.Mutex
+	asked       []string
+}
+
+func (r *remapReach) UnreachableAppPort(_ context.Context, host string, port, appPort uint16) string {
+	r.mu.Lock()
+	r.asked = append(r.asked, fmt.Sprintf("%s for %d", net.JoinHostPort(host, strconv.Itoa(int(port))), appPort))
+	r.mu.Unlock()
+	if port == r.publishedOn && appPort == 8080 {
+		return ""
+	}
+	return fmt.Sprintf("host port %d does not lead to the app's port %d", port, appPort)
+}
+
+// A compose app publishing "18067:8080", recorded on 8080 and replayed with
+// --port 18067: the readiness gate's HTTP stage probes the host port the tests
+// go to, asking about it for the app's port they were recorded on. Asked about
+// the host port alone, the probe was dropped as unreachable, the gate passed on
+// docker's own listener accepting a connection, and the first test was sent to
+// an app still starting. Here the gate waits for the app's answer.
+func TestTheReadinessGateProbesAHostPortPublishedToTheAppsPort(t *testing.T) {
+	defer func(first, max time.Duration) { probeReachRecheckFirst, probeReachRecheckMax = first, max }(probeReachRecheckFirst, probeReachRecheckMax)
+	probeReachRecheckFirst, probeReachRecheckMax = 20*time.Millisecond, 40*time.Millisecond
+
+	// The app answers only after a few probes, as one still starting does.
+	var probes atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if probes.Add(1) < 3 {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("cannot drop the connection")
+				return
+			}
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	n, _ := strconv.Atoi(port)
+
+	tc := &models.TestCase{Kind: models.HTTP, AppPort: 8080}
+	tc.HTTPReq.URL = "http://127.0.0.1:18057/"
+	reach := &remapReach{publishedOn: uint16(n)}
+	cfg := config.Test{Host: host, Port: uint32(n)}
+	probe := resolveTestSetProbeTarget(context.Background(), cfg, []*models.TestCase{tc}, "test-set-0", zap.NewNop(), reach)
+	if !probe.ok || probe.port != port {
+		t.Fatalf("probe target = %+v, want the host port %s the tests are sent to", probe, port)
+	}
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	if !gateOnAppAddress(context.Background(), zap.New(core), gateCfg(30*time.Second), host, port, "compose-published-port", probe) {
+		t.Fatal("gate must pass")
+	}
+	if probes.Load() < 3 {
+		t.Errorf("the gate passed after %d probes, before the app answered", probes.Load())
+	}
+	if confirmed := logs.FilterMessageSnippet("app readiness confirmed").Len(); confirmed != 1 {
+		t.Errorf("readiness not confirmed by a round-trip: %v", logs.All())
+	}
+	reach.mu.Lock()
+	defer reach.mu.Unlock()
+	if len(reach.asked) == 0 {
+		t.Fatal("reach was never asked")
+	}
+	want := fmt.Sprintf("%s for 8080", net.JoinHostPort(host, port))
+	for _, q := range reach.asked {
+		if q != want {
+			t.Errorf("asked %q, want every question about %q", q, want)
+		}
+	}
+}
+
+// --port sends every HTTP test to one host port, including tests recorded on
+// another app port than the one it is published to (an app calling its own
+// in-container server is recorded as ingress on that server's port). Such a
+// test first in the set is unreachable there; a later test at the same address,
+// recorded on the app's published port, is not, and is the one to probe.
+func TestResolveTestSetProbeTargetAsksAboutAnAddressForEachAppPort(t *testing.T) {
+	const hostPort = 18067
+	tcOn := func(appPort uint16) *models.TestCase {
+		tc := &models.TestCase{Kind: models.HTTP, AppPort: appPort}
+		tc.HTTPReq.URL = "http://127.0.0.1:18057/"
+		return tc
+	}
+	reach := &remapReach{publishedOn: hostPort}
+	got := resolveTestSetProbeTarget(context.Background(), config.Test{Port: hostPort},
+		[]*models.TestCase{tcOn(9000), tcOn(9000), tcOn(8080), tcOn(8080)}, "test-set-0", zap.NewNop(), reach)
+	if !got.ok || got.port != strconv.Itoa(hostPort) || got.appPort != 8080 {
+		t.Fatalf("probe target = %+v, want host port %d for the test recorded on 8080", got, hostPort)
+	}
+	reach.mu.Lock()
+	defer reach.mu.Unlock()
+	want := []string{"localhost:18067 for 9000", "localhost:18067 for 8080"}
+	if !slices.Equal(reach.asked, want) {
+		t.Errorf("asked %v, want %v: each address once for each app port", reach.asked, want)
+	}
+}
+
 // startingThenLoopbackReach is the Docker instrumentation for an app port that
 // is published but where the app turns out to listen only on 127.0.0.1: until
 // the app listens, nothing can be said about the port; from then on, the host
@@ -289,7 +398,7 @@ type startingThenLoopbackReach struct {
 	after int64 // the ask from which the app is listening
 }
 
-func (s *startingThenLoopbackReach) UnreachableAppPort(_ context.Context, _ string, port uint16) string {
+func (s *startingThenLoopbackReach) UnreachableAppPort(_ context.Context, _ string, port, _ uint16) string {
 	if strconv.Itoa(int(port)) != s.port {
 		return ""
 	}

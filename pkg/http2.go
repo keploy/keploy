@@ -560,10 +560,12 @@ func isGRPCNoAnswer(err error) bool {
 
 // unreachableGRPCAuthority is err, or, when a gRPC call lost its connection
 // after the dial went through (isGRPCConnectionLost) at an address reach says
-// the app can never be reached at, the *UnreachableAppPortError saying why:
+// the app's server on appPort (the port the test was recorded on, 0 when not
+// known) can never be reached at, the *UnreachableAppPortError saying why:
 // docker accepts a connection to a published port and drops it when the app
-// listens only on 127.0.0.1 in its container.
-func unreachableGRPCAuthority(ctx context.Context, reach AppPortReachability, authority string, err error) error {
+// listens only on 127.0.0.1 in its container. Such a connection never brings
+// the server's preface, so the call fails creating its stream.
+func unreachableGRPCAuthority(ctx context.Context, reach AppPortReachability, authority string, appPort uint16, err error) error {
 	if reach == nil || !isGRPCConnectionLost(err) {
 		return err
 	}
@@ -571,7 +573,7 @@ func unreachableGRPCAuthority(ctx context.Context, reach AppPortReachability, au
 	if splitErr != nil {
 		return err
 	}
-	if unreachable := unreachableAppPort(ctx, reach, host, port, err); unreachable != nil {
+	if unreachable := unreachableAppPort(ctx, reach, host, port, appPort, err); unreachable != nil {
 		return unreachable
 	}
 	return err
@@ -584,8 +586,9 @@ func unreachableGRPCAuthority(ctx context.Context, reach AppPortReachability, au
 // with the shared growing backoff. A refused dial sent zero bytes and consumed
 // zero mocks, so the re-dial is idempotent; any other dial error, exhaustion of
 // the attempts, or a cancelled context returns immediately, and so does a
-// refusal at an address reach says the app can never be reached at.
-func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, authority string, reach AppPortReachability) (net.Conn, error) {
+// refusal at an address reach says the app's server on appPort (the port the
+// test was recorded on, 0 when not known) can never be reached at.
+func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, authority string, reach AppPortReachability, appPort uint16) (net.Conn, error) {
 	for attempt := 0; ; attempt++ {
 		conn, err := net.Dial("tcp", authority)
 		if err == nil {
@@ -596,7 +599,7 @@ func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, author
 		}
 		if attempt == 0 {
 			if host, port, splitErr := net.SplitHostPort(authority); splitErr == nil {
-				if unreachable := unreachableAppPort(ctx, reach, host, port, err); unreachable != nil {
+				if unreachable := unreachableAppPort(ctx, reach, host, port, appPort, err); unreachable != nil {
 					return nil, unreachable
 				}
 			}
@@ -673,7 +676,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// consumed zero mocks, so the re-dial is safe. Mirrors the HTTP replay path's
 	// doRequestWithConnRefusedRetry — a genuinely-down app still fails fast after
 	// the bounded attempts.
-	conn, err := dialTCPWithConnRefusedRetry(ctx, logger, authority, cfg.AppPortReachability)
+	conn, err := dialTCPWithConnRefusedRetry(ctx, logger, authority, cfg.AppPortReachability, tc.AppPort)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
@@ -739,7 +742,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		ClientStreams: true,
 	}, path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stream: %w", unreachableGRPCAuthority(ctx, cfg.AppPortReachability, authority, err))
+		return nil, fmt.Errorf("failed to create stream: %w", unreachableGRPCAuthority(ctx, cfg.AppPortReachability, authority, tc.AppPort, err))
 	}
 
 	// Send every recorded request message, in order.
@@ -774,10 +777,12 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		return nil, fmt.Errorf("failed to close send: %w", err)
 	}
 
-	// Read the response headers
+	// Read the response headers. grpc-go hands a call that fails here, a
+	// connection lost after the request went among them, to RecvMsg below and
+	// answers nil; the error check stays for a client that does not.
 	respHeaders, err := stream.Header()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get response headers: %w", unreachableGRPCAuthority(ctx, cfg.AppPortReachability, authority, err))
+		return nil, fmt.Errorf("failed to get response headers: %w", err)
 	}
 
 	// Drain the response stream to io.EOF.

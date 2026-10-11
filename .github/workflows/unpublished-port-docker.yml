@@ -6,7 +6,9 @@ name: Unpublished App Port (Docker)
 # at replay fails at once saying why the port cannot be reached from the host,
 # instead of being re-sent as an app "not yet accepting connections" or a
 # transient reset and, when it comes first in the set, costing the readiness
-# gate its whole ceiling.
+# gate its whole ceiling. And the converse: the app's port published on another
+# host port and replayed with --port naming it reaches the app, so a slow start
+# there is waited for, not failed as unreachable.
 #
 # Runs only the `build` (PR) binary and image, for record and replay, like
 # the other guards of a feature the published `latest` does not have
@@ -56,5 +58,6 @@ jobs:
           path: |
             .github/workflows/test_workflow_scripts/python/unpublished-port/*.txt
             .github/workflows/test_workflow_scripts/python/unpublished-port/keploy/
+            .github/workflows/test_workflow_scripts/python/unpublished-port/remapped/keploy/
           if-no-files-found: warn
           retention-days: 7
