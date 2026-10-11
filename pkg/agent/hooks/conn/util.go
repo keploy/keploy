@@ -511,6 +511,36 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 	return formData
 }
 
+// InlineFormFiles moves the file parts ExtractFormData left in local temp files
+// into tc itself (FormData.FileContents), for a test case persisted by another
+// process than this one: the DaemonSet agent streams its test cases to
+// k8s-proxy's control plane, which cannot read this pod's temp files. Each temp
+// file is removed once read and its path cleared, so the persister writes the
+// asset from the bytes. A file that cannot be read keeps its path.
+func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
+	for i := range tc.HTTPReq.Form {
+		form := &tc.HTTPReq.Form[i]
+		for j, path := range form.Paths {
+			if path == "" {
+				continue
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				utils.LogError(logger, err, "Error reading multipart temp file", zap.String("path", path))
+				continue
+			}
+			if len(form.FileContents) < len(form.Paths) {
+				form.FileContents = append(form.FileContents, make([][]byte, len(form.Paths)-len(form.FileContents))...)
+			}
+			form.FileContents[j] = content
+			form.Paths[j] = ""
+			if err := os.Remove(path); err != nil {
+				utils.LogError(logger, err, "Error removing temp file", zap.String("path", path))
+			}
+		}
+	}
+}
+
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel.
 // Mirrors NewCapture (HTTP) exactly:
 //   - GRPCCaptureHook is invoked unconditionally before ResolveRange, so

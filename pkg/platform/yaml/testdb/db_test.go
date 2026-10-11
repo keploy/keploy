@@ -1,6 +1,8 @@
 package testdb
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
 )
 
@@ -394,5 +397,65 @@ func TestGetTestCases_KeepsTestCasesNamedAfterMocks(t *testing.T) {
 	want := []string{"get-users-1", "get-x-mocks-1"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("GetTestCases names = %v, want %v", got, want)
+	}
+}
+
+// TestInsertTestCase_WritesFilePartCarriedInTheTestCase covers a test case
+// persisted by another process than the one that captured it (dsmon F19: the
+// DaemonSet agent streams it to k8s-proxy's control plane): its file part
+// arrives as bytes in FileContents, not as a temp path. The asset is written
+// from them byte for byte, the stored test case points at it, and the bytes
+// themselves are stored in neither format.
+func TestInsertTestCase_WritesFilePartCarriedInTheTestCase(t *testing.T) {
+	file := []byte{'P', 'K', 0x03, 0x04, 0xff, 0xfe, 0x00, 0x80} // not valid UTF-8
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(string(format), func(t *testing.T) {
+			keployPath := t.TempDir()
+			db := NewWithFormat(zap.NewNop(), keployPath, format)
+			tc := &models.TestCase{
+				Kind: models.HTTP,
+				HTTPReq: models.HTTPReq{
+					Method: "POST",
+					URL:    "http://localhost:8080/dedup/bytecode",
+					Header: map[string]string{"Content-Type": "multipart/form-data"},
+					Form: []models.FormData{
+						{Key: "namespace", Values: []string{"ns"}},
+						{Key: "classes", Paths: []string{""}, FileNames: []string{"classes.zip"}, FileContents: [][]byte{file}},
+					},
+				},
+				HTTPResp: models.HTTPResp{StatusCode: 200},
+			}
+			if err := db.InsertTestCase(context.Background(), tc, "test-set-0", false); err != nil {
+				t.Fatalf("insert test case: %v", err)
+			}
+
+			form := tc.HTTPReq.Form[1]
+			if len(form.Paths) != 1 || form.FileContents != nil {
+				t.Fatalf("file part after insert: paths %q, contents kept %v", form.Paths, form.FileContents != nil)
+			}
+			onDisk, err := os.ReadFile(filepath.Join(keployPath, form.Paths[0]))
+			if err != nil || !bytes.Equal(onDisk, file) {
+				t.Fatalf("asset %s = %q (err %v), want %q", form.Paths[0], onDisk, err, file)
+			}
+
+			stored, err := db.GetTestCases(context.Background(), "test-set-0")
+			if err != nil || len(stored) != 1 {
+				t.Fatalf("stored test cases = %d (err %v), want 1", len(stored), err)
+			}
+			if got := stored[0].HTTPReq.Form[1].Paths; len(got) != 1 || got[0] != form.Paths[0] {
+				t.Fatalf("stored paths = %q, want [%q]", got, form.Paths[0])
+			}
+			files, err := filepath.Glob(filepath.Join(keployPath, "test-set-0", "tests", "*"))
+			if err != nil || len(files) != 1 {
+				t.Fatalf("test case files = %v (err %v), want 1", files, err)
+			}
+			raw, err := os.ReadFile(files[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(raw, []byte("file_contents")) {
+				t.Fatalf("the stored test case carries the file bytes:\n%s", raw)
+			}
+		})
 	}
 }
