@@ -20,6 +20,8 @@ import (
 // only, saying why.
 const LogFileName = "keploy-logs.txt"
 
+const AgentLogName = "keploy-agent.log"
+
 // logFileMode is what a new log file is created with: its owner writes it,
 // others may read it. It is never set by path, and an existing log writable by
 // others (as every one this used to create was: 0777) is narrowed through the

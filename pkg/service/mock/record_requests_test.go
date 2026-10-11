@@ -280,7 +280,7 @@ func TestRecordRefusesATestThatRanTwice(t *testing.T) {
 	store := &countingStore{}
 	core, logs := observer.New(zap.DebugLevel)
 	err := New(zap.New(core), instr, stubMockDB{}, mapdb.New(zap.NewNop(), dir, ""), store, nil, cfg).Record(context.Background())
-	want := "Recording stopped: TestA ran 2 times in orders/e2e.\nEach test in a folder needs its own name. Rename one of them (or drop -count=2), then run keploy mock record again.\nNothing was saved."
+	want := "TestA ran 2 times in orders/e2e; each test in a folder needs its own name. Rename one of them (or drop -count=2). Nothing was saved."
 	require.EqualError(t, err, want)
 	require.ErrorIs(t, err, ErrRecordRefused)
 	all := logs.All()

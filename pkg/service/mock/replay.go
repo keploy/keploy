@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -94,7 +95,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 0. Materialise the set locally (registry download in enterprise; no-op on files).
 	if err := m.store.Pull(ctx, name); err != nil {
-		utils.LogError(m.logger, err, "failed to fetch the mock set", zap.String("mock-set", name))
+		utils.LogError(m.logger, err, "failed to fetch the mock set", zap.String("mock-set", name), m.own())
 		return err
 	}
 
@@ -103,10 +104,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		return fmt.Errorf("invalid --on-miss value %q: allowed values are fail, passthrough, record", m.config.Mock.OnMiss)
 	}
 
-	m.logger.Info("Replaying mocks for your test command",
-		zap.String("mock-set", name),
-		zap.String("command", m.userCommand),
-		zap.String("on-miss", string(policy)))
+	m.logger.Info("replaying: "+m.userCommand, zap.String("mock-set", name), zap.String("on-miss", string(policy)), log.Show)
 
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
@@ -144,8 +142,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			// proof of a run that had just failed.
 			return nil
 		}
-		utils.LogError(m.logger, err, "failed setting up the environment")
-		return err
+		utils.LogError(m.logger, err, "keploy's agent did not start", m.own())
+		return agentErr("keploy's agent did not start", err)
 	}
 
 	// 2. Docker compose inverts this function's normal order: putting the
@@ -170,8 +168,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			// proof of a run that had just failed.
 			return nil
 		}
-		utils.LogError(m.logger, err, "failed to bring up the keploy-agent compose service")
-		return err
+		utils.LogError(m.logger, err, "keploy's agent compose service did not come up", m.own())
+		return agentErr("keploy's agent compose service did not come up", err)
 	}
 
 	// 3. Put the proxy in mock-serving mode with the miss policy.
@@ -198,8 +196,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			// proof of a run that had just failed.
 			return nil
 		}
-		utils.LogError(m.logger, err, "failed to enable mock serving")
-		return err
+		utils.LogError(m.logger, err, "keploy's agent did not take the recording", m.own())
+		return agentErr("keploy's agent did not take the recording", err)
 	}
 
 	// 4. Load the whole set and push it into the proxy.
@@ -209,8 +207,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	empty := map[string]bool{}
 	filtered, unfiltered, failedPool, err := m.loadMocks(ctx, name, empty)
 	if err != nil {
-		utils.LogError(m.logger, err, "failed to load "+failedPool+" mocks", zap.String("mock-set", name))
-		return err
+		utils.LogError(m.logger, err, "could not read the recording", zap.String("mock-set", name), zap.String("pool", failedPool), m.own())
+		return fmt.Errorf("could not read the recording: %w", err)
 	}
 	// What the agent holds: the pools less what this keploy never sends it
 	// (models.AgentBound: the connection failures, which it does not replay).
@@ -222,13 +220,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// enterprise it is the registry's copy that was actually served.
 	digest := MocksDigest(m.config.Path, name)
 	if loaded == 0 {
-		m.logger.Warn("the mock set is empty; the runner will hit a miss on every dependency call",
-			zap.String("mock-set", name),
-			zap.String("next_step", fmt.Sprintf("record it first with: keploy mock record -c %q --name %s", m.userCommand, name)))
+		m.logger.Warn("the recording has no recorded calls; record first: "+utils.QuoteArgs([]string{"keploy", "mock", "record", "-c", m.userCommand, "--name", name}), zap.String("mock-set", name), m.own())
 	}
 	if err := m.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
-		utils.LogError(m.logger, err, "failed to store mocks on the agent")
-		return err
+		utils.LogError(m.logger, err, "keploy's agent did not take the recording", m.own())
+		return agentErr("keploy's agent did not take the recording", err)
 	}
 
 	// 5. Hand the agent the per-test table so the runner's /agent/scope/begin
@@ -242,8 +238,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		AfterTime:  models.BaseTime,
 		BeforeTime: time.Now(),
 	}); err != nil {
-		utils.LogError(m.logger, err, "failed to arm the mock pool")
-		return err
+		utils.LogError(m.logger, err, "keploy's agent did not take the recording", m.own())
+		return agentErr("keploy's agent did not take the recording", err)
 	}
 
 	// 7. Release the compose app now that the mock pool is armed. This is the
@@ -257,8 +253,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			// proof of a run that had just failed.
 			return nil
 		}
-		utils.LogError(m.logger, err, "failed to release the app behind the keploy-agent healthcheck")
-		return err
+		utils.LogError(m.logger, err, "keploy's agent did not release the app", m.own())
+		return agentErr("keploy's agent did not release the app", err)
 	}
 
 	// 7a. With --emit-mock-events, report each mock as it is first served so a
@@ -378,16 +374,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		utils.ErrCode = 1
 		failedBy = FailedByStrict
 		keployFailure = errors.New("--strict could not verify this replay: the agent never reported which recorded calls were missed")
-		m.logger.Error("replay failed under --strict: the agent never reported which calls were missed, so a clean run could not be proven",
-			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended; run the replay again with --debug to see each miss as it happens"))
+		m.logger.Error("--strict: keploy could not read which calls were not in the recording, so the run fails", m.own())
 	}
 	// Misses that WERE reported fail the run whatever else went unread.
 	if m.config.Mock.Strict && missed > 0 && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByStrict
-		m.logger.Error("replay failed under --strict: recorded dependency calls were missed",
-			zap.Int("missed", missed),
-			zap.String("next_step", "a dependency contract drifted; re-record the set (keploy mock record) or add the new calls with --on-miss record"))
+		m.logger.Error("--strict: "+were(missed, "call")+" not in the recording; the run fails", m.own())
 	}
 
 	// A replay that served NONE of the recorded calls verified nothing: the test
@@ -409,10 +402,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if policy == models.MissFail && loaded > 0 && counts.consumed == 0 && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByNothingVerified
-		m.logger.Error("replay verified nothing: the test command served none of the recorded calls",
-			zap.String("mock-set", name),
-			zap.Int("loaded", loaded),
-			zap.String("next_step", "check the test command actually makes the recorded dependency calls, and that the recording is not stale -- re-record it with keploy mock record if it is"))
+		m.logger.Error(fmt.Sprintf("none of the %d recorded calls was used by this run, so nothing was checked against the recording", loaded),
+			zap.String("mock-set", name), m.own())
 	}
 
 	// 12. What the run proved -- decided once, so the log line below and the
@@ -422,8 +413,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	isolated, isolationNote := isolation(runnerExit, policy, counts, bypass)
 	tests := countTests(counts.tests, gate.reason)
 	if note, ungated := gateReport(gate, detail.windows); note != "" {
-		m.logger.Warn("this replay was asked to run only some tests, and did not", zap.String("mock-set", name), zap.String("why", note),
-			zap.String("next_step", `give the test runner a harness that reports each test to keploy (/agent/scope/begin with "canSkip":true) and skips a test whose answer says "action":"skip"`))
+		m.logger.Warn("--run-only was ignored, so all tests ran: "+note, zap.String("mock-set", name))
 		if tests == nil {
 			tests = &TestCounts{}
 		}
@@ -526,7 +516,7 @@ func (m *mockService) readCoverage(dir string, before report.Before, isolated bo
 	m.logger.Info(label,
 		zap.String("coverage", report.Floor1(s.Percent())+"%"),
 		zap.String("covered", fmt.Sprintf("%d of %d %s", s.Covered, s.Total, s.Unit)),
-		zap.String("report", s.Source))
+		zap.String("report", s.Source), log.Show)
 	return &s, ""
 }
 
@@ -613,9 +603,11 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 		appended++
 	}
 	if appended > 0 {
-		m.logger.Info("appended new dependency calls to the mock set (--on-miss record)",
-			zap.Int("new", appended), zap.String("mock-set", name),
-			zap.String("next_step", "review the added mocks and commit them; the next replay serves them without the real dependency"))
+		dir := name
+		if m.config != nil {
+			dir = filepath.Join(m.config.Path, name)
+		}
+		m.logger.Info(fmt.Sprintf("added %s to %s; review and commit: git diff %s", plural(appended, "new call"), dir, dir), zap.String("mock-set", name), log.Show)
 		if err := m.store.Push(ctx, name); err != nil {
 			m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
 		}
@@ -802,9 +794,7 @@ func (m *mockService) pushScopeGate(ctx context.Context, name, digest string) re
 	case g.run == nil && errors.Is(err, models.ErrScopeGateUnsupported):
 		// Nothing to gate, and nothing a gate-less agent could carry over.
 	default:
-		m.logger.Warn("could not tell the agent which tests to run; every test runs this replay",
-			zap.String("mock-set", name), zap.Error(err),
-			zap.String("next_step", "run the keploy-agent of this keploy version"))
+		m.logger.Warn("--run-only was ignored, so all tests ran", zap.String("mock-set", name), zap.Error(err))
 	}
 	return requestedGate{}
 }
@@ -826,9 +816,7 @@ func (m *mockService) warnUnknownRunOnly(ctx context.Context, name string) {
 		}
 	}
 	if len(unknown) > 0 {
-		m.logger.Warn("--run-only names tests this mock set's mappings do not have: a typo? (a test that recorded no dependency call, or was added since the recording, is not in them, and still runs)",
-			zap.Strings("tests", unknown), zap.String("mock-set", name),
-			zap.String("next_step", "compare with the names the test runner's harness reports, as in keploy/"+name+"/mappings.yaml"))
+		m.logger.Warn("--run-only names tests that are not in the recording: "+strings.Join(unknown, ", ")+"; recorded tests are listed in "+filepath.Join(m.config.Path, name, "mappings.yaml"), zap.String("mock-set", name))
 	}
 }
 
@@ -897,7 +885,7 @@ func (m *mockService) pushSetTable(ctx context.Context, name string) bool {
 	root := gitTop()
 	sets := setTable(mapping, root)
 	if err := pusher.PushSetTable(ctx, root, sets); err != nil {
-		m.logger.Warn("could not install the app start table; app starts are not kept apart in this run", zap.Error(err))
+		m.logger.Warn("could not tell the agent which calls belong to which app start-up", zap.Error(err))
 		return false
 	}
 	m.logger.Info("app starts kept apart", zap.Int("sets", len(sets)), zap.String("mock-set", name))
@@ -1120,7 +1108,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		summary = append(summary, zap.Int("missed", len(misses)))
 	}
 	if consumedErr == nil && missesErr == nil {
-		m.logger.Info("mock replay summary", summary...)
+		m.logger.Info(fmt.Sprintf("outgoing calls: %d recorded, %d answered from the recording, %d not in the recording", loaded, len(consumed), len(misses)), append(summary, m.show())...)
 	} else {
 		next := "check the agent logs for why it stopped before the run ended"
 		if fromCompose {
@@ -1136,7 +1124,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			next += "; run the replay again with --debug to see each miss as it happens"
 		}
 		m.logger.Warn("mock replay summary (incomplete: the agent did not report the whole outcome)",
-			append(summary, zap.String("next_step", next))...)
+			append(summary, zap.String("next_step", next), log.Hide)...)
+		m.logger.Warn("keploy could not read which recorded calls this run used; to see why: "+Again("--debug"), m.own())
 	}
 
 	// What each test used and missed, and its verdict: for the misses named
@@ -1284,7 +1273,7 @@ func (m *mockService) announceServed(served map[string]models.MockState) {
 			continue
 		}
 		m.servedAnnounced[name] = struct{}{}
-		m.logger.Info("mock served",
+		m.logger.Info("mock served", log.Show,
 			zap.String("name", name),
 			zap.String("kind", string(state.Kind)),
 			zap.String("type", state.Type),
@@ -1307,14 +1296,14 @@ const interruptedReadTimeout = 3 * time.Second
 func (m *mockService) reportInterruptedMisses(ctx context.Context, fromCompose bool) {
 	const hint = "run the replay again with --debug to see each miss as it happens"
 	if fromCompose {
-		m.logger.Info("the replay was interrupted before its misses were read; " + hint)
+		m.logger.Info("the replay was interrupted before its misses were read; "+hint, log.Show)
 		return
 	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), interruptedReadTimeout)
 	defer cancel()
 	misses, err := m.instrumentation.GetMockErrors(rctx)
 	if err != nil {
-		m.logger.Info("the replay was interrupted and its misses could not be read; "+hint, zap.Error(err))
+		m.logger.Info("the replay was interrupted and its misses could not be read; "+hint, zap.Error(err), log.Show)
 		return
 	}
 	if len(misses) == 0 {

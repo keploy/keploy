@@ -56,7 +56,7 @@ func TestReplayFailsWhenNothingWasVerified(t *testing.T) {
 			consumed: nil,
 			onMiss:   models.MissFail,
 			wantExit: 1,
-			wantLog:  "verified nothing",
+			wantLog:  "nothing was checked against the recording",
 		},
 		{
 			name:     "it also fails under --strict: known-empty misses do not shadow it",
@@ -65,7 +65,7 @@ func TestReplayFailsWhenNothingWasVerified(t *testing.T) {
 			onMiss:   models.MissFail,
 			strict:   true,
 			wantExit: 1,
-			wantLog:  "verified nothing",
+			wantLog:  "nothing was checked against the recording",
 		},
 		{
 			name:     "serving a recorded call is a real pass",
@@ -157,8 +157,8 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			name:          "both reads land: the real counts, and --strict applies to them",
 			consumedMocks: twoConsumed,
 			wantExit:      0,
-			wantLogs:      []string{"mock replay summary"},
-			unwantLogs:    []string{"incomplete", "could not be proven"},
+			wantLogs:      []string{"outgoing calls: "},
+			unwantLogs:    []string{"incomplete", "could not read which calls were not in the recording"},
 			wantFields:    map[string]any{"consumed": int64(2), "missed": int64(0)},
 			wantMetered:   &ReplayOutcome{SetName: "set", Loaded: 0, Consumed: 2, Missed: 0},
 		},
@@ -168,7 +168,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			errorsErr:   errors.New("connection refused"),
 			wantExit:    1,
 			wantErr:     true,
-			wantLogs:    []string{"incomplete", "could not be proven"},
+			wantLogs:    []string{"incomplete", "could not read which calls were not in the recording"},
 			wantFields:  map[string]any{"consumed": "unknown", "missed": "unknown"},
 		},
 		{
@@ -179,7 +179,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			consumedErr: errors.New("connection refused"),
 			wantExit:    0,
 			wantLogs:    []string{"incomplete"},
-			unwantLogs:  []string{"could not be proven"},
+			unwantLogs:  []string{"could not read which calls were not in the recording"},
 			wantFields:  map[string]any{"consumed": "unknown", "missed": int64(0)},
 		},
 		{
@@ -191,7 +191,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			errorsErr:     errors.New("connection refused"),
 			wantExit:      1,
 			wantErr:       true,
-			wantLogs:      []string{"incomplete", "could not be proven"},
+			wantLogs:      []string{"incomplete", "could not read which calls were not in the recording"},
 			wantFields:    map[string]any{"consumed": int64(2), "missed": "unknown"},
 		},
 		{
@@ -202,8 +202,8 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			consumedErr: errors.New("connection refused"),
 			mockErrors:  oneMiss,
 			wantExit:    1,
-			wantLogs:    []string{"incomplete", "replay failed under --strict"},
-			unwantLogs:  []string{"could not be proven"},
+			wantLogs:    []string{"incomplete", "--strict: "},
+			unwantLogs:  []string{"could not read which calls were not in the recording"},
 			wantFields:  map[string]any{"consumed": "unknown", "missed": int64(1)},
 		},
 	} {
@@ -254,7 +254,7 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			var summary map[string]any
 			for _, e := range logs.All() {
 				printed = append(printed, e.Message)
-				if strings.HasPrefix(e.Message, "mock replay summary") {
+				if strings.HasPrefix(e.Message, "mock replay summary") || strings.HasPrefix(e.Message, "outgoing calls: ") {
 					summary = e.ContextMap()
 				}
 			}
@@ -319,14 +319,14 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			wantIsolated: true,
 			wantFields:   map[string]any{"consumed": int64(2), "missed": int64(0)},
 			wantLogs:     []string{"this replay ran with every dependency answered from the recording"},
-			unwantLogs:   []string{"incomplete", "could not be proven"},
+			unwantLogs:   []string{"incomplete", "could not read which calls were not in the recording"},
 		},
 		{
 			name:       "a miss it left fails --strict as the suite's contract, not as keploy's error",
 			left:       models.MockOutcome{Consumed: twoConsumed, Missed: oneMiss},
 			wantExit:   1,
 			wantFields: map[string]any{"consumed": int64(2), "missed": int64(1)},
-			wantLogs:   []string{"recorded dependency calls were missed"},
+			wantLogs:   []string{"not in the recording; the run fails"},
 			unwantLogs: []string{"incomplete"},
 		},
 		{
@@ -335,7 +335,7 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			wantExit:   1,
 			wantErr:    true,
 			wantFields: map[string]any{"consumed": "unknown", "missed": "unknown", "reason": "the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
-			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "could not be proven"},
+			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "could not read which calls were not in the recording"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -372,7 +372,7 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			var summary map[string]any
 			for _, e := range logs.All() {
 				printed = append(printed, e.Message+" "+fmt.Sprint(e.ContextMap()))
-				if strings.HasPrefix(e.Message, "mock replay summary") {
+				if strings.HasPrefix(e.Message, "mock replay summary") || strings.HasPrefix(e.Message, "outgoing calls: ") {
 					summary = e.ContextMap()
 				}
 			}
@@ -440,10 +440,10 @@ func TestAReplayOfOnlyConnectionFailuresLoadsNothing(t *testing.T) {
 	if utils.ErrCode != 0 {
 		t.Errorf("exit code %d, want 0: nothing was loaded, so nothing was left unverified", utils.ErrCode)
 	}
-	if logs.FilterMessageSnippet("the mock set is empty").Len() != 1 {
+	if logs.FilterMessageSnippet("the recording has no recorded calls").Len() != 1 {
 		t.Errorf("want the empty-set WARN, got %v", logs.All())
 	}
-	if logs.FilterMessageSnippet("verified nothing").Len() != 0 {
+	if logs.FilterMessageSnippet("nothing was checked against the recording").Len() != 0 {
 		t.Errorf("a set the agent holds nothing of is not a replay that verified nothing: %v", logs.All())
 	}
 	if !slices.Contains(instr.seq(), "store") {

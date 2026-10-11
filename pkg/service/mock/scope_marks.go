@@ -33,10 +33,24 @@ func stepWindows(windows []models.ScopeWindow) []models.ScopeWindow {
 
 var ErrRecordRefused = errors.New("recording refused")
 
-type refusal struct{ msg string }
+const (
+	RefusedRepeated = "repeated_test"
+	RefusedNoMarks  = "no_marks"
+	RefusedAgent    = "agent_failed"
+)
+
+type refusal struct{ kind, msg string }
 
 func (r refusal) Error() string        { return r.msg }
 func (r refusal) Is(target error) bool { return target == ErrRecordRefused }
+
+func RefusalKind(err error) string {
+	var r refusal
+	if errors.As(err, &r) {
+		return r.kind
+	}
+	return ""
+}
 
 func repeatedScope(windows []models.ScopeWindow, existed bool) error {
 	runs := map[string]int{}
@@ -63,7 +77,7 @@ func repeatedScope(windows []models.ScopeWindow, existed bool) error {
 		if !existed {
 			last = "Nothing was saved."
 		}
-		return refusal{fmt.Sprintf("Recording stopped: %s ran %d times in %s.\nEach test in a folder needs its own name. Rename one of them (or drop -count=%d), then run keploy mock record again.\n%s", test, n, folder, n, last)}
+		return refusal{kind: RefusedRepeated, msg: fmt.Sprintf("%s ran %d times in %s; each test in a folder needs its own name. Rename one of them (or drop -count=%d). %s", test, n, folder, n, last)}
 	}
 	return nil
 }

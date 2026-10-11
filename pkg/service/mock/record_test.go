@@ -155,7 +155,7 @@ func TestRecordPublishesOnlyWhenTheTestsPassed(t *testing.T) {
 			if utils.ErrCode != tc.exitCode {
 				t.Fatalf("exit code = %d, want %d", utils.ErrCode, tc.exitCode)
 			}
-			warned := logs.FilterMessage("tests failed; the recording was not kept or published, and the previous recording is left as it was").Len() == 1
+			warned := logs.FilterMessage("the tests failed, so nothing was saved or published; the existing recording is unchanged").Len() == 1
 			if warned != tc.warned {
 				t.Fatalf("warned = %v, want %v", warned, tc.warned)
 			}

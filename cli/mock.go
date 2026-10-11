@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	mockSvc "go.keploy.io/server/v3/pkg/service/mock"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -102,7 +103,7 @@ func MockRecord(ctx context.Context, logger *zap.Logger, serviceFactory ServiceF
 				if errors.Is(err, mockSvc.ErrRecordRefused) {
 					return err
 				}
-				utils.LogError(logger, err, "failed to record mocks")
+				utils.LogError(logger, err, "failed to record mocks", log.Hide)
 				// Record() returns nil after a merely-failing test command (it calls
 				// propagateExit and lets utils.ErrCode mirror the runner), so a
 				// non-nil error here is always a real Keploy failure and must not
@@ -156,7 +157,7 @@ func MockReplay(ctx context.Context, logger *zap.Logger, serviceFactory ServiceF
 				if ctx.Err() == context.Canceled {
 					return nil
 				}
-				utils.LogError(logger, err, "failed to replay mocks")
+				utils.LogError(logger, err, "failed to replay mocks", log.Hide)
 				// Replay() returns nil after a merely-failing test command (it calls
 				// propagateExit and lets utils.ErrCode mirror the runner), so a
 				// non-nil error here is always a real Keploy failure and must not

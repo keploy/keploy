@@ -39,6 +39,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -1309,7 +1310,13 @@ func (p *Proxy) relayDeclinedConn(ctx context.Context, err error, logger *zap.Lo
 	// connection unwinds at once, and telling the user their recording is
 	// incomplete at the moment they are reading the logs is noise about
 	// something that did not go wrong.
-	if ctx.Err() == nil {
+	if ctx.Err() == nil && mismatch.MockMode() {
+		dest := ""
+		if addr := session.Egress.RemoteAddr(); addr != nil {
+			dest = " to " + addr.String()
+		}
+		logger.Warn(fmt.Sprintf("a %s connection%s was passed through and not recorded", parserType, dest), zap.Error(err), log.Show)
+	} else if ctx.Err() == nil {
 		// Warn, not Debug: this is permanent capture loss for the rest of
 		// the connection, and the user's recording is quietly smaller than
 		// they think.

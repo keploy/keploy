@@ -76,6 +76,35 @@ func openLogFile() (*os.File, string, error) {
 	return f, "", nil
 }
 
+func OpenAgentLog() (*os.File, error) {
+	f, err := os.OpenFile(AgentLogName, os.O_CREATE|os.O_WRONLY|oNoFollow|oNonBlock, logFileMode)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil {
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		switch {
+		case !fi.Mode().IsRegular() || !ok || st.Nlink != 1:
+			err = errors.New(AgentLogName + " is not a regular file")
+		case !mayKeepLog(st.Uid):
+			err = errors.New(AgentLogName + " belongs to another user")
+		default:
+			err = f.Truncate(0)
+		}
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if os.Geteuid() == 0 {
+		if uid, gid, ok := logOwnerForRoot(); ok {
+			_ = f.Chown(uid, gid)
+		}
+	}
+	return f, nil
+}
+
 // mayKeepLog reports whether a log owned by uid is this run's to write: the
 // user running keploy's, the user who ran sudo's, or the directory owner's.
 func mayKeepLog(uid uint32) bool {

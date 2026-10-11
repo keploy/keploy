@@ -356,10 +356,8 @@ func TestReceiptRecordsTheUsersCommandNotTheLaunchLine(t *testing.T) {
 	if r := mustReceipt(t, keployDir); r.Command != "go test ./..." {
 		t.Fatalf("receipt command = %q, want the user's %q", r.Command, "go test ./...")
 	}
-	for _, e := range logs.FilterMessageSnippet("Replaying mocks for your test command").All() {
-		if got := e.ContextMap()["command"]; got != "go test ./..." {
-			t.Fatalf("the replay log named %q as the user's command", got)
-		}
+	if logs.FilterMessage("replaying: go test ./...").Len() != 1 {
+		t.Fatalf("the replay log did not name the user's command")
 	}
 }
 

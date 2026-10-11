@@ -1163,9 +1163,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	}
 
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
+	mockRun := IsMockRun(cmd)
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
 	if cmd.Name() != "agent" && !machine {
-		PrintLogo(log.PrimarySink(), disableAnsi)
+		banner(log.PrimarySink(), mockRun, disableAnsi)
 	}
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
@@ -1223,6 +1224,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.logger.Info("Color encoding is disabled")
+	}
+
+	if mockRun && !c.cfg.Debug && !log.Quieted() {
+		logger, err := log.Quiet()
+		if err == nil {
+			*c.logger = *logger
+		}
+	}
+	if cmd.Name() == "agent" && !c.cfg.Debug {
+		if on, _ := cmd.Flags().GetBool("mock-mode"); on {
+			*c.logger = *log.Facts(c.logger)
+		}
 	}
 
 	// Validate --storage-format flag (applies to all commands via persistent flag)

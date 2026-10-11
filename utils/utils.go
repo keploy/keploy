@@ -1964,3 +1964,14 @@ func GetFullCommandUsed() string {
 
 	return cmdStr
 }
+
+func QuoteArgs(args []string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = a
+		if a == "" || strings.ContainsAny(a, " \t\n\"'$`\\|&;<>()*?[]{}~#!") {
+			out[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+		}
+	}
+	return strings.Join(out, " ")
+}

@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -45,9 +46,7 @@ const mockDrainQuiet = 500 * time.Millisecond
 func (m *mockService) Record(ctx context.Context) error {
 	name := m.setName()
 	requests := m.requests()
-	m.logger.Info("Recording mocks for your test command",
-		zap.String("mock-set", name),
-		zap.String("command", m.userCommand))
+	m.logger.Info("recording: "+m.userCommand, zap.String("mock-set", name), log.Show)
 
 	// The caller's context: only ITS cancellation is the user's Ctrl+C. The
 	// errgroup below cancels the context it derives whenever any goroutine in
@@ -93,9 +92,9 @@ func (m *mockService) Record(ctx context.Context) error {
 		if parent.Err() != nil {
 			return nil
 		}
-		stopReason = "failed setting up the environment"
-		utils.LogError(m.logger, err, stopReason)
-		return fmt.Errorf("%s: %w", stopReason, err)
+		stopReason = "keploy's agent did not start"
+		utils.LogError(m.logger, err, stopReason, m.own())
+		return agentErr(stopReason, err)
 	}
 
 	// 2. Docker compose inverts this function's normal order: arming the
@@ -115,9 +114,9 @@ func (m *mockService) Record(ctx context.Context) error {
 		if parent.Err() != nil {
 			return nil
 		}
-		stopReason = "failed to bring up the keploy-agent compose service"
-		utils.LogError(m.logger, err, stopReason)
-		return fmt.Errorf("%s: %w", stopReason, err)
+		stopReason = "keploy's agent compose service did not come up"
+		utils.LogError(m.logger, err, stopReason, m.own())
+		return agentErr(stopReason, err)
 	}
 
 	restore, existed, err := m.saveSet(name)
@@ -126,7 +125,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// or cases below, so a failed backup can never destroy the recording.
 		stopReason = "could not back up the existing mock set before re-recording it"
 		utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name),
-			zap.String("next_step", "free up disk space or fix permissions on your keploy mocks folder, then retry — your existing recording was left untouched"))
+			zap.String("next_step", "free up disk space or fix permissions on your keploy mocks folder, then retry — your existing recording was left untouched"), m.own())
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 	keep := false
@@ -147,7 +146,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	if err := m.mockDB.DiscardStagedSet(persistCtx, staging); err != nil {
 		stopReason = "failed to clear a leftover staging set before recording"
 		utils.LogError(m.logger, err, stopReason, zap.String("staging", staging),
-			zap.String("next_step", "remove the leftover staging directory under your keploy mocks folder (its name ends in "+yaml.MockStagingSuffix+") and retry"))
+			zap.String("next_step", "remove the leftover staging directory under your keploy mocks folder (its name ends in "+yaml.MockStagingSuffix+") and retry"), m.own())
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 	defer func() {
@@ -179,9 +178,9 @@ func (m *mockService) Record(ctx context.Context) error {
 		if parent.Err() != nil {
 			return nil
 		}
-		stopReason = "failed to start capturing outgoing calls"
-		utils.LogError(m.logger, err, stopReason)
-		return fmt.Errorf("%s: %w", stopReason, err)
+		stopReason = "keploy's agent did not start capturing outgoing calls"
+		utils.LogError(m.logger, err, stopReason, m.own())
+		return agentErr(stopReason, err)
 	}
 
 	// recorded remembers each captured mock's name + request timestamp so the
@@ -215,7 +214,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		encoded, encodedFormat, err := insertedDoc.Insert(m.mockDB, mk, staging)
 		if err != nil {
 			if errors.Is(err, models.ErrMockEncode) {
-				m.logger.Warn("dropping one unencodable mock and continuing", zap.String("kind", mk.GetKind()), zap.Error(err))
+				m.logger.Warn("one "+mk.GetKind()+" call could not be saved and is not in the recording", zap.Error(err))
 				return
 			}
 			utils.LogError(m.logger, err, "failed to persist mock", zap.String("mock", mk.Name))
@@ -262,15 +261,15 @@ func (m *mockService) Record(ctx context.Context) error {
 		if parent.Err() != nil {
 			return nil
 		}
-		stopReason = "failed to release the app behind the keploy-agent healthcheck"
-		utils.LogError(m.logger, err, stopReason)
-		return fmt.Errorf("%s: %w", stopReason, err)
+		stopReason = "keploy's agent did not release the app"
+		utils.LogError(m.logger, err, stopReason, m.own())
+		return agentErr(stopReason, err)
 	}
 
 	// 6. Optional record timer.
 	if m.config.Mock.RecordTimer > 0 {
 		errGrp.Go(func() error {
-			m.logger.Info("recording will stop after " + m.config.Mock.RecordTimer.String())
+			m.logger.Info("recording will stop after "+m.config.Mock.RecordTimer.String(), log.Show)
 			select {
 			case <-time.After(m.config.Mock.RecordTimer):
 				_ = utils.Stop(m.logger, "record timer elapsed")
@@ -316,9 +315,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	})
 	stopCapture()
 	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
-		m.logger.Warn("the mock consumer made no progress after capture stopped; not waiting for it any longer",
-			zap.Int64("mocks_seen", mocksSeen.Load()),
-			zap.Duration("stalledFor", mockDrainStall))
+		m.logger.Warn(fmt.Sprintf("stopped waiting for the agent after %s: %d calls were saved, later ones were not", mockDrainStall, mocksSeen.Load()))
 	}
 	capture.wait(mockDrainStall)
 
@@ -327,7 +324,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 				m.logger.Debug("failed to discard an empty staging set after interrupt", zap.String("staging", staging), zap.Error(derr))
 			}
-			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged", zap.String("mock-set", name))
+			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged", zap.String("mock-set", name), log.Show)
 			return nil
 		}
 		keep = true
@@ -335,7 +332,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			utils.LogError(m.logger, err, "recording stopped, but saving the captured mocks failed", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 			return nil
 		}
-		m.logger.Info("recording stopped; captured mocks saved", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+		m.logger.Info(fmt.Sprintf("recording stopped; %d captured calls saved", mockCount), zap.String("mock-set", name), log.Show)
 		return nil
 	}
 	// Not the user: the agent died under the test command. What was captured
@@ -352,9 +349,9 @@ func (m *mockService) Record(ctx context.Context) error {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete recording", zap.String("staging", staging), zap.Error(derr))
 		}
-		stopReason = "the recording did not finish"
-		utils.LogError(m.logger, cause, stopReason, zap.Int("mocks", mockCount), zap.String("mock-set", name))
-		return fmt.Errorf("%s: %w", stopReason, cause)
+		stopReason = "keploy's agent stopped before the recording finished"
+		utils.LogError(m.logger, cause, stopReason, zap.Int("mocks", mockCount), zap.String("mock-set", name), m.own())
+		return agentErr(stopReason, cause)
 	}
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
@@ -372,12 +369,11 @@ func (m *mockService) Record(ctx context.Context) error {
 	starts := appStarts(windows)
 	windows, suites := splitSuites(windows)
 	if len(starts) == 0 && len(windows) > 0 {
-		m.logger.Info("no app start seen: calls made outside the tests are kept as the test process's start-up",
-			zap.String("next_step", "if the app runs as a child of the test, call AppStart(pid, port) after starting it so its start-up is kept apart"))
+		m.logger.Info("no AppStart(pid, port) call was seen; calls made outside the tests are saved as the test process's start-up. To keep the app's start-up apart, call AppStart(pid, port) after starting it", log.Show)
 	}
 	if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
-		m.logger.Error(err.Error())
+		m.logger.Error(err.Error(), log.Hide)
 		return err
 	}
 	if err := m.noScopes(windows, windowsErr, appErr, existed); err != nil {
@@ -387,9 +383,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	keep = runnerPassed(appErr)
 	if keep && mockCount == 0 && len(capture.list()) == 0 {
 		keep = false
-		m.logger.Warn("no outgoing calls were captured; the existing mock set (if any) was left unchanged; the runner made no mockable dependency calls, or its traffic was not intercepted",
-			zap.String("mock-set", name),
-			zap.String("next_step", "the app must be started by the test command (as a child process) and announced with AppStart(pid, port), or the tests made no outgoing calls"))
+		m.logger.Warn(fmt.Sprintf("nothing was recorded: keploy saw no outgoing call and no incoming request from the test command (tests marked: %d, AppStart calls: %d); the existing recording is unchanged", len(windows), len(starts)),
+			zap.String("mock-set", name), m.own())
+		m.summarize(Summary{Tests: len(windows)})
 		m.propagateExit(appErr, "record")
 		return nil
 	}
@@ -413,7 +409,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			}
 			if len(byTest) > 0 {
 				if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
-					m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
+					m.logger.Warn("could not save which calls belong to which test; every test will be offered every recorded call", zap.Error(err))
 				} else {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
 				}
@@ -439,18 +435,18 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
 	if !runnerPassed(appErr) {
-		m.logger.Warn("tests failed; the recording was not kept or published, and the previous recording is left as it was", zap.String("mock-set", name))
+		m.logger.Warn("the tests failed, so nothing was saved or published; the existing recording is unchanged", zap.String("mock-set", name), m.own())
 	} else if err := m.store.Push(persistCtx, name); err != nil {
-		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
+		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err), log.Hide)
 	}
 
-	m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
-	if capture != nil {
-		m.logger.Info("recorded test cases", zap.Int("cases", len(capture.list())), zap.String("mock-set", name))
+	sum := Summary{Tests: len(windows), Calls: mockCount, Requests: len(capture.list()), Kept: keep}
+	if keep {
+		m.logger.Info(fmt.Sprintf("recorded %s: %s, %s", plural(sum.Tests, "test"), plural(sum.Calls, "outgoing call"), plural(sum.Requests, "incoming request")), zap.String("mock-set", name), m.show())
 	}
-	if mockCount == 0 {
-		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
-			zap.String("next_step", "the app must be started by the test command (as a child process) and announced with AppStart(pid, port), or the tests made no outgoing calls"))
+	m.summarize(sum)
+	if keep && mockCount == 0 {
+		m.logger.Warn(fmt.Sprintf("no outgoing calls were recorded (%s were)", plural(sum.Requests, "incoming request")))
 	}
 
 	// 13. Propagate the runner's exit code so a CI 're-record on merge' job
@@ -503,10 +499,10 @@ func (m *mockService) noScopes(tests []models.ScopeWindow, readErr error, appErr
 		last = "Nothing was published."
 	}
 	if readErr != nil {
-		return refusal{fmt.Sprintf("Recording stopped: keploy could not read which tests ran from its agent (%v).\n%s", readErr, last)}
+		return refusal{kind: RefusedAgent, msg: fmt.Sprintf("keploy could not read which tests ran from its agent (%v). %s", readErr, last)}
 	}
-	return refusal{"Recording stopped: your tests ran but none called e2e.Scope(t), so keploy cannot tell which calls belong to which test.\n" +
-		"Call e2e.Scope(t) at the start of every test (it marks where the test begins and ends), then run keploy mock record again.\n" + last}
+	return refusal{kind: RefusedNoMarks, msg: "your tests ran but none called e2e.Scope(t), so keploy cannot tell which calls belong to which test. " +
+		"Call e2e.Scope(t) at the start of every test (it marks where the test begins and ends). " + last}
 }
 
 // saveSet backs the named set up to a sibling .<name>.previous directory so a
@@ -546,7 +542,7 @@ func (m *mockService) saveSet(name string) (func(keep bool), bool, error) {
 			return
 		}
 		if mvErr := os.Rename(saved, set); mvErr != nil {
-			m.logger.Warn("could not put the previous recording back; it is kept at "+saved, zap.String("mock-set", name), zap.Error(mvErr))
+			m.logger.Warn("could not put the previous recording back; it is kept at "+saved+"; put it back: mv "+saved+" "+set, zap.String("mock-set", name), zap.Error(mvErr))
 		}
 	}, true, nil
 }
@@ -584,11 +580,11 @@ func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[s
 	}
 	mapper, ok := m.mappingDB.(CaseMapper)
 	if !ok {
-		m.logger.Warn("the mapping store cannot record test cases per flow", zap.String("mock-set", name))
+		m.logger.Debug("the mapping store cannot record test cases per flow", zap.String("mock-set", name))
 		return
 	}
 	if err := mapper.UpsertCases(ctx, name, byCase, startup, suites); err != nil {
-		m.logger.Warn("failed to write per-flow test cases", zap.Error(err))
+		m.logger.Warn("could not save the recorded requests per test", zap.Error(err))
 		return
 	}
 	m.logger.Info("wrote per-flow test cases", zap.Int("flows", len(byCase)), zap.String("mock-set", name))
@@ -597,11 +593,11 @@ func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[s
 func (m *mockService) upsertBoots(ctx context.Context, name string, boots []models.BootSpec) {
 	mapper, ok := m.mappingDB.(BootMapper)
 	if !ok {
-		m.logger.Warn("the mapping store cannot record app starts", zap.String("mock-set", name))
+		m.logger.Debug("the mapping store cannot record app starts", zap.String("mock-set", name))
 		return
 	}
 	if err := mapper.UpsertBoots(ctx, name, boots); err != nil {
-		m.logger.Warn("failed to write the app starts", zap.Error(err))
+		m.logger.Warn("could not save the app start-ups", zap.Error(err))
 	}
 }
 
@@ -612,7 +608,7 @@ func (m *mockService) deleteMappings(ctx context.Context, name string) {
 	}
 	deleter, ok := m.mappingDB.(MappingDeleter)
 	if !ok {
-		m.logger.Warn("the mapping store cannot delete, so old per-test mappings may linger", zap.String("mock-set", name))
+		m.logger.Debug("the mapping store cannot delete, so old per-test mappings may linger", zap.String("mock-set", name))
 		return
 	}
 	if err := deleter.Delete(ctx, name); err != nil {
@@ -796,8 +792,7 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 			// The agent closed the stream on its own; nothing left to wait for.
 			return
 		case <-utils.InterruptedAgain():
-			m.logger.Warn("stopped saving the mocks the agent captured before the run ended, at a second interrupt",
-				zap.String("next_step", "mocks the agent still held were not saved"))
+			m.logger.Warn("second Ctrl-C: calls the agent still held were not saved")
 			return
 		case <-quiet.C:
 			// Quiet means the stream brought nothing held while the consumer

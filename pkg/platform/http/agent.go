@@ -45,8 +45,10 @@ import (
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/term"
 )
 
 const (
@@ -88,6 +90,10 @@ type AgentClient struct {
 	// StoreMocks clears it: a store addresses an agent, possibly a fresh one,
 	// whose answer this client has not seen yet.
 	consumedPerTest atomic.Bool
+
+	mock     bool
+	agentLog string
+	sayLog   sync.Once
 }
 
 // AgentReadsConsumedPerTestOnly reports whether the agent's last
@@ -1438,7 +1444,7 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 		defer utils.Recover(a.logger)
 		appErr := app.Run(runAppCtx)
 		if appErr.Err != nil {
-			utils.LogError(a.logger, appErr.Err, "error while running the app")
+			utils.LogError(a.logger, appErr.Err, "error while running the app", log.Hide)
 		}
 		if appErr.AppErrorType != models.ErrCtxCanceled && appErr != (models.AppError{}) {
 			appErrCh <- appErr
@@ -1672,6 +1678,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 
 	if elevates && agentUtils.NeedsPTY() && !sudoCached {
+		if a.mock && !term.IsTerminal(int(os.Stdin.Fd())) {
+			return fmt.Errorf("keploy needs root on Linux and sudo asks for a password; run it with sudo: sudo -E %s", utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...)))
+		}
 		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp, exited)
 	}
 
@@ -1679,8 +1688,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// If credentials are cached, this will use sudo -n (non-interactive)
 	cmd := agentUtils.NewAgentCommand(keployBin, args, sudoCached)
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout, cmd.Stderr = a.agentOutput()
+	if a.agentLog != "" && cmd.WaitDelay == 0 {
+		cmd.WaitDelay = 5 * time.Second
+	}
 
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
@@ -1704,7 +1715,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		exited <- err
 		// If ctx wasn't cancelled, bubble up unexpected exits
 		if err != nil && ctx.Err() == nil {
-			a.logger.Error("agent process exited with error", zap.Error(err))
+			a.logger.Error("agent process exited with error", zap.Error(err), log.Hide)
 			return err
 		}
 		a.mu.Lock()
@@ -1898,6 +1909,9 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 		// Agent context cancelled or agent stopped
 		if errors.Is(agentCtx.Err(), context.Canceled) {
 			a.logger.Info("Agent was stopped intentionally")
+		} else if a.mock {
+			a.logger.Error("keploy's agent exited before the run ended; this run's results are incomplete")
+			a.sayAgentLog()
 		} else {
 			a.logger.Error("Agent stopped unexpectedly, client operations may be affected", zap.String("next_step", "check agent logs for panic/oom, ensure required capabilities/permissions, or rerun with --debug and verify the agent binary is compatible with the CLI"))
 		}
@@ -1929,13 +1943,19 @@ func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) e
 		}
 	}
 	if cause == nil {
+		a.sayAgentLog()
 		if exitErr == nil {
 			return errors.New("the keploy agent exited before it became ready")
 		}
 		return fmt.Errorf("the keploy agent exited before it became ready: %w", exitErr)
 	}
 	utils.SetExitCodeOnce(utils.ExitCodeFor(cause))
-	a.logger.Error("the keploy agent could not start", zap.Error(cause), zap.String("next_step", agentStartRemedy(cause, isDockerCmd, runtime.GOOS)))
+	remedy := agentStartRemedy(cause, isDockerCmd, runtime.GOOS)
+	if a.agentLog != "" {
+		remedy = strings.ReplaceAll(strings.ReplaceAll(remedy, "The agent's log above", "The agent's log"), "the agent's log above", "the agent's log")
+	}
+	a.logger.Error("the keploy agent could not start", zap.Error(cause), zap.String("next_step", remedy))
+	a.sayAgentLog()
 	return fmt.Errorf("%w: the keploy agent could not start (%v)", cause, exitErr)
 }
 
@@ -2152,6 +2172,7 @@ func (a *AgentClient) fetchAgentCA(ctx context.Context) ([]byte, error) {
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
+	a.mock = opts.MockMode
 
 	agentPort, err := utils.GetAvailablePort()
 	if err != nil {
@@ -2312,6 +2333,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if !isDockerCmd && opts.CommandType != string(utils.DockerCompose) {
 		certPEM, caErr := a.fetchAgentCA(ctx)
 		if caErr != nil {
+			if a.mock {
+				utils.LogError(a.logger, caErr, "keploy's agent did not hand over its TLS certificate")
+				a.sayAgentLog()
+				return caErr
+			}
 			utils.LogError(a.logger, caErr, "failed to fetch the agent's CA certificate; the app would not trust keploy's MITM leaves",
 				zap.String("next_step", "ensure the agent started cleanly (check the agent log for a SetupCA error) and retry"))
 			return caErr
@@ -2547,8 +2573,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout, cmd.Stderr = a.agentOutput()
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.Canceled {

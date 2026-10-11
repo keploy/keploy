@@ -3,6 +3,7 @@ package mock
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/url"
 	"regexp"
 	"slices"
@@ -403,7 +404,7 @@ func (m *mockService) reportMissesAs(misses []models.UnmatchedCall, byFlow []Flo
 		if next == "" {
 			next = "record this call with --on-miss record, or re-record the set"
 		}
-		m.logger.Warn("no recorded mock matched a call", append(fields, zap.String("next_step", next))...)
+		m.logger.Warn(missLine(test, k.protocol, k.call, k.dest, n[k], miss.FieldDiffs), append(fields, zap.String("next_step", next), m.own())...)
 	}
 }
 
@@ -488,4 +489,25 @@ func (f *failScan) list() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.failed...)
+}
+
+func missLine(test, protocol, call, dest string, times int, diffs []models.MockFieldDiff) string {
+	what := call
+	if what == "" {
+		what = protocol
+	}
+	line := "not in the recording: " + test + " called " + what
+	if dest != "" {
+		line += " on " + dest
+	}
+	if times > 1 {
+		line += fmt.Sprintf(" (%d times)", times)
+	}
+	for i, d := range diffs {
+		if i == 2 {
+			break
+		}
+		line += fmt.Sprintf("; nearest recorded call has %s %q, this call %q", d.Path, d.Expected, d.Actual)
+	}
+	return line + "; add it: " + Again("--on-miss", "record")
 }

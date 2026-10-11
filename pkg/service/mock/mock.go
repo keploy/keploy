@@ -298,7 +298,7 @@ func (m *mockService) propagateExit(appErr models.AppError, phase string) {
 	switch appErr.AppErrorType {
 	case models.ErrAppStopped:
 		// Clean exit (code 0). Success.
-		m.logger.Info("test command finished successfully", zap.String("phase", phase))
+		m.logger.Info("the test command exited 0", zap.String("phase", phase), m.show())
 	case models.ErrCtxCanceled, "":
 		// User interrupt or nothing to report — leave ErrCode untouched.
 	case models.ErrUnExpected, models.ErrCommandError:
@@ -307,10 +307,9 @@ func (m *mockService) propagateExit(appErr models.AppError, phase string) {
 			code = 1
 		}
 		utils.ErrCode = code
-		m.logger.Info("test command exited non-zero; mirroring its exit code",
-			zap.String("phase", phase), zap.Int("exitCode", code))
+		m.logger.Info(fmt.Sprintf("the test command exited %d; keploy exits %d", code, code), zap.String("phase", phase), m.show())
 	default:
 		utils.ErrCode = 1
-		m.logger.Info("test command did not complete cleanly", zap.String("phase", phase), zap.String("reason", string(appErr.AppErrorType)))
+		m.logger.Info("the test command did not finish: "+string(appErr.AppErrorType), zap.String("phase", phase), m.show())
 	}
 }
