@@ -9,7 +9,9 @@ name: Mock Mode Regression (Linux)
 # Another replays two concurrent workers under different named scopes and
 # asserts each is served only its own scope's mocks. Another replays a stateful
 # dependency (one request recorded several times) and asserts record order,
-# per worker and per scope. Another replays with the
+# per worker and per scope. Another runs more short-lived processes than the
+# agent's PID map holds between two calls and asserts both are recorded, then
+# replayed without reaching the dependency. Another replays with the
 # network off (loopback only), as on a laptop with its Wi-Fi off, and records a
 # dependency on loopback the same way. Another runs the same binary where its
 # agent cannot start, and asserts the run fails at once with the code that
@@ -99,6 +101,18 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-stateful-linux.sh"
+
+      # A test command that runs more short-lived processes than the agent's
+      # PID map holds (10240) must still have the calls of every later process
+      # recorded, and replayed without reaching the real dependency. The map
+      # used to keep every process that ever called socket(), so once it was
+      # full later calls went live, silently.
+      - name: Run mock-mode process-churn e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-process-churn-linux.sh"
 
       - name: Run mock-mode offline e2e
         env:
