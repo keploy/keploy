@@ -399,11 +399,14 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		default:
 			continue
 		}
-		if strings.Contains(j.Name(), "mocks") {
-			continue
-		}
 
 		name := strings.TrimSuffix(j.Name(), fileExt)
+		// Skip a stray mocks.yaml / mocks.json by its exact name only. A
+		// substring match also dropped every test case whose name merely
+		// contains "mocks" (e.g. get-k8s-proxy-mocks-download-1).
+		if name == "mocks" {
+			continue
+		}
 		// First-wins: pre-sort guarantees the format-matching file is
 		// processed before its sibling, so any later occurrence of the
 		// same basename is by definition the non-preferred format.

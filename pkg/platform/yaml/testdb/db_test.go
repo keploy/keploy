@@ -1,11 +1,15 @@
 package testdb
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 func TestGetTestCases_SortingLogic(t *testing.T) {
@@ -350,4 +354,45 @@ func TestGetTestCases_EdgeCases(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestGetTestCases_KeepsTestCasesNamedAfterMocks guards against the mocks-file
+// skip matching by substring: a test case recorded for a /mocks/* route (named
+// e.g. get-x-mocks-1) must be read back, while a mocks.yaml in tests/ is still
+// skipped.
+func TestGetTestCases_KeepsTestCasesNamedAfterMocks(t *testing.T) {
+	ts := NewWithNaming(zap.NewNop(), t.TempDir(), NamingDescriptive)
+	testSetID := "test-set-0"
+
+	for _, name := range []string{"get-x-mocks-1", "get-users-1"} {
+		tc := httpTC("GET", "http://api.test/"+name)
+		tc.Name = name
+		if err := ts.InsertTestCase(t.Context(), tc, testSetID, false); err != nil {
+			t.Fatalf("insert %s: %v", name, err)
+		}
+	}
+	// A mocks.yaml inside tests/ is skipped by its exact name; were it read,
+	// it would load as a third test case.
+	testsDir := filepath.Join(ts.TcsPath, testSetID, "tests")
+	data, err := os.ReadFile(filepath.Join(testsDir, "get-users-1.yaml"))
+	if err != nil {
+		t.Fatalf("read get-users-1.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(testsDir, "mocks.yaml"), data, 0o644); err != nil {
+		t.Fatalf("write mocks.yaml: %v", err)
+	}
+
+	tcs, err := ts.GetTestCases(t.Context(), testSetID)
+	if err != nil {
+		t.Fatalf("GetTestCases: %v", err)
+	}
+	var got []string
+	for _, tc := range tcs {
+		got = append(got, tc.Name)
+	}
+	sort.Strings(got)
+	want := []string{"get-users-1", "get-x-mocks-1"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("GetTestCases names = %v, want %v", got, want)
+	}
 }
