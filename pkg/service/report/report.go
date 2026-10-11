@@ -153,6 +153,10 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		// that was demoted, and the dependency notice below then printed
 		// directly under a line asserting it passed.
 		fmt.Fprintf(r.out, "Testcase %q (%s) %s (%s)\n", t.TestCaseID, t.Name, testStatusLabel(t.Status), t.TimeTaken)
+		// A test keploy skipped for a reason says why, right under its status.
+		if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
+			fmt.Fprintf(r.out, "  %s\n", quarantinedSkipMessage(t.SkipReason))
+		}
 		// ... but a PASSED test can still have stopped making a recorded
 		// outgoing call. That is the silent-green case; it gets one line here
 		// whether or not --assert-dependencies was passed.

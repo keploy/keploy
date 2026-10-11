@@ -58,6 +58,11 @@ type TestResult struct {
 	Result       Result      `json:"result" yaml:"result"`
 	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
 	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
+	// SkipReason says why keploy skipped this test: set on an IGNORED result
+	// whose skip carried a reason (a quarantine, with its class and why), and
+	// rendered into the JUnit <skipped> message and the text report. Empty for
+	// every other result, and for a test skipped without one.
+	SkipReason string `json:"skip_reason,omitempty" yaml:"skip_reason,omitempty"`
 	// MockMismatches captures expected vs actually-consumed mocks for THIS test.
 	// Distinct from FailureInfo.MockMismatch (which only fires when the mock
 	// pool diverged AND the test case is OBSOLETE) — this field is set for

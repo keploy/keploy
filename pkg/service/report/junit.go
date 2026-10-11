@@ -173,7 +173,7 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 			}
 		case models.TestStatusIgnored:
 			skipped++
-			tc.Skipped = &junitSkipped{Message: "ignored test case"}
+			tc.Skipped = ignoredSkip(t)
 		default:
 			// PASSED (and anything else that is neither failed nor skipped).
 			// A test whose response still matched while a recorded outgoing
@@ -325,6 +325,31 @@ func depFailureLines(deps []models.DepResult) []string {
 	}
 	return parts
 }
+
+// ignoredSkip is the <skipped> element of an IGNORED case. A case keploy
+// skipped with a reason (a quarantine) says so in the message, which is what
+// every CI dashboard shows for a skipped case: "quarantined by keploy
+// (<reason>)", with the reason in the body too. A case skipped without one
+// keeps the historical literal, byte for byte.
+func ignoredSkip(t models.TestResult) *junitSkipped {
+	if t.SkipReason == "" {
+		return &junitSkipped{Message: ignoredSkipMessage}
+	}
+	return &junitSkipped{
+		Message: quarantinedSkipMessage(t.SkipReason),
+		Text:    t.SkipReason,
+	}
+}
+
+// quarantinedSkipMessage is the <skipped message> of a case keploy skipped for
+// a reason.
+func quarantinedSkipMessage(reason string) string {
+	return "quarantined by keploy (" + reason + ")"
+}
+
+// ignoredSkipMessage is the historical <skipped message> literal for an IGNORED
+// case skipped without a reason.
+const ignoredSkipMessage = "ignored test case"
 
 // obsoleteSkipMessage is the historical, FIXED <skipped message> literal for
 // an OBSOLETE test. It is a consumer-visible string contract — CI dashboards

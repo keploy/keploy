@@ -1497,6 +1497,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			TimeTaken: timeTaken.String(),
 			CmdUsed:   r.config.Test.CmdUsed,
 		}
+		// Under the proven switch the report names each skipped test, with its
+		// reason, instead of counting them.
+		if rows := r.ignoredSetResults(testSetID, testCases); rows != nil {
+			for i := range rows {
+				if err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, &rows[i]); err != nil {
+					utils.LogError(r.logger, err, "failed to insert test case result")
+					return models.TestSetStatusFailed, err
+				}
+			}
+			testReport.Tests = rows
+			testReport.Total = len(rows)
+			testReport.Ignored = len(rows)
+		}
 
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
@@ -2274,6 +2287,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				TestCaseID:   testCase.Name,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
 				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+				SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
 			}
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
@@ -2385,6 +2399,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					TestCaseID:   testCase.Name,
 					TestCasePath: filepath.Join(r.config.Path, testSetID),
 					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+					SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
 				}
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
