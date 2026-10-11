@@ -136,7 +136,9 @@ func TestBeginScope_RetryOfUnmappedScopeResetsNothing(t *testing.T) {
 	require.False(t, ack.RetryReset, "nothing was reset")
 	require.Zero(t, ack.RestoredMocks)
 	require.Nil(t, stub.resetWith)
-	require.Empty(t, stub.calls, "an unmapped scope must not touch the proxy at all")
+	// The pool IS re-staged -- to the scope's own spec setup (stageSpecSetup),
+	// which narrows rather than broadens -- but nothing is ever reset.
+	require.NotContains(t, stub.calls, "reset", "an unmapped scope must never reset consumption")
 	require.Len(t, stub.consumed, 3)
 }
 

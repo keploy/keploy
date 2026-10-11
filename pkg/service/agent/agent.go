@@ -144,6 +144,26 @@ type Agent struct {
 	// from it belongs to no test, and stays visible to a scoped test as overflow.
 	mappedUniverse []string
 	loadedMocks    int // replay: count of mocks stored, for /agent/mock/stats
+
+	// replay: per-spec plan of requests shared across the spec (specpool.go),
+	// and the set of representative mock names that are not consumed on match.
+	// Guarded by specPoolMu, never by scopeMu.
+	specPoolMu   sync.RWMutex
+	specPools    map[string]*specPool
+	sharedInSpec map[string]struct{}
+
+	// replay: the test scope currently staged and the names it owns, so its own
+	// mocks can be tagged for the HTTP matcher's pending-write fence
+	// (fencescope.go). Empty while a suite or setup pool is staged.
+	fenceMu    sync.RWMutex
+	fenceScope string
+	fenceOwn   map[string]struct{}
+	// replay: the spec whose setup pool is staged (hooks and the gaps between
+	// tests), and per spec the place in its recorded test order the replay has
+	// reached, so setup copies recorded for a later hook can be held back
+	// (setupslot.go). fenceSetup is empty while a test is staged.
+	fenceSetup string
+	specPos    map[string]int
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -914,6 +934,13 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			zap.Int64("diskBytes", disk.DiskBytes()),
 			zap.Int("residentPerTest", len(storage.filtered)),
 			zap.Int("residentConfig", len(storage.unfiltered)))
+	} else {
+		// KPLOAD: the residency log above only fires when the disk store
+		// exists. With KEPLOY_STRICT_MOCK_WINDOW=0 there is no disk store and
+		// no log at all, which hid where per-test mocks actually landed.
+		a.logger.Info("KPLOAD agent residency (no disk store)",
+			zap.Int("residentPerTest", len(storage.filtered)),
+			zap.Int("residentConfig", len(storage.unfiltered)))
 	}
 
 	a.finalizeClientMocks(ctx, storage)
@@ -1050,10 +1077,18 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	if err != nil {
 		return nil, err
 	}
-	a.logger.Debug("agent mock residency: loaded per-test set from disk",
+	a.logger.Info("KPLOAD agent reload from disk",
 		zap.String("mode", mode),
 		zap.Int("loadedFromDisk", len(loaded)),
-		zap.Int("residentIneligible", len(resident)))
+		zap.Int("residentIneligible", len(resident)),
+		// DIAGNOSTIC: which of the three strict-window conditions held. This is
+		// what showed StrictMockWindow was unset on the scope path (strictFlag
+		// false, both timestamps valid) and every reload fell to lax-all.
+		zap.Bool("strictFlag", pkg.IsStrictMockWindow(params.StrictMockWindow)),
+		zap.Bool("afterZero", params.AfterTime.IsZero()),
+		zap.Bool("beforeZero", params.BeforeTime.IsZero()),
+		zap.Bool("useMapping", params.UseMappingBased),
+		zap.Int("mappingLen", len(params.MockMapping)))
 	return dedupByName(resident, loaded), nil
 }
 
@@ -1282,6 +1317,16 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// supports the WindowedProxy extension. Otherwise fall back to the
 	// stable SetMocks contract — third-party proxies without window
 	// support keep working in legacy lax mode.
+	// Flag spec-shared mocks (specpool.go) so the proxy keeps them on match.
+	a.markSharedInSpec(filteredMocks)
+	// Tag the staged test's own mocks for the pending-write fence. After
+	// markSharedInSpec: a spec-shared write is never a fence.
+	a.markFenceScope(filteredMocks)
+	a.logger.Info("KPLOAD handoff to proxy",
+		zap.Int("filteredMocks", len(filteredMocks)),
+		zap.Int("unfilteredMocks", len(unfilteredMocks)),
+		zap.Bool("afterZero", params.AfterTime.IsZero()),
+		zap.Bool("beforeZero", params.BeforeTime.IsZero()))
 	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
 		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
 			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
@@ -1300,6 +1345,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 // filterOutDeleted filters out deleted mocks based on totalConsumedMocks
 func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[string]models.MockState) []*models.Mock {
 	filtered := make([]*models.Mock, 0, len(mocks))
+	var dropped []string
 	for _, m := range mocks {
 		// treat empty/missing names as never consumed
 		if m == nil || m.Name == "" {
@@ -1314,7 +1360,18 @@ func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[st
 				m.TestModeInfo.SortOrder = k.SortOrder
 			}
 			filtered = append(filtered, m)
+		} else {
+			dropped = append(dropped, m.Name)
 		}
+	}
+	// DIAGNOSTIC: consumption is tracked for the WHOLE session, so a mock any
+	// earlier test matched is subtracted from every later staging -- including
+	// the staging of the test that OWNS it. Naming the drops says whether a
+	// mock missing from a scope's pool was consumed elsewhere or lost further up.
+	if len(dropped) > 0 && a.logger != nil {
+		a.logger.Info("KPCONS mocks withheld from this scope as already consumed",
+			zap.Int("in", len(mocks)), zap.Int("kept", len(filtered)),
+			zap.Strings("dropped", dropped))
 	}
 	return filtered
 }

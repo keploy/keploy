@@ -1484,10 +1484,12 @@ func (ys *MockYaml) getFilteredMocksFile(ctx context.Context, testSetID string, 
 		if err != nil {
 			return nil, err
 		}
+		var kpSeen, kpPerTest, kpSession, kpOther, kpSkippedMapped int
 		for _, mock := range mocks {
 			_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
 			_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
 			if isMappedToSpecificTest && !isNeededForCurrentRun {
+				kpSkippedMapped++
 				continue
 			}
 			// Unification: lifetime-only routing via DeriveLifetime —
@@ -1505,11 +1507,33 @@ func (ys *MockYaml) getFilteredMocksFile(ctx context.Context, testSetID string, 
 			// filtered and unfiltered) — the YAML path mirrors this
 			// via its sibling GetUnFilteredMocks reader.
 			mock.DeriveLifetime()
+			kpSeen++
+			switch mock.TestModeInfo.Lifetime {
+			case models.LifetimePerTest:
+				kpPerTest++
+			case models.LifetimeSession:
+				kpSession++
+			default:
+				kpOther++
+			}
 			if mock.TestModeInfo.Lifetime == models.LifetimePerTest || mock.Kind == models.PostgresV2 {
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
-		return pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime, false), nil
+		ys.Logger.Info("KPLOAD gob",
+			zap.Int("total_in_file", len(mocks)),
+			zap.Int("skipped_other_test", kpSkippedMapped),
+			zap.Int("after_mapping_filter", kpSeen),
+			zap.Int("lifetime_pertest", kpPerTest),
+			zap.Int("lifetime_session", kpSession),
+			zap.Int("lifetime_other", kpOther),
+			zap.Int("into_tcsMocks", len(tcsMocks)),
+			zap.Bool("afterTime_zero", afterTime.IsZero()),
+			zap.Bool("beforeTime_zero", beforeTime.IsZero()))
+		kpOut := pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime, false)
+		ys.Logger.Info("KPLOAD gob post-timefilter",
+			zap.Int("in", len(tcsMocks)), zap.Int("out", len(kpOut)))
+		return kpOut, nil
 	}
 
 	// Auto-detect the mocks file's format (may be yaml or json regardless
@@ -1536,6 +1560,7 @@ func (ys *MockYaml) getFilteredMocksFile(ctx context.Context, testSetID string, 
 	readerIsJSON := reader.Format() == yaml.FormatJSON
 
 	hasContent := false
+	var kpYSeen, kpYPerTest, kpYSession, kpYOther int
 	for {
 		var mocks []*models.Mock
 		if readerIsJSON {
@@ -1584,6 +1609,15 @@ func (ys *MockYaml) getFilteredMocksFile(ctx context.Context, testSetID string, 
 			// in the unfiltered/config pool returned by the sibling
 			// GetUnFilteredMocks below.
 			mock.DeriveLifetime()
+			kpYSeen++
+			switch mock.TestModeInfo.Lifetime {
+			case models.LifetimePerTest:
+				kpYPerTest++
+			case models.LifetimeSession:
+				kpYSession++
+			default:
+				kpYOther++
+			}
 			if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
 				tcsMocks = append(tcsMocks, mock)
 			}
@@ -1622,6 +1656,12 @@ func (ys *MockYaml) getFilteredMocksFile(ctx context.Context, testSetID string, 
 	// mocksThatHaveMappings) already ran in the per-doc loop above,
 	// so what reaches here is the minimal relevant set.
 	ys.Logger.Debug("per-test mocks count", zap.Int("count", len(tcsMocks)))
+	ys.Logger.Info("KPLOAD yaml",
+		zap.Int("seen", kpYSeen),
+		zap.Int("lifetime_pertest", kpYPerTest),
+		zap.Int("lifetime_session", kpYSession),
+		zap.Int("lifetime_other", kpYOther),
+		zap.Int("into_tcsMocks", len(tcsMocks)))
 	return tcsMocks, nil
 }
 

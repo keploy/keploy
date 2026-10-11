@@ -165,6 +165,10 @@ func TestTierKeyPreservesEveryFieldButHitCount(t *testing.T) {
 			LifetimeDerived: true,
 			HitCount:        99,
 			IsStartup:       true,
+			SharedInSpec:    true,
+			FenceScope:      "spec > test",
+			FenceWrite:      true,
+			FenceLater:      true,
 		},
 	}
 
@@ -191,6 +195,12 @@ func TestTierKeyPreservesEveryFieldButHitCount(t *testing.T) {
 	if !got.IsStartup {
 		t.Fatal("IsStartup was dropped")
 	}
+	if !got.SharedInSpec {
+		t.Fatal("SharedInSpec was dropped: a spec-shared startup-tier mock would be consumed on match")
+	}
+	if got.FenceScope != "spec > test" || !got.FenceWrite || !got.FenceLater {
+		t.Fatal("FenceScope/FenceWrite/FenceLater were dropped: the pending-write fence would stop seeing the test's own writes")
+	}
 	if got.HitCount != 0 {
 		t.Fatalf("HitCount = %d, want 0: reading it is exactly the race tierKey exists "+
 			"to avoid", got.HitCount)
@@ -198,8 +208,8 @@ func TestTierKeyPreservesEveryFieldButHitCount(t *testing.T) {
 
 	// Guard the hand-maintained list itself: if a field is ADDED to
 	// TestModeInfo, tierKey must be updated to carry it (or deliberately not).
-	if n := reflect.TypeOf(models.TestModeInfo{}).NumField(); n != 7 {
-		t.Fatalf("TestModeInfo now has %d fields, not 7: tierKey copies them by hand, "+
+	if n := reflect.TypeOf(models.TestModeInfo{}).NumField(); n != 11 {
+		t.Fatalf("TestModeInfo now has %d fields, not 11: tierKey copies them by hand, "+
 			"so decide explicitly whether the new field belongs in a tree key and "+
 			"update this count", n)
 	}

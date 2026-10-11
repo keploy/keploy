@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
@@ -52,9 +53,48 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid, attempt int) (
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
+		own := names
 		tableSize := len(a.scopeTable)
 		universe := a.mappedUniverse
+		// SPEC-SCOPED SETUP. A test's mapping covers only what it issued inside
+		// its OWN scope window. Everything its spec captured before the first
+		// test opened (`beforeAll`: sign-in, app list, first render) and between
+		// test windows (a test's own async traffic that outlived its scope) is
+		// filed under `__suite__:<spec>` instead -- 811 mocks on the atg "order"
+		// tape, 349 true beforeAll and 444 intra-spec leakage.
+		//
+		// Those are in the universe, so FilterTcsMocksMappingWithShared reads
+		// them as "owned by some test -- hide", and they were unreachable by the
+		// very tests that depend on them: 1,264 mock-instances a test requested
+		// AT RECORD that it does not own, 952 of them (75%) sitting in its own
+		// spec's suite entry. That is the single largest source of the 96 misses.
+		//
+		// Appending them to THIS test's mapping restores reach without widening:
+		// a test sees its own mocks plus its own spec's setup, and nothing from
+		// any other spec. Measured across five tapes (f41, f41b, order, bucket-e,
+		// drawer-only), suite captures never land in another spec's window --
+		// cross-spec leakage is 0 -- so the spec boundary is the correct fence.
+		//
+		// Ordering: own mocks FIRST. FilterTcsMocksMapping preserves slice order
+		// within the mapped tier, so a test's own recording still wins every tie
+		// against the shared setup, exactly as before.
+		if ok {
+			if suiteNames, sOK := a.scopeTable[suiteScopeOf(name)]; sOK && len(suiteNames) > 0 {
+				merged := make([]string, 0, len(names)+len(suiteNames))
+				merged = append(merged, names...)
+				merged = append(merged, suiteNames...)
+				names = merged
+			}
+		}
 		a.scopeMu.Unlock()
+		// SPEC-SHARED REQUESTS (specpool.go): requests whose every copy in the
+		// spec carries the same response are reachable from every scope of the
+		// spec and not consumed, so a poll, refetch or extra page load cannot
+		// run them dry. Must run outside scopeMu: building the plan reads the
+		// scope table under that lock.
+		if ok {
+			names = a.applySpecPool(name, names)
+		}
 		// No per-test mapping for this test — leave the whole pool armed. All
 		// three shapes below served the whole set silently before; they are
 		// distinguished here because a runner needs to know WHICH it hit: an
@@ -131,6 +171,15 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid, attempt int) (
 			return models.ScopeAck{Reason: models.ScopeReasonNoMappingTable, Attempt: attempt}, nil
 		case !ok:
 			a.logger.Debug("scope begin: NOT scoped, this name is absent from the mapping table", zap.String("test", name), zap.Int("mapped_tests", tableSize), zap.Int("attempt", attempt))
+			// Not scoped to its own recording (there is none), but still kept
+			// inside its own spec: whatever was staged before belongs to the
+			// previous test or the previous spec. A spec with no suite recording
+			// (28 of 56 on the atg tape) lands here for its suite scope too.
+			if pid == 0 {
+				if err := a.stageSpecSetup(ctx, specOfScope(name), "unmapped-scope"); err != nil {
+					a.logger.Debug("could not stage the spec setup pool for an unmapped scope; the previous pool stays", zap.String("scope", name), zap.Error(err))
+				}
+			}
 			return models.ScopeAck{Reason: models.ScopeReasonUnmappedScope, Attempt: attempt}, nil
 		case len(names) == 0:
 			a.logger.Debug("scope begin: NOT scoped, this name is mapped to zero mocks", zap.String("test", name), zap.Int("attempt", attempt))
@@ -160,6 +209,13 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid, attempt int) (
 			ack.RestoredMocks, ack.RetryReset = a.resetConsumedForScope(ctx, name, names)
 		}
 		a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)))
+		// Pending-write fence (fencescope.go): only a TEST has a sequence of its
+		// own writes to fence; a suite scope is setup shared by every describe.
+		if strings.HasPrefix(name, "__suite__:") {
+			a.setFenceSetup(specOfScope(name))
+		} else {
+			a.setFenceScope(name, own)
+		}
 		if err := a.UpdateMockParams(ctx, models.MockFilterParams{
 			MockMapping: names,
 			// Mocks belonging to no test stay reachable as overflow, after this
@@ -210,8 +266,8 @@ func (a *Agent) BeginScope(ctx context.Context, name string, pid, attempt int) (
 
 // EndScope closes a per-test scope. In record mode it records the [begin, now]
 // window (tagged with the worker PID) for later correlation. In test mode it
-// restores this worker's whole-pool view so a call made between tests still
-// matches.
+// stages the spec's setup pool (stageSpecSetup) so a call made between tests
+// still matches, against its own spec's recording only.
 func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 	if name == "" {
 		return nil
@@ -228,15 +284,16 @@ func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 			a.ClearWorkerScope(uint32(pid))
 			return nil
 		}
-		a.logger.Debug("scope end: restoring whole pool", zap.String("test", name))
-		return a.UpdateMockParams(ctx, models.MockFilterParams{
-			AfterTime:  models.BaseTime,
-			BeforeTime: time.Now(),
-			// Same reason as BeginScope: this restore rebuilds the pool from the
-			// pristine store, so without the flag it hands the next test every
-			// mock this session has already served.
-			AgentOwnsConsumed: true,
-		})
+		// A suite ends only when the runner moves to another spec or tears the
+		// worker down, and the next scope begin replaces the pool either way.
+		// Leave the setup pool staged rather than open a window on the whole
+		// tape in between.
+		if strings.HasPrefix(name, "__suite__:") {
+			a.logger.Info("KPGAP suite scope ended; setup pool left staged", zap.String("scope", name))
+			return nil
+		}
+		a.noteTestEnded(name)
+		return a.stageSpecSetup(ctx, specOfScope(name), "test-end")
 	}
 
 	a.scopeMu.Lock()
@@ -249,6 +306,46 @@ func (a *Agent) EndScope(ctx context.Context, name string, pid int) error {
 	a.scopeMu.Unlock()
 	a.logger.Debug("scope end (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
+}
+
+// stageSpecSetup stages the pool a spec's code runs against OUTSIDE its tests:
+// the spec's suite recording (beforeAll / afterAll and the traffic between
+// tests) plus its spec-shared representatives, and the unowned overflow.
+//
+// WHY. A test's end used to restore the WHOLE tape (every spec, ~7,900 mocks on
+// the atg tape) until the next scope began, and every beforeAll after a spec's
+// first describe runs in exactly that window: the fixture opens the suite scope
+// once per spec and does not reopen it per describe. Measured in one run, that
+// window cost 16 tests: a spec-shared "zero apps" MyApps from apps/page (never
+// consumed, by design) answered six later specs' beforeAll hooks, and gap
+// requests consumed other specs' only copies of /auth/check and
+// /cluster/proxy-origins, starving them before they ran. Each affected spec's
+// own suite recording held the right answer for every one of those hooks.
+// Reloading 7,900 mocks per test end also cost ~2s each.
+//
+// A spec with nothing staged here (no suite recording, no shared requests) is
+// narrowed to the unowned overflow, never widened to other specs' recordings.
+func (a *Agent) stageSpecSetup(ctx context.Context, spec, why string) error {
+	suite := "__suite__:" + spec
+	a.scopeMu.Lock()
+	names := append([]string(nil), a.scopeTable[suite]...)
+	universe := a.mappedUniverse
+	a.scopeMu.Unlock()
+	names = a.applySpecPool(suite, names)
+	mapping := names
+	if len(mapping) == 0 {
+		mapping = []string{strictNoRecordingSentinel}
+	}
+	a.setFenceSetup(spec)
+	a.logger.Info("KPGAP staging spec setup pool", zap.String("spec", spec), zap.String("why", why), zap.Int("names", len(names)))
+	return a.UpdateMockParams(ctx, models.MockFilterParams{
+		MockMapping:         mapping,
+		MockMappingUniverse: universe,
+		UseMappingBased:     true,
+		AfterTime:           models.BaseTime,
+		BeforeTime:          time.Now(),
+		AgentOwnsConsumed:   true,
+	})
 }
 
 // resolveOwner names the per-test scope that owns a capture made by worker `pid`
@@ -309,12 +406,29 @@ func (a *Agent) resolveOwner(pid uint32, ts time.Time) string {
 		return best
 	}
 
+	var owner string
 	if pid != 0 {
-		if owner := scan(true); owner != "" {
-			return owner
+		// Same rule as below: a `__suite__` hit is not a decision, because that
+		// window spans the whole spec and therefore contains every inter-test
+		// gap. Keep it as the fallback and let the grace try first.
+		if o := scan(true); o != "" && !strings.HasPrefix(o, "__suite__:") {
+			return o
+		} else if o != "" {
+			owner = o
 		}
 	}
-	return scan(false)
+	if owner == "" {
+		owner = scan(false)
+	}
+	// A match that is only the spec's own `__suite__` window is NOT a decision:
+	// that window spans the whole spec, so it contains every gap between tests.
+	// Fall through to the trailing grace first and let a test that just closed
+	// claim its own late capture; the suite stays the fallback below.
+	if owner != "" && !strings.HasPrefix(owner, "__suite__:") {
+		return owner
+	}
+
+	return owner
 }
 
 // resetConsumedForScope un-consumes exactly the mocks that belong to `name`, so
@@ -366,6 +480,9 @@ func (a *Agent) SetScopeTable(_ context.Context, table map[string][]string, stri
 	a.scopeTable = table
 	a.scopeStrict = strict
 	a.scopeMu.Unlock()
+	// A new table means a new recording: any per-spec sharing plan built
+	// against the old one is stale.
+	a.resetSpecPools()
 
 	// Push the union of every test's mapped mock names to the proxy so a scoped
 	// worker can tell another test's mock (hide) from a genuinely-shared,
@@ -413,4 +530,16 @@ func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 		stats.Consumed = len(reader.GetPersistentConsumed())
 	}
 	return stats, nil
+}
+
+// suiteScopeOf maps a per-test scope name to its spec's suite scope name.
+// The runner names tests "<spec>.spec.ts > describe > test" and the suite
+// scope "__suite__:<spec>.spec.ts" (tests/_lib/keploy-fixture.ts
+// suiteScopeName), so the spec file is the prefix up to the first " > ".
+func suiteScopeOf(testName string) string {
+	spec := testName
+	if i := strings.Index(spec, " > "); i >= 0 {
+		spec = spec[:i]
+	}
+	return "__suite__:" + spec
 }

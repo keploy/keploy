@@ -1064,6 +1064,10 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// same tree via GetFilteredMocksInWindow and reports 0 in every sample, while
 	// the disk reload reports loading 12-4649 mocks. One of the two is wrong;
 	// this logs what actually goes in, plus what was filtered out on the way.
+	m.logger.Info("KPLOAD setFilteredMocks",
+		zap.Int("filteredForTree", len(filteredForTree)),
+		zap.Int("startupInit", len(unfilteredForTree)),
+		zap.Bool("isInitialStaging", isInitialStaging))
 	m.setFilteredMocks(filteredForTree, false)
 	m.setUnFilteredMocks(unfilteredForTree, false)
 
@@ -2486,6 +2490,10 @@ func tierKey(mk *models.Mock, id int) models.TestModeInfo {
 		Lifetime:        mk.TestModeInfo.Lifetime,
 		LifetimeDerived: mk.TestModeInfo.LifetimeDerived,
 		IsStartup:       mk.TestModeInfo.IsStartup,
+		SharedInSpec:    mk.TestModeInfo.SharedInSpec,
+		FenceScope:      mk.TestModeInfo.FenceScope,
+		FenceWrite:      mk.TestModeInfo.FenceWrite,
+		FenceLater:      mk.TestModeInfo.FenceLater,
 	}
 }
 

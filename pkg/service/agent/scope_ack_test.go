@@ -131,6 +131,8 @@ type fakeScopeProxy struct {
 	workers   map[uint32][]string
 	consumed  map[string]models.MockState
 	universes [][]string
+	// last holds the mocks of the most recent SetMocks, tags included.
+	last []*models.Mock
 }
 
 func newFakeScopeProxy() *fakeScopeProxy {
@@ -143,6 +145,7 @@ func (f *fakeScopeProxy) SetMocks(_ context.Context, filtered, _ []*models.Mock)
 		names = append(names, m.Name)
 	}
 	f.staged = append(f.staged, names)
+	f.last = filtered
 	return nil
 }
 

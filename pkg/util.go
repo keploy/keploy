@@ -3685,6 +3685,30 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
+	// DIAGNOSTIC: names mapped entries that never arrived in the input set.
+	// Showed the 14->9 per-test drop is the ambientPollOps + CORS promotions
+	// moving those mocks to the session tier, not a loss.
+	if len(mocksPresentInMapping) > len(filtered) {
+		present := make(map[string]bool, len(m))
+		for _, mock := range m {
+			if mock != nil {
+				present[mock.Name] = true
+			}
+		}
+		missing := make([]string, 0, len(mocksPresentInMapping)-len(filtered))
+		for _, name := range mocksPresentInMapping {
+			if !present[name] {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			logger.Info("KPDROP mapped mocks absent from the input set",
+				zap.Int("mapped", len(mocksPresentInMapping)),
+				zap.Int("arrived", len(filtered)),
+				zap.Int("inputSet", len(m)),
+				zap.Strings("missing", missing))
+		}
+	}
 	return filtered, unfiltered
 }
 

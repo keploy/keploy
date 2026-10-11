@@ -4108,6 +4108,16 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 			zap.String("closest", r.ClosestMock),
 			zap.String("next_step", r.NextSteps),
 		}
+		// The recorded-vs-live field diff, the one triage fact this line was
+		// missing. It used to be reachable only from the per-parser Debug line
+		// (http/decode.go), which meant answering "what actually differed?"
+		// cost a --debug rerun that also dumps every served body and slows a
+		// 298-test replay by hours. The diff is bounded and already redacted
+		// by the renderer, so carrying it on the Warn makes a default-level
+		// log sufficient for triage.
+		if r.Diff != "" {
+			fields = append(fields, zap.String("diff", r.Diff))
+		}
 		// destination_scope is greppable in a node-wide agent log:
 		// "not_in_compared_set" is the one value that says "nothing this miss
 		// was compared against even targets that upstream" — in Kubernetes

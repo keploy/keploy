@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -367,9 +368,30 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 				// No mock matched — send a 502 so the application gets a
 				// proper HTTP error instead of a silent connection close.
+				//
+				// CORS: a 502 to a BROWSER request must echo the caller's Origin,
+				// or the browser rejects the response at the CORS layer before the
+				// app ever sees the status. The page then reports
+				//   "No 'Access-Control-Allow-Origin' header is present"
+				// and the fetch fails with net::ERR_FAILED — so a missed mock
+				// surfaces as a CORS bug, pointing every debugging effort at the
+				// wrong layer. Observed on a Playwright suite: one missed
+				// background query blanked a page that had already been served
+				// its own data correctly.
+				//
+				// Echoing the request's Origin (rather than "*") keeps this valid
+				// for credentialed requests, which browsers refuse to pair with a
+				// wildcard. Vary: Origin because the value is request-dependent.
+				// Non-browser callers send no Origin and get the plain 502.
+				corsHdrs := ""
+				if origin := request.Header.Get("Origin"); origin != "" {
+					corsHdrs = fmt.Sprintf(
+						"Access-Control-Allow-Origin: %s\r\nAccess-Control-Allow-Credentials: true\r\nVary: Origin\r\n",
+						origin)
+				}
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
-				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
-					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
+				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n%sConnection: close\r\n\r\n%s",
+					request.ProtoMajor, request.ProtoMinor, len(noMockBody), corsHdrs, noMockBody)
 				if _, err := clientConn.Write([]byte(noMock)); err != nil {
 					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
@@ -466,6 +488,11 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 		resp.StatusCode, http.StatusText(resp.StatusCode))
 	body := resp.Body
 	header := pkg.ToHTTPHeader(resp.Header)
+	// header is a fresh map, so rewriting it never touches the pooled mock.
+	if n, by := rebaseSetCookies(header, stub.Spec.ResTimestampMock, time.Now()); n > 0 && h.Logger != nil {
+		h.Logger.Info("KPCOOKIE recorded cookie expiry moved to serve time",
+			zap.String("mock", name), zap.Int("cookies", n), zap.Duration("by", by))
+	}
 	var respBody string
 	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
 		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))

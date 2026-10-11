@@ -1200,3 +1200,75 @@ func TestFuzzy_RawHTTPMessage_GateStillApplies(t *testing.T) {
 		t.Fatalf("served %q for a raw CreateATGApp message: the gate must read identity from the BODY", m.Name)
 	}
 }
+
+func authMock(name string, setCookie bool) *models.Mock {
+	h := map[string]string{"Content-Type": "application/json"}
+	if setCookie {
+		h["Set-Cookie"] = "jwt_token_staging=eyJhbGciOi...; Path=/"
+	}
+	return &models.Mock{
+		Name: name,
+		Kind: models.Kind(models.HTTP),
+		Spec: models.MockSpec{
+			HTTPReq:  &models.HTTPReq{Method: models.Method("GET"), URL: "/auth/check", Body: ""},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Body: `{"ok":true}`, Header: h},
+		},
+	}
+}
+
+// A bodiless GET makes every candidate an exact body match, so the FIRST one
+// wins. On the atg tape 15 of 17 /auth/check recordings carry no Set-Cookie,
+// and the seed helper needs the jwt_token_staging cookie -- it throws
+// "Cannot read properties of undefined (reading 'id')" without it.
+func TestExactBodyMatch_BodilessGET_PrefersCookieBearingResponse(t *testing.T) {
+	h := newHTTP()
+	pool := []*models.Mock{
+		authMock("no-cookie-1", false),
+		authMock("no-cookie-2", false),
+		authMock("with-cookie", true),
+	}
+
+	ok, m := h.ExactBodyMatch([]byte(""), pool)
+	if !ok {
+		t.Fatal("a bodiless GET must match")
+	}
+	if _, has := m.Spec.HTTPResp.Header["Set-Cookie"]; !has {
+		t.Fatalf("matched %q which carries no Set-Cookie: for an identical-body pool the "+
+			"richer response must win, or callers that read a cookie break", m.Name)
+	}
+}
+
+// The RBAC seed helper posts an ANONYMOUS mutation -- no operationName -- so
+// the identity gate had nothing to key on and fuzzy matching answered
+// createATGApp with a startLoadTest payload: a valid 200 for a different
+// operation, surfacing only as "failed to seed an app".
+func TestFuzzy_AnonymousGraphQLOperation_GatedByRootField(t *testing.T) {
+	h := newHTTP()
+	pool := []*models.Mock{
+		identityMock("loadtest",
+			`{"query":"mutation($id: String!) { startLoadTest(id: $id) { loadJobId } }","variables":{"id":"y"}}`),
+	}
+	anonCreate := []byte(`{"query":"mutation($name: String!) { createATGApp(name: $name) }","variables":{"name":"e2e-atgconfig-1"}}`)
+
+	if ok, m := h.PerformFuzzyMatch(pool, anonCreate); ok {
+		t.Fatalf("served %q for an anonymous createATGApp mutation: the root field must gate it", m.Name)
+	}
+}
+
+// The same anonymous operation still matches its OWN recording with drifted
+// arguments -- the gate keys on the root field, not the variables.
+func TestFuzzy_AnonymousGraphQL_SameRootFieldStillMatches(t *testing.T) {
+	h := newHTTP()
+	pool := []*models.Mock{
+		identityMock("loadtest",
+			`{"query":"mutation($id: String!) { startLoadTest(id: $id) { loadJobId } }","variables":{"id":"y"}}`),
+		identityMock("createApp",
+			`{"query":"mutation($name: String!) { createATGApp(name: $name) }","variables":{"name":"e2e-atgconfig-OLD"}}`),
+	}
+	anonCreate := []byte(`{"query":"mutation($name: String!) { createATGApp(name: $name) }","variables":{"name":"e2e-atgconfig-NEW"}}`)
+
+	ok, m := h.PerformFuzzyMatch(pool, anonCreate)
+	if !ok || m.Name != "createApp" {
+		t.Fatalf("anonymous same-operation match failed: ok=%v mock=%v", ok, m)
+	}
+}

@@ -280,12 +280,28 @@ func (d *DiskMocks) LoadByNames(names []string) ([]*models.Mock, error) {
 		return nil, fmt.Errorf("disk mocks: store closed")
 	}
 	sel := make([]diskEntry, 0, len(names))
+	var unresolved []string
 	for _, n := range names {
 		if e, ok := d.byName[n]; ok {
 			sel = append(sel, e)
+		} else {
+			unresolved = append(unresolved, n)
 		}
 	}
 	d.mu.Unlock()
+	// DIAGNOSTIC: a mapped name that is absent from the on-disk index is skipped
+	// SILENTLY, so a scope that asks for 85 mocks and receives 61 reports nothing
+	// anywhere. Measured on the atg "order" tape: scope staged 85, KPLOAD loaded
+	// 61, KPDROP saw inputSet 64 -- 24 names vanished with no error, and the
+	// /auth/check mocks a test needed were among them. Name the misses so the
+	// shortfall is attributable instead of inferred.
+	if len(unresolved) > 0 && d.logger != nil {
+		d.logger.Info("KPNAME mapped names absent from the on-disk index",
+			zap.Int("asked", len(names)),
+			zap.Int("resolved", len(sel)),
+			zap.Int("indexSize", len(d.byName)),
+			zap.Strings("unresolved", unresolved))
+	}
 	return d.decodeAll(sel)
 }
 

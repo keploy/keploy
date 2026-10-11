@@ -84,6 +84,8 @@ func TestResolveOwnerBoundsAreInclusive(t *testing.T) {
 	a.scopeWindows = []models.ScopeWindow{{Name: "t", Start: at(10), End: at(20)}}
 	require.Equal(t, "t", a.resolveOwner(0, at(10)))
 	require.Equal(t, "t", a.resolveOwner(0, at(20)))
+	// Past the end with no first-test boundary known, the capture stays unowned:
+	// positional attribution only applies inside a spec that has started tests.
 	require.Equal(t, "", a.resolveOwner(0, at(21)))
 }
 

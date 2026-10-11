@@ -290,6 +290,30 @@ type TestModeInfo struct {
 	// inert — the reapers run only on the live record buffer, never on
 	// disk-loaded mocks.
 	IsStartup bool `json:"-" bson:"-"`
+
+	// SharedInSpec marks a per-test mock whose exact request has the SAME
+	// response in every copy recorded in its spec (service/agent/specpool.go).
+	// Such a mock is visible to every scope in the spec and is NOT consumed on
+	// match: re-serving it cannot hand a caller the wrong moment, because the
+	// recording shows no other answer to that request anywhere in the spec.
+	// Set by the agent when it stages a scope's pool; runtime-only.
+	SharedInSpec bool `json:"-" bson:"-"`
+
+	// FenceScope names the test scope this mock was recorded in, set only on
+	// the mocks OWNED by the test that is currently staged (empty for suite,
+	// spec-shared-from-elsewhere and session mocks). The HTTP matcher keys its
+	// pending-write fence on it (integrations/http/fence.go). Runtime-only.
+	FenceScope string `json:"-" bson:"-"`
+
+	// FenceWrite marks one of the staged test's OWN GraphQL mutations that is
+	// not spec-shared: a state change the replay has to perform before any read
+	// recorded after it may be served. Runtime-only.
+	FenceWrite bool `json:"-" bson:"-"`
+
+	// FenceLater marks a suite copy staged with a test whose recording ended
+	// before this copy was captured: it belongs to a later hook (another
+	// describe's beforeAll) and the test should not use it up. Runtime-only.
+	FenceLater bool `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -995,6 +1019,10 @@ func (m *Mock) DeepCopy() *Mock {
 	lifetime := m.TestModeInfo.Lifetime
 	lifetimeDerived := m.TestModeInfo.LifetimeDerived
 	isStartup := m.TestModeInfo.IsStartup
+	sharedInSpec := m.TestModeInfo.SharedInSpec
+	fenceScope := m.TestModeInfo.FenceScope
+	fenceWrite := m.TestModeInfo.FenceWrite
+	fenceLater := m.TestModeInfo.FenceLater
 	c := Mock{
 		Version: m.Version,
 		Name:    m.Name,
@@ -1007,6 +1035,10 @@ func (m *Mock) DeepCopy() *Mock {
 			Lifetime:        lifetime,
 			LifetimeDerived: lifetimeDerived,
 			IsStartup:       isStartup,
+			SharedInSpec:    sharedInSpec,
+			FenceScope:      fenceScope,
+			FenceWrite:      fenceWrite,
+			FenceLater:      fenceLater,
 		},
 		ConnectionID: m.ConnectionID,
 		Owner:        m.Owner,
