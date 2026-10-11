@@ -359,8 +359,9 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
 	var windows []models.ScopeWindow
+	var windowsErr error
 	if m.mappingDB != nil {
-		windows = m.agentWindows(persistCtx)
+		windows, windowsErr = m.agentWindows(persistCtx)
 	}
 	if len(windows) > 0 {
 		root := gitTop()
@@ -370,9 +371,17 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	starts := appStarts(windows)
 	windows, suites := splitSuites(windows)
+	if len(starts) == 0 && len(windows) > 0 {
+		m.logger.Info("no app start seen: calls made outside the tests are kept as the test process's start-up",
+			zap.String("next_step", "if the app runs as a child of the test, call AppStart(pid, port) after starting it so its start-up is kept apart"))
+	}
 	if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
 		m.logger.Error(err.Error())
+		return err
+	}
+	if err := m.noScopes(windows, windowsErr, appErr, existed); err != nil {
+		m.propagateExit(appErr, "record")
 		return err
 	}
 	keep = runnerPassed(appErr)
@@ -380,7 +389,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		keep = false
 		m.logger.Warn("no outgoing calls were captured; the existing mock set (if any) was left unchanged; the runner made no mockable dependency calls, or its traffic was not intercepted",
 			zap.String("mock-set", name),
-			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
+			zap.String("next_step", "the app must be started by the test command (as a child process) and announced with AppStart(pid, port), or the tests made no outgoing calls"))
 		m.propagateExit(appErr, "record")
 		return nil
 	}
@@ -394,14 +403,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if keep && m.mappingDB != nil {
 		if len(windows) > 0 {
-			byTest := correlateScopes(windows, recorded)
-			owned := recorded
-			var plan bootPlan
-			if len(starts) > 0 {
-				plan = classify(windows, starts, suites, recorded)
-				byTest, owned = plan.tests, plan.perTest
-			}
-			byCase := correlateCases(windows, owned, capture.list(), stepWindows(windows))
+			plan := classify(windows, starts, suites, recorded)
+			byTest := plan.tests
+			byCase := correlateCases(windows, plan.perTest, capture.list(), stepWindows(windows))
 			for _, w := range windows {
 				if _, ok := byTest[w.Name]; !ok {
 					byTest[w.Name] = nil
@@ -422,12 +426,8 @@ func (m *mockService) Record(ctx context.Context) error {
 				tc.Dir = w.Dir
 				byCase[w.Name] = tc
 			}
-			if len(starts) > 0 {
-				m.upsertCases(persistCtx, name, byCase, nil, suites)
-				m.upsertBoots(persistCtx, name, plan.boots)
-			} else {
-				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded), suites)
-			}
+			m.upsertCases(persistCtx, name, byCase, nil, suites)
+			m.upsertBoots(persistCtx, name, plan.boots)
 		}
 	}
 
@@ -450,7 +450,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if mockCount == 0 {
 		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
-			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
+			zap.String("next_step", "the app must be started by the test command (as a child process) and announced with AppStart(pid, port), or the tests made no outgoing calls"))
 	}
 
 	// 13. Propagate the runner's exit code so a CI 're-record on merge' job
@@ -478,19 +478,35 @@ func runnerPassed(appErr models.AppError) bool {
 }
 
 // agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.
-func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
+func (m *mockService) agentWindows(ctx context.Context) ([]models.ScopeWindow, error) {
 	reader, ok := m.instrumentation.(ScopeReader)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	scopeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
 	defer cancel()
 	windows, err := reader.GetScopeWindows(scopeCtx)
 	if err != nil {
 		m.logger.Debug("failed to read per-test scope windows from the agent", zap.Error(err))
+		return nil, err
+	}
+	return windows, nil
+}
+
+func (m *mockService) noScopes(tests []models.ScopeWindow, readErr error, appErr models.AppError, existed bool) error {
+	scoped, ok := m.store.(ScopedStore)
+	if !ok || !scoped.NeedsScopes() || len(tests) > 0 || !runnerPassed(appErr) {
 		return nil
 	}
-	return windows
+	last := "Nothing was published: your previous recording is kept."
+	if !existed {
+		last = "Nothing was published."
+	}
+	if readErr != nil {
+		return refusal{fmt.Sprintf("Recording stopped: keploy could not read which tests ran from its agent (%v).\n%s", readErr, last)}
+	}
+	return refusal{"Recording stopped: your tests ran but none called e2e.Scope(t), so keploy cannot tell which calls belong to which test.\n" +
+		"Call e2e.Scope(t) at the start of every test (it marks where the test begins and ends), then run keploy mock record again.\n" + last}
 }
 
 // saveSet backs the named set up to a sibling .<name>.previous directory so a
@@ -742,16 +758,6 @@ func flowOf(windows []models.ScopeWindow, test string) string {
 		}
 	}
 	return flow
-}
-
-func startupMocks(windows []models.ScopeWindow, mocks []capturedMock) []models.MockEntry {
-	var out []models.MockEntry
-	for _, mk := range mocks {
-		if mk.boot || containing(windows, mk.ts) == "" {
-			out = append(out, models.MockEntry{Name: mk.name})
-		}
-	}
-	return out
 }
 
 func containing(windows []models.ScopeWindow, at time.Time) string {

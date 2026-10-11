@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
@@ -346,5 +348,47 @@ func TestRecord_AfterMockInsertGetsTheDocumentInMocksYAML(t *testing.T) {
 	want := append([]byte(utils.GetVersionAsComment()), bytes.Join(hooks.docs, []byte("---\n"))...)
 	if !bytes.Equal(want, file) {
 		t.Fatalf("the documents AfterMockInsert got are not what is in mocks.yaml\ngot:\n%s\nmocks.yaml:\n%s", want, file)
+	}
+}
+
+type scopedStore struct {
+	FileStore
+	pushes int
+}
+
+func (s *scopedStore) NeedsScopes() bool { return true }
+
+func (s *scopedStore) Push(context.Context, string) error {
+	s.pushes++
+	return nil
+}
+
+func TestRecordWithoutAnyTestMarkStopsWhenTheStoreNeedsThem(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		marks   []models.ScopeWindow
+		refused bool
+	}{
+		{name: "no test called Scope", marks: []models.ScopeWindow{{Name: "/repo/e2e", Start: runnerT0, End: runnerT0.Add(time.Second), Suite: true}}, refused: true},
+		{name: "a test called Scope", marks: sequentialMarks()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			instr := newRunnerInstr(t, tc.marks...)
+			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+			store := &scopedStore{}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test ./...")
+			cfg.Path = t.TempDir()
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			err := New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), cfg.Path, ""), store, nil, cfg).Record(context.Background())
+			if !tc.refused {
+				require.NoError(t, err)
+				require.Equal(t, 1, store.pushes)
+				return
+			}
+			require.ErrorIs(t, err, ErrRecordRefused)
+			require.Contains(t, err.Error(), "none called e2e.Scope(t)")
+			require.Zero(t, store.pushes, "nothing is published")
+		})
 	}
 }
