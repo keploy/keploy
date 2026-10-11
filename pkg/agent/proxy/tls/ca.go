@@ -841,12 +841,37 @@ func runAlias(ca *caState) string        { return "keploy-mitm-" + ca.runID }
 // can remove exactly that and nothing else. remove is false for a persisted
 // per-user CA (Windows), which is kept so the user is not re-prompted next run.
 type nativeInstall struct {
-	certFile string // system-store filename (Linux)
-	alias    string // JDK keystore alias
-	cn       string // certificate CN, for the Windows ROOT-store removal
-	remove   bool
+	anchors []string  // system-store anchor files (Linux)
+	claim   *runClaim // marks the anchors as in use for the life of the run (Linux)
+	alias   string    // JDK keystore alias
+	cn      string    // certificate CN, for the Windows ROOT-store removal
+	remove  bool
 }
 
+// withdrawAnchors removes every anchor file this install put in the system
+// trust store, reporting whether any was removed. The run's claim is kept: it
+// is released (releaseClaim) once the store no longer carries the CA.
+func (n *nativeInstall) withdrawAnchors(logger *zap.Logger) bool {
+	removedAny := false
+	for _, p := range n.anchors {
+		if err := os.Remove(p); err == nil {
+			removedAny = true
+			logger.Debug("removed this run's CA anchor", zap.String("path", p))
+		}
+	}
+	n.anchors = nil
+	return removedAny
+}
+
+// releaseClaim gives up the claim that marked this install's anchors as in use.
+func (n *nativeInstall) releaseClaim() {
+	n.claim.release()
+	n.claim = nil
+}
+
+// installedNative is what this process currently has installed. The claim in
+// it must stay reachable for as long as the CA is in use: an *os.File that is
+// garbage-collected is closed, and closing it is what ends a claim.
 var (
 	installedNativeMu sync.Mutex
 	installedNative   *nativeInstall
@@ -858,10 +883,22 @@ func recordNativeInstall(n *nativeInstall) {
 	installedNativeMu.Unlock()
 }
 
+// takeNativeInstall returns what this process has installed and forgets it, so
+// that whoever removes an install is the only one that does.
+func takeNativeInstall() *nativeInstall {
+	installedNativeMu.Lock()
+	defer installedNativeMu.Unlock()
+	n := installedNative
+	installedNative = nil
+	return n
+}
+
 // setupNativeForApp is the PID-aware native-install path. It installs this run's
 // generated CA public certificate into the OS trust store under a unique
 // filename for the duration of the run (removed at teardown; crashed-run copies
 // are inert because the key died with the process and are swept at next start).
+// Other keploy agents running on the same machine keep theirs: see
+// installSystemStoreAnchors.
 func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, store caStore, appPID int, javaHomeOverride string) error {
 	// Resolve the target JDK's java.home once, up front. Order:
 	//   1. --ca-java-home CLI override wins (opts.Agent.CAJavaHome).
@@ -926,49 +963,10 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		return err
 	}
 
-	// Remove any keploy-mitm-*.crt a previous run left behind on a crash before
-	// installing this run's. Those copies are inert (their signing key died with
-	// the process), but leaving them accumulates dead anchors.
-	sweepRunLeftovers(logger, ca.runID)
-
-	certFileName := runCertFileName(ca)
-	var finalCAPath string
-	for _, path := range caPaths {
-		caPath := filepath.Join(path, certFileName)
-		finalCAPath = caPath // Keep one valid path for env vars
-
-		// Write the cert with explicit 0644 (NOT os.Create's 0666, which under
-		// keploy's process-wide umask 0 left a world-WRITABLE anchor any local
-		// user could swap). O_TRUNC so a stale same-name file is overwritten.
-		fs, err := os.OpenFile(caPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-		if err != nil {
-			utils.LogError(logger, err, "Failed to create path for ca certificate", zap.Any("root store path", path))
-			return err
-		}
-		if _, err = fs.Write(ca.certPEM); err != nil {
-			fs.Close()
-			utils.LogError(logger, err, "Failed to write custom ca certificate", zap.Any("root store path", path))
-			return err
-		}
-		fs.Close()
-
-		// install CA in the java keystore if java is installed. Non-fatal for the
-		// same reason as the Windows path above: JAVA_TOOL_OPTIONS is the primary
-		// Java mechanism now, so a missing keytool degrades gracefully.
-		if err := installJavaCAForHome(ctx, logger, caPath, resolvedJavaHome, alias); err != nil {
-			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
-		}
-	}
-
-	// Update the system store
-	if err := updateCaStore(ctx); err != nil {
-		utils.LogError(logger, err, "Failed to update the CA store")
+	finalCAPath, err := installSystemStoreAnchors(ctx, logger, ca, caPaths, resolvedJavaHome, alias)
+	if err != nil {
 		return err
 	}
-
-	// Record what we installed so teardown removes exactly this run's anchor and
-	// JDK alias (native CAs are ephemeral, so remove is always true here).
-	recordNativeInstall(&nativeInstall{certFile: certFileName, alias: alias, remove: true})
 
 	// Set Env Vars pointing to the installed cert.
 	//
@@ -995,47 +993,172 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	return nil
 }
 
+// installSystemStoreAnchors puts this run's CA into the Linux system trust store
+// — an anchor file in each of caPaths, the JDK keystore, and a regenerated
+// bundle — and returns the path of one anchor for the CA environment variables
+// to point at.
+//
+// It runs as one step under the machine-wide trust-store lock, because other
+// keploy agents may be starting, running and stopping on this machine at the
+// same time and the store is the one thing they all share:
+//
+//   - anchors left by runs that are gone are swept; the anchors of every agent
+//     that is still running are left alone (sweepRunLeftovers);
+//   - this run is claimed before its anchors are written, so no other agent
+//     can take them for leftovers while this process lives (claimRun);
+//   - the store is regenerated with no other agent's regeneration under way.
+//
+// Once the lock is held, the run's context no longer stops anything: a
+// regeneration or keytool import killed half-way leaves the store half-written
+// for every process on the machine (on Fedora, killing update-ca-trust 0.3 s in
+// left OpenSSL's default directory empty). Only the wait for the lock is
+// cancellable.
+//
+// If any of it fails, the anchors written so far are taken back and the claim
+// is released: a claim is held exactly when the install it belongs to
+// succeeded.
+func installSystemStoreAnchors(ctx context.Context, logger *zap.Logger, ca *caState, caPaths []string, javaHome, alias string) (string, error) {
+	work, unlock, err := lockTrustStore(ctx, logger)
+	if err != nil {
+		utils.LogError(logger, err, "Failed to take the lock that keploy agents on this machine share while they change the system trust store, "+
+			"so the keploy CA was not installed in it. Check that /run/keploy can be created and written by the user keploy runs as, then start keploy again")
+		return "", err
+	}
+	defer unlock()
+
+	// A process has one CA in use at a time. Installing a new one retires
+	// whatever this process installed before: its claim would otherwise mark
+	// anchors of a CA nothing signs with any more as live, until the process
+	// exits.
+	if prev := takeNativeInstall(); prev != nil {
+		prev.withdrawAnchors(logger)
+		removeJavaAlias(work, logger, prev.alias)
+		prev.releaseClaim()
+	}
+
+	sweepRunLeftovers(logger)
+
+	claim, err := claimRun(ca.runID)
+	if err != nil {
+		utils.LogError(logger, err, "Failed to claim this run's CA in /run/keploy, so it was not installed in the system trust store")
+		return "", err
+	}
+	n := &nativeInstall{claim: claim, alias: alias, remove: true}
+	installed := false
+	defer func() {
+		if !installed {
+			n.withdrawAnchors(logger)
+			n.releaseClaim()
+		}
+	}()
+
+	certFileName := runCertFileName(ca)
+	var finalCAPath string
+	for _, path := range caPaths {
+		caPath := filepath.Join(path, certFileName)
+		if err := writeAnchor(caPath, ca.certPEM); err != nil {
+			utils.LogError(logger, err, "Failed to write the ca certificate to the system trust store", zap.String("path", caPath))
+			return "", err
+		}
+		n.anchors = append(n.anchors, caPath)
+		finalCAPath = caPath // Keep one valid path for env vars
+
+		// install CA in the java keystore if java is installed. Non-fatal for the
+		// same reason as the Windows path: JAVA_TOOL_OPTIONS is the primary
+		// Java mechanism now, so a missing keytool degrades gracefully.
+		if err := installJavaCAForHome(work, logger, caPath, javaHome, alias); err != nil {
+			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
+		}
+	}
+
+	// Update the system store
+	if err := updateCaStore(work, logger); err != nil {
+		utils.LogError(logger, err, "Failed to update the CA store")
+		return "", err
+	}
+
+	// Record what we installed so teardown removes exactly this run's anchors
+	// and JDK alias (native CAs are ephemeral, so remove is always true here).
+	recordNativeInstall(n)
+	installed = true
+	return finalCAPath, nil
+}
+
 // TeardownNativeCA removes the CA this run installed into the OS trust store so
 // trust does not persist after the run. It is called from the proxy's shutdown
 // path, where the run's context is already cancelled — so it runs the trust-store
-// and keytool commands under its own short-lived context rather than the dead
-// one. Safe to call when nothing was installed (docker/k8s modes, or a persisted
-// per-user CA): it is then a no-op.
+// and keytool commands under a context of its own rather than the dead one. Safe
+// to call when nothing was installed (docker/k8s modes, or a persisted per-user
+// CA): it is then a no-op.
 func TeardownNativeCA(logger *zap.Logger) {
-	installedNativeMu.Lock()
-	n := installedNative
-	installedNative = nil
-	installedNativeMu.Unlock()
+	n := takeNativeInstall()
 	if n == nil || !n.remove {
+		return
+	}
+
+	if len(n.anchors) > 0 {
+		teardownSystemStore(logger, n)
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	removedAny := false
-	if n.certFile != "" {
-		for _, dir := range caStorePath {
-			p := filepath.Join(dir, n.certFile)
-			if err := os.Remove(p); err == nil {
-				removedAny = true
-				logger.Debug("removed this run's CA anchor", zap.String("path", p))
-			}
-		}
-	}
-	if removedAny {
-		// A plain refresh (not --fresh): this run's anchors are uniquely named
-		// keploy-mitm-<id>.crt, removed directly here, so a full bundle rebuild is
-		// unnecessary. --fresh is reserved for `keploy ca clean`, where pruning
-		// stale hash-links of a generically-named legacy anchor matters.
-		if err := refreshCaStore(ctx, false); err != nil {
-			logger.Debug("could not refresh the CA store after removing this run's anchor", zap.Error(err))
-		}
-	}
 	removeJavaAlias(ctx, logger, n.alias)
 	if runtime.GOOS == "windows" {
 		removeWindowsCAByName(ctx, logger, n.cn)
 	}
+}
+
+// teardownSystemStore removes this run's CA from the Linux system trust store:
+// its anchor files, its entry in the regenerated outputs and its JDK alias.
+//
+// Like the install, it changes the store only under the machine-wide lock.
+// When several agents stop together they regenerate one after the other, so
+// how long this takes depends on how many are ahead in the queue — which is
+// why nothing here runs against a timer. The wait for the lock ends when the
+// lock is free; a regeneration, once started, runs to its end, because one
+// that is killed half-way leaves the store half-written for every process on
+// the machine.
+//
+// A SIGINT or SIGTERM to this process ends the wait (untilToldToStopNow): the
+// CLI runs the agent in a process group of its own and stops it over its API,
+// so no signal started this stop and the first one to arrive means "stop now"
+// (a second Ctrl-C at the CLI does not reach the agent; it has to be sent to
+// the agent's pid); when a signal did start the stop, the next one does. The
+// run's CA is then left in the store as it is — anchor files and all — for the
+// next agent to start on this machine to sweep, under the lock: removing an
+// anchor without the lock could pull it from under another agent's
+// regeneration, which is reading it. That leftover is harmless meanwhile: the
+// CA's key existed only in this process.
+func teardownSystemStore(logger *zap.Logger, n *nativeInstall) {
+	wait, stop := untilToldToStopNow()
+	defer stop()
+	work, unlock, err := lockTrustStore(wait, logger)
+	if err != nil {
+		// The anchors stay; the claim goes, so that the next agent sweeps them
+		// even if this process lingers.
+		n.releaseClaim()
+		logger.Warn("left this run's CA in the system trust store: keploy was told to stop before another keploy agent on this machine "+
+			"had finished changing the store, and the store is only changed by one agent at a time. The next keploy agent to start on "+
+			"this machine removes it. It cannot be used to sign anything: its key existed only in this process.",
+			zap.Strings("anchors", n.anchors), zap.Error(err))
+		return
+	}
+	defer unlock()
+
+	if n.withdrawAnchors(logger) {
+		// A plain refresh (not --fresh): this run's anchors are uniquely named
+		// keploy-mitm-<id>.crt, removed directly here, so a full bundle rebuild is
+		// unnecessary. --fresh is reserved for `keploy ca clean`, where pruning
+		// stale hash-links of a generically-named legacy anchor matters.
+		if err := refreshCaStore(work, logger, false); err != nil {
+			logger.Debug("could not refresh the CA store after removing this run's anchor", zap.Error(err))
+		}
+	}
+	removeJavaAlias(work, logger, n.alias)
+	// The store no longer carries the CA: nothing is left for the claim to
+	// protect.
+	n.releaseClaim()
 }
 
 // removeWindowsCAByName removes a CA from the Windows ROOT store by its subject
@@ -1061,11 +1184,22 @@ func removeWindowsCAByName(ctx context.Context, logger *zap.Logger, cn string) {
 	}
 }
 
-// sweepRunLeftovers removes keploy-mitm-*.crt anchors from a previous crashed
-// run (any run id other than the current one). They are inert — their signing
-// key is gone — so this is housekeeping, not a security fix.
-func sweepRunLeftovers(logger *zap.Logger, currentRunID string) {
-	current := "keploy-mitm-" + currentRunID + ".crt"
+// sweepRunLeftovers removes the keploy-mitm-*.crt anchors of runs that are gone
+// — an agent that crashed or was killed never reached its own teardown. They
+// are inert, their signing key having died with the process, so this is
+// housekeeping, not a security fix.
+//
+// It must not touch the anchor of an agent that is still running: applications
+// of that run are being served leaves signed by that CA, and the ones that read
+// only the system trust store would start failing every TLS handshake with
+// "unable to get local issuer certificate" the moment the bundle is next
+// regenerated. Which is which is decided by the claim each agent holds on its
+// run for as long as it lives (runIsLive), not by the anchor's name: every
+// other run's id is "not the current one", whether that run is dead or alive.
+// The claims of runs that are gone are cleared on the way.
+//
+// The caller holds the trust-store lock.
+func sweepRunLeftovers(logger *zap.Logger) {
 	for _, dir := range caStorePath {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -1073,14 +1207,26 @@ func sweepRunLeftovers(logger *zap.Logger, currentRunID string) {
 		}
 		for _, e := range entries {
 			name := e.Name()
-			if name == current || !strings.HasPrefix(name, "keploy-mitm-") || !strings.HasSuffix(name, ".crt") {
+			if !strings.HasPrefix(name, "keploy-mitm-") || !strings.HasSuffix(name, ".crt") {
 				continue
 			}
-			if err := os.Remove(filepath.Join(dir, name)); err == nil {
-				logger.Debug("swept a crashed run's CA anchor", zap.String("path", filepath.Join(dir, name)))
+			p := filepath.Join(dir, name)
+			live, err := runIsLive(strings.TrimSuffix(strings.TrimPrefix(name, "keploy-mitm-"), ".crt"))
+			switch {
+			case err != nil:
+				logger.Debug("left a CA anchor in place: could not tell whether its run is still alive", zap.String("path", p), zap.Error(err))
+			case live:
+				logger.Debug("left a CA anchor in place: the keploy agent that installed it is still running", zap.String("path", p))
+			default:
+				if err := os.Remove(p); err != nil {
+					logger.Debug("could not remove a crashed run's CA anchor", zap.String("path", p), zap.Error(err))
+				} else {
+					logger.Debug("swept a crashed run's CA anchor", zap.String("path", p))
+				}
 			}
 		}
 	}
+	sweepRunClaims(logger)
 }
 
 // removeJavaAlias deletes alias from the resolvable JDK's cacerts, best-effort.
@@ -1089,8 +1235,13 @@ func removeJavaAlias(ctx context.Context, logger *zap.Logger, alias string) {
 	if !ok {
 		return
 	}
-	cmd := exec.CommandContext(ctx, keytool, "-delete", "-alias", alias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if systemTrustGenerates(cacerts) {
+		// Nothing to delete: the import was skipped for the same reason, and
+		// the regeneration has already taken the CA out of this keystore.
+		return
+	}
+	cmd := storeCommand(ctx, keytool, "-delete", "-alias", alias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
+	if out, err := runStoreCommand(cmd); err != nil {
 		logger.Debug("could not delete this run's JDK alias", zap.String("alias", alias), zap.ByteString("output", out), zap.Error(err))
 	}
 }
@@ -1293,22 +1444,10 @@ func commandExists(cmd string) bool {
 	return err == nil
 }
 
-func updateCaStore(ctx context.Context) error {
-	commandRun := false
-	for _, cmd := range caStoreUpdateCmd {
-		if commandExists(cmd) {
-			commandRun = true
-			c := exec.CommandContext(ctx, cmd)
-			if _, err := c.CombinedOutput(); err != nil {
-				return err
-			}
-			break
-		}
-	}
-	if !commandRun {
-		return fmt.Errorf("no valid CA store tools command found")
-	}
-	return nil
+// updateCaStore regenerates the system trust bundle from the anchors now in the
+// store. The caller holds the trust-store lock (lockTrustStore).
+func updateCaStore(ctx context.Context, logger *zap.Logger) error {
+	return refreshCaStore(ctx, logger, false)
 }
 
 func getCaPaths() ([]string, error) {
@@ -1430,13 +1569,23 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 
 	logger.Debug("", zap.String("java_home", javaHome), zap.String("keytool", keytoolBin), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath), zap.String("alias", alias))
 
+	// On Fedora and RHEL the JDK's cacerts is a p11-kit output, regenerated
+	// from the anchors — this run's included — right after this. keytool would
+	// rewrite it in place, a window in which a JVM starting on this machine
+	// reads a truncated truststore, only for the regeneration to replace it.
+	if systemTrustGenerates(cacertsPath) {
+		logger.Debug("the JDK's cacerts is generated from the system trust store's anchors; the regeneration puts the keploy CA in it",
+			zap.String("cacerts", cacertsPath))
+		return nil
+	}
+
 	if isJavaCAExistWithTool(ctx, keytoolBin, alias, storePass, cacertsPath) {
 		logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
-	cmdOutput, err := cmd.CombinedOutput()
+	cmd := storeCommand(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
+	cmdOutput, err := runStoreCommand(cmd)
 	if err != nil {
 		utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
 		return err

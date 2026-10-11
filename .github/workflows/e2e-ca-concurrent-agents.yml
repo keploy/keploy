@@ -1,0 +1,73 @@
+# e2e-ca-concurrent-agents.yml — runs tests/e2e/ca-concurrent-agents/run.sh.
+#
+# Several keploy agents can run on one Linux machine at once, and each installs
+# its run CA into the same system trust store. The unit tests in
+# pkg/agent/proxy/tls cover the rules that keep them apart against a store
+# built in a temp directory; this runs the same install and teardown against
+# the real thing, where the rules have to hold, on each trust-store layout
+# keploy handles:
+#
+#   * debian12, debian13, ubuntu2204 — update-ca-certificates
+#   * fedora44 — the p11-kit store with OpenSSL's default directory as its only
+#     default source (no /etc/pki/tls/cert.pem)
+#   * rhel8, rhel9, rhel10 — the p11-kit store as each RHEL generation lays it
+#     out (UBI images)
+#   * al2023 — Amazon Linux 2023: RHEL 9's layout written by "p11-kit extract",
+#     with /etc/ssl/certs a symlink to directory-hash
+#
+# In each container the harness starts, kills and stops agents (alone, in
+# pairs, six at once) and after every step asks curl and openssl, given nothing
+# but the system store, whether they still accept each running agent's
+# certificates; probes the first agent without a pause from the moment it is
+# ready until it stops; and finally checks that the store is exactly as it was
+# before the first agent started, and that the distro's own tool, run on it,
+# changes nothing.
+#
+# No network egress is needed beyond building the images: the agents and the
+# clients talk over loopback, and the containers run with --network none.
+
+name: e2e-ca-concurrent-agents
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pkg/agent/proxy/tls/**
+      - pkg/agent/proxy/util/**
+      - utils/**
+      - tests/e2e/ca-concurrent-agents/**
+      - .github/workflows/e2e-ca-concurrent-agents.yml
+  pull_request:
+    paths:
+      - pkg/agent/proxy/tls/**
+      - pkg/agent/proxy/util/**
+      - utils/**
+      - tests/e2e/ca-concurrent-agents/**
+      - .github/workflows/e2e-ca-concurrent-agents.yml
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-ca-concurrent-agents:
+    name: e2e-ca-concurrent-agents (${{ matrix.distro }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian12, debian13, ubuntu2204, fedora44, rhel8, rhel9, rhel10, al2023]
+    # Bounds a hung step, not a slow one: nothing in the scenario waits on the
+    # clock, so a run that is merely slow still passes. A healthy run is one
+    # image build and a few minutes of scenario.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show docker version
+        run: docker version
+
+      - name: Run e2e harness
+        working-directory: tests/e2e/ca-concurrent-agents
+        env:
+          DISTROS: ${{ matrix.distro }}
+        run: bash ./run.sh
