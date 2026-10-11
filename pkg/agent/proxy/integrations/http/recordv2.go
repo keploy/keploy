@@ -676,7 +676,12 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 				return nil, fmt.Errorf("decompress response body: %w", err)
 			}
 		}
-		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
+		// A response with no body by rule (to a HEAD, a 1xx, 204 or 304)
+		// keeps the Content-Length it was sent with: a HEAD's is the size of
+		// the body a GET gets (an S3 client's Stat), not its own 0.
+		if !responseHasNoBody(req.Method, respParsed.StatusCode) {
+			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
+		}
 	}
 
 	meta := map[string]string{
