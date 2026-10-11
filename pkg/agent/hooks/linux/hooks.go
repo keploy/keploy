@@ -14,7 +14,6 @@ import (
 	"sync"
 
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
@@ -484,16 +483,12 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	agentInfo.DNSPort = int32(setupOpts.DnsPort)
 
-	// Set recording start time using CLOCK_BOOTTIME so the eBPF tracepoint
-	// can compare process start_boottime and auto-exclude pre-existing PIDs.
+	// When the recording started in this PID namespace, for the eBPF
+	// tracepoint to exclude the processes that were there before it: this
+	// agent's load time, unless an agent before it in the same PID namespace
+	// loaded first (recording_start.go).
 	if setupOpts.IsDocker {
-		var ts unix.Timespec
-		if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
-			h.logger.Debug("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
-		} else {
-			agentInfo.RecordingStartTime = uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
-			h.logger.Info("recording start boottime set", zap.Uint64("ns", agentInfo.RecordingStartTime))
-		}
+		agentInfo.RecordingStartTime = recordingStart(h.logger, hostRecordingStart())
 	}
 
 	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
