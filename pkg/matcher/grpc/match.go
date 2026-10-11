@@ -35,6 +35,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	for _, opt := range opts {
 		opt(&mo)
 	}
+	// Under the proven switch response arrays are compared in order.
+	ignoreOrdering = matcher.ResponseIgnoreOrdering(ignoreOrdering)
 	expectedResp := tc.GrpcResp
 	result := &models.Result{
 		HeadersResult: make([]models.HeaderResult, 0),

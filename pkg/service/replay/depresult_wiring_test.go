@@ -200,9 +200,11 @@ func TestRunTestSetWiring(t *testing.T) {
 			// the failure this guard is supposed to catch, not cause.
 			//
 			// assertTestMocks, not AssertDependencies, for the same reason: see
-			// the emitFailureLogs row.
+			// the emitFailureLogs row. strictFailure, not StrictFailure, too:
+			// the veto is read through r.strictFailure(), which answers for the
+			// knob AND for the proven switch that turns it on for everyone.
 			want: []string{"resolveTestOutcome", "testPass", "mockSetMismatch",
-				"NoiseStrict", "assertTestMocks", "StrictFailure"},
+				"NoiseStrict", "assertTestMocks", "strictFailure"},
 			why: "resolveTestOutcome is where --assert-dependencies turns a PASSED-and-green test into a " +
 				"FAILED-and-red one. Passing anything other than the raw testPass and the three knobs " +
 				"silently removes a promotion.",

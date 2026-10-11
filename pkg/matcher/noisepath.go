@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -86,6 +87,12 @@ const (
 	// cannot be paired, so which element drifted is unknowable and any path
 	// derived from a positional pairing may name a field that never moved.
 	NoiseSkipOrderAmbiguous NoiseSkipReason = "ORDER_AMBIGUOUS"
+	// NoiseSkipUnstableOrder — the array came back in another order (the order
+	// rule, ArrayReordered). An order difference is not a drifting value: noise
+	// on its fields would only hide the reorder, so the case stays failed and is
+	// judged as unstable order. Only produced under the proven switch, where
+	// response arrays are compared in order.
+	NoiseSkipUnstableOrder NoiseSkipReason = "UNSTABLE_ORDER"
 	// NoiseSkipUnresolved — the derived entries do not make the matcher accept the
 	// response. Reported by asking the matcher itself rather than by reasoning
 	// about it, so a difference can never be reported as handled when it is not.
@@ -122,6 +129,12 @@ type NoiseSkip struct {
 // not a difference at all and a genuine one cannot be attributed to a particular
 // element.
 //
+// Under the proven switch (provenswitch.On) response arrays are compared in
+// order whatever ignoreOrdering says, and every array that differs is first put
+// to the order rule (ArrayReordered): a reordered array is refused as
+// NoiseSkipUnstableOrder rather than learned as noise, and only an array whose
+// elements pair by index is walked for drifting leaves.
+//
 // Both return values are sorted and deduplicated: this output is persisted to a
 // test case file, and Go map order would rewrite the file on every run.
 func BodyNoiseFromJSONDiff(expJSON, actJSON string, known map[string][]string, ignoreOrdering bool) (paths []string, skipped []NoiseSkip) {
@@ -144,11 +157,17 @@ func BodyNoiseFromJSONDiff(expJSON, actJSON string, known map[string][]string, i
 		return nil, []NoiseSkip{{Reason: NoiseSkipInvalidJSON}}
 	}
 
+	// The proven model compares response arrays in order, so the replay this
+	// noise is for does too, and the order rule replaces the multiset pairing.
+	orderRule := provenswitch.On()
+	ignoreOrdering = ResponseIgnoreOrdering(ignoreOrdering)
+
 	w := &noiseCandidateWalk{
 		seen:            map[string]bool{},
 		skipSeen:        map[NoiseSkip]bool{},
 		drifted:         map[string]bool{},
 		ignoreOrdering:  ignoreOrdering,
+		orderRule:       orderRule,
 		knownGlobalRegs: map[string][]*regexp.Regexp{},
 	}
 	// Mirror JSONDiffWithNoiseControl's split: a key with no dot is a GLOBAL key
@@ -219,6 +238,9 @@ type noiseCandidateWalk struct {
 	knownGlobalRegs map[string][]*regexp.Regexp
 	hasKnownGlobal  bool
 	ignoreOrdering  bool
+	// orderRule applies ArrayReordered to every array that differs (the proven
+	// switch); ignoreOrdering is then false.
+	orderRule bool
 
 	seen     map[string]bool
 	skipSeen map[NoiseSkip]bool
@@ -408,6 +430,20 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 			w.skip(key, NoiseSkipOrderAmbiguous)
 			return
 		}
+		// The order rule, for EVERY array, scalars included: with order compared a
+		// reordered array of scalars is an order difference too, not a value that
+		// drifted at the array's key. An array the matcher already accepts as it
+		// stands (its differences all excused by noise) has nothing to refuse and
+		// nothing to learn, so it is left before the rule can call it reordered.
+		if w.orderRule && len(e) > 1 {
+			if w.arrayMatchesAsIs(key, e, a, ancestorNoisy) {
+				return
+			}
+			if ArrayReordered(e, a) {
+				w.skip(key, NoiseSkipUnstableOrder)
+				return
+			}
+		}
 		// The walker recurses into elements with the key UNCHANGED, so every
 		// element contributes to the same path. This is precisely what makes an
 		// index-free path the only spelling that can ever match.
@@ -464,6 +500,14 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 			w.emit(key)
 		}
 	}
+}
+
+// arrayMatchesAsIs reports whether the matcher accepts the live array against
+// the recorded one in order, with the test case's existing noise: the same
+// positional comparison the replay makes, from this array down.
+func (w *noiseCandidateWalk) arrayMatchesAsIs(key string, e, a []interface{}, ancestorNoisy bool) bool {
+	res, err := matchJSONWithNoiseHandlingIndexed(key, e, a, w.knownPath, w.knownGlobalRegs, false, ancestorNoisy, nil)
+	return err == nil && res.matches && res.isExact
 }
 
 // globalUnconditional reports whether a global entry ignores this field name

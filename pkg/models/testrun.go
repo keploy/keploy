@@ -425,6 +425,11 @@ const (
 	// modelled, so a difference can never be reported as handled when the next
 	// replay would fail on it again.
 	NoiseFailureUnresolved NoiseFailureReason = "UNRESOLVED"
+	// NoiseFailureUnstableOrder — an array came back in another order (the order
+	// rule, matcher.ArrayReordered), and carries matcher.NoiseSkipUnstableOrder
+	// through. A refusal: noise on the array's fields would only hide the
+	// reorder, so the case stays failed and is judged as unstable order.
+	NoiseFailureUnstableOrder NoiseFailureReason = "UNSTABLE_ORDER"
 )
 
 // FailureAssessment contains JSON structural analysis of response body differences.
