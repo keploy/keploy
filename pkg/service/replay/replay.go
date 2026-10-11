@@ -3350,7 +3350,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					jsonNoiseKeys := pkg.CollectStreamingGlobalNoiseKeys(streamBodyNoise, tc.Noise)
 
-					streamMatched, capturedBody, streamMismatchInfo, streamErr := pkg.CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, jsonNoiseKeys, r.logger)
+					// An answer that is not a stream (a JSON error to a recorded
+					// stream, say) has no frames to compare: it is read whole and
+					// compared below as a normal response is, so its result carries
+					// what the app answered.
+					notAStream := streamResp.StreamConfig.Mode == pkg.HTTPStreamModeNone
+					var streamMatched bool
+					var capturedBody string
+					var streamMismatchInfo *pkg.StreamMismatchInfo
+					var streamErr error
+					if notAStream {
+						var body []byte
+						body, streamErr = io.ReadAll(streamResp.Reader)
+						capturedBody = string(body)
+					} else {
+						streamMatched, capturedBody, streamMismatchInfo, streamErr = pkg.CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, jsonNoiseKeys, r.logger)
+					}
 					if closeErr := streamResp.Reader.Close(); closeErr != nil {
 						r.logger.Debug("failed to close streaming response reader", zap.Error(closeErr))
 					}
@@ -3377,7 +3392,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						continue
 					}
 
-					if !streamMatched {
+					if notAStream {
+						httpResp = &models.HTTPResp{
+							StatusCode:    streamResp.StatusCode,
+							StatusMessage: streamResp.StatusMessage,
+							Body:          capturedBody,
+							Header:        streamResp.Header,
+						}
+					} else if !streamMatched {
 						r.logger.Error("streaming response mismatch detected", zap.String("testcase", tc.Name))
 						hadStreamingMismatch = true
 						streamMismatch = streamMismatchInfo
