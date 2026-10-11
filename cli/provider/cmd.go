@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -160,6 +161,11 @@ type CmdConfigurator struct {
 	logger *zap.Logger
 	cfg    *config.Config
 }
+
+// enableProvenSwitch is what the agent's --proven flag calls. A variable only
+// so a test can see the call without turning the switch on for the rest of
+// its process: provenswitch.Enable cannot be undone.
+var enableProvenSwitch = provenswitch.Enable
 
 func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigurator {
 	return &CmdConfigurator{
@@ -365,6 +371,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		_ = cmd.Flags().MarkHidden("mock-mode")
 		cmd.Flags().Bool("record-requests", c.cfg.Agent.RecordRequests, "Internal: keeps the ingress hooks on in mock mode. Set by the orchestrator, not by users.")
 		_ = cmd.Flags().MarkHidden("record-requests")
+		// Internal orchestrator→agent flag: the proven model's staging switch.
+		// The CLI reads KEPLOY_PROVEN, but the agent does not inherit it (sudo
+		// drops the environment, the agent container is not given it), so the
+		// launchers pass it as this flag (provenswitch.AgentArgs).
+		cmd.Flags().Bool(provenswitch.AgentFlag, false, "Internal: the proven model's staging switch (KEPLOY_PROVEN=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
+		_ = cmd.Flags().MarkHidden(provenswitch.AgentFlag)
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -2032,6 +2044,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.RecordRequests = recordRequests
+
+		proven, err := cmd.Flags().GetBool(provenswitch.AgentFlag)
+		if err != nil {
+			errMsg := "failed to read the proven flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		if proven {
+			enableProvenSwitch()
+			c.logger.Debug("the proven model's staging switch is on in this agent (KEPLOY_PROVEN=1, passed as --proven)")
+		}
 
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on
 		// Changed() — but the gate now records that the flag was PRESENT
