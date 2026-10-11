@@ -88,9 +88,12 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 		return false, err
 	}
 
-	// Read the upstream response.
+	// Read the upstream's final response: an interim one (the 100 Continue
+	// to an upload, a 103 Early Hints) is not its answer, and is not relayed.
+	// The app had its 100 from the decoder already, and a matched mock
+	// serves the final response alone too.
 	respReader := bufio.NewReader(dstConn)
-	respParsed, err := http.ReadResponse(respReader, request)
+	respParsed, err := pUtil.ReadFinalResponse(respReader, request, nil)
 	if err != nil {
 		return false, err
 	}

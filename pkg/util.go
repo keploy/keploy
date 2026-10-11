@@ -391,6 +391,19 @@ type SimulationConfig struct {
 	ConfigHost      string
 	URLReplacements map[string]string
 	PortMappings    map[uint32]uint32
+	// TargetFromURL says an HTTP test case's URL already names where the app
+	// is, as it does once test.basePath has been put in it. What the recording
+	// kept of the address the app had then is another deployment's, and is
+	// left out of the request: the recorded app_port does not replace the
+	// URL's port, and the recorded Host header is not sent, so the request
+	// asks for the URL's host (see HostHeaderOf). An app behind an ingress or
+	// a virtual host is not reached under the name it was recorded with.
+	TargetFromURL bool
+	// SentTo, when set, is told where each HTTP request goes once everything
+	// that moves it (replaceWith, ports, TargetFromURL) has been applied: the
+	// URL it is sent to, the Host it asks for, and the Host header its test
+	// was recorded with ("" when it has none).
+	SentTo func(target *url.URL, host, recordedHost string)
 	// TLSConfig, when non-nil, is applied to the http.Transport used by
 	// the replay client. Lets callers pin a specific cert (e.g. for
 	// short-lived replay pods serving a self-signed cert) without
@@ -407,22 +420,28 @@ type SimulationConfig struct {
 // AppPortReachability is implemented by an instrumentation that can tell a
 // failed connection to an address the app can NEVER be reached at from one to
 // an app that is still starting. In Docker mode the host reaches the app only
-// through the ports its docker command publishes, and replay sends each test
-// from the host to the port it was recorded on, so a test recorded on a port
-// the command does not publish is refused every time (the app calling its own
-// in-container server is recorded as ingress on such a port). A test on a
-// published port where the app listens only on 127.0.0.1 inside the container
-// fails every time too, as a dropped connection: docker accepts it, finds
-// nothing listening on the container's own address, and drops it.
+// through the ports its docker command publishes. Replay sends each test from
+// the host to the port it was recorded on, unless test.port (--port), a
+// protocol port or replaceWith sends it to another host port. That host port
+// then has to be published to where the app serves the test: the app's port
+// the test was recorded on, or, for an app that has moved since the recording,
+// the port it listens on now. A test sent to a port the command does not
+// publish is refused every time (the app calling its own in-container server
+// is recorded as ingress on such a port). A test on a published port where the
+// app listens only on 127.0.0.1 inside the container fails every time too, as
+// a dropped connection: docker accepts it, finds nothing listening on the
+// container's own address, and drops it.
 type AppPortReachability interface {
 	// UnreachableAppPort explains why a connection to host:port cannot reach
-	// the app, and how to fix that, as a clause that reads after "the app's
-	// port N cannot be reached from the host: ". It returns "" when the
-	// address can reach the app or it cannot tell.
+	// the app's server on appPort, and how to fix that, as a clause that reads
+	// after the prefix UnreachableAppPortError gives it. appPort is the port the
+	// test was recorded on, where the app listened in its container then; 0
+	// when it is not known, and then port is all there is to go on. It returns
+	// "" when the address can reach the app or it cannot tell.
 	//
 	// It bounds its own wait: it is asked from a recording's insert loop, a
 	// readiness gate and a failing test, with whatever context they hold.
-	UnreachableAppPort(ctx context.Context, host string, port uint16) string
+	UnreachableAppPort(ctx context.Context, host string, port, appPort uint16) string
 }
 
 // UnreachableAppPortError is a test request that failed to connect at an
@@ -430,12 +449,25 @@ type AppPortReachability interface {
 // so it still classifies as one everywhere that matters; the one thing that
 // must not act on it is a re-send (see IsUnreachableAppPort).
 type UnreachableAppPortError struct {
-	Port   uint16
-	Reason string
-	Err    error
+	// Port is the port the request was sent to on the host.
+	Port uint16
+	// AppPort is the app's port the test was recorded on; 0 when not known.
+	AppPort uint16
+	Reason  string
+	Err     error
 }
 
+// Error names the app's port the test was recorded on and, when the request
+// went to another host port, that one too: "the app's port 8080 cannot be
+// reached from the host at port 18080: <reason>". A test that does not say its
+// app port names the host port alone.
 func (e *UnreachableAppPortError) Error() string {
+	switch {
+	case e.AppPort == 0:
+		return fmt.Sprintf("the app cannot be reached from the host at port %d: %s: %v", e.Port, e.Reason, e.Err)
+	case e.AppPort != e.Port:
+		return fmt.Sprintf("the app's port %d cannot be reached from the host at port %d: %s: %v", e.AppPort, e.Port, e.Reason, e.Err)
+	}
 	return fmt.Sprintf("the app's port %d cannot be reached from the host: %s: %v", e.Port, e.Reason, e.Err)
 }
 
@@ -449,9 +481,9 @@ func IsUnreachableAppPort(err error) bool {
 }
 
 // unreachableAppPort asks reach, if set, whether the address a connection
-// failed at is one the app can never be reached at, and returns the error to
-// fail with if it is.
-func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, port string, refused error) error {
+// failed at is one the app's server on appPort (0: not known) can never be
+// reached at, and returns the error to fail with if it is.
+func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, port string, appPort uint16, refused error) error {
 	if reach == nil {
 		return nil
 	}
@@ -459,11 +491,11 @@ func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, po
 	if err != nil || n == 0 {
 		return nil
 	}
-	reason := reach.UnreachableAppPort(ctx, host, uint16(n))
+	reason := reach.UnreachableAppPort(ctx, host, uint16(n), appPort)
 	if reason == "" {
 		return nil
 	}
-	return &UnreachableAppPortError{Port: uint16(n), Reason: reason, Err: refused}
+	return &UnreachableAppPortError{Port: uint16(n), AppPort: appPort, Reason: reason, Err: refused}
 }
 
 // urlHostPort is the host and port a request to u dials.
@@ -482,6 +514,23 @@ func urlHostPort(u *url.URL) (string, string) {
 type preparedHTTPRequest struct {
 	Request *http.Request
 	Client  *http.Client
+	// AppPort is the app's port the request is for: the one its test was
+	// recorded on, which test.port or replaceWith may have sent to another
+	// host port. 0 when not known, or when the URL names where the app is
+	// (SimulationConfig.TargetFromURL).
+	AppPort uint16
+}
+
+// HostHeaderOf is the Host header a client sends for u: its host, and its port
+// unless that is the one its scheme has anyway. A front that routes by name
+// matches the header as written, and need not know "staging:443" for the
+// "staging" every client of https://staging asks it for.
+func HostHeaderOf(u *url.URL) string {
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		return strings.TrimSuffix(u.Host, ":"+port)
+	}
+	return u.Host
 }
 
 // prepareHTTPRequest handles all common request preparation logic shared between
@@ -678,7 +727,11 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	// app_port < config port < replaceWith URL replacements
 	// (explicit replacement port short-circuits lower-priority port overrides)
 	// < replaceWith port mappings.
-	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, true, logger)
+	appPort := tc.AppPort
+	if cfg.TargetFromURL {
+		appPort = 0
+	}
+	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, appPort, cfg.ConfigPort, true, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -700,9 +753,21 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 
 	// override host header if present in the request
 	hostHeader := tc.HTTPReq.Header["Host"]
-	if hostHeader != "" {
+	if cfg.TargetFromURL {
+		// Not left to the URL as it stands: ResolveTestTarget has written the
+		// scheme's own port into it, and "staging:443" is not the name a
+		// client of https://staging asks for.
+		req.Host = HostHeaderOf(req.URL)
+	} else if hostHeader != "" {
 		logger.Debug("overriding host header", zap.String("host", hostHeader))
 		req.Host = hostHeader
+	}
+	if cfg.SentTo != nil {
+		asked := req.Host
+		if asked == "" {
+			asked = req.URL.Host
+		}
+		cfg.SentTo(req.URL, asked, hostHeader)
 	}
 
 	// Creating the client and disabling redirects
@@ -755,6 +820,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	return &preparedHTTPRequest{
 		Request: req,
 		Client:  client,
+		AppPort: appPort,
 	}, nil
 }
 
@@ -781,11 +847,122 @@ func isPreResponseConnRefused(err error) bool {
 	return neterr.IsConnRefused(err)
 }
 
+// netHTTPServerClosedIdle is the text of net/http's errServerClosedIdle
+// (net/http/transport.go). net/http does not export the error, so its text
+// is all there is to know it by. This test provokes the real one, and fails if
+// the text changes:
+// TestIsTransportConnResetClassifiesAServerThatClosedTheConnectionFirst.
+const netHTTPServerClosedIdle = "http: server closed idle connection"
+
+// inErrorTree reports whether match holds for err or any error it wraps. It
+// walks the tree errors.Is walks: through Unwrap() error and Unwrap() []error
+// alike.
+func inErrorTree(err error, match func(error) bool) bool {
+	if err == nil {
+		return false
+	}
+	if match(err) {
+		return true
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		return inErrorTree(u.Unwrap(), match)
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			if inErrorTree(e, match) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isServerClosedIdle reports whether err, or any error it wraps, is net/http's
+// errServerClosedIdle.
+func isServerClosedIdle(err error) bool {
+	return inErrorTree(err, func(e error) bool { return e.Error() == netHTTPServerClosedIdle })
+}
+
+// isTimedOut reports whether err, or any error it wraps, says it timed out
+// (a Timeout method that returns true, as net.Error has): a context's deadline
+// (context.DeadlineExceeded); net/http's client timeout, awaiting the answer's
+// headers or reading its body; a deadline on the connection ("i/o timeout");
+// a dial, a TLS handshake or a name lookup that timed out.
+func isTimedOut(err error) bool {
+	return inErrorTree(err, func(e error) bool {
+		t, ok := e.(interface{ Timeout() bool })
+		return ok && t.Timeout()
+	})
+}
+
+// isAnswerCutShort reports whether err is the connection closing part-way
+// through the app's answer, by the answer's own framing: net/http reports that
+// as io.ErrUnexpectedEOF.
+func isAnswerCutShort(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// isConnDropped reports whether err is the connection to the app dropping: a
+// reset (ECONNRESET), a broken pipe (EPIPE), a bare io.EOF, or net/http's
+// errServerClosedIdle. One drop is reported as any of these. Which one depends
+// on timing: net/http reports a close its read loop reads before the request
+// is on the connection as errServerClosedIdle, which a request on a fresh
+// connection gets as is (on a reused one, net/http sends again a request it
+// can replay), and a close it reads after as io.EOF. By the error alone a
+// reset can also have come part-way through an answer (see
+// IsTransportConnReset). Every rule about a drop asks this one.
+func isConnDropped(err error) bool {
+	return neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) ||
+		errors.Is(err, io.EOF) || isServerClosedIdle(err)
+}
+
+// IsAppConnectionError reports whether err says a test request failed because
+// the connection to the app failed: it was refused (isPreResponseConnRefused,
+// which the refusal re-send and the gRPC dial ask), the app's host was not
+// found, it dropped (isConnDropped), or a gRPC call lost it before the server
+// answered (isGRPCConnectionLost). This is what a test result's
+// APP_CONNECTION_ERROR means, and replay asks only this to set it.
+//
+// A close part-way through an answer (isAnswerCutShort) is not one: the app
+// answered, if not completely. IsTransportConnReset takes it too, for the
+// re-send its caller gates on the mocks the request consumed, and so does
+// IsAppNoAnswer.
+func IsAppConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	return isPreResponseConnRefused(err) ||
+		(errors.As(err, &dnsErr) && dnsErr.IsNotFound) ||
+		isConnDropped(err) ||
+		isGRPCConnectionLost(err)
+}
+
+// IsAppNoAnswer reports whether err says a test request got no complete
+// answer: none came in time (isTimedOut), the request was cancelled (a stop:
+// context.Canceled), or the connection closed part-way through the answer
+// (isAnswerCutShort). grpc-go turns the end of a call's
+// context into a status and keeps no cause, so a gRPC call's is its code
+// (isGRPCNoAnswer). This is replay's no-answer mark, which holds off the mocks
+// prune and a new mappings.yaml, and replay asks only this to set it.
+//
+// It is not APP_CONNECTION_ERROR: a stop's cancel is not the app being down.
+// An answer that came back whole but does not decode (answerDoesNotDecode) is
+// an answer, so it is neither.
+func IsAppNoAnswer(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isTimedOut(err) ||
+		errors.Is(err, context.Canceled) ||
+		isAnswerCutShort(err) ||
+		isGRPCNoAnswer(err)
+}
+
 // IsTransportConnReset reports whether err is a transport-level connection
-// reset / unexpected close while exchanging the request with the app — i.e.
-// "connection reset by peer" (ECONNRESET), a broken pipe (EPIPE), or a bare
-// io.EOF / io.ErrUnexpectedEOF surfaced by net/http when the peer dropped the
-// connection.
+// reset / unexpected close while exchanging the request with the app: the
+// connection dropping before any of an answer came back (isConnDropped), or
+// closing part-way through one (isAnswerCutShort).
 //
 // This class is dominated, under loaded CI replaying a DOCKER app, by docker's
 // userland proxy (docker-proxy) resetting a freshly-accepted host-side
@@ -808,16 +985,10 @@ func IsTransportConnReset(err error) bool {
 	if err == nil {
 		return false
 	}
-	if neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) {
-		return true
-	}
 	// net/http surfaces a peer-side drop during the response read as a bare
 	// io.EOF / io.ErrUnexpectedEOF (no syscall in the chain) — the docker-proxy
 	// reset frequently lands here too (see the "EOF" hits in the reproduction).
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	return false
+	return isConnDropped(err) || isAnswerCutShort(err)
 }
 
 // doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
@@ -825,9 +996,10 @@ func IsTransportConnReset(err error) bool {
 // rewound via GetBody). Any other error, or a real response, returns
 // immediately — so a genuinely crashed/unreachable app still fails fast after
 // the bounded retries, and a mid-response reset is never retried. A refusal,
-// reset or drop at an address reach says the app can never be reached at fails
-// at once, saying why, as an *UnreachableAppPortError.
-func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability) (*http.Response, error) {
+// reset or drop at an address reach says the app's server on appPort (the port
+// the test was recorded on, 0 when not known) can never be reached at fails at
+// once, saying why, as an *UnreachableAppPortError.
+func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability, appPort uint16) (*http.Response, error) {
 	asked := false
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
@@ -841,7 +1013,7 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 		if !asked && (refused || IsTransportConnReset(err)) {
 			asked = true
 			host, port := urlHostPort(req.URL)
-			if unreachable := unreachableAppPort(ctx, reach, host, port, err); unreachable != nil {
+			if unreachable := unreachableAppPort(ctx, reach, host, port, appPort, err); unreachable != nil {
 				return nil, unreachable
 			}
 		}
@@ -873,6 +1045,23 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 	}
 }
 
+// answerDoesNotDecode is the error of a test request whose answer came back,
+// whole by its own framing, but whose body does not decode as its
+// Content-Encoding says (an encoded answer with no body, such as a 204 or the
+// answer to a HEAD, or an encoded body cut short). It keeps the decoder's
+// error as text only, never wrapped: gzip reports a body with no bytes as
+// io.EOF and a short one as io.ErrUnexpectedEOF, and br reports both as
+// io.ErrUnexpectedEOF, the errors of a dropped connection and of an answer the
+// connection cut short, and the app did answer. Wrapped, they would read as a
+// drop to the reset re-send (IsTransportConnReset) and to APP_CONNECTION_ERROR
+// (IsAppConnectionError), and as no answer to replay's no-answer mark
+// (IsAppNoAnswer). A body that decodes but inflates past the cap is not one:
+// it keeps Decompress's error, which wraps ErrDecompressedTooLarge and none of
+// those.
+func answerDoesNotDecode(status int, encoding string, err error) error {
+	return fmt.Errorf("the app's %d answer does not decode as its Content-Encoding %q says: %v", status, encoding, err)
+}
+
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -888,7 +1077,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -910,11 +1099,17 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	// Decompress if needed
-	if httpResp.Header.Get("Content-Encoding") != "" {
-		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody, MaxDecompressedSize)
+	if enc := httpResp.Header.Get("Content-Encoding"); enc != "" {
+		respBody, err = Decompress(logger, enc, respBody, MaxDecompressedSize)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decode response body")
-			return nil, err
+			// A body that inflates past the cap decodes; it is only too large.
+			// It keeps Decompress's error, by which a caller tells it from a
+			// body that does not decode (ErrDecompressedTooLarge).
+			if errors.Is(err, ErrDecompressedTooLarge) {
+				return nil, err
+			}
+			return nil, answerDoesNotDecode(httpResp.StatusCode, enc, err)
 		}
 	}
 
@@ -965,7 +1160,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -988,6 +1183,13 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		if gzErr != nil {
 			httpResp.Body.Close()
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
+			// A body that ended, by its own framing, before its first byte
+			// (io.EOF), or whose first bytes are not a gzip header, is the
+			// answer not decoding. Any other error may have come from reading
+			// the body off the connection, and stays as it is.
+			if errors.Is(gzErr, io.EOF) || errors.Is(gzErr, gzip.ErrHeader) {
+				return nil, answerDoesNotDecode(httpResp.StatusCode, contentEncoding, gzErr)
+			}
 			return nil, gzErr
 		}
 		// Cap decompressed output so a bomb fails the test instead of
@@ -3473,7 +3675,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 
 	strict := strictWindowEnabled(strictPerCall)
 	isNonKeploy := false
-	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 
 	for _, mock := range m {
 		if mock == nil {
@@ -3484,6 +3686,21 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		p := mock.DeepCopy()
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
+		}
+		// A window-bound mock (a connection failure) is served from its own
+		// window or the startup band and nowhere else, in both modes — see
+		// placeWindowBound. Routed before every rule below, each of which can
+		// otherwise hand it to every test: the untimed branch, the session
+		// short-circuit, the config/connection tag fallback, lax promotion.
+		if models.WindowBound(p.Kind) {
+			if placeWindowBound(p, afterTime, beforeTime, firstWindowStart) == windowBoundDropped {
+				droppedWindowBound++
+				continue
+			}
+			p.TestModeInfo.Lifetime = models.LifetimePerTest
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
 		}
 		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing",
@@ -3652,11 +3869,12 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			unfilteredMocks = append(unfilteredMocks, p)
 		}
 	}
-	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 || droppedWindowBound > 0 {
 		logger.Debug("filterByTimeStamp tier-aware outcome (see separate counts for reasons)",
 			zap.Int("dropped_out_of_window", droppedOutOfWindow),
 			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
 			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Int("dropped_window_bound_outside_own_window", droppedWindowBound),
 			zap.Bool("strict", strict),
 			zap.Time("after", afterTime),
 			zap.Time("before", beforeTime),
@@ -3720,6 +3938,13 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			}
 			p := mk.DeepCopy()
 			lt := effectiveLifetimeForRouting(p)
+			if models.WindowBound(p.Kind) {
+				// Never a reusable pool, whatever its tag says (see
+				// placeWindowBound). With no window there is nothing to place
+				// it in, so it goes where every per-test mock goes.
+				lt = models.LifetimePerTest
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+			}
 			switch lt {
 			case models.LifetimeSession:
 				p.TestModeInfo.IsFiltered = false
@@ -3736,7 +3961,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 	}
 
 	strict := strictWindowEnabled(strictPerCall)
-	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 	isNonKeploy := false
 
 	for _, mk := range m {
@@ -3746,6 +3971,23 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		p := mk.DeepCopy()
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
+		}
+		// Window-bound: own window or startup band only, in both modes. Same
+		// rule, same reason, as in filterByTimeStampTierAware.
+		if models.WindowBound(p.Kind) {
+			switch placeWindowBound(p, afterTime, beforeTime, firstWindowStart) {
+			case windowBoundInWindow:
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+				p.TestModeInfo.IsFiltered = true
+				filtered = append(filtered, p)
+			case windowBoundStartup:
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+				p.TestModeInfo.IsFiltered = true
+				startup = append(startup, p)
+			default:
+				droppedWindowBound++
+			}
+			continue
 		}
 		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing",
@@ -3828,11 +4070,12 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		}
 	}
 
-	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 || droppedWindowBound > 0 {
 		logger.Debug("FilterByTimeStampThreeTier outcome",
 			zap.Int("dropped_out_of_window", droppedOutOfWindow),
 			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
 			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Int("dropped_window_bound_outside_own_window", droppedWindowBound),
 			zap.Int("perTest", len(filtered)),
 			zap.Int("session", len(unfiltered)),
 			zap.Int("startup", len(startup)),
@@ -3845,6 +4088,39 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
 	return filtered, unfiltered, startup
+}
+
+// windowBoundPlace is where the filters put a window-bound mock.
+type windowBoundPlace int
+
+const (
+	windowBoundDropped windowBoundPlace = iota
+	windowBoundInWindow
+	windowBoundStartup
+)
+
+// placeWindowBound places a models.WindowBound mock (a connection failure) for
+// the test window [afterTime, beforeTime]: in the window when its request time
+// is inside it; in the startup band when it predates firstWindowStart (app
+// boot, before any test); dropped in every other case, strict mode or lax.
+//
+// Lax mode promotes an out-of-window per-test mock to the session pool, which
+// every later test reads; a window-bound mock without both timestamps, or with
+// its response before its request, cannot be placed in any window at all and
+// would otherwise go to the per-test pool of every test. Either way a failure
+// recorded in one test would fail connects in others, so neither happens.
+func placeWindowBound(p *models.Mock, afterTime, beforeTime, firstWindowStart time.Time) windowBoundPlace {
+	req, res := p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock
+	if req.IsZero() || res.IsZero() || res.Before(req) {
+		return windowBoundDropped
+	}
+	if !req.Before(afterTime) && !req.After(beforeTime) {
+		return windowBoundInWindow
+	}
+	if !firstWindowStart.IsZero() && req.Before(firstWindowStart) {
+		return windowBoundStartup
+	}
+	return windowBoundDropped
 }
 
 // effectiveLifetimeForRouting resolves a mock's Lifetime for

@@ -12,6 +12,7 @@ if [[ ! -f "${TEST_IID_SCRIPT}" ]]; then
 fi
 source "${TEST_IID_SCRIPT}"
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
 
 # Verify Docker Desktop is running -- never start it from CI.
 if ! docker info >/dev/null 2>&1; then
@@ -140,7 +141,8 @@ mongo_postmortem() {
 
 echo "Waiting for MongoDB to accept connections..."
 for i in $(seq 1 30); do
-    if docker exec "$MONGO_CONTAINER" mongosh --quiet --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1; then
+    # mongo_ping (mongo-ci.sh) is every lane's readiness probe.
+    if mongo_ping "$MONGO_CONTAINER"; then
         echo "MongoDB is up after $i attempt(s)."
         break
     fi
@@ -166,6 +168,7 @@ for i in $(seq 1 30); do
     fi
     if [ "$i" -eq 30 ]; then
         echo "::error::MongoDB never came up, so the app cannot reach its database and this run would fail for a reason that is not keploy's."
+        mongo_ping_said; echo
         mongo_postmortem
         exit 1
     fi

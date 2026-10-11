@@ -226,6 +226,9 @@ func (h *Holder) selfTest() error {
 
 var errNoLoopback = errors.New("no loopback address for this family")
 
+// probeTimeout is how long a probe connection waits for its answer.
+const probeTimeout = 3 * time.Second
+
 // probe makes one probe connection to the port over the family's loopback.
 func (h *Holder) probe(family int) error {
 	fd, err := unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
@@ -263,12 +266,7 @@ func (h *Holder) probe(family int) error {
 	}
 	h.selfTestPort.Store(uint32(port))
 	defer h.selfTestPort.Store(0)
-	// A blocking connect gives up after SO_SNDTIMEO.
-	tv := unix.NsecToTimeval((3 * time.Second).Nanoseconds())
-	if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &tv); err != nil {
-		return err
-	}
-	err = unix.Connect(fd, remote)
+	err = connectWithin(fd, remote, probeTimeout)
 	switch {
 	case err == nil:
 		return errors.New("the probe connection was accepted")
@@ -276,6 +274,56 @@ func (h *Holder) probe(family int) error {
 		return nil
 	}
 	return fmt.Errorf("the probe connection was not refused: %w", err)
+}
+
+// connectWithin connects fd to remote, making fd non-blocking, and returns
+// how the connection ended: nil if it was made, the error it failed with
+// (ECONNREFUSED if it was refused), or ETIMEDOUT if nothing answered it
+// within timeout.
+//
+// One deadline bounds the wait, however often a signal interrupts it. A
+// signal can be handled on the waiting thread: one sent to the process may
+// be handled on any thread, and the Go runtime's preemption signal can
+// arrive just as a goroutine enters a system call. A blocking connect with
+// a timeout (SO_SNDTIMEO) then fails with EINTR, the handshake still under
+// way; called again it would wait on, but for the whole timeout again each
+// time. So connect only starts the handshake, and its answer is waited for
+// in a poll, made again with the time left when a signal interrupts it.
+func connectWithin(fd int, remote unix.Sockaddr, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	// A blocking connect would wait for as long as the kernel retries the
+	// SYN, far longer than the timeout.
+	if err := unix.SetNonblock(fd, true); err != nil {
+		return err
+	}
+	// A non-blocking connect does not sleep, so no signal can fail it.
+	if err := unix.Connect(fd, remote); !errors.Is(err, unix.EINPROGRESS) {
+		return err
+	}
+	// Ready to write is connected or failed, and SO_ERROR says which.
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLOUT}}
+	for {
+		left := time.Until(deadline)
+		if left <= 0 {
+			return unix.ETIMEDOUT
+		}
+		ts := unix.NsecToTimespec(left.Nanoseconds())
+		n, err := unix.Ppoll(fds, &ts, nil)
+		if err == nil && n > 0 {
+			break
+		}
+		if err != nil && !errors.Is(err, unix.EINTR) {
+			return err
+		}
+	}
+	errno, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ERROR)
+	if err != nil {
+		return err
+	}
+	if errno != 0 {
+		return unix.Errno(errno)
+	}
+	return nil
 }
 
 // bindQueue opens and binds the queue numbered after the port.

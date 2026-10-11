@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -198,6 +199,9 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	if path := stopOutcomePath(a.config.Agent.SetupOptions); path != "" {
 		a.armStopOutcome(path, utils.RegisterPreCancelHook)
 	}
+
+	// The mismatch hints name the command that records this kind of run again.
+	mismatch.SetMockMode(a.config.Agent.MockMode)
 
 	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)

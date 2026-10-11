@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -85,7 +86,7 @@ func TestRecordViaSupervisor_HalfCloseReachesTheUpstream(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		_ = p.recordViaSupervisor(ctx, srcConn, dstConn, probe, "test",
+		_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), probe, "test",
 			make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2,
 			models.OutgoingOptions{})
 	}()
@@ -195,7 +196,7 @@ func TestRecordViaSupervisor_ServerHalfCloseReachesTheClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		_ = p.recordViaSupervisor(ctx, srcConn, dstConn, probe, "test",
+		_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), probe, "test",
 			make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2,
 			models.OutgoingOptions{})
 	}()

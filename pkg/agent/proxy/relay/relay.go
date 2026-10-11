@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
@@ -102,6 +103,14 @@ type Relay struct {
 	seqC2D atomic.Uint64
 	seqD2C atomic.Uint64
 
+	// order numbers the chunks of both directions (fakeconn.Chunk.ConnSeq)
+	// as each Read returns, before the bytes are written on: the proxy's end
+	// of the connection to the destination, which dst reads through, and
+	// which numbers a client chunk after every byte the destination had sent
+	// by then (connseq.Upstream). The destination can answer only bytes it
+	// was written, so its answer is numbered after them.
+	order *connseq.Upstream
+
 	// runOnce ensures Run's one-time startup path executes exactly once.
 	runOnce sync.Once
 	// runErr stores the error returned from the first Run. Relay is
@@ -188,6 +197,14 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg:        cfg,
 		directives: make(chan directive.Directive, 8),
 		acks:       make(chan directive.Ack, 8),
+		order:      connseq.Of(dst),
+	}
+	if r.order == nil {
+		// Every chunk is numbered (fakeconn.ErrUnnumbered), and only the
+		// conn under any TLS can say what the destination sent: a
+		// destination dialled anywhere but util's dials has no order to
+		// number by.
+		panic("relay: the destination is not read through a connseq.Upstream: dial it with util.DialUpstream")
 	}
 	r.src.Store(&src)
 	r.dst.Store(&dst)
@@ -231,6 +248,12 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	// See [Config.ParserCanResyncAfterGap] for why the default is "cannot".
 	r.teeC2D.parserCanResync = cfg.ParserCanResyncAfterGap
 	r.teeD2C.parserCanResync = cfg.ParserCanResyncAfterGap
+	// Whether a desynced tee ends its stream at the hole. See
+	// [Config.EndAtHole].
+	if end := cfg.EndAtHole; end != nil {
+		r.teeC2D.endAtHole = func(reason string) { end(fakeconn.FromClient, reason) }
+		r.teeD2C.endAtHole = func(reason string) { end(fakeconn.FromDest, reason) }
+	}
 
 	var localAddr, remoteAddr net.Addr
 	if src != nil {
@@ -564,9 +587,11 @@ func (r *Relay) run(ctx context.Context) error {
 //
 // Each iteration:
 //  1. Check for pause; block on pauseCh if set.
-//  2. Read up to ForwardBuf bytes from src. Stamp readAt = time.Now().
-//  3. Write to dst; stamp writtenAt = time.Now() after Write returns.
-//  4. Build Chunk and push into the tee (non-blocking).
+//  2. Read up to ForwardBuf bytes from src, and make their Chunk, once:
+//     ReadAt, the number (order) that orders it against the other
+//     direction's (fakeconn.Chunk.ConnSeq), and a copy of the bytes.
+//  3. Write to dst; stamp the Chunk's WrittenAt after Write returns.
+//  4. Push the Chunk into the tee (non-blocking), with its SeqNo.
 //  5. Bump activity.
 //
 // Returns the first read or write error encountered. io.EOF is
@@ -623,9 +648,26 @@ func (r *Relay) forward(
 
 		src := *srcPtr.Load()
 		n, err := src.Read(buf)
-		readAt := time.Now()
+		// The chunk the Read returned, made once, here, and teed as it is by
+		// whichever path below takes the bytes (written on, stashed, held):
+		// each sets only what is its own, SeqNo as it tees and WrittenAt
+		// once the bytes are written on. It is numbered here, as the Read
+		// returns: a client chunk after every byte the destination had sent
+		// by now, read or not, a destination chunk by when its bytes reached
+		// the proxy (connseq.Upstream). Its bytes are an owned copy, so the
+		// forwarder can reuse the scratch buffer on the next iteration
+		// without the parser observing a torn read.
+		var chunk fakeconn.Chunk
 		if n > 0 {
-			readAt = observedReadAt(src, readAt)
+			chunk.Dir = dir
+			chunk.ReadAt = observedReadAt(src, time.Now())
+			if dir == fakeconn.FromClient {
+				chunk.ConnSeq = r.order.FromClient()
+			} else {
+				chunk.ConnSeq = r.order.FromDest()
+			}
+			chunk.Bytes = make([]byte, n)
+			copy(chunk.Bytes, buf[:n])
 		}
 
 		// Re-check the pause barrier AFTER Read returns and BEFORE
@@ -650,9 +692,7 @@ func (r *Relay) forward(
 		// (see the upstream-corruption analysis above).
 		if pc := r.currentPauseCh(); pc != nil {
 			if n > 0 {
-				stash := make([]byte, n)
-				copy(stash, buf[:n])
-				r.stashInflightFromPause(dir, stash, readAt)
+				r.stashInflightFromPause(dir, chunk.Bytes, chunk.ReadAt)
 				if log != nil {
 					log.Debug("relay: stashing in-flight bytes across pause boundary",
 						zap.String("dir", dir.String()),
@@ -687,12 +727,7 @@ func (r *Relay) forward(
 				// the parser's stream has a hole covering bytes the real
 				// server received.
 				if (r.preDispatchActive.Load() || r.holdClient.Load()) && dir == fakeconn.FromClient {
-					chunk := fakeconn.Chunk{
-						Dir:    dir,
-						Bytes:  stash,
-						ReadAt: readAt,
-						SeqNo:  seq.Add(1),
-					}
+					chunk.SeqNo = seq.Add(1)
 					teed := t.push(chunk)
 					if teed && r.cfg.OnClientChunkTeed != nil {
 						r.cfg.OnClientChunkTeed()
@@ -748,9 +783,6 @@ func (r *Relay) forward(
 				// normally, after the flush it just completed.
 				r.holdMu.Unlock()
 			} else {
-				payload := make([]byte, n)
-				copy(payload, buf[:n])
-
 				// Stash BEFORE teeing, and the order is load-bearing.
 				//
 				// The parser's decision is what ends the hold, so everything
@@ -768,13 +800,8 @@ func (r *Relay) forward(
 				// stash between these two statements, the bytes go upstream
 				// and are teed immediately after, so the parser still sees
 				// every byte the connection carried.
-				r.stashInflightFromPause(dir, payload, readAt)
-				chunk := fakeconn.Chunk{
-					Dir:    dir,
-					Bytes:  payload,
-					ReadAt: readAt,
-					SeqNo:  seq.Add(1),
-				}
+				r.stashInflightFromPause(dir, chunk.Bytes, chunk.ReadAt)
+				chunk.SeqNo = seq.Add(1)
 				teed := t.push(chunk)
 				if teed && r.cfg.OnClientChunkTeed != nil {
 					r.cfg.OnClientChunkTeed()
@@ -820,27 +847,17 @@ func (r *Relay) forward(
 		}
 
 		if n > 0 {
-			// Copy into an owned slice so the forwarder can reuse
-			// the scratch buffer on the next iteration without the
-			// parser observing a torn read. This copy is unavoidable
-			// given the chunk has to outlive the Read buffer.
-			payload := make([]byte, n)
-			copy(payload, buf[:n])
-
 			dst := *dstPtr.Load()
-			wn, werr := dst.Write(payload)
-			writtenAt := time.Now()
+			wn, werr := dst.Write(chunk.Bytes)
+			chunk.WrittenAt = time.Now()
 
 			// Tee regardless of Write outcome: the bytes were
 			// observed, the parser gets to see them. If Write failed
 			// the mock is still incomplete because the real peer did
 			// not receive them, so flag it.
-			chunk := fakeconn.Chunk{
-				Dir:       dir,
-				Bytes:     payload,
-				ReadAt:    readAt,
-				WrittenAt: writtenAt,
-				SeqNo:     seq.Add(1),
+			chunk.SeqNo = seq.Add(1)
+			if r.cfg.beforeTee != nil {
+				r.cfg.beforeTee(dir)
 			}
 			teed := t.push(chunk)
 			// On a successful client→dest tee, signal the supervisor

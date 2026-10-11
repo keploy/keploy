@@ -2583,19 +2583,22 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 }
 
 // DeleteStartupMock removes a matched startup-tier mock from the
-// startup tree so the next identical query at boot phase picks the
-// next-recorded same-shape mock in chronological order. This is the
-// boot-path analogue of DeleteFilteredMock for the startup tier.
+// startup tree so the next identical query served from that tier (at
+// boot phase, or by the startup-tier rescue after a test's per-test pool
+// misses) picks the next-recorded same-shape mock in chronological
+// order. This is the boot-path analogue of DeleteFilteredMock for the
+// startup tier.
 //
 // Required for boot-phase replay correctness: when an application
 // issues the same query repeatedly during recording while DB state
 // mutates, the recorder captures multiple same-shape mocks with
-// diverging responses. The matcher's boot-phase tiebreaker (see
-// mongo/v2 match.go: `bootPhaseAwareRequestTimeDiff`) orders them
-// earliest-first; this consumer advances through that order so the
-// booting app sees the same response chain it saw at record time.
-// Without consumption, the matcher repeatedly picks the same earliest
-// mock and follow-on revalidation queries fail.
+// diverging responses. The mongo/v2 matcher (keploy/integrations,
+// pkg/mongo/v2/match.go) serves startup-tier candidates that score the
+// same earliest-recorded first, at boot phase and in the startup-tier
+// rescue; this consumer advances through that order so the booting app
+// sees the same response chain it saw at record time. Without
+// consumption, the matcher repeatedly picks the same earliest mock and
+// follow-on revalidation queries fail.
 //
 // Implementation note: the startup tree is keyed by a tier-local
 // TestModeInfo copy (see the comment on the SetMocksWithWindow branch

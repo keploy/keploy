@@ -63,6 +63,29 @@ const (
 	// the YAML mapper, so no Aerospike-specific type lives in OSS core.
 	Aerospike Kind = "Aerospike"
 
+	// ConnectionFailure records that the application's attempt to open a
+	// connection to a dependency failed in a way it could see (refused,
+	// unreachable, timed out, closed before any data came back). The details
+	// are in Spec.ConnFailure; see connfailure.go.
+	//
+	// The name has NO HYPHEN, on purpose. Every keploy since 2023 skips a mock
+	// kind containing "-" at Debug level as "does not belong to open source
+	// version", BEFORE it reaches the unknown-kind branch that logs an ERROR
+	// naming the kind. A hyphenated name would make a keploy too old to replay
+	// these mocks drop them in silence; without the hyphen its YAML reader
+	// says, once per document, which kind it cannot read (its JSON reader
+	// skips an unknown kind at Debug either way). Pinned by
+	// TestConnectionFailureKindReachesTheUnknownKindError.
+	//
+	// For the keploy that records and replays the kind: never write it to a
+	// gob mock file, and send it to the agent only when the agent says it
+	// supports it. A gob reader up to v3.6.107, and an agent that predates the
+	// kind, read it as a mock of no kind and no metadata.destAddr, so its port
+	// is unknown and recorded.unknown is set: every port then counts as
+	// recorded, which turns loopback refusal off for the whole test set. This
+	// keploy never sends one to the agent (see AgentClient.StoreMocks).
+	ConnectionFailure Kind = "ConnectionFailure"
+
 	// RevokedTests is a RESERVED control Kind — it is NOT a real mock and no
 	// traffic parser ever produces it. The recorder emits a Mock with this Kind
 	// on the /outgoing stream to tell the CLI to revoke (delete) test cases
@@ -340,6 +363,11 @@ type MockSpec struct {
 	// PostgresV3 is the single discriminated spec for the v3 Postgres parser.
 	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.
 	PostgresV3 *PostgresV3Spec `yaml:"postgresV3,omitempty" json:"postgresV3,omitempty" bson:"postgres_v3,omitempty"`
+
+	// ConnFailure is the body of a ConnectionFailure mock (see connfailure.go);
+	// nil for every other kind. An older keploy's gob decoder drops it, as
+	// encoding/gob drops any field the receiving struct lacks.
+	ConnFailure *ConnFailureSpec `yaml:"connFailure,omitempty" json:"connFailure,omitempty" bson:"conn_failure,omitempty"`
 
 	// Aerospike (enterprise-only) stores its captured frames in the
 	// generic GenericRequests / GenericResponses payload slices above,
@@ -1099,6 +1127,10 @@ func (m *Mock) DeepCopy() *Mock {
 	if m.Spec.GRPCResp != nil {
 		grpcRespCopy := *m.Spec.GRPCResp
 		c.Spec.GRPCResp = &grpcRespCopy
+	}
+	if m.Spec.ConnFailure != nil {
+		connFailureCopy := *m.Spec.ConnFailure
+		c.Spec.ConnFailure = &connFailureCopy
 	}
 	if m.Spec.DNSReq != nil {
 		dnsReqCopy := *m.Spec.DNSReq

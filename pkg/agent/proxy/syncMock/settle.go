@@ -125,6 +125,17 @@ func (h *TestCaseHold) Add(tc *models.TestCase, namespace, pod string) {
 // Len is how many test cases are held.
 func (h *TestCaseHold) Len() int { return len(h.q) }
 
+// Drain hands back every test case still held, settled or not, and holds none
+// after: what its stream had taken when it ended without sending them.
+func (h *TestCaseHold) Drain() []*models.TestCase {
+	out := make([]*models.TestCase, 0, len(h.q))
+	for _, e := range h.q {
+		out = append(out, e.TC)
+	}
+	h.q, h.bytes = nil, 0
+	return out
+}
+
 // EarliestStarts calls fn once for each pod it holds test cases of, with the
 // earliest request time among them: every test case of the pod still to be
 // checked that has come to the hold starts no earlier (Spans.CheckedBefore).

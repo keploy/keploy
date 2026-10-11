@@ -32,13 +32,14 @@ jobs:
       # CGO_ENABLED=0, and under that combination any cgo-only dependency stops
       # linking rather than silently switching implementation.
       #
-      # That is not hypothetical: docker/compose's backend reaches
+      # That is not hypothetical: compose v2's backend reached
       # github.com/fsnotify/fsevents through pkg/watch, fsevents is cgo-only on
       # darwin, and adding the compose library broke a downstream darwin build
       # with `undefined: EventFlags` while this workflow stayed green. The fix
-      # keeps that import behind a build tag
-      # (pkg/platform/docker/compose_backend_darwin.go); this step is what keeps
-      # it that way.
+      # kept the backend out of darwin builds
+      # (pkg/platform/docker/compose_backend_unsupported.go). compose v5 no
+      # longer links fsevents without its own `fsnotify` tag; this step is what
+      # catches the next cgo-only dependency.
       - name: Build darwin/arm64 without cgo (downstream cross-compile shape)
         run: GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build ./...
 
@@ -48,3 +49,13 @@ jobs:
       # the other implementation.
       - name: Test utils on darwin
         run: go test -count=1 ./utils/
+
+      # connseq.Upstream is the proxy's end of its connection to a destination.
+      # Off Linux it asks the socket for no count (received_others.go), so it
+      # numbers chunks by what was read. upstream_others_test.go checks that no
+      # socket is asked; it builds only off Linux, so only this job and the
+      # Windows one can run it. The numbering by what was read is checked by
+      # upstream_test.go, which builds everywhere. Neither file had run on
+      # macOS before this job.
+      - name: Test connseq on darwin
+        run: go test -count=1 ./pkg/agent/proxy/connseq/

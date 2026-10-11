@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
@@ -48,7 +49,7 @@ func newHarness(t *testing.T, cfg Config) *relayHarness {
 		cfg.Logger = zap.NewNop()
 	}
 
-	r := New(cfg, srcProxy, dstProxy)
+	r := New(cfg, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	h := &relayHarness{
@@ -508,7 +509,7 @@ func TestDirectiveUpgradeTLS_PostUpgradeChunkUsesSocketReadTime(t *testing.T) {
 		TLSUpgradeFn: func(_ context.Context, conn net.Conn, _ bool, _ *tls.Config) (net.Conn, error) {
 			return conn, nil
 		},
-	}, srcProxy, dstProxy)
+	}, srcProxy, connseq.NewUpstream(dstProxy))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -688,7 +689,7 @@ func TestCleanShutdownOnCtxCancel(t *testing.T) {
 		_ = dstProxy.Close()
 	})
 
-	r := New(Config{}, srcProxy, dstProxy)
+	r := New(Config{}, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan error, 1)
@@ -737,7 +738,7 @@ func TestRunReturnsPromptlyWhenDestClosesWhileClientIdle(t *testing.T) {
 		_ = dstProxy.Close()
 	})
 
-	r := New(Config{}, srcProxy, dstProxy)
+	r := New(Config{}, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -801,7 +802,7 @@ func TestSecondRunReturnsError(t *testing.T) {
 		_ = dstProxy.Close()
 	})
 
-	r := New(Config{}, srcProxy, dstProxy)
+	r := New(Config{}, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() { _ = r.Run(ctx) }()

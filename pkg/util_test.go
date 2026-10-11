@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1960,6 +1961,99 @@ func TestHasExplicitPort_IPv6_777(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.expected, hasExplicitPort(tc.host))
+		})
+	}
+}
+
+// A URL that already says where the app is (test.basePath) is where the
+// request goes under TargetFromURL, and under that address's name. The
+// recorded app_port otherwise replaces the URL's port, and the recorded Host
+// header the URL's host: the test goes to the port the app was recorded on,
+// asking for the app by the name it had there.
+func TestSimulateHTTP_TargetFromURLLeavesTheRecordedAddressOut(t *testing.T) {
+	// askedAs gets the Host header of each request the server answers.
+	askedAs := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		askedAs <- r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	serverHost := strings.TrimPrefix(server.URL, "http://")
+
+	// The port the test was recorded on: nothing listens there any more.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	recordedPort := uint16(l.Addr().(*net.TCPAddr).Port)
+	require.NoError(t, l.Close())
+
+	newCase := func(appPort uint16) *models.TestCase {
+		return &models.TestCase{
+			Name:    "get-orders",
+			AppPort: appPort,
+			HTTPReq: models.HTTPReq{
+				Method: "GET",
+				URL:    server.URL + "/orders",
+				Header: map[string]string{"Host": "recorded.internal:8080"},
+			},
+		}
+	}
+
+	resp, err := SimulateHTTP(context.Background(), newCase(recordedPort), "test-set", zap.NewNop(),
+		SimulationConfig{APITimeout: 5, TargetFromURL: true})
+	require.NoError(t, err, "the request must go to the URL's own port")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, serverHost, <-askedAs, "the app must be asked for by the URL's host")
+
+	// Without it the recorded port still wins, as it must for an app keploy
+	// starts, and so does the recorded name.
+	_, err = SimulateHTTP(context.Background(), newCase(recordedPort), "test-set", zap.NewNop(),
+		SimulationConfig{APITimeout: 5})
+	require.Error(t, err, "the recorded app_port did not replace the URL's port")
+	assert.Contains(t, err.Error(), fmt.Sprintf(":%d", recordedPort))
+
+	_, err = SimulateHTTP(context.Background(), newCase(0), "test-set", zap.NewNop(),
+		SimulationConfig{APITimeout: 5})
+	require.NoError(t, err)
+	assert.Equal(t, "recorded.internal:8080", <-askedAs, "the recorded Host header was not sent")
+}
+
+// Under TargetFromURL the app is asked for by the URL's host as a client
+// writes it: without the port when it is the scheme's own. ResolveTestTarget
+// writes that port into every URL, and left to Go the request asked for
+// "staging.example.com:443", which a front that matches the name as written
+// does not route to the app every client reaches as "staging.example.com".
+func TestPrepareHTTPRequest_TargetFromURLAsksForTheHostAsAClientWritesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, url  string
+		configPort uint32
+		want       string
+	}{
+		{"http and no port", "http://staging.example.com/orders", 0, "staging.example.com"},
+		{"https and no port", "https://staging.example.com/orders", 0, "staging.example.com"},
+		{"the scheme's own port written out", "https://staging.example.com:443/orders", 0, "staging.example.com"},
+		{"IPv6 and no port", "http://[::1]/orders", 0, "[::1]"},
+		{"a port of its own", "http://staging.example.com:8080/orders", 0, "staging.example.com:8080"},
+		{"the other scheme's port", "http://staging.example.com:443/orders", 0, "staging.example.com:443"},
+		{"a port set for the tests", "http://staging.example.com/orders", 8080, "staging.example.com:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			test := &models.TestCase{
+				Name:    "get-orders",
+				AppPort: 9090,
+				HTTPReq: models.HTTPReq{
+					Method: "GET",
+					URL:    tc.url,
+					Header: map[string]string{"Host": "recorded.internal:9090"},
+				},
+			}
+			prepared, err := prepareHTTPRequest(context.Background(), test, "test-set", zap.NewNop(),
+				SimulationConfig{TargetFromURL: true, ConfigPort: tc.configPort})
+			require.NoError(t, err)
+
+			// The request as it goes on the wire.
+			var wire bytes.Buffer
+			require.NoError(t, prepared.Request.Write(&wire))
+			assert.Contains(t, wire.String(), "\r\nHost: "+tc.want+"\r\n")
 		})
 	}
 }

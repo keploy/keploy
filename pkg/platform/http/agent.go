@@ -932,6 +932,10 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 // predates the large-corpus recordings streaming exists for — so the fallback
 // is safe; a genuine bad-request 400 simply fails again on the retry.
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) (retErr error) {
+	// The callers strip what the agent does not hold (models.AgentBound) at
+	// the source, so their counts agree with what is sent; this is the same
+	// rule again, for a caller that did not.
+	filtered, unFiltered = models.AgentBound(filtered), models.AgentBound(unFiltered)
 	defer func() {
 		if retErr == nil {
 			a.session().record(stepStoreMocks, func(c context.Context) error { return a.StoreMocks(c, filtered, unFiltered) })

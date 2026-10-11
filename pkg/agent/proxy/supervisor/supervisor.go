@@ -87,7 +87,10 @@ type Supervisor struct {
 	// parser's blocked reads unblock with ErrClosed.
 	//
 	// Set it before calling Run. The supervisor calls it synchronously
-	// on the abort path, so the callback must not block.
+	// on the abort path, so the callback must not block. It calls it
+	// before it logs or reports why it aborts: the parser is dead or
+	// retired from that moment, and what the connection carries while the
+	// supervisor writes a panic's stack, say, is captured for no one.
 	//
 	// Go cannot forcibly kill a goroutine: the best we can do is
 	// cancel its context and shut the FakeConns so I/O-bound code
@@ -260,7 +263,17 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 	go func() {
 		var ret fnReturn
 		defer func() {
-			if r := recover(); r != nil {
+			r := recover()
+			if r != nil || ret.err != nil {
+				// The parser is gone, and nothing records what its
+				// connection carries from here on: stamp the session's
+				// stop (Session.StoppedAt) here, where the supervisor
+				// learns it, before the stack is taken and the return
+				// handed on to be logged. A parser that returns nil has
+				// recorded what it read, and is not stopped here.
+				sess.StoppedAt()
+			}
+			if r != nil {
 				ret = fnReturn{
 					panicked: true,
 					panicVal: r,
@@ -277,6 +290,9 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		return s.classifyReturn(ctx, r.panicked, r.panicVal, r.stack, r.err)
 
 	case <-s.hungCh:
+		// Abort first: the parser is retired from here, and the abort
+		// stops its capture (SessionOnAbort).
+		s.fireOnAbort()
 		// Debug-level: hang abort is a designed control-flow path —
 		// the dispatcher's FallthroughToPassthrough handling picks it
 		// up and the relay keeps forwarding bytes. Operators who want
@@ -285,7 +301,6 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 			zap.Duration("hang_budget", s.cfg.HangBudget),
 			zap.String("next_step", "raise supervisor.Config.HangBudget for slow-but-legitimate workloads (long LLM replies, pg_sleep), or set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough)"),
 		)
-		s.fireOnAbort()
 		runCancel()
 		return Result{
 			Status:                   StatusHung,
@@ -301,10 +316,10 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		select {
 		case r := <-done:
 			if r.panicked {
+				s.fireOnAbort()
 				if s.cfg.PanicReporter != nil {
 					s.reportPanic(r.panicVal, r.stack)
 				}
-				s.fireOnAbort()
 				return Result{
 					Status:                   StatusPanicked,
 					Err:                      wrapPanic(r.panicVal),
@@ -344,13 +359,16 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 // the supervisor's sticky abort flags to a Result.
 func (s *Supervisor) classifyReturn(outerCtx context.Context, panicked bool, panicVal any, stack []byte, fnErr error) Result {
 	if panicked {
+		// Abort first: the parser is dead, and the abort stops its capture
+		// (SessionOnAbort). Logged first, the stack and the report took
+		// their time while the connection's bytes were captured for no one.
+		s.fireOnAbort()
 		s.cfg.Logger.Error("parser panicked",
 			zap.Any("panic", panicVal),
 			zap.ByteString("stack", stack),
 			zap.String("next_step", "the supervisor is falling through to raw passthrough so user traffic continues unaffected; file the panic with the parser owner using the captured stack, and set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely until the root cause is fixed"),
 		)
 		s.reportPanic(panicVal, stack)
-		s.fireOnAbort()
 		return Result{
 			Status:                   StatusPanicked,
 			Err:                      wrapPanic(panicVal),

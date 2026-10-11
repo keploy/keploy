@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.keploy.io/server/v3/utils"
 )
 
 type sysProc struct{}
@@ -49,41 +51,20 @@ func boot() time.Time {
 	return bootTime
 }
 
-func stat(pid uint32) ([]string, bool) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return nil, false
-	}
-	s := string(b)
-	end := strings.LastIndexByte(s, ')')
-	if end < 0 || end+2 >= len(s) {
-		return nil, false
-	}
-	return strings.Fields(s[end+2:]), true
-}
-
 func (sysProc) Parent(pid uint32) (uint32, bool) {
-	f, ok := stat(pid)
-	if !ok || len(f) < 2 {
+	st, ok := utils.ReadProcStat(int(pid))
+	if !ok {
 		return 0, false
 	}
-	p, err := strconv.ParseUint(f[1], 10, 32)
-	if err != nil {
-		return 0, false
-	}
-	return uint32(p), true
+	return uint32(st.PPID), true
 }
 
 func (sysProc) Birth(pid uint32) (time.Time, bool) {
-	f, ok := stat(pid)
-	if !ok || len(f) < 20 {
+	st, ok := utils.ReadProcStat(int(pid))
+	if !ok || boot().IsZero() {
 		return time.Time{}, false
 	}
-	t, err := strconv.ParseInt(f[19], 10, 64)
-	if err != nil || boot().IsZero() {
-		return time.Time{}, false
-	}
-	return boot().Add(time.Duration(t) * time.Second / ticks), true
+	return boot().Add(time.Duration(st.StartTime) * time.Second / ticks), true
 }
 
 func (sysProc) Program(pid uint32) string {

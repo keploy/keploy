@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -152,6 +154,14 @@ func cut(s []byte, from, to int) []byte {
 	return append(append([]byte(nil), s[:from]...), s[to:]...)
 }
 
+// resetWarnLimiters forgets every warning logged so far, the recorder's and
+// the left-out mocks' (Session.ReportLeftOut), so a test can count the ones it
+// causes.
+func resetWarnLimiters() {
+	framingWarns.Reset()
+	supervisor.ResetLeftOutWarningsForTest()
+}
+
 // chunked splits s into the reads a reader of size n makes.
 func chunked(s []byte, n int) [][]byte {
 	var out [][]byte
@@ -175,6 +185,9 @@ type recording struct {
 	// leftOut are the exchanges RecordV2 framed but did not record, as the
 	// windows it left out (Session.RecordOrphanWindow).
 	leftOut *orphanSpans
+	// mgr is the session's manager, which counts each mock left out
+	// (SyncMockManager.MocksLeftOut).
+	mgr *syncMock.SyncMockManager
 	// cleared counts the times RecordV2 told the supervisor its input so far
 	// was consumed (Session.OnPendingCleared), and clearedAt how many client
 	// bytes it had consumed at each; clientConsumed is how many it consumed in
@@ -185,6 +198,10 @@ type recording struct {
 	// closedAt is when the streams of a connection left open were closed, at
 	// the deadline (zero when RecordV2 returned before it).
 	closedAt time.Time
+	// stops counts the times the connection's stop was stamped
+	// (Session.OnStop): once for a recording that stopped, never for one that
+	// went on.
+	stops int64
 }
 
 // orphanSpans collects the windows a Session leaves out (supervisor.OrphanSpans),
@@ -229,21 +246,36 @@ func (o *orphanSpans) last() ([2]time.Time, bool) {
 	return o.windows[len(o.windows)-1], true
 }
 
+// handshakeChunks is how many chunks recordChunks' handshake takes: the
+// server's greeting, the client's response and the server's OK, numbered 1 to
+// 3 as they were captured (fakeconn.Chunk.ConnSeq). The chunks its caller
+// hands it are numbered on from them.
+const handshakeChunks = 3
+
 // recordConn runs RecordV2 over a connection: its handshake, then client and
 // server (each delivered in the given chunks, the way a capture hands them
 // over, stamped as they are pushed). closeAtEnd closes both streams after the
 // last chunk, as a connection that ended does; without it they stay open, as a
 // pooled connection's do.
+//
+// The two byte streams do not say how their chunks were interleaved, so they
+// are numbered every client chunk first, then the server's: no server chunk
+// is taken for one captured before the command it answers, and no command's
+// floor drops one (Session.NextRequest). These tests frame packets; capture
+// order has tests of its own.
 func recordConn(t *testing.T, client, server [][]byte, closeAtEnd bool, deadline time.Duration) recording {
 	t.Helper()
+	seq := uint64(handshakeChunks)
 	chunks := func(bufs [][]byte, dir fakeconn.Direction) []fakeconn.Chunk {
 		out := make([]fakeconn.Chunk, len(bufs))
 		for i, b := range bufs {
-			out[i] = fakeconn.Chunk{Dir: dir, Bytes: b}
+			seq++
+			out[i] = fakeconn.Chunk{Dir: dir, ConnSeq: fakeconn.ConnSeqOf(seq), Bytes: b}
 		}
 		return out
 	}
-	return recordChunks(t, chunks(client, fakeconn.FromClient), chunks(server, fakeconn.FromDest), closeAtEnd, deadline)
+	c := chunks(client, fakeconn.FromClient)
+	return recordChunks(t, c, chunks(server, fakeconn.FromDest), closeAtEnd, deadline)
 }
 
 // wireBase is when the chunks onTheWire lays out are captured from: after the
@@ -251,23 +283,29 @@ func recordConn(t *testing.T, client, server [][]byte, closeAtEnd bool, deadline
 var wireBase = time.Date(2026, 10, 2, 10, 47, 0, 0, time.UTC)
 
 // onTheWire lays the exchanges out as a capture of a client that waits for
-// each answer before its next command stamps them: each command in a chunk of
-// its own, sent before its answer, then the answer in reads of n bytes, every
-// one of them before the next command (the server sends nothing more until it
-// arrives). An exchange with no command (nil) is more of the answer before it;
-// one with no reply, a command the server does not answer.
+// each answer before its next command numbers and stamps them: each command
+// in a chunk of its own, captured before its answer, then the answer in reads
+// of n bytes, every one of them before the next command (the server sends
+// nothing more until it arrives). An exchange with no command (nil) is more of
+// the answer before it; one with no reply, a command the server does not
+// answer.
 func onTheWire(xs []exchange, n int) (client, server []fakeconn.Chunk) {
 	tick := 0
 	at := func() time.Time {
 		tick++
 		return wireBase.Add(time.Duration(tick) * time.Microsecond)
 	}
+	seq := uint64(handshakeChunks)
+	next := func() uint32 {
+		seq++
+		return fakeconn.ConnSeqOf(seq)
+	}
 	for _, x := range xs {
 		if len(x.command) > 0 {
-			client = append(client, fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: x.command, ReadAt: at()})
+			client = append(client, fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: next(), Bytes: x.command, ReadAt: at()})
 		}
 		for _, c := range chunked(bytes.Join(x.reply, nil), n) {
-			server = append(server, fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: c, ReadAt: at()})
+			server = append(server, fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: next(), Bytes: c, ReadAt: at()})
 		}
 	}
 	return client, server
@@ -280,10 +318,18 @@ func recordWire(t *testing.T, xs []exchange, n int, closeAtEnd bool, deadline ti
 	return recordChunks(t, client, server, closeAtEnd, deadline)
 }
 
-// recordChunks is recordConn over chunks: one with no capture time is stamped
-// as it is pushed, client and server alike.
+// recordChunks is recordConn over chunks its caller numbered, from
+// handshakeChunks on: the two directions are pushed concurrently, so the order
+// they were captured in is their numbers', never the order they are pushed
+// in. One with no capture time is stamped as it is pushed, client and server
+// alike.
 func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool, deadline time.Duration) recording {
 	t.Helper()
+	for _, c := range append(append([]fakeconn.Chunk{}, client...), server...) {
+		if c.ConnSeq == 0 {
+			t.Fatal("fixture: a chunk with no capture number, which the recorder refuses (fakeconn.ErrUnnumbered)")
+		}
+	}
 	core, logs := observer.New(zapcore.DebugLevel)
 	logger := zap.New(core)
 	h := newV2Harness(t)
@@ -293,6 +339,10 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 	h.sess.Mocks = mocks
 	leftOut := &orphanSpans{}
 	h.sess.Orphans = leftOut
+	mgr := syncMock.New(nil)
+	h.sess.Mgr = mgr
+	var stops atomic.Int64
+	h.sess.OnStop = func(time.Time) { stops.Add(1) }
 	var cleared atomic.Int64
 	var clearedMu sync.Mutex
 	var clearedAt []int64
@@ -326,7 +376,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 	pushers.Add(2)
 	go func() {
 		defer pushers.Done()
-		h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: cannedHandshakeResponse41(t, 1, false), ReadAt: at()}
+		h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: 2, Bytes: cannedHandshakeResponse41(t, 1, false), ReadAt: at()}
 		for _, c := range client {
 			if c.ReadAt.IsZero() {
 				c.ReadAt = at()
@@ -340,8 +390,8 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 	}()
 	go func() {
 		defer pushers.Done()
-		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: greetingBuf, ReadAt: at()}
-		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: cannedOK(t, 2, greeting.CapabilityFlags), ReadAt: at()}
+		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: 1, Bytes: greetingBuf, ReadAt: at()}
+		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: handshakeChunks, Bytes: cannedOK(t, 2, greeting.CapabilityFlags), ReadAt: at()}
 		for _, c := range server {
 			if c.ReadAt.IsZero() {
 				c.ReadAt = at()
@@ -362,7 +412,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 		close(pushed)
 	}()
 
-	rec := recording{logs: logs, leftOut: leftOut}
+	rec := recording{logs: logs, leftOut: leftOut, mgr: mgr}
 	timer := time.NewTimer(deadline)
 	defer timer.Stop()
 	select {
@@ -381,6 +431,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 	}
 	<-pushed
 	rec.cleared = cleared.Load()
+	rec.stops = stops.Load()
 	clearedMu.Lock()
 	rec.clearedAt = clearedAt
 	clearedMu.Unlock()
@@ -502,9 +553,20 @@ func TestErrFramingLostSaysItWasReported(t *testing.T) {
 	}
 }
 
+// leftOutWarnings are the WARN lines among logs that report a mock left out
+// (Session.ReportLeftOut): the ones with a reason. The recorder's own WARNs,
+// of a connection's stop (warnFramingLost) and of a response it could not
+// frame (reportFault), have none.
+func leftOutWarnings(logs *observer.ObservedLogs) []observer.LoggedEntry {
+	return logs.FilterLevelExact(zapcore.WarnLevel).Filter(func(e observer.LoggedEntry) bool {
+		_, ok := e.ContextMap()["reason"]
+		return ok
+	}).All()
+}
+
 // requireFramingLost asserts the recording stopped where the bytes went
 // missing, said so, recorded nothing wrong before it, and left out the
-// exchange it stopped in.
+// exchange it stopped in, counted as every exchange left out is.
 func requireFramingLost(t *testing.T, rec recording) {
 	t.Helper()
 	if w := wrongMocks(t, rec.mocks); len(w) > 0 {
@@ -516,6 +578,11 @@ func requireFramingLost(t *testing.T, rec recording) {
 	if !errors.Is(rec.err, ErrFramingLost) {
 		t.Fatalf("RecordV2 = %v, want ErrFramingLost: an end that is not an error passes for the connection closing, and nothing counts what it carried after", rec.err)
 	}
+	// The stop is stamped where the recorder decides it, which opens the span
+	// of what the connection carries from there (Session.OnStop).
+	if rec.stops != 1 {
+		t.Fatalf("the connection's stop was stamped %d times, want once", rec.stops)
+	}
 	// The supervisor counts what the connection carries from where the parser
 	// stopped; the exchange it stopped in began before that, so the recorder
 	// leaves it out itself.
@@ -525,6 +592,12 @@ func requireFramingLost(t *testing.T, rec recording) {
 	}
 	if w[1].Before(w[0]) {
 		t.Fatalf("the window left out ends (%v) before it starts (%v)", w[1], w[0])
+	}
+	// Each exchange left out, the one the recording stopped in included, is
+	// counted for the recording's summary (mocks_left_out), as every parser
+	// counts the exchange it stops on (Session.ReportStoppedOn).
+	if n, left := rec.mgr.MocksLeftOut(), rec.leftOut.count(); n != int64(left) {
+		t.Fatalf("%d mocks left out counted for %d exchanges left out: the summary misses the exchange the recording stopped in", n, left)
 	}
 }
 
@@ -540,6 +613,9 @@ func requireRecordedOn(t *testing.T, rec recording, leftOut, queries int) {
 	}
 	if got := rec.leftOut.count(); got != leftOut {
 		t.Fatalf("%d exchanges left out, want %d: an exchange without a mock must be left out where its test cases are checked, or they are saved without it", got, leftOut)
+	}
+	if n := rec.mgr.MocksLeftOut(); n != int64(leftOut) {
+		t.Fatalf("%d mocks left out counted, want %d: the recording's summary (mocks_left_out) misses one", n, leftOut)
 	}
 	if got := queryMocks(rec.mocks); got != queries {
 		t.Fatalf("%d query mocks, want %d", got, queries)
@@ -584,6 +660,93 @@ func TestRecordV2_LargeResultFramesAcrossAnyChunking(t *testing.T) {
 				t.Fatalf("%d query mocks, want %d", got, c.queries)
 			}
 		})
+	}
+}
+
+// The exchange a framing loss stops the recording in is reported as every
+// parser reports the exchange it stops on (Session.ReportStoppedOn), as the
+// HTTP recorder reports a request or response that does not decode: counted
+// in the recording's summary (mocks_left_out), said at WARN with the MySQL
+// kind and why, and spanned from its command to the stop. The stop itself is
+// said apart from it, at WARN (warnFramingLost), as the dispatcher says an
+// HTTP parser's retirement. Before, the exchange was only spanned: nothing
+// counted it or said it was left out. The loss here is the client's bytes:
+// one found in a response leaves its exchange out alone, with no stop
+// (TestRecordV2_AResponseLeftOutIsReportedAsSuch).
+//
+// Not parallel: the WARN is limited process-wide, and this test counts it.
+func TestRecordV2_TheExchangeAFramingLossStopsInIsCounted(t *testing.T) {
+	resetWarnLimiters()
+	xs := kitTraffic(t, []int{7}, false)
+	s := layOut(xs)
+	// From the start of SET autocommit=0 to inside the first SELECT's text.
+	client := cut(s.client, 0, len(xs[0].command)+4+20)
+	rec := recordConn(t, chunked(client, 64), chunked(s.server, 16384), true, 5*time.Second)
+	requireFramingLost(t, rec)
+	if n := rec.mgr.MocksLeftOut(); n != 1 || rec.leftOut.count() != 1 {
+		t.Fatalf("counted %d mocks left out over %d spans, want the exchange the recording stopped in, once", n, rec.leftOut.count())
+	}
+	w := leftOutWarnings(rec.logs)
+	if len(w) != 1 {
+		t.Fatalf("%d left-out WARNs, want one for the exchange the recording stopped in", len(w))
+	}
+	fields := w[0].ContextMap()
+	if reason, _ := fields["reason"].(string); fields["kind"] != string(models.MySQL) ||
+		!strings.HasPrefix(reason, "mysql exchange not recorded: ") || !strings.Contains(reason, ErrFramingLost.Error()) {
+		t.Fatalf("the left-out WARN says %v, want the MySQL kind, the recorder's cause and the framing lost", fields)
+	}
+	if n := rec.logs.FilterMessageSnippet("the connection is no longer recorded").FilterLevelExact(zapcore.WarnLevel).Len(); n != 1 {
+		t.Fatalf("%d WARNs of the connection's stop, want one, apart from the exchange left out", n)
+	}
+}
+
+// leaveOutInFlight reports the exchange a recording stops in through
+// Session.ReportStoppedOn, the rule every parser's stop follows: from its
+// command to the stop, counted, and under the relay's mark when one is on the
+// flag (the recorder returns, so nothing else takes it), with the recorder's
+// cause and why after it. A stream's end or a recording's stop is no exchange
+// stopped in: nothing is reported for it, and a mark is left alone.
+//
+// Not parallel: the WARN is limited process-wide, and this test counts it.
+func TestLeaveOutInFlightReportsTheExchangeItStopsInAsEveryParserDoes(t *testing.T) {
+	resetWarnLimiters()
+	core, logs := observer.New(zapcore.DebugLevel)
+	spans := &orphanSpans{}
+	mgr := syncMock.New(nil)
+	sess := &supervisor.Session{Mgr: mgr, Orphans: spans, ClientConnID: "c1", Logger: zap.New(core)}
+	at := time.Now().Add(-time.Minute)
+	sess.MarkMockIncomplete("per_conn_cap")
+	for _, end := range []error{nil, io.EOF, fakeconn.ErrClosed, context.Canceled, context.DeadlineExceeded, errServerDropped} {
+		if got := leaveOutInFlight(sess, at, end); got != end {
+			t.Fatalf("leaveOutInFlight(%v) = %v, want the error it was handed", end, got)
+		}
+	}
+	if n := mgr.MocksLeftOut(); n != 0 || spans.count() != 0 || !sess.IsMockIncomplete() {
+		t.Fatalf("at a stream's or a recording's end: counted %d, %d spans, mark kept %v; want nothing reported and the mark left alone",
+			n, spans.count(), sess.IsMockIncomplete())
+	}
+
+	lost := framingLost("a packet out of sequence")
+	before := time.Now()
+	if got := leaveOutInFlight(sess, at, lost); got != lost {
+		t.Fatalf("leaveOutInFlight = %v, want the error it was handed", got)
+	}
+	after := time.Now()
+	if w, ok := spans.last(); spans.count() != 1 || !ok || !w[0].Equal(at) || w[1].Before(before) || w[1].After(after) {
+		t.Fatalf("%d spans, last %v; want one from the command (%v) to the stop", spans.count(), w, at)
+	}
+	if n := mgr.MocksLeftOut(); n != 1 {
+		t.Fatalf("counted %d, want the exchange stopped in, once", n)
+	}
+	w := leftOutWarnings(logs)
+	if len(w) != 1 {
+		t.Fatalf("%d left-out WARNs, want 1", len(w))
+	}
+	if reason := w[0].ContextMap()["reason"]; reason != "per_conn_cap: mysql exchange not recorded: "+lost.Error() {
+		t.Fatalf("the WARN's reason is %v, want the relay's mark, then the recorder's cause and why", reason)
+	}
+	if sess.IsMockIncomplete() {
+		t.Fatal("the mark was left on the flag: nothing takes it once the recorder returns")
 	}
 }
 
@@ -687,9 +850,10 @@ func TestRecordV2_AResponseOfSeveralResultsIsLeftOut(t *testing.T) {
 }
 
 // joinedMidStream is a decrypted TLS stream of a pooled connection the capture
-// joined mid-stream: no handshake on it, so its framing is assumed
-// (CLIENT_DEPRECATE_EOF, which the server here offers). run starts RecordV2 on
-// it and returns what it recorded once it returns, or fails after a minute.
+// joined mid-stream, as its producer says (Session.JoinedMidConnection): no
+// handshake on it, so its framing is assumed (CLIENT_DEPRECATE_EOF, which the
+// server here offers). run starts RecordV2 on it and returns what it recorded
+// once it returns, or fails after a minute.
 type joinedMidStream struct {
 	h    *v2Harness
 	caps uint32
@@ -717,6 +881,7 @@ func newJoinedMidStream(t *testing.T) *joinedMidStream {
 	}
 	greeting := wrapPacket(gb, 0)
 	sslReq := cannedSSLRequest(t, 1)
+	h.sess.JoinedMidConnection = true
 	h.sess.Opts.NetNS = testNetNS
 	ctx := postTLSCtx(t, greeting, sslReq, base, 3306)
 	store, _ := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
@@ -934,12 +1099,17 @@ func TestRecordV2_PostTLS_APrepareOnAnAssumedFraming(t *testing.T) {
 	// 255 definitions under CLIENT_DEPRECATE_EOF: the next answer starts at
 	// sequence id 1, which an EOF of the PREPARE would also have. COM_SET_OPTION
 	// is answered with an EOF, so an EOF there is either: both exchanges are
-	// left out, and the recording goes on from the next command.
+	// left out, and the recording goes on from the next command. Each is
+	// counted for the recording's summary (mocks_left_out): the PREPARE's
+	// mock is left out for the lost framing as any is, and so is the
+	// COM_SET_OPTION, whose answer cannot be told from the PREPARE's EOF.
 	t.Run("an EOF that may be the PREPARE's or the next answer", func(t *testing.T) {
 		t.Parallel()
 		j := newJoinedMidStream(t)
 		leftOut := &orphanSpans{}
 		j.h.sess.Orphans = leftOut
+		mgr := syncMock.New(nil)
+		j.h.sess.Mgr = mgr
 		j.exchange(prepare, [][]byte{bytes.Join(prepareOK(true, defs(255), nil), nil)})
 		j.exchange(wrapPacket([]byte{0x1b, 0x00, 0x00}, 0), [][]byte{wrapPacket(eofPayload, 1)})
 		mocks, err := j.run(t)
@@ -951,6 +1121,9 @@ func TestRecordV2_PostTLS_APrepareOnAnAssumedFraming(t *testing.T) {
 		}
 		if leftOut.count() != 2 {
 			t.Fatalf("%d exchanges left out, want the PREPARE and the COM_SET_OPTION", leftOut.count())
+		}
+		if n := mgr.MocksLeftOut(); n != 2 {
+			t.Fatalf("%d mocks left out counted, want the PREPARE and the COM_SET_OPTION, each once", n)
 		}
 	})
 	// What follows the PREPARE's definitions is checked on what it can be:
@@ -969,6 +1142,8 @@ func TestRecordV2_PostTLS_APrepareOnAnAssumedFraming(t *testing.T) {
 			j := newJoinedMidStream(t)
 			leftOut := &orphanSpans{}
 			j.h.sess.Orphans = leftOut
+			mgr := syncMock.New(nil)
+			j.h.sess.Mgr = mgr
 			j.exchange(prepare, prepareOK(true, defs(2), nil))
 			if next.command != nil {
 				j.h.pushClient(next.command, j.at())
@@ -986,6 +1161,9 @@ func TestRecordV2_PostTLS_APrepareOnAnAssumedFraming(t *testing.T) {
 			}
 			if leftOut.count() == 0 {
 				t.Fatal("the PREPARE is neither recorded nor left out")
+			}
+			if n := mgr.MocksLeftOut(); n != int64(leftOut.count()) {
+				t.Fatalf("%d mocks left out counted for %d exchanges left out: one is missing from the recording's summary", n, leftOut.count())
 			}
 		})
 	}
@@ -1545,6 +1723,13 @@ func recordBuffered(t *testing.T, xs []exchange) buffered {
 // window starts there. It started at the misread header, which arrived after
 // the lost command, and covered nothing.
 //
+// On a TLS connection joined mid-stream, the handshake reads the first
+// command. When the bytes lost were a continuation of it (a command of 16 MiB
+// or more), the window starts where that command began. It started at the
+// header misread as the continuation's, the next command's, which arrived
+// after the command and its answer: the test case that sent the command was
+// saved without its mock.
+//
 // Server bytes lost inside a result stop nothing: that exchange alone is left
 // out, over a window that holds when its command was sent, and the recording
 // goes on (realign).
@@ -1592,6 +1777,23 @@ func TestRecordV2_TheWindowLeftOutReachesTheParsersRetirement(t *testing.T) {
 		xs[1].command = xs[1].command[4+20:]
 		b := recordBuffered(t, xs)
 		requireWindow(t, b, b.handshakeEnd, "the handshake ended, after which the lost command was sent")
+	})
+	t.Run("a continuation of a joined connection's first command lost", func(t *testing.T) {
+		t.Parallel()
+		j := newJoinedMidStream(t)
+		b := buffered{leftOut: &orphanSpans{}}
+		j.h.sess.Orphans = b.leftOut
+		sent := time.Now().Add(-time.Minute)
+		// An INSERT of 16 MiB or more: its first packet, then its
+		// continuation, lost. Its answer comes 10ms after it, and the next
+		// command a second after it.
+		insert := splitPacket(append([]byte{mysql.COM_QUERY}, "INSERT INTO blobs VALUES ('"+strings.Repeat("x", 17<<20)+"')"...), 0)
+		j.h.pushClient(insert[:4+(1<<24-1)], sent)
+		j.h.pushDest(wrapPacket([]byte{0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00}, 2), sent.Add(10*time.Millisecond))
+		b.lastArrival = sent.Add(time.Second)
+		j.h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), b.lastArrival)
+		_, b.err = j.run(t)
+		requireWindow(t, b, sent, "the INSERT it stopped in was sent")
 	})
 }
 
@@ -1835,6 +2037,8 @@ func TestRecordV2_PostTLS_AFetchSettlesAnAssumedFraming(t *testing.T) {
 			j := newJoinedMidStream(t)
 			leftOut := &orphanSpans{}
 			j.h.sess.Orphans = leftOut
+			mgr := syncMock.New(nil)
+			j.h.sess.Mgr = mgr
 			j.exchange(cursorFetch, frame([][]byte{f.row(7), f.end(statusAutocommit | statusLastRowSent)}))
 			prepare := wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "SELECT * FROM events"...), 0)
 			// One chunk: the harness's channels hold fewer packets than 255.
@@ -1846,10 +2050,143 @@ func TestRecordV2_PostTLS_AFetchSettlesAnAssumedFraming(t *testing.T) {
 			if len(mocks) != 1 || leftOut.count() != 1 {
 				t.Fatalf("%d mock(s), %d exchange(s) left out; want the FETCH left out and the PREPARE recorded", len(mocks), leftOut.count())
 			}
+			if n := mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("the FETCH left out is counted %d times, want once, for the recording's summary (mocks_left_out)", n)
+			}
 			sp, ok := mocks[0].Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket)
 			if !ok || len(sp.ColumnDefs) != c.cols || (sp.EOFAfterColumnDefs != nil) == c.deprecateEOF {
 				t.Fatalf("the PREPARE recorded %T; want %d columns, with an EOF after them only for a client that framed with EOFs", mocks[0].Spec.MySQLResponses[0].Message, c.cols)
 			}
 		})
+	}
+}
+
+// leaveOut reports the exchange it leaves out as a mock left out
+// (Session.ReportLeftOut), as every parser does: its span, so the test cases
+// recorded over it that are not saved yet are left out; a count on the
+// session's manager, for the recording's summary (mocks_left_out);
+// the pending work cleared; and a WARN, rate-limited, with why. The WARN says
+// only what holds of the test cases over the exchange. Its span is recorded
+// when the recorder gets to the exchange, behind the traffic, and proxy mode
+// checks each test case as it streams it: the test cases not saved yet are
+// left out, and one saved before then lacks the mock and fails replay with
+// no_mocks (routes'
+// TestHandleIncoming_AMockLeftOutReachesOnlyTestCasesNotYetStreamed). One the
+// limit holds back is logged at DEBUG, and counted. Before, leaveOut recorded
+// the span and logged a WARN of its own: nothing counted the exchange, and
+// each one held back left no line at any level.
+// Not parallel: the WARN limit is process-wide.
+func TestLeaveOutSaysOnlyWhatHoldsOfTheTestCasesOverIt(t *testing.T) {
+	resetWarnLimiters()
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core)
+	spans := &orphanSpans{}
+	mgr := syncMock.New(nil)
+	sess := &supervisor.Session{Mgr: mgr, Orphans: spans, ClientConnID: "c1", Logger: logger}
+	cleared := 0
+	sess.OnPendingCleared = func() { cleared++ }
+	at := time.Now().Add(-time.Minute)
+	leaveOut(sess, at, at.Add(time.Millisecond), notRecorded("a test"))
+	if w, ok := spans.last(); spans.count() != 1 || !ok || !w[0].Equal(at) || !w[1].Equal(at.Add(time.Millisecond)) {
+		t.Fatalf("%d spans recorded (last %v), want the exchange's", spans.count(), w)
+	}
+	if n := mgr.MocksLeftOut(); n != 1 {
+		t.Fatalf("the exchange left out is counted %d times, want once: the recording's summary (mocks_left_out) misses it", n)
+	}
+	if cleared != 1 {
+		t.Fatalf("pending work cleared %d times, want once", cleared)
+	}
+	w := logs.FilterLevelExact(zapcore.WarnLevel).All()
+	if len(w) != 1 {
+		t.Fatalf("%d WARN lines, want 1", len(w))
+	}
+	if strings.Contains(w[0].Message, "left out") {
+		t.Errorf("the WARN %q promises the test cases over the exchange are left out", w[0].Message)
+	}
+	ctx := w[0].ContextMap()
+	if reason, _ := ctx["reason"].(string); !strings.HasPrefix(reason, "mysql exchange not recorded: ") || !strings.HasSuffix(reason, ": a test") ||
+		strings.Contains(reason, errNotRecorded.Error()) {
+		t.Errorf("the WARN's reason is %q, want the recorder's cause and why, once", reason)
+	}
+	if ctx["kind"] != string(models.MySQL) || ctx["connID"] != "c1" {
+		t.Errorf("the WARN names kind %v on connection %v, want a MySQL mock on c1", ctx["kind"], ctx["connID"])
+	}
+	next, _ := ctx["next_step"].(string)
+	for _, want := range []string{"not saved yet", "are left out of the recording", "saved before then", "lacks this mock", "no_mocks"} {
+		if !strings.Contains(next, want) {
+			t.Errorf("next_step %q does not say %q", next, want)
+		}
+	}
+	if strings.Contains(next, "not saved without its mock") {
+		t.Errorf("next_step %q promises no test case over the exchange is saved without its mock", next)
+	}
+
+	// Another within the interval is held back from WARN, and said at DEBUG
+	// with its own reason; it is counted and its span recorded all the same.
+	leaveOut(sess, at.Add(time.Second), at.Add(time.Second+time.Millisecond), errors.New("another"))
+	if n := mgr.MocksLeftOut(); n != 2 || spans.count() != 2 || cleared != 2 {
+		t.Fatalf("after a second exchange left out: counted %d, %d spans, pending cleared %d times; want 2 of each", n, spans.count(), cleared)
+	}
+	if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != 1 {
+		t.Fatalf("%d WARN lines, want the first only: the second is within the interval", n)
+	}
+	held := logs.FilterLevelExact(zapcore.DebugLevel).FilterField(zap.String("reason", "mysql exchange not recorded: another")).Len()
+	if held != 1 {
+		t.Fatalf("%d DEBUG lines for the exchange held back from WARN, want 1: it leaves no trace", held)
+	}
+}
+
+// Each of the recorder's warnings is limited on its own: one is never held
+// back behind another's, nor counted under it. A connection that retires on a
+// framing loss right after another left an exchange out still says why it
+// stopped being recorded, at WARN, and so does the exchange left out after a
+// retirement's WARN. Held back behind it, the second would wait out the
+// interval, and the next WARN of the first would count it as one of its own.
+// One held back behind a WARN of its own kind is said at DEBUG: a retirement
+// or an exchange left out never leaves no line at all.
+// Not parallel: the WARN limit is process-wide.
+func TestEachRecorderWarningIsLimitedByItsOwnMessage(t *testing.T) {
+	resetWarnLimiters()
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core)
+	sess := &supervisor.Session{Orphans: &orphanSpans{}, Mgr: syncMock.New(nil), ClientConnID: "c1", Logger: logger}
+	at := time.Now().Add(-time.Minute)
+	const lost = "V2: mysql response framing lost; the connection is no longer recorded"
+	warns := func() []observer.LoggedEntry { return logs.FilterLevelExact(zapcore.WarnLevel).All() }
+
+	leaveOut(sess, at, at.Add(time.Millisecond), notRecorded("a test"))
+	warnFramingLost(logger, sess, lost, errors.New("a test"))
+	w := warns()
+	if len(w) != 2 || w[0].ContextMap()["reason"] != "mysql exchange not recorded: a test" || w[1].Message != lost {
+		t.Fatalf("logged %d WARN lines, want the exchange left out and then the framing loss: one was held back behind the other's", len(w))
+	}
+	for _, e := range w {
+		if held, ok := e.ContextMap()["sameWarningsHeldBack"]; ok {
+			t.Errorf("%q says %v of the same warning were held back: it counts another kind's", e.Message, held)
+		}
+	}
+
+	// The same kinds again, within the interval, are held back from WARN and
+	// said at DEBUG.
+	logs.TakeAll()
+	leaveOut(sess, at, at.Add(time.Millisecond), notRecorded("a test"))
+	warnFramingLost(logger, sess, lost, errors.New("a test"))
+	if n := len(warns()); n != 0 {
+		t.Fatalf("%d WARN lines for warnings already logged within the interval, want 0", n)
+	}
+	if d := logs.FilterLevelExact(zapcore.DebugLevel).All(); len(d) != 2 || d[0].ContextMap()["reason"] != "mysql exchange not recorded: a test" || d[1].Message != lost {
+		t.Fatalf("%d DEBUG lines for the two held back, want the exchange left out and then the framing loss: one left no trace", len(d))
+	}
+	// Another message is not held back, nor counts the one held back of the
+	// first as its own.
+	logs.TakeAll()
+	const outOfSequence = "V2: mysql response packet out of sequence; the connection is no longer recorded"
+	warnFramingLost(logger, sess, outOfSequence, errors.New("a test"))
+	w = warns()
+	if len(w) != 1 || w[0].Message != outOfSequence {
+		t.Fatalf("logged %d WARN lines, want the out-of-sequence one: it was held back behind another message", len(w))
+	}
+	if held, ok := w[0].ContextMap()["sameWarningsHeldBack"]; ok {
+		t.Fatalf("the out-of-sequence WARN says %v of the same warning were held back: it counts the framing loss held back before it", held)
 	}
 }

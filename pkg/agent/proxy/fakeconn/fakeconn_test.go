@@ -212,6 +212,45 @@ func TestReadAfterCloseDrainsBuffered(t *testing.T) {
 	}
 }
 
+// A reader that found nothing and is about to wait, when a chunk is delivered
+// and Close follows, still gets the chunk: the relay's teardown delivers what
+// its tee holds and then closes the stream, and a parser a moment behind lost
+// the connection's last request or response to it. Here the chunk and the
+// Close arrive between Waiting and the wait (beforeWait) in every round, so the
+// reader waits with both ready every time; it used to take the Close about
+// half the time, and lose the chunk.
+func TestReadChunkAboutToWaitWhenAChunkAndCloseArriveGetsTheChunk(t *testing.T) {
+	// Not parallel: it sets the package's beforeWait. The hook acts only for
+	// this test's FakeConn, and runs on the goroutine that reads it.
+	t.Cleanup(func() { beforeWait.Store(nil) })
+	const rounds = 2000
+	lost := 0
+	for i := 0; i < rounds; i++ {
+		ch := make(chan Chunk, 1)
+		f := New(ch, nil, nil)
+		arrived := false
+		hook := func(waiting *FakeConn) {
+			if waiting != f || arrived {
+				return
+			}
+			arrived = true
+			ch <- Chunk{Dir: FromDest, Bytes: []byte("last response")}
+			close(ch)
+			_ = f.Close()
+		}
+		beforeWait.Store(&hook)
+		if _, err := f.ReadChunk(); err != nil {
+			lost++
+		}
+		if !arrived {
+			t.Fatal("the reader did not wait: the chunk and the Close did not arrive as it was about to")
+		}
+	}
+	if lost != 0 {
+		t.Fatalf("a chunk delivered before Close was lost in %d of %d rounds", lost, rounds)
+	}
+}
+
 func TestReadDeadlineExceeded(t *testing.T) {
 	t.Parallel()
 	ch := make(chan Chunk)
@@ -770,4 +809,63 @@ func TestSkipThroughHonoursAPendingDiscard(t *testing.T) {
 	if _, err := io.ReadFull(f, got); err != nil || string(got) != "new" {
 		t.Fatalf("read after the skip = %q, %v", got, err)
 	}
+}
+
+// TestAtChunkBoundaryIsNoChunkReadInPart: the reader is at a chunk's boundary
+// before its first byte, once it has read a chunk whole, and at a chunk Peek
+// showed it that it has not taken. It is not once some of a chunk's bytes have
+// left the FakeConn, read or swallowed for the reader by a watermark, until
+// the rest of that chunk is read. Peek is how a session finds a request's
+// first chunk (supervisor.Session.NextRequest): a boundary that meant "nothing
+// in hand" would say every request found so starts in the middle of a chunk.
+func TestAtChunkBoundaryIsNoChunkReadInPart(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 4)
+	for _, b := range []string{"abcd", "efgh", "ijkl", "mnop"} {
+		ch <- Chunk{Dir: FromClient, Bytes: []byte(b)}
+	}
+	f := New(ch, nil, nil)
+	at := func(want bool, when string) {
+		t.Helper()
+		if got := f.AtChunkBoundary(); got != want {
+			t.Fatalf("AtChunkBoundary = %v %s, want %v", got, when, want)
+		}
+	}
+	read := func(n int) {
+		t.Helper()
+		if _, err := io.ReadFull(f, make([]byte, n)); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+	}
+	peek := func(want string) {
+		t.Helper()
+		c, err := f.Peek()
+		if err != nil || string(c.Bytes) != want {
+			t.Fatalf("Peek = %q, %v; want %q", c.Bytes, err, want)
+		}
+	}
+	at(true, "before the stream's first byte")
+	read(2)
+	at(false, "with half of the first chunk read")
+	read(2)
+	at(true, "with the first chunk read whole")
+	peek("efgh")
+	at(true, "at a whole chunk Peek showed and the reader has not taken")
+	read(1)
+	at(false, "with one byte of the second chunk read")
+	peek("fgh")
+	at(false, "at the rest of a chunk read in part, which Peek showed")
+	if c, err := f.ReadChunk(); err != nil || string(c.Bytes) != "fgh" {
+		t.Fatalf("ReadChunk = %q, %v; want the rest of the second chunk", c.Bytes, err)
+	}
+	at(true, "with the rest of the second chunk read")
+	// A watermark two bytes into the third chunk: they are swallowed for the
+	// reader, and what is left does not start a chunk.
+	f.DiscardBefore(f.Consumed() + 2)
+	peek("kl")
+	at(false, "at what a watermark left of the third chunk")
+	read(2)
+	at(true, "with the third chunk gone")
+	peek("mnop")
+	at(true, "at the fourth chunk, whole")
 }

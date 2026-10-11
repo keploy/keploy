@@ -15,6 +15,8 @@
 #      cursor entirely (1,1,1), and a shared cursor would interleave them.
 #   3. t1 run twice by ONE worker process: the second run is a new scope (same
 #      pid), so its sequence starts over at 1,2,3 instead of saturating.
+#   4. ONE keep-alive connection reused for t1 and then t2: what it sees
+#      follows the worker to t2 (4,5), not the scope it was opened in.
 # Uses the PR `build` binary for record and replay (mock_linux.yml).
 set -uo pipefail
 
@@ -106,6 +108,36 @@ for p in ps:
 print(subprocess.run(["python3", "worker.py", PORT, "t1", "3", "2"], stdout=subprocess.PIPE).stdout.decode().strip().replace("t1=", "t1first="), flush=True)
 PY
 
+# Replay 4: ONE keep-alive connection reused across two scopes in one worker:
+# what the connection sees must follow the worker to its next test.
+# The recording was made with urllib, so each request carries the header keys
+# urllib sends (matching requires them); Connection: keep-alive keeps the one
+# socket open, and the socket's address proves it was never reopened — a new
+# connection opened in t2 would pass this step without the fix.
+cat > keepalive.py <<'PY'
+import http.client, sys, time
+from kp import scope
+conn = http.client.HTTPConnection("127.0.0.1", int(sys.argv[1]), timeout=5)
+socks = set()
+def read(k):
+    out = []
+    for _ in range(k):
+        conn.request("GET", "/counter", headers={"User-Agent": "Python-urllib/3", "Connection": "keep-alive"})
+        out.append(conn.getresponse().read().decode())
+        # http.client drops its socket when the peer will close after the
+        # response; a reconnect per request would otherwise hide here.
+        assert conn.sock is not None, "the connection was closed after a response"
+        socks.add(conn.sock.getsockname())
+    return ",".join(out)
+scope("/agent/scope/begin", "t1"); time.sleep(2)
+a = read(3); scope("/agent/scope/end", "t1")
+scope("/agent/scope/begin", "t2")
+b = read(2); scope("/agent/scope/end", "t2")
+print("KA_t1=" + a, flush=True)
+print("KA_t2=" + b, flush=True)
+print("KA_sockets=%d" % len(socks), flush=True)
+PY
+
 start_dep() { python3 dep.py "$PORT" >dep.log 2>&1 & echo $!; }
 DP=$(start_dep); sleep 1
 
@@ -127,6 +159,12 @@ has "t1=1,2,3"      rep-workers.log || { echo "FAIL: worker t1 was not served it
 has "t2=4,5"        rep-workers.log || { echo "FAIL: worker t2 was not served its own 4,5 (got: $(grep -o 't2=[0-9,A-Z:a-z]*' rep-workers.log | head -1))"; FAIL=1; }
 has "t1first=1,2,3" rep-workers.log || { echo "FAIL: t1 in a new worker process was not served 1,2,3 (got: $(grep -o 't1first=[0-9,A-Z:a-z]*' rep-workers.log | head -1))"; FAIL=1; }
 has "t1again=1,2,3" rep-workers.log || { echo "FAIL: a re-run of t1 in the same process did not start its sequence over (got: $(grep -o 't1again=[0-9,A-Z:a-z]*' rep-workers.log | head -1))"; FAIL=1; }
+
+echo "== 4. one keep-alive connection across two scopes, dependency DOWN =="
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 keepalive.py $PORT" --name s --disable-tele 2>&1 | tee rep-keepalive.log
+has "KA_t1=1,2,3" rep-keepalive.log || { echo "FAIL: t1 on the keep-alive connection was not served its own 1,2,3 (got: $(grep -o 'KA_t1=[0-9,A-Z:a-z]*' rep-keepalive.log | head -1))"; FAIL=1; }
+has "KA_t2=4,5" rep-keepalive.log || { echo "FAIL: t2 on the connection t1 opened was not served its own 4,5 (got: $(grep -o 'KA_t2=[0-9,A-Z:a-z]*' rep-keepalive.log | head -1))"; FAIL=1; }
+has "KA_sockets=1" rep-keepalive.log || { echo "FAIL: the client reconnected, so step 4 did not test one connection across two tests ($(grep -o 'KA_sockets=[0-9]*' rep-keepalive.log | head -1))"; FAIL=1; }
 
 [ "$FAIL" = 0 ] && echo "MOCK STATEFUL E2E: PASSED" || echo "MOCK STATEFUL E2E: FAILED"
 exit $FAIL

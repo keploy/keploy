@@ -37,7 +37,7 @@ func TestWatchPropagatesADestinationThatClosesFirst(t *testing.T) {
 		time.Sleep(100 * time.Millisecond) // an idle timeout
 		_ = c.Close()
 	})
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestWatchLeavesAGreetingForTheDial(t *testing.T) {
 		time.Sleep(time.Second)
 		_ = c.Close()
 	})
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestTakeEndsTheWatch(t *testing.T) {
 		}
 		_ = c.Close()
 	})
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestTakeEndsTheWatch(t *testing.T) {
 // the destination closing it.
 func TestCloseIfUnusedEndsTheWatchQuietly(t *testing.T) {
 	addr := serve(t, func(c net.Conn) { time.Sleep(time.Second); _ = c.Close() })
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestReturnRearmsTheConnection(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 		_ = c.Close()
 	})
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestReturnRearmsTheConnection(t *testing.T) {
 // connection the destination keeps open is the next dial's.
 func TestReturnHandsTheConnectionToTheNextDial(t *testing.T) {
 	addr := serve(t, func(c net.Conn) { time.Sleep(time.Second); _ = c.Close() })
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestReturnHandsTheConnectionToTheNextDial(t *testing.T) {
 // next dial through the replay wrapper it hands back.
 func TestReturnReplaysWhatWasRead(t *testing.T) {
 	addr := serve(t, func(c net.Conn) { time.Sleep(time.Second); _ = c.Close() })
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestTakeDiscardsAConnectionTheDestinationClosed(t *testing.T) {
 		}
 	}()
 	addr := l.Addr().String()
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}

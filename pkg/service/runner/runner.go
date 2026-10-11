@@ -447,7 +447,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 
 	// Disk fetch uses the widest window; per-test containment is
 	// enforced by the agent via UpdateMockParams at step time.
-	filtered, unfiltered, err := r.loadMocks(gCtx, testSetID, mocksThatHaveMappings, mocksWeNeed)
+	filtered, unfiltered, skipped, err := r.loadMocks(gCtx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		return nil, err
 	}
@@ -462,6 +462,19 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	for _, m := range unfiltered {
 		mockKindByName[m.Name] = m.Kind
 	}
+	// A document the decoders skipped is in no pool, but a mapping entry with
+	// no kind can still name it; one the assertion leaves out (a connection
+	// failure this keploy cannot replay) stays out by name (as in the
+	// replayer's RunTestSet).
+	for name, kind := range skipped {
+		if _, ok := mockKindByName[name]; !ok && models.ExcludedFromDependencyAssertion(kind) {
+			mockKindByName[name] = kind
+		}
+	}
+
+	// What the agent holds: the pools less what this keploy never sends it
+	// (models.AgentBound), so what is counted below is what was sent.
+	filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
 
 	// Seed the process-wide sort counter past the highest recorded
 	// mock sortOrder so any live-generated mocks during replay don't
@@ -531,25 +544,27 @@ func (r *Runner) strictMockWindow() bool {
 
 // loadMocks returns the test set's per-test and session pools over the widest
 // window, from one read of its mock file when the mock store can (see
-// keployPkg.TestSetMocksReader), otherwise with one read per pool.
-func (r *Runner) loadMocks(ctx context.Context, testSetID string, mocksThatHaveMappings, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, err error) {
+// keployPkg.TestSetMocksReader), otherwise with one read per pool. skipped is
+// the documents the store's decoders skipped (models.TestSetMocks.Skipped),
+// nil from a store that reads one pool per call.
+func (r *Runner) loadMocks(ctx context.Context, testSetID string, mocksThatHaveMappings, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, skipped map[string]models.Kind, err error) {
 	if reader, ok := r.mockDB.(keployPkg.TestSetMocksReader); ok {
 		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			// The pass that failed is the one the per-test pool was read in.
-			return nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
 		}
-		return set.Filtered, set.Unfiltered, nil
+		return set.Filtered, set.Unfiltered, set.Skipped, nil
 	}
 	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
 	}
 	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
 	}
-	return filtered, unfiltered, nil
+	return filtered, unfiltered, nil, nil
 }
 
 // loadMappingsForSet returns the full per-test-case mapping and the
@@ -686,9 +701,11 @@ func (r *Runner) agentReadsConsumedPerTestOnly() bool {
 	return ok && s.AgentReadsConsumedPerTestOnly()
 }
 
-// checkMockMismatches filters DNS entries from both the expected and
-// consumed sets before reporting — DNS resolution order is
-// non-deterministic (replay.go:1499-1517 does the same). MockEntry.Kind
+// checkMockMismatches filters the kinds the per-test dependency comparison
+// leaves out (models.ExcludedFromDependencyAssertion: DNS, whose resolution
+// order is non-deterministic, and connection failures, which nothing consumes
+// at replay yet) from both the expected and consumed sets before reporting,
+// as the replayer's RunTestSet does. MockEntry.Kind
 // in mappings is frequently empty, so we fall back to the kind registry
 // built from the loaded mock pool.
 //
@@ -702,12 +719,12 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 	if r.instrumentation == nil {
 		return nil
 	}
-	isDNS := func(name string, kind models.Kind) bool {
-		if kind == models.DNS {
+	unasserted := func(name string, kind models.Kind) bool {
+		if models.ExcludedFromDependencyAssertion(kind) {
 			return true
 		}
 		if setup != nil {
-			if k, ok := setup.mockKindByName[name]; ok && k == models.DNS {
+			if k, ok := setup.mockKindByName[name]; ok && models.ExcludedFromDependencyAssertion(k) {
 				return true
 			}
 		}
@@ -738,7 +755,7 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 
 	filteredExpected := make([]MockRef, 0, len(expected))
 	for _, e := range expected {
-		if isDNS(e.Name, models.Kind(e.Kind)) || isStartup(e.Name) {
+		if unasserted(e.Name, models.Kind(e.Kind)) || isStartup(e.Name) {
 			continue
 		}
 		filteredExpected = append(filteredExpected, e)
@@ -746,7 +763,7 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 
 	filteredConsumed := make([]MockRef, 0, len(consumed))
 	for _, s := range consumed {
-		if isDNS(s.Name, s.Kind) || isStartup(s.Name) {
+		if unasserted(s.Name, s.Kind) || isStartup(s.Name) {
 			continue
 		}
 		filteredConsumed = append(filteredConsumed, MockRef{

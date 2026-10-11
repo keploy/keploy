@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -107,7 +108,9 @@ func TestMySQLProbeBranchRoutesByShouldRecordViaSupervisor(t *testing.T) {
 			defer cleanup()
 			// Mirror handleConnection: the upgrader holds pointers to the
 			// caller's own conn variables, never to a callee's copies.
-			srcConn, destConn := srcRaw, destRaw
+			// handleConnection reads every destination through the
+			// connseq.Upstream its dial made (util.DialUpstream).
+			srcConn, destConn := srcRaw, net.Conn(connseq.NewUpstream(destRaw))
 			upgrader := util.NewConnTLSUpgrader(&srcConn, &destConn, zap.NewNop(), nil)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -210,13 +213,13 @@ func TestRecordMySQLOutgoing_UnregisteredParser(t *testing.T) {
 
 	appSide, proxySide, cleanup := tcpConnPair(t)
 	defer cleanup()
-	dstConn, err := net.DialTimeout("tcp", upstream.Addr().String(), 5*time.Second)
+	dstConn, err := util.DialUpstream(context.Background(), &net.Dialer{Timeout: 5 * time.Second}, "tcp", upstream.Addr().String())
 	if err != nil {
 		t.Fatalf("dial upstream: %v", err)
 	}
 	defer func() { _ = dstConn.Close() }()
 
-	src, dst := proxySide, dstConn
+	src, dst := proxySide, net.Conn(dstConn)
 	upgrader := util.NewConnTLSUpgrader(&src, &dst, zap.NewNop(), nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -399,7 +402,9 @@ func TestMySQLProbeBranchHonoursTheKillSwitch(t *testing.T) {
 
 			srcRaw, destRaw, cleanup := tcpConnPair(t)
 			defer cleanup()
-			srcConn, destConn := srcRaw, destRaw
+			// handleConnection reads every destination through the
+			// connseq.Upstream its dial made (util.DialUpstream).
+			srcConn, destConn := srcRaw, net.Conn(connseq.NewUpstream(destRaw))
 			upgrader := util.NewConnTLSUpgrader(&srcConn, &destConn, zap.NewNop(), nil)
 
 			// globalPassThrough reads these two off the context and type-asserts
@@ -491,7 +496,7 @@ func TestMySQLProbeKillSwitchRelaysAndHonoursHalfClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	dstConn, err := net.Dial("tcp", up.Addr().String())
+	dstConn, err := util.DialUpstream(context.Background(), nil, "tcp", up.Addr().String())
 	if err != nil {
 		t.Fatalf("dial upstream: %v", err)
 	}

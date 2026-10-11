@@ -17,6 +17,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -180,38 +181,185 @@ func TestCaptureHookSemaphoreMatchesConcurrencyConstant(t *testing.T) {
 }
 
 // TestCaptureHookSemaphoreBackpressuresParser verifies that once
-// captureHookConcurrency permits are held, a further send on
-// captureHookSem blocks — i.e. the parser goroutine in
-// parseStreamingHTTP would block before launching another CaptureHook
-// goroutine. Without this backpressure the unbounded `go
+// captureHookConcurrency slots are held, a further takeCaptureSlot waits:
+// a handler waits there for a slot before it starts another CaptureHook
+// goroutine, and takes the next slot given back. A take whose context ends
+// first gives up then, so a handler is not pinned to a saturated semaphore
+// through shutdown. Without this backpressure the unbounded `go
 // hooksUtils.CaptureHook(...)` call piled goroutines (each holding ~10MB
 // in body buffers) past the 250 MiB go-memory-load CI threshold.
 func TestCaptureHookSemaphoreBackpressuresParser(t *testing.T) {
 	// Save and restore the global so this test doesn't poison sibling
-	// tests that may run before parseStreamingHTTP fires CaptureHook.
+	// tests. No capture of another test is running to read it: each test
+	// that starts captures waits for them (pm.captures) before it returns.
 	saved := captureHookSem
 	t.Cleanup(func() { captureHookSem = saved })
-	captureHookSem = make(chan struct{}, captureHookConcurrency)
+	sem := make(chan struct{}, captureHookConcurrency)
+	captureHookSem = sem
 
+	// Bounds every wait below: a take that never returns fails the test in
+	// seconds instead of hanging it until go test's timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	releases := make([]func(), 0, captureHookConcurrency)
 	for i := 0; i < captureHookConcurrency; i++ {
-		select {
-		case captureHookSem <- struct{}{}:
-		default:
-			t.Fatalf("acquire %d unexpectedly blocked before reaching capacity", i)
+		release, ok := takeCaptureSlot(ctx)
+		if !ok {
+			t.Fatalf("take %d failed before reaching capacity", i)
 		}
+		releases = append(releases, release)
 	}
 
-	// One more acquire must NOT succeed in non-blocking mode — that's
-	// the backpressure the parser relies on.
+	type take struct {
+		release func()
+		ok      bool
+	}
+	// A take still running when the test fails has read captureHookSem, and
+	// the restore above would race with it. This cleanup runs first and lets
+	// every such take end.
+	var takes sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()           // a take that honours its context gives up,
+		for len(sem) > 0 { // and one that does not gets a slot.
+			<-sem
+		}
+		ended := make(chan struct{})
+		go func() { takes.Wait(); close(ended) }()
+		select {
+		case <-ended:
+		case <-time.After(5 * time.Second):
+		}
+	})
+	takeInBackground := func(ctx context.Context) <-chan take {
+		got := make(chan take, 1)
+		takes.Add(1)
+		go func() {
+			defer takes.Done()
+			release, ok := takeCaptureSlot(ctx)
+			got <- take{release, ok}
+		}()
+		return got
+	}
+
+	// A take past capacity waits for a slot: that's the backpressure the
+	// handler relies on.
+	waiting := takeInBackground(ctx)
 	select {
-	case captureHookSem <- struct{}{}:
-		t.Fatal("acquire past captureHookConcurrency succeeded; semaphore is not backpressuring")
-	default:
+	case got := <-waiting:
+		if got.ok {
+			got.release()
+		}
+		t.Fatalf("a take past captureHookConcurrency returned (ok=%v) while every slot was held; it must wait for one", got.ok)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// It takes the next slot given back.
+	releases[0]()
+	select {
+	case got := <-waiting:
+		if !got.ok {
+			t.Fatal("the waiting take gave up instead of taking the slot given back")
+		}
+		releases[0] = got.release
+	case <-ctx.Done():
+		t.Fatal("the waiting take did not take the slot given back")
 	}
 
-	// Drain so the channel is left empty for any later subtests.
-	for i := 0; i < captureHookConcurrency; i++ {
-		<-captureHookSem
+	// A take past capacity whose context ends gives up then, and not before.
+	ending, cancelEnding := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancelEnding()
+	select {
+	case got := <-takeInBackground(ending):
+		if got.ok {
+			got.release()
+			t.Fatal("a take past captureHookConcurrency succeeded; the semaphore is not backpressuring")
+		}
+		if ending.Err() == nil {
+			t.Fatal("a take past captureHookConcurrency gave up before its context ended; it must wait for a slot until then")
+		}
+	case <-ctx.Done():
+		t.Fatal("a take past captureHookConcurrency did not give up when its context ended")
+	}
+
+	for _, release := range releases {
+		release()
+	}
+	if n := len(sem); n != 0 {
+		t.Fatalf("%d slots still held after every slot taken was given back", n)
+	}
+}
+
+// A capture gives its slot back to the semaphore it took it from. Read again
+// when the capture ended, captureHookSem freed a slot of whatever had replaced
+// it by then (TestCaptureHookSemaphoreBackpressuresParser replaces it): the
+// slot taken stayed held for good, and a slot its holder still had was freed.
+// A capture that outlived its test also raced with that replacement.
+func TestHandleHttp1ZeroCopy_CaptureGivesBackTheSlotItTook(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+	upstream := oneShotUpstream(t, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	entered, proceed := make(chan struct{}), make(chan struct{})
+	var enterOnce, proceedOnce sync.Once
+	letCaptureEnd := func() { proceedOnce.Do(func() { close(proceed) }) }
+	stubCaptureHook(t, func(context.Context, *zap.Logger, chan *models.TestCase,
+		*http.Request, *http.Response, time.Time, time.Time,
+		models.IncomingOptions, bool, bool, uint16) {
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+	})
+	// Registered before ingressPipe's pm.captures.Wait, so it runs after it.
+	saved := captureHookSem
+	t.Cleanup(func() { captureHookSem = saved })
+	took := make(chan struct{}, captureHookConcurrency)
+	captureHookSem = took
+
+	// Neither synchronous nor sampled: the zero-copy path.
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())), 10*time.Second)
+	defer cancel()
+	client, done := ingressPipe(t, ctx, pm, upstream)
+	t.Cleanup(letCaptureEnd) // runs before ingressPipe's cleanups: a failure still lets the capture end
+
+	if _, err := io.WriteString(client, "GET / HTTP/1.1\r\nHost: app\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("the exchange was not captured")
+	}
+	if n := len(took); n != 1 {
+		t.Fatalf("captureHookSem holds %d slots while the capture runs, want the 1 it took", n)
+	}
+
+	// While the capture holds its slot, captureHookSem is replaced by a
+	// semaphore one slot of which its holder still has.
+	replacement := make(chan struct{}, captureHookConcurrency)
+	replacement <- struct{}{}
+	captureHookSem = replacement
+	letCaptureEnd()
+
+	captured := make(chan struct{})
+	go func() { pm.captures.Wait(); close(captured) }()
+	select {
+	case <-captured:
+	case <-ctx.Done():
+		t.Fatal("the capture did not end")
+	}
+	if n := len(took); n != 0 {
+		t.Errorf("the semaphore the capture took its slot from still holds %d, want it given back", n)
+	}
+	if n := len(replacement); n != 1 {
+		t.Errorf("the semaphore that replaced it holds %d slots, want its holder's 1: the capture gave back a slot it never took there", n)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("handleHttp1Connection did not return")
 	}
 }
 
@@ -620,6 +768,7 @@ func TestHandleHttp1Connection_ChunkedExchangeIsCaptured(t *testing.T) {
 		synchronous: true,
 		samplingSem: make(chan struct{}, 1),
 	}
+	t.Cleanup(pm.captures.Wait) // every capture it started is over before the next test swaps a hook or a semaphore
 
 	// Dial the client side via a TCP pipe. handleHttp1Connection dials
 	// upstream itself (so it needs a real TCP listener), but the client
@@ -773,6 +922,7 @@ func TestHandleHttp1Connection_ChunkedRequestIsCaptured(t *testing.T) {
 		synchronous: true,
 		samplingSem: make(chan struct{}, 1),
 	}
+	t.Cleanup(pm.captures.Wait) // every capture it started is over before the next test swaps a hook or a semaphore
 
 	clientListener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -927,6 +1077,7 @@ func TestHandleHttp1Connection_ForcedCloseIsNotRecorded(t *testing.T) {
 				sampling:    mode == "sampled",
 				samplingSem: make(chan struct{}, 1),
 			}
+			t.Cleanup(pm.captures.Wait) // every capture it started is over before the next test swaps a hook or a semaphore
 
 			ln, err := net.Listen("tcp4", "127.0.0.1:0")
 			if err != nil {

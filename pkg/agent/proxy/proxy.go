@@ -24,7 +24,6 @@ import (
 	"time"
 
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
-	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"golang.org/x/sync/errgroup"
@@ -185,11 +184,15 @@ type Proxy struct {
 	// each other's pool. Empty/absent ⇒ the worker serves the whole pool
 	// (backward compatible with suite-level and single-worker sequential scope).
 	workerScopeMu sync.RWMutex
-	workerScope   map[uint32]map[string]struct{}
-	// workerScopeGen counts each worker's scope registrations, so every new
-	// scope (the worker's next test) gets fresh stateful cursors. Guarded by
+	workerScope   map[uint32]workerScopeEntry
+	// scopeSeq counts every change to the worker scopes and the mapped
+	// universe, and every scoped view made. workerScopeAt is its value when
+	// each worker's scope last changed (began or ended a test), universeAt
+	// when the universe did: a view's version (see workerView). Guarded by
 	// workerScopeMu.
-	workerScopeGen map[uint32]uint64
+	scopeSeq      uint64
+	workerScopeAt map[uint32]uint64
+	universeAt    uint64
 	// mappedUniverse is the union of every test's mapped mock names; lets a
 	// scoped worker distinguish "another test's mock" from an unmapped shared
 	// recording. Guarded by workerScopeMu.
@@ -238,11 +241,13 @@ type Proxy struct {
 	// replaced, by ResetRecordedDNSMocks.
 	nodataRelayLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
 
+	// The DNS servers, set by startDNSServers before anything serves or
+	// stops them.
+	tcpDNS, udpDNS *dnsServer
+
 	//to store the nsswitch.conf file data
 	nsSwitchMutex             sync.Mutex
 	nsswitchData              []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
-	UDPDNSServer              *dns.Server
-	TCPDNSServer              *dns.Server
 	GlobalPassthrough         bool
 	OpportunisticTLSIntercept bool
 	// DisableHandshakeHold mirrors config.Agent.DisableHandshakeHold: accept
@@ -325,6 +330,10 @@ type Proxy struct {
 	isGracefulShutdown atomic.Bool
 
 	auxiliaryHook agent.AuxiliaryProxyHook
+	// teardownOnce guards runAuxTeardown so the auxiliary hook's
+	// BeforeTeardown runs at most once across start()'s mutually-exclusive
+	// shutdown paths (skipListener return / listener defer).
+	teardownOnce sync.Once
 
 	// skipListener disables the TCP accept loop. When true, the proxy
 	// does not bind a port. DNS, parser init, and session state still run.
@@ -469,7 +478,7 @@ const (
 	maxRecordBufferStallGrace = 10 * time.Second
 
 	// dnsBindTimeout is the BACKSTOP for StartProxy's DNS-listener readiness
-	// wait. A real bind error fails fast via dnsErrCh, so this only bounds the
+	// wait. A real bind error fails it at once (startDNSServers), so this only bounds the
 	// pathological case of a socket that neither reports listening nor errors.
 	// Generous enough never to false-fail a healthy start (a bind is a syscall,
 	// near-instant) yet short enough that a truly stuck start surfaces as an
@@ -1492,6 +1501,24 @@ func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
 	p.auxiliaryHook = h
 }
 
+// runAuxTeardown invokes the auxiliary hook's BeforeTeardown (if it implements
+// TeardownableProxyHook), at most once, synchronously. start() calls it on the
+// shutdown path before TeardownNativeCA so a hook that attached uprobes removes
+// them while still inside the awaited start() goroutine — before the process
+// exits and before any update-ca-certificates fork — closing the race that
+// otherwise leaks the uprobe.
+func (p *Proxy) runAuxTeardown(ctx context.Context) {
+	h, ok := p.auxiliaryHook.(agent.TeardownableProxyHook)
+	if !ok {
+		return
+	}
+	p.teardownOnce.Do(func() {
+		if err := h.BeforeTeardown(ctx); err != nil {
+			utils.LogError(p.logger, err, "auxiliary proxy hook teardown failed")
+		}
+	})
+}
+
 // getMockManager returns the current mock manager in a thread-safe manner.
 func (p *Proxy) getMockManager() *MockManager {
 	p.sessionMu.RLock()
@@ -1789,105 +1816,14 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// legacy default response.
 	p.captureDNSUpstream()
 
-	// Closed (via NotifyStartedFunc) once each DNS socket is bound. StartProxy
-	// blocks on both below before returning, so the agent's readiness -- and the
-	// docker-compose `depends_on: service_healthy` app-release gated on it --
-	// cannot fire before DNS is listening. Without this the reconstructed
-	// replay app's eager boot-time resolve of a recorded name races an unbound
-	// DNS socket and dies with UnknownHostException, tearing down the whole
-	// stack (intermittent cloud-replay flake, saas/selfhosted pipeline 9847).
-	tcpDNSReady := make(chan struct{})
-	udpDNSReady := make(chan struct{})
-	// A DNS bind failure closes neither ready channel; the goroutines below also
-	// report it here so the wait fails FAST with the real error (e.g. "bind:
-	// address already in use") instead of stalling to the timeout. Buffered for
-	// both servers so the send never blocks a goroutine that is exiting.
-	dnsErrCh := make(chan error, 2)
-
-	// start the TCP DNS server
-	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
-	g.Go(func() error {
-		defer utils.Recover(p.logger)
-		errCh := make(chan error, 1)
-		go func(errCh chan error) {
-			defer utils.Recover(p.logger)
-			err := p.startTCPDNSServer(ctx, func() { close(tcpDNSReady) })
-			if err != nil {
-				errCh <- err
-				dnsErrCh <- err
-			}
-		}(errCh)
-
-		select {
-		case <-ctx.Done():
-			if p.TCPDNSServer != nil {
-				err := p.TCPDNSServer.Shutdown()
-				if err != nil {
-					utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
-					return err
-				}
-			}
-			return nil
-		case err := <-errCh:
-			return err
-		}
-	})
-
-	// start the UDP DNS server
-	p.logger.Debug("Starting Udp Dns Server for handling Dns queries over UDP")
-	g.Go(func() error {
-		defer utils.Recover(p.logger)
-		errCh := make(chan error, 1)
-		go func(errCh chan error) {
-			defer utils.Recover(p.logger)
-			err := p.startUDPDNSServer(ctx, func() { close(udpDNSReady) })
-			if err != nil {
-				errCh <- err
-				dnsErrCh <- err
-			}
-		}(errCh)
-
-		select {
-		case <-ctx.Done():
-			if p.UDPDNSServer != nil {
-				err := p.UDPDNSServer.Shutdown()
-				if err != nil {
-					utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
-					return err
-				}
-			}
-			return nil
-		case err := <-errCh:
-			return err
-		}
-	})
-
 	// Wait for the proxy server to be ready or fail
 	if err := <-readyChan; err != nil {
 		return err
 	}
 
-	// ...then wait for the DNS listeners to actually be bound before returning,
-	// so nothing gated on StartProxy (notably the agent readiness that releases
-	// the app container) can observe an unbound DNS socket. ListenAndServe binds
-	// then serves; the NotifyStartedFunc set in start{TCP,UDP}DNSServer closes
-	// these once bound. A bind FAILURE reports on dnsErrCh, so we fail fast with
-	// the real error; dnsBindTimeout is only a backstop for a socket that neither
-	// binds nor errors. One shared deadline caps the total wait for both servers.
-	dnsBindDeadline := time.After(dnsBindTimeout)
-	for _, d := range []struct {
-		name string
-		ch   <-chan struct{}
-	}{{"UDP", udpDNSReady}, {"TCP", tcpDNSReady}} {
-		select {
-		case <-d.ch:
-		case err := <-dnsErrCh:
-			return fmt.Errorf("DNS server failed to start: %w", err)
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-dnsBindDeadline:
-			return fmt.Errorf("%s DNS server did not report listening within %s", d.name, dnsBindTimeout)
-		}
+	// Serve DNS over TCP and UDP, and wait for both to be bound.
+	if err := p.startDNSServers(ctx, g); err != nil {
+		return err
 	}
 
 	if p.auxiliaryHook != nil {
@@ -2022,6 +1958,11 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 		p.nsSwitchMutex.Unlock()
+		// Remove TLS uprobes (and any other hook-owned kernel state) BEFORE
+		// forking update-ca-certificates below: a uprobe teardown that races
+		// that fork can inherit the last link reference into the child and
+		// then be killed mid-removal, leaking the breakpoint.
+		p.runAuxTeardown(ctx)
 		// Remove this run's MITM CA from the OS trust store so trust does not
 		// persist after the run (no-op in docker/k8s mode and for a persisted
 		// per-user CA).
@@ -2133,6 +2074,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 		p.nsSwitchMutex.Unlock()
+		// Remove TLS uprobes (and any other hook-owned kernel state) before
+		// forking update-ca-certificates below — see the skipListener path.
+		p.runAuxTeardown(ctx)
 		// Remove this run's MITM CA from the OS trust store so trust does not
 		// persist after the run (no-op in docker/k8s mode and for a persisted
 		// per-user CA).
@@ -3506,11 +3450,8 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	// WaitGroup + ctx cancellation combination already covers the
 	// "stuck parser eventually exits" case without double-close
 	// races on the real sockets.
-	if p.UDPDNSServer != nil || p.TCPDNSServer != nil {
-		if err := p.stopDNSServers(ctx); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))
-
-		}
+	if err := p.stopDNSServers(); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))
 	}
 
 	// Channel-binding shim teardown — detach uprobes, drop allowlist

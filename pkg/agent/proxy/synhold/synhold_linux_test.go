@@ -3,9 +3,21 @@
 package synhold
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"net"
 	"net/netip"
+	"os"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestEndpointsReadsTheSYN: a held SYN is named by its source (the
@@ -127,4 +139,228 @@ func TestForgetExpiredDropsOnlyWhatExpired(t *testing.T) {
 	if len(h.expiry) != 2 {
 		t.Fatalf("%d entries left to expire, want 2", len(h.expiry))
 	}
+}
+
+// TestConnectWithinWaitsThroughSignals: connectWithin runs on a thread that
+// is sent SIGURG each time it sleeps waiting for the connection's answer, and
+// returns that answer: refused, accepted, or, when nothing answers, ETIMEDOUT
+// once its timeout is up and not long after. The signals stop half a second
+// before the timeout, so a wait that started over at the last of them would
+// end long after it. connectWithin is handed a blocking socket, which it must
+// make non-blocking: a blocking connect waits for as long as the kernel
+// retries the SYN, not for the timeout.
+func TestConnectWithinWaitsThroughSignals(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		// answer is given once the connection has been signalled three
+		// times.
+		answer func(*unanswering, *testing.T)
+		want   error
+	}{
+		// The answer reaches the connection with a SYN it sends again a
+		// second or more after its first; the timeout leaves a loaded
+		// machine room to miss some of them.
+		{"refused", 20 * time.Second, (*unanswering).refuse, unix.ECONNREFUSED},
+		{"accepted", 20 * time.Second, (*unanswering).accept, nil},
+		{"never answered", 2 * time.Second, func(*unanswering, *testing.T) {}, unix.ETIMEDOUT},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			u := newUnanswering(t)
+			fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = unix.Close(fd) })
+			start := time.Now()
+			signals, err := signalled(t, fd,
+				func() error { return connectWithin(fd, u.addr, tc.timeout) },
+				func() { tc.answer(u, t) }, tc.timeout-500*time.Millisecond, tc.timeout+3*time.Second)
+			took := time.Since(start)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("connectWithin = %v after %v, signalled %d times; want %v", err, took, signals, tc.want)
+			}
+			if tc.want == unix.ETIMEDOUT && took < tc.timeout {
+				t.Fatalf("gave up after %v, before its %v were up", took, tc.timeout)
+			}
+			if signals < 3 {
+				t.Fatalf("the connection was signalled %d times while it waited, not 3: nothing was tested", signals)
+			}
+			if tc.want == unix.ETIMEDOUT && took > tc.timeout+time.Second {
+				t.Fatalf("gave up after %v, long after its %v were up", took, tc.timeout)
+			}
+		})
+	}
+}
+
+// unanswering is a loopback port whose accept queue is full, so the kernel
+// drops each SYN sent to it: a connection to it waits for its answer, as one
+// to a held port does. Its next SYN is refused once the listener is closed,
+// or accepted once the queue is emptied.
+type unanswering struct {
+	fd    int // the listener
+	addr  *unix.SockaddrInet4
+	close func()
+}
+
+func newUnanswering(t *testing.T) *unanswering {
+	t.Helper()
+	socket := func() int {
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Lets two sockets be bound to one port while only one listens.
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+			t.Fatal(err)
+		}
+		return fd
+	}
+	// keep stays bound to the port, and never listens: once the listener is
+	// closed the kernel gives the port to nothing else, which could listen
+	// there and accept the connection that is to be refused.
+	keep := socket()
+	t.Cleanup(func() { _ = unix.Close(keep) })
+	if err := unix.Bind(keep, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	sa, err := unix.Getsockname(keep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := socket()
+	u := &unanswering{fd: fd, addr: sa.(*unix.SockaddrInet4), close: sync.OnceFunc(func() { _ = unix.Close(fd) })}
+	t.Cleanup(u.close)
+	if err := unix.Bind(fd, u.addr); err != nil {
+		t.Fatal(err)
+	}
+	// A backlog of 0 is full with one connection waiting to be accepted.
+	if err := unix.Listen(fd, 0); err != nil {
+		t.Fatal(err)
+	}
+	c, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(u.addr.Port)), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	// The connection is in the queue once the listener has its last ACK,
+	// which may be a moment after the dial returned.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		ti, err := unix.GetsockoptTCPInfo(fd, unix.IPPROTO_TCP, unix.TCP_INFO)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Of a listener, Unacked counts the connections waiting to be
+		// accepted.
+		if ti.Unacked > 0 {
+			return u
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the listener's accept queue did not fill")
+		}
+	}
+}
+
+// refuse closes the listener.
+func (u *unanswering) refuse(*testing.T) { u.close() }
+
+// accept empties the queue.
+func (u *unanswering) accept(t *testing.T) {
+	c, _, err := unix.Accept(u.fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unix.Close(c)
+}
+
+// signalled runs call on a thread of its own and, for signalFor, sends that
+// thread SIGURG each time it sleeps waiting for fd's connection to be
+// answered (in the poll, or in connect itself), running answer once it has
+// sent three. It returns how many it sent and what call returned. It fails
+// the test when it cannot tell where the thread sleeps, or when call has not
+// returned within limit; fd is then shut down first, which ends any wait on
+// it, so that call is not left on a descriptor the cleanup closes and another
+// test reuses.
+func signalled(t *testing.T, fd int, call func() error, answer func(), signalFor, limit time.Duration) (int, error) {
+	t.Helper()
+	tids := make(chan int, 1)
+	done := make(chan error, 1)
+	go func() {
+		// Never unlocked: the thread exits with the goroutine.
+		runtime.LockOSThread()
+		tids <- unix.Gettid()
+		done <- call()
+	}()
+	tid := <-tids
+	signals := 0
+	// stop ends the call before the test fails, so it is not left waiting
+	// on a descriptor the cleanup closes and another test may be given.
+	stop := func() {
+		_ = unix.Shutdown(fd, unix.SHUT_RDWR)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}
+	for start := time.Now(); ; time.Sleep(time.Millisecond) {
+		select {
+		case err := <-done:
+			return signals, err
+		default:
+		}
+		if time.Since(start) > limit {
+			stop()
+			t.Fatalf("the connection was not answered within %v, having been signalled %d times", limit, signals)
+		}
+		asleep, err := asleepIn(tid, unix.SYS_PPOLL, unix.SYS_CONNECT)
+		if err != nil {
+			// The thread is gone only once call has returned.
+			select {
+			case err := <-done:
+				return signals, err
+			default:
+			}
+			stop()
+			t.Fatalf("cannot tell where the connection waits, so cannot signal it there: %v", err)
+		}
+		if !asleep || time.Since(start) > signalFor {
+			continue
+		}
+		// tgkill wakes the thread before it returns: asleep again is asleep
+		// after the last signal.
+		if err := unix.Tgkill(os.Getpid(), tid, unix.SIGURG); err != nil {
+			if errors.Is(err, unix.ESRCH) {
+				continue // call returned meanwhile, and its thread is gone
+			}
+			stop()
+			t.Fatal(err)
+		}
+		if signals++; signals == 3 {
+			answer()
+		}
+	}
+}
+
+// asleepIn reports whether thread tid sleeps in one of the system calls.
+func asleepIn(tid int, sysnos ...uintptr) (bool, error) {
+	sc, err := os.ReadFile(fmt.Sprintf("/proc/self/task/%d/syscall", tid))
+	if err != nil {
+		return false, err
+	}
+	// The call's number while the thread is in one; "running" otherwise.
+	f := strings.Fields(string(sc))
+	if len(f) == 0 {
+		return false, nil
+	}
+	if n, err := strconv.ParseUint(f[0], 10, 64); err != nil || !slices.Contains(sysnos, uintptr(n)) {
+		return false, nil
+	}
+	st, err := os.ReadFile(fmt.Sprintf("/proc/self/task/%d/stat", tid))
+	if err != nil {
+		return false, err
+	}
+	i := bytes.LastIndexByte(st, ')')
+	f = strings.Fields(string(st[i+1:]))
+	return i >= 0 && len(f) > 0 && f[0] == "S", nil
 }

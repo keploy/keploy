@@ -21,8 +21,8 @@ import (
 	composetypes "github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	cliflags "github.com/docker/cli/cli/flags"
-	"github.com/docker/compose/v2/pkg/api"
-	"github.com/docker/docker/client"
+	"github.com/docker/compose/v5/pkg/api"
+	"github.com/moby/moby/client"
 )
 
 // composeProjectNameEnv is the variable compose itself consults when no
@@ -32,8 +32,20 @@ const composeProjectNameEnv = "COMPOSE_PROJECT_NAME"
 
 // ComposeRunner drives one compose project through the compose library.
 type ComposeRunner struct {
-	svc     api.Compose
+	cli     command.Cli
 	project *composetypes.Project
+	// progressGiven: the CLI's stderr is ComposeRunnerOptions.Progress.
+	progressGiven bool
+}
+
+// service is the compose service for one operation. Each operation gets its
+// own, as each `docker compose` command does, because the progress display it
+// reports through (composeProgress) belongs to one operation: on a terminal it
+// redraws the block it last drew, so the teardown's Down, sharing Up's, would
+// move the cursor up over whatever keploy printed in between -- the end of
+// its test summary -- and show Up's rows again.
+func (r *ComposeRunner) service() (api.Compose, error) {
+	return newComposeBackend(r.cli, r.progressGiven)
 }
 
 // composeLogConsumer forwards container output to the same writers the
@@ -59,8 +71,23 @@ func (c composeLogConsumer) Status(container, msg string) {
 	fmt.Fprintf(c.out, "%s  %s\n", container, msg)
 }
 
-// newComposeCLI builds the command.Cli the compose service needs, backed by the
-// Docker client keploy already holds.
+// NewComposeAPIClient builds the Engine API client NewComposeRunner drives the
+// compose library through.
+//
+// It is the compose library's own client type: compose v5 and docker/cli v29
+// are built on github.com/moby/moby/client, not on the github.com/docker/docker
+// client the rest of keploy holds. It reads the same environment variables New
+// reads for that one (DOCKER_HOST, DOCKER_TLS_VERIFY, DOCKER_CERT_PATH,
+// DOCKER_API_VERSION) and negotiates the API version, which moby's client does
+// by default, so the two reach the same daemon. Unlike docker/docker's, moby's
+// client refuses a malformed DOCKER_API_VERSION here rather than on first use,
+// and does not negotiate below API 1.40 (Docker 19.03).
+func NewComposeAPIClient() (client.APIClient, error) {
+	return client.New(client.FromEnv)
+}
+
+// newComposeCLI builds the command.Cli the compose service needs, backed by
+// apiClient.
 //
 // Initialize must be called even though the API client is supplied: DockerCli's
 // lazy init resolves the docker endpoint BEFORE it notices a client is already
@@ -70,12 +97,16 @@ func (c composeLogConsumer) Status(container, msg string) {
 // to that by calling os.Exit(1), which would take keploy down with no error.
 //
 // The context is pinned to "default" rather than autodetected so this object
-// can never resolve to a different daemon than keploy's own client, which is
-// built with client.FromEnv and honours DOCKER_HOST alone (docker contexts are
-// not consulted). Every compose operation runs through the supplied client
+// can never resolve to a different daemon than apiClient, which is built with
+// client.FromEnv and honours DOCKER_HOST alone (docker contexts are not
+// consulted). Every compose operation runs through the supplied client
 // regardless; the endpoint only supplies metadata.
-func newComposeCLI(apiClient client.APIClient) (command.Cli, error) {
-	dockerCli, err := command.NewDockerCli(command.WithAPIClient(apiClient))
+func newComposeCLI(apiClient client.APIClient, progress io.Writer) (command.Cli, error) {
+	ops := []command.CLIOption{command.WithAPIClient(apiClient)}
+	if progress != nil {
+		ops = append(ops, command.WithErrorStream(progress))
+	}
+	dockerCli, err := command.NewDockerCli(ops...)
 	if err != nil {
 		return nil, fmt.Errorf("build compose docker cli: %w", err)
 	}
@@ -103,13 +134,19 @@ type ComposeRunnerOptions struct {
 	ProjectName string
 	// WorkingDir is --project-directory, or the process cwd when not given.
 	WorkingDir string
+	// Progress is where compose reports what it does to the project's
+	// containers, networks and images. When nil: os.Stderr, or os.Stdout under
+	// COMPOSE_STATUS_STDOUT (see composeProgress). compose writes it from
+	// several goroutines, and an attached Up and the teardown's Down at once,
+	// so it must be safe for concurrent writes, as an *os.File is.
+	Progress io.Writer
 }
 
 // NewComposeRunner builds a runner for an in-memory compose document.
 //
-// apiClient is the Docker Engine client keploy already holds — the same one
-// docker.Client embeds — so this adds no second connection and no second
-// configuration source.
+// apiClient is the Engine API client every compose operation runs through,
+// built by NewComposeAPIClient: the same configuration source as the client
+// docker.Client embeds, in the type the compose library takes.
 //
 // The command.Cli it builds is an in-process object, not a subprocess: no
 // `docker` binary is executed. It does read $DOCKER_CONFIG/config.json to
@@ -134,7 +171,7 @@ func NewComposeRunner(ctx context.Context, apiClient client.APIClient, opts Comp
 		return nil, fmt.Errorf("resolve compose working directory: %w", err)
 	}
 
-	dockerCli, err := newComposeCLI(apiClient)
+	dockerCli, err := newComposeCLI(apiClient, opts.Progress)
 	if err != nil {
 		return nil, err
 	}
@@ -161,11 +198,12 @@ func NewComposeRunner(ctx context.Context, apiClient client.APIClient, opts Comp
 		return nil, fmt.Errorf("prepare compose project: %w", err)
 	}
 
-	svc, err := newComposeBackend(dockerCli)
-	if err != nil {
+	// Built here once only to fail here, where a build without the library
+	// says so; each operation builds its own (service).
+	if _, err := newComposeBackend(dockerCli, opts.Progress != nil); err != nil {
 		return nil, err
 	}
-	return &ComposeRunner{svc: svc, project: project}, nil
+	return &ComposeRunner{cli: dockerCli, project: project, progressGiven: opts.Progress != nil}, nil
 }
 
 // syntheticComposeFilename names the in-memory document. It is never read from
@@ -366,14 +404,18 @@ func (r *ComposeRunner) attachTo() []string {
 //
 // SIGNALS ARE NOT OURS ALONE while Up runs. Because Attach is non-nil, compose
 // takes the attached path and registers its own handler —
-// signal.Notify(SIGINT, SIGTERM), compose v2.40.3 pkg/compose/up.go:70 — for
+// signal.Notify(SIGINT, SIGTERM), compose v5.5.1 pkg/compose/up.go:96 — for
 // the duration of the call. So a Ctrl+C or a pod SIGTERM starts compose's
 // graceful stop, with its own per-service grace, at the same time as keploy's
 // bounded teardown. The two do not conflict (both are stopping the same
 // project) but the total teardown time is the slower of them, not keploy's
 // bound alone.
 func (r *ComposeRunner) Up(ctx context.Context, opts ComposeUpOptions, out, errW io.Writer) error {
-	return r.svc.Up(ctx, r.project, api.UpOptions{
+	svc, err := r.service()
+	if err != nil {
+		return err
+	}
+	return svc.Up(ctx, r.project, api.UpOptions{
 		Create: api.CreateOptions{
 			Recreate:             api.RecreateDiverged,
 			RecreateDependencies: api.RecreateDiverged,
@@ -392,7 +434,11 @@ func (r *ComposeRunner) Up(ctx context.Context, opts ComposeUpOptions, out, errW
 // Pull fetches every image the project references, resolving registry
 // credentials through the same config.json the CLI would read.
 func (r *ComposeRunner) Pull(ctx context.Context, quiet bool) error {
-	return r.svc.Pull(ctx, r.project, api.PullOptions{Quiet: quiet})
+	svc, err := r.service()
+	if err != nil {
+		return err
+	}
+	return svc.Pull(ctx, r.project, api.PullOptions{Quiet: quiet})
 }
 
 // Down tears the project down. It is the direct analogue of the
@@ -403,7 +449,11 @@ func (r *ComposeRunner) Pull(ctx context.Context, quiet bool) error {
 // Removing them here would silently discard a user's database between
 // test-sets.
 func (r *ComposeRunner) Down(ctx context.Context, timeout time.Duration) error {
-	return r.svc.Down(ctx, r.project.Name, api.DownOptions{
+	svc, err := r.service()
+	if err != nil {
+		return err
+	}
+	return svc.Down(ctx, r.project.Name, api.DownOptions{
 		Project: r.project,
 		Timeout: &timeout,
 	})
@@ -428,7 +478,11 @@ type ServiceState struct {
 // `-a` matters: the classifier has to see a service that already exited, which
 // is exactly the row a running-only listing would drop.
 func (r *ComposeRunner) Ps(ctx context.Context) ([]ServiceState, error) {
-	containers, err := r.svc.Ps(ctx, r.project.Name, api.PsOptions{Project: r.project, All: true})
+	svc, err := r.service()
+	if err != nil {
+		return nil, err
+	}
+	containers, err := svc.Ps(ctx, r.project.Name, api.PsOptions{Project: r.project, All: true})
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +490,7 @@ func (r *ComposeRunner) Ps(ctx context.Context) ([]ServiceState, error) {
 	for _, c := range containers {
 		states = append(states, ServiceState{
 			Service:  c.Service,
-			State:    c.State,
+			State:    string(c.State),
 			ExitCode: c.ExitCode,
 			ID:       c.ID,
 			Labels:   c.Labels,
@@ -449,7 +503,11 @@ func (r *ComposeRunner) Ps(ctx context.Context) ([]ServiceState, error) {
 // service key. The agent's container_name is random per process, so it can only
 // be found by service, never by name.
 func (r *ComposeRunner) ContainerIDsForService(ctx context.Context, service string) ([]string, error) {
-	containers, err := r.svc.Ps(ctx, r.project.Name, api.PsOptions{
+	svc, err := r.service()
+	if err != nil {
+		return nil, err
+	}
+	containers, err := svc.Ps(ctx, r.project.Name, api.PsOptions{
 		Project:  r.project,
 		All:      true,
 		Services: []string{service},

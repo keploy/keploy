@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -204,8 +205,8 @@ func TestDialsUpstream(t *testing.T) {
 // the same end replaces.
 func TestPredialsAreReapedAndReplaced(t *testing.T) {
 	addr, _ := listenCounting(t)
-	dial := func() net.Conn {
-		c, err := net.Dial("tcp", addr)
+	dial := func() *connseq.Upstream {
+		c, err := util.DialUpstream(context.Background(), nil, "tcp", addr)
 		if err != nil {
 			t.Fatal(err)
 		}

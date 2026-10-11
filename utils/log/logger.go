@@ -319,22 +319,26 @@ func New() (*zap.Logger, *os.File, error) {
 		return NewANSIConsoleEncoder(config), nil
 	})
 
-	logFile, err := os.OpenFile("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
+	// The log file is this run's only when it is safely so (LogFileName); a
+	// run that refuses the file there logs to the console, and says why.
+	logFile, refused, err := openLogFile()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
-	}
-
-	err = os.Chmod("keploy-logs.txt", 0777)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
 	}
 
 	LogCfg = defaultLogCfg()
 
 	// Build the core with our custom encoder
-	core := consoleCore(LogCfg, zapcore.NewMultiWriteSyncer(primarySyncer(), zapcore.AddSync(logFile)), LogCfg.Level)
+	sink := primarySyncer()
+	if logFile != nil {
+		sink = zapcore.NewMultiWriteSyncer(sink, zapcore.AddSync(logFile))
+	}
+	core := consoleCore(LogCfg, sink, LogCfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
+	if refused != "" {
+		logger.Warn("not writing "+LogFileName+" in this directory; logging to the console only", zap.String("reason", refused))
+	}
 	return logger, logFile, nil
 }
 

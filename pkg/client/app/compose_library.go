@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/compose/v2/pkg/api"
+	"github.com/docker/compose/v5/pkg/api"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -60,10 +60,18 @@ func (a *App) composeRunner(ctx context.Context) (composeStack, error) {
 
 // newLibraryComposeStack is the production builder: the real compose library,
 // scoped to the same project the equivalent `docker compose` invocation would
-// have resolved.
+// have resolved. composeRunner calls it holding composeRunnerMu, which guards
+// composeAPI.
 func (a *App) newLibraryComposeStack(ctx context.Context) (composeStack, error) {
 	projectName, projectDir := composeProjectScope(a.cmd)
-	return docker.NewComposeRunner(ctx, a.docker, docker.ComposeRunnerOptions{
+	if a.composeAPI == nil {
+		apiClient, err := docker.NewComposeAPIClient()
+		if err != nil {
+			return nil, fmt.Errorf("configure the compose Engine API client: %w", err)
+		}
+		a.composeAPI = apiClient
+	}
+	return docker.NewComposeRunner(ctx, a.composeAPI, docker.ComposeRunnerOptions{
 		Content:     a.composeContent,
 		ProjectName: projectName,
 		WorkingDir:  projectDir,

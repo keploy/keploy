@@ -167,6 +167,48 @@ type GapResyncCapable interface {
 	CanResyncAfterGap() bool
 }
 
+// EndAtHoleCapable is the optional capability interface of a parser that
+// cannot re-align after a hole (GapResyncCapable not implemented, or answered
+// no) and reads each direction of its connection to that direction's own end.
+// Optional, like GapResyncCapable: the relay type-asserts for it.
+//
+// Such a parser is fed nothing of a direction after its hole, but without
+// this it is not told where the hole is: the direction is not ended, so the
+// parser waits for bytes that will not come. A parser that runs behind its
+// capture cannot place the hole from the incomplete-mock flag either: the
+// relay sets it when the chunk is lost, and the parser takes it when it reads
+// its next chunk, which can be a full queue of chunks teed before the hole
+// later. Everything the relay still delivers was teed before the hole.
+//
+// Returning true asks the relay to end a direction at its hole: once every
+// chunk teed before it is delivered, the direction's FakeConn returns io.EOF,
+// and the session says the stream ended at a hole, and why
+// (supervisor.Session.EndedAtHole), so the parser can tell it from the end of
+// the connection. The relay then marks no mock incomplete for the lost chunk,
+// nor for the chunks it refuses after it: a mark voids whichever mock is
+// emitted next, which is one from before the hole. The other direction is fed
+// as before, until the connection ends.
+//
+// It asserts that the parser reads each direction to its own end, and tells a
+// hole's end from the connection's (supervisor.Session.EndedAtHole): one that
+// does not would record what the hole cut as though the connection had closed
+// there. Mid-connection, only a parser that claims it sees one direction end
+// while the other goes on. Whenever the parser returns, at the end of both
+// directions or before, the relay goes on forwarding the application's bytes
+// until a peer closes: a parser's return never ends it.
+//
+// keploy/integrations' HTTP/2 recorder implements it, and asserts so at
+// compile time, so renaming the interface or its method breaks that build
+// rather than silently leaving the recorder waiting at its holes.
+type EndAtHoleCapable interface {
+	// CanEndAtHole reports whether this parser wants a direction that lost a
+	// chunk ended at the hole (see EndAtHoleCapable). It is consulted once
+	// per connection, before the relay starts, so it must not depend on
+	// per-connection state. A parser that can re-align after a hole keeps
+	// its feed whatever this answers.
+	CanEndAtHole() bool
+}
+
 func Register(name IntegrationType, p *Parsers) {
 	Registered[name] = p
 }

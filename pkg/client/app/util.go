@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/compose/v2/pkg/api"
+	"github.com/docker/compose/v5/pkg/api"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -280,7 +280,7 @@ func composeUpSemantics(cmd string) docker.ComposeUpOptions {
 		}
 	}
 	// --exit-code-from IMPLIES --abort-on-container-exit. The CLI does this
-	// itself (compose v2.40.3 cmd/compose/up.go), and without it a command
+	// itself (compose v5.5.1 cmd/compose/up.go), and without it a command
 	// carrying only --exit-code-from would leave Up blocking after the app
 	// exited, where the shell-out returns. --abort-on-container-failure is the
 	// documented exception and keeps precedence.

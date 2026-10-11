@@ -35,6 +35,40 @@ New-Item -ItemType Directory -Path $work | Out-Null
 $fake = Join-Path $work 'fake-docker.ps1'
 $stateFile = Join-Path $work 'state.json'
 
+# Add-Line appends a line to a file that a case may be reading at that very
+# moment: the background cases below poll the logs and event files their
+# drivers write, and the fake docker's call log, while the processes under
+# test append to them. The fake docker and the drivers dot-source it from
+# here. Not Add-Content: Windows PowerShell 5.1 opens the file sharing it for
+# writing only (PowerShell/PowerShell#8091 changed that in PowerShell 6.2), so
+# it fails, "being used by another process", whenever the case has the file
+# open to read it. The line is then lost, as an error on a stream no case
+# showed, and a case waiting for it fails at its deadline however fast the
+# runner is. That fits "did not say it was waiting within 120s", six times
+# between run 37144006052 and run 37755316184, and "within 300s" the one
+# time that deadline was tried (run 37438550485): lines missing from the
+# middle of the log (run 37649266092), and the script still in its wait.
+# Add-Line opens the file sharing it for reading too, as every reader here
+# opens it, and writes the line in one go. A line it still cannot write is
+# said on the error stream, never thrown: in the fake docker a throw would
+# reach its trap and turn the docker call itself into a failed one, which
+# the script under test acts on.
+$addLine = Join-Path $work 'add-line.ps1'
+Set-Content -Path $addLine -Encoding ASCII -Value @'
+function Add-Line([string]$Path, [string]$Line) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Line + [Environment]::NewLine)
+    $fs = $null
+    try {
+        $fs = New-Object IO.FileStream($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        $fs.Write($bytes, 0, $bytes.Length)
+    } catch {
+        Write-Error -ErrorAction Continue -Message "could not add a line to ${Path}: $($_.Exception.Message)"
+    } finally {
+        if ($null -ne $fs) { $fs.Dispose() }
+    }
+}
+'@
+
 # The fake docker. Understands exactly the calls the scripts make, with
 # docker's semantics (the name filter is an unanchored match); anything else
 # fails loudly so a new call cannot silently get an empty answer.
@@ -50,8 +84,10 @@ Set-Content -Path $fake -Encoding ASCII -Value @'
 # ends: its exit code, the daemonDown and psDown it read from the state, and
 # why when it failed. A failing case can then tell a call that found the
 # daemon down from one that threw, and a call with no end line died on the
-# way: killed, or its PowerShell never got that far.
+# way: killed, or its PowerShell never got that far. A case may be reading
+# that file as a call writes it, hence Add-Line, from the file beside this.
 $ownProcess = $MyInvocation.CommandOrigin -eq 'Runspace'
+. (Join-Path $PSScriptRoot 'add-line.ps1')
 # Not read yet. Run inside the calling script, an unset $state would be the
 # caller's.
 $state = $null
@@ -61,7 +97,7 @@ function Exit-Fake([int]$code, [string]$why = '') {
         if ($why) { $how = ": $why" }
         $read = 'state not read'
         if ($null -ne $state) { $read = "daemonDown $($state.daemonDown), psDown $($state.psDown)" }
-        Add-Content -LiteralPath $env:FAKE_DOCKER_CALLS -Value ("  -> exit {0} (pid {1} at {2:HH:mm:ss.fff}, {3}){4}" -f $code, $PID, [DateTime]::UtcNow, $read, $how)
+        Add-Line $env:FAKE_DOCKER_CALLS ("  -> exit {0} (pid {1} at {2:HH:mm:ss.fff}, {3}){4}" -f $code, $PID, [DateTime]::UtcNow, $read, $how)
     }
     if ($why) {
         if ($ownProcess) { [Console]::Error.WriteLine($why) } else { Write-Error $why }
@@ -70,7 +106,7 @@ function Exit-Fake([int]$code, [string]$why = '') {
 }
 trap { Exit-Fake 3 "fake docker threw: $_" }
 if ($env:FAKE_DOCKER_CALLS) {
-    Add-Content -LiteralPath $env:FAKE_DOCKER_CALLS -Value ("{0} (pid {1} at {2:HH:mm:ss.fff}, .up {3})" -f "$args", $PID, [DateTime]::UtcNow, (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up"))
+    Add-Line $env:FAKE_DOCKER_CALLS ("{0} (pid {1} at {2:HH:mm:ss.fff}, .up {3})" -f "$args", $PID, [DateTime]::UtcNow, (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up"))
 }
 $state = Get-Content -Raw -Path $env:FAKE_DOCKER_STATE | ConvertFrom-Json
 function Save { $state | ConvertTo-Json -Depth 5 | Set-Content -Path $env:FAKE_DOCKER_STATE -Encoding ASCII }
@@ -278,15 +314,20 @@ function Start-Background($script, [hashtable]$params, [hashtable]$blocks = @{},
 }
 # What it has written so far, and anything that stopped it. These helpers
 # also take a script started in a process of its own (Start-Ensure below):
-# Proc is that process, and Log the file it writes to.
+# Proc is that process, and Log the file it writes to. Once it has ended,
+# that is followed by its stderr and stdout, where its driver's own errors go
+# (one writing the log, say); once Stop-Background has stopped it, it is what
+# it had written by then.
 function Read-Background($bg) {
     if ($bg.Proc) {
+        if ($null -ne $bg.Final) { return $bg.Final }
         $text = ''
         try {
             $fs = [IO.File]::Open($bg.Log, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
             try { $text = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() }
         } catch { }
-        if ($bg.Proc.HasExited) { $text += $bg.Err.Result + $bg.StdOut.Result }
+        # Bounded: a docker call it started can still hold the pipes.
+        if ($bg.Proc.HasExited) { foreach ($t in @($bg.Err, $bg.StdOut)) { if ($t.Wait(10000)) { $text += $t.Result } } }
         return $text
     }
     $lines = @(for ($i = 0; $i -lt $bg.Out.Count; $i++) { "$($bg.Out[$i])" })
@@ -314,9 +355,14 @@ function Get-BackgroundExit($bg) {
     if ($bg.Proc) { if ($bg.Proc.HasExited) { return $bg.Proc.ExitCode } else { return $null } }
     if ((Read-Background $bg) -match '(?m)^exit=(\d+)\s*$') { [int]$Matches[1] } else { $null }
 }
+# A case that fails while the process is still going reports what
+# Read-Background returns after this: with its stderr, which it could not
+# read while the process ran.
 function Stop-Background($bg) {
     if ($bg.Proc) {
         if (-not $bg.Proc.HasExited) { try { $bg.Proc.Kill() } catch { } }
+        [void]$bg.Proc.WaitForExit(10000)
+        $bg | Add-Member -NotePropertyName Final -NotePropertyValue (Read-Background $bg) -Force
         $bg.Proc.Dispose()
         return
     }
@@ -1400,6 +1446,70 @@ try {
         (Ensured $r 1 @()), (Says $r '::error::Docker Desktop was NOT restarted: docker-desktop.started' "the error"), (Locks $r @())
     )
 
+    # The fake docker's call log is only a record. When a line cannot go in
+    # (here another process holds the file with no sharing), the call still
+    # answers exactly as it does with the log free - in a process of its own,
+    # as ensure-docker.ps1 runs it, and inside the calling script, as the
+    # reaper runs it - and says on stderr that the line is missing. A failed
+    # docker call instead would be one the script under test acts on.
+    function Invoke-FakeAlone {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$fake`" info"
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $p.StandardOutput.ReadToEndAsync(); $stderr = $p.StandardError.ReadToEndAsync()
+        $code = 'none: still going after 60s'
+        if ($p.WaitForExit(60000)) { $p.WaitForExit(); $code = $p.ExitCode } else { try { $p.Kill() } catch { $code += ', and could not be killed' } }
+        $p.Dispose()
+        $text = @{ Out = ''; Err = '' }
+        if ($stdout.Wait(10000)) { $text.Out = "$($stdout.Result)".Trim() }
+        if ($stderr.Wait(10000)) { $text.Err = "$($stderr.Result)" }
+        [pscustomobject]@{ Code = $code; Out = $text.Out; Err = $text.Err }
+    }
+    # A throw out of the fake fails this case, as Invoke-Script's do, instead
+    # of aborting the run.
+    function Invoke-FakeInside {
+        $global:LASTEXITCODE = 0
+        $all = New-Object System.Collections.ArrayList
+        try {
+            & { $ErrorActionPreference = 'Continue'; & $fake info 2>&1 } | ForEach-Object { [void]$all.Add($_) }
+            $code = $LASTEXITCODE
+        } catch {
+            [void]$all.Add($_)
+            $code = "none: it threw"
+        }
+        [pscustomobject]@{
+            Code = $code
+            Out  = (@($all | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join "`n").Trim()
+            Err  = (@($all | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join "`n")
+        }
+    }
+    Set-State @()
+    $savedCalls = $env:FAKE_DOCKER_CALLS
+    $env:FAKE_DOCKER_CALLS = Join-Path (New-Dir 'calls') 'calls'
+    $free = @(); $heldBy = @()
+    try {
+        $free = @((Invoke-FakeAlone), (Invoke-FakeInside))
+        $hold = New-Object IO.FileStream($env:FAKE_DOCKER_CALLS, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try { $heldBy = @((Invoke-FakeAlone), (Invoke-FakeInside)) } finally { $hold.Dispose() }
+    } finally {
+        $env:FAKE_DOCKER_CALLS = $savedCalls
+    }
+    $problems = @(); $said = ''
+    foreach ($i in 0, 1) {
+        $how = @('in a process of its own', 'inside the calling script')[$i]
+        $f = $free[$i]; $h = $heldBy[$i]
+        $said += "$how, log free: exit $($f.Code) [$($f.Out)] stderr [$($f.Err)]`n$how, log held: exit $($h.Code) [$($h.Out)] stderr [$($h.Err)]`n"
+        if (($f.Code -ne 0) -or (-not $f.Out) -or ($f.Err -match 'could not add a line')) { $problems += "$how, with the log free the call did not answer cleanly" }
+        if (($h.Code -ne $f.Code) -or ($h.Out -ne $f.Out)) { $problems += "$how, with the log held the call answered exit $($h.Code) [$($h.Out)], want exit $($f.Code) [$($f.Out)] as with it free" }
+        if ($h.Err -notmatch 'could not add a line to') { $problems += "$how, with the log held the call did not say its line is missing" }
+    }
+    Report "a docker call whose line the fake's call log cannot take answers as it does with the log free, and says the line is missing" ([pscustomobject]@{ Output = $said }) $problems
+
     # Another runner's start or restart is under way. The runs below are in
     # the background, so that the test can play the other runners, and each
     # is a PowerShell process of its own, as each runner's is. (Not a
@@ -1413,13 +1523,16 @@ try {
     # hashtable), and $running is the body of -TestDesktopRunning. Time is
     # real here (PollSeconds 1), and
     # the cases move on events, not on timing: the deadlines only bound a
-    # failure.
+    # failure. The cases read the log and the events while the run writes
+    # them, so every line goes in with Add-Line: one Add-Content lost there
+    # is an event that never comes.
     $ensureDriver = @'
 $ErrorActionPreference = 'Continue'
+. '@@ADDLINE@@'
 $drvLog = '@@LOG@@'; $drvLockDir = '@@LOCKDIR@@'; $drvEvents = '@@EVENTS@@'; $drvState = '@@STATE@@'
 function Get-MarkerSeen {
     $m = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $drvLockDir -Filter 'docker-prune-*.inprogress')
-    if ($m.Count) { Microsoft.PowerShell.Management\Add-Content -LiteralPath "$drvEvents.marked" -Value $m[0].LastWriteTimeUtc.Ticks; return '+marker' }
+    if ($m.Count) { Add-Line "$drvEvents.marked" $m[0].LastWriteTimeUtc.Ticks; return '+marker' }
     ''
 }
 @@PRELUDE@@
@@ -1428,17 +1541,17 @@ $drvParams = @{
     BackoffSeconds = 0; PollSeconds = 1; ReadyTimeoutSeconds = 60; StabilizeSeconds = 0; CallTimeoutSeconds = 60
     DesktopExe = 'C:\no\such\Docker Desktop.exe'
     TestDesktopRunning = { @@RUNNING@@ }
-    StopDesktop = { Microsoft.PowerShell.Management\Add-Content -LiteralPath $drvEvents -Value "stop$(Get-MarkerSeen)" }
+    StopDesktop = { Add-Line $drvEvents "stop$(Get-MarkerSeen)" }
     StartDesktop = {
-        Microsoft.PowerShell.Management\Add-Content -LiteralPath $drvEvents -Value "start$(Get-MarkerSeen)"
+        Add-Line $drvEvents "start$(Get-MarkerSeen)"
         Microsoft.PowerShell.Management\Set-Content -LiteralPath "$drvState.up" -Value up
     }
     GetRunStatus = { param($repo, $run, $attempt) @@RUNSTATUS@@ }
     @@EXTRA@@
 }
-& '@@ENSURE@@' @drvParams *>&1 | ForEach-Object { Microsoft.PowerShell.Management\Add-Content -LiteralPath $drvLog -Value "$_" }
+& '@@ENSURE@@' @drvParams *>&1 | ForEach-Object { Add-Line $drvLog "$_" }
 $drvCode = $LASTEXITCODE
-Microsoft.PowerShell.Management\Add-Content -LiteralPath $drvLog -Value "exit=$drvCode"
+Add-Line $drvLog "exit=$drvCode"
 exit $drvCode
 '@
     function Start-Ensure([string]$lockDir, [string]$events, [switch]$DesktopDown, [string]$prelude = '', [string]$getRunStatus = '$null', [string]$extra = '', [string]$running = '') {
@@ -1452,7 +1565,7 @@ exit $drvCode
         }
         $text = $ensureDriver.Replace('@@PRELUDE@@', $prelude).Replace('@@RUNNING@@', $running).Replace('@@RUNSTATUS@@', $getRunStatus).Replace('@@EXTRA@@', $extra).
             Replace('@@LOG@@', $log).Replace('@@LOCKDIR@@', $lockDir).Replace('@@EVENTS@@', $events).Replace('@@STATE@@', $env:FAKE_DOCKER_STATE).
-            Replace('@@FAKE@@', $fake).Replace('@@ENSURE@@', $ensure)
+            Replace('@@FAKE@@', $fake).Replace('@@ENSURE@@', $ensure).Replace('@@ADDLINE@@', $addLine)
         Set-Content -LiteralPath $driver -Encoding ASCII -Value $text
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -1493,7 +1606,7 @@ exit $drvCode
 $env:FAKE_DOCKER_CALLS = '@@CALLS@@'
 function Get-ChildItem {
     $items = Microsoft.PowerShell.Management\Get-ChildItem @args
-    if ($args -contains 'docker-prune-*.inprogress') { Microsoft.PowerShell.Management\Add-Content -LiteralPath '@@LISTED@@' -Value x }
+    if ($args -contains 'docker-prune-*.inprogress') { Add-Line '@@LISTED@@' x }
     $items
 }
 '@ -replace '@@CALLS@@', $callsFile -replace '@@LISTED@@', $listedFile
@@ -1535,6 +1648,13 @@ function Get-ChildItem {
             if ($left.Count) { $problems += "left $($left -join ', ')" }
         } finally {
             Stop-Background $bg
+        }
+        # When it fails, also the docker calls the run made, each with how it
+        # ended, and how often it looked for markers: a log with lines missing
+        # is then told from a run that never got as far as the lines say.
+        $said = Read-Background $bg
+        if ($problems.Count) {
+            $said += "`n---- docker calls`n" + (@(Get-Events $callsFile) -join "`n") + "`n---- looks for markers: $((Get-Events $listedFile).Count)"
         }
         Report "Docker Desktop is not started or restarted while another runner's $($v.What) has its marker down; Docker is checked again after it" ([pscustomobject]@{ Output = $said }) $problems
     }
@@ -1605,7 +1725,7 @@ function Get-ChildItem {
         } finally {
             Stop-Background $bg
         }
-        Report "a restart that waited for another runner's, which $($v.What), goes on correctly" ([pscustomobject]@{ Output = $said }) $problems
+        Report "a restart that waited for another runner's, which $($v.What), goes on correctly" ([pscustomobject]@{ Output = (Read-Background $bg) }) $problems
     }
 
     # The waits end at MaxWaitMinutes (0 here: at once), and the job fails
@@ -1642,7 +1762,7 @@ function Get-ChildItem {
         } finally {
             Stop-Background $bg
         }
-        Report "a wait $($v.What) ends at MaxWaitMinutes and fails the job" ([pscustomobject]@{ Output = $said }) $problems
+        Report "a wait $($v.What) ends at MaxWaitMinutes and fails the job" ([pscustomobject]@{ Output = (Read-Background $bg) }) $problems
     }
 
     # Two runners whose checks fail together put their markers down at the
@@ -1734,6 +1854,7 @@ function Set-Content {
         # Then the fake's state as the runs left it, and whether <state>.up
         # (written by the start) was there.
         if ($problems.Count) {
+            $said = @($bgs | ForEach-Object { Read-Background $_ }) -join "`n----`n"
             foreach ($id in 'a', 'b') { $said += "`n---- docker calls of run $id`n" + (@(Get-Events (Join-Path $barrierDir "calls-$id")) -join "`n") }
             $said += "`n---- the fake's state at the end, .up $(Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up")`n" +
                 "$(Get-Content -Raw -LiteralPath $env:FAKE_DOCKER_STATE -ErrorAction SilentlyContinue)"
