@@ -2797,6 +2797,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// ports); same-port-different-host disambiguation only engages where
 		// sniHost is present.
 		hsCtx := ctx
+		// A client that dialled an IP literal sends no SNI; hand the MITM the
+		// destination IP so its leaf carries the IP SAN the client checks. A
+		// CONNECT target is a host name, which reaches the MITM through
+		// SrcPortToDstURL instead.
+		if host, _, splitErr := net.SplitHostPort(dstAddr); splitErr == nil {
+			hsCtx = pTls.WithDstIP(hsCtx, net.ParseIP(host))
+		}
 		if rule.Mode == models.MODE_TEST {
 			sniHost := ""
 			if v, ok := pTls.SrcPortToDstURL.Load(sourcePort); ok {
