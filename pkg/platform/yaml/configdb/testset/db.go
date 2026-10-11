@@ -285,9 +285,9 @@ func droppedFieldNames(existingV, incomingV reflect.Value) []string {
 	return dropped
 }
 
-func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
-	filePath := filepath.Join(db.path, testSetID)
-
+// encode is the bytes Write stores for config: its secrets stripped, and a
+// field the write would drop from the config on disk said in a warning.
+func (db *Db[T]) encode(ctx context.Context, testSetID string, config T) ([]byte, error) {
 	if isNilValue(config) {
 		config = newValue[T]()
 	}
@@ -304,6 +304,28 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 	data, err := yaml.MarshalGeneric(db.Format, config)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
+		return nil, err
+	}
+	return data, nil
+}
+
+// ConfigFile returns the file Write stores config in for testSetID and the
+// bytes it would hold, without writing it: for a caller that replaces it
+// together with other files of the test set (yaml.ReplaceFiles), so the
+// config takes effect with them or not at all.
+func (db *Db[T]) ConfigFile(ctx context.Context, testSetID string, config T) (yaml.File, error) {
+	data, err := db.encode(ctx, testSetID, config)
+	if err != nil {
+		return yaml.File{}, err
+	}
+	return yaml.File{Path: filepath.Join(db.path, testSetID, "config."+db.Format.FileExtension()), Data: data}, nil
+}
+
+func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
+	filePath := filepath.Join(db.path, testSetID)
+
+	data, err := db.encode(ctx, testSetID, config)
+	if err != nil {
 		return err
 	}
 	err = yaml.WriteFileF(ctx, db.logger, filePath, "config", data, false, db.Format)

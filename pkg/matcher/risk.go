@@ -52,6 +52,38 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	hasType := len(typeChanges) > 0
 	hasValue := len(valueChanges) > 0
 
+	// The path maps above keep one value per path, an array's elements
+	// folded into one "[]" path (the last element's value wins), so they
+	// cannot see a value, a field or an element that changed inside an array
+	// while another element still holds it, and they read a reordered array
+	// as changed values. "Only new fields were added" is decided by
+	// containment instead (JSONContainsWithNoiseControl, with the noise and
+	// the ordering the comparison applied): every recorded value is still
+	// where it was, element for element, and the answer differs only by
+	// members it added. keploy test's additive-schema auto-pass trusts this
+	// grade (Low), so it passes nothing else.
+	contains, decided, _ := JSONContainsWithNoiseControl(NewValidatedJSON(exp, act), bodyNoise, ignoreOrdering, nil)
+	samePaths := !hasAdded && !hasRemoved && !hasType && !hasValue
+	if decided && contains && !samePaths && !hasRemoved && !hasType {
+		// The values the path maps call changed are how they fold arrays
+		// (a reordered array): every recorded value is still there. A field
+		// they read as removed or retyped keeps its HIGH grade below, as on
+		// main, so neither the auto-pass nor an auto-replay's noise learning
+		// (which skips HIGH) treats it as new fields only.
+		assess.ValueChanges = nil
+		assess.Reasons = []string{"Backward-compatible: only new fields added."}
+		assess.Category = []models.FailureCategory{models.SchemaAdded}
+		assess.Risk = models.Low
+		return assess, nil
+	}
+	notContained := ""
+	switch {
+	case !decided:
+		notContained = "Not graded as only new fields: the response's arrays hold too many elements to pair one by one, so it was not verified that nothing but new fields changed."
+	case !contains:
+		notContained = "An array no longer holds what it held, element for element: a value, a field or an element of it changed."
+	}
+
 	// Build reasons (human friendly)
 	if hasRemoved {
 		assess.Reasons = append(assess.Reasons, "Removed fields: "+strings.Join(removed, ", "))
@@ -59,24 +91,25 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	if hasType {
 		assess.Reasons = append(assess.Reasons, "Type changes at: "+strings.Join(typeChanges, ", "))
 	}
-	if hasAdded && !hasRemoved && !hasType && !hasValue {
-		assess.Reasons = append(assess.Reasons, "Backward-compatible: only new fields added.")
-	}
 	if hasAdded && !hasRemoved && !hasType && hasValue {
 		assess.Reasons = append(assess.Reasons, "Backward-compatible (with value differences): new fields plus value changes on existing fields.")
 	}
 	if !hasAdded && !hasRemoved && !hasType && hasValue {
 		assess.Reasons = append(assess.Reasons, "Schema identical; only values changed.")
 	}
-	if !hasAdded && !hasRemoved && !hasType && !hasValue {
+	if samePaths && notContained == "" {
 		assess.Reasons = append(assess.Reasons, "Schema and values are identical.")
+	}
+	if notContained != "" && (!decided || (!hasRemoved && !hasType && !hasValue)) {
+		// What the path maps do not show, or that the arrays went unpaired.
+		assess.Reasons = append(assess.Reasons, notContained)
 	}
 
 	// Categorize per spec:
 	// - Schema Changes (removed/type change) -> High
 	// - Schema Same (value-only)             -> Medium
 	// - Schema Addition:
-	//     * only new fields                  -> Low
+	//     * only new fields                  -> Low (contained, above)
 	//     * new + some value changes        -> Medium
 	// - No differences at all               -> SchemaUnchanged / None
 	switch {
@@ -84,26 +117,20 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 		assess.Category = []models.FailureCategory{models.SchemaBroken}
 		assess.Risk = models.High
 
-	case !hasAdded && !hasRemoved && !hasType && !hasValue:
+	case samePaths && notContained == "":
 		assess.Category = []models.FailureCategory{models.SchemaUnchanged}
 		assess.Risk = models.None
 
-	case !hasAdded && !hasRemoved && !hasType && hasValue:
+	case !hasAdded:
+		// Values changed: by the path maps, or inside an array they fold.
 		assess.Category = []models.FailureCategory{models.SchemaUnchanged}
 		assess.Risk = models.Medium
 
-	case hasAdded && !hasRemoved && !hasType && !hasValue:
-		assess.Category = []models.FailureCategory{models.SchemaAdded}
-		assess.Risk = models.Low
-
-	case hasAdded && !hasRemoved && !hasType && hasValue:
+	default:
+		// New fields, and values changed besides: by the path maps, or
+		// inside an array they fold.
 		assess.Category = []models.FailureCategory{models.SchemaAdded}
 		assess.Risk = models.Medium
-
-	default:
-		// Mixed but already-handled breaking cases (added along with removed/type change) fall here defensively.
-		assess.Category = []models.FailureCategory{models.SchemaBroken}
-		assess.Risk = models.High
 	}
 
 	return assess, nil

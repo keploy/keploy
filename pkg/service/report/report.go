@@ -19,7 +19,6 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -830,7 +829,8 @@ func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []mode
 }
 
 // shouldRenderDiff reports whether a test result is admitted to the per-test
-// detail renderer at all.
+// detail renderer at all. A test case that failed on a template variable is
+// FAILED: keploy test never demotes it to OBSOLETE.
 func shouldRenderDiff(result models.TestResult) bool {
 	return result.Status == models.TestStatusFailed || result.Result.HasMissingDeps()
 }
@@ -1001,6 +1001,27 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 	// mock, the response diff below is usually a downstream symptom (the app
 	// reacting to keploy's synthetic error), so lead with the root cause.
 	renderUnmatchedCalls(sb, test)
+
+	// Template variable places the answer did not satisfy. Each fails the
+	// test case on its own, so a test case can fail here with every row of
+	// the comparison below normal (a variable under noise, a capture that
+	// found nothing in a body the comparison does not read).
+	renderTemplateFailures(sb, test.TemplateFailures)
+	if refusedUnsent(test.TemplateFailures) {
+		// Refused when its set loaded: nothing was sent, so nothing was
+		// compared, and no status, header or body section may read as if
+		// it had been ("No differences found in status or headers.").
+		sb.WriteString("\n--------------------------------------------------------------------\n")
+		return nil
+	}
+	if len(test.TemplateFailures) > 0 && comparisonMatched(test) {
+		// Only its variable places failed it: empty status, header and body
+		// sections would read as if nothing had.
+		sb.WriteString("The comparison of its status, headers and body found no difference: the template variable places above failed this test case.\n")
+		renderDepResults(sb, test)
+		sb.WriteString("\n--------------------------------------------------------------------\n")
+		return nil
+	}
 
 	// Status & header diffs (compact)
 	metaDiff := GenerateStatusAndHeadersTableDiff(test)
@@ -1239,6 +1260,10 @@ func (r *Report) renderSingleFullBodyFailedTest(ctx context.Context, sb *strings
 	header := r.generateTestHeader(test, r.printer) // returns string via Sprintf already
 	sb.WriteString(header)
 
+	// Template variable places the answer did not satisfy: each fails the
+	// test case on its own, also where every row below is normal.
+	renderTemplateFailures(sb, test.TemplateFailures)
+
 	// Route DiffsPrinter output into this builder (no os.Stdout)
 	localOut := &writerAdapter{sb: sb}
 	logDiffs := matcherUtils.NewDiffsPrinterOut(localOut, test.Name)
@@ -1330,30 +1355,85 @@ func (r *Report) addBodyDiffs(_ context.Context, test models.TestResult, logDiff
 
 	for _, bodyResult := range test.Result.BodyResult {
 		if !bodyResult.Normal {
-			actualValue, err := r.renderTemplateValue(bodyResult.Actual)
-			if err != nil {
-				return fmt.Errorf("failed to render actual body value: %w", err)
-			}
-
-			expectedValue, err := r.renderTemplateValue(bodyResult.Expected)
-			if err != nil {
-				return fmt.Errorf("failed to render expected body value: %w", err)
-			}
-
-			logDiffs.PushBodyDiff(fmt.Sprint(expectedValue), fmt.Sprint(actualValue), nil)
+			// The report holds the expected body as the run resolved it:
+			// each placeholder already at the value it was compared with.
+			logDiffs.PushBodyDiff(bodyResult.Expected, bodyResult.Actual, nil)
 		}
 	}
 	return nil
 }
 
-// renderTemplateValue renders a templated value and returns the result
-func (r *Report) renderTemplateValue(value interface{}) (interface{}, error) {
-	_, renderedValue, err := tools.RenderIfTemplatized(value)
-	if err != nil {
-		r.logger.Error("failed to render template value", zap.Error(err))
-		return nil, err
+// renderTemplateFailures writes one line per template variable place a test
+// case failed on: where, the placeholder, and why. A placeholder refused when
+// the set loaded is said under its own heading: the test case was never sent,
+// so no answer was compared.
+func renderTemplateFailures(sb *strings.Builder, fs []models.TemplateFailure) {
+	var failed, refused []models.TemplateFailure
+	for _, f := range fs {
+		if f.Refused {
+			refused = append(refused, f)
+		} else {
+			failed = append(failed, f)
+		}
 	}
-	return renderedValue, nil
+	for _, s := range []struct {
+		heading string
+		fs      []models.TemplateFailure
+	}{
+		{"=== TEMPLATE VARIABLES THE ANSWER DID NOT SATISFY ===", failed},
+		{"=== TEMPLATE PLACEHOLDERS REFUSED WHEN THE TEST SET LOADED (THE TEST CASE WAS NOT SENT) ===", refused},
+	} {
+		if len(s.fs) == 0 {
+			continue
+		}
+		sb.WriteString(s.heading + "\n")
+		for _, f := range s.fs {
+			sb.WriteString("  " + templateFailureLine(f) + "\n")
+		}
+		sb.WriteString("\n")
+	}
+}
+
+// comparisonMatched reports whether every row of a result's comparison is
+// normal: its status (an HTTP status, a gRPC grpc-status), each header (a
+// gRPC trailer too), each body and the body's size.
+func comparisonMatched(t models.TestResult) bool {
+	if !t.Result.StatusCode.Normal {
+		return false
+	}
+	if t.Result.BodySizeResult != (models.IntResult{}) && !t.Result.BodySizeResult.Normal {
+		return false
+	}
+	for _, h := range t.Result.HeadersResult {
+		if !h.Normal {
+			return false
+		}
+	}
+	for _, h := range t.Result.TrailerResult {
+		if !h.Normal {
+			return false
+		}
+	}
+	for _, b := range t.Result.BodyResult {
+		if !b.Normal {
+			return false
+		}
+	}
+	return true
+}
+
+// refusedUnsent reports whether a test case's template failures are refusals
+// made when its set loaded: such a test case was never sent.
+func refusedUnsent(fs []models.TemplateFailure) bool {
+	if len(fs) == 0 {
+		return false
+	}
+	for _, f := range fs {
+		if !f.Refused {
+			return false
+		}
+	}
+	return true
 }
 
 // extractTestSetIDs extracts and cleans test set IDs from config
@@ -1369,17 +1449,7 @@ func (r *Report) extractTestSetIDs() []string {
 func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
 	logDiffs := matcherUtils.NewDiffsPrinter("")
 
-	actualValue, err := r.renderTemplateValue(bodyResult.Actual)
-	if err != nil {
-		return fmt.Errorf("failed to render actual value for default body diff: %w", err)
-	}
-
-	expectedValue, err := r.renderTemplateValue(bodyResult.Expected)
-	if err != nil {
-		return fmt.Errorf("failed to render expected value for default body diff: %w", err)
-	}
-
-	logDiffs.PushBodyDiff(fmt.Sprint(expectedValue), fmt.Sprint(actualValue), nil)
+	logDiffs.PushBodyDiff(bodyResult.Expected, bodyResult.Actual, nil)
 
 	if err := logDiffs.Render(); err != nil {
 		r.logger.Error("failed to render the default body diffs", zap.Error(err))

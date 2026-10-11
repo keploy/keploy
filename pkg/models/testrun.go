@@ -81,6 +81,45 @@ type TestResult struct {
 	// Consumers should treat an absent value as "data not available for
 	// this test / run mode", NOT "no mocks were consumed".
 	MockMismatches *MockMismatchInfo `json:"mock_mismatches,omitempty" yaml:"mock_mismatches,omitempty"`
+	// Captured is what this test case's {{capture ...}} placeholders took
+	// from the app's answer, in order: each key's value for the rest of the
+	// run. Absent when the expected response captures nothing.
+	Captured []TemplateCapture `json:"captured,omitempty" yaml:"captured,omitempty"`
+	// TemplateFailures are the template variable places the app's answer
+	// did not satisfy: a capture that found no value of its type, a use that
+	// did not hold its key's value; or, for a test case refused when its set
+	// loaded (never sent), each placeholder refused (Refused). Each fails
+	// the test case on its own, noise or not, unless the mock set's
+	// divergence demotes the test case to OBSOLETE (as it demotes any
+	// failure without --strict-failure); the report still names the places.
+	// Absent when there is none.
+	TemplateFailures []TemplateFailure `json:"template_failures,omitempty" yaml:"template_failures,omitempty"`
+}
+
+// TemplateFailure is one template variable place a test case failed on, or
+// one placeholder it was refused for when its test set loaded.
+type TemplateFailure struct {
+	// Where is the place: in the answer for a failure ("body.id", "header
+	// Set-Cookie.sid"), in the test case for a refusal ("request body",
+	// "response body.items[0].id").
+	Where string `json:"where" yaml:"where"`
+	// Placeholder is the placeholder as the test case writes it.
+	Placeholder string `json:"placeholder" yaml:"placeholder"`
+	// Why says what the place needed and what the answer held; for a
+	// refusal, why the placeholder cannot run and the edit to make.
+	Why string `json:"why" yaml:"why"`
+	// Refused marks a placeholder refused when the test set loaded: the test
+	// case was never sent, and there is no answer to accept.
+	Refused bool `json:"refused,omitempty" yaml:"refused,omitempty"`
+}
+
+// TemplateCapture is one value a test case's expected response took from the
+// app's answer through a {{capture ...}} placeholder.
+type TemplateCapture struct {
+	Key   string `json:"key" yaml:"key"`
+	Value string `json:"value" yaml:"value"`
+	// Where is the place in the answer: "body.items[0].id", "header Set-Cookie.sid".
+	Where string `json:"where" yaml:"where"`
 }
 
 // FailureInfo captures structured diagnostic data about why a test case failed or became obsolete.
@@ -287,6 +326,13 @@ const (
 	// (keploy-consumer-design-v2.md §5, false-pass row 0). Attached only to
 	// FAILED/OBSOLETE tests so a passing test never grows a failure label.
 	DependencyMissing FailureCategory = "DEPENDENCY_MISSING"
+	// TemplateVariable means a template variable place of the expected
+	// response was not satisfied by the answer (a {{capture ...}} that found
+	// no value of its type, or a use that did not hold its key's value), or
+	// that the test case was refused when its test set loaded, for a
+	// placeholder it cannot run with, and never sent.
+	// TestResult.TemplateFailures names each place and why.
+	TemplateVariable FailureCategory = "TEMPLATE_VARIABLE"
 )
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.

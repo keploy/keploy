@@ -302,6 +302,17 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 	return nil, false
 }
 
+// StreamChunksOf splits a streamed body into its frames the way a recording
+// stores them (StreamBody), by the response's Content-Type: SSE frames by
+// blank lines, NDJSON and streamed text by lines, an octet stream whole. It
+// is nil for a body a recording keeps flat. A replay splits what a stream
+// delivered with it, so frame i of a recording and frame i of an answer are
+// read alike.
+func StreamChunksOf(header map[string]string, body string) []HTTPStreamChunk {
+	chunks, _ := streamChunksForYAML(HTTPResp{Header: header, Body: body})
+	return chunks
+}
+
 // detectStreamBodyKind inspects the Content-Type header to decide
 // which streaming format the body uses. This determines how flat body strings
 // are reconstructed from structured chunks.
