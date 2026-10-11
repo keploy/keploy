@@ -4563,7 +4563,9 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // setup used (BeforeTestSetCompose -> MockOutgoing -> StoreMocks ->
 // SendMockFilterParamsToAgent -> MakeAgentReadyForDockerCompose) and the result
 // is confirmed via stats; when the re-registration does not take, the test set
-// fails loudly instead of proceeding mockless.
+// fails loudly instead of proceeding mockless. When it fails and the app's
+// container is no longer running, the failure names the app's exit rather than
+// a replaced agent (appExitFailure).
 //
 // The whole repair runs under agentRepairTimeout, and from the moment a
 // replacement is detected every later filter-params send carries the CLI's own
@@ -4601,8 +4603,21 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 		return nil
 	}
 
-	r.logger.Warn("keploy-agent no longer holds this test set's stored mocks (it was replaced during the docker compose bring-up); re-registering the session's mocks with the replacement before any test fires",
-		zap.String("testSetID", testSetID), zap.Int("stored", stored), zap.Int("agentLoaded", stats.Loaded))
+	// An agent that does not answer at all may have gone with the app rather
+	// than been replaced (see appExitFailure), so say which before concluding.
+	// The re-registration below runs either way, exactly as before: only what
+	// is reported changes.
+	var appExit error
+	if err != nil {
+		appExit = r.appContainerExit(ctx)
+	}
+	if appExit != nil {
+		r.logger.Warn("keploy-agent does not answer and the application's container is no longer running; re-registering the session's mocks before any test fires all the same",
+			zap.String("testSetID", testSetID), zap.Int("stored", stored), zap.Error(appExit))
+	} else {
+		r.logger.Warn("keploy-agent no longer holds this test set's stored mocks (it was replaced during the docker compose bring-up); re-registering the session's mocks with the replacement before any test fires",
+			zap.String("testSetID", testSetID), zap.Int("stored", stored), zap.Int("agentLoaded", stats.Loaded))
+	}
 
 	// Latch here, at the moment we conclude the agent was replaced, so EVERY
 	// later send carries the CLI's consumption map — not just the one below.
@@ -4628,12 +4643,21 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 		utils.LogError(r.logger, err, "failed to re-run BeforeTestSetCompose hook on the replacement agent")
 	}
 	if err := r.instrumentation.MockOutgoing(ctx, outgoingOpts); err != nil {
+		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
+			return exitErr
+		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at MockOutgoing: %w", testSetID, err)
 	}
 	if err := r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
+		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
+			return exitErr
+		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
 	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, recordedSetShapeOf(testCases)); err != nil {
+		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
+			return exitErr
+		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at the filter params: %w", testSetID, err)
 	}
 	// Same soft-fail as the setup call site: a readiness-file write that fails
@@ -4652,6 +4676,9 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 				zap.String("testSetID", testSetID))
 			return nil
 		}
+		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
+			return exitErr
+		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks could not be confirmed: %w", testSetID, err)
 	}
 	if !agentHoldsStoredCorpus(stored, confirmed.Loaded) {
@@ -4661,6 +4688,40 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	r.logger.Info("re-registered the session's mocks with the replacement keploy-agent",
 		zap.String("testSetID", testSetID), zap.Int("mocks", stored))
 	return nil
+}
+
+// appContainerExit is the application's container no longer running, as the
+// instrumentation reports it (AppContainerExitReader), and nil while it runs,
+// when the instrumentation cannot tell, or once ctx has ended: an interrupted
+// or timed-out run is reported as it always was.
+func (r *Replayer) appContainerExit(ctx context.Context) error {
+	reader, ok := r.instrumentation.(AppContainerExitReader)
+	if !ok || ctx.Err() != nil {
+		return nil
+	}
+	return reader.AppContainerExit(ctx)
+}
+
+// appExitFailure is ensureAgentHoldsStoredMocks' failure when setting
+// keploy-agent up again failed (agentErr) and the application's container is
+// no longer running, and nil when it runs or that cannot be told; the caller
+// then reports the agent as replaced, as before.
+//
+// Under docker compose the agent is a service in the app's project, and
+// compose stops every service the moment the app's container exits. The agent
+// that does not answer is then not a replaced one, and "replaced" sends
+// whoever reads it after the wrong thing: what failed is the app, and its own
+// output says why, so its recent logs are logged with the failure.
+func (r *Replayer) appExitFailure(ctx context.Context, testSetID string, agentErr error) error {
+	exit := r.appContainerExit(ctx)
+	if exit == nil {
+		return nil
+	}
+	r.logger.Error("the application's container is no longer running, and keploy-agent could not be set up for this test set during the docker compose bring-up; no test of this set was run",
+		zap.String("testSetID", testSetID), zap.Error(exit),
+		zap.String("appLogs", r.instrumentation.GetRecentAppLogs(ctx)),
+		zap.String("next_step", "fix why the application exited: its last log lines are in appLogs"))
+	return fmt.Errorf("%w during the docker compose bring-up, before test set %q ran any test; setting keploy-agent up for it failed as well: %w", exit, testSetID, agentErr)
 }
 
 func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {
