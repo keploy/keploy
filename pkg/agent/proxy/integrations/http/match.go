@@ -169,11 +169,15 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
 		if ok {
+			// Several callers can make the same request (a PAT authorize call
+			// whose body names only the resource): prefer the recording made
+			// with this request's credentials. No-op when they do not decide.
+			bestMatch = h.preferCredentialTwin(bestMatch, schemaMatched, input.header)
 			// Stateful dependency: when several recorded responses share this
 			// exact request (a counter, a created-then-read row), serve them in
 			// record order via a per-request cursor instead of always the first,
 			// then saturate on the last. No-op for a single recording.
-			bestMatch, commitCursor := h.cursorPick(bestMatch, schemaMatched, mockDb, statefulMocks)
+			bestMatch, commitCursor := h.cursorPick(bestMatch, schemaMatched, mockDb, statefulMocks, input.header)
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
 			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil, nil)
@@ -293,7 +297,12 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 // first recording; that case is handled by request→response correlation (masked
 // grouping), tracked separately — see correlation-auto-replay. This is a known,
 // documented limit, not a silent catch-all.
-func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, mockDb integrations.MockMemDb, statefulMocks bool) (*models.Mock, func()) {
+//
+// Callers: identical requests made with different credentials (live, the
+// request's headers) are different callers' sequences, not one. When the
+// credentials pick out some of the recordings (credentialPreferred), only those
+// are cursored, under a key of their own; otherwise the whole group is, as before.
+func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, mockDb integrations.MockMemDb, statefulMocks bool, live http.Header) (*models.Mock, func()) {
 	if !statefulMocks || bestMatch == nil || bestMatch.TestModeInfo.Consume != models.ConsumeCursorSaturate {
 		return bestMatch, nil
 	}
@@ -323,8 +332,12 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 			group = append(group, m)
 		}
 	}
+	group, caller := credentialPreferred(group, live)
 	if len(group) <= 1 {
-		return bestMatch, nil // single recording: nothing to advance through
+		if len(group) == 1 {
+			return group[0], nil // single recording (for this caller): nothing to advance through
+		}
+		return bestMatch, nil
 	}
 	// Record order: request timestamp is stable across replay; SortOrder is
 	// mutated on every match so it cannot be used here. ID then Name break ties.
@@ -339,12 +352,149 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 		return group[i].Name < group[j].Name
 	})
 	key := cursorKey(string(wantMethod), wantURL, wantBody)
+	if caller != "" {
+		key += "\x00caller:" + caller
+	}
 	idx := cs.MockCursorIndex(key, len(group))
 	if idx < 0 || idx >= len(group) {
 		return bestMatch, nil
 	}
 	n := len(group)
 	return group[idx], func() { cs.AdvanceMockCursor(key, idx, n) }
+}
+
+// preferCredentialTwin returns, among the schema-matched recordings of the same
+// request as bestMatch (method, URL and body), the first one recorded with the
+// live request's credentials (see credentialPreferred). It returns bestMatch
+// itself when bestMatch is one of them or when the credentials do not decide.
+func (h *HTTP) preferCredentialTwin(bestMatch *models.Mock, schemaMatched []*models.Mock, live http.Header) *models.Mock {
+	if bestMatch == nil || bestMatch.Spec.HTTPReq == nil {
+		return bestMatch
+	}
+	twins := make([]*models.Mock, 0, 4)
+	for _, m := range schemaMatched {
+		if m != nil && m.Spec.HTTPReq != nil &&
+			m.Spec.HTTPReq.Method == bestMatch.Spec.HTTPReq.Method &&
+			m.Spec.HTTPReq.URL == bestMatch.Spec.HTTPReq.URL &&
+			m.Spec.HTTPReq.Body == bestMatch.Spec.HTTPReq.Body {
+			twins = append(twins, m)
+		}
+	}
+	preferred, caller := credentialPreferred(twins, live)
+	if caller == "" {
+		return bestMatch
+	}
+	for _, m := range preferred {
+		if m == bestMatch {
+			return bestMatch
+		}
+	}
+	h.Logger.Debug("http mock: preferring the recording made with the request's credentials",
+		zap.String("mock name", preferred[0].Name), zap.String("instead of", bestMatch.Name))
+	return preferred[0]
+}
+
+// credentialPreferred narrows group, the recordings of one request (same method,
+// URL and body), to those recorded with the live request's credentials.
+//
+// Header matching is presence-only on purpose (and Authorization is default
+// header noise): credentials often differ between record and replay. But then
+// the same request made by DIFFERENT callers — an authorize call that carries
+// the caller only in Authorization — is recorded as indistinguishable copies,
+// and replay hands one caller's answer to another. A credential-like header
+// (isSensitiveHeader) whose recorded value differs between the copies tells the
+// callers apart, so the copies whose recorded values equal the request's are
+// preferred (the most equal headers win).
+//
+// It only prefers, it never rejects: when no copy's recorded value equals the
+// request's — a rotated token, a per-request signature, a value that is still
+// encrypted — group is returned unchanged with an empty caller, which is the
+// behaviour without it. Otherwise caller identifies the request's credentials
+// for a cursor key; it is a hash, so no credential is kept or logged.
+func credentialPreferred(group []*models.Mock, live http.Header) ([]*models.Mock, string) {
+	if len(group) < 2 || !hasCredentialHeader(live) {
+		return group, ""
+	}
+	// The credential-like headers whose recorded values differ within the group:
+	// only those can tell its callers apart.
+	var names []string
+	seen := map[string]struct{}{}
+	for _, m := range group {
+		for k := range m.Spec.HTTPReq.Header {
+			lk := strings.ToLower(k)
+			if _, dup := seen[lk]; dup || strings.HasPrefix(lk, "keploy") || !isSensitiveHeader(lk) {
+				continue
+			}
+			seen[lk] = struct{}{}
+			first := recordedHeaderValue(group[0], lk)
+			for _, o := range group[1:] {
+				if recordedHeaderValue(o, lk) != first {
+					names = append(names, lk)
+					break
+				}
+			}
+		}
+	}
+	if len(names) == 0 {
+		return group, ""
+	}
+	sort.Strings(names)
+	// Recorded header values are the request's lines joined by ","
+	// (pkg.ToYamlHTTPHeader); join the live ones the same way.
+	want := make([]string, len(names))
+	for i, n := range names {
+		want[i] = strings.Join(live.Values(n), ",")
+	}
+	var preferred []*models.Mock
+	best := 0
+	for _, m := range group {
+		score := 0
+		for i, n := range names {
+			if want[i] != "" && recordedHeaderValue(m, n) == want[i] {
+				score++
+			}
+		}
+		switch {
+		case score > best:
+			best, preferred = score, append(preferred[:0], m)
+		case score > 0 && score == best:
+			preferred = append(preferred, m)
+		}
+	}
+	if best == 0 {
+		return group, ""
+	}
+	var b strings.Builder
+	for i, n := range names {
+		b.WriteString(n)
+		b.WriteByte('\x00')
+		b.WriteString(want[i])
+		b.WriteByte('\x00')
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return preferred, hex.EncodeToString(sum[:])
+}
+
+// hasCredentialHeader reports whether the live request carries any
+// credential-like header, so requests without one skip credentialPreferred.
+func hasCredentialHeader(live http.Header) bool {
+	for k := range live {
+		if !strings.HasPrefix(strings.ToLower(k), "keploy") && isSensitiveHeader(k) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordedHeaderValue returns the recorded value of the request header name
+// (case-insensitive), or "" when the mock did not record it.
+func recordedHeaderValue(m *models.Mock, name string) string {
+	for k, v := range m.Spec.HTTPReq.Header {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
 }
 
 // cursorKey builds a stable per-request key so repeated identical requests share
