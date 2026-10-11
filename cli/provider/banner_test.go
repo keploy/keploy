@@ -25,7 +25,10 @@ func TestMockRunsPrintOneVersionLineWithoutATerminal(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer f.Close()
-			banner(f, tc.mock, true)
+			stdout := os.Stdout
+			os.Stdout = f
+			banner(tc.mock, true)
+			os.Stdout = stdout
 			b, _ := os.ReadFile(f.Name())
 			if got := string(b); strings.Contains(got, "▓") != tc.logo {
 				t.Fatalf("logo printed = %v, want %v: %q", !tc.logo, tc.logo, got)

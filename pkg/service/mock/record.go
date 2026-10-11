@@ -446,7 +446,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	m.summarize(sum)
 	if keep && mockCount == 0 {
-		m.logger.Warn(fmt.Sprintf("no outgoing calls were recorded (%s were)", plural(sum.Requests, "incoming request")))
+		m.logger.Warn("no outgoing calls were recorded (" + were(sum.Requests, "incoming request") + ")")
 	}
 
 	// 13. Propagate the runner's exit code so a CI 're-record on merge' job

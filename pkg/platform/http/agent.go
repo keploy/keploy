@@ -91,9 +91,11 @@ type AgentClient struct {
 	// whose answer this client has not seen yet.
 	consumedPerTest atomic.Bool
 
-	mock     bool
-	agentLog string
-	sayLog   sync.Once
+	mock      bool
+	agentLog  string
+	agentFile *os.File
+	failed    atomic.Bool
+	sayLog    sync.Once
 }
 
 // AgentReadsConsumedPerTestOnly reports whether the agent's last
@@ -1722,6 +1724,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		a.agentCmd = nil
 		a.mu.Unlock()
 		a.logger.Debug("agent process stopped")
+		a.dropAgentLog()
 		return nil
 	})
 
@@ -2579,6 +2582,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		if ctx.Err() == context.Canceled {
 			cmd.Process.Kill()
 			logger.Info("Keploy agent in docker stopped gracefully.")
+			a.dropAgentLog()
 			return nil
 		}
 		utils.LogError(logger, err, "failed to run keploy agent in docker")

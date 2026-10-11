@@ -48,6 +48,7 @@ func (a *AgentClient) agentOutput() (io.Writer, io.Writer) {
 		a.logger.Debug("could not open the agent log; the agent writes to the console", zap.Error(err))
 		return os.Stdout, os.Stderr
 	}
+	a.agentFile = f
 	a.agentLog = f.Name()
 	if abs, err := filepath.Abs(f.Name()); err == nil {
 		a.agentLog = abs
@@ -61,6 +62,15 @@ func (a *AgentClient) sayAgentLog() {
 		return
 	}
 	a.sayLog.Do(func() {
+		a.failed.Store(true)
 		a.logger.Error("agent log: "+a.agentLog, log.Show)
 	})
+}
+
+func (a *AgentClient) dropAgentLog() {
+	if a.agentFile == nil || a.failed.Load() {
+		return
+	}
+	_ = a.agentFile.Close()
+	_ = os.Remove(a.agentFile.Name())
 }

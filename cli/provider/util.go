@@ -10,16 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/utils"
-	"golang.org/x/term"
 )
-
-func banner(w *os.File, mockRun, disableANSI bool) {
-	if mockRun && !term.IsTerminal(int(w.Fd())) {
-		fmt.Fprintf(w, "keploy: version %s\n", utils.Version)
-		return
-	}
-	PrintLogo(w, disableANSI)
-}
 
 func IsMockRun(cmd *cobra.Command) bool {
 	return cmd != nil && cmd.Parent() != nil && cmd.Parent().Name() == "mock" && (cmd.Name() == "record" || cmd.Name() == "replay")
