@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -181,7 +182,16 @@ func eligibleExpectedEntries(
 // isMockSubsetWithConfig) calls it, so the two sides exclude the same kinds:
 // a kind left out of one side only makes every test that maps one of its
 // mocks look like it lost a dependency.
+//
+// Under the proven switch the expected side keeps every data-plane mock,
+// session-tier ones included (excludedFromTestMockAssertion), so the consumed
+// side must keep them too, or an untagged HTTP mock the test did consume would
+// read as unconsumed. Only the excluded kinds and the recorder-tagged
+// protocol-phase mocks are left out.
 func consumedOutsideAssertion(m models.MockState) bool {
+	if provenswitch.On() {
+		return models.ExcludedFromDependencyAssertion(m.Kind) || m.Type == "config" || m.Type == "connection"
+	}
 	return models.ExcludedFromDependencyAssertion(m.Kind) || isReusableTierState(m)
 }
 

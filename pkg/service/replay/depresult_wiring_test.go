@@ -183,7 +183,10 @@ func TestRunTestSetWiring(t *testing.T) {
 		{
 			name:       "the response diff is un-suppressed through the tested predicate",
 			assignment: "emitFailureLogs",
-			want:       []string{"shouldEmitFailureLogs", "mockSetMismatch", "AssertDependencies"},
+			// assertTestMocks, not AssertDependencies: the knob is read through
+			// r.assertTestMocks(), which answers for --assert-dependencies AND
+			// for the proven switch that turns the assertion on for everyone.
+			want: []string{"shouldEmitFailureLogs", "mockSetMismatch", "assertTestMocks"},
 			why: "Reverting this to `!mockSetMismatch` hands the user a test that --assert-dependencies " +
 				"just marked FAILED with its response diff suppressed as 're-record noise'.",
 		},
@@ -196,8 +199,11 @@ func TestRunTestSetWiring(t *testing.T) {
 			// Naming the raw field here would pin the seam to one spelling and
 			// go quiet the moment a caller sets only the other one — which is
 			// the failure this guard is supposed to catch, not cause.
+			//
+			// assertTestMocks, not AssertDependencies, for the same reason: see
+			// the emitFailureLogs row.
 			want: []string{"resolveTestOutcome", "testPass", "mockSetMismatch",
-				"NoiseStrict", "AssertDependencies", "StrictFailure"},
+				"NoiseStrict", "assertTestMocks", "StrictFailure"},
 			why: "resolveTestOutcome is where --assert-dependencies turns a PASSED-and-green test into a " +
 				"FAILED-and-red one. Passing anything other than the raw testPass and the three knobs " +
 				"silently removes a promotion.",
@@ -219,7 +225,7 @@ func TestRunTestSetWiring(t *testing.T) {
 		{
 			name: "the rows are attached to the persisted result",
 			call: "attachDepResults",
-			want: []string{"testCaseResult", "testStatus", "depAssert", "AssertDependencies"},
+			want: []string{"testCaseResult", "testStatus", "depAssert", "assertTestMocks"},
 			why: "Without this call the rows are computed and thrown away: nothing reaches the report, " +
 				"JUnit, --format json, or the DEPENDENCY_MISSING category.",
 		},

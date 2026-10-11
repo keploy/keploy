@@ -113,6 +113,12 @@ fi
 wait
 echo "Recorded test cases and mocks"
 
+# The recording as recorded, before the mutation below, for the proven-switch
+# steps at the end (12b, 12c).
+rm -rf ./pristine-run
+mkdir ./pristine-run
+cp -a ./keploy ./pristine-run/keploy
+
 # Force a mock mismatch: rewrite the recorded request PATH on the mock side.
 # HTTP schema matching compares the request URL path (not host), so changing
 # the recorded "/api/v2/..." path means the live outgoing request to
@@ -794,6 +800,123 @@ if ! jq -es 'length > 0 and all(.dependencies_checked == true and ((.effects // 
 fi
 echo "✓ the knob changed the status, not the dependency data"
 
+# ---------------------------------------------------------------------------
+# PHASE 4 — THE PROVEN SWITCH (KEPLOY_PROVEN=1, the proven model's staging
+# gate). A test fails when one of its calls got no recorded answer or when it
+# did not make a call it recorded, and which calls a test owns is what its
+# mapping lists (every data-plane mock), not DeriveLifetime's tier. So the
+# recording's HTTP_CLIENT mocks, session-tier and never checked in phases 1-2,
+# are checked here WITHOUT KEPLOY_STRICT_MOCK_WINDOW.
+# ---------------------------------------------------------------------------
+
+# 12a. The mutated recording under the switch. Step 2 proved every verdict is
+#      NOT CHECKED without it; under it every test owns its pokeapi mock, did
+#      not consume it (the path was rewritten), reports the miss, and fails.
+rm -rf ./keploy/reports
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false 2>&1 | tee proven_logs.txt
+proven_rc=${PIPESTATUS[0]}
+if grep "WARNING: DATA RACE" proven_logs.txt; then
+    echo "::error::Race condition detected in the proven-switch run"
+    exit 1
+fi
+"$REPLAY_BIN" report --format json > ndjson_proven.txt 2> ndjson_proven_err.txt
+if ! jq -es 'length > 0 and all(.status == "FAILED" and .dependencies_checked == true and ((.effects // []) | map(select(.matched == false)) | length > 0))' ndjson_proven.txt > /dev/null; then
+    echo "::error::under KEPLOY_PROVEN=1 every test of the mutated recording must own its recorded pokeapi call (membership, not tier: no KEPLOY_STRICT_MOCK_WINDOW here), report it unconsumed, and fail. Step 2 showed the same recording NOT CHECKED without the switch."
+    jq -s 'map({test_case_id, status, dependencies_checked, effects: (.effects // [] | length)})' ndjson_proven.txt
+    exit 1
+fi
+shopt -s nullglob
+proven_reports=( ./keploy/reports/test-run-*/test-set-*-report.yaml )
+shopt -u nullglob
+proven_misses=false
+for rf in "${proven_reports[@]}"; do
+    if grep -q 'unmatched_calls:' "$rf"; then
+        proven_misses=true
+    fi
+done
+if [ "$proven_misses" != true ] || [ "$proven_rc" -eq 0 ]; then
+    echo "::error::under KEPLOY_PROVEN=1 the run must report the calls that got no recorded answer (unmatched_calls) and exit non-zero; reported=$proven_misses exit=$proven_rc"
+    tail -40 proven_logs.txt
+    exit 1
+fi
+echo "✓ KEPLOY_PROVEN=1: every test owned its recorded call, the miss was reported, and the run failed (exit $proven_rc)"
+
+# 12b. THE CONTROL: the recording as recorded, under the switch. Every test
+#      makes every call it recorded and gets every answer, so every test passes
+#      and the run exits 0. This is what keeps 12a and 12c honest: DNS and
+#      protocol-phase mocks are not owned, and a consumed session-tier mock
+#      reads as consumed.
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./pristine-run --delay 7 --generateGithubActions=false 2>&1 | tee proven_pristine_logs.txt
+proven_pristine_rc=${PIPESTATUS[0]}
+"$REPLAY_BIN" report --format json --path ./pristine-run > ndjson_proven_pristine.txt 2> ndjson_proven_pristine_err.txt
+if [ "$proven_pristine_rc" -ne 0 ] || ! jq -es 'length > 0 and all(.status == "PASSED")' ndjson_proven_pristine.txt > /dev/null; then
+    echo "::error::under KEPLOY_PROVEN=1 the unmutated recording must replay green (exit $proven_pristine_rc). A red test here is a false red: a mock its test did consume read as unconsumed, or a protocol-phase/DNS mock was required of a test."
+    jq -s 'map({test_case_id, status, dependencies_checked, effects})' ndjson_proven_pristine.txt
+    tail -40 proven_pristine_logs.txt
+    exit 1
+fi
+echo "✓ KEPLOY_PROVEN=1: the unmutated recording replays green"
+
+# 12c. A RECORDED CALL THE TEST NO LONGER MAKES, AND NOTHING ELSE. In a copy of
+#      the unmutated recording, the first /api/locations test is made to own
+#      the pokeapi call of the /api/locations/<location> test too: a call it
+#      never makes. Its response still matches. Without the switch it passes
+#      (that mock is session-tier and filtered out); with it, it fails, and
+#      every other test still passes.
+rm -rf ./unconsumed-run
+mkdir ./unconsumed-run
+cp -a ./pristine-run/keploy ./unconsumed-run/keploy
+rm -rf ./unconsumed-run/keploy/reports
+uc_mappings=$(ls ./unconsumed-run/keploy/test-set-*/mappings.yaml | head -n 1)
+uc_tests_dir="$(dirname "$uc_mappings")/tests"
+owner=""
+lender=""
+for tc in "$uc_tests_dir"/*.yaml; do
+    url=$(yq '.spec.req.url' "$tc")
+    name=$(yq '.name' "$tc")
+    case "$url" in
+        */api/locations) [ -z "$owner" ] && owner="$name" ;;
+        */api/locations/*) [ -z "$lender" ] && lender="$name" ;;
+    esac
+done
+lent_mock=$(LENDER="$lender" yq '.tests[] | select(.id == strenv(LENDER)) | .mock_entries[] | select(.kind != "DNS") | .name' "$uc_mappings" | head -n 1)
+if [ -z "$owner" ] || [ -z "$lender" ] || [ -z "$lent_mock" ]; then
+    echo "::error::could not find a /api/locations test ($owner), a /api/locations/<location> test ($lender) and the latter's mapped pokeapi mock ($lent_mock) in $uc_mappings"
+    cat "$uc_mappings"
+    exit 1
+fi
+OWNER="$owner" LENDER="$lender" yq -i '(.tests[] | select(.id == strenv(OWNER)) | .mock_entries) += [(.tests[] | select(.id == strenv(LENDER)) | .mock_entries[] | select(.kind != "DNS"))]' "$uc_mappings"
+echo "made $owner own $lender's recorded call $lent_mock"
+
+for phase in off on; do
+    rm -rf ./unconsumed-run/keploy/reports
+    if [ "$phase" = on ]; then
+        KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./unconsumed-run --delay 7 --generateGithubActions=false 2>&1 | tee "unconsumed_${phase}_logs.txt"
+    else
+        "$REPLAY_BIN" test -c "./http-pokeapi" --path ./unconsumed-run --delay 7 --generateGithubActions=false 2>&1 | tee "unconsumed_${phase}_logs.txt"
+    fi
+    uc_rc=${PIPESTATUS[0]}
+    "$REPLAY_BIN" report --format json --path ./unconsumed-run > "ndjson_unconsumed_${phase}.txt" 2>/dev/null
+    if [ "$phase" = off ]; then
+        if [ "$uc_rc" -ne 0 ] || ! jq -es 'length > 0 and all(.status == "PASSED")' "ndjson_unconsumed_${phase}.txt" > /dev/null; then
+            echo "::error::control: without the switch the extra session-tier mock is not checked, so every test must pass (exit $uc_rc)"
+            jq -s 'map({test_case_id, status})' "ndjson_unconsumed_${phase}.txt"
+            exit 1
+        fi
+        continue
+    fi
+    if ! OWNER="$owner" jq -es 'length > 0 and all(if .test_case_id == env.OWNER then .status == "FAILED" and ((.effects // []) | map(select(.matched == false)) | length > 0) else .status == "PASSED" end)' "ndjson_unconsumed_${phase}.txt" > /dev/null; then
+        echo "::error::under KEPLOY_PROVEN=1, $owner, which owns a recorded call it never makes, must fail with that call reported unconsumed, and every other test must pass"
+        jq -s 'map({test_case_id, status, effects})' "ndjson_unconsumed_${phase}.txt"
+        exit 1
+    fi
+    if [ "$uc_rc" -eq 0 ]; then
+        echo "::error::under KEPLOY_PROVEN=1 a failed test must make the run exit non-zero"
+        exit 1
+    fi
+done
+echo "✓ KEPLOY_PROVEN=1: a test that no longer makes a recorded call fails, with the call named, and nothing else does"
+
 echo "mock-mismatch e2e passed:"
 echo "  - the forced HTTP /api/v2/ unmatched call was reported;"
 echo "  - with the tier as an ordinary recording leaves it, every dependency is"
@@ -803,5 +926,8 @@ echo "  - with the per-test tier in force (KEPLOY_STRICT_MOCK_WINDOW=1) the same
 echo "    recording drove the other branch: the assertion RAN and reported the"
 echo "    vanished dependency as MISSING, the inert warning stayed silent, and"
 echo "    --assert-dependencies moved those verdicts OBSOLETE -> FAILED and the"
-echo "    exit code 0 -> non-zero, which no knob-independent label can fake."
+echo "    exit code 0 -> non-zero, which no knob-independent label can fake;"
+echo "  - under KEPLOY_PROVEN=1 a test owns every data-plane mock its mapping"
+echo "    lists: the unmutated recording replays green, and a test fails when it"
+echo "    does not make a call it recorded or a call got no recorded answer."
 exit 0
