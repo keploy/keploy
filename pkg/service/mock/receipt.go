@@ -54,6 +54,10 @@ const (
 	FailedByMinCoverage     = "min-coverage"     // --min-coverage: the run covered too little, or wrote no report
 	FailedByKeploy          = "keploy"           // keploy itself did not complete the run
 	FailedByNothingVerified = "nothing-verified" // the run served none of the recorded calls, so it verified nothing
+	// FailedByCaptureIncomplete: the agent could not track a process the test
+	// command ran (its PID map was full), so that process's calls went to the
+	// real dependency, neither mocked nor counted (models.PIDMapRefusals).
+	FailedByCaptureIncomplete = "capture_incomplete"
 )
 
 // Receipt is what one `keploy mock replay` proved.

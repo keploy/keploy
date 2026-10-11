@@ -24,6 +24,36 @@ type TestReport struct {
 	TimeTaken     string       `json:"time_taken" yaml:"time_taken"`
 	CmdUsed       string       `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
 	AppLogs       string       `json:"appLogs,omitempty" yaml:"app_logs,omitempty"`
+	// CaptureVerification says whether keploy could confirm the agent
+	// intercepted every process this test set ran. Absent when there was
+	// nothing to check (an agent that does not count). The founder rule is
+	// that capture is never silent, so this reaches the report, not only a
+	// WARN log; the set's pass/fail is unchanged by it except that a verified
+	// INCOMPLETE capture already fails the set (its calls reached the real
+	// dependency).
+	CaptureVerification *CaptureVerification `json:"capture_verification,omitempty" yaml:"capture_verification,omitempty"`
+}
+
+// CaptureVerificationStatus is the outcome of checking that the agent tracked
+// every process of a test set.
+type CaptureVerificationStatus string
+
+const (
+	// CaptureIncomplete: a process went untracked (the agent's PID map was
+	// full), so a dependency call reached the real service unmocked. The set
+	// is FAILED for it.
+	CaptureIncompleteStatus CaptureVerificationStatus = "incomplete"
+	// CaptureUnverified: the agent counts untracked processes, but keploy
+	// could not read the count, so the capture could not be confirmed. The
+	// set's pass/fail is left as decided; only --strict (mock mode) fails on it.
+	CaptureUnverifiedStatus CaptureVerificationStatus = "unverified"
+)
+
+// CaptureVerification is the capture-completeness outcome carried in a
+// TestReport (and the JUnit and json projections).
+type CaptureVerification struct {
+	Status CaptureVerificationStatus `json:"status" yaml:"status"`
+	Reason string                    `json:"reason" yaml:"reason"`
 }
 
 type TestCoverage struct {
@@ -255,6 +285,18 @@ type MockOutcome struct {
 	// incomplete (ErrUnmatchedCallsUnread, under the proven switch). Missed
 	// holds what was read.
 	MissedUnread string `json:"missed_unread,omitempty"`
+	// PIDMapRefusals are the inserts into the agent's PID maps the kernel
+	// refused over its life, which under compose is the replay's: processes
+	// its hooks could not track. nil when it cannot count them, which is
+	// "unknown".
+	PIDMapRefusals *PIDMapRefusals `json:"pidMapRefusals,omitempty"`
+	// PIDMapRefusalsError is why hooks that count those refusals could not be
+	// read as the agent stopped; "" when they were read, or when the hooks do
+	// not count them at all. It is what tells the CLI "the count was lost"
+	// (completeness unproven: --strict fails it) from "this agent never
+	// counts" (an older agent, or hooks without PID maps), which a nil
+	// PIDMapRefusals alone cannot.
+	PIDMapRefusalsError string `json:"pidMapRefusalsError,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.

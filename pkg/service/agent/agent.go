@@ -782,6 +782,18 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	return errs, err
 }
 
+// PIDMapRefusals counts the inserts into the hooks' PID maps the kernel has
+// refused since they loaded, each of them a process whose calls this agent
+// could not intercept (models.PIDMapRefusals). Hooks that do not count them give
+// models.ErrPIDMapRefusalsUnsupported, "unknown".
+func (a *Agent) PIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error) {
+	r, ok := a.Hooks.(coreAgent.PIDMapReporter)
+	if !ok {
+		return models.PIDMapRefusals{}, models.ErrPIDMapRefusalsUnsupported
+	}
+	return r.PIDMapRefusals(ctx)
+}
+
 // BeginTestErrorCapture opens a per-test mock-error capture window so the
 // replayer's subsequent GetMockErrors returns only this test's misses instead
 // of draining a process-global queue. The replayer calls it before each test

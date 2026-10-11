@@ -461,6 +461,9 @@ type Replayer struct {
 	// a reason, keyed by test set and test, for the run's summary.
 	quarantinedMu sync.Mutex
 	quarantined   map[[2]string]string
+	// pidMark is where the next test set's refused PID map inserts are
+	// counted from (pidmaps.go).
+	pidMark pidMapMark
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -753,6 +756,14 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// lived just above the for-range over testSets is removed (kept
 	// in a single canonical location here).
 	cmdType := utils.CmdType(r.config.CommandType)
+
+	// The agent is up, and the application it serves has not started (not
+	// even the --keep-app-alive one below): the run's refused PID map inserts
+	// are counted from here. A compose agent comes up with its project, in
+	// RunTestSet, which marks it there.
+	if r.instrument && cmdType != utils.DockerCompose {
+		r.markPIDMaps(ctx)
+	}
 
 	// --keep-app-alive: start the user app ONCE on the outer errgroup
 	// so its lifecycle is tied to the whole replay run rather than a
@@ -1920,6 +1931,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShapeOf(testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
+		}
+
+		// The compose agent is up and the app is still parked behind its
+		// healthcheck: this test set's refused PID map inserts are counted from
+		// here. Only for an agent this test set started; one reused across
+		// test sets carries the mark the last test set left.
+		if !serveTest || r.isFirstTestSet {
+			r.markPIDMaps(ctx)
 		}
 
 		err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
@@ -4282,6 +4301,32 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatus = models.TestSetStatusFaultUserApp
 	}
 
+	// A process the agent could not track -- the kernel refused it a place in
+	// a full PID map -- made calls that were not mocked and reached the real
+	// dependency, so this test set's verdict was not reached against the
+	// recording. FAILED when it would have passed; a status that already says
+	// something went wrong keeps it. Either way the report says why first,
+	// and what the tests consumed is no basis for the prune or for
+	// mappings.yaml below: the mocks of those calls were consumed by nobody.
+	//
+	// A count that could not be read (pidMapVerdict.unverified) changes no
+	// status, but holds the prune and mappings.yaml the same way: a consumed
+	// set nothing shows is complete is no basis for deleting recorded mocks.
+	pidVerdict := r.pidMapCaptureIncomplete(ctx, testSetID)
+	captureIncomplete, captureUnverified := pidVerdict.incomplete, pidVerdict.unverified
+	if captureIncomplete != "" && testSetStatus == models.TestSetStatusPassed {
+		testSetStatus = models.TestSetStatusFailed
+	}
+	// The report says what the capture check found (the founder rule: capture
+	// is never silent). "incomplete" also fails the set, above; "unverified"
+	// leaves the verdict as decided and only records that it is unconfirmed.
+	var captureVerification *models.CaptureVerification
+	switch {
+	case captureIncomplete != "":
+		captureVerification = &models.CaptureVerification{Status: models.CaptureIncompleteStatus, Reason: captureIncomplete}
+	case captureUnverified != "":
+		captureVerification = &models.CaptureVerification{Status: models.CaptureUnverifiedStatus, Reason: captureUnverified}
+	}
 	// Under the proven switch a set none of whose tests got a verdict, its
 	// tests IGNORED, verified nothing, and is IGNORED, as a set the run skips
 	// whole is, not PASSED. Last, so a status that says more (FAILED, not
@@ -4319,12 +4364,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged}),
+		FailureReason: withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged})),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
 		LowRisk:       riskLow,
 		CmdUsed:       r.config.Test.CmdUsed,
+
+		CaptureVerification: captureVerification,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
@@ -4383,6 +4430,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		resultsComplete:     resultsComplete,
 		noAnswer:            len(noAnswerTests) > 0,
 		appUnreachable:      appUnreachable,
+		captureIncomplete:   captureIncomplete != "",
+		captureUnverified:   captureUnverified != "",
 		success:             success,
 		failure:             failure,
 		obsolete:            obsolete,
@@ -4543,6 +4592,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	case !wouldWrite:
 	case !allTestsGotAVerdict:
 		holdMappings = "not every loaded test got a verdict"
+	case captureIncomplete != "":
+		// Whatever the flag: a call of an untracked process reached the real
+		// dependency, so the mock recorded for it is in no test's entry. A
+		// file created from that lacks it for good, and --update-test-mapping
+		// would put the short entries in place of the complete ones.
+		holdMappings = "the agent could not track every process the application ran, so the calls of an untracked one are in no test's entry"
+	case captureUnverified != "":
+		// The same, unproven either way: the agent's count could not be read.
+		holdMappings = "keploy could not read whether the agent tracked every process the application ran, so the calls of an untracked one may be in no test's entry"
 	case !r.config.Test.UpdateTestMapping && (len(noAnswerTests) > 0 || internalErr || !resultsComplete || appUnreachable):
 		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
 			holdMappings = "a test got no answer, was refused or lost its result, and a new file would lack it for good"
@@ -5935,11 +5993,19 @@ func pruneInputUntrustworthy(success int, appUnreachable bool) bool {
 // consumed-mock set must be trustworthy enough to delete against. When it
 // refuses, the second value names the rule, for the "skipping mock pruning" log:
 //
+//   - capture_incomplete: the agent could not track a process the application
+//     ran (pidmaps.go). Its calls reached the real dependency, so the mocks
+//     recorded for them were consumed by nobody, and every test may have passed.
 //   - not_every_test_got_a_verdict: a subset or stopped run. The tests it did
 //     not score consumed nothing, and only mappings.yaml protects their mocks.
 //   - internal_error: keploy lost part of the run, such as a result insert.
 //   - results_unreadable: the results the rules below read are missing or short.
 //   - no_answer: a request consumed nothing for want of an answer.
+//   - capture_unverified: the agent counts untracked processes, but the count
+//     could not be read, so nothing shows the consumed-mock set is complete.
+//     It is no evidence of a loss, so it comes after the rules that name what
+//     did go wrong: an agent stopped mid-run loses the count too, and the
+//     stop (not_every_test_got_a_verdict) is what the line must say.
 //   - app_unreachable, no_test_passed, preserve_failed_mocks: shouldSkipPruning.
 //
 // It exists as one function because the data-loss bug lives in this conjunction,
@@ -5951,6 +6017,8 @@ func shouldPrune(removeUnusedMocks, instrument bool, run pruneRun) (bool, string
 	switch {
 	case !removeUnusedMocks || !instrument:
 		return false, "disabled"
+	case run.captureIncomplete:
+		return false, "capture_incomplete"
 	case !run.allTestsGotAVerdict:
 		return false, "not_every_test_got_a_verdict"
 	case run.internalErr:
@@ -5959,6 +6027,8 @@ func shouldPrune(removeUnusedMocks, instrument bool, run pruneRun) (bool, string
 		return false, "results_unreadable"
 	case run.noAnswer:
 		return false, "no_answer"
+	case run.captureUnverified:
+		return false, "capture_unverified"
 	case !shouldSkipPruning(run.success, run.failure, run.obsolete, run.preserveFailedMocks, run.appUnreachable):
 		return true, ""
 	case run.appUnreachable:
@@ -5976,6 +6046,8 @@ type pruneRun struct {
 	resultsComplete            bool // results read back, none short of the verdicts
 	noAnswer                   bool // a request got no answer (pkg.IsAppNoAnswer)
 	appUnreachable             bool // anyAppConnectionError over the results read back
+	captureIncomplete          bool // the agent could not track a process (pidMapCaptureIncomplete)
+	captureUnverified          bool // the agent counts, but its count could not be read (pidMapVerdict)
 	success, failure, obsolete int
 	preserveFailedMocks        bool
 }

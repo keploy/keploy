@@ -118,6 +118,10 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		}
 		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
+		// The refused inserts into the hooks' PID maps, each a process they
+		// could not track; a session during which one was refused is capture
+		// incomplete. See pkg/agent/routes/pidmaps.go.
+		r.Get("/pidmaps", a.HandlePIDMapRefusals)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
 		// Pollable, non-draining view of which mocks have been served. Distinct

@@ -354,6 +354,11 @@ func (m *mockService) Record(ctx context.Context) error {
 	var casesSeen atomic.Int64
 	capture := m.captureCases(captureCtx, persistCtx, name, &casesSeen, requests)
 
+	// 4c. What the agent had already refused a place in its PID maps before
+	//     the test command runs: the run's own refusals are what it grows by
+	//     (PIDMapReader). Read here, with the compose app still parked.
+	pidBase := m.pidMapBaseline(ctx)
+
 	// 5. Release the compose app now that the capture is armed and draining.
 	//    This is the post-arm half of step 2 — see releaseComposeApp.
 	if err := m.releaseComposeApp(ctx); err != nil {
@@ -420,6 +425,27 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	capture.wait(mockDrainStall)
 
+	// 8a. A process the agent could not track -- the kernel refused it a place
+	//     in a full PID map -- made calls the agent never saw, so the recording
+	//     is missing them, with nothing to show where. Kept, it would replay
+	//     green wherever the agent tracks every process, the missing calls
+	//     reaching the real dependency. So it is not kept, however the run
+	//     ended, and the run fails: the runner's own code first, keploy's 1
+	//     when the runner passed or was stopped.
+	pidCheck := m.pidMapRefusedDuring(persistCtx, pidBase, "record")
+	if refused := pidCheck.refused; pidCheck.known && refused.Any() {
+		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
+		}
+		reason := refused.CaptureIncomplete()
+		m.logger.Error("the recording was not kept: the agent could not track every process the test command ran, so their calls were not recorded; the existing mock set (if any) was left unchanged",
+			append(pidMapFields(refused), zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.String("reason", reason))...)
+		if parent.Err() == nil {
+			m.propagateExit(appErr, "record")
+		}
+		utils.SetExitCodeOnce(utils.ExitKeployError)
+		return errors.New("the recording is incomplete: " + reason)
+	}
 	// The agent still held mocks when the drain ended (said above, at ERROR):
 	// what was captured is not the whole run, and promoted it would replace
 	// the set it was recorded to update with one that is short of mocks.
@@ -438,6 +464,15 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.Error(err),
 			zap.String("next_step", "re-record the mock set"))
 		return err
+	}
+	// 8b. The agent counts, but its count could not be read: nothing shows a
+	//     process went untracked, and nothing shows none did. The recording
+	//     is kept -- a lost read is no evidence against it, and record has no
+	//     --strict to ask for more -- but it is not vouched for in silence.
+	if pidCheck.unreadable != nil {
+		m.logger.Warn("the recording is kept, but keploy could not verify it is complete: it could not read whether the agent tracked every process the test command ran",
+			zap.String("mock-set", name), zap.Error(pidCheck.unreadable), zap.String("reason", models.CaptureUnverified(pidCheck.unreadable)),
+			zap.String("next_step", "record again once the agent answers, or replay the set: under --on-miss fail (the default) a call it is missing fails the replay"))
 	}
 
 	if parent.Err() != nil { // user stopped the recording (Ctrl+C, or a session stop)

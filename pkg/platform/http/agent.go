@@ -1497,6 +1497,40 @@ func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error
 	return stats, nil
 }
 
+// GetPIDMapRefusals fetches GET /pidmaps: the inserts into the agent's PID maps
+// the kernel has refused since its hooks loaded, each of them a process they
+// could not track (models.PIDMapRefusals). An agent older than the
+// route (404) or one that cannot count them (501) gives
+// models.ErrPIDMapRefusalsUnsupported, which is "unknown", not "none".
+func (a *AgentClient) GetPIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error) {
+	url := fmt.Sprintf("%s/pidmaps", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return models.PIDMapRefusals{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return models.PIDMapRefusals{}, fmt.Errorf("failed to ask the agent for refused PID map inserts: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for pidmaps")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return models.PIDMapRefusals{}, fmt.Errorf("%w: agent returned %d", models.ErrPIDMapRefusalsUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return models.PIDMapRefusals{}, agentRespErr("get refused PID map inserts", res, rawBody)
+	}
+	var refusals models.PIDMapRefusals
+	if err := json.NewDecoder(res.Body).Decode(&refusals); err != nil {
+		return models.PIDMapRefusals{}, fmt.Errorf("failed to decode the refused PID map inserts: %w", err)
+	}
+	return refusals, nil
+}
+
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppError {
 	app, err := a.getApp()
 	if err != nil {

@@ -239,3 +239,39 @@ func TestSetGracefulShutdownTellsTheIngressItIsStopping(t *testing.T) {
 		t.Fatal("a recording that began is still taken for one stopping")
 	}
 }
+
+// countingHooks count the inserts into their PID maps the kernel refused, as
+// the Linux hooks do.
+type countingHooks struct {
+	loadedHooks
+	refusals models.PIDMapRefusals
+	err      error
+}
+
+func (h countingHooks) PIDMapRefusals(context.Context) (models.PIDMapRefusals, error) {
+	return h.refusals, h.err
+}
+
+// The agent answers what its hooks counted. With hooks that do not count
+// (other platforms', an older build's) it answers "unknown": a zero count from
+// it would say that every process was tracked, and pass a session nobody
+// checked.
+func TestPIDMapRefusalsAreTheHooksCountOrUnknown(t *testing.T) {
+	ctx := context.Background()
+	want := models.PIDMapRefusals{Target: 271, LastTargetTGID: 1481467, TargetCapacity: 10240, ExcludedCapacity: 10240}
+	a := &Agent{logger: zap.NewNop(), Hooks: countingHooks{refusals: want}}
+	if got, err := a.PIDMapRefusals(ctx); err != nil || got != want {
+		t.Fatalf("hooks that count: got %+v, %v; want %+v", got, err, want)
+	}
+
+	a = &Agent{logger: zap.NewNop(), Hooks: loadedHooks{}}
+	if got, err := a.PIDMapRefusals(ctx); !errors.Is(err, models.ErrPIDMapRefusalsUnsupported) {
+		t.Fatalf("hooks that do not count: got %+v, %v; want ErrPIDMapRefusalsUnsupported", got, err)
+	}
+
+	readFailed := errors.New("read pid_map_insert_failures[target_namespace_pids]: bad file descriptor")
+	a = &Agent{logger: zap.NewNop(), Hooks: countingHooks{err: readFailed}}
+	if _, err := a.PIDMapRefusals(ctx); !errors.Is(err, readFailed) || errors.Is(err, models.ErrPIDMapRefusalsUnsupported) {
+		t.Fatalf("a read that failed: got %v; want that error, not \"unsupported\"", err)
+	}
+}

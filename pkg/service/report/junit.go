@@ -21,12 +21,26 @@ type junitTestSuites struct {
 }
 
 type junitTestSuite struct {
-	Name     string          `xml:"name,attr"`
-	Tests    int             `xml:"tests,attr"`
-	Failures int             `xml:"failures,attr"`
-	Skipped  int             `xml:"skipped,attr"`
-	Time     string          `xml:"time,attr"`
-	Cases    []junitTestCase `xml:"testcase"`
+	Name     string `xml:"name,attr"`
+	Tests    int    `xml:"tests,attr"`
+	Failures int    `xml:"failures,attr"`
+	Skipped  int    `xml:"skipped,attr"`
+	Time     string `xml:"time,attr"`
+	// Properties carries suite-level facts that are not per-testcase. Emitted
+	// only when there is one, so a report without any stays byte-identical
+	// (the backward-compat contract this file documents). Today the only one
+	// is capture verification: whether the agent tracked every process.
+	Properties *junitProperties `xml:"properties,omitempty"`
+	Cases      []junitTestCase  `xml:"testcase"`
+}
+
+type junitProperties struct {
+	Property []junitProperty `xml:"property"`
+}
+
+type junitProperty struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:"value,attr"`
 }
 
 type junitTestCase struct {
@@ -202,7 +216,7 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 		suiteDur = estimateDuration(rep.Tests)
 	}
 
-	return junitTestSuite{
+	suite := junitTestSuite{
 		Name:     name,
 		Tests:    rep.Total,
 		Failures: failures,
@@ -210,6 +224,19 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 		Time:     fmtSeconds(suiteDur),
 		Cases:    cases,
 	}
+	// Capture verification is a suite-level fact, not a per-testcase one, so it
+	// is a property. Emitted only when the run checked it (an agent that counts
+	// untracked processes), so a report without it stays byte-identical. It
+	// makes no false claim: "unverified" does not flip the suite red (the
+	// failures attr is unchanged), it only records that the capture was not
+	// confirmed; an "incomplete" capture has already failed the set's tests.
+	if cv := rep.CaptureVerification; cv != nil {
+		suite.Properties = &junitProperties{Property: []junitProperty{
+			{Name: "keploy.capture_verification", Value: string(cv.Status)},
+			{Name: "keploy.capture_verification.reason", Value: cv.Reason},
+		}}
+	}
+	return suite
 }
 
 func buildFailure(t models.TestResult) *junitFailure {

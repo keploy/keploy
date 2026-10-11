@@ -246,7 +246,7 @@ func TestReports_SayEveryTemplateFailureAndARefusal(t *testing.T) {
 				t.Fatal(err)
 			}
 			junit := buildFailure(c.test).Text
-			data, err := json.Marshal(buildTestVerdict("run", "set", c.test))
+			data, err := json.Marshal(buildTestVerdict("run", "set", c.test, nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -310,7 +310,7 @@ func TestReports_SayEveryTemplateFailureAndARefusal(t *testing.T) {
 			}
 		})
 	}
-	plain, err := json.Marshal(buildTestVerdict("run", "set", models.TestResult{Kind: models.HTTP, TestCaseID: "t", Status: models.TestStatusPassed}))
+	plain, err := json.Marshal(buildTestVerdict("run", "set", models.TestResult{Kind: models.HTTP, TestCaseID: "t", Status: models.TestStatusPassed}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -77,7 +77,7 @@ func TestBuildTestVerdict_Schema(t *testing.T) {
 		Result: models.Result{
 			DepResult: []models.DepResult{missingDepRow()}, DepsChecked: true, DepsConsumed: 7,
 		},
-	})
+	}, nil)
 
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -138,7 +138,7 @@ func TestBuildTestVerdict_Schema(t *testing.T) {
 func TestBuildTestVerdict_EmptyCategoriesAreOmittedAndEffectsAlwaysPresent(t *testing.T) {
 	data, err := json.Marshal(buildTestVerdict("run", "set", models.TestResult{
 		Kind: models.HTTP, TestCaseID: "t", Status: models.TestStatusPassed,
-	}))
+	}, nil))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -300,12 +300,12 @@ func TestNDJSON_UncheckedIsDistinguishableFromCleanlyChecked(t *testing.T) {
 	checked := buildTestVerdict("run", "set", models.TestResult{
 		Kind: models.HTTP, TestCaseID: "checked", Status: models.TestStatusPassed,
 		Result: models.Result{DepsChecked: true, DepsConsumed: 2},
-	})
+	}, nil)
 	// A --base-path run, --disable-mapping, an unmapped test set, a failed
 	// consumed-mock fetch, or the deferred streaming path.
 	unchecked := buildTestVerdict("run", "set", models.TestResult{
 		Kind: models.HTTP, TestCaseID: "unchecked", Status: models.TestStatusPassed,
-	})
+	}, nil)
 
 	if !checked.DependenciesChecked {
 		t.Error("a test whose assertion ran and found nothing must report dependencies_checked=true")
@@ -348,7 +348,7 @@ func TestNDJSON_PassedWithMissingDependencyIsMachineDetectable(t *testing.T) {
 		Result: models.Result{
 			DepResult: []models.DepResult{missingDepRow()}, DepsChecked: true, DepsConsumed: 4,
 		},
-	})
+	}, nil)
 	data, err := json.Marshal(v)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
