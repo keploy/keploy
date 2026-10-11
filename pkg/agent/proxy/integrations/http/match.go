@@ -302,6 +302,9 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 // request's headers) are different callers' sequences, not one. When the
 // credentials pick out some of the recordings (credentialPreferred), only those
 // are cursored, under a key of their own; otherwise the whole group is, as before.
+//
+// Tests: the recordings made inside the running test's window are served before
+// the set-wide cursor is consulted (see the test-scope note in the body).
 func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, mockDb integrations.MockMemDb, statefulMocks bool, live http.Header) (*models.Mock, func()) {
 	if !statefulMocks || bestMatch == nil || bestMatch.TestModeInfo.Consume != models.ConsumeCursorSaturate {
 		return bestMatch, nil
@@ -355,11 +358,39 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 	if caller != "" {
 		key += "\x00caller:" + caller
 	}
-	idx := cs.MockCursorIndex(key, len(group))
-	if idx < 0 || idx >= len(group) {
+	n := len(group)
+	// Test scope: these session mocks are reusable across the whole set, but a
+	// recording made inside the running test's window (CurrentTestWindow, the
+	// recorded [request, response] of the test being replayed) is that test's
+	// own. Serve those first, in record order under a per-test key, so a test
+	// that was skipped or failed before making its calls cannot shift its
+	// recordings onto the next test. The set-wide cursor moves past what was
+	// served and stays the fallback for a test with no recording of its own.
+	if start, end := mockDb.CurrentTestWindow(); !start.IsZero() && !end.IsZero() {
+		var own []int // positions in group of the running test's recordings
+		for i, m := range group {
+			ts := m.Spec.ReqTimestampMock
+			if !ts.IsZero() && !ts.Before(start) && !ts.After(end) {
+				own = append(own, i)
+			}
+		}
+		if len(own) > 0 {
+			testKey := fmt.Sprintf("%s\x00test:%d-%d", key, start.UnixNano(), end.UnixNano())
+			idx := cs.MockCursorIndex(testKey, len(own))
+			if idx < 0 || idx >= len(own) {
+				return bestMatch, nil
+			}
+			at, ownN := own[idx], len(own)
+			return group[at], func() {
+				cs.AdvanceMockCursor(testKey, idx, ownN)
+				cs.AdvanceMockCursor(key, at, n)
+			}
+		}
+	}
+	idx := cs.MockCursorIndex(key, n)
+	if idx < 0 || idx >= n {
 		return bestMatch, nil
 	}
-	n := len(group)
 	return group[idx], func() { cs.AdvanceMockCursor(key, idx, n) }
 }
 
