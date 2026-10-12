@@ -3,12 +3,16 @@ package replay
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"sync"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 )
 
 // misses answers the harness's per-test GetMockErrors calls in test order:
@@ -78,6 +82,9 @@ func TestRunTestSet_UnreadMissesLeaveTheSetUnjudged(t *testing.T) {
 				if reason := h.report.report.FailureReason; !strings.Contains(reason, "not judged") || !strings.Contains(reason, "test-2") {
 					t.Fatalf("failure reason %q does not say the set is not judged, and for which test", reason)
 				}
+				if !h.replayer.notJudged("test-set-0") {
+					t.Fatal("the set is not recorded as not judged: the run would stop after it, and the sets after it would get no verdict")
+				}
 			})
 		}
 	}
@@ -95,5 +102,80 @@ func TestAttachMockErrors_KeepsWhatAnIncompleteReadReturned(t *testing.T) {
 	}
 	if len(result.FailureInfo.UnmatchedCalls) != 1 || result.FailureInfo.UnmatchedCalls[0].ActualSummary != "GET /read" {
 		t.Fatalf("unmatched calls %+v; the calls the read did return must be kept", result.FailureInfo.UnmatchedCalls)
+	}
+}
+
+// A set that is only not judged fails, and the run goes on to the next set so
+// every set gets its verdict. Every other INTERNAL_ERR ends the round, as
+// before, and so does a not-judged mark on a set that ended otherwise.
+func TestAbortAfterTestSet(t *testing.T) {
+	for _, tc := range []struct {
+		status    models.TestSetStatus
+		notJudged bool
+		want      bool
+	}{
+		{models.TestSetStatusInternalErr, true, false},
+		{models.TestSetStatusInternalErr, false, true},
+		{models.TestSetStatusAppHalted, true, true},
+		{models.TestSetStatusFailed, true, false},
+	} {
+		if got := abortAfterTestSet(tc.status, utils.Native, tc.notJudged); got != tc.want {
+			t.Errorf("abortAfterTestSet(%s, notJudged=%v) = %v, want %v", tc.status, tc.notJudged, got, tc.want)
+		}
+	}
+}
+
+// Start decides whether to stop after an INTERNAL_ERR set through
+// abortAfterTestSet, told whether that set was only not judged: the rule is
+// tested above, and this pins the one call that feeds it the set's mark.
+func TestStartGoesOnAfterANotJudgedSet(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "replay.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse replay.go: %v", err)
+	}
+	var start *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "Start" && fn.Recv != nil {
+			start = fn
+		}
+	}
+	if start == nil {
+		t.Fatal("Replayer.Start not found in replay.go")
+	}
+	found := false
+	ast.Inspect(start, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || calleeName(call) != "abortAfterTestSet" || len(call.Args) != 3 {
+			return true
+		}
+		if mark, ok := call.Args[2].(*ast.CallExpr); ok && calleeName(mark) == "r.notJudged" && len(mark.Args) == 1 {
+			if id, ok := mark.Args[0].(*ast.Ident); ok && id.Name == "testSet" {
+				found = true
+			}
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("Start does not call abortAfterTestSet(…, r.notJudged(testSet)): a set that is only not judged would stop the run, and the sets after it would get no verdict")
+	}
+}
+
+// A set's not-judged mark is the run's of that set: a mark left by an earlier
+// attempt (a flaky check) or an earlier Start does not keep a later run of
+// the set, judged this time, from being judged, nor a later INTERNAL_ERR of
+// it from ending the round.
+func TestRunTestSetClearsTheSetsNotJudgedMark(t *testing.T) {
+	h := newPartialRunHarness(t, 1, 0)
+	h.replayer.markNotJudged("test-set-0")
+	h.replayer.markNotJudged("test-set-9")
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("set %s; want PASSED", status)
+	}
+	if h.replayer.notJudged("test-set-0") {
+		t.Fatal("the set's run left an earlier mark standing")
+	}
+	if !h.replayer.notJudged("test-set-9") {
+		t.Fatal("another set's mark was cleared")
 	}
 }

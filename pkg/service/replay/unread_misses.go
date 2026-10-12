@@ -41,3 +41,28 @@ func unreadMissesReason(tests []string) string {
 	return fmt.Sprintf("not judged: the calls that %d test(s) made with no recorded answer could not all be read from keploy's agent (%s); check the agent's log for why, then run the test-set again",
 		len(tests), strings.Join(tests, ", "))
 }
+
+// markNotJudged records that testSetID ended not judged: its INTERNAL_ERR
+// fails the set and the run, and does not end the round (abortAfterTestSet).
+func (r *Replayer) markNotJudged(testSetID string) {
+	r.notJudgedMu.Lock()
+	defer r.notJudgedMu.Unlock()
+	if r.notJudgedSets == nil {
+		r.notJudgedSets = map[string]bool{}
+	}
+	r.notJudgedSets[testSetID] = true
+}
+
+// notJudged reports whether testSetID ended not judged in this run.
+func (r *Replayer) notJudged(testSetID string) bool {
+	r.notJudgedMu.Lock()
+	defer r.notJudgedMu.Unlock()
+	return r.notJudgedSets[testSetID]
+}
+
+// forgetNotJudged clears testSetID's mark, as a run of the set starts.
+func (r *Replayer) forgetNotJudged(testSetID string) {
+	r.notJudgedMu.Lock()
+	defer r.notJudgedMu.Unlock()
+	delete(r.notJudgedSets, testSetID)
+}

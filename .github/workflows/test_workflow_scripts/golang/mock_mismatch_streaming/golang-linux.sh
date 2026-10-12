@@ -153,9 +153,10 @@ if [ ${#reports[@]} -eq 0 ]; then
     tail -40 test_logs.txt
     exit 1
 fi
-streaming_reported=false
-for rf in "${reports[@]}"; do
-    if python3 - "$rf" <<'PY'
+# report_has_streaming_miss says whether a report holds a streaming test with
+# an unmatched_calls entry.
+report_has_streaming_miss() {
+    python3 - "$1" <<'PY'
 import sys, re
 txt = open(sys.argv[1]).read()
 # Each per-test block starts with "    - " at the test-results list level.
@@ -172,6 +173,10 @@ for b in blocks:
         print("streaming test reported a mismatch:", tid)
 sys.exit(0 if ok else 1)
 PY
+}
+streaming_reported=false
+for rf in "${reports[@]}"; do
+    if report_has_streaming_miss "$rf"
     then
         echo "✓ $(basename "$rf") has a streaming test with an unmatched_calls entry"
         streaming_reported=true
@@ -221,12 +226,12 @@ for rf in "${proven_reports[@]}"; do
         docker compose down 2>/dev/null || true
         exit 1
     fi
-    if grep -q 'unmatched_calls:' "$rf"; then
+    if report_has_streaming_miss "$rf"; then
         proven_streaming_reported=true
     fi
 done
 if [ "$proven_streaming_reported" != true ]; then
-    echo "::error::under the proven switch the forced streaming misses never reached a test"
+    echo "::error::under the proven switch the forced misses never reached a streaming test"
     tail -40 test_logs_proven.txt
     docker compose down 2>/dev/null || true
     exit 1

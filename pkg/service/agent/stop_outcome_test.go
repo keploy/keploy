@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -238,5 +239,41 @@ func TestWriteStopOutcomeCarriesTheTestsWindows(t *testing.T) {
 	}
 	if len(got.Windows) != 1 || got.Windows[0].Name != "TestOrders" || got.Windows[0].Outcome != models.ScopeOutcomePassed {
 		t.Fatalf("the outcome carries windows %+v, want TestOrders passed", got.Windows)
+	}
+}
+
+// partialMissProxy is an outcomeProxy whose read of the calls no mock answered
+// was incomplete (the proven switch): it returns what it read, and says so.
+type partialMissProxy struct{ outcomeProxy }
+
+func (p *partialMissProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
+	return p.missed, fmt.Errorf("%w: keploy's error drain stopped", models.ErrUnmatchedCallsUnread)
+}
+
+// An incomplete read of the misses is kept, with what was read and why it may
+// be short, rather than throwing away the whole account (what was served
+// included).
+func TestWriteStopOutcomeKeepsAnIncompleteMissRead(t *testing.T) {
+	proxy := &partialMissProxy{outcomeProxy{
+		consumed: []models.MockState{{Name: "mock-0", Kind: models.HTTP}},
+		missed:   []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /a"}},
+	}}
+	a := &Agent{Proxy: proxy, logger: zap.NewNop()}
+	path := filepath.Join(t.TempDir(), "outcome.json")
+	if err := a.writeStopOutcome(context.Background(), path); err != nil {
+		t.Fatalf("writeStopOutcome: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("no outcome left: %v", err)
+	}
+	var got models.MockOutcome
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("not a models.MockOutcome: %v", err)
+	}
+	// The cause alone: whoever reads the account names the incomplete read
+	// itself, so the sentinel's text is not said twice.
+	if len(got.Consumed) != 1 || len(got.Missed) != 1 || got.MissedUnread != "keploy's error drain stopped" {
+		t.Fatalf("left %+v; want what was served, what was read of the misses, and why that may be short", got)
 	}
 }

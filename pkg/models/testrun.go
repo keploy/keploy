@@ -219,6 +219,11 @@ type MockOutcome struct {
 	// with the served and missed calls comfortably up to suites of tens of
 	// thousands of tests.
 	Windows []ScopeWindow `json:"windows,omitempty"`
+	// MissedUnread is why Missed may be missing calls, empty when it is
+	// complete: the agent's read of the calls no mock answered was
+	// incomplete (ErrUnmatchedCallsUnread, under the proven switch). Missed
+	// holds what was read.
+	MissedUnread string `json:"missed_unread,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.

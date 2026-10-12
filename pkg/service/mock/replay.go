@@ -1040,6 +1040,11 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	if fromCompose {
 		outcome, err := composeOutcome.ComposeAgentOutcome()
 		consumed, misses, consumedErr, missesErr = outcome.Consumed, outcome.Missed, err, err
+		if err == nil && outcome.MissedUnread != "" {
+			// As the agent's own read would have said it: incomplete, with
+			// what was read.
+			missesErr = fmt.Errorf("%w: %s", models.ErrUnmatchedCallsUnread, outcome.MissedUnread)
+		}
 	} else {
 		outcomeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
 		defer cancel()
@@ -1095,7 +1100,13 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		m.logger.Info("mock replay summary", summary...)
 	} else {
 		next := "check the agent logs for why it stopped before the run ended"
-		if fromCompose {
+		if fromCompose && consumedErr == nil {
+			// The agent left its account, but its read of the calls no mock
+			// answered was incomplete (the proven switch): that is what to
+			// look into.
+			summary = append(summary, zap.NamedError("reason", missesErr))
+			next = "the keploy-agent container could not read every call no mock answered as compose stopped it; check its logs above for why"
+		} else if fromCompose {
 			// Compose stopping the agent is the normal end of the run, not
 			// the thing to look into: the agent writes its account as it
 			// stops, and what needs explaining is why this one did not.

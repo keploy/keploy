@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -109,13 +110,18 @@ func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read the mocks this replay served: %w", err)
 	}
 	missed, err := a.GetMockErrors(ctx)
-	if err != nil {
+	missedUnread := ""
+	if errors.Is(err, models.ErrUnmatchedCallsUnread) {
+		// What was read is kept, and the account says it may be short, and
+		// why (the reader names ErrUnmatchedCallsUnread itself).
+		missedUnread = models.UnreadCause(err)
+	} else if err != nil {
 		return nil, fmt.Errorf("failed to read the calls this replay could not match: %w", err)
 	}
 	// The windows say which test ran when, and with what verdict; the CLI
 	// cannot ask a stopped agent for them.
 	windows, _ := a.GetScopeWindows(ctx)
-	body, err := json.Marshal(models.MockOutcome{Consumed: consumed, Missed: missed, Windows: windows})
+	body, err := json.Marshal(models.MockOutcome{Consumed: consumed, Missed: missed, Windows: windows, MissedUnread: missedUnread})
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode the replay outcome: %w", err)
 	}

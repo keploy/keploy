@@ -85,6 +85,19 @@ func startupMockCutoff(testCases []*models.TestCase, keepAll time.Time) time.Tim
 	return time.Time{}
 }
 
+// abortAfterTestSet reports whether the run stops after a test set that ended
+// with status. A set that is only not judged (its evidence could not all be
+// read: notJudged) does not stop it: the set fails as not judged, with every
+// reason, and the run goes on so every set gets its verdict; the run exits
+// non-zero. Anything else that is INTERNAL_ERR ends the round
+// (shouldAbortTestRun).
+func abortAfterTestSet(status models.TestSetStatus, cmdType utils.CmdType, notJudged bool) bool {
+	if notJudged && status == models.TestSetStatusInternalErr {
+		return false
+	}
+	return shouldAbortTestRun(status, cmdType)
+}
+
 func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool {
 	switch status {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
@@ -370,6 +383,11 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
+	// notJudgedSets are the test sets of this run that ended not judged
+	// (markNotJudged): INTERNAL_ERR that does not end the round.
+	notJudgedMu   sync.Mutex
+	notJudgedSets map[string]bool
+
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
@@ -970,7 +988,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
-				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
+				abortTestRun = abortAfterTestSet(testSetStatus, cmdType, r.notJudged(testSet))
 			case models.TestSetStatusFaultUserApp:
 				testSetResult = false
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
@@ -1421,6 +1439,9 @@ func (r *Replayer) beforeFirstTestSet(ctx context.Context, testRunID string) {
 var testSetDrainTimeout = 30 * time.Second
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, serveTest bool) (models.TestSetStatus, error) {
+	// Whether this run of the set is judged is this run's to say: a mark left
+	// by an earlier attempt, or an earlier Start, says nothing about it.
+	r.forgetNotJudged(testSetID)
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -3881,11 +3902,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	unreadMisses := testsWithUnreadMisses(testCaseResults)
 	if len(unreadMisses) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed) {
 		notJudged = unreadMissesReason(unreadMisses)
-		r.logger.Error("test-set is not judged: the calls some of its tests made that no mock answered could not all be read from keploy's agent",
+		r.logger.Error("test-set is not judged: the calls some of its tests made that no mock answered could not all be read from keploy's agent; the run goes on to the next test-set",
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", unreadMisses),
 			zap.String("next_step", "check the agent's log for why the read was incomplete, then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
 	}
 
 	appFailure := getLastAppErr()

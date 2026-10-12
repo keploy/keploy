@@ -175,11 +175,18 @@ type Proxy struct {
 	// the events that end those waits, in place of a deadline. Set before
 	// errDrainActive goes true, so a reader that sees the drain active sees it.
 	errDrainDone chan struct{}
-	// missesLost is set, under the proven switch, when a miss could not be
-	// queued for its test: the error drain had stopped, or never ran. The next
-	// GetMockErrors then reports its read incomplete (ErrUnmatchedCallsUnread)
-	// instead of returning a list that a miss is missing from.
-	missesLost atomic.Bool
+	// missLoss is, under the proven switch, why a miss was lost since the
+	// last read (the first cause): it could not be queued (the error drain
+	// had stopped, or never ran) or its test's list was full. The next
+	// GetMockErrors then reports its read incomplete (ErrUnmatchedCallsUnread),
+	// naming the cause, instead of returning a list a miss is missing from.
+	missLoss atomic.Pointer[string]
+	// pendingLost is set, under the proven switch and captureMu, when a miss
+	// made with no test's window open was dropped because pendingMockErrors
+	// was full. The next window decides whose loss it is: a set's first
+	// discards those misses (they are no test's), so it only says so; the next
+	// test's carries them, so its read is incomplete (missLoss).
+	pendingLost bool
 	// pendingMockErrors retains mock-not-found errors that arrive while no test
 	// capture window is active (activeTestErrors is nil) — e.g. between tests,
 	// or when the replayer/agent predates the BeginTestErrorCapture wiring.
@@ -4018,6 +4025,36 @@ func (a *testErrorAccumulator) addBounded(err error, max int) bool {
 	return true
 }
 
+// The causes a read of the misses is incomplete for (missLoss).
+var (
+	missLostListFull        = fmt.Sprintf("a miss was dropped: the test's list of misses was full (%d)", maxPendingMockErrors)
+	missLostBetweenFull     = fmt.Sprintf("a miss made between two tests was dropped: the list of misses waiting for the next test was full (%d)", maxPendingMockErrors)
+	missLostDrainStopped    = "a miss could not be queued for its test: keploy's error drain had stopped"
+	missLostNoDrainChanFull = "a miss could not be queued for its test: keploy's error channel was full and no error drain was running"
+)
+
+// noteMissLost records, under the proven switch, that a miss was lost, and
+// why: the next read is then incomplete, naming the first cause, rather than
+// silently short.
+func (p *Proxy) noteMissLost(err error, cause string) {
+	if provenswitch.On() && isMockNotFoundErr(err) {
+		p.missLoss.CompareAndSwap(nil, &cause)
+	}
+}
+
+// missDroppedForRoom notes, under the proven switch, that a miss was dropped
+// because its test's list is full (maxPendingMockErrors).
+func (p *Proxy) missDroppedForRoom(err error) { p.noteMissLost(err, missLostListFull) }
+
+// pendingDroppedForRoom notes, under the proven switch and captureMu, that a
+// miss made with no window open was dropped because pendingMockErrors is full;
+// the next window decides whose loss it is (pendingLost).
+func (p *Proxy) pendingDroppedForRoom(err error) {
+	if provenswitch.On() && isMockNotFoundErr(err) {
+		p.pendingLost = true
+	}
+}
+
 // isMockNotFoundErr reports whether err is a parser mock-not-found error —
 // the only error class GetMockErrors surfaces to the replayer, and thus the
 // only class worth retaining in pendingMockErrors.
@@ -4075,11 +4112,16 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 					p.captureMu.Lock()
 					acc := p.activeTestErrors.Load()
 					if acc != nil {
-						acc.addBounded(err, maxPendingMockErrors)
+						if !acc.addBounded(err, maxPendingMockErrors) {
+							p.missDroppedForRoom(err)
+						}
 						p.captureMu.Unlock()
 						continue
 					}
 					retained := isMockNotFoundErr(err) && p.pendingMockErrors.addBounded(err, maxPendingMockErrors)
+					if !retained {
+						p.pendingDroppedForRoom(err)
+					}
 					p.captureMu.Unlock()
 					if !retained {
 						// Log only the first discard and then every 100th to reduce noise.
@@ -4101,7 +4143,10 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // The replayer opens it for the first test of a test set. Misses retained
 // before it, with no window open (the app's startup, or a previous set's last
 // test's traffic), are not this test's: they are discarded so they don't
-// attach to it, and logged, so none is lost without a word.
+// attach to it, and logged, so none is lost without a word. Under the proven
+// switch too they reach no verdict: a set whose last test's late or async call
+// missed after its last read stays judged on what was read. Closing that is
+// the round's own count of calls in flight at its end, not this window.
 // GetMockErrors retrieves and the next Begin/ContinueTestErrorCapture resets
 // the window.
 func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false) }
@@ -4136,14 +4181,27 @@ func (p *Proxy) openTestErrorCapture(carry bool) {
 		}
 	}
 	between = append(between, p.pendingMockErrors.drain()...)
+	pendingLost := p.pendingLost
+	p.pendingLost = false
 	if carry {
 		for _, err := range between {
-			acc.addBounded(err, maxPendingMockErrors)
+			if !acc.addBounded(err, maxPendingMockErrors) {
+				p.missDroppedForRoom(err)
+			}
+		}
+		if pendingLost {
+			// They were this test's: its read is short of them.
+			p.missLoss.CompareAndSwap(nil, &missLostBetweenFull)
 		}
 	}
 	p.captureMu.Unlock()
 	if !carry {
 		p.logDroppedMisses("mock mismatches made while no test's capture window was open are not attributed to a test", between)
+		if pendingLost {
+			// They were no test's either: said, and no read is short of them.
+			p.logger.Warn("more mock mismatches were made while no test's capture window was open than keploy keeps; the rest were dropped, and they are not attributed to a test either",
+				zap.Int("kept", maxPendingMockErrors))
+		}
 	}
 	p.logDroppedMisses("mock mismatches of a test whose capture window was never read are dropped", unread)
 }
@@ -4241,15 +4299,24 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 			}
 		}
 	}
-	if proven && p.missesLost.Swap(false) && unreadCause == "" {
-		unreadCause = "a miss could not be queued for its test: keploy's error drain was not running"
+	if proven {
+		if lost := p.missLoss.Swap(nil); lost != nil && unreadCause == "" {
+			unreadCause = *lost
+		}
 	}
 
 	p.captureMu.Lock()
 
 	// Pre-window stragglers (retained before the first capture window — e.g.
-	// startup traffic). Oldest first.
+	// startup traffic). Oldest first. A read that takes them is short of any
+	// that were dropped for room.
 	rawErrs := p.pendingMockErrors.drain()
+	if p.pendingLost {
+		p.pendingLost = false
+		if proven && unreadCause == "" {
+			unreadCause = missLostBetweenFull
+		}
+	}
 
 	// Legacy path only (no drain goroutine): errors sit unrouted in errChannel,
 	// so sweep them here. With the drain goroutine active, the rendezvous above
@@ -4385,7 +4452,7 @@ func (p *Proxy) SendError(err error) {
 			return
 		case <-p.errDrainDone:
 		}
-		p.missesLost.Store(true)
+		p.noteMissLost(err, missLostDrainStopped)
 		p.logger.Error("keploy's error drain stopped; a call no mock answered could not be reported to its test", zap.Error(err))
 		return
 	}
@@ -4394,7 +4461,7 @@ func (p *Proxy) SendError(err error) {
 	default:
 		p.logger.Error("Error channel is full, dropping error", zap.Error(err))
 		if proven {
-			p.missesLost.Store(true)
+			p.noteMissLost(err, missLostNoDrainChanFull)
 		}
 	}
 }

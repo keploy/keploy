@@ -224,6 +224,16 @@ var ErrNoMockMatched = errors.New("no matching mock found")
 // reports it.
 var ErrUnmatchedCallsUnread = errors.New("the unmatched calls of this test could not all be read")
 
+// UnreadCause is why a read of the unmatched calls was incomplete: the text
+// err carries after ErrUnmatchedCallsUnread's own ("…: <cause>"), or all of it
+// when it carries none.
+func UnreadCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.TrimPrefix(err.Error(), ErrUnmatchedCallsUnread.Error()+": ")
+}
+
 type ParserError struct {
 	ParserErrorType ParserErrorType
 	Err             error
