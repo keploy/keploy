@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,8 +25,16 @@ func httpMiss(t *testing.T, p *Proxy) (done <-chan error) {
 	t.Cleanup(mm.Close)
 	now := time.Now()
 	mm.SetMocksWithWindow(nil, nil, now.Add(-time.Hour), now.Add(time.Hour))
-	ctx := models.WithMockMismatchReporter(context.Background(), p.sendMockNotFoundError)
-	app, agentEnd := net.Pipe()
+	app, pipeEnd := net.Pipe()
+	agentEnd := &writeSeen{Conn: pipeEnd}
+	// The order itself, whatever the scheduler does: when the miss is
+	// reported, nothing may have been written to the app yet.
+	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) {
+		if provenswitch.On() && agentEnd.wrote.Load() {
+			t.Errorf("the 502 reached the app before its miss was reported")
+		}
+		p.sendMockNotFoundError(err)
+	})
 	t.Cleanup(func() { _ = app.Close() })
 	returned := make(chan error, 1)
 	go func() {
@@ -44,6 +53,17 @@ func httpMiss(t *testing.T, p *Proxy) (done <-chan error) {
 		t.Fatalf("the app got %d, want 502", resp.StatusCode)
 	}
 	return returned
+}
+
+// writeSeen notes that something was written to the app.
+type writeSeen struct {
+	net.Conn
+	wrote atomic.Bool
+}
+
+func (c *writeSeen) Write(b []byte) (int, error) {
+	c.wrote.Store(true)
+	return c.Conn.Write(b)
 }
 
 // Under the proven switch an HTTP miss is queued for the test that made it
