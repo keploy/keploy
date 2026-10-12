@@ -176,6 +176,9 @@ type MockManager struct {
 	// call mid-set being able to deactivate a live test's window. Written
 	// under swapMu.
 	boundaryPending bool
+	// stagedOnce is set by the first staging call; until then a BaseTime
+	// staging is initial even with no reset pending (a fresh manager).
+	stagedOnce atomic.Bool
 
 	// cutoffSeeded parks the startup-init cutoff the replayer supplies for the
 	// NEXT set, until that set's staging call installs it.
@@ -364,6 +367,10 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		unfiltered = NewTreeDb(customComparator)
 	}
 	mm := &MockManager{
+		// A fresh manager IS awaiting its first set: proxy.go:3626 builds one
+		// instead of calling ResetForReplaySession on the first replay session,
+		// so without this the first (genuine) staging call would not be
+		// recognised as a set boundary now that isInitialStaging requires it.
 		filtered:            filtered,
 		unfiltered:          unfiltered,
 		startup:             NewTreeDb(customComparator),
@@ -995,11 +1002,23 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// to filtered; mocks with req < firstWindowStart stay in startup;
 	// mocks with firstWindowStart <= req < start are stale previous-
 	// test bleed and get dropped.
-	isInitialStaging := start.Equal(models.BaseTime)
 	// A set boundary: the first staging after ResetForReplaySession. A
 	// BaseTime staging without one is a mid-set stage (see boundaryPending).
-	setBoundary := isInitialStaging && m.boundaryPending
-	if isInitialStaging {
+	//
+	setBoundary := start.Equal(models.BaseTime) && m.boundaryPending
+	// Initial staging (everything into startupInit, the per-test tree emptied)
+	// is a BaseTime staging that starts a set: one a reset left pending, or
+	// this manager's first. Never a BaseTime start alone: a per-test
+	// scope/begin re-stages its test's pool with AfterTime BaseTime too
+	// (pkg/service/agent/scope.go), and keying on the timestamp made every such
+	// scope look like a set boundary, so the per-test tree stayed empty and
+	// per-test scoping never engaged. Measured on a 118-test run:
+	// filteredIn 4,649 -> filteredForTree 0, and GetPerTestMocksInWindow
+	// returned 0 in all 10,576 samples.
+	baseTimeStaging := start.Equal(models.BaseTime)
+	isInitialStaging := baseTimeStaging && (m.boundaryPending || !m.stagedOnce.Load())
+	m.stagedOnce.Store(true)
+	if baseTimeStaging {
 		// Every staging call starts a new epoch, boundary or not: whatever a
 		// consumer built from the previous staging snapshot is stale now.
 		m.stagingEpoch.Add(1)
@@ -1031,6 +1050,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			m.windowEnd = time.Time{}
 			m.windowMu.Unlock()
 		}
+	}
+	if isInitialStaging {
 		// Wave-3 H3 fix: include BOTH filtered (per-test) and unfiltered
 		// (session + connection) mocks in the startup pool during initial
 		// staging. Rationale: during Runner/Replayer's pre-test staging
@@ -1314,6 +1335,13 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// window: any revision a consumer can observe now corresponds to a state
 	// where all three tiers agree. Suppression is per-call, not a flag on the
 	// manager, so it cannot swallow a concurrent consumer's own bump.
+	// What actually goes into the per-test and startup trees: the disk reload
+	// logs what it loaded, and this logs what was staged from it, so a scope
+	// that serves nothing can be told apart from one that was never staged.
+	m.logger.Info("KPLOAD setFilteredMocks",
+		zap.Int("filteredForTree", len(filteredForTree)),
+		zap.Int("startupInit", len(unfilteredForTree)),
+		zap.Bool("isInitialStaging", isInitialStaging))
 	m.publishFiltered(filteredBuild, false)
 	m.publishUnfiltered(unfilteredBuild, false)
 
@@ -3054,6 +3082,34 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	}
 	m.consumedMu.Unlock()
 	return nil
+}
+
+// ResetConsumedMocks un-consumes exactly the named mocks in the cumulative
+// ledger and reports how many entries it actually removed.
+//
+// Scope-precise by construction: the caller passes the mock names ONE scope
+// owns (its mappings.yaml entry), so no other scope's consumption is touched.
+// Clearing the ledger wholesale would resurrect every mock the session has
+// served so far, which is precisely the bug the ledger exists to prevent.
+//
+// Only consumedPersistent is reset. consumedList/consumedIndex — the drain the
+// CLI's end-of-run summary counts — are deliberately left alone: that summary
+// answers "how many distinct mocks did this session serve", which a re-run of
+// the same test does not change (a re-serve updates the entry in place).
+func (m *MockManager) ResetConsumedMocks(names []string) int {
+	if len(names) == 0 {
+		return 0
+	}
+	m.consumedMu.Lock()
+	defer m.consumedMu.Unlock()
+	removed := 0
+	for _, name := range names {
+		if _, ok := m.consumedPersistent[name]; ok {
+			delete(m.consumedPersistent, name)
+			removed++
+		}
+	}
+	return removed
 }
 
 // GetConsumedMocks returns and drains the list of mocks that were consumed

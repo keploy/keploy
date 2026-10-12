@@ -156,6 +156,13 @@ type Mock struct {
 	// no bigger for it.
 	pooled bool
 
+	// Owner is the client-declared replacement unit this mock belongs to -- the
+	// per-test scope name the runner opened around the call (models.ScopeReq.Name).
+	// Unlike SourcePID this IS persisted: it is the first half of the mock's
+	// identity, the half that makes the second half (a per-owner ordinal) stable
+	// across recordings. Empty for every capture made outside a scope, and for
+	// every `keploy record` integration capture, which opens none.
+	Owner string `json:"Owner,omitempty" yaml:"owner,omitempty" bson:"Owner,omitempty"`
 	// Noise holds exact-match regex patterns for obfuscated values.
 	// During mock matching, any stored value matching a pattern in this
 	// list is skipped (treated as noise). Written by the enterprise
@@ -195,8 +202,60 @@ func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
 // load all discriminate on.
 func (m *Mock) IsAsync() bool { return m.Spec.Async != nil }
 
-// HydrateResponse loads an elided response into Spec; no-op if not spilled, so
-// serve paths can call it unconditionally before reading the response.
+// HydratedHTTPResp returns the mock's HTTP response, fetching it from the
+// agent's spill store when the response was elided at ingest
+// (proxy.DiskMocks.Add). It returns nil when there is no response at all.
+//
+// It NEVER writes to the mock, and that is load-bearing rather than stylistic.
+// A pooled *Mock is shared by every proxy connection goroutine, and a
+// goroutine that matched the same mock reads it WHOLE by value on the consume
+// path -- `updatedMock := *matchedMock` and `deleteMock := *matchedMock` in
+// http.updateMock, `*old` in MockManager.UpdateUnFilteredMock. Those readers
+// cannot be made to take a lock without changing the by-value MockMemDb
+// interface, so the only contract that holds is: the serve path does not
+// write. See HydrateResponse for why that method is not the one to call here.
+//
+// A repeat serve re-reads the blob rather than caching it in Spec. That is the
+// intended trade: the spill exists to keep the resident matching window small,
+// and a per-test mock is consumed on first match, so a repeat serve is off the
+// normal path anyway.
+func (m *Mock) HydratedHTTPResp() (*HTTPResp, error) {
+	if m.Spec.HTTPResp != nil {
+		return m.Spec.HTTPResp, nil
+	}
+	fn := m.responseHydrator
+	if fn == nil {
+		return nil, nil
+	}
+	httpResp, _, err := fn()
+	return httpResp, err
+}
+
+// HydratedMongoResponses is the Mongo counterpart of HydratedHTTPResp. Nothing
+// in OSS calls it: DiskMocks.EligibleForResponseSpill spills every Mongo mock
+// with responses, but there is no Mongo parser in this repo, so a spilled
+// Mongo mock currently has no serve path that restores it. This exists so
+// wiring one up is a one-line change rather than a re-derivation.
+func (m *Mock) HydratedMongoResponses() ([]MongoResponse, error) {
+	if len(m.Spec.MongoResponses) > 0 {
+		return m.Spec.MongoResponses, nil
+	}
+	fn := m.responseHydrator
+	if fn == nil {
+		return nil, nil
+	}
+	_, mongoResp, err := fn()
+	return mongoResp, err
+}
+
+// HydrateResponse loads an elided response INTO Spec and clears the hydrator.
+//
+// Do not call this on a mock that is in a live pool. It mutates two fields
+// that other connection goroutines read by value off the same pointer, which
+// is a data race with no happens-before edge; use HydratedHTTPResp on any
+// serve path. It is retained for callers that own the mock outright -- a
+// freshly gob-decoded one, or a test fixture -- and for out-of-tree parsers
+// that already depend on the signature.
 func (m *Mock) HydrateResponse() error {
 	fn := m.responseHydrator
 	if fn == nil {
@@ -282,6 +341,30 @@ type TestModeInfo struct {
 	// inert — the reapers run only on the live record buffer, never on
 	// disk-loaded mocks.
 	IsStartup bool `json:"-" bson:"-"`
+
+	// SharedInSpec marks a per-test mock whose exact request has the SAME
+	// response in every copy recorded in its spec (service/agent/specpool.go).
+	// Such a mock is visible to every scope in the spec and is NOT consumed on
+	// match: re-serving it cannot hand a caller the wrong moment, because the
+	// recording shows no other answer to that request anywhere in the spec.
+	// Set by the agent when it stages a scope's pool; runtime-only.
+	SharedInSpec bool `json:"-" bson:"-"`
+
+	// FenceScope names the test scope this mock was recorded in, set only on
+	// the mocks OWNED by the test that is currently staged (empty for suite,
+	// spec-shared-from-elsewhere and session mocks). The HTTP matcher keys its
+	// pending-write fence on it (integrations/http/fence.go). Runtime-only.
+	FenceScope string `json:"-" bson:"-"`
+
+	// FenceWrite marks one of the staged test's OWN GraphQL mutations that is
+	// not spec-shared: a state change the replay has to perform before any read
+	// recorded after it may be served. Runtime-only.
+	FenceWrite bool `json:"-" bson:"-"`
+
+	// FenceLater marks a suite copy staged with a test whose recording ended
+	// before this copy was captured: it belongs to a later hook (another
+	// describe's beforeAll) and the test should not use it up. Runtime-only.
+	FenceLater bool `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -1035,6 +1118,7 @@ func (m *Mock) DeepCopy() *Mock {
 		Spec:         m.Spec,
 		TestModeInfo: m.TestModeInfo,
 		ConnectionID: m.ConnectionID,
+		Owner:        m.Owner,
 	}
 
 	// Carry the loader so tree copies can still hydrate their elided response.

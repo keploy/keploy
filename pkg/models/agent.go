@@ -134,6 +134,19 @@ type ScopeReq struct {
 	// that cannot skip would run the test anyway, against a pool the gate never
 	// narrowed for it.
 	CanSkip bool `json:"canSkip,omitempty"`
+	// Attempt is the runner's attempt number for this test: 0 (or omitted) is
+	// the first run, 1 and up are retries. Playwright exposes it as
+	// testInfo.retry, Jest as the retry index, pytest-rerunfailures as the
+	// rerun count.
+	//
+	// It exists because a retry and a deliberately reopened scope label are the
+	// SAME two calls on the wire — begin(name) after end(name) — yet they want
+	// opposite things. A retry re-runs a test that already consumed its mocks,
+	// so it must replay that test's tape from the start. A reopened label is a
+	// second test deliberately continuing the first one's tape, so it must keep
+	// advancing. Only the runner can tell them apart, so it says which it is
+	// rather than leaving Keploy to guess.
+	Attempt int `json:"attempt,omitempty"`
 }
 
 // The verdicts a harness reports in ScopeReq.Outcome, and ScopeOutcomeGated,
@@ -226,6 +239,71 @@ type ScopeWindow struct {
 	Outcome string `json:"outcome,omitempty"`
 }
 
+// ScopeAck is the body of POST /agent/scope/begin. Status is retained verbatim
+// for callers written against the original `{"status":"ok"}` contract; the
+// remaining fields report whether the call actually took effect, so a test
+// runner can assert it in one line instead of reading the agent's debug log.
+//
+// Scoped is true only when the served mock pool was genuinely narrowed to this
+// scope (replay). It is therefore false for every record-mode call — recording
+// serves nothing — and Reason names which case it was.
+type ScopeAck struct {
+	Status string `json:"status"`
+	Scoped bool   `json:"scoped"`
+	// Mocks is how many recordings mappings.yaml attributes to THIS scope --
+	// the count of mapped names, not the number of mocks the agent went on to
+	// stage (the served pool also carries recordings no test owns, as overflow).
+	// It is the useful number for a runner: it knows how many dependency calls
+	// its test makes, so a short count is how a truncated mapping shows up --
+	// most often a second scope/begin at record with no end between, which
+	// resets the window and orphans everything captured before it.
+	Mocks  int    `json:"mocks"`
+	Reason string `json:"reason"`
+	// Attempt echoes ScopeReq.Attempt. An agent that predates the field echoes
+	// nothing, so a fixture can distinguish "this build ignored my attempt
+	// number" from "this build reset nothing because there was nothing to
+	// reset".
+	Attempt int `json:"attempt,omitempty"`
+	// RetryReset is true when Attempt > 0 AND this scope's consumed state was
+	// cleared, so its mocks replay from the start. False with Attempt > 0 means
+	// nothing was reset and Reason says why: the scope has no mapping entry to
+	// reset (no_mapping_table / unmapped_scope / empty_mapping), or the call is
+	// worker-scoped (worker_scoped), where the served pool is never re-staged.
+	RetryReset bool `json:"retry_reset,omitempty"`
+	// RestoredMocks is how many of this scope's mocks the retry reset returned
+	// to the servable pool. 0 alongside RetryReset true means the scope had
+	// consumed nothing yet — e.g. the previous attempt failed before its first
+	// outgoing call.
+	RestoredMocks int `json:"restored_mocks,omitempty"`
+}
+
+// Reason values for ScopeAck. Stable tokens — test runners branch on them.
+const (
+	// Replay, narrowed. Scoped=true.
+	ScopeReasonPoolRestricted = "pool_restricted" // pid==0, single global pool
+	ScopeReasonWorkerScoped   = "worker_scoped"   // pid>0, this worker's view only
+
+	// Replay, NOT narrowed. Scoped=false — the whole set is being served.
+	ScopeReasonNoMappingTable = "no_mapping_table" // no mappings.yaml, so no scope table was installed
+	ScopeReasonUnmappedScope  = "unmapped_scope"   // table installed, this name absent from it
+	ScopeReasonEmptyMapping   = "empty_mapping"    // name present but mapped to zero mocks
+	// ScopeReasonStrictNoRecording: strict scoping is on and this test has no
+	// recording of its own, so it was narrowed to nothing rather than being
+	// served the pool. Its first dependency call will miss, which is the point:
+	// another test's response is not a valid answer for this one.
+	ScopeReasonStrictNoRecording = "strict_no_recording"
+
+	// Record. Nothing is served, so Scoped is always false.
+	ScopeReasonRecordWindowOpened = "record_window_opened"
+	// ScopeReasonRecordAlreadyOpen: a second begin for a scope that was never
+	// ended. The window start is reset, so anything captured before this call
+	// is attributed to no test and disappears from mappings.yaml.
+	ScopeReasonRecordAlreadyOpen = "record_scope_already_open"
+
+	ScopeReasonEmptyName   = "empty_name"  // no name supplied; the call is a no-op
+	ScopeReasonUnsupported = "unsupported" // this agent build has no scope support
+)
+
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
@@ -233,6 +311,11 @@ type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
 	Root     string              `json:"root,omitempty"`
 	Sets     map[string]SetTable `json:"sets,omitempty"`
+	// Strict makes a test with no recording serve NOTHING but the mocks no test
+	// owns, instead of leaving the whole pool armed. Opt-in: integration testing
+	// deliberately lets one test's recording answer another's request, and that
+	// must keep working.
+	Strict bool `json:"strict,omitempty"`
 }
 
 type SetTable struct {
@@ -331,6 +414,20 @@ type MockFilterParams struct {
 	// (which is O(testcases^2) marshaling). Default false = legacy behaviour.
 	AgentOwnsConsumed  bool                 `json:"agentOwnsConsumed,omitempty"`
 	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	// MockMappingUniverse is the union of every test's mapped mock names, i.e.
+	// every name that appears anywhere in mappings.yaml. A recorded mock whose
+	// name is ABSENT from it belongs to no test — traffic captured outside every
+	// scope window, such as a Playwright `beforeAll` or a bootstrap handshake.
+	//
+	// Set alongside MockMapping, it makes those shared recordings visible to a
+	// scoped test as OVERFLOW: the test's own mapped mocks are matched first and
+	// the shared ones only after they are exhausted. Ordering is load-bearing —
+	// see FilterTcsMocksMappingWithShared.
+	//
+	// nil restores the previous behaviour exactly (mapped-only pool). Only
+	// Agent.BeginScope populates it, so the `keploy test` replay path — which
+	// also sets UseMappingBased — is unaffected.
+	MockMappingUniverse []string `json:"mockMappingUniverse,omitempty"`
 	// StrictMockWindow controls whether out-of-window non-config mocks are
 	// dropped rather than being promoted into the cross-test config pool.
 	// Default TRUE (see config.Test default) — out-of-window per-test

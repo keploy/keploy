@@ -40,6 +40,7 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
 		Start:        mock.Start,
+		Owner:        mock.Owner,
 		Async:        mock.Spec.Async,
 		// Unified noise block: the obfuscator value-regexes (mock.Noise) plus the
 		// request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys; regex
@@ -304,6 +305,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
 		Start:        mock.Start,
+		Owner:        mock.Owner,
 		// Async-egress bookkeeping as a kind-agnostic top-level block, set on the
 		// envelope (like Noise) so it survives the per-kind spec projection. nil
 		// for ordinary mocks, so omitempty drops the key.
@@ -667,6 +669,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			Noise:        m.Noise.ValueNoise(),
 			ConnectionID: m.ConnectionID,
 			Start:        m.Start,
+			Owner:        m.Owner,
 		}
 		mapped, err := decodeWithMapper(m, &mock)
 		if err != nil {
@@ -1649,6 +1652,7 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 			Noise:        m.Noise.ValueNoise(),
 			ConnectionID: m.ConnectionID,
 			Start:        m.Start,
+			Owner:        m.Owner,
 		}
 
 		switch m.Kind {

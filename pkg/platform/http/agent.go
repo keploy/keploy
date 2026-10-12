@@ -3084,15 +3084,15 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // PushScopeTable hands the agent the replay-time per-test name→mock-names table
 // (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
 // served pool per test. A missing endpoint (older agent) is a no-op.
-func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string) (retErr error) {
+func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string, strict bool) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded := maps.Clone(table)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushScopeTable(c, recorded) })
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushScopeTable(c, recorded, strict) })
 		}
 	}()
 	url := fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI)
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Strict: strict})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

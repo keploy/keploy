@@ -57,6 +57,15 @@ type HTTP struct {
 	// life. Mock names repeat across test sets (mock-0, mock-1, ...), so a
 	// later set's mock of a name already warned about is not warned again.
 	ptLoadWarned sync.Map
+	// wb invalidates read-mocks recorded before a served mutation. See
+	// writebarrier.go.
+	wb writeBarrier
+	// fence holds back read-mocks recorded after a write the staged test has
+	// not made yet. See fence.go.
+	fence fence
+	// liveCookies holds every cookie name a live request has carried during
+	// this replay. See setcookie.go (cookies the server never set).
+	liveCookies sync.Map
 }
 
 func New(logger *zap.Logger) integrations.Integrations {

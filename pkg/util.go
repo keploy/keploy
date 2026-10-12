@@ -2914,6 +2914,69 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 	return filteredMocks
 }
 
+// FilterTcsMocksMappingWithShared narrows the per-test pool to this test's own
+// mapped mocks and then appends, as OVERFLOW, the mocks that belong to no test
+// at all — those whose name is absent from `universe`, the union of every test's
+// mappings.yaml entry. Traffic captured outside every scope window (a Playwright
+// `beforeAll`, a bootstrap handshake) lands there.
+//
+// Without the overflow tier such a recording is invisible for the whole of every
+// scoped test: FilterTcsMocksMapping keeps only in-mapping mocks, and an HTTP
+// mock is LifetimePerTest (the recorder tags it "HTTP_CLIENT", which rule 5's
+// lax promotion deliberately excludes), so it never reaches the session pool
+// that FilterConfigMocksMapping passes through whole. A call that needs it then
+// misses with candidates: 0 while an exact, unconsumed match sits in the set.
+//
+// ORDERING IS LOAD-BEARING, not cosmetic. The matcher takes the first match in
+// slice order, so this test's own recordings must precede the shared ones. Put
+// the shared tier first and a `beforeAll` recording of the same URL wins the tie
+// and the test is served another scope's response with missed: 0 — trading a
+// loud miss for a silent wrong answer, which is strictly worse. Mapped-first
+// means every call the mapping already covers behaves byte-for-byte as before
+// and the shared tier is reached only on overflow.
+//
+// Each tier stays sorted by request timestamp internally, so ordered-tape replay
+// (N identical requests, N different responses) is preserved within a tier.
+//
+// universe == nil ⇒ identical to FilterTcsMocksMapping.
+//
+// This mirrors the shape FilterConfigMocksMapping has always had for the session
+// pool (append(inMapping, everythingElse...)), and the semantics scopedMockDb.keep
+// already implements for the per-worker path (pkg/agent/proxy/scoped_mockdb.go).
+func FilterTcsMocksMappingWithShared(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, universe []string) []*models.Mock {
+	mine := FilterTcsMocksMapping(ctx, logger, m, mocksPresentInMapping)
+	if len(universe) == 0 {
+		return mine
+	}
+	mapped := make(map[string]struct{}, len(universe))
+	for _, n := range universe {
+		mapped[n] = struct{}{}
+	}
+	var shared []*models.Mock
+	for _, mock := range m {
+		if mock == nil {
+			continue
+		}
+		if _, isMapped := mapped[mock.Name]; isMapped {
+			continue
+		}
+		p := mock.DeepCopy()
+		// IsFiltered marks membership of the per-test pool, which is what this
+		// slice becomes; the tier a mock came from is carried by Lifetime, not
+		// by this flag.
+		p.TestModeInfo.IsFiltered = true
+		shared = append(shared, p)
+	}
+	sort.SliceStable(shared, func(i, j int) bool {
+		return shared[i].Spec.ReqTimestampMock.Before(shared[j].Spec.ReqTimestampMock)
+	})
+	if len(shared) > 0 {
+		logger.Debug("per-test pool: appended unmapped shared mocks as overflow",
+			zap.Int("mine", len(mine)), zap.Int("shared", len(shared)))
+	}
+	return append(mine, shared...)
+}
+
 // FilterConfigMocksMapping tags the reusable (config/session/connection) pool
 // with its mapping membership and returns it in RECORDED order.
 //
@@ -3659,6 +3722,30 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 	}
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
+	// DIAGNOSTIC: names mapped entries that never arrived in the input set.
+	// Showed the 14->9 per-test drop is the ambientPollOps + CORS promotions
+	// moving those mocks to the session tier, not a loss.
+	if len(mocksPresentInMapping) > len(filtered) {
+		present := make(map[string]bool, len(m))
+		for _, mock := range m {
+			if mock != nil {
+				present[mock.Name] = true
+			}
+		}
+		missing := make([]string, 0, len(mocksPresentInMapping)-len(filtered))
+		for _, name := range mocksPresentInMapping {
+			if !present[name] {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			logger.Info("KPDROP mapped mocks absent from the input set",
+				zap.Int("mapped", len(mocksPresentInMapping)),
+				zap.Int("arrived", len(filtered)),
+				zap.Int("inputSet", len(m)),
+				zap.Strings("missing", missing))
+		}
 	}
 	return filtered, unfiltered
 }

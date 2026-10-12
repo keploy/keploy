@@ -3963,6 +3963,17 @@ func (p *Proxy) GetPersistentConsumed() map[string]models.MockState {
 	return m.GetPersistentConsumed()
 }
 
+// ResetConsumedMocks clears the cumulative consumption ledger for exactly the
+// named mocks, so a retried test's own recordings become servable again without
+// disturbing any other test's. See coreAgent.ConsumedMockResetter.
+func (p *Proxy) ResetConsumedMocks(_ context.Context, names []string) (int, error) {
+	m := p.getMockManager()
+	if m == nil {
+		return 0, fmt.Errorf("mock manager not found to reset consumed mocks")
+	}
+	return m.ResetConsumedMocks(names), nil
+}
+
 // testErrorAccumulator collects errors during an active test case.
 // It is goroutine-safe via an internal mutex.
 type testErrorAccumulator struct {
@@ -4363,6 +4374,16 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 			zap.String("closest", r.ClosestMock),
 			zap.String("next_step", r.NextSteps),
 		}
+		// The recorded-vs-live field diff, the one triage fact this line was
+		// missing. It used to be reachable only from the per-parser Debug line
+		// (http/decode.go), which meant answering "what actually differed?"
+		// cost a --debug rerun that also dumps every served body and slows a
+		// 298-test replay by hours. The diff is bounded and already redacted
+		// by the renderer, so carrying it on the Warn makes a default-level
+		// log sufficient for triage.
+		if r.Diff != "" {
+			fields = append(fields, zap.String("diff", r.Diff))
+		}
 		// destination_scope is greppable in a node-wide agent log:
 		// "not_in_compared_set" is the one value that says "nothing this miss
 		// was compared against even targets that upstream" — in Kubernetes
@@ -4381,6 +4402,14 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 		// "not established", which is the truth.
 		if r.DestinationScope != models.DestinationScopeUnknown {
 			fields = append(fields, zap.String("destination_scope", r.DestinationScope))
+		}
+		// Which logical call missed. Emitted only when the protocol could
+		// establish it: on a multiplexed endpoint (one GraphQL POST /query for
+		// every operation) "actual" names the transport, not the call, so
+		// triage cannot tell a background poll from a new call a code change
+		// introduced. Absent means "not established", never "nothing there".
+		if r.ReqIdentity != "" {
+			fields = append(fields, zap.String("req_identity", r.ReqIdentity))
 		}
 		p.logger.Warn("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {

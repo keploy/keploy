@@ -23,6 +23,15 @@ import (
 type scopeBeginner interface {
 	BeginScope(ctx context.Context, name string, pid int) error
 }
+
+// scopeAckBeginner begins a scope with the runner's attempt number and answers
+// with what the begin did (models.ScopeAck): whether the pool was narrowed, to
+// how many mocks, and why not when it was not. A harness that reads only
+// {"status":"ok"} is unaffected; one that reads the rest can tell a test with no
+// recording from one that needed none.
+type scopeAckBeginner interface {
+	BeginScopeAck(ctx context.Context, name string, pid, attempt int, at time.Time) (models.ScopeAck, error)
+}
 type scopeEnder interface {
 	EndScope(ctx context.Context, name string, pid int) error
 }
@@ -72,7 +81,7 @@ type scopeWindowReader interface {
 	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
 }
 type scopeTableSetter interface {
-	SetScopeTable(ctx context.Context, table map[string][]string) error
+	SetScopeTable(ctx context.Context, table map[string][]string, strict bool) error
 }
 type mockStatsReader interface {
 	MockStats(ctx context.Context) (models.MockStats, error)
@@ -114,6 +123,29 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		s.NoteScope(req.Name, req.Pid, req.Dir, req.Suite)
 	}
 	starts.Default.Begin(uint32(req.Pid), req.Name, req.Dir, req.Suite, markTime(req.At))
+	if s, ok := a.svc.(scopeAckBeginner); ok {
+		ack, err := s.BeginScopeAck(r.Context(), req.Name, req.Pid, req.Attempt, req.At)
+		if err != nil {
+			a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// "status" is kept so a runner written against the original contract is
+		// unaffected; scoped/mocks/reason say whether the call did anything.
+		ack.Status = "ok"
+		render.Status(r, http.StatusOK)
+		render.JSON(w, r, ack)
+		return
+	}
+	_, at := a.svc.(scopeBeginnerAt)
+	_, plain := a.svc.(scopeBeginner)
+	if !at && !plain {
+		// No scope support at all in this build: say so, so a runner can tell
+		// "scoping is off" from "scoped, nothing to narrow".
+		render.Status(r, http.StatusOK)
+		render.JSON(w, r, models.ScopeAck{Status: "ok", Reason: models.ScopeReasonUnsupported})
+		return
+	}
 	if err := beginScope(r.Context(), a.svc, req); err != nil {
 		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -187,7 +219,7 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
-		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
+		if err := s.SetScopeTable(r.Context(), req.Mappings, req.Strict); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

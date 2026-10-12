@@ -194,7 +194,7 @@ func (m *Mock) DeriveLifetime() {
 	// know is input-independent. COM_QUERY / COM_INIT_DB /
 	// COM_CHANGE_USER / COM_SET_OPTION all depend on input and must
 	// stay per-test.
-	if m.Kind == MySQL && mysqlIsSessionReusableCommand(m) {
+	if m.IsSharedAcrossTests() {
 		m.TestModeInfo.Lifetime = LifetimeSession
 		return
 	}
@@ -283,7 +283,7 @@ func (m *Mock) DeriveLifetime() {
 	// kind-based session fallback for any non-canonical tag when
 	// the kind is in the implicit-session list. Strict mode takes
 	// the narrow path above and returns before reaching here.
-	if !laxKindFallbackDisabled() && kindsWithImplicitSessionLifetime(m.Kind) {
+	if !laxKindFallbackDisabled() && kindsWithLaxTaggedSessionPromotion(m.Kind) {
 		m.TestModeInfo.Lifetime = LifetimeSession
 		// Same rationale as the untagged branch above: a non-canonical tag on a
 		// data-plane kind under lax mode is still a data mock whose repeated
@@ -366,6 +366,42 @@ var laxKindFallbackDisabledCache = func() bool {
 	}
 	return false
 }()
+
+// httpPerTestCache snapshots KEPLOY_MOCK_HTTP_PER_TEST at package init, with
+// the same startup-read semantics as KEPLOY_STRICT_MOCK_WINDOW above.
+//
+// Off (the default), a recorded HTTP mock tagged per-test is promoted to the
+// session pool by rule 5 and served by a record-order cursor that repeats its
+// last copy. On, it stays LifetimePerTest: each test is served its OWN copies,
+// in record order, and each is consumed when served. A browser suite needs
+// that: its page loads and polls are byte-identical across tests while their
+// answers are not (a list before and after a create, a login cookie, a 401 in a
+// negative test), so a copy recorded for another test, or for another moment
+// of this one, is a wrong answer that no miss would report. The spec-level
+// sharing, setup slots and fences the agent and the HTTP matcher add
+// (service/agent/specpool.go, setupslot.go, http/fence.go) work on per-test
+// mocks only.
+var httpPerTestCache = func() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KEPLOY_MOCK_HTTP_PER_TEST"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}()
+
+// HTTPPerTest reports whether recorded per-test HTTP mocks stay per-test under
+// lax mode (KEPLOY_MOCK_HTTP_PER_TEST).
+func HTTPPerTest() bool { return httpPerTestCache }
+
+// kindsWithLaxTaggedSessionPromotion is the set rule 5 promotes: the implicit
+// session kinds, less HTTP when per-test HTTP is on. Untagged legacy recordings
+// (rule 4) still use kindsWithImplicitSessionLifetime unchanged.
+func kindsWithLaxTaggedSessionPromotion(k Kind) bool {
+	if k == HTTP && httpPerTestCache {
+		return false
+	}
+	return kindsWithImplicitSessionLifetime(k)
+}
 
 // legacyKindFallbackFires counts how many times DeriveLifetime has fallen
 // back to kind-based inference because a recording lacked an explicit
@@ -598,4 +634,55 @@ func (r *mockPredicates) reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.byKnd.Store(nil)
+}
+
+// IsSharedAcrossTests reports whether DeriveLifetime's rule-1 protocol
+// overrides classify this mock as semantically reusable: its recorded response
+// is a property of the ENDPOINT, not of whichever test happened to trigger it.
+// A MySQL connection-alive command and a browser CORS preflight both qualify;
+// the answer does not depend on the caller.
+//
+// Deliberately NARROWER than Lifetime == LifetimeSession. Most session mocks
+// are session because of the tiering fallbacks (rules 4 and 5), which say
+// nothing about reusability. Per-worker scoping (pkg/agent/proxy/scoped_mockdb.go)
+// must keep hiding those from other workers, so it consults this predicate
+// instead of Lifetime. DeriveLifetime calls it too, so an override added here is
+// honoured by the scoping filter as well.
+func (m *Mock) IsSharedAcrossTests() bool {
+	if m == nil {
+		return false
+	}
+	switch {
+	case m.Kind == MySQL && mysqlIsSessionReusableCommand(m):
+		return true
+	case m.Kind == HTTP && httpIsCORSPreflight(m):
+		return true
+	}
+	return false
+}
+
+// httpIsCORSPreflight reports whether an HTTP mock captured a browser CORS
+// preflight. Its response is the endpoint's allow-policy, input-independent, so
+// it is session-reusable whatever the recorder's per-test "HTTP_CLIENT" tag.
+// HTTP2 is not wired up: keploy's h2 parser serves gRPC, where browser
+// preflights do not appear.
+func httpIsCORSPreflight(m *Mock) bool {
+	if m == nil || m.Spec.HTTPReq == nil {
+		return false
+	}
+	return IsCORSPreflightRequest(m.Spec.HTTPReq.Method, m.Spec.HTTPReq.Header)
+}
+
+// IsCORSPreflightRequest reports whether a recorded HTTP request is a browser
+// CORS preflight: method OPTIONS and an Access-Control-Request-Method header.
+func IsCORSPreflightRequest(method Method, header map[string]string) bool {
+	if string(method) != "OPTIONS" {
+		return false
+	}
+	for k, v := range header {
+		if strings.EqualFold(k, "Access-Control-Request-Method") {
+			return strings.TrimSpace(v) != ""
+		}
+	}
+	return false
 }

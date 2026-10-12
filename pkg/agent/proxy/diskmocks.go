@@ -317,8 +317,54 @@ func (d *DiskMocks) LoadByNames(names []string) ([]*models.Mock, error) {
 		return nil, fmt.Errorf("disk mocks: store closed")
 	}
 	sel := make([]diskEntry, 0, len(names))
+	var unresolved []string
 	for _, n := range names {
 		if e, ok := d.byName[n]; ok {
+			sel = append(sel, e)
+		} else {
+			unresolved = append(unresolved, n)
+		}
+	}
+	d.mu.Unlock()
+	// DIAGNOSTIC: a mapped name that is absent from the on-disk index is skipped
+	// SILENTLY, so a scope that asks for 85 mocks and receives 61 reports nothing
+	// anywhere. Measured on the atg "order" tape: scope staged 85, KPLOAD loaded
+	// 61, KPDROP saw inputSet 64 -- 24 names vanished with no error, and the
+	// /auth/check mocks a test needed were among them. Name the misses so the
+	// shortfall is attributable instead of inferred.
+	if len(unresolved) > 0 && d.logger != nil {
+		d.logger.Info("KPNAME mapped names absent from the on-disk index",
+			zap.Int("asked", len(names)),
+			zap.Int("resolved", len(sel)),
+			zap.Int("indexSize", len(d.byName)),
+			zap.Strings("unresolved", unresolved))
+	}
+	return d.decodeAll(sel)
+}
+
+// LoadUnmapped returns every on-disk mock whose name is ABSENT from universe —
+// the union of every test's mappings.yaml entry. Those mocks belong to no test:
+// they were captured outside every scope window (a Playwright `beforeAll`, a
+// bootstrap handshake). They are the overflow tier a scoped test falls back to
+// once its own tape is exhausted; see FilterTcsMocksMappingWithShared.
+//
+// Entries are returned in d.entries order, which Finalize sorts by request
+// timestamp, so recorded order is preserved within the tier.
+func (d *DiskMocks) LoadUnmapped(universe []string) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	mapped := make(map[diskEntry]struct{}, len(universe))
+	for _, n := range universe {
+		if e, ok := d.byName[n]; ok {
+			mapped[e] = struct{}{}
+		}
+	}
+	sel := make([]diskEntry, 0, len(d.entries))
+	for _, e := range d.entries {
+		if _, isMapped := mapped[e]; !isMapped {
 			sel = append(sel, e)
 		}
 	}

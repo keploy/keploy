@@ -277,6 +277,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		// Read directly; see utils.NoViperBindAnnotation.
+		_ = cmd.Flags().SetAnnotation("pass-through-ports", utils.NoViperBindAnnotation, []string{"true"})
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().MarkDeprecated("app-id", "DEPRICATED : was used for unique name for the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
@@ -384,6 +386,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		_ = cmd.Flags().MarkHidden(provenswitch.AgentFlag)
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		// Read directly; see utils.NoViperBindAnnotation.
+		_ = cmd.Flags().SetAnnotation("pass-through-ports", utils.NoViperBindAnnotation, []string{"true"})
 		// --ca-java-home is the manual override for the app-aware Java
 		// truststore install. When the auto-detector in
 		// pkg/agent/proxy/tls/java_detect.go cannot resolve the app's JDK
@@ -2448,17 +2452,22 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy to intercept outgoing calls")
 	cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server")
 	cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Destination ports to leave untouched (never mocked)")
+	// Read directly; see utils.NoViperBindAnnotation.
+	_ = cmd.Flags().SetAnnotation("pass-through-ports", utils.NoViperBindAnnotation, []string{"true"})
 	cmd.Flags().Bool("local", c.cfg.Mock.Local, "Use the local file-backed mock store even when a cloud registry is configured")
 	cmd.Flags().Bool("disable-handshake-hold", false, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers")
 
 	switch cmd.Name() {
 	case "record":
+		cmd.Flags().Bool("partial", c.cfg.Mock.Partial, "Re-record only the tests the wrapped runner exercises, replacing those whole and keeping every other test's existing recording. Without it a re-record replaces the entire set.")
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
 		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
 		cmd.Flags().Bool("emit-mock-events", c.cfg.Mock.EmitMockEvents, "Log one line per mock as it is first served (stdout; stderr under --json)")
+		cmd.Flags().Bool("strict-scope", c.cfg.Mock.StrictScope, "Serve a test with no recording of its own NOTHING but unowned mocks, instead of the whole pool. Use for browser suites that assert on the response; leave off for integration testing, where one test's recording answering another's request is intended.")
+		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Match outgoing request bodies by VALUE, not just by key presence: a mock is rejected when any request-body field outside test.globalNoise.requestbody drifted. Off by default; turning it on will surface request drift that was previously served the stale recorded response")
 		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
 		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")
 		cmd.Flags().String("coverage-report", c.cfg.Mock.CoverageReport, "Coverage report the test command writes, when it is not a default location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...)")
@@ -2686,6 +2695,14 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 
 	switch cmd.Name() {
 	case "record":
+		if cmd.Flags().Changed("partial") {
+			partial, err := cmd.Flags().GetBool("partial")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the partial flag")
+				return errors.New("failed to get the partial flag")
+			}
+			c.cfg.Mock.Partial = partial
+		}
 		if cmd.Flags().Changed("record-timer") {
 			d, err := cmd.Flags().GetDuration("record-timer")
 			if err != nil {
@@ -2698,6 +2715,14 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			return err
 		}
 	case "replay":
+		if cmd.Flags().Changed("strict-scope") {
+			strictScope, err := cmd.Flags().GetBool("strict-scope")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the strict-scope flag")
+				return errors.New("failed to get the strict-scope flag")
+			}
+			c.cfg.Mock.StrictScope = strictScope
+		}
 		onMiss, err := cmd.Flags().GetString("on-miss")
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to get the on-miss flag")
@@ -2731,6 +2756,16 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 				return errors.New("failed to get the emit-mock-events flag")
 			}
 			c.cfg.Mock.EmitMockEvents = emitMockEvents
+		}
+		// Changed()-guarded so an unset flag doesn't clobber
+		// test.schemaNoiseStrict from keploy.yml with the flag's default.
+		if cmd.Flags().Changed("schema-noise-strict") {
+			schemaNoiseStrict, err := cmd.Flags().GetBool("schema-noise-strict")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the schema-noise-strict flag")
+				return errors.New("failed to get the schema-noise-strict flag")
+			}
+			c.cfg.Test.SchemaNoiseStrict = schemaNoiseStrict
 		}
 
 		if cmd.Flags().Changed("delay") {

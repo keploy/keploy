@@ -31,8 +31,10 @@ func windowNames(a *Agent) []string {
 func TestRecordScopesNestedPidZero(t *testing.T) {
 	a := newRecordAgent()
 	ctx := context.Background()
-	require.NoError(t, a.BeginScope(ctx, "suite", 0))
-	require.NoError(t, a.BeginScope(ctx, "test1", 0))
+	_, err := a.BeginScopeAck(ctx, "suite", 0, 0, time.Time{})
+	require.NoError(t, err)
+	_, err = a.BeginScopeAck(ctx, "test1", 0, 0, time.Time{})
+	require.NoError(t, err)
 	require.NoError(t, a.EndScope(ctx, "test1", 0))
 	require.NoError(t, a.EndScope(ctx, "suite", 0))
 	require.ElementsMatch(t, []string{"suite", "test1"}, windowNames(a),
@@ -44,8 +46,10 @@ func TestRecordScopesNestedPidZero(t *testing.T) {
 func TestRecordScopesParallelWorkers(t *testing.T) {
 	a := newRecordAgent()
 	ctx := context.Background()
-	require.NoError(t, a.BeginScope(ctx, "t", 100))
-	require.NoError(t, a.BeginScope(ctx, "t", 200)) // overlaps worker 100's scope
+	_, err := a.BeginScopeAck(ctx, "t", 100, 0, time.Time{})
+	require.NoError(t, err)
+	_, err = a.BeginScopeAck(ctx, "t", 200, 0, time.Time{}) // overlaps worker 100's scope
+	require.NoError(t, err)
 	require.NoError(t, a.EndScope(ctx, "t", 100))
 	require.NoError(t, a.EndScope(ctx, "t", 200))
 

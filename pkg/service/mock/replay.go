@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
+	"go.keploy.io/server/v3/pkg/service/replay"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -175,6 +176,19 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	// 3. Put the proxy in mock-serving mode with the miss policy.
+	//
+	// --schema-noise-strict makes a changed request VALUE miss: the default
+	// request-body check compares top-level key presence only, so a payload
+	// that keeps its shape and changes a value is served the stale recorded
+	// response. NoiseConfig is forwarded only alongside it: it also feeds header
+	// noise, so passing it unconditionally would loosen matching for anyone
+	// with an existing test.globalNoise block. SchemaNoiseDetection is not
+	// forwarded: a learner pointed at a gate would amnesty the very field the
+	// PR broke.
+	var mockNoiseConfig map[string]map[string][]string
+	if m.config.Test.SchemaNoiseStrict {
+		mockNoiseConfig = replay.PrepareMockNoiseConfig(m.config.Test.GlobalNoise.Global, m.config.Test.GlobalNoise.Testsets, name)
+	}
 	if err := m.instrumentation.MockOutgoing(ctx, models.OutgoingOptions{
 		Rules:                     m.config.BypassRules,
 		MongoPassword:             m.config.Test.MongoPassword,
@@ -189,6 +203,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 		DisableStatefulMocks:      m.config.Test.DisableStatefulMocks,
 		DisableMockCorrelation:    m.config.Test.DisableMockCorrelation,
+		NoiseConfig:               mockNoiseConfig,
+		SchemaNoiseStrict:         m.config.Test.SchemaNoiseStrict,
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -709,7 +725,7 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) {
 		}
 		table[testName] = names
 	}
-	if err := pusher.PushScopeTable(ctx, table); err != nil {
+	if err := pusher.PushScopeTable(ctx, table, m.config.Mock.StrictScope); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
 		return
 	}

@@ -159,6 +159,10 @@ func TestTierKeyKeepsEveryFieldButTheID(t *testing.T) {
 			LifetimeDerived: true,
 			IsStartup:       true,
 			Consume:         models.ConsumeCursorSaturate,
+			SharedInSpec:    true,
+			FenceScope:      "spec > test",
+			FenceWrite:      true,
+			FenceLater:      true,
 		},
 	}
 	v := reflect.ValueOf(src.TestModeInfo)
