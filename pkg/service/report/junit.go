@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -57,6 +58,12 @@ type junitSkipped struct {
 	// single "obsolete test case" bucket into one bucket per dependency
 	// combination, and an unbounded attribute (one clause per unconsumed mock)
 	// would put kilobytes on one XML line.
+	//
+	// The one exception is a case keploy quarantined: its message is
+	// "quarantined by keploy (<reason>)", as a test framework's own skip
+	// shows its reason (the proven model's contract), so it groups by reason.
+	// It stays one line and bounded (quarantinedSkipMessage); the whole
+	// reason is the body.
 	Text string `xml:",chardata"`
 }
 
@@ -174,7 +181,7 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 			}
 		case models.TestStatusIgnored:
 			skipped++
-			tc.Skipped = &junitSkipped{Message: "ignored test case"}
+			tc.Skipped = ignoredSkip(t)
 		default:
 			// PASSED (and anything else that is neither failed nor skipped).
 			// A test whose response still matched while a recorded outgoing
@@ -338,6 +345,55 @@ func depFailureLines(deps []models.DepResult) []string {
 	}
 	return parts
 }
+
+// ignoredSkip is the <skipped> element of an IGNORED case. A case keploy
+// skipped with a reason (a quarantine) says so in the message, which is what
+// every CI dashboard shows for a skipped case: "quarantined by keploy
+// (<reason>)", with the reason in the body too. A case skipped without one
+// keeps the historical literal, byte for byte.
+func ignoredSkip(t models.TestResult) *junitSkipped {
+	if t.SkipReason == "" {
+		return &junitSkipped{Message: ignoredSkipMessage}
+	}
+	return &junitSkipped{
+		Message: quarantinedSkipMessage(t.SkipReason),
+		Text:    t.SkipReason,
+	}
+}
+
+// quarantinedSkipMessage is the <skipped message> of a case keploy skipped for
+// a reason: the reason on one line, cut at maxSkipMessageReason bytes (at a
+// character's start, marked "…").
+func quarantinedSkipMessage(reason string) string {
+	return quarantinedLine(capBytes(models.SkipReasonOneLine(reason), maxSkipMessageReason))
+}
+
+// quarantinedLine says a case was quarantined, and why.
+func quarantinedLine(reason string) string {
+	return "quarantined by keploy (" + reason + ")"
+}
+
+// maxSkipMessageReason bounds the reason in a <skipped message>: a
+// developer's own reason is at most 200 bytes, and a class/reason with its
+// detail fits as well.
+const maxSkipMessageReason = 200
+
+// capBytes is s cut to at most n bytes at the start of a character, with "…"
+// when it was cut.
+func capBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
+// ignoredSkipMessage is the historical <skipped message> literal for an IGNORED
+// case skipped without a reason.
+const ignoredSkipMessage = "ignored test case"
 
 // obsoleteSkipMessage is the historical, FIXED <skipped message> literal for
 // an OBSOLETE test. It is a consumer-visible string contract — CI dashboards

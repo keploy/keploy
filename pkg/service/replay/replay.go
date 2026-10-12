@@ -457,6 +457,10 @@ type Replayer struct {
 	failedTCsBySetID      map[string][]string
 	mockMismatchFailures  *TestFailureStore
 	fallbackDeprecateOnce sync.Once
+	// quarantined is, under the proven switch, each test this run skipped for
+	// a reason, keyed by test set and test, for the run's summary.
+	quarantinedMu sync.Mutex
+	quarantined   map[[2]string]string
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -664,6 +668,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.consumedMockNames = make(map[string]struct{})
 	r.totalTestTimeTaken = 0
 	r.completeTestReportMu.Unlock()
+	r.forgetQuarantined()
 	r.failedTCsBySetID = make(map[string][]string)
 	r.mockMismatchFailures = NewTestFailureStore()
 
@@ -1524,6 +1529,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			TimeTaken: timeTaken.String(),
 			CmdUsed:   r.config.Test.CmdUsed,
 		}
+		// Under the proven switch the report names each skipped test, with its
+		// reason, instead of counting them.
+		if rows := r.ignoredSetResults(testSetID, testCases); rows != nil {
+			for i := range rows {
+				if err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, &rows[i]); err != nil {
+					utils.LogError(r.logger, err, "failed to insert test case result")
+					return models.TestSetStatusFailed, err
+				}
+			}
+			testReport.Tests = rows
+			testReport.Total = len(rows)
+			testReport.Ignored = len(rows)
+		}
 
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
@@ -2305,12 +2323,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		if _, ok := ignoredTests[testCase.Name]; ok {
 			testCaseResult := &models.TestResult{
-				Kind:         models.HTTP,
+				Kind:         ignoredKind(testCase),
 				Name:         testSetID,
 				Status:       models.TestStatusIgnored,
 				TestCaseID:   testCase.Name,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
 				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+				SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
 			}
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
@@ -2416,12 +2435,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			if _, ok := ignoredTests[testCase.Name]; ok {
 				testCaseResult := &models.TestResult{
-					Kind:         models.HTTP,
+					Kind:         ignoredKind(testCase),
 					Name:         testSetID,
 					Status:       models.TestStatusIgnored,
 					TestCaseID:   testCase.Name,
 					TestCasePath: filepath.Join(r.config.Path, testSetID),
 					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+					SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
 				}
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -5565,6 +5585,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 					return
 				}
 			}
+			fmt.Print(r.quarantinedSummary())
 			if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
 				utils.LogError(r.logger, err, "failed to print separator")
 				return
@@ -5629,6 +5650,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				fmt.Printf(format.String(), args...)
 			}
 
+			fmt.Print(r.quarantinedSummary())
 			fmt.Print("\n<=========================================> \n\n")
 		}
 	}
