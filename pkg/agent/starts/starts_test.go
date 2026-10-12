@@ -365,70 +365,160 @@ func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
 	}
 }
 
-func TestACallSeesOnlyTheMocksOfTheCaseInFlight(t *testing.T) {
-	f := newFake()
-	r := New(f, 0)
-	f.spawn(100, 1, at(0), "/tmp/e2e.test")
-	r.Begin(100, "/repo/e2e", "/repo/e2e", true, at(1))
-	f.spawn(101, 100, at(2), "/tmp/shop")
-	r.SetTable("/repo", map[string]models.SetTable{"e2e": {
+func caseTable() map[string]models.SetTable {
+	return map[string]models.SetTable{"e2e": {
 		Tests: map[string][]models.Owned{"T": {{Name: "m1"}, {Name: "m2"}, {Name: "m3"}, {Name: "fx"}}, "U": {{Name: "u1"}}},
 		Cases: map[string][]models.Case{"T": {
 			{Name: "test-1", Method: "GET", URL: "http://localhost:8080/a", Mocks: []string{"m1"}},
 			{Name: "test-2", Method: "GET", URL: "http://localhost:8080/a", Mocks: []string{"m2"}},
 			{Name: "test-3", Method: "POST", URL: "http://localhost:8080/b/42", Mocks: []string{"m3"}},
 		}},
-	}})
-	r.Begin(100, "T", "/repo/e2e", false, at(10))
-	seen := func() []string {
-		rank, _, ok := r.View(101, at(20))
-		if !ok {
-			t.Fatal("no view")
-		}
-		var out []string
-		for n := range rank {
-			out = append(out, n)
-		}
-		slices.Sort(out)
-		return out
-	}
-	check := func(what string, want ...string) {
-		t.Helper()
-		if got := seen(); !slices.Equal(got, want) {
-			t.Fatalf("%s: sees %v, want %v", what, got, want)
-		}
-	}
-	check("between cases", "fx")
-	end := r.Exchange("GET", "/a")
-	check("first GET /a", "fx", "m1")
-	end()
-	end()
-	check("after the first case", "fx")
-	end = r.Exchange("GET", "/a")
-	check("second GET /a", "fx", "m2")
-	end()
-	end = r.Exchange("POST", "/b/43")
-	check("POST /b by its path", "fx", "m3")
-	end()
-	end = r.Exchange("GET", "/c")
-	check("a request no case recorded", "fx")
-	end()
+	}}
 }
 
-func TestWithoutCasesTheWholeTestIsServed(t *testing.T) {
+func seen(t *testing.T, r *Registry, pid uint32) []string {
+	t.Helper()
+	rank, _, ok := r.View(pid, at(20))
+	if !ok {
+		t.Fatal("no view")
+	}
+	var out []string
+	for n := range rank {
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func sees(t *testing.T, r *Registry, pid uint32, what string, want ...string) {
+	t.Helper()
+	if got := seen(t, r, pid); !slices.Equal(got, want) {
+		t.Fatalf("%s: sees %v, want %v", what, got, want)
+	}
+}
+
+func oneTest(sets map[string]models.SetTable) (*fake, *Registry) {
 	f := newFake()
 	r := New(f, 0)
 	f.spawn(100, 1, at(0), "/tmp/e2e.test")
 	r.Begin(100, "/repo/e2e", "/repo/e2e", true, at(1))
 	f.spawn(101, 100, at(2), "/tmp/shop")
-	r.SetTable("/repo", map[string]models.SetTable{"e2e": {
+	r.SetTable("/repo", sets)
+	r.Begin(100, "T", "/repo/e2e", false, at(10))
+	return f, r
+}
+
+func TestACallSeesOnlyTheMocksOfTheCaseInFlight(t *testing.T) {
+	_, r := oneTest(caseTable())
+	sees(t, r, 101, "before the first case", "fx")
+	end := r.Exchange(0, "GET", "/a")
+	sees(t, r, 101, "first GET /a", "fx", "m1")
+	end()
+	end()
+	sees(t, r, 101, "after the first case, until the next one", "fx", "m1")
+	end = r.Exchange(0, "GET", "/a")
+	sees(t, r, 101, "second GET /a", "fx", "m2")
+	end()
+	end = r.Exchange(0, "POST", "/b/43/")
+	sees(t, r, 101, "POST /b by its path", "fx", "m3")
+	end()
+}
+
+func TestARequestNoCaseRecordedSeesTheWholeTest(t *testing.T) {
+	_, r := oneTest(caseTable())
+	for _, c := range []struct{ method, url string }{{"GET", "/a"}, {"GET", "/a"}, {"POST", "/b/1"}} {
+		r.Exchange(0, c.method, c.url)()
+	}
+	end := r.Exchange(0, "GET", "/a")
+	sees(t, r, 101, "a third GET /a", "fx", "m1", "m2", "m3")
+	end()
+	end = r.Exchange(0, "GET", "/c")
+	sees(t, r, 101, "GET /c", "fx", "m1", "m2", "m3")
+	end()
+	sees(t, r, 101, "after it", "fx", "m3")
+}
+
+func TestWithoutCasesTheWholeTestIsServed(t *testing.T) {
+	_, r := oneTest(map[string]models.SetTable{"e2e": {
 		Tests: map[string][]models.Owned{"T": {{Name: "m1"}, {Name: "fx"}}},
 	}})
-	r.Begin(100, "T", "/repo/e2e", false, at(10))
-	end := r.Exchange("GET", "/a")
+	end := r.Exchange(0, "GET", "/a")
 	defer end()
-	rank, _, _ := r.View(101, at(20))
-	if len(rank) != 2 {
-		t.Fatalf("sees %v, want both mocks of the test", rank)
+	sees(t, r, 101, "a test with no cases", "fx", "m1")
+}
+
+func TestATestWithoutCasesInASetWithCasesIsServedWhole(t *testing.T) {
+	_, r := oneTest(caseTable())
+	r.End(100, "T", false, at(11))
+	r.Begin(100, "U", "/repo/e2e", false, at(12))
+	end := r.Exchange(0, "GET", "/a")
+	defer end()
+	sees(t, r, 101, "test U", "u1")
+}
+
+func TestTwoOpenTestsPairEachRequestByItsAppsPort(t *testing.T) {
+	f, r := oneTest(caseTable())
+	r.Ready(101, 8080, at(3))
+	f.spawn(200, 1, at(0), "/tmp/other.test")
+	r.Begin(200, "/repo/e2e", "/repo/e2e", true, at(1))
+	f.spawn(201, 200, at(2), "/tmp/shop")
+	r.Ready(201, 9090, at(3))
+	r.Begin(200, "T", "/repo/e2e", false, at(10))
+
+	end := r.Exchange(8080, "GET", "/a")
+	sees(t, r, 101, "first package's GET /a", "fx", "m1")
+	sees(t, r, 201, "second package between cases", "fx")
+	end()
+	end = r.Exchange(9090, "POST", "/b/7")
+	sees(t, r, 201, "second package's POST", "fx", "m3")
+	end()
+
+	end = r.Exchange(0, "GET", "/a")
+	sees(t, r, 101, "a request no app port places", "fx", "m1", "m2", "m3")
+	end()
+	sees(t, r, 101, "after it", "fx", "m1")
+}
+
+func TestATestWhoseProcessDiedDoesNotBlockPairing(t *testing.T) {
+	f, r := oneTest(caseTable())
+	f.spawn(300, 1, at(0), "/tmp/dead.test")
+	r.Begin(300, "/repo/e2e", "/repo/e2e", true, at(1))
+	r.Begin(300, "U", "/repo/e2e", false, at(5))
+	delete(f.born, 300)
+	end := r.Exchange(0, "GET", "/a")
+	defer end()
+	sees(t, r, 101, "GET /a", "fx", "m1")
+}
+
+func TestASiblingsMockInAnotherTestsCaseStaysVisible(t *testing.T) {
+	_, r := oneTest(map[string]models.SetTable{"e2e": {
+		Tests: map[string][]models.Owned{"T": {{Name: "x"}, {Name: "fx"}}, "T/a": {{Name: "a1"}}},
+		Cases: map[string][]models.Case{
+			"T":   {{Name: "test-1", Method: "GET", URL: "/t", Mocks: []string{"fx"}}},
+			"T/a": {{Name: "test-2", Method: "GET", URL: "/a", Mocks: []string{"a1", "x"}}},
+		},
+	}})
+	sees(t, r, 101, "T between cases", "x")
+}
+
+func TestPickCaseKeys(t *testing.T) {
+	cases := []models.Case{
+		{Method: "GET", URL: "http://h/a%2Fb"},
+		{Method: "GET", URL: "http://h/u/01HZX3N4QK8V9E2R5T7Y6W1M0P"},
+		{Method: "GET", URL: "http://h/q?x=1&y=2"},
+	}
+	for _, c := range []struct {
+		method, url string
+		want        int
+	}{
+		{"GET", "/a/b", -1},
+		{"GET", "/a%2Fb", 0},
+		{"get", "/u/01J0000000000000000000000Z/", 1},
+		{"GET", "/q?y=2&x=1", 2},
+		{"POST", "/q?x=1&y=2", -1},
+	} {
+		if got := pickCase(cases, make([]bool, len(cases)), c.method, c.url); got != c.want {
+			t.Errorf("%s %s pairs with %d, want %d", c.method, c.url, got, c.want)
+		}
 	}
 }

@@ -1142,3 +1142,82 @@ func TestHandleHttp1Connection_ForcedCloseIsNotRecorded(t *testing.T) {
 		})
 	}
 }
+
+func TestMockModeEndsEachExchangeItStarts(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+	stubCaptureHook(t, func(context.Context, *zap.Logger, chan *models.TestCase,
+		*http.Request, *http.Response, time.Time, time.Time,
+		models.IncomingOptions, bool, bool, uint16) {
+	})
+	for _, tc := range []struct {
+		name, mode, response string
+	}{
+		{"zero-copy, answered", "", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"},
+		{"sync, answered", "sync", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"},
+		{"zero-copy, app hangs up", "", ""},
+		{"sync, app hangs up", "sync", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var calls []string
+			ends := 0
+			prev := exchange
+			exchange = func(port uint16, method, rawURL string) func() {
+				mu.Lock()
+				defer mu.Unlock()
+				calls = append(calls, fmt.Sprintf("%d %s %s", port, method, rawURL))
+				return func() {
+					mu.Lock()
+					defer mu.Unlock()
+					ends++
+				}
+			}
+			t.Cleanup(func() { exchange = prev })
+			pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), mockMode: true, synchronous: tc.mode == "sync"}
+			ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())), 5*time.Second)
+			defer cancel()
+			client, done := ingressPipe(t, ctx, pm, oneShotUpstream(t, tc.response))
+			if _, err := io.WriteString(client, "GET /orders/7?x=1 HTTP/1.1\r\nHost: app\r\nConnection: close\r\n\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.ReadAll(client)
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("handleHttp1Connection did not return")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(calls, []string{"8080 GET /orders/7?x=1"}) || ends < 1 {
+				t.Fatalf("exchanges %v, ended %d times; want the one request, ended", calls, ends)
+			}
+		})
+	}
+}
+
+func TestOutsideMockModeNoExchangeIsStarted(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+	stubCaptureHook(t, func(context.Context, *zap.Logger, chan *models.TestCase,
+		*http.Request, *http.Response, time.Time, time.Time,
+		models.IncomingOptions, bool, bool, uint16) {
+	})
+	prev := exchange
+	exchange = func(uint16, string, string) func() {
+		t.Error("an exchange was started outside mock mode")
+		return func() {}
+	}
+	t.Cleanup(func() { exchange = prev })
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())), 5*time.Second)
+	defer cancel()
+	client, done := ingressPipe(t, ctx, pm, oneShotUpstream(t, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"))
+	if _, err := io.WriteString(client, "GET / HTTP/1.1\r\nHost: app\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(client)
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("handleHttp1Connection did not return")
+	}
+}

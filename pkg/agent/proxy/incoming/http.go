@@ -676,7 +676,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
 		}
 		if pm.mockMode {
-			endCase = starts.Default.Exchange(req.Method, req.URL.String())
+			endCase = exchange(appPort, req.Method, req.URL.String())
 		}
 
 		// Request modifications for sync/sampling modes.
@@ -1160,6 +1160,8 @@ func isStaleConnError(err error) bool {
 	return false
 }
 
+var exchange = starts.Default.Exchange
+
 func writeBadGateway(c net.Conn) {
 	_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 }
@@ -1444,7 +1446,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
 		}
 		if pm.mockMode {
-			endCase = starts.Default.Exchange(req.Method, req.URL.String())
+			endCase = exchange(appPort, req.Method, req.URL.String())
 		}
 
 		// MSG_PEEK before reusing a pooled upstream conn.

@@ -890,6 +890,8 @@ func (m *mockService) pushSetTable(ctx context.Context, name string, cases bool)
 	if cases && m.testDB != nil {
 		if tcs, err := m.testDB.GetTestCases(ctx, name); err == nil {
 			addCases(sets, mapping, root, tcs)
+		} else {
+			m.logger.Debug("could not read the recorded requests; each test is served all its mocks", zap.Error(err))
 		}
 	}
 	if err := pusher.PushSetTable(ctx, root, sets); err != nil {

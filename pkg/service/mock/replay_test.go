@@ -89,3 +89,22 @@ func TestAddCasesListsEachTestsHTTPCasesInRequestOrder(t *testing.T) {
 		t.Fatalf("cases %+v", got)
 	}
 }
+
+func TestAddCasesSkipsATestWhoseCasesHaveNoMappedMocks(t *testing.T) {
+	t0 := time.Date(2026, 10, 12, 1, 6, 5, 0, time.UTC)
+	m := &models.Mapping{TestCases: []models.MappedTestCase{
+		{ID: "Old", Dir: "e2e", Mocks: []models.MockEntry{{Name: "mock-1"}}, Cases: []string{"test-1"}},
+		{ID: "Bare", Dir: "e2e", Cases: []string{"test-2"}},
+	}}
+	sets := setTable(m, "")
+	addCases(sets, m, "", []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: "http://h/a", Timestamp: t0}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: "http://h/b", Timestamp: t0}},
+	})
+	if _, ok := sets["e2e"].Cases["Old"]; ok {
+		t.Fatalf("a recording without case mocks got cases: %+v", sets["e2e"].Cases)
+	}
+	if got := sets["e2e"].Cases["Bare"]; len(got) != 1 || got[0].Name != "test-2" {
+		t.Fatalf("a test with no mocks at all: cases %+v", got)
+	}
+}

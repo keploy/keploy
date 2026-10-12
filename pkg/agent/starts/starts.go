@@ -44,6 +44,7 @@ type frame struct {
 	seq    uint64 // order of the Begin that opened it, unique per registry
 	used   []bool
 	open   map[int]int
+	last   int
 }
 
 type worker struct {
@@ -74,7 +75,8 @@ type Registry struct {
 	root     string
 	sets     map[string]models.SetTable
 	universe map[string]struct{}
-	inCase   map[string]map[string]struct{}
+	free     map[string]map[string]map[string]struct{}
+	blind    int
 	marked   bool
 	onMark   []func()
 	begins   uint64 // Begin calls so far; numbers test frames
@@ -98,7 +100,8 @@ func (r *Registry) Reset() {
 	r.root = ""
 	r.sets = nil
 	r.universe = nil
-	r.inCase = nil
+	r.free = nil
+	r.blind = 0
 	r.marked = false
 }
 
@@ -462,17 +465,25 @@ func (r *Registry) SetTable(root string, sets map[string]models.SetTable) {
 	r.root = root
 	r.sets = sets
 	r.universe = map[string]struct{}{}
-	r.inCase = map[string]map[string]struct{}{}
+	r.free = map[string]map[string]map[string]struct{}{}
 	for set, st := range sets {
-		for _, cases := range st.Cases {
+		for test, cases := range st.Cases {
+			in := map[string]struct{}{}
 			for _, c := range cases {
 				for _, n := range c.Mocks {
-					if r.inCase[set] == nil {
-						r.inCase[set] = map[string]struct{}{}
-					}
-					r.inCase[set][n] = struct{}{}
+					in[n] = struct{}{}
 				}
 			}
+			free := map[string]struct{}{}
+			for _, o := range st.Tests[test] {
+				if _, ok := in[o.Name]; !ok {
+					free[o.Name] = struct{}{}
+				}
+			}
+			if r.free[set] == nil {
+				r.free[set] = map[string]map[string]struct{}{}
+			}
+			r.free[set][test] = free
 		}
 		for _, names := range st.Boots {
 			for _, n := range names {
@@ -620,7 +631,7 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 	allow := r.caseView(set, f, test)
 	rank := map[string]int{}
 	put := func(name string, g int) {
-		if _, ok := allow[name]; allow != nil && !ok {
+		if allow != nil && !allow(name) {
 			return
 		}
 		if old, ok := rank[name]; !ok || g < old {
@@ -658,47 +669,55 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 	return rank, r.universe, true
 }
 
-func (r *Registry) caseView(set string, f *frame, test string) map[string]struct{} {
-	st := r.sets[set]
-	if len(st.Cases) == 0 {
+func (r *Registry) caseView(set string, f *frame, test string) func(string) bool {
+	cases := r.sets[set].Cases[test]
+	if len(cases) == 0 || f == nil || r.blind > 0 || f.open[-1] > 0 {
 		return nil
 	}
-	allow := map[string]struct{}{}
-	if f != nil && len(f.open) > 0 {
-		cases := st.Cases[test]
-		for i := range f.open {
-			if i >= 0 && i < len(cases) {
-				for _, n := range cases[i].Mocks {
-					allow[n] = struct{}{}
-				}
-			}
+	free := r.free[set][test]
+	var mine []string
+	for i := range f.open {
+		if i < len(cases) {
+			mine = append(mine, cases[i].Mocks...)
 		}
 	}
-	for _, o := range st.Tests[test] {
-		if _, ok := r.inCase[set][o.Name]; !ok {
-			allow[o.Name] = struct{}{}
-		}
+	if f.last > 0 && f.last <= len(cases) {
+		mine = append(mine, cases[f.last-1].Mocks...)
 	}
-	return allow
+	return func(name string) bool {
+		_, ok := free[name]
+		return ok || slices.Contains(mine, name)
+	}
 }
 
-func (r *Registry) Exchange(method, rawURL string) func() {
+func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var w *worker
-	for _, o := range r.workers {
-		if len(o.frames) > 1 {
-			if w != nil {
-				return func() {}
-			}
-			w = o
-		}
-	}
-	if w == nil {
+	if r.sets == nil {
 		return func() {}
 	}
-	f := w.frames[len(w.frames)-1]
-	cases := r.sets[r.setOf(w.dir)].Cases[f.place]
+	f, set := r.exchangeFrame(port)
+	if f == nil {
+		open := false
+		for _, o := range r.workers {
+			open = open || len(o.frames) > 1
+		}
+		if !open {
+			return func() {}
+		}
+		r.blind++
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				r.mu.Lock()
+				defer r.mu.Unlock()
+				if r.blind > 0 {
+					r.blind--
+				}
+			})
+		}
+	}
+	cases := r.sets[set].Cases[f.place]
 	if len(cases) == 0 {
 		return func() {}
 	}
@@ -709,6 +728,7 @@ func (r *Registry) Exchange(method, rawURL string) func() {
 	i := pickCase(cases, f.used, method, rawURL)
 	if i >= 0 {
 		f.used[i] = true
+		f.last = 0
 	}
 	f.open[i]++
 	var once sync.Once
@@ -719,8 +739,50 @@ func (r *Registry) Exchange(method, rawURL string) func() {
 			if f.open[i]--; f.open[i] <= 0 {
 				delete(f.open, i)
 			}
+			if i >= 0 {
+				f.last = i + 1
+			}
 		})
 	}
+}
+
+func (r *Registry) exchangeFrame(port uint16) (*frame, string) {
+	var w *worker
+	if port != 0 {
+		for k := len(r.all) - 1; k >= 0 && w == nil; k-- {
+			s := r.all[k]
+			if s.Port != port || !r.alive(s.Root, s.Born) {
+				continue
+			}
+			w = r.workers[s.Worker]
+		}
+	}
+	if w == nil {
+		for _, o := range r.workers {
+			if len(o.frames) > 1 && r.alive(o.pid, o.born) {
+				if w != nil {
+					return nil, ""
+				}
+				w = o
+			}
+		}
+	}
+	if w == nil {
+		return nil, ""
+	}
+	f := r.currentFrame(w)
+	if f == nil {
+		return nil, ""
+	}
+	return f, r.setOf(w.dir)
+}
+
+func (r *Registry) alive(pid uint32, born time.Time) bool {
+	if born.IsZero() || r.proc == nil {
+		return true
+	}
+	b, ok := r.proc.Birth(pid)
+	return ok && b.Equal(born)
 }
 
 func pickCase(cases []models.Case, used []bool, method, rawURL string) int {
@@ -740,15 +802,15 @@ func exactKey(method, rawURL string) string {
 	if err != nil {
 		return strings.ToUpper(method) + " " + rawURL
 	}
-	return strings.ToUpper(method) + " " + u.Path + "?" + u.Query().Encode()
+	return strings.ToUpper(method) + " " + u.EscapedPath() + "?" + u.Query().Encode()
 }
 
 func pathKey(method, rawURL string) string {
 	path := rawURL
 	if u, err := url.Parse(rawURL); err == nil {
-		path = u.Path
+		path = u.EscapedPath()
 	}
-	parts := strings.Split(path, "/")
+	parts := strings.Split(strings.TrimSuffix(path, "/"), "/")
 	for i, p := range parts {
 		if idPart.MatchString(p) {
 			parts[i] = "{id}"
@@ -757,4 +819,4 @@ func pathKey(method, rawURL string) string {
 	return strings.ToUpper(method) + " " + strings.Join(parts, "/")
 }
 
-var idPart = regexp.MustCompile(`^([0-9]+|[0-9a-fA-F]{12,}|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27})$`)
+var idPart = regexp.MustCompile(`^([0-9]+|[0-9a-fA-F]{12,}|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}|[0-9A-HJKMNP-TV-Z]{26})$`)
