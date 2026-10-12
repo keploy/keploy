@@ -80,8 +80,14 @@ func TestTheWireIsServedOnlyUnderTheSwitch(t *testing.T) {
 	if strings.Contains(rec.Body.String(), `"v"`) {
 		t.Fatalf("switch off: the old answer carries no version, got %s", rec.Body.String())
 	}
-	if rec := call(t, a.HandleInstance, `{"key":"orders"}`); rec.Code != http.StatusNotFound {
-		t.Fatalf("switch off: /agent/instance answered %d", rec.Code)
+	// Off, /agent/instance is the plain 404 it was before the wire, for
+	// every method.
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		rec := httptest.NewRecorder()
+		a.HandleInstance(rec, httptest.NewRequest(method, "/agent/instance", strings.NewReader(`{"key":"orders"}`)))
+		if rec.Code != http.StatusNotFound || rec.Body.String() != "404 page not found\n" {
+			t.Fatalf("switch off: %s /agent/instance answered %d %q", method, rec.Code, rec.Body.String())
+		}
 	}
 }
 

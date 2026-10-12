@@ -101,7 +101,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/replay/gate", a.HandleScopeGate)
 		// The proven wire's instance claim (scope_proven.go): a test
 		// process's keploy integration claims the run before its first test.
-		r.Post("/instance", a.HandleInstance)
+		// Every method is routed to it, so with the switch off the path is
+		// the plain 404 it was before the wire existed.
+		r.HandleFunc("/instance", a.HandleInstance)
 		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)

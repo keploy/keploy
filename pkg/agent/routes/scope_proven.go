@@ -65,7 +65,13 @@ func badScopeBody(w http.ResponseWriter, r *http.Request, what string, err error
 func (a *Agent) HandleInstance(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.proven()
 	if !ok {
-		http.Error(w, "this keploy agent does not serve /agent/instance: it is served under KEPLOY_PROVEN=1", http.StatusNotFound)
+		// Off, the agent has no such route.
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
 	var req models.InstanceReq

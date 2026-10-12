@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
 )
@@ -184,17 +185,16 @@ func (a *Agent) HandleScopeWindows(w http.ResponseWriter, r *http.Request) {
 	if s, ok := a.svc.(scopeWindowReader); ok {
 		read := s.GetScopeWindows
 		// The run's last read (?final=1, the CLI's once its command has
-		// exited) closes it: a test still open is failed. Any other value
-		// is refused, so a client that means the last read never gets a
-		// plain one, which would leave an open test out instead of failing
-		// it.
-		switch final := r.URL.Query().Get("final"); final {
-		case "":
-		case "1":
+		// exited) closes it: a test still open is failed. Under the proven
+		// switch any other value is refused, so a client that means the
+		// last read never gets a plain one, which would leave an open test
+		// out instead of failing it.
+		switch final := r.URL.Query().Get("final"); {
+		case final == "1":
 			if f, ok := a.svc.(finalWindowReader); ok {
 				read = f.FinalScopeWindows
 			}
-		default:
+		case final != "" && provenswitch.On():
 			render.Status(r, http.StatusBadRequest)
 			render.JSON(w, r, map[string]string{"error": fmt.Sprintf("final=%q: the run's last read is final=1", final)})
 			return

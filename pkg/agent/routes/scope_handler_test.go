@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 )
 
@@ -343,6 +344,7 @@ func (s *windowsSvc) FinalScopeWindows(context.Context) ([]models.ScopeWindow, e
 // meant the last read would otherwise get a plain one and leave an open test
 // out of the verdict.
 func TestScopeWindowsFinalReadIsTheRunsLast(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
 	svc := &windowsSvc{}
 	a := &Agent{logger: zap.NewNop(), svc: svc}
 	for _, tc := range []struct {
@@ -373,5 +375,18 @@ func TestScopeWindowsFinalReadIsTheRunsLast(t *testing.T) {
 		if !slices.Equal(svc.reads, []string{tc.read}) || len(got) != 1 || got[0].Name != tc.read {
 			t.Fatalf("%q: reads %v, answered %+v, want the %s read", tc.query, svc.reads, got, tc.read)
 		}
+	}
+}
+
+// With the switch off any final value other than 1 is the plain read, as
+// before the final read existed.
+func TestScopeWindowsWithTheSwitchOffReadAnyOtherFinalPlainly(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	svc := &windowsSvc{}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	rec := httptest.NewRecorder()
+	a.HandleScopeWindows(rec, httptest.NewRequest(http.MethodGet, "/agent/scope/windows?final=true", nil))
+	if rec.Code != http.StatusOK || !slices.Equal(svc.reads, []string{"plain"}) {
+		t.Fatalf("status %d, reads %v, want one plain read", rec.Code, svc.reads)
 	}
 }

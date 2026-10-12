@@ -2539,9 +2539,13 @@ func exportMockScopeEnv(logger *zap.Logger, opts models.SetupOptions, agentPort 
 	// A claim marker inherited from an enclosing keploy run (this keploy was
 	// started by a test of another run) names a process of that run: left
 	// in place, this run's test processes would take themselves for its
-	// helpers and never claim, and their tests would pass unjudged.
-	if err := os.Unsetenv(models.TestPIDEnv); err != nil {
-		logger.Debug("failed to remove "+models.TestPIDEnv, zap.Error(err))
+	// helpers and never claim, and their tests would pass unjudged. Only
+	// the proven wire has claims; with the switch off the environment is
+	// left as it was.
+	if provenswitch.On() {
+		if err := os.Unsetenv(models.TestPIDEnv); err != nil {
+			logger.Debug("failed to remove "+models.TestPIDEnv, zap.Error(err))
+		}
 	}
 }
 

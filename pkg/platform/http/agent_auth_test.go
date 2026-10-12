@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/routes"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -291,9 +292,17 @@ func TestExportMockScopeEnv_DropsAnInheritedClaimMarker(t *testing.T) {
 	t.Setenv(token.MockAgentTokenEnv, "")
 	t.Setenv("KEPLOY_MOCK_SESSION", "")
 	t.Setenv(models.TestPIDEnv, "4242")
+	t.Setenv(provenswitch.Env, "1")
 	exportMockScopeEnv(zap.NewNop(), models.SetupOptions{MockMode: true, Mode: models.MODE_TEST}, 16789)
 	_, set := os.LookupEnv(models.TestPIDEnv)
 	require.False(t, set, "the enclosing run's claim marker reached this run's command")
+
+	// With the switch off there are no claims, and the environment is left
+	// as it was.
+	t.Setenv(models.TestPIDEnv, "4242")
+	t.Setenv(provenswitch.Env, "")
+	exportMockScopeEnv(zap.NewNop(), models.SetupOptions{MockMode: true, Mode: models.MODE_TEST}, 16789)
+	require.Equal(t, "4242", os.Getenv(models.TestPIDEnv))
 }
 
 func TestRedactToken_KeepsTheTokenOutOfLogs(t *testing.T) {
