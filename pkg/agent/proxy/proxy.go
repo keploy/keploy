@@ -127,6 +127,16 @@ type Proxy struct {
 	// predials are the upstream connections dialled while their application's
 	// handshake was held (handshake_hold.go), until handleConnection takes them.
 	predials predials
+	// agentMode is the mode the agent was started in (--mode); with
+	// GlobalPassthrough it decides what happens to a connection that arrives
+	// while there is no session (no_session.go). noSessionDests are the
+	// destinations such a connection has been logged for, and
+	// noSessionPassthroughs the ones passed through, which Record and Mock
+	// close once the session is set up. A session, once set, overrides
+	// agentMode for every connection.
+	agentMode             models.Mode
+	noSessionDests        noSessionDests
+	noSessionPassthroughs noSessionPassthroughs
 	// failedDests rate-limits the log line for a dependency that refused a
 	// held connection.
 	failedDests failedDests
@@ -330,6 +340,10 @@ type Proxy struct {
 	isGracefulShutdown atomic.Bool
 
 	auxiliaryHook agent.AuxiliaryProxyHook
+	// teardownOnce guards runAuxTeardown so the auxiliary hook's
+	// BeforeTeardown runs at most once across start()'s mutually-exclusive
+	// shutdown paths (skipListener return / listener defer).
+	teardownOnce sync.Once
 
 	// skipListener disables the TCP accept loop. When true, the proxy
 	// does not bind a port. DNS, parser init, and session state still run.
@@ -970,6 +984,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		EnableIPv6Redirect:        opts.Agent.EnableIPv6Redirect,
 		appPID:                    opts.Agent.ClientNSPID,
 		mockMode:                  opts.Agent.MockMode,
+		agentMode:                 opts.Agent.Mode,
 		caJavaHome:                opts.Agent.CAJavaHome,
 		dnsCache:                  newDNSCache(),
 		recordedDNSMocks:          newRecordedDNSMocksCache(),
@@ -1497,6 +1512,24 @@ func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
 	p.auxiliaryHook = h
 }
 
+// runAuxTeardown invokes the auxiliary hook's BeforeTeardown (if it implements
+// TeardownableProxyHook), at most once, synchronously. start() calls it on the
+// shutdown path before TeardownNativeCA so a hook that attached uprobes removes
+// them while still inside the awaited start() goroutine — before the process
+// exits and before any update-ca-certificates fork — closing the race that
+// otherwise leaks the uprobe.
+func (p *Proxy) runAuxTeardown(ctx context.Context) {
+	h, ok := p.auxiliaryHook.(agent.TeardownableProxyHook)
+	if !ok {
+		return
+	}
+	p.teardownOnce.Do(func() {
+		if err := h.BeforeTeardown(ctx); err != nil {
+			utils.LogError(p.logger, err, "auxiliary proxy hook teardown failed")
+		}
+	})
+}
+
 // getMockManager returns the current mock manager in a thread-safe manner.
 func (p *Proxy) getMockManager() *MockManager {
 	p.sessionMu.RLock()
@@ -1936,6 +1969,11 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 		p.nsSwitchMutex.Unlock()
+		// Remove TLS uprobes (and any other hook-owned kernel state) BEFORE
+		// forking update-ca-certificates below: a uprobe teardown that races
+		// that fork can inherit the last link reference into the child and
+		// then be killed mid-removal, leaking the breakpoint.
+		p.runAuxTeardown(ctx)
 		// Remove this run's MITM CA from the OS trust store so trust does not
 		// persist after the run (no-op in docker/k8s mode and for a persisted
 		// per-user CA).
@@ -2047,6 +2085,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 		p.nsSwitchMutex.Unlock()
+		// Remove TLS uprobes (and any other hook-owned kernel state) before
+		// forking update-ca-certificates below — see the skipListener path.
+		p.runAuxTeardown(ctx)
 		// Remove this run's MITM CA from the OS trust store so trust does not
 		// persist after the run (no-op in docker/k8s mode and for a persisted
 		// per-user CA).
@@ -2163,7 +2204,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Delete-on-close (O7): drop this source port's TLS dest mapping when the
 	// connection finishes — but ONLY if this connection still owns the port.
 	// The source port is released at the OS level when srcConn is closed (the
-	// defer below), which runs BEFORE this one (LIFO), so a recycled port whose
+	// defers below), which run BEFORE this one (LIFO), so a recycled port whose
 	// NEW connection has already re-Stored its mapping must not be clobbered by
 	// this older connection's cleanup. ReleaseSrcPortIfOwner's CompareAndDelete
 	// on the owner token enforces that. It still bounds SrcPortToDstURL and,
@@ -2172,6 +2213,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// destination when its ClientHello carries no SNI. Harmless for
 	// non-CONNECT/non-TLS connections (the keys are simply absent).
 	defer pTls.ReleaseSrcPortIfOwner(sourcePort, destConnID)
+
+	// The accepted connection is this function's to close, on every return.
+	// Nothing returns before this line, and every later path is covered no
+	// matter what srcConn has since been replaced by: a return that skipped
+	// the close left the application blocked on its call until its own
+	// timeout. The cleanup further down still closes srcConn first, so a TLS
+	// connection says goodbye before its socket goes; this close then finds
+	// the socket already closed and does nothing.
+	defer func() { _ = appConn.Close() }()
 
 	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
 
@@ -2189,9 +2239,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// which is cleaner than a partial/broken connection that causes "already closed" errors.
 		p.logger.Debug("Untracked connection (eBPF lookup failed), closing gracefully",
 			zap.Int("Source port", sourcePort), zap.Error(err))
-		if srcConn != nil {
-			srcConn.Close()
-		}
 		return nil
 	}
 
@@ -2204,11 +2251,25 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	var dstAddr string
+
+	switch destInfo.Version {
+	case 4:
+		p.logger.Debug("the destination is ipv4")
+		dstAddr = destAddr(destInfo) // the address a held handshake's upstream was dialled at
+		p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port))
+	case 6:
+		p.logger.Debug("the destination is ipv6")
+		dstAddr = destAddr(destInfo)
+		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
+	}
+
 	//get the session rule
 	rule := p.getSession()
 	if rule == nil {
-		utils.LogError(p.logger, nil, "failed to fetch the session rule")
-		return err
+		// The agent has no session yet (it has just started, or restarted,
+		// and its client has not armed it): the agent's own mode decides.
+		return p.serveWithoutSession(ctx, srcConn, dstAddr, predialed)
 	}
 
 	// Create a local copy of OutgoingOptions to avoid data race when multiple
@@ -2224,18 +2285,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	mgr := syncMock.Get()
 	mgr.SetOutputChannel(rule.MC)
-	var dstAddr string
-
-	switch destInfo.Version {
-	case 4:
-		p.logger.Debug("the destination is ipv4")
-		dstAddr = destAddr(destInfo) // the address a held handshake's upstream was dialled at
-		p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port))
-	case 6:
-		p.logger.Debug("the destination is ipv6")
-		dstAddr = destAddr(destInfo)
-		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
-	}
 	if p.mockMode {
 		starts.Default.Dest(fmt.Sprint(clientConnID), dstAddr)
 	}
@@ -2597,15 +2646,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					zap.String("proxy_addr", dstAddr))
 				return err
 			}
+			// dstConn from the moment it is dialled, so the deferred close
+			// owns it on every return below — including the ones after the
+			// tunnel is up and before the inner bytes arrive, which used to
+			// return with it unreferenced. Once the tunnel is established it
+			// is the tunneled connection the TLS dial below wraps.
+			dstConn = proxyConn
 		}
 
 		connectResult, err = handleConnectTunnel(p.logger, srcConn, proxyConn, isTestMode)
 		if err != nil {
-			// Close proxyConn on error to avoid leaking the TCP connection,
-			// since it won't be assigned to dstConn for deferred cleanup.
-			if proxyConn != nil {
-				proxyConn.Close()
-			}
 			utils.LogError(p.logger, err, "failed to handle CONNECT tunnel; check HTTP_PROXY/HTTPS_PROXY settings, proxy authentication (407), DNS/network reachability to the proxy, and egress firewall rules")
 			return err
 		}
@@ -2648,13 +2698,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			Conn:   stripUtilConn(srcConn),
 			Reader: innerReader,
 			Logger: p.logger,
-		}
-
-		// In record mode, dstConn is now the tunneled connection through the
-		// corporate proxy (the CONNECT tunnel is established, raw bytes flow).
-		// We'll set dstConn = proxyConn so the TLS dial below wraps it.
-		if !isTestMode {
-			dstConn = proxyConn
 		}
 
 		p.logger.Debug("CONNECT tunnel established, proceeding with inner connection",
@@ -2784,7 +2827,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					zap.String("sniHost", sniHost), zap.Uint32("dstPort", destInfo.Port))
 			}
 		}
-		srcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
+		// Into its own variable, not srcConn: a failed handshake returns a
+		// nil conn, and assigning that over srcConn would hide the
+		// connection from the deferred close.
+		var tlsSrcConn net.Conn
+		tlsSrcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),
 			zap.Int64("dur_ns", time.Since(tlsStart).Nanoseconds()),
@@ -2802,6 +2849,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
 		}
+		srcConn = tlsSrcConn
 
 		if isMTLS {
 			if tlsConn, ok := srcConn.(*tls.Conn); ok {
@@ -3645,6 +3693,9 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 		p.stopPacketCapture()
 	}
 
+	// The session is set up: what was passed through while there was none
+	// is reset, so it reconnects and is recorded.
+	p.endNoSessionPassthroughs(rule)
 	return nil
 }
 
@@ -3738,6 +3789,10 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
 	}
+
+	// The session is set up: what was passed through while there was none
+	// is reset, so it reconnects and is served under the session.
+	p.endNoSessionPassthroughs(rule)
 
 	p.nsSwitchMutex.Lock()
 	defer p.nsSwitchMutex.Unlock()

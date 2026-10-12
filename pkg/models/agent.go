@@ -239,6 +239,7 @@ type SetTable struct {
 	Boots  map[string][]string `json:"boots,omitempty"`
 	Tests  map[string][]Owned  `json:"tests,omitempty"`
 	Runner []string            `json:"runner,omitempty"`
+	Start  time.Time           `json:"start,omitzero"`
 }
 
 type Owned struct {

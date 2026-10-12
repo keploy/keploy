@@ -12,7 +12,6 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"io/fs"
 	"math"
@@ -24,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,7 +43,6 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 var SortCounter int64 = -1
-var templateValuesMu sync.RWMutex
 
 const maxStreamTokenSize = 10 * 1024 * 1024
 
@@ -91,42 +88,6 @@ func InitSortCounter(counter int64) {
 
 func GetNextSortNum() int64 {
 	return atomic.AddInt64(&SortCounter, 1)
-}
-
-func cloneStringAnyMap(src map[string]interface{}) map[string]interface{} {
-	if len(src) == 0 {
-		return map[string]interface{}{}
-	}
-
-	dst := make(map[string]interface{}, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func snapshotTemplateState() (map[string]interface{}, map[string]interface{}) {
-	templateValuesMu.RLock()
-	defer templateValuesMu.RUnlock()
-
-	return cloneStringAnyMap(utils.TemplatizedValues), cloneStringAnyMap(utils.SecretValues)
-}
-
-func buildTemplateDataSnapshot() map[string]interface{} {
-	templatedValues, secretValues := snapshotTemplateState()
-	if len(templatedValues) == 0 && len(secretValues) == 0 {
-		return map[string]interface{}{}
-	}
-
-	templateData := make(map[string]interface{}, len(templatedValues)+1)
-	for k, v := range templatedValues {
-		templateData[k] = v
-	}
-	if len(secretValues) > 0 {
-		templateData["secret"] = secretValues
-	}
-
-	return templateData
 }
 
 func UpdateSortCounterIfHigher(val int64) {
@@ -420,22 +381,28 @@ type SimulationConfig struct {
 // AppPortReachability is implemented by an instrumentation that can tell a
 // failed connection to an address the app can NEVER be reached at from one to
 // an app that is still starting. In Docker mode the host reaches the app only
-// through the ports its docker command publishes, and replay sends each test
-// from the host to the port it was recorded on, so a test recorded on a port
-// the command does not publish is refused every time (the app calling its own
-// in-container server is recorded as ingress on such a port). A test on a
-// published port where the app listens only on 127.0.0.1 inside the container
-// fails every time too, as a dropped connection: docker accepts it, finds
-// nothing listening on the container's own address, and drops it.
+// through the ports its docker command publishes. Replay sends each test from
+// the host to the port it was recorded on, unless test.port (--port), a
+// protocol port or replaceWith sends it to another host port. That host port
+// then has to be published to where the app serves the test: the app's port
+// the test was recorded on, or, for an app that has moved since the recording,
+// the port it listens on now. A test sent to a port the command does not
+// publish is refused every time (the app calling its own in-container server
+// is recorded as ingress on such a port). A test on a published port where the
+// app listens only on 127.0.0.1 inside the container fails every time too, as
+// a dropped connection: docker accepts it, finds nothing listening on the
+// container's own address, and drops it.
 type AppPortReachability interface {
 	// UnreachableAppPort explains why a connection to host:port cannot reach
-	// the app, and how to fix that, as a clause that reads after "the app's
-	// port N cannot be reached from the host: ". It returns "" when the
-	// address can reach the app or it cannot tell.
+	// the app's server on appPort, and how to fix that, as a clause that reads
+	// after the prefix UnreachableAppPortError gives it. appPort is the port the
+	// test was recorded on, where the app listened in its container then; 0
+	// when it is not known, and then port is all there is to go on. It returns
+	// "" when the address can reach the app or it cannot tell.
 	//
 	// It bounds its own wait: it is asked from a recording's insert loop, a
 	// readiness gate and a failing test, with whatever context they hold.
-	UnreachableAppPort(ctx context.Context, host string, port uint16) string
+	UnreachableAppPort(ctx context.Context, host string, port, appPort uint16) string
 }
 
 // UnreachableAppPortError is a test request that failed to connect at an
@@ -443,12 +410,25 @@ type AppPortReachability interface {
 // so it still classifies as one everywhere that matters; the one thing that
 // must not act on it is a re-send (see IsUnreachableAppPort).
 type UnreachableAppPortError struct {
-	Port   uint16
-	Reason string
-	Err    error
+	// Port is the port the request was sent to on the host.
+	Port uint16
+	// AppPort is the app's port the test was recorded on; 0 when not known.
+	AppPort uint16
+	Reason  string
+	Err     error
 }
 
+// Error names the app's port the test was recorded on and, when the request
+// went to another host port, that one too: "the app's port 8080 cannot be
+// reached from the host at port 18080: <reason>". A test that does not say its
+// app port names the host port alone.
 func (e *UnreachableAppPortError) Error() string {
+	switch {
+	case e.AppPort == 0:
+		return fmt.Sprintf("the app cannot be reached from the host at port %d: %s: %v", e.Port, e.Reason, e.Err)
+	case e.AppPort != e.Port:
+		return fmt.Sprintf("the app's port %d cannot be reached from the host at port %d: %s: %v", e.AppPort, e.Port, e.Reason, e.Err)
+	}
 	return fmt.Sprintf("the app's port %d cannot be reached from the host: %s: %v", e.Port, e.Reason, e.Err)
 }
 
@@ -462,9 +442,9 @@ func IsUnreachableAppPort(err error) bool {
 }
 
 // unreachableAppPort asks reach, if set, whether the address a connection
-// failed at is one the app can never be reached at, and returns the error to
-// fail with if it is.
-func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, port string, refused error) error {
+// failed at is one the app's server on appPort (0: not known) can never be
+// reached at, and returns the error to fail with if it is.
+func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, port string, appPort uint16, refused error) error {
 	if reach == nil {
 		return nil
 	}
@@ -472,11 +452,11 @@ func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, po
 	if err != nil || n == 0 {
 		return nil
 	}
-	reason := reach.UnreachableAppPort(ctx, host, uint16(n))
+	reason := reach.UnreachableAppPort(ctx, host, uint16(n), appPort)
 	if reason == "" {
 		return nil
 	}
-	return &UnreachableAppPortError{Port: uint16(n), Reason: reason, Err: refused}
+	return &UnreachableAppPortError{Port: uint16(n), AppPort: appPort, Reason: reason, Err: refused}
 }
 
 // urlHostPort is the host and port a request to u dials.
@@ -495,6 +475,11 @@ func urlHostPort(u *url.URL) (string, string) {
 type preparedHTTPRequest struct {
 	Request *http.Request
 	Client  *http.Client
+	// AppPort is the app's port the request is for: the one its test was
+	// recorded on, which test.port or replaceWith may have sent to another
+	// host port. 0 when not known, or when the URL names where the app is
+	// (SimulationConfig.TargetFromURL).
+	AppPort uint16
 }
 
 // HostHeaderOf is the Host header a client sends for u: its host, and its port
@@ -510,40 +495,24 @@ func HostHeaderOf(u *url.URL) string {
 }
 
 // prepareHTTPRequest handles all common request preparation logic shared between
-// SimulateHTTP and SimulateHTTPStreaming: URL decoding, template rendering,
-// body loading, multipart construction, compression, and client creation.
+// SimulateHTTP and SimulateHTTPStreaming: URL decoding, body loading,
+// multipart construction, compression, and client creation.
 func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*preparedHTTPRequest, error) {
-	// case in which URL string has encoded template placeholders
-	if strings.Contains(tc.HTTPReq.URL, "%7B") {
+	// A URL that is not rendered and holds "%7B" is unescaped whole before
+	// it is sent. A URL a replay rendered (pkg/templates) has each value
+	// escaped for its place already, and unescaping it again would turn a
+	// '+' in a value into a space and a "%26" into a new query parameter: it
+	// is sent as it stands.
+	if strings.Contains(tc.HTTPReq.URL, "%7B") && !tc.HTTPReq.URLRendered {
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
 		if err == nil {
 			tc.HTTPReq.URL = decoded
 		}
 	}
 
-	// TODO: adjust this logic in the render function in order to remove the redundant code.
-	// Convert testcase to string and render template values before simulation.
-	templateData := buildTemplateDataSnapshot()
-	if len(templateData) > 0 {
-		testCaseBytes, err := json.Marshal(tc)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the testcase for templating")
-			return nil, err
-		}
-
-		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
-		// ignoring LaTeX/HTML like {{\pi}}.
-		renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
-		if rerr != nil {
-			logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
-		}
-
-		err = json.Unmarshal([]byte(renderedStr), &tc)
-		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
-			return nil, err
-		}
-	}
+	// The test case arrives as it is to be sent: a replay renders its
+	// placeholders (pkg/templates) on a copy before handing it here, and
+	// nothing here reads or writes template values.
 
 	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
@@ -796,6 +765,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	return &preparedHTTPRequest{
 		Request: req,
 		Client:  client,
+		AppPort: appPort,
 	}, nil
 }
 
@@ -971,9 +941,10 @@ func IsTransportConnReset(err error) bool {
 // rewound via GetBody). Any other error, or a real response, returns
 // immediately — so a genuinely crashed/unreachable app still fails fast after
 // the bounded retries, and a mid-response reset is never retried. A refusal,
-// reset or drop at an address reach says the app can never be reached at fails
-// at once, saying why, as an *UnreachableAppPortError.
-func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability) (*http.Response, error) {
+// reset or drop at an address reach says the app's server on appPort (the port
+// the test was recorded on, 0 when not known) can never be reached at fails at
+// once, saying why, as an *UnreachableAppPortError.
+func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability, appPort uint16) (*http.Response, error) {
 	asked := false
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
@@ -987,7 +958,7 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 		if !asked && (refused || IsTransportConnReset(err)) {
 			asked = true
 			host, port := urlHostPort(req.URL)
-			if unreachable := unreachableAppPort(ctx, reach, host, port, err); unreachable != nil {
+			if unreachable := unreachableAppPort(ctx, reach, host, port, appPort, err); unreachable != nil {
 				return nil, unreachable
 			}
 		}
@@ -1036,9 +1007,11 @@ func answerDoesNotDecode(status int, encoding string, err error) error {
 	return fmt.Errorf("the app's %d answer does not decode as its Content-Encoding %q says: %v", status, encoding, err)
 }
 
+// SimulateHTTP sends tc's request to the app and returns its answer. It sends
+// tc as given: a test case's placeholders are rendered by the replay, on a
+// copy, before it gets here (pkg/templates), and what the app answers is
+// read for template values there too, never here.
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
-	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
-
 	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 
 	// Prepare the HTTP request using the shared helper
@@ -1051,7 +1024,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -1096,22 +1069,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		Header:        ToYamlHTTPHeader(httpResp.Header),
 	}
 
-	// Centralized template update: walk the response body and headers to refresh template values.
-	// NOTE: header-only updates are important for e.g. listmonk where the login 302 has an empty
-	// body but carries a fresh Set-Cookie: session=... that every subsequent test consumes.
-	if len(respBody) > 0 || len(resp.Header) > 0 {
-		templateValuesMu.Lock()
-		defer templateValuesMu.Unlock()
-		prevTemplatedValues := cloneStringAnyMap(utils.TemplatizedValues)
-		if len(prevTemplatedValues) > 0 {
-			logger.Debug("Received response from user app", zap.Any("response", resp))
-
-			updated := updateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues, prevTemplatedValues)
-			if updated {
-				logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
-			}
-		}
-	}
 	return resp, errHTTPReq
 }
 
@@ -1134,7 +1091,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -2343,471 +2300,6 @@ func looksBinary(s string) bool {
 	return false
 }
 
-// updateTemplateValuesFromHTTPResp checks the HTTP response body and the previous
-// templatized response body and updates the template values that are currently held
-// under templateValuesMu.
-func updateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, resp models.HTTPResp, currentTemplatedValues, prevTemplatedValues map[string]interface{}) bool {
-	// We derive template keys directly from the templated response body & headers by
-	// scanning for placeholder patterns like {{key}} (go text/template simple identifiers)
-	// and then recursively locating the same JSON path in the new response to fetch
-	// the concrete value. This avoids relying on updateTemplatesFromJSON and gives
-	// deterministic path-based updates.
-	if len(currentTemplatedValues) == 0 { // nothing to update
-		logger.Debug("no templatized values present, nothing to update")
-		return false
-	}
-
-	// Capture entire inner expression (supports: {{string .token}}, {{ .id }}, {{token}}, {{ float .price | printf "%f" }})
-	placeholderRe := regexp.MustCompile(`{{\s*([^{}]+?)\s*}}`)
-	changed := false
-
-	// --- 1. Handle JSON body path-based updates ---
-	// Problem: templated response can contain raw placeholders (e.g. array: [{{int .x}},{{int .y}}]) which is not valid JSON.
-	// Solution: produce a sanitized JSON by wrapping any unquoted placeholder token in quotes so that the body becomes parseable.
-	var templatedParsed interface{}
-	var actualParsed interface{}
-	sanitizedTemplatedBody := sanitizeTemplatedJSON(templatedResponse.Body, placeholderRe)
-	templatedIsJSON := json.Valid([]byte(sanitizedTemplatedBody))
-	actualIsJSON := json.Valid([]byte(resp.Body))
-
-	if templatedIsJSON && actualIsJSON {
-		if err := json.Unmarshal([]byte(sanitizedTemplatedBody), &templatedParsed); err == nil {
-			if err2 := json.Unmarshal([]byte(resp.Body), &actualParsed); err2 == nil {
-				if traverseAndUpdateTemplates(logger, templatedParsed, actualParsed, "", placeholderRe, currentTemplatedValues, prevTemplatedValues) {
-					changed = true
-				}
-			}
-		}
-	} else {
-		logger.Debug("response body or templated body is not JSON, skipping body path-based template updates", zap.Bool("templatedIsJSON", templatedIsJSON), zap.Bool("actualIsJSON", actualIsJSON))
-	}
-
-	// --- 2. Handle response header updates ---
-	// The record-side (pkg/service/tools/templatize.go buildValueIndexV2) can rewrite
-	// header values (including Set-Cookie sub-components and "Authorization: Bearer <tok>")
-	// into {{.VarName}} placeholders. At replay time the live server sends fresh values
-	// for those same headers — we must pull them out so downstream test cases that
-	// consume the placeholder (e.g. Cookie: session={{.session}}) render the live value.
-	if updateTemplateValuesFromHeaders(logger, templatedResponse.Header, resp.Header, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
-		changed = true
-	}
-	return changed
-}
-
-// updateTemplateValuesFromHeaders walks the recorded (templated) response headers side-by-side
-// with the live response headers. For each recorded header value that carries a {{.Var}}
-// placeholder it extracts the corresponding live substring and writes it into
-// currentTemplatedValues[Var]. Returns true if any template was updated.
-//
-// It mirrors the record-side decomposition performed in
-// pkg/service/tools/templatize.go buildValueIndexV2:
-//   - Set-Cookie lines are split into per-cookie name=value pairs; the placeholder lives in
-//     the value slot (`name={{.var}}; Path=/; HttpOnly`).
-//   - `Authorization: Bearer {{.token}}` has the Bearer prefix stripped before extracting.
-//   - Every other header is handled generically by substring-between-literals extraction.
-func updateTemplateValuesFromHeaders(
-	logger *zap.Logger,
-	templatedHeaders map[string]string,
-	liveHeaders map[string]string,
-	placeholderRe *regexp.Regexp,
-	currentTemplatedValues, prevTemplatedValues map[string]interface{},
-) bool {
-	changed := false
-	if len(templatedHeaders) == 0 || len(liveHeaders) == 0 {
-		return false
-	}
-
-	// Case-insensitive lookup into the live header map (HTTP header names are
-	// case-insensitive per RFC 7230 and our yaml map can preserve either casing).
-	liveByLower := make(map[string]string, len(liveHeaders))
-	for k, v := range liveHeaders {
-		liveByLower[strings.ToLower(k)] = v
-	}
-
-	for name, templatedVal := range templatedHeaders {
-		if !placeholderRe.MatchString(templatedVal) {
-			continue
-		}
-		liveVal, ok := liveByLower[strings.ToLower(name)]
-		if !ok || liveVal == "" {
-			continue
-		}
-
-		switch {
-		case strings.EqualFold(name, "Set-Cookie"):
-			if updateTemplatesFromSetCookie(logger, templatedVal, liveVal, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
-				changed = true
-			}
-		case strings.EqualFold(name, "Authorization") && strings.HasPrefix(strings.TrimSpace(templatedVal), "Bearer "):
-			tmplToken := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(templatedVal), "Bearer "))
-			liveToken := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(liveVal), "Bearer "))
-			if liveToken == "" {
-				continue
-			}
-			if updateTemplateFromTokenized(logger, tmplToken, liveToken, placeholderRe, currentTemplatedValues, prevTemplatedValues, "header.Authorization") {
-				changed = true
-			}
-		default:
-			if updateTemplateFromTokenized(logger, templatedVal, liveVal, placeholderRe, currentTemplatedValues, prevTemplatedValues, "header."+name) {
-				changed = true
-			}
-		}
-	}
-	return changed
-}
-
-// updateTemplatesFromSetCookie splits both recorded and live Set-Cookie blobs into per-cookie
-// lines, matches them by cookie name, and extracts the live value for each cookie whose
-// recorded value was a placeholder.
-func updateTemplatesFromSetCookie(
-	logger *zap.Logger,
-	templatedVal, liveVal string,
-	placeholderRe *regexp.Regexp,
-	currentTemplatedValues, prevTemplatedValues map[string]interface{},
-) bool {
-	changed := false
-	tmplLines := splitSetCookieLines(templatedVal)
-	liveLines := splitSetCookieLines(liveVal)
-	if len(tmplLines) == 0 || len(liveLines) == 0 {
-		return false
-	}
-
-	liveByName := make(map[string]string, len(liveLines))
-	for _, ln := range liveLines {
-		name, val := splitSetCookieNV(ln)
-		if name == "" {
-			continue
-		}
-		liveByName[name] = val
-	}
-
-	for _, ln := range tmplLines {
-		name, tmplCookieVal := splitSetCookieNV(ln)
-		if name == "" || !placeholderRe.MatchString(tmplCookieVal) {
-			continue
-		}
-		liveCookieVal, ok := liveByName[name]
-		if !ok || liveCookieVal == "" {
-			continue
-		}
-		if updateTemplateFromTokenized(logger, tmplCookieVal, liveCookieVal, placeholderRe, currentTemplatedValues, prevTemplatedValues, "Set-Cookie."+name) {
-			changed = true
-		}
-	}
-	return changed
-}
-
-// updateTemplateFromTokenized handles a single "templated value vs live value" pair where
-// the templated value contains one or more {{.VarName}} placeholders. It supports:
-//   - Whole-value placeholder: "{{.var}}" -> var = liveVal
-//   - Prefix/suffix literal wrapping: "trace-{{.id}}-v1" -> id = substring between literals
-//   - Multi-placeholder values are best-effort: they only update when the literal separators
-//     between placeholders can unambiguously split the live value.
-func updateTemplateFromTokenized(
-	logger *zap.Logger,
-	templatedVal, liveVal string,
-	placeholderRe *regexp.Regexp,
-	currentTemplatedValues, prevTemplatedValues map[string]interface{},
-	debugPath string,
-) bool {
-	trim := strings.TrimSpace(templatedVal)
-	matches := placeholderRe.FindAllStringSubmatchIndex(templatedVal, -1)
-	if len(matches) == 0 {
-		return false
-	}
-
-	// Fast path: the entire (trimmed) templated value is a single placeholder.
-	if len(matches) == 1 && strings.HasPrefix(trim, "{{") && strings.HasSuffix(trim, "}}") {
-		inner := placeholderRe.FindStringSubmatch(trim)
-		if len(inner) < 2 {
-			return false
-		}
-		keys := extractTemplateKeys(inner[1])
-		if len(keys) != 1 {
-			return false
-		}
-		return applyTemplateUpdate(logger, keys[0], strings.TrimSpace(liveVal), currentTemplatedValues, prevTemplatedValues, debugPath)
-	}
-
-	// General path: split the templated value into alternating literals & placeholders,
-	// then use each literal as an anchor in liveVal to carve out each live substitution.
-	type segment struct {
-		isPlaceholder bool
-		literal       string // only set when !isPlaceholder
-		key           string // only set when isPlaceholder
-	}
-	var segs []segment
-	cursor := 0
-	for _, m := range matches {
-		start, end := m[0], m[1]
-		if start > cursor {
-			segs = append(segs, segment{literal: templatedVal[cursor:start]})
-		}
-		innerMatch := placeholderRe.FindStringSubmatch(templatedVal[start:end])
-		if len(innerMatch) < 2 {
-			cursor = end
-			continue
-		}
-		keys := extractTemplateKeys(innerMatch[1])
-		if len(keys) != 1 {
-			cursor = end
-			continue
-		}
-		segs = append(segs, segment{isPlaceholder: true, key: keys[0]})
-		cursor = end
-	}
-	if cursor < len(templatedVal) {
-		segs = append(segs, segment{literal: templatedVal[cursor:]})
-	}
-
-	// Walk live value consuming segments.
-	changed := false
-	pos := 0
-	for i, s := range segs {
-		if !s.isPlaceholder {
-			if !strings.HasPrefix(liveVal[pos:], s.literal) {
-				// Literal mismatch — bail out; we can't trust the alignment.
-				return changed
-			}
-			pos += len(s.literal)
-			continue
-		}
-		// placeholder: consume up to the next literal (or end-of-string).
-		var nextLit string
-		if i+1 < len(segs) && !segs[i+1].isPlaceholder {
-			nextLit = segs[i+1].literal
-		}
-		var extracted string
-		if nextLit == "" {
-			extracted = liveVal[pos:]
-			pos = len(liveVal)
-		} else {
-			idx := strings.Index(liveVal[pos:], nextLit)
-			if idx < 0 {
-				return changed
-			}
-			extracted = liveVal[pos : pos+idx]
-			pos += idx
-		}
-		if extracted == "" {
-			continue
-		}
-		if applyTemplateUpdate(logger, s.key, extracted, currentTemplatedValues, prevTemplatedValues, debugPath) {
-			changed = true
-		}
-	}
-	return changed
-}
-
-// applyTemplateUpdate writes key=value into currentTemplatedValues, but only when the key
-// already exists (we never invent new template vars at replay time) and the value is
-// actually different from the previous one.
-func applyTemplateUpdate(
-	logger *zap.Logger,
-	key, value string,
-	currentTemplatedValues, prevTemplatedValues map[string]interface{},
-	debugPath string,
-) bool {
-	if _, ok := currentTemplatedValues[key]; !ok {
-		return false
-	}
-	prevStr := fmt.Sprintf("%v", prevTemplatedValues[key])
-	if prevStr == value {
-		return false
-	}
-	logger.Debug("updating template value from header",
-		zap.String("key", key),
-		zap.String("path", debugPath),
-		zap.String("old_value", prevStr),
-		zap.String("new_value", value),
-	)
-	currentTemplatedValues[key] = value
-	return true
-}
-
-// splitSetCookieLines decomposes a yaml-stored Set-Cookie header into individual cookie lines.
-// Mirrors the record-side splitSetCookie in pkg/service/tools/templatize.go — kept as a small,
-// duplicated helper here to avoid importing a service package into pkg/util.go.
-func splitSetCookieLines(s string) []string {
-	if s == "" {
-		return nil
-	}
-	if strings.Contains(s, "\n") {
-		lines := strings.Split(s, "\n")
-		out := make([]string, 0, len(lines))
-		for _, ln := range lines {
-			if ln = strings.TrimSpace(ln); ln != "" {
-				out = append(out, ln)
-			}
-		}
-		return out
-	}
-	raw := strings.Split(s, ",")
-	if len(raw) == 1 {
-		return []string{strings.TrimSpace(raw[0])}
-	}
-	out := []string{strings.TrimSpace(raw[0])}
-	for _, token := range raw[1:] {
-		t := strings.TrimSpace(token)
-		name, _, hasEq := strings.Cut(t, "=")
-		startsName := hasEq && name != "" && isCookieNameStart(name)
-		if startsName {
-			out = append(out, t)
-		} else {
-			out[len(out)-1] = out[len(out)-1] + "," + token
-		}
-	}
-	return out
-}
-
-func isCookieNameStart(name string) bool {
-	if name == "" {
-		return false
-	}
-	r := rune(name[0])
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '$'
-}
-
-// splitSetCookieNV extracts the cookie name and value (pre-attribute) from a single Set-Cookie
-// line. E.g. "session=abc123; Path=/; HttpOnly" -> ("session", "abc123"). Mirrors the
-// record-side splitSetCookieNameValue.
-func splitSetCookieNV(line string) (string, string) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return "", ""
-	}
-	head := line
-	if i := strings.IndexByte(line, ';'); i >= 0 {
-		head = line[:i]
-	}
-	name, val, ok := strings.Cut(head, "=")
-	if !ok {
-		return "", ""
-	}
-	return strings.TrimSpace(name), strings.TrimSpace(val)
-}
-
-// traverseAndUpdateTemplates walks the templated JSON tree in lock-step with the actual JSON.
-// Whenever it finds a string containing a placeholder, it extracts the template key(s) and updates
-// the current template values with the concrete value from the actual JSON at the same path.
-func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode interface{}, path string, placeholderRe *regexp.Regexp, currentTemplatedValues, prevTemplatedValues map[string]interface{}) bool {
-	changed := false
-	switch t := templatedNode.(type) {
-	case map[string]interface{}:
-		actMap, _ := actualNode.(map[string]interface{})
-		for k, v := range t {
-			p := k
-			if path != "" {
-				p = path + "." + k
-			}
-			if traverseAndUpdateTemplates(logger, v, actMap[k], p, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
-				changed = true
-			}
-		}
-	case []interface{}:
-		actArr, _ := actualNode.([]interface{})
-		for i, v := range t {
-			var actElem interface{}
-			if i < len(actArr) {
-				actElem = actArr[i]
-			}
-			p := fmt.Sprintf("%s[%d]", path, i)
-			if path == "" {
-				p = fmt.Sprintf("[%d]", i)
-			}
-			if traverseAndUpdateTemplates(logger, v, actElem, p, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
-				changed = true
-			}
-		}
-	case string:
-		matches := placeholderRe.FindAllStringSubmatch(t, -1)
-		if len(matches) == 0 {
-			return changed
-		}
-		concrete := fmt.Sprintf("%v", actualNode)
-		if concrete == "<nil>" || concrete == "" {
-			return changed
-		}
-		trimT := strings.TrimSpace(t)
-		for _, m := range matches {
-			if len(m) < 2 {
-				continue
-			}
-			keys := extractTemplateKeys(m[1])
-			if len(keys) != 1 {
-				continue
-			}
-			key := keys[0]
-			if _, ok := currentTemplatedValues[key]; !ok {
-				continue
-			}
-			prevStr := fmt.Sprintf("%v", prevTemplatedValues[key])
-			if prevStr == concrete {
-				continue
-			}
-			// Update only if original value is a single placeholder expression (no static mix)
-			if !(strings.HasPrefix(trimT, "{{") && strings.HasSuffix(trimT, "}}") && len(matches) == 1) {
-				continue
-			}
-			logger.Debug("updating template value from JSON path", zap.String("key", key), zap.String("path", path), zap.String("old_value", prevStr), zap.String("new_value", concrete))
-			currentTemplatedValues[key] = concrete
-			changed = true
-		}
-	default:
-		// non-string primitives can't contain placeholders; nothing to do
-	}
-	return changed
-}
-
-// RenderTestCaseWithTemplates returns a copy of the provided TestCase with
-// current templated and secret values applied. This is useful for producing
-// a concrete "expected" testcase (for example expected responses) before
-// the test is executed and templates may get updated by the runtime.
-func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) {
-	templatedValues, secretValues := snapshotTemplateState()
-
-	// If there are no templated or secret values, just return a deep copy
-	if len(templatedValues) == 0 && len(secretValues) == 0 {
-		copy := *tc
-		return &copy, nil
-	}
-
-	// Marshal the testcase and execute the template with current values
-	testCaseStr, err := json.Marshal(tc)
-	if err != nil {
-		return nil, err
-	}
-
-	funcMap := template.FuncMap{
-		"int":    utils.ToInt,
-		"string": utils.ToString,
-		"float":  utils.ToFloat,
-	}
-	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
-	if err != nil || tmpl == nil {
-		return nil, err
-	}
-
-	data := make(map[string]interface{})
-	for k, v := range templatedValues {
-		data[k] = v
-	}
-	if len(secretValues) > 0 {
-		data["secret"] = secretValues
-	}
-
-	var output bytes.Buffer
-	if err := tmpl.Execute(&output, data); err != nil {
-		return nil, err
-	}
-
-	var rendered models.TestCase
-	if err := json.Unmarshal(output.Bytes(), &rendered); err != nil {
-		return nil, err
-	}
-	return &rendered, nil
-}
-
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
@@ -3649,7 +3141,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 
 	strict := strictWindowEnabled(strictPerCall)
 	isNonKeploy := false
-	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 
 	for _, mock := range m {
 		if mock == nil {
@@ -3660,6 +3152,21 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		p := mock.DeepCopy()
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
+		}
+		// A window-bound mock (a connection failure) is served from its own
+		// window or the startup band and nowhere else, in both modes — see
+		// placeWindowBound. Routed before every rule below, each of which can
+		// otherwise hand it to every test: the untimed branch, the session
+		// short-circuit, the config/connection tag fallback, lax promotion.
+		if models.WindowBound(p.Kind) {
+			if placeWindowBound(p, afterTime, beforeTime, firstWindowStart) == windowBoundDropped {
+				droppedWindowBound++
+				continue
+			}
+			p.TestModeInfo.Lifetime = models.LifetimePerTest
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
 		}
 		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing",
@@ -3828,11 +3335,12 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			unfilteredMocks = append(unfilteredMocks, p)
 		}
 	}
-	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 || droppedWindowBound > 0 {
 		logger.Debug("filterByTimeStamp tier-aware outcome (see separate counts for reasons)",
 			zap.Int("dropped_out_of_window", droppedOutOfWindow),
 			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
 			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Int("dropped_window_bound_outside_own_window", droppedWindowBound),
 			zap.Bool("strict", strict),
 			zap.Time("after", afterTime),
 			zap.Time("before", beforeTime),
@@ -3896,6 +3404,13 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			}
 			p := mk.DeepCopy()
 			lt := effectiveLifetimeForRouting(p)
+			if models.WindowBound(p.Kind) {
+				// Never a reusable pool, whatever its tag says (see
+				// placeWindowBound). With no window there is nothing to place
+				// it in, so it goes where every per-test mock goes.
+				lt = models.LifetimePerTest
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+			}
 			switch lt {
 			case models.LifetimeSession:
 				p.TestModeInfo.IsFiltered = false
@@ -3912,7 +3427,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 	}
 
 	strict := strictWindowEnabled(strictPerCall)
-	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 	isNonKeploy := false
 
 	for _, mk := range m {
@@ -3922,6 +3437,23 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		p := mk.DeepCopy()
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
+		}
+		// Window-bound: own window or startup band only, in both modes. Same
+		// rule, same reason, as in filterByTimeStampTierAware.
+		if models.WindowBound(p.Kind) {
+			switch placeWindowBound(p, afterTime, beforeTime, firstWindowStart) {
+			case windowBoundInWindow:
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+				p.TestModeInfo.IsFiltered = true
+				filtered = append(filtered, p)
+			case windowBoundStartup:
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+				p.TestModeInfo.IsFiltered = true
+				startup = append(startup, p)
+			default:
+				droppedWindowBound++
+			}
+			continue
 		}
 		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing",
@@ -4004,11 +3536,12 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		}
 	}
 
-	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 || droppedWindowBound > 0 {
 		logger.Debug("FilterByTimeStampThreeTier outcome",
 			zap.Int("dropped_out_of_window", droppedOutOfWindow),
 			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
 			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Int("dropped_window_bound_outside_own_window", droppedWindowBound),
 			zap.Int("perTest", len(filtered)),
 			zap.Int("session", len(unfiltered)),
 			zap.Int("startup", len(startup)),
@@ -4021,6 +3554,39 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
 	return filtered, unfiltered, startup
+}
+
+// windowBoundPlace is where the filters put a window-bound mock.
+type windowBoundPlace int
+
+const (
+	windowBoundDropped windowBoundPlace = iota
+	windowBoundInWindow
+	windowBoundStartup
+)
+
+// placeWindowBound places a models.WindowBound mock (a connection failure) for
+// the test window [afterTime, beforeTime]: in the window when its request time
+// is inside it; in the startup band when it predates firstWindowStart (app
+// boot, before any test); dropped in every other case, strict mode or lax.
+//
+// Lax mode promotes an out-of-window per-test mock to the session pool, which
+// every later test reads; a window-bound mock without both timestamps, or with
+// its response before its request, cannot be placed in any window at all and
+// would otherwise go to the per-test pool of every test. Either way a failure
+// recorded in one test would fail connects in others, so neither happens.
+func placeWindowBound(p *models.Mock, afterTime, beforeTime, firstWindowStart time.Time) windowBoundPlace {
+	req, res := p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock
+	if req.IsZero() || res.IsZero() || res.Before(req) {
+		return windowBoundDropped
+	}
+	if !req.Before(afterTime) && !req.After(beforeTime) {
+		return windowBoundInWindow
+	}
+	if !firstWindowStart.IsZero() && req.Before(firstWindowStart) {
+		return windowBoundStartup
+	}
+	return windowBoundDropped
 }
 
 // effectiveLifetimeForRouting resolves a mock's Lifetime for
@@ -4329,109 +3895,6 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 		return compressedBuffer.Bytes(), nil
 	}
 	return data, nil
-}
-
-// extractTemplateKeys parses the inner segment of a template placeholder and returns variable keys.
-// Supports patterns like:
-//
-//	token
-//	.token
-//	string .token
-//	int .id
-//	float .price
-//	.user.id  (returns last path segment id)
-//
-// Only the first pipeline segment is considered (text before |).
-func extractTemplateKeys(inner string) []string {
-	inner = strings.TrimSpace(inner)
-	if inner == "" {
-		return nil
-	}
-	if idx := strings.Index(inner, "|"); idx >= 0 {
-		inner = inner[:idx]
-	}
-	parts := strings.Fields(inner)
-	if len(parts) == 0 {
-		return nil
-	}
-	funcNames := map[string]struct{}{"int": {}, "string": {}, "float": {}}
-	varToken := parts[0]
-	if _, isFunc := funcNames[varToken]; isFunc {
-		if len(parts) < 2 {
-			return nil
-		}
-		varToken = parts[1]
-	}
-	varToken = strings.TrimSpace(varToken)
-	if varToken == "" {
-		return nil
-	}
-	varToken = strings.TrimLeft(varToken, ".")
-	if varToken == "" {
-		return nil
-	}
-	segs := strings.Split(varToken, ".")
-	key := segs[len(segs)-1]
-	return []string{key}
-}
-
-// sanitizeTemplatedJSON makes a JSON string containing go-template placeholders parseable by wrapping
-// any placeholder tokens that appear in value positions without surrounding quotes with quotes.
-// Example: {"arr":[{{int .a}},{{int .b}}]} => {"arr":["{{int .a}}","{{int .b}}"]}
-// This lets us unmarshal while still preserving the placeholder text for later extraction.
-func sanitizeTemplatedJSON(raw string, placeholderRe *regexp.Regexp) string {
-	if raw == "" {
-		return raw
-	}
-	// Precompute which byte positions are inside JSON string literals.
-	inString := make([]bool, len(raw))
-	escaped := false
-	inside := false
-	for i := 0; i < len(raw); i++ {
-		c := raw[i]
-		if c == '\\' && !escaped { // potential escape for next char
-			escaped = true
-			if inside {
-				inString[i] = true
-			}
-			continue
-		}
-		if c == '"' && !escaped { // toggle string state
-			inside = !inside
-			inString[i] = inside
-			continue
-		}
-		if inside {
-			inString[i] = true
-		}
-		escaped = false
-	}
-
-	matches := placeholderRe.FindAllStringIndex(raw, -1)
-	if len(matches) == 0 {
-		return raw
-	}
-
-	// Build sanitized output.
-	var b strings.Builder
-	last := 0
-	for _, m := range matches {
-		start, end := m[0], m[1]
-		// Determine if this placeholder starts inside a string literal.
-		insideString := start < len(inString) && inString[start]
-		b.WriteString(raw[last:start])
-		if !insideString {
-			// Insert quotes to force valid JSON token.
-			b.WriteByte('"')
-			b.WriteString(raw[start:end])
-			b.WriteByte('"')
-		} else {
-			b.WriteString(raw[start:end])
-		}
-		last = end
-	}
-	b.WriteString(raw[last:])
-	return b.String()
 }
 
 // LooksLikeJSON checks if a string appears to be JSON by checking for opening and closing brackets/braces.

@@ -92,6 +92,12 @@ type prMappingDB struct {
 	existsCalls int
 	// last is the mapping of the last Insert.
 	last *models.Mapping
+	// onDisk is the per-test mapping Get reports, and onDiskStartup the
+	// startup section GetStartup reports, as the file on disk holds them;
+	// none by default. getCalls counts the reads of the per-test mapping.
+	onDisk        map[string][]models.MockEntry
+	onDiskStartup []models.MockEntry
+	getCalls      int
 }
 
 func (m *prMappingDB) Insert(_ context.Context, mapping *models.Mapping) error {
@@ -101,10 +107,17 @@ func (m *prMappingDB) Insert(_ context.Context, mapping *models.Mapping) error {
 	m.last = mapping
 	return nil
 }
-func (*prMappingDB) Get(context.Context, string) (map[string][]models.MockEntry, bool, error) {
-	return nil, false, nil
+func (m *prMappingDB) Get(context.Context, string) (map[string][]models.MockEntry, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.getCalls++
+	return m.onDisk, len(m.onDisk) > 0, nil
 }
-func (*prMappingDB) GetStartup(context.Context, string) ([]models.MockEntry, error) { return nil, nil }
+func (m *prMappingDB) GetStartup(context.Context, string) ([]models.MockEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.onDiskStartup, nil
+}
 func (m *prMappingDB) Exists(context.Context, string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -154,7 +167,16 @@ func (f *prReportDB) GetTestCaseResults(context.Context, string, string) ([]mode
 func (f *prReportDB) GetReport(context.Context, string, string) (*models.TestReport, error) {
 	return nil, nil
 }
-func (f *prReportDB) ClearTestCaseResults(context.Context, string, string) {}
+
+// ClearTestCaseResults drops every result kept, as the YAML report store
+// (reportdb) does. Replayer.Start clears the run's results before every
+// attempt at a test set, so a --must-pass or flaky-check rerun reads only its
+// own results.
+func (f *prReportDB) ClearTestCaseResults(context.Context, string, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.results = nil
+}
 func (f *prReportDB) InsertTestCaseResult(_ context.Context, _ string, _ string, r *models.TestResult) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

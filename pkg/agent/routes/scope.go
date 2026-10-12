@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
 )
 
@@ -90,6 +91,8 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-begin request: %v", err), http.StatusBadRequest)
 		return
 	}
+	set, start := starts.Default.Start(uint32(req.Pid), req.Dir)
+	req.At = runnerAt(0, set, start, req.At)
 	// A test the replay gated out is told to skip before anything else: it
 	// opens no window and narrows no pool, so skipping it leaves the replay
 	// exactly as if it had never been begun — except for the record that it
@@ -127,6 +130,8 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-end request: %v", err), http.StatusBadRequest)
 		return
 	}
+	set, start := starts.Default.Start(uint32(req.Pid), req.Dir)
+	req.At = runnerAt(0, set, start, req.At)
 	starts.Default.End(uint32(req.Pid), req.Name, req.Suite, markTime(req.At))
 	if s, ok := a.svc.(scopeOutcomeNoter); ok {
 		if outcome := models.NormalizeScopeOutcome(req.Outcome); outcome != "" {
@@ -169,6 +174,17 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Sets != nil {
 		starts.Default.SetTable(req.Root, req.Sets)
+		var first time.Time
+		for _, st := range req.Sets {
+			if !st.Start.IsZero() && (first.IsZero() || st.Start.Before(first)) {
+				first = st.Start
+			}
+		}
+		if !first.IsZero() {
+			if err := agent.ActiveHooks.SetFreezeAnchor(r.Context(), first); err != nil {
+				a.logger.Debug("could not anchor the clock at the first recorded suite start", zap.Error(err))
+			}
+		}
 	}
 	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
 		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
@@ -287,6 +303,7 @@ func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid app-start request: pid must be the app's pid", http.StatusBadRequest)
 		return
 	}
+	req.At = runnerAt(req.Pid, "", time.Time{}, req.At)
 	var placed bool
 	if req.Port == 0 {
 		placed = starts.Default.Mark(uint32(req.Pid), markTime(req.At))
@@ -298,6 +315,22 @@ func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
+}
+
+var OnMark func(pid int, set string, start time.Time, live []string) time.Duration
+
+func runnerAt(pid int, set string, start, at time.Time) time.Time {
+	if OnMark == nil {
+		return at
+	}
+	off := OnMark(pid, set, start, starts.Default.Live())
+	if off == 0 || at.IsZero() {
+		return at
+	}
+	if s := at.Add(off); time.Since(s).Abs() < time.Since(at).Abs() {
+		return s
+	}
+	return at
 }
 
 func markTime(at time.Time) time.Time {

@@ -14,9 +14,27 @@ import (
 	"go.uber.org/zap"
 )
 
+// MatchOption tunes Match without changing its signature.
+type MatchOption func(*matchOptions)
+
+type matchOptions struct {
+	noPassLine bool
+}
+
+// WithoutPassLine says the caller has already failed the test case on its
+// own (a template variable's place the answer does not satisfy): a
+// comparison that matches then prints no "Testrun passed" line for it.
+func WithoutPassLine() MatchOption {
+	return func(o *matchOptions) { o.noPassLine = true }
+}
+
 // Match compares an expected gRPC response with an actual response and returns whether they match
 // along with detailed comparison results
-func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger, emitFailureLogs bool, opts ...MatchOption) (bool, *models.Result) {
+	var mo matchOptions
+	for _, opt := range opts {
+		opt(&mo)
+	}
 	expectedResp := tc.GrpcResp
 	result := &models.Result{
 		HeadersResult: make([]models.HeaderResult, 0),
@@ -343,7 +361,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				utils.LogError(logger, err, "failed to render the diffs")
 			}
 		}
-	} else {
+	} else if !mo.noPassLine {
 		// Display success message
 		newLogger := pp.New()
 		newLogger.WithLineInfo = false

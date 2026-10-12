@@ -25,7 +25,12 @@ func (r *recordedPorts) add(sets ...[]*models.Mock) {
 	defer r.mu.Unlock()
 	for _, mocks := range sets {
 		for _, m := range mocks {
-			if m == nil || m.Kind == models.DNS {
+			// A connection failure says the destination was NOT reached, so
+			// it is no evidence that the recording talked to that port. It
+			// carries no metadata.destAddr either, and a mock whose port is
+			// unknown would set r.unknown and make every port "recorded",
+			// switching off the loopback refusal rules for the whole set.
+			if m == nil || m.Kind == models.DNS || m.Kind == models.ConnectionFailure {
 				continue
 			}
 			addr := m.Spec.Metadata["destAddr"]

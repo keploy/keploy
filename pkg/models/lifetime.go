@@ -168,6 +168,15 @@ func (m *Mock) DeriveLifetime() {
 	}
 	defer func() { m.TestModeInfo.LifetimeDerived = true }()
 
+	// A window-bound kind (a connection failure) is per-test whatever its tag,
+	// kind or registered hook says: a failure recorded in one test must never
+	// be served in another, and every reusable lifetime would do exactly that.
+	// First, so no later rule can promote it.
+	if WindowBound(m.Kind) {
+		m.TestModeInfo.Lifetime = LifetimePerTest
+		return
+	}
+
 	// Protocol-specific override that runs BEFORE the tag-based
 	// classification. A small allowlist of MySQL command-phase packet
 	// types have input-independent responses (COM_PING → OK,

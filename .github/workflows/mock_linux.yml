@@ -9,7 +9,9 @@ name: Mock Mode Regression (Linux)
 # Another replays two concurrent workers under different named scopes and
 # asserts each is served only its own scope's mocks. Another replays a stateful
 # dependency (one request recorded several times) and asserts record order,
-# per worker and per scope. Another replays with the
+# per worker and per scope. Another runs more short-lived processes than the
+# agent's PID map holds between two calls and asserts both are recorded, then
+# replayed without reaching the dependency. Another replays with the
 # network off (loopback only), as on a laptop with its Wi-Fi off, and records a
 # dependency on loopback the same way. Another runs the same binary where its
 # agent cannot start, and asserts the run fails at once with the code that
@@ -21,6 +23,10 @@ name: Mock Mode Regression (Linux)
 # a recording with `keploy test --base-path` against an app that is already
 # running, which uses no agent and no mocks at all, and asserts the tests are
 # sent to the base path and the report and the exit code follow their result.
+# Another records an app that mints ids and cookies, templatizes the set and
+# asserts it replays with each run's values, that a wrong id in an answer
+# fails, and that keploy normalize keeps the placeholders; once recorded by
+# this build and once by the released keploy.
 on:
   workflow_call:
     inputs:
@@ -40,7 +46,7 @@ jobs:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     name: mock-mode (record_replay_build)
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -100,6 +106,18 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-stateful-linux.sh"
 
+      # A test command that runs more short-lived processes than the agent's
+      # PID map holds (10240) must still have the calls of every later process
+      # recorded, and replayed without reaching the real dependency. The map
+      # used to keep every process that ever called socket(), so once it was
+      # full later calls went live, silently.
+      - name: Run mock-mode process-churn e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-process-churn-linux.sh"
+
       - name: Run mock-mode offline e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -158,3 +176,37 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/base-path-linux.sh"
+
+      # keploy record / keploy templatize / keploy test for values an app makes
+      # on every run: templatize writes {{capture ...}} where the create answers
+      # an id and a seven-digit order number and where the login sets two
+      # cookies (one with an Expires date), a use of the id in the create's own
+      # Location, and a use placeholder at each later request that sends them.
+      # The set must pass with this run's values sent (the number as its
+      # digits, both cookies), templatize must be idempotent, an answer naming
+      # another id must fail even when the create answers the recorded id and
+      # even under noise on that field, keploy test must never write
+      # config.yaml (--update-template included), keploy normalize must keep
+      # the placeholders, and no log may hold an ERROR or a data race. The
+      # only e2e of keploy templatize.
+      - name: Run templates record/templatize/test e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/templates-test-linux.sh"
+
+      # The same, recorded by the released keploy and templatized and tested by
+      # this build: what an upgrading user has. The recording format did not
+      # change.
+      - id: latest
+        uses: ./.github/actions/download-binary
+        with:
+          src: latest
+
+      - name: Run templates e2e (record latest, templatize and test build)
+        env:
+          RECORD_BIN: ${{ steps.latest.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/templates-test-linux.sh"

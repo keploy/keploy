@@ -662,7 +662,10 @@ func healthProbePathForLog(configured string) string {
 // as the target of the readiness gate's HTTP stage.
 type httpProbeTarget struct {
 	scheme, host, port string
-	ok                 bool
+	// appPort is the app's port the test was recorded on, which port leads
+	// to; 0 when not known.
+	appPort uint16
+	ok      bool
 	// src, when set, is where the target came from: the gate asks it again
 	// while probing, and takes the set's next target from it when the host
 	// turns out unable to reach this one.
@@ -691,9 +694,13 @@ type httpProbeTarget struct {
 // A test whose address reach says the host can never reach (in Docker mode, a
 // port the run command does not publish) is not evidence of anything: probing it
 // spends the whole ceiling on every set. It is skipped for the next test, and
-// each address is asked about once here. Whether the app listens where a
-// published port reaches it is often unknown this early (the app is still
-// starting), so the gate asks again while it probes; see lostReach.
+// each address is asked about once here for each app port its tests were
+// recorded on: whether an address reaches the app depends on the app port it
+// has to lead to, so one test's verdict is not another's when --port sends
+// tests recorded on different app ports to one host port. Whether the app
+// listens where a published port reaches it is often unknown this early (the
+// app is still starting), so the gate asks again while it probes; see
+// lostReach.
 //
 // Returns ok=false when no test case resolves (empty set, non-HTTP set, or an
 // unresolvable or unreachable target); the caller then keeps the TCP-accept stage
@@ -707,8 +714,8 @@ func resolveTestSetProbeTarget(ctx context.Context, testCfg config.Test, testCas
 }
 
 // probeTargetSource walks a test set's HTTP tests, in order, for readiness-gate
-// probe targets: each distinct address once, skipping those reach says the
-// host cannot reach.
+// probe targets: each distinct address once for each app port, skipping those
+// reach says the host cannot reach.
 type probeTargetSource struct {
 	testCfg   config.Test
 	testCases []*models.TestCase
@@ -716,7 +723,7 @@ type probeTargetSource struct {
 	logger    *zap.Logger
 	reach     pkg.AppPortReachability
 	next      int             // the next test case to look at
-	seen      map[string]bool // addresses already returned or skipped
+	seen      map[string]bool // addresses, for an app port, already returned or skipped
 }
 
 // nextTarget is the next address the set's tests dial that the host may reach,
@@ -733,16 +740,17 @@ func (s *probeTargetSource) nextTarget(ctx context.Context) httpProbeTarget {
 			continue
 		}
 		addr := net.JoinHostPort(host, port)
-		if s.seen[addr] {
+		key := addr + " for " + strconv.Itoa(int(tc.AppPort))
+		if s.seen[key] {
 			continue
 		}
-		s.seen[addr] = true
-		if s.reach != nil && probeTargetUnreachable(ctx, s.reach, host, port) {
+		s.seen[key] = true
+		if s.reach != nil && probeTargetUnreachable(ctx, s.reach, host, port, tc.AppPort) {
 			s.logger.Debug("readiness gate: not probing a test the host cannot reach",
-				zap.String("testcase", tc.Name), zap.String("address", addr))
+				zap.String("testcase", tc.Name), zap.String("address", addr), zap.Uint16("appPort", tc.AppPort))
 			continue
 		}
-		return httpProbeTarget{scheme: scheme, host: host, port: port, ok: true, src: s}
+		return httpProbeTarget{scheme: scheme, host: host, port: port, appPort: tc.AppPort, ok: true, src: s}
 	}
 	return httpProbeTarget{}
 }
@@ -775,17 +783,18 @@ func (t httpProbeTarget) lostReach(ctx context.Context) func() bool {
 			interval = min(2*interval, probeReachRecheckMax)
 		}
 		due = time.Now().Add(interval)
-		return probeTargetUnreachable(ctx, t.src.reach, t.host, t.port)
+		return probeTargetUnreachable(ctx, t.src.reach, t.host, t.port, t.appPort)
 	}
 }
 
-// probeTargetUnreachable asks reach about host:port. reach bounds its own wait.
-func probeTargetUnreachable(ctx context.Context, reach pkg.AppPortReachability, host, port string) bool {
+// probeTargetUnreachable asks reach about host:port, for the app's server on
+// appPort (0: not known). reach bounds its own wait.
+func probeTargetUnreachable(ctx context.Context, reach pkg.AppPortReachability, host, port string, appPort uint16) bool {
 	n, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || n == 0 {
 		return false
 	}
-	return reach.UnreachableAppPort(ctx, host, uint16(n)) != ""
+	return reach.UnreachableAppPort(ctx, host, uint16(n), appPort) != ""
 }
 
 // appPortReachabilityOf is the instrumentation's AppPortReachability when it
@@ -1354,9 +1363,10 @@ func retainNoisyTestCaseMocks(noisyTestCaseNames []string, mapping *models.Mappi
 // the expected set flags a mismatch — UNLESS it is a mock that doesn't
 // participate in the per-test comparison. Only PER-TEST mocks are compared;
 // reusable/startup-tier mocks (session / connection / config, recorded once at
-// app boot and reused) and DNS (non-deterministic resolution order) are
-// ignored, mirroring the non-streaming path's filtering. They belong in the
-// mapping but must not, by their reuse, falsely demote a test to OBSOLETE.
+// app boot and reused), DNS (non-deterministic resolution order) and connection
+// failures are ignored through consumedOutsideAssertion, the filter the
+// non-streaming path uses. They belong in the mapping but must not falsely
+// demote a test to OBSOLETE.
 func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []string) bool {
 	expectedMap := make(map[string]bool)
 	for _, name := range expectedMocks {
@@ -1366,10 +1376,8 @@ func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []st
 	for _, m := range consumedMocks {
 		if !expectedMap[m.Name] {
 			// An extra consumed mock that wasn't in the mapping is a mismatch
-			// ONLY if it's a per-test mock. Reusable/startup-tier mocks
-			// (session/connection/config) and DNS are excluded from the
-			// comparison — they are reused / non-deterministically attributed.
-			if m.Kind != models.DNS && !isReusableTierState(m) {
+			// ONLY if it takes part in the per-test comparison.
+			if !consumedOutsideAssertion(m) {
 				return false
 			}
 		}
@@ -1514,6 +1522,60 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 		ID:    testCaseID,
 		Mocks: newMocks,
 	})
+}
+
+// keepConnFailureMappings adds to the mapping write the connection-failure
+// entries the mapping on disk holds for what the write is about to replace:
+// mapdb.Insert replaces a written test's entries, and the startup section when
+// the write has one. The written entries come from what this run consumed, and
+// this keploy never consumes a connection failure, so without this a
+// --update-test-mapping run would strip them from the recording for good, and
+// a keploy that replays them would no longer serve one to its test (or at
+// boot). An entry is a connection failure by its own kind or, for an entry
+// recorded without one, by mockKindByName.
+func keepConnFailureMappings(write *models.Mapping, onDisk map[string][]models.MockEntry, onDiskStartup []models.MockEntry, mockKindByName map[string]models.Kind) {
+	if write == nil {
+		return
+	}
+	keep := func(written, disk []models.MockEntry) []models.MockEntry {
+		have := make(map[string]bool, len(written))
+		for _, m := range written {
+			have[m.Name] = true
+		}
+		for _, e := range disk {
+			if have[e.Name] || !isConnFailureEntry(e, mockKindByName) {
+				continue
+			}
+			written = append(written, e)
+			have[e.Name] = true
+		}
+		return written
+	}
+	for i := range write.TestCases {
+		write.TestCases[i].Mocks = keep(write.TestCases[i].Mocks, onDisk[write.TestCases[i].ID])
+	}
+	if len(write.Startup) > 0 {
+		write.Startup = keep(write.Startup, onDiskStartup)
+	}
+}
+
+// holdsConnFailures reports whether a test set's mocks (mockKindByName, which
+// lists the ones the decoders skipped too) include a connection failure: only
+// then can its mapping hold entries keepConnFailureMappings keeps.
+func holdsConnFailures(mockKindByName map[string]models.Kind) bool {
+	for _, k := range mockKindByName {
+		if k == models.ConnectionFailure {
+			return true
+		}
+	}
+	return false
+}
+
+func isConnFailureEntry(e models.MockEntry, mockKindByName map[string]models.Kind) bool {
+	if e.Kind != "" {
+		return models.Kind(e.Kind) == models.ConnectionFailure
+	}
+	return mockKindByName[e.Name] == models.ConnectionFailure
 }
 
 type TestFailure struct {

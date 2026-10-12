@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"time"
@@ -608,4 +609,44 @@ func TestTheDropGuardIsSilentWhenNothingIsDropped(t *testing.T) {
 	})
 
 	require.Empty(t, logs.All(), "adding a field is not dropping one")
+}
+
+// ConfigFile returns, byte for byte, the file Write stores, without writing
+// it: a caller replaces it together with other files of the test set. Like
+// Write it strips the secrets.
+func TestConfigFileIsTheFileWriteStores(t *testing.T) {
+	t.Parallel()
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(string(format), func(t *testing.T) {
+			configFileIsTheFileWriteStores(t, format)
+		})
+	}
+}
+
+// configFileIsTheFileWriteStores checks ConfigFile against Write for a store
+// of one format: the same path, config.yaml or config.json, and the same
+// bytes.
+func configFileIsTheFileWriteStores(t *testing.T, format yaml.Format) {
+	root := t.TempDir()
+	db := NewWithFormat[*models.TestSet](zap.NewNop(), root, format)
+	config := func() *models.TestSet {
+		return &models.TestSet{
+			PreScript:  "echo pre",
+			AppCommand: "npm start",
+			Template:   map[string]interface{}{"id": "u_1", "n": "7"},
+			Secret:     map[string]interface{}{"token": "s3cr3t"},
+			Metadata:   map[string]interface{}{"ui": "joined"},
+		}
+	}
+	file, err := db.ConfigFile(context.Background(), "ts", config())
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(root, "ts", "config."+format.FileExtension()), file.Path)
+	_, statErr := os.Stat(filepath.Join(root, "ts"))
+	require.True(t, os.IsNotExist(statErr), "ConfigFile wrote into the test set")
+	require.NotContains(t, string(file.Data), "s3cr3t")
+
+	require.NoError(t, db.Write(context.Background(), "ts", config()))
+	onDisk, err := os.ReadFile(file.Path)
+	require.NoError(t, err)
+	require.Equal(t, string(onDisk), string(file.Data))
 }

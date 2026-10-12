@@ -14,7 +14,6 @@ import (
 	"sync"
 
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
@@ -64,6 +63,7 @@ type Hooks struct {
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
 	socket      link.Link
+	processExit link.Link
 	connect4    link.Link
 	udp4Sendmsg link.Link
 	udp4Recvmsg link.Link
@@ -254,6 +254,27 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
+
+	// sys_enter_socket only ever adds to target_namespace_pids and
+	// excluded_pids; k_process_exit takes a process out of both when its last
+	// thread exits. Without it the maps only grow, and once
+	// target_namespace_pids is full (10240 TGIDs: seconds of process churn,
+	// and it takes every process in the agent's PID namespace, the whole host
+	// for a native agent) no new process is intercepted, so its calls go to the real dependency with
+	// nothing recorded or mocked and nothing said. Attached in every mode,
+	// DaemonSet and per-container targeting included: it only removes TGIDs
+	// of processes that no longer exist, whoever added them. A raw
+	// tracepoint, so it needs no tracefs. Attached before sys_enter_socket so
+	// that no process it adds can exit unseen.
+	processExit, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+		Name:    "sched_process_exit",
+		Program: objs.K_processExit,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the sched_process_exit hook that removes exited processes from the PID maps")
+		return err
+	}
+	h.processExit = processExit
 
 	// In DaemonSet mode the CRD-scoped SessionReconciler is the SOLE owner of
 	// target_namespace_pids — it arms exactly the recorded pods' TGIDs, and the
@@ -462,16 +483,12 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	agentInfo.DNSPort = int32(setupOpts.DnsPort)
 
-	// Set recording start time using CLOCK_BOOTTIME so the eBPF tracepoint
-	// can compare process start_boottime and auto-exclude pre-existing PIDs.
+	// When the recording started in this PID namespace, for the eBPF
+	// tracepoint to exclude the processes that were there before it: this
+	// agent's load time, unless an agent before it in the same PID namespace
+	// loaded first (recording_start.go).
 	if setupOpts.IsDocker {
-		var ts unix.Timespec
-		if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
-			h.logger.Debug("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
-		} else {
-			agentInfo.RecordingStartTime = uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
-			h.logger.Info("recording start boottime set", zap.Uint64("ns", agentInfo.RecordingStartTime))
-		}
+		agentInfo.RecordingStartTime = recordingStart(h.logger, hostRecordingStart())
 	}
 
 	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
@@ -544,6 +561,12 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.socket != nil {
 		if err := h.socket.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the tracepoint hook on sys_socket")
+		}
+	}
+
+	if h.processExit != nil {
+		if err := h.processExit.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the sched_process_exit hook")
 		}
 	}
 

@@ -45,15 +45,18 @@ func RegisterCarryOver(kind Kind, isCarryOver func(*Mock) bool) (unregister func
 var carryOverHooks mockPredicates
 
 // IsCarryOver reports whether m is a per-test mock that a RegisterCarryOver
-// predicate accepts. The mock's lifetime must already be derived.
+// predicate accepts. The mock's lifetime must already be derived. A
+// window-bound kind (WindowBound) never carries over, whatever is registered
+// for it: carrying it into a later window is serving it in a test it does not
+// belong to.
 func IsCarryOver(m *Mock) bool {
-	return m != nil && m.TestModeInfo.Lifetime == LifetimePerTest && carryOverHooks.match(m)
+	return m != nil && !WindowBound(m.Kind) && m.TestModeInfo.Lifetime == LifetimePerTest && carryOverHooks.match(m)
 }
 
 // CarryOverKind reports whether any RegisterCarryOver predicate is registered
-// for kind.
+// for kind. Never for a window-bound kind (see IsCarryOver).
 func CarryOverKind(kind Kind) bool {
-	return carryOverHooks.hasKind(kind)
+	return !WindowBound(kind) && carryOverHooks.hasKind(kind)
 }
 
 // CarryOverRegistered reports whether any kind registered a carry-over

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -410,5 +411,47 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 				t.Errorf("receipt consumed/missed = %d/%d, want %d/%d", r.Consumed, r.Missed, wantConsumed, wantMissed)
 			}
 		})
+	}
+}
+
+// cfOnlyMockDB is a set whose mocks are all connection failures, which this
+// keploy reads but does not replay, and never sends to the agent.
+type cfOnlyMockDB struct{ stubMockDB }
+
+func (cfOnlyMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	return []*models.Mock{{Name: "mock-0", Kind: models.ConnectionFailure}, {Name: "mock-1", Kind: models.ConnectionFailure}}, nil
+}
+
+// A replay counts as loaded what the agent holds. A set whose mocks are all
+// connection failures loads nothing, as it did when this keploy could not
+// read the kind: it is warned about as empty, and is not failed as a replay
+// that verified nothing.
+func TestAReplayOfOnlyConnectionFailuresLoadsNothing(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "pytest -q")
+	cfg.Mock.OnMiss = string(models.MissFail)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+
+	if err := New(zap.New(core), instr, cfOnlyMockDB{}, nil, nil, nil, cfg).Replay(context.Background()); err != nil {
+		t.Fatalf("Replay returned an unexpected error: %v", err)
+	}
+	if utils.ErrCode != 0 {
+		t.Errorf("exit code %d, want 0: nothing was loaded, so nothing was left unverified", utils.ErrCode)
+	}
+	if logs.FilterMessageSnippet("the mock set is empty").Len() != 1 {
+		t.Errorf("want the empty-set WARN, got %v", logs.All())
+	}
+	if logs.FilterMessageSnippet("verified nothing").Len() != 0 {
+		t.Errorf("a set the agent holds nothing of is not a replay that verified nothing: %v", logs.All())
+	}
+	if !slices.Contains(instr.seq(), "store") {
+		t.Fatalf("precondition: the set was stored on the agent, events %v", instr.seq())
+	}
+	instr.mu.Lock()
+	defer instr.mu.Unlock()
+	if len(instr.stored) != 0 {
+		t.Errorf("the agent was sent %d connection failures; it is sent what is counted as loaded, none", len(instr.stored))
 	}
 }

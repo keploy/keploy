@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net"
 	"strconv"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -309,5 +311,49 @@ func TestAppListenPortFollowsTheMovedBind(t *testing.T) {
 	pm.StopAll()
 	if port, ok := pm.AppListenPort(8097); !ok || port != 8097 {
 		t.Fatalf("after StopAll: got %d, %v; want the app's own port", port, ok)
+	}
+}
+
+// The HTTP/1 ingress is handed its client's connection wrapped (replayConn),
+// and a half-close of it reaches the connection underneath: lingerClose ends
+// what the ingress sends with one, so a client still sending a body the
+// ingress cut off knows the response is all. The wrapper, embedding net.Conn
+// as an interface, did not promote CloseWrite, and the half-close did
+// nothing. The connection still reads after it, from what was read ahead on.
+func TestReplayConnHalfClosesTheConnectionUnderneath(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+	client, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server := <-accepted
+	defer server.Close()
+
+	conn := newReplayConn([]byte("GE"), server)
+	if err := util.CloseWriteIfPossible(conn); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, err := client.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		t.Fatalf("the client read (%d, %v), want the end of what the ingress sends", n, err)
+	}
+	if _, err := io.WriteString(client, "T /"); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	got := make([]byte, 5)
+	if _, err := io.ReadFull(conn, got); err != nil || string(got) != "GET /" {
+		t.Fatalf("read %q (%v) after the half-close, want what was read ahead, then what the client sent", got, err)
 	}
 }

@@ -209,4 +209,23 @@ func TestMatch_IgnoreOrdering(t *testing.T) {
 	if !matchedIgnoreOrder {
 		t.Error("Expected arrays with different ordering to match when ignoreOrdering=true")
 	}
+
+	// The failure's grade reads the body with the ordering the comparison
+	// applied: reordered with a field added to each element is only new
+	// fields (LOW) under ignoreOrdering, and an array that no longer holds
+	// what it held, element for element, without it (MEDIUM).
+	added := *actualResp
+	added.Body.DecodedData = `{"items": [{"id": 2, "x": 1}, {"id": 1, "x": 1}]}`
+	for _, c := range []struct {
+		ignoreOrdering bool
+		want           models.RiskLevel
+	}{{true, models.Low}, {false, models.Medium}} {
+		matched, result := Match(tc, &added, noiseConfig, c.ignoreOrdering, logger, false)
+		if matched || result == nil || result.FailureInfo.Assessment == nil {
+			t.Fatalf("ignoreOrdering=%v: an added field must fail with a body assessment: %v %+v", c.ignoreOrdering, matched, result)
+		}
+		if got := result.FailureInfo.Assessment.Risk; got != c.want {
+			t.Errorf("ignoreOrdering=%v: graded %s, want %s (%q)", c.ignoreOrdering, got, c.want, result.FailureInfo.Assessment.Reasons)
+		}
+	}
 }
