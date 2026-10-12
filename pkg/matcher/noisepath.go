@@ -439,7 +439,7 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 			if w.arrayMatchesAsIs(key, e, a, ancestorNoisy) {
 				return
 			}
-			if ArrayReordered(e, a) {
+			if ArrayReorderedUnderNoise(key, e, a, w.excusedInArray(ancestorNoisy)) {
 				w.skip(key, NoiseSkipUnstableOrder)
 				return
 			}
@@ -508,6 +508,31 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 func (w *noiseCandidateWalk) arrayMatchesAsIs(key string, e, a []interface{}, ancestorNoisy bool) bool {
 	res, err := matchJSONWithNoiseHandlingIndexed(key, e, a, w.knownPath, w.knownGlobalRegs, false, ancestorNoisy, nil)
 	return err == nil && res.matches && res.isExact
+}
+
+// excusedInArray is the order rule's view of the test case's noise inside an
+// array: a node the matcher does not compare, as the walk below would treat
+// it, casts no vote. Under an ancestor the noise matched every descendant
+// value is accepted; a container is skipped by an entry without patterns on
+// its path, or by a global entry on its field; a leaf by the entry that
+// excuses its value.
+func (w *noiseCandidateWalk) excusedInArray(ancestorNoisy bool) func(key, field string, value interface{}) bool {
+	return func(key, field string, value interface{}) bool {
+		switch value.(type) {
+		case map[string]interface{}, []interface{}:
+			if w.knownCoversSubtree(key) {
+				return true
+			}
+			if field != "" && w.globalCoversSubtree(field, value) {
+				return true
+			}
+			// A pattern-guarded entry on a container relaxes every value
+			// beneath it, as the walk's ancestorNoisy does.
+			return w.knownMatches(key)
+		default:
+			return ancestorNoisy || w.knownCoversLeaf(key, value)
+		}
+	}
 }
 
 // globalUnconditional reports whether a global entry ignores this field name

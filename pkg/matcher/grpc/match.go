@@ -10,6 +10,7 @@ import (
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -339,6 +340,10 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 							logDiffs.SetHasarrayIndexMismatch(true)
 							logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
 						}
+						if diff.Message == reorderedRepeatedMessage {
+							// Only the order of a repeated field differs: say so.
+							logDiffs.PushFooterDiff(reorderedRepeatedMessage)
+						}
 						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
 					default:
 						// Any other body differences
@@ -526,6 +531,7 @@ func compareGrpcMessage(
 	// Compare decoded data — JSON comparison when both sides are valid JSON,
 	// canonicalization otherwise.
 	decodedDataNormal := true
+	decodedMessage := "decoded data mismatch"
 	expectedDecodedData := expMsg.DecodedData
 	actualDecodedData := actMsg.DecodedData
 	var jsonComparisonResult matcher.JSONComparisonResult
@@ -562,9 +568,20 @@ func compareGrpcMessage(
 
 		// Per-message only. Canonicalizing a whole stream would sort across
 		// message boundaries and let a reordered stream match.
-		expCanon := CanonicalizeTopLevelBlocks(expectedDecodedData)
-		actCanon := CanonicalizeTopLevelBlocks(actualDecodedData)
+		//
+		// Under the proven switch a repeated field's elements are compared
+		// in order (CanonicalizeKeepingRepeatedOrder); a reorder alone is
+		// then said as one.
+		canonicalize := CanonicalizeTopLevelBlocks
+		if provenswitch.On() {
+			canonicalize = CanonicalizeKeepingRepeatedOrder
+		}
+		expCanon := canonicalize(expectedDecodedData)
+		actCanon := canonicalize(actualDecodedData)
 		decodedDataNormal = expCanon == actCanon
+		if !decodedDataNormal && provenswitch.On() && CanonicalizeTopLevelBlocks(expectedDecodedData) == CanonicalizeTopLevelBlocks(actualDecodedData) {
+			decodedMessage = reorderedRepeatedMessage
+		}
 		expectedDecodedData = expCanon
 		actualDecodedData = actCanon
 	}
@@ -573,7 +590,7 @@ func compareGrpcMessage(
 		differences[key("decoded_data")] = grpcDiff{
 			Expected: expectedDecodedData,
 			Actual:   actualDecodedData,
-			Message:  "decoded data mismatch",
+			Message:  decodedMessage,
 		}
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
@@ -616,3 +633,10 @@ func compareGrpcMessage(
 func useIndexedKeys(expMsgs, actMsgs []models.GrpcLengthPrefixedMessage) bool {
 	return len(expMsgs) > 1 || len(actMsgs) > 1
 }
+
+// reorderedRepeatedMessage says a gRPC message's decoded data differs only in
+// the order of a repeated field's elements, which the proven switch compares
+// in order. Protoscope text carries no schema, so a map field's entries are
+// compared in order too: with proto files configured the message is compared
+// as JSON, where a map is an object.
+const reorderedRepeatedMessage = "decoded data mismatch: a repeated field's elements came back in another order (KEPLOY_PROVEN=1 compares them in order); if the field is a map, configure --proto-file or --proto-dir so it is compared as a map"

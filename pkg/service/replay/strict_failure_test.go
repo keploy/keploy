@@ -1,6 +1,9 @@
 package replay
 
 import (
+	"fmt"
+	"net/http"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
@@ -91,6 +94,8 @@ func TestProvenSwitchVetoesTheObsoleteDemotion(t *testing.T) {
 					hooks.consumed = []models.MockState{{Name: "mock-other", Kind: models.HTTP}}
 				}
 				h.replayer.hookImpl = hooks
+				core, logs := observer.New(zap.InfoLevel)
+				h.replayer.logger = zap.New(core)
 
 				status := h.run(t)
 
@@ -105,7 +110,68 @@ func TestProvenSwitchVetoesTheObsoleteDemotion(t *testing.T) {
 				if got != wantTest || status != wantSet {
 					t.Fatalf("test %s, set %s; want test %s, set %s", got, status, wantTest, wantSet)
 				}
+				if !on {
+					return
+				}
+				// What is said is the verdict, and the switch is named as
+				// what keeps the test FAILED, not a flag never passed. (The
+				// streamed test here also left its recorded call unconsumed,
+				// which O-2 names as the reason; either way it is the switch.)
+				said := logs.FilterMessageSnippet("mock mapping mismatch detected").All()
+				if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || !strings.Contains(fmt.Sprint(said[0].ContextMap()["reason"]), provenswitch.Env+"=1") || strings.Contains(fmt.Sprint(said[0].ContextMap()["reason"]), "--strict-failure") {
+					t.Errorf("the mismatch was said %+v; want once, as FAILED, with %s=1 as the reason", said, provenswitch.Env)
+				}
 			})
 		}
+	}
+}
+
+// Under the switch the response comparison reads arrays in order whatever
+// test.ignoreOrdering says, so a capture inside an array takes the element at
+// its own index: the set loads it rather than refusing it, as with
+// ignoreOrdering off, and the next request sends the captured value. Without
+// the switch, ignoreOrdering on refuses it (which element it takes cannot be
+// decided).
+func TestRunTestSet_ProvenSwitchCapturesInAnArrayAtItsIndex(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		name := "switch off"
+		if on {
+			name = "switch on"
+		}
+		t.Run(name, func(t *testing.T) {
+			if on {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
+				mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {
+					a.record(r)
+					writeJSON(w, http.StatusCreated, `{"orders":[{"id":"ord_LIVE"}]}`)
+				})
+				mux.HandleFunc("/orders/", func(w http.ResponseWriter, r *http.Request) {
+					a.record(r)
+					writeJSON(w, http.StatusOK, `{"ok":true}`)
+				})
+			})
+			conf := &tmplConf{stored: models.TestSet{Template: map[string]interface{}{"id": "ord_REC"}}}
+			cases := []*models.TestCase{
+				tmplCase(1, app.addr, "POST", "/orders", map[string]string{"Content-Type": "application/json"}, `{}`,
+					recorded(201, nil, `{"orders":[{"id":"{{capture string .id}}"}]}`, conf.stored.Template)),
+				tmplCase(2, app.addr, "GET", "/orders/{{string .id}}", nil, "", recorded(200, nil, `{"ok":true}`, conf.stored.Template)),
+			}
+			h := newTmplHarness(t, conf, cases, func(cfg *config.Config) { cfg.Test.IgnoreOrdering = true })
+			core, logs := observer.New(zap.WarnLevel)
+			h.r.logger = zap.New(core)
+			h.run(t)
+			if !on {
+				assertRefusedUnsent(t, h, logs, "test-1", "response body.orders[0].id", "{{capture string .id}}", "which element it takes cannot be decided")
+				return
+			}
+			assertStatus(t, h, "test-1", models.TestStatusPassed, "the capture is loaded and takes the element at its index")
+			if got := app.sent("GET", "/orders/ord_LIVE"); len(got) != 1 {
+				t.Errorf("the next request was sent with the captured value %d time(s), want once", len(got))
+			}
+		})
 	}
 }

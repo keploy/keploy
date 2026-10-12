@@ -51,6 +51,22 @@ func ResponseIgnoreOrdering(configured bool) bool {
 // Arrays of different lengths, and arrays of fewer than two elements, are never
 // reordered: there is no other index to prefer.
 func ArrayReordered(recorded, live []interface{}) bool {
+	return arrayReordered("", recorded, live, nil)
+}
+
+// ArrayReorderedUnderNoise is ArrayReordered for an array at key (the noise
+// walker's key: index-free, dot-joined) whose leaves noise may already excuse.
+// An excused node (excused(key, field, value): field is its object key, ""
+// for an array element) and its subtree cast no vote: a leaf the comparison
+// does not compare cannot say which element is which. Otherwise a noise-tied
+// leaf (a timestamp at each index) votes for the index pairing, ties a pure
+// reorder of the compared leaves, and the walker learns those as noise: a
+// reorder goes green.
+func ArrayReorderedUnderNoise(key string, recorded, live []interface{}, excused func(key, field string, value interface{}) bool) bool {
+	return arrayReordered(key, recorded, live, excused)
+}
+
+func arrayReordered(key string, recorded, live []interface{}, excused func(key, field string, value interface{}) bool) bool {
 	n := len(recorded)
 	if n != len(live) || n < 2 {
 		return false
@@ -60,7 +76,7 @@ func ArrayReordered(recorded, live []interface{}) bool {
 	// per pair of elements.
 	holders := make(map[string][]int)
 	for j, el := range recorded {
-		for leaf := range elementLeaves(el) {
+		for leaf := range elementLeaves(key, el, excused) {
 			holders[leaf] = append(holders[leaf], j)
 		}
 	}
@@ -71,7 +87,7 @@ func ArrayReordered(recorded, live []interface{}) bool {
 			shared[j] = 0
 		}
 		touched = touched[:0]
-		for leaf := range elementLeaves(el) {
+		for leaf := range elementLeaves(key, el, excused) {
 			for _, j := range holders[leaf] {
 				if shared[j] == 0 {
 					touched = append(touched, j)
@@ -91,18 +107,23 @@ func ArrayReordered(recorded, live []interface{}) bool {
 
 // elementLeaves is the set of leaves of one array element, each a path inside
 // the element joined with its value, in a form where two leaves are equal
-// exactly when their paths and values are.
-func elementLeaves(v interface{}) map[string]struct{} {
+// exactly when their paths and values are. key is the array's walker key, and
+// excused (nil: none) leaves out the nodes noise already excuses.
+func elementLeaves(key string, v interface{}, excused func(key, field string, value interface{}) bool) map[string]struct{} {
 	out := make(map[string]struct{})
-	collectLeaves(out, "", v)
+	collectLeaves(out, "", key, "", v, excused)
 	return out
 }
 
 // collectLeaves adds v's leaves under path. An object key is quoted and an
 // array position bracketed, so no key can pose as a position or as a deeper
 // path; the value carries its JSON type, so "1" and 1 are different leaves, as
-// they are different values to the matcher.
-func collectLeaves(out map[string]struct{}, path string, v interface{}) {
+// they are different values to the matcher. key is v's walker key (an array
+// element's is its array's) and field its object key, for excused.
+func collectLeaves(out map[string]struct{}, path, key, field string, v interface{}, excused func(key, field string, value interface{}) bool) {
+	if excused != nil && excused(key, field, v) {
+		return
+	}
 	switch t := v.(type) {
 	case map[string]interface{}:
 		if len(t) == 0 {
@@ -110,7 +131,7 @@ func collectLeaves(out map[string]struct{}, path string, v interface{}) {
 			return
 		}
 		for k, child := range t {
-			collectLeaves(out, path+"\x00"+strconv.Quote(k), child)
+			collectLeaves(out, path+"\x00"+strconv.Quote(k), childNoisePath(key, k), k, child, excused)
 		}
 	case []interface{}:
 		if len(t) == 0 {
@@ -118,7 +139,7 @@ func collectLeaves(out map[string]struct{}, path string, v interface{}) {
 			return
 		}
 		for i, child := range t {
-			collectLeaves(out, path+"\x00["+strconv.Itoa(i)+"]", child)
+			collectLeaves(out, path+"\x00["+strconv.Itoa(i)+"]", key, "", child, excused)
 		}
 	default:
 		out[path+"\x01"+leafValue(t)] = struct{}{}

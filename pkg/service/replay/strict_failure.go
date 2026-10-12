@@ -1,6 +1,9 @@
 package replay
 
-import "go.keploy.io/server/v3/pkg/provenswitch"
+import (
+	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+)
 
 // strictFailure is the veto of the OBSOLETE demotion: a test whose response
 // failed is FAILED even when its consumed mock set also diverged from the
@@ -17,4 +20,16 @@ func (r *Replayer) strictFailure() bool {
 // switch, which asserts every response field.
 func (r *Replayer) additiveAutoPassOff() bool {
 	return r.config.Test.AutoReplay || provenswitch.On()
+}
+
+// responseIgnoreOrdering is the ignoreOrdering the response comparison runs
+// with (matcherUtils.ResponseIgnoreOrdering): off under the proven switch. The
+// replay's template layer reads it too, so what it asserts of a variable's
+// place in an array, and what it refuses there, follow the comparison the
+// test case gets. (A streamed use is asserted at its index either way:
+// templates.Run.StreamUseFailures.) keploy templatize keeps the configured
+// value on purpose: what it writes must replay with the switch off too, and a
+// capture it wrote inside an array under the switch would be refused then.
+func (r *Replayer) responseIgnoreOrdering() bool {
+	return matcherUtils.ResponseIgnoreOrdering(r.config.Test.IgnoreOrdering)
 }

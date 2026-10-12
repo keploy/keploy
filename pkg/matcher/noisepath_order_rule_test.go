@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"fmt"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -29,7 +30,7 @@ func TestBodyNoiseFromJSONDiff_OrderRuleRefusesReorderPlusDrift(t *testing.T) {
 	})
 
 	for _, ignoreOrdering := range []bool{false, true} {
-		t.Run("switch on refuses it", func(t *testing.T) {
+		t.Run(fmt.Sprintf("switch on refuses it, ignoreOrdering=%v", ignoreOrdering), func(t *testing.T) {
 			t.Setenv(provenswitch.Env, "1")
 			paths, skipped := BodyNoiseFromJSONDiff(exp, act, nil, ignoreOrdering)
 			if len(paths) != 0 {
@@ -101,5 +102,47 @@ func TestBodyNoiseFromJSONDiff_OrderRuleLeavesAnExcusedArrayAlone(t *testing.T) 
 	}
 	if len(paths) != 1 || paths[0] != "n" {
 		t.Fatalf("paths = %v, want [n]", paths)
+	}
+}
+
+// The golden for noise inside an array: a reorder hidden by a leaf the test
+// case's noise already excuses. `ts` is noise, so the matcher compares `id`
+// alone, and `id` is a pure reorder. Were `ts` to vote, each element would tie
+// between its own index (same `ts`) and the other (same `id`), the array would
+// pair by index, `items.id` would be learned as noise and the reorder would go
+// green. Excused leaves cast no vote: the array is refused as unstable order.
+func TestBodyNoiseFromJSONDiff_OrderRuleIgnoresNoiseExcusedLeaves(t *testing.T) {
+	const (
+		exp = `{"items":[{"id":"a","ts":1},{"id":"b","ts":2}]}`
+		act = `{"items":[{"id":"b","ts":1},{"id":"a","ts":2}]}`
+	)
+	t.Setenv(provenswitch.Env, "1")
+	for name, known := range map[string]map[string][]string{
+		"path noise":   {"items.ts": {}},
+		"global noise": {"ts": {}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			paths, skipped := BodyNoiseFromJSONDiff(exp, act, known, false)
+			if len(paths) != 0 {
+				t.Fatalf("derived %v: noise on the reordered field would green the reorder", paths)
+			}
+			if len(skipped) != 1 || skipped[0].Reason != NoiseSkipUnstableOrder || skipped[0].Path != "items" {
+				t.Fatalf("skipped = %+v, want one UNSTABLE_ORDER at items", skipped)
+			}
+		})
+	}
+}
+
+// The order rule reaches into nested arrays: elements that pair by index are
+// walked, and an inner reorder is refused at the inner array's key.
+func TestBodyNoiseFromJSONDiff_OrderRuleRefusesANestedReorder(t *testing.T) {
+	const (
+		exp = `{"o":[{"k":"x","v":[1,2]},{"k":"y","v":[3,4]}]}`
+		act = `{"o":[{"k":"x","v":[2,1]},{"k":"y","v":[3,4]}]}`
+	)
+	t.Setenv(provenswitch.Env, "1")
+	paths, skipped := BodyNoiseFromJSONDiff(exp, act, nil, false)
+	if len(paths) != 0 || len(skipped) != 1 || skipped[0].Reason != NoiseSkipUnstableOrder || skipped[0].Path != "o.v" {
+		t.Fatalf("paths=%v skipped=%+v, want one UNSTABLE_ORDER at o.v", paths, skipped)
 	}
 }

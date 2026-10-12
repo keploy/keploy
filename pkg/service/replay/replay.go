@@ -1574,7 +1574,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Placeholders a test case cannot run with are refused now, before any
 	// is sent, and each such test case fails with the reason.
 	tmplCheck := tmplRun.Check(testCases, templates.CheckOptions{
-		IgnoreOrdering: r.config.Test.IgnoreOrdering,
+		IgnoreOrdering: r.responseIgnoreOrdering(),
 		Streaming:      pkg.IsHTTPStreamingTestCase,
 	})
 	r.refuseUntiedArrayUses(testSetID, &tmplCheck, testCases)
