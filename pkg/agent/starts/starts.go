@@ -45,6 +45,14 @@ type frame struct {
 	used   []bool
 	open   map[int]int
 	last   int
+	lost   bool
+}
+
+type book struct {
+	free   map[string]struct{}
+	owners map[string][]int
+	key    []string
+	group  map[string][]int
 }
 
 type worker struct {
@@ -75,8 +83,7 @@ type Registry struct {
 	root     string
 	sets     map[string]models.SetTable
 	universe map[string]struct{}
-	free     map[string]map[string]map[string]struct{}
-	peers    map[string]map[string][][]string
+	books    map[string]map[string]*book
 	blind    int
 	gen      uint64
 	marked   bool
@@ -102,8 +109,7 @@ func (r *Registry) Reset() {
 	r.root = ""
 	r.sets = nil
 	r.universe = nil
-	r.free = nil
-	r.peers = nil
+	r.books = nil
 	r.blind = 0
 	r.gen++
 	r.marked = false
@@ -469,30 +475,13 @@ func (r *Registry) SetTable(root string, sets map[string]models.SetTable) {
 	r.root = root
 	r.sets = sets
 	r.universe = map[string]struct{}{}
-	r.free = map[string]map[string]map[string]struct{}{}
-	r.peers = map[string]map[string][][]string{}
+	r.books = map[string]map[string]*book{}
 	for set, st := range sets {
 		for test, cases := range st.Cases {
-			if r.peers[set] == nil {
-				r.peers[set] = map[string][][]string{}
+			if r.books[set] == nil {
+				r.books[set] = map[string]*book{}
 			}
-			r.peers[set][test] = peersOf(cases)
-			in := map[string]struct{}{}
-			for _, c := range cases {
-				for _, n := range c.Mocks {
-					in[n] = struct{}{}
-				}
-			}
-			free := map[string]struct{}{}
-			for _, o := range st.Tests[test] {
-				if _, ok := in[o.Name]; !ok {
-					free[o.Name] = struct{}{}
-				}
-			}
-			if r.free[set] == nil {
-				r.free[set] = map[string]map[string]struct{}{}
-			}
-			r.free[set][test] = free
+			r.books[set][test] = bookOf(cases, st.Tests[test])
 		}
 		for _, names := range st.Boots {
 			for _, n := range names {
@@ -683,25 +672,30 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 
 func (r *Registry) caseView(set string, f *frame, test string) func(string) bool {
 	cases := r.sets[set].Cases[test]
-	if len(cases) == 0 || f == nil || !slices.Contains(f.used, true) || r.blind > 0 || f.open[-1] > 0 {
+	b := r.books[set][test]
+	if len(cases) == 0 || b == nil || f == nil || f.lost || !slices.Contains(f.used, true) || r.blind > 0 || f.open[-1] > 0 {
 		return nil
 	}
-	free := r.free[set][test]
-	var mine []string
-	peers := r.peers[set][test]
-	add := func(i int) {
-		if i >= 0 && i < len(cases) {
-			mine = append(mine, cases[i].Mocks...)
+	ok := make([]bool, len(cases))
+	add := func(i int, peers bool) {
+		if i < 0 || i >= len(cases) {
+			return
 		}
-		if i >= 0 && i < len(peers) {
-			mine = append(mine, peers[i]...)
+		ok[i] = true
+		if !peers {
+			return
+		}
+		for _, j := range b.group[b.key[i]] {
+			if cases[j].Sum != cases[i].Sum {
+				ok[j] = true
+			}
 		}
 	}
 	for i := range f.open {
-		add(i)
+		add(i, true)
 	}
 	if f.last > 0 {
-		add(f.last - 1)
+		add(f.last-1, true)
 	}
 	if len(f.open) == 0 {
 		next := -1
@@ -713,13 +707,18 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) bool
 		if next < 0 {
 			next = slices.Index(f.used, false)
 		}
-		if next >= 0 && next < len(cases) {
-			mine = append(mine, cases[next].Mocks...)
-		}
+		add(next, false)
 	}
 	return func(name string) bool {
-		_, ok := free[name]
-		return ok || slices.Contains(mine, name)
+		if _, in := b.free[name]; in {
+			return true
+		}
+		for _, i := range b.owners[name] {
+			if ok[i] {
+				return true
+			}
+		}
+		return false
 	}
 }
 
@@ -729,7 +728,10 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 	if r.sets == nil {
 		return func() {}
 	}
-	f, set := r.exchangeFrame(port)
+	f, set, placed := r.exchangeFrame(port)
+	if f == nil && placed {
+		return func() {}
+	}
 	if f == nil {
 		open := false
 		for _, o := range r.workers {
@@ -739,6 +741,11 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 			return func() {}
 		}
 		r.blind++
+		for _, o := range r.workers {
+			if len(o.frames) > 1 && r.alive(o.pid, o.born) {
+				o.frames[len(o.frames)-1].lost = true
+			}
+		}
 		gen := r.gen
 		var once sync.Once
 		return func() {
@@ -780,7 +787,7 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 	}
 }
 
-func (r *Registry) exchangeFrame(port uint16) (*frame, string) {
+func (r *Registry) exchangeFrame(port uint16) (*frame, string, bool) {
 	var w *worker
 	if port != 0 {
 		for k := len(r.all) - 1; k >= 0 && w == nil; k-- {
@@ -795,16 +802,19 @@ func (r *Registry) exchangeFrame(port uint16) (*frame, string) {
 		for _, o := range r.workers {
 			if len(o.frames) > 0 && r.alive(o.pid, o.born) {
 				if w != nil {
-					return nil, ""
+					return nil, "", false
 				}
 				w = o
 			}
 		}
 	}
-	if w == nil || len(w.frames) < 2 {
-		return nil, ""
+	if w == nil {
+		return nil, "", false
 	}
-	return w.frames[len(w.frames)-1], r.setOf(w.dir)
+	if len(w.frames) < 2 {
+		return nil, "", true
+	}
+	return w.frames[len(w.frames)-1], r.setOf(w.dir), true
 }
 
 func (r *Registry) alive(pid uint32, born time.Time) bool {
@@ -815,16 +825,21 @@ func (r *Registry) alive(pid uint32, born time.Time) bool {
 	return ok && b.Equal(born)
 }
 
-func peersOf(cases []models.Case) [][]string {
-	out := make([][]string, len(cases))
+func bookOf(cases []models.Case, owned []models.Owned) *book {
+	b := &book{free: map[string]struct{}{}, owners: map[string][]int{}, key: make([]string, len(cases)), group: map[string][]int{}}
 	for i, c := range cases {
-		for j, d := range cases {
-			if i != j && c.Sum != d.Sum && exactKey(c.Method, c.URL) == exactKey(d.Method, d.URL) {
-				out[i] = append(out[i], d.Mocks...)
-			}
+		b.key[i] = exactKey(c.Method, c.URL)
+		b.group[b.key[i]] = append(b.group[b.key[i]], i)
+		for _, n := range c.Mocks {
+			b.owners[n] = append(b.owners[n], i)
 		}
 	}
-	return out
+	for _, o := range owned {
+		if _, ok := b.owners[o.Name]; !ok {
+			b.free[o.Name] = struct{}{}
+		}
+	}
+	return b
 }
 
 func pickCase(cases []models.Case, used []bool, method, rawURL string) int {

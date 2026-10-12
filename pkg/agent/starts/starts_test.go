@@ -481,7 +481,7 @@ func TestTwoOpenTestsPairEachRequestByItsAppsPort(t *testing.T) {
 	end = r.Exchange(0, "GET", "/a")
 	sees(t, r, 101, "a request no app port places", "fx", "m1", "m2", "m3")
 	end()
-	sees(t, r, 101, "after it, the last case and the first one not yet served", "fx", "m1", "m3")
+	sees(t, r, 101, "the rest of the test, after a request it may have missed", "fx", "m1", "m2", "m3")
 }
 
 func TestARequestToAnAppBetweenTestsLeavesOtherTestsCasesAlone(t *testing.T) {
@@ -643,4 +643,16 @@ func TestAPortlessRequestWhileAnotherPackageRunsIsNotPairedWithItsTest(t *testin
 	end := r.Exchange(0, "GET", "/a")
 	defer end()
 	sees(t, r, 101, "the open test, a request it may not own in flight", "fx", "m1", "m2", "m3")
+}
+
+func TestATestOpenDuringAPlacelessRequestIsServedWholeAfterIt(t *testing.T) {
+	f, r := oneTest(caseTable())
+	r.Exchange(0, "GET", "/a")()
+	f.spawn(200, 1, at(0), "/tmp/other.test")
+	r.Begin(200, "/repo/e2e", "/repo/e2e", true, at(1))
+	r.Exchange(0, "GET", "/a")()
+	delete(f.born, 200)
+	end := r.Exchange(0, "GET", "/a")
+	defer end()
+	sees(t, r, 101, "the next GET /a, once the other package is gone", "fx", "m1", "m2", "m3")
 }

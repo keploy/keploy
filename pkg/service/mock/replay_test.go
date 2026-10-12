@@ -113,6 +113,12 @@ func TestBodySumTellsBodiesApart(t *testing.T) {
 	a := bodySum(models.HTTPReq{Body: `{"sku":"lamp"}`})
 	b := bodySum(models.HTTPReq{Body: `{"sku":"vase"}`})
 	off := bodySum(models.HTTPReq{BodyRef: models.BodyRef{Path: "assets/body-1"}})
+	up1 := bodySum(models.HTTPReq{Form: []models.FormData{{Key: "file", FileNames: []string{"a.png"}, Paths: []string{"p1"}}}})
+	up2 := bodySum(models.HTTPReq{Form: []models.FormData{{Key: "file", FileNames: []string{"b.png"}, Paths: []string{"p2"}}}})
+	up3 := bodySum(models.HTTPReq{Form: []models.FormData{{Key: "file", FileNames: []string{"a.png"}, Paths: []string{"p3"}}}})
+	if up1 == "" || up1 == up2 || up1 != up3 {
+		t.Fatalf("upload sums %q %q %q", up1, up2, up3)
+	}
 	if a == "" || a == b || off == "" || off == a || bodySum(models.HTTPReq{}) != "" {
 		t.Fatalf("sums %q %q %q", a, b, off)
 	}
