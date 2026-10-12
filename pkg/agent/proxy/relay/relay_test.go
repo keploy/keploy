@@ -833,6 +833,80 @@ func TestBumpActivityInvoked(t *testing.T) {
 	}
 }
 
+// carriedEvent is one call of Config.OnCarried.
+type carriedEvent struct {
+	dir     fakeconn.Direction
+	at      time.Time
+	teed    bool
+	through int64
+}
+
+// OnCarried tells of each chunk as the forwarder hands it to the tee, with
+// where it ends in the parser's stream, in the offsets the parser's FakeConn
+// counts what it has taken in (Consumed): what tells a chunk the parser read
+// from one it never did once it has stopped reading. A chunk the tee refuses
+// is told of as not teed, and moves no position. Teed is the position past
+// the last chunk teed.
+func TestOnCarriedTellsWhereEachChunkEndsInTheParsersStream(t *testing.T) {
+	t.Parallel()
+	events := make(chan carriedEvent, 16)
+	h := newHarness(t, Config{
+		TeeChanBuf: 64,
+		OnCarried: func(dir fakeconn.Direction, at time.Time, teed bool, through int64) {
+			events <- carriedEvent{dir, at, teed, through}
+		},
+	})
+	next := func(what string) carriedEvent {
+		t.Helper()
+		select {
+		case e := <-events:
+			return e
+		case <-time.After(5 * time.Second):
+			t.Fatalf("OnCarried never told of %s", what)
+			return carriedEvent{}
+		}
+	}
+
+	go h.writeClient([]byte("abc"))
+	_ = h.readDest(3)
+	first := next("the first chunk")
+	if first.dir != fakeconn.FromClient || !first.teed || first.through != 3 {
+		t.Fatalf("first chunk told of as %+v, want a teed client chunk through 3", first)
+	}
+	c, err := h.r.ClientStream().ReadChunk()
+	if err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	if got := h.r.ClientStream().Consumed(); got != first.through {
+		t.Fatalf("the parser took the whole chunk and stands at %d, told it ends at %d", got, first.through)
+	}
+	if !c.ReadAt.Equal(first.at) {
+		t.Fatalf("chunk told of as read at %v, the parser's chunk says %v", first.at, c.ReadAt)
+	}
+
+	go h.writeClient([]byte("defg"))
+	_ = h.readDest(4)
+	if e := next("the second chunk"); !e.teed || e.through != 7 {
+		t.Fatalf("second chunk told of as %+v, want teed through 7", e)
+	}
+
+	go h.writeDest([]byte("xy"))
+	_ = h.readClient(2)
+	if e := next("the destination's chunk"); e.dir != fakeconn.FromDest || !e.teed || e.through != 2 {
+		t.Fatalf("destination chunk told of as %+v, want a teed dest chunk through 2 of its own stream", e)
+	}
+
+	h.r.teeC2D.setPaused(true)
+	go h.writeClient([]byte("hij"))
+	_ = h.readDest(3)
+	if e := next("the refused chunk"); e.teed || e.through != 7 {
+		t.Fatalf("refused chunk told of as %+v, want not teed, the stream still through 7", e)
+	}
+	if c, d := h.r.Teed(fakeconn.FromClient), h.r.Teed(fakeconn.FromDest); c != 7 || d != 2 {
+		t.Fatalf("Teed = %d client, %d dest, want 7 and 2: where the last teed chunk of each stream ends", c, d)
+	}
+}
+
 // dropSink mirrors dropRecorder in tee_test.go but lives here so the
 // relay tests stay self-contained; kept separate to avoid exporting
 // test helpers across files.

@@ -199,7 +199,11 @@ type Session struct {
 	// moment the stop is stamped, before any of those logs it: a test case
 	// checked from then on overlaps it. It runs on the goroutine of the event
 	// that stamped the stop, so it must not block, and must not call
-	// StoppedAt. Set it before the parser runs.
+	// StoppedAt; the dispatcher's takes only its connection's ledger lock
+	// (pkg/agent/proxy's parserReads), which is held for a bounded time: to
+	// open a span, or, once, while the parser's return records the spans of
+	// what it never read.
+	// Set it before the parser runs.
 	OnStop func(at time.Time)
 
 	// RecordingDone is closed once the recording this connection is captured
@@ -1022,8 +1026,12 @@ func (s *Session) StoppedAt() time.Time {
 // capture hole (OnCaptureDesync answers whether it costs the recording
 // anything), the dispatcher's "parser retired", and the one a parser that
 // reports its own stop (ErrReported) logs in its place: the MySQL recorder's
-// for lost framing. A recording that has stopped does not resume. A nil
-// Session's is false.
+// for lost framing. The requests a parser never read by the time its Run
+// returned are judged by the instant the recording stopped instead
+// (pkg/agent/proxy's parserReads): those captured before it are a loss,
+// however late the return (their spans cover the test cases not streamed by
+// then). A recording that has stopped does not resume. A
+// nil Session's is false.
 func (s *Session) RecordingStopping() bool {
 	if s == nil {
 		return false
